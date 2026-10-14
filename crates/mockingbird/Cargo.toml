@@ -41,6 +41,7 @@ metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tower.workspace = true
@@ -52,7 +53,6 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 assert_cmd.workspace = true
-reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true

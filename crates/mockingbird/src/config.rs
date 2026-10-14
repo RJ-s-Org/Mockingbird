@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_store::ControlStore;
 
+use crate::client::ClientCommand;
 use crate::file_config::{self, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile};
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
@@ -25,6 +26,14 @@ pub const HEALTH_PATH: &str = "/__mockingbird/healthz";
 #[derive(Parser, Debug)]
 #[command(name = "mockingbird", version, about = "LLM-backed mock endpoints")]
 pub struct Cli {
+    /// Admin API base URL used by the client subcommands.
+    #[arg(
+        long,
+        global = true,
+        env = "MB_ADMIN_URL",
+        default_value = crate::client::DEFAULT_ADMIN_URL
+    )]
+    pub admin_url: String,
     #[command(subcommand)]
     pub cmd: Command,
 }
@@ -35,6 +44,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Compile a contract and print an operation summary.
     Validate { contract: PathBuf },
+    #[command(flatten)]
+    Client(ClientCommand),
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]

@@ -1,5 +1,6 @@
 //! Mockingbird command-line front end.
 
+pub mod client;
 pub mod config;
 pub mod file_config;
 pub mod ops;

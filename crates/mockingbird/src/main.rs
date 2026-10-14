@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use clap::Parser;
+use mockingbird::client::{self, ClientCommand, ClientError};
 use mockingbird::config::{
     Cli, Command, LlmEnv, ServeArgs, build_app, missing_env_api_key, resolve_config,
 };
@@ -21,6 +22,7 @@ async fn main() -> ExitCode {
     let result = match cli.cmd {
         Command::Serve(args) => serve(args).await,
         Command::Validate { contract } => validate(&contract),
+        Command::Client(cmd) => client(&cli.admin_url, cmd).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -28,6 +30,7 @@ async fn main() -> ExitCode {
             eprintln!("{msg}");
             ExitCode::from(2)
         }
+        Err(Failure::Silent) => ExitCode::from(1),
         Err(Failure::Other(e)) => {
             eprintln!("error: {e:#}");
             ExitCode::from(1)
@@ -37,12 +40,36 @@ async fn main() -> ExitCode {
 
 enum Failure {
     Usage(String),
+    /// Already reported on stderr; exit 1.
+    Silent,
     Other(anyhow::Error),
 }
 
 impl From<anyhow::Error> for Failure {
     fn from(e: anyhow::Error) -> Self {
         Failure::Other(e)
+    }
+}
+
+/// Runs a client subcommand: JSON on stdout, problem details on stderr.
+async fn client(admin_url: &str, cmd: ClientCommand) -> Result<(), Failure> {
+    match client::run(admin_url, cmd).await {
+        Ok(Some(value)) => {
+            let text = serde_json::to_string_pretty(&value).map_err(anyhow::Error::from)?;
+            println!("{text}");
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(ClientError::Api { status, body }) => {
+            let body = match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(problem) => serde_json::to_string_pretty(&problem).unwrap_or(body),
+                Err(_) if body.trim().is_empty() => format!("HTTP {status}"),
+                Err(_) => format!("HTTP {status}: {body}"),
+            };
+            eprintln!("{body}");
+            Err(Failure::Silent)
+        }
+        Err(ClientError::Other(e)) => Err(Failure::Other(e)),
     }
 }
 
