@@ -456,3 +456,54 @@ async fn failed_rebuild_keeps_serving_previous_version() {
     registry.reload_mock(&deps, "c").await;
     assert_eq!(status_of(&base, "/c/orders").await, 404);
 }
+
+/// A primary that times out falls back to the secondary profile, which gets
+/// its own timeout: the engine waits for the whole chain.
+#[tokio::test]
+async fn fallback_profile_used_when_primary_times_out() {
+    let primary = MockServer::start().await;
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .mount(&primary)
+        .await;
+    let secondary = MockServer::start().await;
+    let order = json!({"id": "6f1c0f0e-2f7b-4a59-9d55-3d1c2b1a0e9f", "customerId": "from-secondary",
+                       "status": "shipped", "total": 7});
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": order.to_string()}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        })))
+        .expect(1)
+        .mount(&secondary)
+        .await;
+
+    let store = store().await;
+    let mut s = profile("secondary", secondary.uri(), None);
+    s.secret_ref = None;
+    s.timeout_ms = 2000;
+    store.put_profile(&s).await.unwrap();
+    let mut p = profile("primary", primary.uri(), Some("secondary"));
+    p.secret_ref = None;
+    p.timeout_ms = 300;
+    store.put_profile(&p).await.unwrap();
+    let mock = create_mock(&store, "orders", "/orders", Some("primary")).await;
+    activate(&store, &mock, &fixture_source()).await;
+
+    let mut deps = deps(store);
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+
+    let r = reqwest::get(format!("{base}/orders/orders/o1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-mockingbird-source"], "llm");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["customerId"], "from-secondary");
+    secondary.verify().await;
+}

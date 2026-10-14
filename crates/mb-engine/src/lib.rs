@@ -350,7 +350,9 @@ impl Engine {
             max_tokens: self.config.max_tokens,
             timeout: self.config.timeout,
         };
-        match tokio::time::timeout(self.config.timeout, provider.complete(request)).await {
+        // A fallback chain gets every hop's timeout, not just the first's.
+        let limit = provider.total_timeout(self.config.timeout);
+        match tokio::time::timeout(limit, provider.complete(request)).await {
             Ok(Ok(response)) => {
                 *usage = *usage + response.usage;
                 Ok(response.content)

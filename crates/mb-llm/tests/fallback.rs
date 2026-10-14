@@ -97,3 +97,45 @@ fn fallback_capabilities_are_the_intersection() {
         }
     );
 }
+
+#[tokio::test]
+async fn fallback_rewrites_request_per_hop_and_sums_timeouts() {
+    use mb_llm::HopSettings;
+
+    let primary = Arc::new(ScriptedProvider::new(vec![Err(LlmError::Timeout)]));
+    let secondary = Arc::new(ScriptedProvider::new(vec![Ok("from secondary".into())]));
+    let p = HopSettings {
+        timeout: Duration::from_millis(300),
+        temperature: 0.1,
+        max_tokens: 10,
+    };
+    let s = HopSettings {
+        timeout: Duration::from_secs(2),
+        temperature: 0.9,
+        max_tokens: 20,
+    };
+    let fallback = FallbackProvider::new(primary.clone(), secondary.clone())
+        .with_primary_settings(p)
+        .with_secondary_settings(s);
+
+    assert_eq!(
+        fallback.total_timeout(Duration::from_secs(1)),
+        Duration::from_millis(2300)
+    );
+    // Without settings each hop gets the request timeout.
+    let plain = FallbackProvider::new(primary.clone(), secondary.clone());
+    assert_eq!(
+        plain.total_timeout(Duration::from_secs(1)),
+        Duration::from_secs(2)
+    );
+
+    let response = fallback.complete(request()).await.unwrap();
+    assert_eq!(response.content, "from secondary");
+    let sent = primary.requests();
+    assert_eq!(sent[0].timeout, Duration::from_millis(300));
+    assert_eq!(sent[0].max_tokens, 10);
+    let sent = secondary.requests();
+    assert_eq!(sent[0].timeout, Duration::from_secs(2));
+    assert_eq!(sent[0].max_tokens, 20);
+    assert!((sent[0].temperature - 0.9).abs() < f32::EPSILON);
+}

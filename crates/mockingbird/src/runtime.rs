@@ -9,7 +9,7 @@ use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwapOption;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec};
 use mb_ext::{Extensions, Tenancy};
-use mb_llm::{FallbackProvider, OpenAiCompatible, OpenAiConfig, Provider};
+use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
 use mb_protocols::{MockRuntime, RequestRecorder, ScenarioRuntime};
 use mb_state::StateStore;
 use mb_store::{ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, Scenario};
@@ -76,11 +76,15 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     };
     let provider = match profile_name(deps, mock)? {
         Some(name) if !deps.offline => {
-            let profile = load_profile(deps, &name).await?;
-            config.timeout = Duration::from_millis(profile.timeout_ms);
-            config.temperature = profile.temperature;
-            config.max_tokens = profile.max_tokens;
-            Some(build_provider(deps, &name).await?)
+            let chain = load_chain(deps, &name).await?;
+            let head = chain
+                .first()
+                .map(hop_settings)
+                .ok_or_else(|| anyhow!("empty LLM profile chain"))?;
+            config.timeout = head.timeout;
+            config.temperature = head.temperature;
+            config.max_tokens = head.max_tokens;
+            Some(chain_provider(deps, &chain).await?)
         }
         _ => None,
     };
@@ -108,13 +112,20 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
 }
 
 /// The provider for `profile_name`, wrapped in [`FallbackProvider`]s along
-/// its `fallback_profile` chain. A cycle, a chain longer than
+/// its `fallback_profile` chain, each hop with its own profile's timeout,
+/// temperature and token limit. A cycle, a chain longer than
 /// [`MAX_FALLBACK_DEPTH`] hops, a missing profile or an unresolvable secret
 /// is an error.
 pub async fn build_provider(
     deps: &RuntimeDeps,
     profile_name: &str,
 ) -> anyhow::Result<Arc<dyn Provider>> {
+    let chain = load_chain(deps, profile_name).await?;
+    chain_provider(deps, &chain).await
+}
+
+/// `profile_name` and the profiles it falls back to, in order; never empty.
+async fn load_chain(deps: &RuntimeDeps, profile_name: &str) -> anyhow::Result<Vec<LlmProfile>> {
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut next = Some(profile_name.to_string());
@@ -134,16 +145,44 @@ pub async fn build_provider(
         next = profile.fallback_profile.clone().filter(|f| !f.is_empty());
         chain.push(profile);
     }
+    if chain.is_empty() {
+        bail!("empty LLM profile chain");
+    }
+    Ok(chain)
+}
 
-    let mut provider: Option<Arc<dyn Provider>> = None;
+/// The provider for a loaded chain: each profile falls back to the next.
+async fn chain_provider(
+    deps: &RuntimeDeps,
+    chain: &[LlmProfile],
+) -> anyhow::Result<Arc<dyn Provider>> {
+    // Built from the last hop backwards: (provider, its profile's settings).
+    let mut fallback: Option<(Arc<dyn Provider>, HopSettings)> = None;
     for profile in chain.iter().rev() {
         let this = openai_provider(deps, profile).await?;
-        provider = Some(match provider {
+        let settings = hop_settings(profile);
+        let provider = match fallback {
             None => this,
-            Some(secondary) => Arc::new(FallbackProvider::new(this, secondary)),
-        });
+            Some((secondary, secondary_settings)) => Arc::new(
+                FallbackProvider::new(this, secondary)
+                    .with_primary_settings(settings)
+                    .with_secondary_settings(secondary_settings),
+            ),
+        };
+        fallback = Some((provider, settings));
     }
-    provider.ok_or_else(|| anyhow!("empty LLM profile chain"))
+    fallback
+        .map(|(provider, _)| provider)
+        .ok_or_else(|| anyhow!("empty LLM profile chain"))
+}
+
+/// A profile's per-request settings.
+fn hop_settings(profile: &LlmProfile) -> HopSettings {
+    HopSettings {
+        timeout: Duration::from_millis(profile.timeout_ms),
+        temperature: profile.temperature,
+        max_tokens: profile.max_tokens,
+    }
 }
 
 /// The profile the provider policy picks for `mock`, if any.

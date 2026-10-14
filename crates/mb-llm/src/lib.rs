@@ -11,7 +11,7 @@ pub mod openai;
 #[cfg(feature = "testing")]
 pub mod scripted;
 
-pub use fallback::FallbackProvider;
+pub use fallback::{FallbackProvider, HopSettings};
 pub use openai::{OpenAiCompatible, OpenAiConfig};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;
@@ -101,4 +101,11 @@ pub enum LlmError {
 pub trait Provider: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// The longest a [`Provider::complete`] call with `request_timeout` may
+    /// take: the request timeout for a single provider; the sum over every
+    /// hop for a [`FallbackProvider`]. Callers bound the call by this.
+    fn total_timeout(&self, request_timeout: Duration) -> Duration {
+        request_timeout
+    }
 }
