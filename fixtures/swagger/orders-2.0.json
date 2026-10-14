@@ -1,0 +1,102 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Orders API", "version": "1.0.0" },
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "paths": {
+    "/orders": {
+      "get": {
+        "operationId": "listOrders",
+        "summary": "List orders",
+        "parameters": [
+          { "name": "status", "in": "query", "type": "string", "enum": ["pending", "shipped"] }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": { "type": "array", "items": { "$ref": "#/definitions/Order" } }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createOrder",
+        "summary": "Create an order",
+        "parameters": [
+          { "name": "body", "in": "body", "required": true, "schema": { "$ref": "#/definitions/NewOrder" } }
+        ],
+        "responses": {
+          "201": { "description": "Created", "schema": { "$ref": "#/definitions/Order" } },
+          "400": { "description": "Bad request", "schema": { "$ref": "#/definitions/Error" } }
+        }
+      }
+    },
+    "/orders/{orderId}": {
+      "parameters": [
+        { "name": "orderId", "in": "path", "required": true, "type": "string" }
+      ],
+      "get": {
+        "operationId": "getOrder",
+        "summary": "Get an order",
+        "responses": {
+          "200": { "description": "OK", "schema": { "$ref": "#/definitions/Order" } },
+          "404": { "description": "Not found", "schema": { "$ref": "#/definitions/Error" } }
+        }
+      },
+      "put": {
+        "operationId": "updateOrder",
+        "summary": "Update an order",
+        "parameters": [
+          { "name": "body", "in": "body", "required": true, "schema": { "$ref": "#/definitions/NewOrder" } }
+        ],
+        "responses": {
+          "200": { "description": "OK", "schema": { "$ref": "#/definitions/Order" } }
+        }
+      },
+      "delete": {
+        "operationId": "deleteOrder",
+        "summary": "Delete an order",
+        "responses": {
+          "204": { "description": "Deleted" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Order": {
+      "type": "object",
+      "required": ["id", "customerId", "status", "total"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "customerId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "shipped"] },
+        "total": { "type": "number", "minimum": 0 },
+        "note": { "type": "string", "x-nullable": true },
+        "category": { "$ref": "#/definitions/Category" }
+      }
+    },
+    "NewOrder": {
+      "type": "object",
+      "required": ["customerId", "total"],
+      "properties": {
+        "customerId": { "type": "string" },
+        "total": { "type": "number" }
+      }
+    },
+    "Category": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "parent": { "$ref": "#/definitions/Category" }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

@@ -98,10 +98,11 @@ fn fix_exclusive_bounds(obj: &mut Map<String, Value>) {
     }
 }
 
-/// 3.0: `nullable: true` -> `type: [T, "null"]`.
+/// 3.0 `nullable: true` / 2.0 `x-nullable: true` -> `type: [T, "null"]`.
 fn apply_nullable(obj: &mut Map<String, Value>) {
-    let nullable = obj.remove("nullable");
-    if nullable != Some(Value::Bool(true)) {
+    // `x-nullable` is the Swagger 2.0 vendor spelling of the same flag.
+    let flags = [obj.remove("nullable"), obj.remove("x-nullable")];
+    if !flags.contains(&Some(Value::Bool(true))) {
         return;
     }
     let null = || Value::String("null".into());

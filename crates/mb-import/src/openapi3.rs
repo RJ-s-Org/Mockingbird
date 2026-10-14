@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 const REF_PREFIX: &str = "#/components/schemas/";
 
-const METHODS: [(&str, HttpMethod); 7] = [
+pub(crate) const METHODS: [(&str, HttpMethod); 7] = [
     ("get", HttpMethod::Get),
     ("put", HttpMethod::Put),
     ("post", HttpMethod::Post),
@@ -21,19 +21,23 @@ const METHODS: [(&str, HttpMethod); 7] = [
     ("options", HttpMethod::Options),
 ];
 
-fn invalid(pointer: impl Into<String>, message: impl Into<String>) -> ImportError {
+pub(crate) fn invalid(pointer: impl Into<String>, message: impl Into<String>) -> ImportError {
     ImportError::Invalid {
         pointer: pointer.into(),
         message: message.into(),
     }
 }
 
-fn escape(seg: &str) -> String {
+pub(crate) fn escape(seg: &str) -> String {
     seg.replace('~', "~0").replace('/', "~1")
 }
 
 /// Follow a component `$ref` (`#/components/...`) until a concrete object.
-fn deref<'a>(doc: &'a Value, mut v: &'a Value, at: &str) -> Result<&'a Value, ImportError> {
+pub(crate) fn deref<'a>(
+    doc: &'a Value,
+    mut v: &'a Value,
+    at: &str,
+) -> Result<&'a Value, ImportError> {
     for _ in 0..16 {
         match v.get("$ref").and_then(Value::as_str) {
             Some(r) => {
@@ -48,7 +52,7 @@ fn deref<'a>(doc: &'a Value, mut v: &'a Value, at: &str) -> Result<&'a Value, Im
     Err(invalid(at, "$ref chain too deep"))
 }
 
-fn slug(s: &str) -> String {
+pub(crate) fn slug(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
         if c.is_ascii_alphanumeric() {
@@ -60,7 +64,7 @@ fn slug(s: &str) -> String {
     out.trim_end_matches('-').to_owned()
 }
 
-fn is_json_media(ct: &str) -> bool {
+pub(crate) fn is_json_media(ct: &str) -> bool {
     let base = ct
         .split(';')
         .next()
@@ -198,7 +202,11 @@ fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<Option<Value>, Impo
         .map(|(_, m)| schema_of(m)))
 }
 
-fn check_refs(value: &Value, defs: &Map<String, Value>, at: &str) -> Result<(), ImportError> {
+pub(crate) fn check_refs(
+    value: &Value,
+    defs: &Map<String, Value>,
+    at: &str,
+) -> Result<(), ImportError> {
     let mut refs = Vec::new();
     collect_refs(value, &mut refs);
     for r in refs {

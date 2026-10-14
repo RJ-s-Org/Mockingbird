@@ -4,6 +4,7 @@
 mod heuristics;
 mod openapi3;
 mod schema;
+mod swagger2;
 
 use mb_mcm::Bundle;
 use serde_json::Value;
@@ -24,15 +25,24 @@ pub enum ImportError {
     Invalid { pointer: String, message: String },
 }
 
+/// A version field as text. Unquoted YAML versions (`swagger: 2.0`) parse as numbers.
+fn version_string(v: Option<&Value>) -> Option<String> {
+    match v? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// Detect the contract format from `"openapi": "3.x"` or `"swagger": "2.0"`.
 pub fn detect_format(doc: &Value) -> Result<SourceFormat, ImportError> {
-    if let Some(v) = doc.get("openapi").and_then(Value::as_str) {
+    if let Some(v) = version_string(doc.get("openapi")) {
         if v.starts_with("3.") {
             return Ok(SourceFormat::OpenApi3);
         }
         return Err(ImportError::Unsupported(format!("openapi {v}")));
     }
-    if let Some(v) = doc.get("swagger").and_then(Value::as_str) {
+    if let Some(v) = version_string(doc.get("swagger")) {
         if v == "2.0" {
             return Ok(SourceFormat::Swagger2);
         }
@@ -56,8 +66,6 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
     let doc = parse_document(bytes)?;
     match detect_format(&doc)? {
         SourceFormat::OpenApi3 => openapi3::compile(&doc, bytes),
-        SourceFormat::Swagger2 => Err(ImportError::Unsupported(
-            "swagger 2.0 is not implemented yet".into(),
-        )),
+        SourceFormat::Swagger2 => swagger2::compile(&doc, bytes),
     }
 }
