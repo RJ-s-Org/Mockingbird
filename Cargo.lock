@@ -1719,9 +1719,16 @@ name = "mb-state"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "dashmap",
+ "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

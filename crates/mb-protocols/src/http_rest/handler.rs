@@ -163,7 +163,10 @@ pub(crate) async fn handle(
     let resource_type = op.resource_type.as_deref();
     let target_id = target_id(op, &path_params);
     let target = match (resource_type, &target_id) {
-        (Some(t), Some(id)) => rt.state.get(&session, t, id).await,
+        (Some(t), Some(id)) => rt.state.get(&session, t, id).await.unwrap_or_else(|e| {
+            tracing::warn!(mock = %rt.name, error = %e, "state read failed; continuing without state");
+            None
+        }),
         _ => None,
     };
     let related = related(rt, &session, op, target_id.is_some(), &query, body.as_ref()).await;
@@ -511,7 +514,14 @@ async fn related(
         && !has_target
         && let Some(t) = op.resource_type.as_deref()
     {
-        out = rt.state.list(session, t, LIST_CONTEXT_LIMIT).await;
+        out = rt
+            .state
+            .list(session, t, LIST_CONTEXT_LIMIT)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(mock = %rt.name, error = %e, "state read failed; continuing without state");
+                Vec::new()
+            });
     }
     let body_fields = body.and_then(Value::as_object).into_iter().flatten();
     for (field, value) in query.iter().chain(body_fields) {
@@ -519,7 +529,11 @@ async fn related(
             continue;
         };
         for t in [format!("{prefix}s"), prefix.to_string()] {
-            if let Some(hit) = rt.state.get(session, &t, id).await {
+            let hit = rt.state.get(session, &t, id).await.unwrap_or_else(|e| {
+                tracing::warn!(mock = %rt.name, error = %e, "state read failed; continuing without state");
+                None
+            });
+            if let Some(hit) = hit {
                 if !out
                     .iter()
                     .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
@@ -543,7 +557,7 @@ async fn write_state(
     request_body: Option<Value>,
 ) {
     let data = generated.body.clone().or(request_body);
-    match op.kind {
+    let result = match op.kind {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
             let Some(data) = data else { return };
@@ -559,28 +573,34 @@ async fn write_state(
                         data,
                     },
                 )
-                .await;
+                .await
         }
         OperationKind::Command(Effect::Update) => {
-            if let (Some(id), Some(data)) = (target_id, data) {
-                rt.state
-                    .upsert(
-                        session,
-                        StoredResource {
-                            resource_type: resource_type.into(),
-                            id,
-                            data,
-                        },
-                    )
-                    .await;
-            }
+            let (Some(id), Some(data)) = (target_id, data) else {
+                return;
+            };
+            rt.state
+                .upsert(
+                    session,
+                    StoredResource {
+                        resource_type: resource_type.into(),
+                        id,
+                        data,
+                    },
+                )
+                .await
         }
         OperationKind::Command(Effect::Delete) => {
-            if let Some(id) = target_id {
-                rt.state.delete(session, resource_type, &id).await;
-            }
+            let Some(id) = target_id else { return };
+            rt.state
+                .delete(session, resource_type, &id)
+                .await
+                .map(|_| ())
         }
-        _ => {}
+        _ => return,
+    };
+    if let Err(e) = result {
+        tracing::warn!(mock = %rt.name, error = %e, "state write failed; response served without persisting");
     }
 }
 

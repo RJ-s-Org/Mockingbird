@@ -133,6 +133,7 @@ async fn sessions_isolate_state() {
         h.rt.state
             .get(&session("a"), "orders", "o1")
             .await
+            .unwrap()
             .is_some()
     );
 
@@ -151,6 +152,7 @@ async fn sessions_isolate_state() {
         h.rt.state
             .get(&session("b"), "orders", "o1")
             .await
+            .unwrap()
             .is_none()
     );
 }
@@ -168,6 +170,7 @@ async fn delete_returns_204_and_removes_state() {
         h.rt.state
             .get(&session("default"), "orders", "o1")
             .await
+            .unwrap()
             .is_some()
     );
 
@@ -181,6 +184,7 @@ async fn delete_returns_204_and_removes_state() {
         h.rt.state
             .get(&session("default"), "orders", "o1")
             .await
+            .unwrap()
             .is_none()
     );
     // Only the create call reached the LLM.
@@ -212,7 +216,8 @@ async fn routes_trailing_slash_query_and_unknown() {
                 data: order("o 1", "c9"),
             },
         )
-        .await;
+        .await
+        .unwrap();
     let resp = send(&h, get("/orders/o%201")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
