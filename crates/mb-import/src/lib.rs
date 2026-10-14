@@ -58,7 +58,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Value, ImportError> {
     if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
         return Ok(v);
     }
-    serde_yaml_ng::from_slice::<Value>(bytes).map_err(|e| ImportError::Parse(e.to_string()))
+    serde_saphyr::from_slice::<Value>(bytes).map_err(|e| ImportError::Parse(e.to_string()))
 }
 
 /// Parse, detect the format, and dispatch to the matching compiler.

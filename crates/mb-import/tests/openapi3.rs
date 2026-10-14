@@ -157,3 +157,26 @@ fn imports_request_body_required() {
     assert!(op.input.body.is_some());
     assert!(!op.input.body_required);
 }
+
+#[test]
+fn parses_unquoted_integer_status_keys() {
+    let text = String::from_utf8(fixture("orders-3.0.yaml")).unwrap();
+    let unquoted = unquote_status_keys(&text);
+    assert_ne!(unquoted, text);
+    let b = compile(unquoted.as_bytes()).unwrap();
+    assert_eq!(b.operations.len(), 5);
+}
+
+fn unquote_status_keys(text: &str) -> String {
+    let mut out = text.to_string();
+    for code in ["200", "201", "204", "400", "404", "409", "422", "500"] {
+        out = out.replace(&format!("\"{code}\":"), &format!("{code}:"));
+    }
+    out
+}
+
+#[test]
+fn malformed_yaml_is_parse_error() {
+    let r = compile(b"openapi: 3.0.0\npaths: [unclosed\n  - : {{{\n\t bad: *missing_anchor\n");
+    assert!(matches!(r, Err(ImportError::Parse(_))), "got {r:?}");
+}
