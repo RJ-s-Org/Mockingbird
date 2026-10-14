@@ -18,7 +18,7 @@ pub mod scenario;
 pub mod validate;
 
 pub use extract::extract_json;
-pub use faker::Faker;
+pub use faker::{Costs, Faker};
 pub use prompt::build_messages;
 pub use scenario::{ScenarioSpec, apply_set};
 pub use validate::SchemaValidator;
@@ -252,11 +252,13 @@ impl Engine {
     ) -> GeneratedResponse {
         let schema = bundle.with_reachable_defs(schema);
         let faker = Faker::new(self.config.faker_depth);
+        // One cost table for every attempt: computing it walks the schema.
+        let costs = Costs::compute(&schema);
         let mut rng = rand::rng();
         let mut first: Option<Value> = None;
         let mut body = None;
         for attempt in 0..FALLBACK_ATTEMPTS {
-            let candidate = faker.fake_with_branch(&schema, Some(attempt), &mut rng);
+            let candidate = faker.fake_with_costs(&schema, Some(attempt), &costs, &mut rng);
             match validator {
                 Some(v) if v.validate(&candidate).is_err() => {
                     first.get_or_insert(candidate);

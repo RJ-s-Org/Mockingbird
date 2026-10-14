@@ -1,6 +1,6 @@
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const WORDS: &[&str] = &[
     "alpha", "bravo", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris", "juniper",
@@ -41,7 +41,7 @@ impl Default for Faker {
 /// number of values generated so far.
 struct Ctx<'a> {
     root: &'a Value,
-    costs: Costs,
+    costs: &'a Costs,
     generated: usize,
 }
 
@@ -63,9 +63,23 @@ impl Faker {
         branch: Option<usize>,
         rng: &mut impl Rng,
     ) -> Value {
+        let costs = Costs::compute(schema_with_defs);
+        self.fake_with_costs(schema_with_defs, branch, &costs, rng)
+    }
+
+    /// Like [`Faker::fake_with_branch`], with the cost table precomputed by
+    /// [`Costs::compute`] on the same `schema_with_defs`. Callers that fake
+    /// one schema repeatedly compute it once and reuse it.
+    pub fn fake_with_costs(
+        &self,
+        schema_with_defs: &Value,
+        branch: Option<usize>,
+        costs: &Costs,
+        rng: &mut impl Rng,
+    ) -> Value {
         let mut ctx = Ctx {
             root: schema_with_defs,
-            costs: Costs::compute(schema_with_defs),
+            costs,
             generated: 0,
         };
         self.gen_value(&mut ctx, schema_with_defs, 0, branch, rng)
@@ -91,7 +105,7 @@ impl Faker {
             None if at_limit => Pick::Shallow,
             None => Pick::Random,
         };
-        let flat = flatten(ctx.root, &ctx.costs, schema, 0, pick, rng);
+        let flat = flatten(ctx.root, ctx.costs, schema, 0, pick, rng);
         let Some(s) = flat.as_object() else {
             // `true` accepts anything, `false` accepts nothing.
             return Value::String(word(rng));
@@ -212,16 +226,36 @@ fn hard_exhausted(ctx: &Ctx<'_>) -> bool {
     ctx.generated > NODE_BUDGET + HARD_NODE_EXTRA
 }
 
+/// `$ref` targets inlined through `allOf` before falling back to the
+/// fixed-point table (bounds `allOf` reference cycles).
+const MAX_INLINE_HOPS: usize = 32;
+
 /// Minimal instance cost (roughly, the number of values a smallest instance
 /// generates) of every `$ref` target reachable from a root, computed as a
 /// fixed point so that recursion is accounted for: a definition whose only
-/// instances recurse forever stays [`INFINITE`].
-struct Costs {
+/// instances recurse forever stays infinite.
+///
+/// Computing it walks every definition, so callers that fake the same
+/// schema repeatedly compute it once (see [`Faker::fake_with_costs`]).
+pub struct Costs {
     by_ref: HashMap<String, u64>,
 }
 
+/// The object keywords of a schema merged across its `allOf` members (and
+/// their inlined `$ref` targets), as [`flatten`] merges them for the faker.
+#[derive(Default)]
+struct Parts<'a> {
+    props: HashMap<&'a str, Vec<&'a Value>>,
+    required: Vec<&'a str>,
+    /// Cost of everything other than the required members.
+    extra: u64,
+    /// A merged `const`/`enum` ends generation with a single value.
+    terminal: bool,
+}
+
 impl Costs {
-    fn compute(root: &Value) -> Self {
+    /// The cost table for `root` (a schema with its `$defs` attached).
+    pub fn compute(root: &Value) -> Self {
         let mut refs = Vec::new();
         collect_refs(root, &mut refs);
         refs.sort_unstable();
@@ -230,33 +264,64 @@ impl Costs {
             .into_iter()
             .filter_map(|r| resolve_ref(root, &r).map(|t| (r, t)))
             .collect();
+        let index: HashMap<&str, usize> = targets
+            .iter()
+            .enumerate()
+            .map(|(i, (r, _))| (r.as_str(), i))
+            .collect();
+        // dependents[j]: targets whose cost reads target j's cost.
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); targets.len()];
+        for (i, (_, target)) in targets.iter().enumerate() {
+            let mut deps = Vec::new();
+            let mut visited = HashSet::new();
+            cost_deps(root, target, false, &mut deps, &mut visited);
+            deps.sort_unstable();
+            deps.dedup();
+            for d in deps {
+                if let Some(&j) = index.get(d.as_str()) {
+                    dependents[j].push(i);
+                }
+            }
+        }
         let mut costs = Self {
             by_ref: targets.iter().map(|(r, _)| (r.clone(), INFINITE)).collect(),
         };
-        // Costs only decrease from infinity; a minimal derivation never
-        // repeats a definition along a path, so `n + 1` rounds converge.
-        for _ in 0..=targets.len() {
-            let mut changed = false;
-            for (r, target) in &targets {
-                let cost = costs.of(root, target);
-                if let Some(slot) = costs.by_ref.get_mut(r)
-                    && cost < *slot
-                {
-                    *slot = cost;
-                    changed = true;
-                }
-            }
-            if !changed {
+        // Worklist fixed point: costs only decrease from infinity, and a
+        // target is re-evaluated only when a cost it reads has decreased.
+        // The evaluation cap matches the round-robin bound (`n + 1` rounds
+        // of `n` targets) and is not reached in practice.
+        let mut queue: VecDeque<usize> = (0..targets.len()).rev().collect();
+        let mut queued = vec![true; targets.len()];
+        let mut budget = (targets.len() + 1).saturating_mul(targets.len());
+        while let Some(i) = queue.pop_front() {
+            queued[i] = false;
+            if budget == 0 {
                 break;
+            }
+            budget -= 1;
+            let (r, target) = &targets[i];
+            let cost = costs.of(root, target);
+            if let Some(slot) = costs.by_ref.get_mut(r)
+                && cost < *slot
+            {
+                *slot = cost;
+                for &d in &dependents[i] {
+                    if !queued[d] {
+                        queued[d] = true;
+                        queue.push_back(d);
+                    }
+                }
             }
         }
         costs
     }
 
     /// `1 +` the cost of everything a minimal instance of `schema` must
-    /// contain: required properties, `minItems` elements, all `allOf`
-    /// members, the cheapest `oneOf`/`anyOf` branch and the `$ref` target's
-    /// current cost. Mirrors what [`Faker`] generates past its limits.
+    /// contain: required properties (with `properties` and `required`
+    /// merged across `allOf` members and their `$ref` targets), `minItems`
+    /// elements, the cheapest `oneOf`/`anyOf` branch and the `$ref`
+    /// target's current cost. Mirrors what [`Faker`] generates past its
+    /// limits.
     fn of(&self, root: &Value, schema: &Value) -> u64 {
         let Some(obj) = schema.as_object() else {
             return 1;
@@ -271,35 +336,127 @@ impl Costs {
         if let Some(Value::String(r)) = obj.get("$ref")
             && resolve_ref(root, r).is_some()
         {
-            cost = cost.saturating_add(self.by_ref.get(r).copied().unwrap_or(INFINITE));
+            cost = cost.saturating_add(self.ref_cost(r));
         }
-        if let Some(Value::Array(all)) = obj.get("allOf") {
-            for sub in all {
-                cost = cost.saturating_add(self.of(root, sub));
+        let mut parts = Parts::default();
+        self.gather(root, obj, false, 0, &mut parts);
+        if parts.terminal {
+            return 1;
+        }
+        cost = cost.saturating_add(parts.extra);
+        for name in &parts.required {
+            let member = match parts.props.get(name) {
+                None => 1,
+                Some(decls) => decls
+                    .iter()
+                    .fold(0u64, |acc, p| acc.saturating_add(self.of(root, p))),
+            };
+            cost = cost.saturating_add(member);
+        }
+        cost
+    }
+
+    fn ref_cost(&self, r: &str) -> u64 {
+        self.by_ref.get(r).copied().unwrap_or(INFINITE)
+    }
+
+    /// Adds `obj`'s keywords to `parts`, then those of its `allOf` members.
+    /// With `inline_ref`, `obj`'s own `$ref` target is merged in too (an
+    /// `allOf` member's reference is part of the same object); otherwise
+    /// the caller costs it from the table.
+    fn gather<'a>(
+        &self,
+        root: &'a Value,
+        obj: &'a Map<String, Value>,
+        inline_ref: bool,
+        hops: usize,
+        parts: &mut Parts<'a>,
+    ) {
+        if hops > 0
+            && (obj.contains_key("const")
+                || matches!(obj.get("enum"), Some(Value::Array(a)) if !a.is_empty()))
+        {
+            parts.terminal = true;
+        }
+        if inline_ref
+            && let Some(Value::String(r)) = obj.get("$ref")
+            && let Some(target) = resolve_ref(root, r)
+        {
+            match target.as_object() {
+                Some(t) if hops < MAX_INLINE_HOPS => self.gather(root, t, true, hops + 1, parts),
+                Some(_) => parts.extra = parts.extra.saturating_add(self.ref_cost(r)),
+                None => {}
             }
         }
         for key in ["oneOf", "anyOf"] {
             if let Some(Value::Array(branches)) = obj.get(key)
                 && let Some(min) = branches.iter().map(|b| self.of(root, b)).min()
             {
-                cost = cost.saturating_add(min);
-            }
-        }
-        let props = obj.get("properties").and_then(Value::as_object);
-        if let Some(Value::Array(required)) = obj.get("required") {
-            for name in required.iter().filter_map(Value::as_str) {
-                let member = props
-                    .and_then(|p| p.get(name))
-                    .map_or(1, |p| self.of(root, p));
-                cost = cost.saturating_add(member);
+                parts.extra = parts.extra.saturating_add(min);
             }
         }
         let min_items = obj.get("minItems").and_then(Value::as_u64).unwrap_or(0);
         if min_items > 0 {
             let item = obj.get("items").map_or(1, |i| self.of(root, i));
-            cost = cost.saturating_add(item.saturating_mul(min_items));
+            parts.extra = parts.extra.saturating_add(item.saturating_mul(min_items));
         }
-        cost
+        if let Some(Value::Object(props)) = obj.get("properties") {
+            for (name, sub) in props {
+                parts.props.entry(name.as_str()).or_default().push(sub);
+            }
+        }
+        if let Some(Value::Array(required)) = obj.get("required") {
+            for name in required.iter().filter_map(Value::as_str) {
+                if !parts.required.contains(&name) {
+                    parts.required.push(name);
+                }
+            }
+        }
+        if let Some(Value::Array(all)) = obj.get("allOf") {
+            for member in all.iter().filter_map(Value::as_object) {
+                self.gather(root, member, true, hops + 1, parts);
+            }
+        }
+    }
+}
+
+/// Every `$ref` whose table cost [`Costs::of`] may read while costing
+/// `value`: all references inside it, plus those inside the targets it
+/// inlines through `allOf` (see [`Costs::gather`]).
+fn cost_deps(
+    root: &Value,
+    value: &Value,
+    inline_ref: bool,
+    out: &mut Vec<String>,
+    visited: &mut HashSet<String>,
+) {
+    match value {
+        Value::Object(obj) => {
+            if inline_ref
+                && let Some(Value::String(r)) = obj.get("$ref")
+                && visited.insert(r.clone())
+                && let Some(target) = resolve_ref(root, r)
+            {
+                cost_deps(root, target, true, out, visited);
+            }
+            for (k, v) in obj {
+                match (k.as_str(), v) {
+                    ("$ref", Value::String(r)) => out.push(r.clone()),
+                    ("allOf", Value::Array(members)) => {
+                        for m in members {
+                            cost_deps(root, m, true, out, visited);
+                        }
+                    }
+                    _ => cost_deps(root, v, false, out, visited),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                cost_deps(root, v, false, out, visited);
+            }
+        }
+        _ => {}
     }
 }
 
