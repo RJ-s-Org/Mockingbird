@@ -35,6 +35,7 @@ anyhow = "1"
 http = "1"
 metrics = "0.24"
 arc-swap = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev
 wiremock = "0.6"
@@ -52,6 +53,7 @@ mb-engine = { path = "crates/mb-engine" }
 mb-state = { path = "crates/mb-state" }
 mb-protocols = { path = "crates/mb-protocols" }
 mb-ext = { path = "crates/mb-ext" }
+mb-store = { path = "crates/mb-store" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
