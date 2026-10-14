@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role};
+use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, Usage};
 use mb_mcm::{Bundle, Effect, Operation, OperationKind, OutputVariant, StatusSelector};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
@@ -14,11 +14,13 @@ use serde_json::{Map, Value};
 pub mod extract;
 pub mod faker;
 pub mod prompt;
+pub mod scenario;
 pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::Faker;
 pub use prompt::build_messages;
+pub use scenario::{ScenarioSpec, apply_set};
 pub use validate::SchemaValidator;
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +51,9 @@ pub struct GenerationContext<'a> {
     /// Existing resource for query/update/delete.
     pub target: Option<&'a StoredResource>,
     pub forced_status: Option<u16>,
+    /// The active scenario: its instructions go in the prompt and its `set`
+    /// patches 2xx object bodies.
+    pub scenario: Option<&'a ScenarioSpec>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +85,9 @@ pub struct GeneratedResponse {
     pub content_type: Option<String>,
     pub body: Option<Value>,
     pub source: Source,
+    /// Tokens spent on this response, summed over the primary and repair
+    /// calls; zero when no LLM call was made.
+    pub usage: Usage,
 }
 
 #[derive(Clone, Debug)]
@@ -155,11 +163,13 @@ impl Engine {
                 content_type: variant.content_type.clone(),
                 body: None,
                 source: Source::Llm,
+                usage: Usage::default(),
             });
         };
 
         let validator = self.validator(bundle, op, status, schema)?;
-        let response = match &self.provider {
+        let mut usage = Usage::default();
+        let mut response = match &self.provider {
             None => self.fake_response(bundle, variant, status, schema, Some(&validator)),
             Some(provider) => {
                 let messages = build_messages(
@@ -176,7 +186,7 @@ impl Engine {
                     schema: bundle.with_reachable_defs(schema),
                 };
                 match self
-                    .generate_with_llm(provider.as_ref(), &validator, messages, &format)
+                    .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)
                     .await
                 {
                     Ok((body, source)) => GeneratedResponse {
@@ -184,6 +194,7 @@ impl Engine {
                         content_type: variant.content_type.clone(),
                         body: Some(body),
                         source,
+                        usage: Usage::default(),
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -192,7 +203,8 @@ impl Engine {
                 }
             }
         };
-        Ok(reflect(&validator, op, call, &ctx, response))
+        response.usage = usage;
+        Ok(finish(&validator, op, call, &ctx, response))
     }
 
     /// A faker-generated response for `variant`, tagged `Fallback`. The body
@@ -214,13 +226,14 @@ impl Engine {
                 content_type: variant.content_type.clone(),
                 body: None,
                 source: Source::Fallback,
+                usage: Usage::default(),
             };
         };
         match self.validator(bundle, op, status, schema) {
             Ok(validator) => {
                 let response =
                     self.fake_response(bundle, variant, status, schema, Some(&validator));
-                reflect(&validator, op, call, ctx, response)
+                finish(&validator, op, call, ctx, response)
             }
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
@@ -263,6 +276,7 @@ impl Engine {
             content_type: variant.content_type.clone(),
             body,
             source: Source::Fallback,
+            usage: Usage::default(),
         }
     }
 
@@ -283,14 +297,17 @@ impl Engine {
     }
 
     /// Ask the LLM, repairing once. `Err` carries the reason to fall back.
+    /// Every completed call's tokens are added to `usage`, including calls
+    /// whose output is ultimately discarded.
     async fn generate_with_llm(
         &self,
         provider: &dyn Provider,
         validator: &SchemaValidator,
         mut messages: Vec<ChatMessage>,
         format: &ResponseFormat,
+        usage: &mut Usage,
     ) -> Result<(Value, Source), String> {
-        let first = self.complete(provider, &messages, format).await?;
+        let first = self.complete(provider, &messages, format, usage).await?;
         let errors = match check(validator, &first) {
             Ok(value) => return Ok((value, Source::Llm)),
             Err(errors) => errors,
@@ -307,7 +324,7 @@ impl Engine {
                 "The JSON above is invalid against the schema. Errors:\n{list}Return only corrected JSON."
             ),
         });
-        let second = self.complete(provider, &messages, format).await?;
+        let second = self.complete(provider, &messages, format, usage).await?;
         match check(validator, &second) {
             Ok(value) => Ok((value, Source::Repaired)),
             Err(errors) => Err(format!(
@@ -322,6 +339,7 @@ impl Engine {
         provider: &dyn Provider,
         messages: &[ChatMessage],
         format: &ResponseFormat,
+        usage: &mut Usage,
     ) -> Result<String, String> {
         let request = ChatRequest {
             messages: messages.to_vec(),
@@ -331,7 +349,10 @@ impl Engine {
             timeout: self.config.timeout,
         };
         match tokio::time::timeout(self.config.timeout, provider.complete(request)).await {
-            Ok(Ok(response)) => Ok(response.content),
+            Ok(Ok(response)) => {
+                *usage = *usage + response.usage;
+                Ok(response.content)
+            }
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err("LLM request timed out".into()),
         }
@@ -362,6 +383,61 @@ fn format_name(id: &str) -> String {
         "response".into()
     } else {
         name
+    }
+}
+
+/// Post-process a generated response: reflect request and state, then apply
+/// the scenario's `set` patch.
+fn finish(
+    validator: &SchemaValidator,
+    op: &Operation,
+    call: &OperationCall,
+    ctx: &GenerationContext<'_>,
+    response: GeneratedResponse,
+) -> GeneratedResponse {
+    let response = reflect(validator, op, call, ctx, response);
+    apply_scenario(validator, op, call, ctx, response)
+}
+
+/// For a 2xx object body, apply the scenario's `set` merge patch, re-reflect
+/// so the request body and identity still win, and validate. An invalid
+/// result is discarded and the pre-patch body kept.
+fn apply_scenario(
+    validator: &SchemaValidator,
+    op: &Operation,
+    call: &OperationCall,
+    ctx: &GenerationContext<'_>,
+    response: GeneratedResponse,
+) -> GeneratedResponse {
+    let Some(scenario) = ctx.scenario else {
+        return response;
+    };
+    let Some(set) = &scenario.set else {
+        return response;
+    };
+    if !(200..300).contains(&response.status) {
+        return response;
+    }
+    let Some(body @ Value::Object(_)) = &response.body else {
+        return response;
+    };
+    let patched = GeneratedResponse {
+        body: Some(apply_set(body, set)),
+        ..response.clone()
+    };
+    let patched = reflect(validator, op, call, ctx, patched);
+    match patched.body.as_ref().map(|b| validator.validate(b)) {
+        Some(Ok(())) => patched,
+        Some(Err(errors)) => {
+            tracing::warn!(
+                operation = %op.id,
+                scenario = %scenario.name,
+                errors = %errors.join("; "),
+                "scenario set produces an invalid body; ignoring it"
+            );
+            response
+        }
+        None => response,
     }
 }
 

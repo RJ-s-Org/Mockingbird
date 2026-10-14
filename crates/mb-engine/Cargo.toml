@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 dashmap.workspace = true
+json-patch.workspace = true
 jsonschema.workspace = true
 mb-llm.workspace = true
 mb-mcm.workspace = true

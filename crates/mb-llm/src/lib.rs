@@ -1,14 +1,17 @@
 //! LLM provider abstraction and an OpenAI-compatible client.
 
+use std::ops::Add;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
+pub mod fallback;
 pub mod openai;
 #[cfg(feature = "testing")]
 pub mod scripted;
 
+pub use fallback::FallbackProvider;
 pub use openai::{OpenAiCompatible, OpenAiConfig};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;
@@ -56,6 +59,18 @@ pub struct ChatRequest {
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+}
+
+impl Add for Usage {
+    type Output = Usage;
+
+    /// Saturating, so a misreporting provider cannot overflow a total.
+    fn add(self, rhs: Usage) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens.saturating_add(rhs.prompt_tokens),
+            completion_tokens: self.completion_tokens.saturating_add(rhs.completion_tokens),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

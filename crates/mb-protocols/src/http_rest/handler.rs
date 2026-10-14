@@ -183,6 +183,7 @@ pub(crate) async fn handle(
         related: &related,
         target: target.as_ref(),
         forced_status: overrides.status,
+        scenario: None,
     };
     let generated = match rt.engine.generate(&rt.bundle, op, &call, ctx).await {
         Ok(g) => g,

@@ -35,6 +35,7 @@ anyhow = "1"
 http = "1"
 metrics = "0.24"
 arc-swap = "1"
+json-patch = { version = "4", default-features = false }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev

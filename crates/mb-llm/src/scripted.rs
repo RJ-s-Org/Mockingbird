@@ -12,15 +12,21 @@ pub struct ScriptedProvider {
 }
 
 impl ScriptedProvider {
+    /// Replays `script` reporting zero usage for every call.
     pub fn new(script: Vec<Result<String, LlmError>>) -> Self {
+        Self::with_usage(
+            script
+                .into_iter()
+                .map(|r| r.map(|content| (content, Usage::default())))
+                .collect(),
+        )
+    }
+
+    /// Replays `script`, reporting the given usage for each successful call.
+    pub fn with_usage(script: Vec<Result<(String, Usage), LlmError>>) -> Self {
         let script = script
             .into_iter()
-            .map(|r| {
-                r.map(|content| ChatResponse {
-                    content,
-                    usage: Usage::default(),
-                })
-            })
+            .map(|r| r.map(|(content, usage)| ChatResponse { content, usage }))
             .collect();
         Self {
             script: Mutex::new(script),
