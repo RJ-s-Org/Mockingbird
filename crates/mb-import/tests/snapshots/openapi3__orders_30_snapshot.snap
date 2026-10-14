@@ -1,0 +1,223 @@
+---
+source: crates/mb-import/tests/openapi3.rs
+expression: b
+---
+id: orders-api
+title: Orders API
+version: 1.0.0
+source_digest: "[digest]"
+operations:
+  - id: listOrders
+    protocol: http
+    binding:
+      http:
+        method: get
+        path: /orders
+    kind: query
+    summary: List orders
+    input:
+      path: ~
+      query:
+        properties:
+          status:
+            enum:
+              - pending
+              - shipped
+            type: string
+        type: object
+      headers: ~
+      body: ~
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          items:
+            $ref: "#/$defs/Order"
+          type: array
+    resource_type: orders
+    identity: ~
+    semantic_hints: []
+  - id: createOrder
+    protocol: http
+    binding:
+      http:
+        method: post
+        path: /orders
+    kind:
+      command: create
+    summary: Create an order
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/NewOrder"
+    outputs:
+      - status:
+          code: 201
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/Order"
+      - status:
+          code: 400
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/Error"
+    resource_type: orders
+    identity:
+      path_param: ~
+      field: id
+    semantic_hints: []
+  - id: getOrder
+    protocol: http
+    binding:
+      http:
+        method: get
+        path: "/orders/{orderId}"
+    kind: query
+    summary: Get an order
+    input:
+      path:
+        properties:
+          orderId:
+            type: string
+        required:
+          - orderId
+        type: object
+      query: ~
+      headers: ~
+      body: ~
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/Order"
+      - status:
+          code: 404
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/Error"
+    resource_type: orders
+    identity:
+      path_param: orderId
+      field: id
+    semantic_hints: []
+  - id: updateOrder
+    protocol: http
+    binding:
+      http:
+        method: put
+        path: "/orders/{orderId}"
+    kind:
+      command: update
+    summary: Update an order
+    input:
+      path:
+        properties:
+          orderId:
+            type: string
+        required:
+          - orderId
+        type: object
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/NewOrder"
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/Order"
+    resource_type: orders
+    identity:
+      path_param: orderId
+      field: id
+    semantic_hints: []
+  - id: deleteOrder
+    protocol: http
+    binding:
+      http:
+        method: delete
+        path: "/orders/{orderId}"
+    kind:
+      command: delete
+    summary: Delete an order
+    input:
+      path:
+        properties:
+          orderId:
+            type: string
+        required:
+          - orderId
+        type: object
+      query: ~
+      headers: ~
+      body: ~
+    outputs:
+      - status:
+          code: 204
+        content_type: ~
+        schema: ~
+    resource_type: orders
+    identity: ~
+    semantic_hints: []
+defs:
+  Category:
+    properties:
+      name:
+        type: string
+      parent:
+        $ref: "#/$defs/Category"
+    required:
+      - name
+    type: object
+  Error:
+    properties:
+      code:
+        type: integer
+      message:
+        type: string
+    required:
+      - code
+      - message
+    type: object
+  NewOrder:
+    properties:
+      customerId:
+        type: string
+      total:
+        type: number
+    required:
+      - customerId
+      - total
+    type: object
+  Order:
+    properties:
+      category:
+        $ref: "#/$defs/Category"
+      customerId:
+        type: string
+      id:
+        format: uuid
+        type: string
+      note:
+        type:
+          - string
+          - "null"
+      status:
+        enum:
+          - pending
+          - shipped
+        type: string
+      total:
+        minimum: 0
+        type: number
+    required:
+      - id
+      - customerId
+      - status
+      - total
+    type: object
