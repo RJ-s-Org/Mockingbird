@@ -441,6 +441,39 @@ async fn reconcile_keeps_api_resources() {
     );
 }
 
+/// A file mock whose route prefix an API mock holds is rejected, and
+/// nothing from that config is applied.
+#[tokio::test]
+async fn reconcile_rejects_prefix_clash_with_api_mock() {
+    let ws = Workspace::new();
+    let store = store().await;
+    api_mock(&store, "manual").await;
+
+    let cfg = ws.load(
+        "llm:\n  profiles:\n    extra: {base_url: http://x, model: m}\nmocks:\n  orders:\n    contract: orders.yaml\n    route_prefix: /manual\n",
+    );
+    let err = reconcile(store.as_ref(), &cfg).await.unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("/manual") && text.contains("manual"),
+        "{text}"
+    );
+    assert!(
+        store
+            .get_mock(DEFAULT_WORKSPACE, "orders")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "extra")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn reconcile_deletes_removed_file_mocks() {
     let ws = Workspace::new();

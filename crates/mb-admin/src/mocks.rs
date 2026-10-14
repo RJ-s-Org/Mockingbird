@@ -88,6 +88,23 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
+/// A 409 problem when a mock other than `except` already serves `prefix`.
+async fn ensure_prefix_free(st: &AdminState, prefix: &str, except: Option<&str>) -> ApiResult<()> {
+    let holder = st
+        .store
+        .list_mocks(DEFAULT_WORKSPACE)
+        .await?
+        .into_iter()
+        .find(|m| m.route_prefix == prefix && Some(m.name.as_str()) != except);
+    match holder {
+        Some(holder) => Err(Problem::conflict(format!(
+            "route prefix {prefix:?} is already used by mock {:?}",
+            holder.name
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn view(st: &AdminState, m: Mock) -> ApiResult<MockView> {
     let active = st.store.active_contract(m.id).await?.map(|c| c.version);
     Ok(MockView::new(m, active))
@@ -114,7 +131,7 @@ pub async fn list(State(st): State<AdminState>) -> ApiResult<Json<Vec<MockView>>
     request_body = CreateMock,
     responses(
         (status = 201, body = MockView),
-        (status = 409, description = "The mock already exists", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The mock already exists, or another mock has its route prefix", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid name or route prefix", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -122,6 +139,11 @@ pub async fn create(
     State(st): State<AdminState>,
     Json(body): Json<CreateMock>,
 ) -> ApiResult<impl IntoResponse> {
+    let prefix = body
+        .route_prefix
+        .clone()
+        .unwrap_or_else(|| format!("/{}", body.name));
+    ensure_prefix_free(&st, &prefix, None).await?;
     let created = st
         .store
         .create_mock(
@@ -166,7 +188,7 @@ pub async fn get_one(
     responses(
         (status = 200, body = MockView),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Managed by config file, or another mock has the route prefix", body = Problem, content_type = "application/problem+json"),
         (status = 422, body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -179,6 +201,7 @@ pub async fn patch(
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     if let Some(prefix) = body.route_prefix {
         validate_route_prefix(&prefix)?;
+        ensure_prefix_free(&st, &prefix, Some(&m.name)).await?;
         m.route_prefix = prefix;
     }
     if let Some(persona) = body.persona {

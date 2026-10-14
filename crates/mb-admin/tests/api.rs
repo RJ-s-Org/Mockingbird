@@ -321,6 +321,58 @@ async fn mock_lifecycle() {
 }
 
 #[tokio::test]
+async fn route_prefix_collisions_conflict() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    h.create_mock("billing").await;
+
+    // Exactly another mock's prefix: 409, on create and on patch.
+    let p = h
+        .json(
+            Method::POST,
+            "/api/v1/mocks",
+            json!({ "name": "copy", "route_prefix": "/orders" }),
+        )
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    assert!(p["detail"].as_str().unwrap().contains("orders"), "{p}");
+    assert!(h.get("/api/v1/mocks/copy").await.status == StatusCode::NOT_FOUND);
+    h.json(
+        Method::PATCH,
+        "/api/v1/mocks/billing",
+        json!({ "route_prefix": "/orders" }),
+    )
+    .await
+    .assert_problem(StatusCode::CONFLICT);
+    // The default prefix `/<name>` counts too.
+    h.json(
+        Method::POST,
+        "/api/v1/mocks",
+        json!({ "name": "other", "route_prefix": "/billing" }),
+    )
+    .await
+    .assert_problem(StatusCode::CONFLICT);
+
+    // Nested prefixes and re-saving a mock's own prefix are fine.
+    let r = h
+        .json(
+            Method::POST,
+            "/api/v1/mocks",
+            json!({ "name": "nested", "route_prefix": "/orders/v2" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let r = h
+        .json(
+            Method::PATCH,
+            "/api/v1/mocks/orders",
+            json!({ "route_prefix": "/orders" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+}
+
+#[tokio::test]
 async fn upload_activate_and_list_versions() {
     let h = harness().await;
     h.create_mock("orders").await;

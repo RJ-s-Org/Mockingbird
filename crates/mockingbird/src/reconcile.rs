@@ -47,8 +47,8 @@ struct Prepared<'a> {
 ///
 /// The whole config is validated first (names, prefixes, profile
 /// references, secret references, contracts and scenario operations, and
-/// clashes with API-owned resources); any error returns `Err` with nothing
-/// applied.
+/// clashes with API-owned resources, route prefixes included); any error
+/// returns `Err` with nothing applied.
 pub async fn reconcile(
     store: &dyn ControlStore,
     cfg: &FileConfig,
@@ -235,6 +235,19 @@ async fn validate<'a>(
             source,
             bundle,
         });
+    }
+    // A file mock may not take the prefix of a mock the API owns.
+    for api_mock in existing_mocks
+        .values()
+        .filter(|m| m.source == ResourceSource::Api)
+    {
+        if let Some(name) = prefixes.get(&api_mock.route_prefix) {
+            bail!(
+                "mock {name:?}: route prefix {:?} is already used by mock {:?}, which is managed through the API",
+                api_mock.route_prefix,
+                api_mock.name
+            );
+        }
     }
     Ok(prepared)
 }
