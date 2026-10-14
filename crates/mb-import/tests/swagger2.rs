@@ -93,3 +93,69 @@ fn unquoted_numeric_versions_are_detected() {
     let y = b"openapi: 3.1\ninfo: {title: T, version: '1'}\npaths: {}\n";
     assert!(compile(y).is_ok());
 }
+
+fn swagger(paths: serde_json::Value) -> Vec<u8> {
+    json!({"swagger": "2.0", "info": {"title": "T", "version": "1"}, "paths": paths})
+        .to_string()
+        .into_bytes()
+}
+
+#[test]
+fn rejects_duplicate_operation_ids() {
+    let ok = json!({"200": {"description": "OK"}});
+    let src = swagger(json!({"/a": {
+        "get": {"operationId": "dup", "responses": ok},
+        "post": {"operationId": "dup", "responses": ok}
+    }}));
+    match compile(&src) {
+        Err(mb_import::ImportError::Invalid { pointer, .. }) => {
+            assert_eq!(pointer, "/paths/~1a/post/operationId");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn disambiguates_generated_operation_ids() {
+    let ok = json!({"200": {"description": "OK"}});
+    let src = swagger(json!({
+        "/a-b": {"get": {"responses": ok}},
+        "/a_b": {"get": {"responses": ok}}
+    }));
+    let b = compile(&src).unwrap();
+    let mut ids: Vec<&str> = b.operations.iter().map(|o| o.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["get_a_b", "get_a_b_2"]);
+}
+
+#[test]
+fn imports_body_and_form_required() {
+    let b = orders20();
+    assert!(b.operation("createOrder").unwrap().input.body_required);
+    let ok = json!({"200": {"description": "OK"}});
+    let src = swagger(json!({
+        "/opt": {"post": {"parameters": [
+            {"name": "body", "in": "body", "schema": {"type": "object"}}
+        ], "responses": ok}},
+        "/form": {"post": {"consumes": ["application/x-www-form-urlencoded"], "parameters": [
+            {"name": "name", "in": "formData", "type": "string", "required": true}
+        ], "responses": ok}},
+        "/upload": {"post": {"consumes": ["multipart/form-data"], "parameters": [
+            {"name": "file", "in": "formData", "type": "file"}
+        ], "responses": ok}}
+    }));
+    let b = compile(&src).unwrap();
+    let opt = b.operation("post_opt").unwrap();
+    assert!(opt.input.body.is_some() && !opt.input.body_required);
+    let form = b.operation("post_form").unwrap();
+    assert!(form.input.body_required);
+    assert_eq!(
+        form.input.body.as_ref().unwrap()["x-content-type"],
+        "application/x-www-form-urlencoded"
+    );
+    let upload = b.operation("post_upload").unwrap();
+    assert_eq!(
+        upload.input.body.as_ref().unwrap()["x-content-type"],
+        "multipart/form-data"
+    );
+}

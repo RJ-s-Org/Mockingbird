@@ -17,6 +17,7 @@ fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
             query: None,
             headers: None,
             body: None,
+            body_required: false,
         },
         outputs,
         resource_type: Some("orders".into()),

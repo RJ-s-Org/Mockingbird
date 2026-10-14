@@ -98,3 +98,62 @@ fn orders_30_snapshot() {
     let b = orders30();
     insta::assert_yaml_snapshot!(b, {".source_digest" => "[digest]"});
 }
+
+fn oas(paths: &str) -> String {
+    format!("openapi: 3.0.3\ninfo: {{title: T, version: '1'}}\npaths:\n{paths}")
+}
+
+#[test]
+fn rejects_duplicate_operation_ids() {
+    let src = oas(r#"
+  /a:
+    get: {operationId: dup, responses: {"200": {description: OK}}}
+    post: {operationId: dup, responses: {"200": {description: OK}}}
+"#);
+    match compile(src.as_bytes()) {
+        Err(ImportError::Invalid { pointer, message }) => {
+            assert_eq!(pointer, "/paths/~1a/post/operationId");
+            assert!(message.contains("dup"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn disambiguates_generated_operation_ids() {
+    let src = oas(r#"
+  /a-b:
+    get: {responses: {"200": {description: OK}}}
+  /a_b:
+    get: {responses: {"200": {description: OK}}}
+  /x:
+    get: {responses: {"200": {description: OK}}}
+  /y:
+    get: {operationId: get_x, responses: {"200": {description: OK}}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let mut ids: Vec<&str> = b.operations.iter().map(|o| o.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["get_a_b", "get_a_b_2", "get_x", "get_x_2"]);
+    // The explicit operationId keeps its name.
+    let y = b.operation("get_x").unwrap();
+    assert!(matches!(&y.binding, mb_mcm::Binding::Http { path, .. } if path == "/y"));
+}
+
+#[test]
+fn imports_request_body_required() {
+    let b = orders30();
+    assert!(b.operation("createOrder").unwrap().input.body_required);
+    assert!(!b.operation("getOrder").unwrap().input.body_required);
+    let src = oas(r#"
+  /a:
+    post:
+      requestBody:
+        content: {application/json: {schema: {type: object}}}
+      responses: {"200": {description: OK}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let op = &b.operations[0];
+    assert!(op.input.body.is_some());
+    assert!(!op.input.body_required);
+}

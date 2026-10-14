@@ -27,6 +27,7 @@ operations:
         type: object
       headers: ~
       body: ~
+      body_required: false
     outputs:
       - status:
           code: 200
@@ -53,6 +54,7 @@ operations:
       headers: ~
       body:
         $ref: "#/$defs/NewOrder"
+      body_required: true
     outputs:
       - status:
           code: 201
@@ -88,6 +90,7 @@ operations:
       query: ~
       headers: ~
       body: ~
+      body_required: false
     outputs:
       - status:
           code: 200
@@ -125,6 +128,7 @@ operations:
       headers: ~
       body:
         $ref: "#/$defs/NewOrder"
+      body_required: true
     outputs:
       - status:
           code: 200
@@ -156,6 +160,7 @@ operations:
       query: ~
       headers: ~
       body: ~
+      body_required: false
     outputs:
       - status:
           code: 204

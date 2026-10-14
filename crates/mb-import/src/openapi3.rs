@@ -8,6 +8,7 @@ use mb_mcm::{
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 const REF_PREFIX: &str = "#/components/schemas/";
 
@@ -62,6 +63,62 @@ pub(crate) fn slug(s: &str) -> String {
         }
     }
     out.trim_end_matches('-').to_owned()
+}
+
+/// Assigns operation ids: explicit `operationId`s must be unique across the
+/// document; generated `{method}_{path}` slugs get a numeric suffix when they
+/// collide with an explicit or an earlier id.
+pub(crate) struct OperationIds {
+    explicit: HashSet<String>,
+    used: HashSet<String>,
+}
+
+impl OperationIds {
+    /// Collects the explicit ids, rejecting a duplicate with a pointer to
+    /// its second occurrence.
+    pub(crate) fn new(doc: &Value) -> Result<Self, ImportError> {
+        let mut explicit = HashSet::new();
+        if let Some(paths) = doc.get("paths").and_then(Value::as_object) {
+            for (path, item) in paths {
+                let item = deref(doc, item, &format!("/paths/{}", escape(path)))?;
+                for (key, _) in METHODS {
+                    let Some(id) = item
+                        .get(key)
+                        .and_then(|op| op.get("operationId"))
+                        .and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if !explicit.insert(id.to_owned()) {
+                        return Err(invalid(
+                            format!("/paths/{}/{key}/operationId", escape(path)),
+                            format!("duplicate operationId {id:?}"),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            explicit,
+            used: HashSet::new(),
+        })
+    }
+
+    pub(crate) fn assign(&mut self, op: &Value, method_key: &str, path: &str) -> String {
+        if let Some(id) = op.get("operationId").and_then(Value::as_str) {
+            self.used.insert(id.to_owned());
+            return id.to_owned();
+        }
+        let base = format!("{method_key}_{}", slug(path).replace('-', "_"));
+        let mut id = base.clone();
+        let mut n = 2;
+        while self.explicit.contains(&id) || self.used.contains(&id) {
+            id = format!("{base}_{n}");
+            n += 1;
+        }
+        self.used.insert(id.clone());
+        id
+    }
 }
 
 pub(crate) fn is_json_media(ct: &str) -> bool {
@@ -190,16 +247,19 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
     Ok(outputs)
 }
 
-fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<Option<Value>, ImportError> {
+/// The JSON request body schema and whether the body is required.
+fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<(Option<Value>, bool), ImportError> {
     let Some(body) = op.get("requestBody") else {
-        return Ok(None);
+        return Ok((None, false));
     };
     let body = deref(doc, body, &format!("{at}/requestBody"))?;
-    Ok(body
+    let schema = body
         .get("content")
         .and_then(Value::as_object)
         .and_then(json_media)
-        .map(|(_, m)| schema_of(m)))
+        .map(|(_, m)| schema_of(m));
+    let required = body.get("required").and_then(Value::as_bool) == Some(true);
+    Ok((schema, required))
 }
 
 pub(crate) fn check_refs(
@@ -243,6 +303,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
         }
     }
 
+    let mut ids = OperationIds::new(doc)?;
     let mut operations = Vec::new();
     let empty = Map::new();
     let paths = doc
@@ -256,17 +317,15 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
             let at = format!("/paths/{}/{key}", escape(path));
             let params = merged_parameters(doc, item, op, &at)?;
             let outputs = compile_outputs(doc, op, &at)?;
+            let (body, body_required) = compile_body(doc, op, &at)?;
             let input = InputSchemas {
                 path: params_schema(&params, "path"),
                 query: params_schema(&params, "query"),
                 headers: params_schema(&params, "header"),
-                body: compile_body(doc, op, &at)?,
+                body,
+                body_required,
             };
-            let id = op
-                .get("operationId")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{key}_{}", slug(path).replace('-', "_")));
+            let id = ids.assign(op, key, path);
             let kind = infer_kind(method, path);
             let mut op_out = Operation {
                 id,

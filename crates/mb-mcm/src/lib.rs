@@ -86,6 +86,11 @@ pub struct InputSchemas {
     pub query: Option<Value>,
     pub headers: Option<Value>,
     pub body: Option<Value>,
+    /// Whether a request body must be present (OpenAPI 3
+    /// `requestBody.required`, Swagger 2 `in: body` `required` or any
+    /// required `formData` parameter).
+    #[serde(default)]
+    pub body_required: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,9 @@
 
 use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
-use crate::openapi3::{METHODS, check_refs, deref, escape, invalid, is_json_media, slug};
+use crate::openapi3::{
+    METHODS, OperationIds, check_refs, deref, escape, invalid, is_json_media, slug,
+};
 use crate::schema::normalize_schema;
 use mb_mcm::{Binding, Bundle, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector};
 use serde_json::{Map, Value, json};
@@ -10,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 const REF_PREFIX: &str = "#/definitions/";
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
 
 /// Parameter keys that describe the parameter itself, not its value schema.
 const PARAM_META: [&str; 6] = [
@@ -98,19 +101,34 @@ fn params_schema(params: &[&Value], location: &str) -> Option<Value> {
     Some(Value::Object(obj))
 }
 
-/// The `in: body` schema, else an object schema built from `formData` params.
-fn compile_body(params: &[&Value]) -> Option<Value> {
+/// The `in: body` schema, else an object schema built from `formData`
+/// params (tagged with its `x-content-type`), and whether it is required.
+fn compile_body(params: &[&Value], consumes: &[String]) -> (Option<Value>, bool) {
+    let is_required = |p: &Value| p.get("required").and_then(Value::as_bool) == Some(true);
     let body = params
         .iter()
         .find(|p| p.get("in").and_then(Value::as_str) == Some("body"));
-    if let Some(schema) = body.and_then(|p| p.get("schema")) {
-        return Some(norm(schema));
+    if let Some(p) = body
+        && let Some(schema) = p.get("schema")
+    {
+        return (Some(norm(schema)), is_required(p));
     }
-    let mut form = params_schema(params, "formData")?;
+    let Some(mut form) = params_schema(params, "formData") else {
+        return (None, false);
+    };
+    let has = |ct: &str| consumes.iter().any(|c| c.eq_ignore_ascii_case(ct));
+    let content_type = if !has(FORM_CONTENT_TYPE) && has(MULTIPART_CONTENT_TYPE) {
+        MULTIPART_CONTENT_TYPE
+    } else {
+        FORM_CONTENT_TYPE
+    };
     if let Value::Object(o) = &mut form {
-        o.insert("x-content-type".into(), json!(FORM_CONTENT_TYPE));
+        o.insert("x-content-type".into(), json!(content_type));
     }
-    Some(form)
+    let required = params
+        .iter()
+        .any(|p| p.get("in").and_then(Value::as_str) == Some("formData") && is_required(p));
+    (Some(form), required)
 }
 
 fn media_types(v: Option<&Value>) -> Vec<String> {
@@ -181,6 +199,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
         }
     }
 
+    let mut ids = OperationIds::new(doc)?;
     let mut operations = Vec::new();
     let empty = Map::new();
     let paths = doc
@@ -194,17 +213,20 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
             let at = format!("/paths/{}/{key}", escape(path));
             let params = merged_parameters(doc, item, op, &at)?;
             let outputs = compile_outputs(doc, op, &at)?;
+            // Operation-level `consumes` replaces the global list.
+            let consumes = match op.get("consumes") {
+                Some(c) => media_types(Some(c)),
+                None => media_types(doc.get("consumes")),
+            };
+            let (body, body_required) = compile_body(&params, &consumes);
             let input = InputSchemas {
                 path: params_schema(&params, "path"),
                 query: params_schema(&params, "query"),
                 headers: params_schema(&params, "header"),
-                body: compile_body(&params),
+                body,
+                body_required,
             };
-            let id = op
-                .get("operationId")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{key}_{}", slug(path).replace('-', "_")));
+            let id = ids.assign(op, key, path);
             let kind = infer_kind(method, path);
             let mut op_out = Operation {
                 id,
