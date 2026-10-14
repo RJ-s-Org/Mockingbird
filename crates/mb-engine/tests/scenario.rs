@@ -9,6 +9,7 @@ use mb_engine::{
 use mb_import::compile;
 use mb_llm::{Provider, Role, ScriptedProvider, Usage};
 use mb_mcm::Bundle;
+use mb_state::StoredResource;
 use serde_json::{Map, Value, json};
 
 fn orders() -> Bundle {
@@ -121,6 +122,80 @@ async fn scenario_set_applied_and_validated() {
     assert_eq!(body["status"], json!("shipped"));
     assert_eq!(body["id"], json!("o1"));
     assert_eq!(body["total"], json!(42.5));
+    order_validator(&bundle).validate(&body).unwrap();
+}
+
+fn stored_order() -> StoredResource {
+    StoredResource {
+        resource_type: "orders".into(),
+        id: "o1".into(),
+        data: json!({"id": "o1", "customerId": "c9", "status": "pending", "total": 5}),
+    }
+}
+
+#[tokio::test]
+async fn scenario_set_wins_over_stored_target() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let scenario = ScenarioSpec {
+        name: "shipped".into(),
+        instructions: None,
+        set: Some(json!({"status": "shipped", "id": "other"})),
+    };
+    let target = stored_order();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
+    let out = engine_with(provider)
+        .generate(
+            &bundle,
+            op,
+            &call(),
+            GenerationContext {
+                target: Some(&target),
+                ..ctx(Some(&scenario))
+            },
+        )
+        .await
+        .unwrap();
+
+    let body = out.body.unwrap();
+    assert_eq!(body["status"], json!("shipped"));
+    assert_eq!(body["id"], json!("o1"));
+    assert_eq!(body["customerId"], json!("c9"));
+    order_validator(&bundle).validate(&body).unwrap();
+}
+
+#[tokio::test]
+async fn scenario_set_on_update_beats_target_but_not_request_body() {
+    let bundle = orders();
+    let op = bundle.operation("updateOrder").unwrap();
+    let scenario = ScenarioSpec {
+        name: "shipped".into(),
+        instructions: None,
+        set: Some(json!({"status": "shipped", "customerId": "c-set", "total": 99})),
+    };
+    let target = stored_order();
+    let mut update = call();
+    update.operation_id = "updateOrder".into();
+    update.body = Some(json!({"customerId": "c-req"}));
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
+    let out = engine_with(provider)
+        .generate(
+            &bundle,
+            op,
+            &update,
+            GenerationContext {
+                target: Some(&target),
+                ..ctx(Some(&scenario))
+            },
+        )
+        .await
+        .unwrap();
+
+    let body = out.body.unwrap();
+    assert_eq!(body["status"], json!("shipped"));
+    assert_eq!(body["total"], json!(99));
+    assert_eq!(body["customerId"], json!("c-req"));
+    assert_eq!(body["id"], json!("o1"));
     order_validator(&bundle).validate(&body).unwrap();
 }
 

@@ -399,8 +399,9 @@ fn finish(
     apply_scenario(validator, op, call, ctx, response)
 }
 
-/// For a 2xx object body, apply the scenario's `set` merge patch, re-reflect
-/// so the request body and identity still win, and validate. An invalid
+/// For a 2xx object body, apply the scenario's `set` merge patch, re-apply
+/// the request body (create/update) and the identity so they still win, and
+/// validate. Stored state is not re-applied: `set` beats the target. An invalid
 /// result is discarded and the pre-patch body kept.
 fn apply_scenario(
     validator: &SchemaValidator,
@@ -425,7 +426,7 @@ fn apply_scenario(
         body: Some(apply_set(body, set)),
         ..response.clone()
     };
-    let patched = reflect(validator, op, call, ctx, patched);
+    let patched = reassert_request(validator, op, call, patched);
     match patched.body.as_ref().map(|b| validator.validate(b)) {
         Some(Ok(())) => patched,
         Some(Err(errors)) => {
@@ -470,6 +471,27 @@ fn reflect(
             overlay(validator, body, call.body.as_ref())
         }
         OperationKind::Command(_) => body,
+    };
+    response.body = Some(force_identity(validator, op, call, body));
+    response
+}
+
+/// After a scenario `set`: re-apply only the request-body overlay (creates
+/// and updates) and the path identity, never the stored target.
+fn reassert_request(
+    validator: &SchemaValidator,
+    op: &Operation,
+    call: &OperationCall,
+    mut response: GeneratedResponse,
+) -> GeneratedResponse {
+    let Some(body) = response.body.take() else {
+        return response;
+    };
+    let body = match op.kind {
+        OperationKind::Command(Effect::Create | Effect::Update) => {
+            overlay(validator, body, call.body.as_ref())
+        }
+        _ => body,
     };
     response.body = Some(force_identity(validator, op, call, body));
     response
