@@ -15,17 +15,21 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 axum.workspace = true
 clap.workspace = true
 humantime.workspace = true
 mb-engine.workspace = true
+mb-ext.workspace = true
 mb-import.workspace = true
 mb-llm.workspace = true
 mb-mcm.workspace = true
 mb-protocols.workspace = true
 mb-state.workspace = true
+mb-store.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["signal"] }
+tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

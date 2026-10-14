@@ -1,0 +1,361 @@
+#![allow(clippy::unwrap_used)]
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use mb_ext::Extensions;
+use mb_state::{MemoryStore, StateStore};
+use mb_store::{
+    ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
+    ResourceSource, SqliteControlStore,
+};
+use mockingbird::registry::MockRegistry;
+use mockingbird::runtime::{RuntimeDeps, build_provider};
+use serde_json::{Value, json};
+use wiremock::matchers::{header, method, path};
+use wiremock::{MockServer, ResponseTemplate};
+
+const PING_PATH: &str = r#"  /ping:
+    get:
+      operationId: ping
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+"#;
+
+fn fixture_source() -> String {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/openapi/orders-3.0.yaml");
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// The fixture with an extra `GET /ping` operation.
+fn fixture_v2_source() -> String {
+    fixture_source().replacen("paths:\n", &format!("paths:\n{PING_PATH}"), 1)
+}
+
+async fn store() -> Arc<dyn ControlStore> {
+    Arc::new(
+        SqliteControlStore::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+}
+
+fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    RuntimeDeps {
+        store,
+        state,
+        ext: Extensions::default(),
+        recorder: None,
+        offline: true,
+        default_profile: None,
+    }
+}
+
+async fn create_mock(
+    store: &Arc<dyn ControlStore>,
+    name: &str,
+    prefix: &str,
+    profile: Option<&str>,
+) -> Mock {
+    store
+        .create_mock(
+            DEFAULT_WORKSPACE,
+            NewMock {
+                name: name.into(),
+                route_prefix: Some(prefix.into()),
+                persona: None,
+                llm_profile: profile.map(str::to_string),
+                header_overrides: true,
+                source: ResourceSource::Api,
+            },
+        )
+        .await
+        .unwrap()
+}
+
+/// Adds `source` as a new approved version and activates it.
+async fn activate(store: &Arc<dyn ControlStore>, mock: &Mock, source: &str) {
+    let bundle = mb_import::compile(source.as_bytes()).unwrap();
+    let v = store
+        .add_contract_version(
+            mock.id,
+            NewContractVersion {
+                source: source.as_bytes().to_vec(),
+                bundle,
+                status: ContractStatus::Approved,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .activate_contract_version(mock.id, v.version)
+        .await
+        .unwrap();
+}
+
+async fn serve(app: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+async fn status_of(base: &str, p: &str) -> u16 {
+    reqwest::get(format!("{base}{p}"))
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn wait_for_status(base: &str, p: &str, want: u16) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let got = status_of(base, p).await;
+        if got == want {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "GET {p}: expected {want} within 2s, last saw {got}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn serves_active_contract_at_prefix() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        registry.mounted(),
+        vec![("orders".to_string(), "/orders".to_string())]
+    );
+
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/orders/orders").await, 200);
+
+    let r = reqwest::get(format!("{base}/nowhere")).await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.headers()["content-type"], "application/problem+json");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["title"], "No mock mounted at this path");
+}
+
+#[tokio::test]
+async fn mock_without_active_contract_not_mounted() {
+    let store = store().await;
+    create_mock(&store, "orders", "/orders", None).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(registry.mounted().is_empty());
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/orders/orders").await, 404);
+}
+
+#[tokio::test]
+async fn activation_change_reloads() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let _watcher = registry.spawn_watcher(deps);
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/orders/ping").await, 404);
+
+    activate(&store, &mock, &fixture_v2_source()).await;
+    wait_for_status(&base, "/orders/ping", 200).await;
+}
+
+#[tokio::test]
+async fn delete_unmounts() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let _watcher = registry.spawn_watcher(deps);
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/orders/orders").await, 200);
+
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "orders")
+            .await
+            .unwrap()
+    );
+    wait_for_status(&base, "/orders/orders", 404).await;
+    assert!(registry.mounted().is_empty());
+}
+
+#[tokio::test]
+async fn longest_prefix_wins() {
+    let store = store().await;
+    let root = create_mock(&store, "root", "/", None).await;
+    activate(&store, &root, &fixture_source()).await;
+    let a = create_mock(&store, "a", "/a", None).await;
+    activate(&store, &a, &fixture_v2_source()).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        registry.mounted(),
+        vec![
+            ("a".to_string(), "/a".to_string()),
+            ("root".to_string(), "/".to_string()),
+        ]
+    );
+    let base = serve(registry.router()).await;
+
+    // `/a/ping` exists only in `a`; `/ping` is not in `root`.
+    assert_eq!(status_of(&base, "/a/ping").await, 200);
+    assert_eq!(status_of(&base, "/ping").await, 404);
+    // `/orders` goes to `root`; `/a/orders` goes to `a` (stripped to `/orders`).
+    assert_eq!(status_of(&base, "/orders").await, 200);
+    assert_eq!(status_of(&base, "/a/orders").await, 200);
+    // `/ab/...` is not under `/a` (segment boundary), so `root` gets it.
+    assert_eq!(status_of(&base, "/ab/orders").await, 404);
+}
+
+#[tokio::test]
+async fn swap_during_inflight_requests() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &fixture_source()).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    let http = reqwest::Client::new();
+
+    let mut inflight = Vec::new();
+    for _ in 0..20 {
+        let http = http.clone();
+        let url = format!("{base}/orders/orders");
+        inflight.push(tokio::spawn(async move {
+            http.get(url)
+                .header("X-Mockingbird-Latency", "200ms")
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    activate(&store, &mock, &fixture_v2_source()).await;
+    registry.reload_mock(&deps, "orders").await;
+
+    for h in inflight {
+        assert_eq!(h.await.unwrap(), 200);
+    }
+    assert_eq!(status_of(&base, "/orders/ping").await, 200);
+}
+
+fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
+    LlmProfile {
+        workspace: DEFAULT_WORKSPACE.into(),
+        name: name.into(),
+        base_url,
+        model: "m".into(),
+        secret_ref: Some("env:MB_TEST_REGISTRY_LLM_KEY".into()),
+        json_schema: false,
+        temperature: 0.2,
+        timeout_ms: 3000,
+        max_tokens: 512,
+        fallback_profile: fallback.map(str::to_string),
+        source: ResourceSource::Api,
+    }
+}
+
+#[tokio::test]
+async fn profile_secret_resolved_and_fallback_chain() {
+    // SAFETY: no other test in this binary reads or writes this variable.
+    unsafe { std::env::set_var("MB_TEST_REGISTRY_LLM_KEY", "sekrit") };
+
+    let primary = MockServer::start().await;
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&primary)
+        .await;
+    let secondary = MockServer::start().await;
+    let order = json!({"id": "6f1c0f0e-2f7b-4a59-9d55-3d1c2b1a0e9f", "customerId": "from-secondary",
+                       "status": "shipped", "total": 42});
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer sekrit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": order.to_string()}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        })))
+        .mount(&secondary)
+        .await;
+
+    let store = store().await;
+    store
+        .put_profile(&profile("secondary", secondary.uri(), None))
+        .await
+        .unwrap();
+    store
+        .put_profile(&profile("primary", primary.uri(), Some("secondary")))
+        .await
+        .unwrap();
+    let mock = create_mock(&store, "orders", "/orders", Some("primary")).await;
+    activate(&store, &mock, &fixture_source()).await;
+
+    let mut deps = deps(store);
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+
+    let r = reqwest::get(format!("{base}/orders/orders/o1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-mockingbird-source"], "llm");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["customerId"], "from-secondary");
+    assert_eq!(body["total"], 42);
+}
+
+#[tokio::test]
+async fn fallback_profile_cycle_errors() {
+    let store = store().await;
+    store
+        .put_profile(&profile("a", "http://127.0.0.1:9".into(), Some("b")))
+        .await
+        .unwrap();
+    store
+        .put_profile(&profile("b", "http://127.0.0.1:9".into(), Some("a")))
+        .await
+        .unwrap();
+    let mut deps = deps(store);
+    deps.offline = false;
+    let err = build_provider(&deps, "a")
+        .await
+        .err()
+        .expect("a cyclic fallback chain must fail");
+    assert!(err.to_string().contains("cycle"), "{err:#}");
+}
