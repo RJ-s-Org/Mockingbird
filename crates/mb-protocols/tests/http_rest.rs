@@ -393,6 +393,59 @@ async fn recursive_one_of_contract_does_not_crash() {
     assert_eq!(h.rt.name, "inline");
 }
 
+/// Same shape as [`EXPR_CONTRACT`], but the leaf has three required
+/// references, so a recursion-blind branch cost prefers the recursive branch.
+const FANOUT_EXPR_CONTRACT: &str = r##"
+openapi: 3.1.0
+info: {title: Expr API, version: "1"}
+paths:
+  /expr:
+    get:
+      operationId: getExpr
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Expr"}
+components:
+  schemas:
+    Expr:
+      oneOf:
+        - $ref: "#/components/schemas/And"
+        - $ref: "#/components/schemas/Leaf"
+    And:
+      type: object
+      required: [left, right]
+      properties:
+        left: {$ref: "#/components/schemas/Expr"}
+        right: {$ref: "#/components/schemas/Expr"}
+    Leaf:
+      type: object
+      required: [a, b, c]
+      properties:
+        a: {$ref: "#/components/schemas/S"}
+        b: {$ref: "#/components/schemas/S"}
+        c: {$ref: "#/components/schemas/S"}
+    S: {type: string}
+"##;
+
+#[tokio::test]
+async fn recursive_one_of_with_ref_heavy_leaf_returns_quickly() {
+    let h = offline_contract(FANOUT_EXPR_CONTRACT);
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        let resp = send(&h, get("/expr")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_json(resp).await.is_object());
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 fn put_json(uri: &str, body: &str) -> Request<Body> {
     Request::put(uri)
         .header(header::CONTENT_TYPE, "application/json")

@@ -261,3 +261,83 @@ fn fakes_each_one_of_branch_validly() {
     }
     assert_eq!(seen.len(), 2, "{seen:?}");
 }
+
+/// `Expr: oneOf [And{l, r: Expr}, Leaf{refs to S required}]`, recursive
+/// branch first. `leaf_refs` required `$ref`s make the leaf look at least as
+/// "expensive" as the recursive branch to a recursion-blind cost.
+fn fanout_expr_schema(leaf_refs: usize) -> Value {
+    let names: Vec<String> = (0..leaf_refs).map(|i| format!("f{i}")).collect();
+    let props: serde_json::Map<String, Value> = names
+        .iter()
+        .map(|n| (n.clone(), json!({"$ref": "#/$defs/S"})))
+        .collect();
+    json!({
+        "$ref": "#/$defs/Expr",
+        "$defs": {
+            "Expr": {"oneOf": [{"$ref": "#/$defs/And"}, {"$ref": "#/$defs/Leaf"}]},
+            "And": {
+                "type": "object",
+                "required": ["l", "r"],
+                "properties": {"l": {"$ref": "#/$defs/Expr"}, "r": {"$ref": "#/$defs/Expr"}}
+            },
+            "Leaf": {"type": "object", "required": names, "properties": props},
+            "S": {"type": "string"}
+        }
+    })
+}
+
+fn assert_fast_and_valid(schema: &Value) {
+    let validator = SchemaValidator::new(schema).unwrap();
+    for (label, faker) in [("new(0)", Faker::new(0)), ("default", Faker::default())] {
+        for branch in [Some(0usize), Some(1), None] {
+            for seed in 0..10u64 {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let start = std::time::Instant::now();
+                let v = faker.fake_with_branch(schema, branch, &mut rng);
+                let elapsed = start.elapsed();
+                assert!(
+                    elapsed < std::time::Duration::from_secs(1),
+                    "{label} branch {branch:?} seed {seed}: {elapsed:?}"
+                );
+                assert!(
+                    validator.validate(&v).is_ok(),
+                    "{label} branch {branch:?} seed {seed}: {v}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn recursion_aware_branch_choice_with_three_ref_leaf() {
+    assert_fast_and_valid(&fanout_expr_schema(3));
+}
+
+#[test]
+fn recursion_aware_branch_choice_with_tied_ref_counts() {
+    // Leaf and And both have exactly two required refs; And is listed first.
+    assert_fast_and_valid(&fanout_expr_schema(2));
+}
+
+#[test]
+fn node_budget_bounds_wide_unsatisfiable_recursion() {
+    // Every instance recurses forever with fan-out 2; the node caps (not the
+    // 2^depth tree) bound the work.
+    let schema = json!({
+        "$ref": "#/$defs/Node",
+        "$defs": {"Node": {
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {"a": {"$ref": "#/$defs/Node"}, "b": {"$ref": "#/$defs/Node"}}
+        }}
+    });
+    let start = std::time::Instant::now();
+    let mut rng = StdRng::seed_from_u64(3);
+    let v = Faker::default().fake(&schema, &mut rng);
+    assert!(v.is_object());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}

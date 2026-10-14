@@ -1,5 +1,6 @@
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
+use std::collections::HashMap;
 
 const WORDS: &[&str] = &[
     "alpha", "bravo", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris", "juniper",
@@ -8,7 +9,21 @@ const WORDS: &[&str] = &[
 
 /// Extra levels allowed beyond `max_depth` for schemas that cannot terminate
 /// by omitting optional members (for example a required self-reference).
+/// Bounds the stack; the node caps below bound the total work.
 const HARD_DEPTH_SLACK: usize = 32;
+
+/// Values generated per `fake` call before every further position switches
+/// to its minimal instance (cheapest branch, no optional properties,
+/// `minItems` elements).
+const NODE_BUDGET: usize = 10_000;
+
+/// Values generated past [`NODE_BUDGET`] before containers are emitted
+/// empty. Only reached when a schema has no finite instance (or a very large
+/// minimal one); keeps the worst case linear.
+const HARD_NODE_EXTRA: usize = 100_000;
+
+/// Cost of a schema with no finite instance.
+const INFINITE: u64 = u64::MAX;
 
 /// Deterministic-shape, seeded-random generator of values that satisfy a
 /// JSON Schema.
@@ -20,6 +35,14 @@ impl Default for Faker {
     fn default() -> Self {
         Self::new(6)
     }
+}
+
+/// Per-call state: the root (for `$ref`), its minimal-cost table and the
+/// number of values generated so far.
+struct Ctx<'a> {
+    root: &'a Value,
+    costs: Costs,
+    generated: usize,
 }
 
 impl Faker {
@@ -40,27 +63,35 @@ impl Faker {
         branch: Option<usize>,
         rng: &mut impl Rng,
     ) -> Value {
-        self.gen_value(schema_with_defs, schema_with_defs, 0, branch, rng)
+        let mut ctx = Ctx {
+            root: schema_with_defs,
+            costs: Costs::compute(schema_with_defs),
+            generated: 0,
+        };
+        self.gen_value(&mut ctx, schema_with_defs, 0, branch, rng)
     }
 
     fn gen_value<R: Rng>(
         &self,
-        root: &Value,
+        ctx: &mut Ctx<'_>,
         schema: &Value,
         depth: usize,
         branch: Option<usize>,
         rng: &mut R,
     ) -> Value {
-        let at_limit = depth >= self.max_depth;
+        ctx.generated = ctx.generated.saturating_add(1);
+        // Past the depth limit or the node budget, every position takes its
+        // minimal instance.
+        let at_limit = depth >= self.max_depth || ctx.generated > NODE_BUDGET;
         // Absolute cutoff: past it, containers are emitted empty so that even
         // an unsatisfiable required self-reference terminates.
-        let hard_limit = depth >= self.max_depth + HARD_DEPTH_SLACK;
+        let hard_limit = depth >= self.max_depth + HARD_DEPTH_SLACK || hard_exhausted(ctx);
         let pick = match branch {
             Some(i) => Pick::Forced(i),
             None if at_limit => Pick::Shallow,
             None => Pick::Random,
         };
-        let flat = flatten(root, schema, 0, pick, rng);
+        let flat = flatten(ctx.root, &ctx.costs, schema, 0, pick, rng);
         let Some(s) = flat.as_object() else {
             // `true` accepts anything, `false` accepts nothing.
             return Value::String(word(rng));
@@ -95,15 +126,15 @@ impl Faker {
             "string" => Value::String(fake_string(s, rng)),
             "array" if hard_limit => Value::Array(Vec::new()),
             "object" if hard_limit => Value::Object(Map::new()),
-            "array" => self.fake_array(root, s, depth, at_limit, rng),
-            "object" => self.fake_object(root, s, depth, at_limit, rng),
+            "array" => self.fake_array(ctx, s, depth, at_limit, rng),
+            "object" => self.fake_object(ctx, s, depth, at_limit, rng),
             _ => Value::String(word(rng)),
         }
     }
 
     fn fake_object<R: Rng>(
         &self,
-        root: &Value,
+        ctx: &mut Ctx<'_>,
         s: &Map<String, Value>,
         depth: usize,
         at_limit: bool,
@@ -121,16 +152,17 @@ impl Faker {
             let sub = props.and_then(|p| p.get(*name)).unwrap_or(&any);
             out.insert(
                 (*name).to_string(),
-                self.gen_value(root, sub, depth + 1, None, rng),
+                self.gen_value(ctx, sub, depth + 1, None, rng),
             );
         }
-        if !at_limit && let Some(props) = props {
+        if let Some(props) = props {
             for (name, sub) in props {
+                // Re-checked per property: the budget may run out mid-object.
+                if at_limit || ctx.generated >= NODE_BUDGET {
+                    break;
+                }
                 if !out.contains_key(name) {
-                    out.insert(
-                        name.clone(),
-                        self.gen_value(root, sub, depth + 1, None, rng),
-                    );
+                    out.insert(name.clone(), self.gen_value(ctx, sub, depth + 1, None, rng));
                 }
             }
         }
@@ -139,7 +171,7 @@ impl Faker {
 
     fn fake_array<R: Rng>(
         &self,
-        root: &Value,
+        ctx: &mut Ctx<'_>,
         s: &Map<String, Value>,
         depth: usize,
         at_limit: bool,
@@ -157,19 +189,136 @@ impl Faker {
         let unique = s.get("uniqueItems").and_then(Value::as_bool) == Some(true);
         let any = Value::Bool(true);
         let items = s.get("items").unwrap_or(&any);
-        let mut out: Vec<Value> = Vec::with_capacity(len);
-        for _ in 0..len {
-            let mut candidate = self.gen_value(root, items, depth + 1, None, rng);
+        let mut out: Vec<Value> = Vec::with_capacity(len.min(NODE_BUDGET));
+        for i in 0..len {
+            if hard_exhausted(ctx) || (i >= min && ctx.generated >= NODE_BUDGET) {
+                break;
+            }
+            let mut candidate = self.gen_value(ctx, items, depth + 1, None, rng);
             if unique {
                 let mut tries = 0;
-                while out.contains(&candidate) && tries < 32 {
-                    candidate = self.gen_value(root, items, depth + 1, None, rng);
+                while out.contains(&candidate) && tries < 32 && !hard_exhausted(ctx) {
+                    candidate = self.gen_value(ctx, items, depth + 1, None, rng);
                     tries += 1;
                 }
             }
             out.push(candidate);
         }
         Value::Array(out)
+    }
+}
+
+fn hard_exhausted(ctx: &Ctx<'_>) -> bool {
+    ctx.generated > NODE_BUDGET + HARD_NODE_EXTRA
+}
+
+/// Minimal instance cost (roughly, the number of values a smallest instance
+/// generates) of every `$ref` target reachable from a root, computed as a
+/// fixed point so that recursion is accounted for: a definition whose only
+/// instances recurse forever stays [`INFINITE`].
+struct Costs {
+    by_ref: HashMap<String, u64>,
+}
+
+impl Costs {
+    fn compute(root: &Value) -> Self {
+        let mut refs = Vec::new();
+        collect_refs(root, &mut refs);
+        refs.sort_unstable();
+        refs.dedup();
+        let targets: Vec<(String, &Value)> = refs
+            .into_iter()
+            .filter_map(|r| resolve_ref(root, &r).map(|t| (r, t)))
+            .collect();
+        let mut costs = Self {
+            by_ref: targets.iter().map(|(r, _)| (r.clone(), INFINITE)).collect(),
+        };
+        // Costs only decrease from infinity; a minimal derivation never
+        // repeats a definition along a path, so `n + 1` rounds converge.
+        for _ in 0..=targets.len() {
+            let mut changed = false;
+            for (r, target) in &targets {
+                let cost = costs.of(root, target);
+                if let Some(slot) = costs.by_ref.get_mut(r)
+                    && cost < *slot
+                {
+                    *slot = cost;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        costs
+    }
+
+    /// `1 +` the cost of everything a minimal instance of `schema` must
+    /// contain: required properties, `minItems` elements, all `allOf`
+    /// members, the cheapest `oneOf`/`anyOf` branch and the `$ref` target's
+    /// current cost. Mirrors what [`Faker`] generates past its limits.
+    fn of(&self, root: &Value, schema: &Value) -> u64 {
+        let Some(obj) = schema.as_object() else {
+            return 1;
+        };
+        if obj.contains_key("const")
+            || matches!(obj.get("enum"), Some(Value::Array(a)) if !a.is_empty())
+            || type_names(obj).contains(&"null")
+        {
+            return 1;
+        }
+        let mut cost = 1u64;
+        if let Some(Value::String(r)) = obj.get("$ref")
+            && resolve_ref(root, r).is_some()
+        {
+            cost = cost.saturating_add(self.by_ref.get(r).copied().unwrap_or(INFINITE));
+        }
+        if let Some(Value::Array(all)) = obj.get("allOf") {
+            for sub in all {
+                cost = cost.saturating_add(self.of(root, sub));
+            }
+        }
+        for key in ["oneOf", "anyOf"] {
+            if let Some(Value::Array(branches)) = obj.get(key)
+                && let Some(min) = branches.iter().map(|b| self.of(root, b)).min()
+            {
+                cost = cost.saturating_add(min);
+            }
+        }
+        let props = obj.get("properties").and_then(Value::as_object);
+        if let Some(Value::Array(required)) = obj.get("required") {
+            for name in required.iter().filter_map(Value::as_str) {
+                let member = props
+                    .and_then(|p| p.get(name))
+                    .map_or(1, |p| self.of(root, p));
+                cost = cost.saturating_add(member);
+            }
+        }
+        let min_items = obj.get("minItems").and_then(Value::as_u64).unwrap_or(0);
+        if min_items > 0 {
+            let item = obj.get("items").map_or(1, |i| self.of(root, i));
+            cost = cost.saturating_add(item.saturating_mul(min_items));
+        }
+        cost
+    }
+}
+
+fn collect_refs(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(obj) => {
+            for (k, v) in obj {
+                match (k.as_str(), v) {
+                    ("$ref", Value::String(r)) => out.push(r.clone()),
+                    _ => collect_refs(v, out),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                collect_refs(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -207,14 +356,21 @@ enum Pick {
     Forced(usize),
     /// A uniformly random branch.
     Random,
-    /// The branch with the fewest required references, so that recursion
-    /// past the depth limit converges on a leaf.
+    /// The branch with the smallest minimal-instance cost (see [`Costs`]),
+    /// so that recursion past the limits converges on a finite instance.
     Shallow,
 }
 
 /// Resolve `$ref` (against the root's `$defs`), and merge `allOf` and one
 /// `oneOf`/`anyOf` branch (chosen by `pick`) into a single schema object.
-fn flatten<R: Rng>(root: &Value, schema: &Value, hops: usize, pick: Pick, rng: &mut R) -> Value {
+fn flatten<R: Rng>(
+    root: &Value,
+    costs: &Costs,
+    schema: &Value,
+    hops: usize,
+    pick: Pick,
+    rng: &mut R,
+) -> Value {
     let Some(obj) = schema.as_object() else {
         return schema.clone();
     };
@@ -227,11 +383,11 @@ fn flatten<R: Rng>(root: &Value, schema: &Value, hops: usize, pick: Pick, rng: &
     if let Some(Value::String(r)) = obj.get("$ref")
         && let Some(target) = resolve_ref(root, r)
     {
-        extras.push(flatten(root, target, hops + 1, pick, rng));
+        extras.push(flatten(root, costs, target, hops + 1, pick, rng));
     }
     if let Some(Value::Array(all)) = obj.get("allOf") {
         for sub in all {
-            extras.push(flatten(root, sub, hops + 1, pick, rng));
+            extras.push(flatten(root, costs, sub, hops + 1, pick, rng));
         }
     }
     for key in ["oneOf", "anyOf"] {
@@ -244,10 +400,10 @@ fn flatten<R: Rng>(root: &Value, schema: &Value, hops: usize, pick: Pick, rng: &
                 Pick::Shallow => branches
                     .iter()
                     .enumerate()
-                    .min_by_key(|(_, b)| branch_cost(root, b, 0))
+                    .min_by_key(|(_, b)| costs.of(root, b))
                     .map_or(0, |(i, _)| i),
             };
-            extras.push(flatten(root, &branches[index], hops + 1, pick, rng));
+            extras.push(flatten(root, costs, &branches[index], hops + 1, pick, rng));
         }
     }
 
@@ -265,62 +421,6 @@ fn flatten<R: Rng>(root: &Value, schema: &Value, hops: usize, pick: Pick, rng: &
         }
     }
     Value::Object(out)
-}
-
-/// How many references a minimal instance of `schema` must expand: one per
-/// `$ref` in a required position (required properties, non-empty arrays),
-/// with the schema's own top-level `$ref`/`allOf`/`oneOf`/`anyOf` followed.
-/// Used to steer recursion towards terminating branches.
-fn branch_cost(root: &Value, schema: &Value, hops: usize) -> usize {
-    const UNBOUNDED: usize = 1 << 16;
-    let Some(obj) = schema.as_object() else {
-        return 0;
-    };
-    if hops > 8 {
-        return UNBOUNDED;
-    }
-    let mut cost = 0usize;
-    if let Some(Value::String(r)) = obj.get("$ref")
-        && let Some(target) = resolve_ref(root, r)
-    {
-        cost = cost.saturating_add(branch_cost(root, target, hops + 1));
-    }
-    if let Some(Value::Array(all)) = obj.get("allOf") {
-        for sub in all {
-            cost = cost.saturating_add(branch_cost(root, sub, hops + 1));
-        }
-    }
-    for key in ["oneOf", "anyOf"] {
-        if let Some(Value::Array(branches)) = obj.get(key)
-            && let Some(min) = branches
-                .iter()
-                .map(|b| branch_cost(root, b, hops + 1))
-                .min()
-        {
-            cost = cost.saturating_add(min);
-        }
-    }
-    let member = |m: &Value| -> usize {
-        if m.get("$ref").is_some() {
-            1
-        } else {
-            branch_cost(root, m, hops + 1)
-        }
-    };
-    let props = obj.get("properties").and_then(Value::as_object);
-    if let Some(Value::Array(required)) = obj.get("required") {
-        for name in required.iter().filter_map(Value::as_str) {
-            if let Some(p) = props.and_then(|p| p.get(name)) {
-                cost = cost.saturating_add(member(p));
-            }
-        }
-    }
-    if obj.get("minItems").and_then(Value::as_u64).unwrap_or(0) > 0
-        && let Some(items) = obj.get("items")
-    {
-        cost = cost.saturating_add(member(items));
-    }
-    cost
 }
 
 fn merge_keyword(out: &mut Map<String, Value>, key: String, value: Value) {
