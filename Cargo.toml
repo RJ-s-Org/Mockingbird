@@ -36,6 +36,7 @@ http = "1"
 metrics = "0.24"
 arc-swap = "1"
 json-patch = { version = "4", default-features = false }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev
@@ -55,6 +56,7 @@ mb-state = { path = "crates/mb-state" }
 mb-protocols = { path = "crates/mb-protocols" }
 mb-ext = { path = "crates/mb-ext" }
 mb-store = { path = "crates/mb-store" }
+mb-admin = { path = "crates/mb-admin" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
