@@ -6,7 +6,9 @@ mod model;
 mod postgres;
 mod sqlite;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -22,8 +24,16 @@ pub use sqlite::SqliteControlStore;
 /// Capacity of the [`ControlChange`] broadcast channel.
 pub const CHANGE_CHANNEL_CAPACITY: usize = 256;
 
-/// Request-log pruning runs only when the new row id is a multiple of this.
+/// Request-log pruning is amortised: a mock's log is pruned on the first
+/// insert for it this process makes, and then on every
+/// `RETENTION_PRUNE_INTERVAL`-th insert for that mock (counted per mock, so
+/// any interleaving of mocks stays bounded). A mock therefore never holds
+/// more than `retention + RETENTION_PRUNE_INTERVAL` entries.
 pub const RETENTION_PRUNE_INTERVAL: i64 = 100;
+
+/// How long a store call waits for a pooled connection before failing, so
+/// an unreachable database fails fast instead of stalling every request.
+pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[async_trait]
 pub trait ControlStore: Send + Sync {
@@ -69,8 +79,9 @@ pub trait ControlStore: Send + Sync {
     /// Upserts by `(workspace, name)`.
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError>;
     async fn delete_profile(&self, ws: &str, name: &str) -> Result<bool, StoreError>;
-    /// Returns the new row id. Every [`RETENTION_PRUNE_INTERVAL`] inserts the
-    /// mock's rows beyond the newest `retention` are deleted.
+    /// Returns the new row id. The mock's rows beyond the newest `retention`
+    /// are deleted on its first insert and then every
+    /// [`RETENTION_PRUNE_INTERVAL`] inserts for that mock.
     async fn append_request_log(
         &self,
         e: NewRequestLogEntry,
@@ -137,6 +148,32 @@ pub fn validate_route_prefix(prefix: &str) -> Result<(), StoreError> {
         Err(StoreError::Invalid(format!(
             "route prefix {prefix:?} must be \"/\" or \"/seg(/seg)*\" with segments of [A-Za-z0-9._-]"
         )))
+    }
+}
+
+/// Per-mock request-log insert counters deciding when to prune.
+#[derive(Default)]
+pub(crate) struct PruneCounter(Mutex<HashMap<Uuid, i64>>);
+
+impl PruneCounter {
+    /// Counts an insert for `mock`; `true` when it should prune: the first
+    /// insert this process makes for the mock, then every
+    /// [`RETENTION_PRUNE_INTERVAL`]-th.
+    pub(crate) fn tick(&self, mock: Uuid) -> bool {
+        let Ok(mut counts) = self.0.lock() else {
+            return true;
+        };
+        let n = counts.entry(mock).or_insert(0);
+        let prune = *n == 0;
+        *n = (*n + 1) % RETENTION_PRUNE_INTERVAL;
+        prune
+    }
+
+    /// Forgets the counters (e.g. after mocks are deleted).
+    pub(crate) fn clear(&self) {
+        if let Ok(mut counts) = self.0.lock() {
+            counts.clear();
+        }
     }
 }
 

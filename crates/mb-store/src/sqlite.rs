@@ -10,8 +10,8 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange, ControlStore,
-    LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry, RETENTION_PRUNE_INTERVAL,
+    ACQUIRE_TIMEOUT, CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange,
+    ControlStore, LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
     RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError, now,
     sha256_hex, validate_mock_name, validate_route_prefix,
 };
@@ -31,6 +31,7 @@ const LOG_COLUMNS: &str = "id, mock_id, operation_id, session, method, path, sta
 pub struct SqliteControlStore {
     pool: SqlitePool,
     changes: broadcast::Sender<ControlChange>,
+    prune: PruneCounter,
 }
 
 impl SqliteControlStore {
@@ -47,6 +48,7 @@ impl SqliteControlStore {
             // One connection that never closes, so every query sees the same
             // in-memory database for the store's whole lifetime.
             SqlitePoolOptions::new()
+                .acquire_timeout(ACQUIRE_TIMEOUT)
                 .max_connections(1)
                 .min_connections(1)
                 .idle_timeout(None)
@@ -55,6 +57,7 @@ impl SqliteControlStore {
                 .await?
         } else {
             SqlitePoolOptions::new()
+                .acquire_timeout(ACQUIRE_TIMEOUT)
                 .connect_with(options.journal_mode(SqliteJournalMode::Wal))
                 .await?
         };
@@ -62,7 +65,11 @@ impl SqliteControlStore {
         migrator.dangerous_set_table_name(MIGRATIONS_TABLE);
         migrator.run(&pool).await?;
         let (changes, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
-        Ok(Self { pool, changes })
+        Ok(Self {
+            pool,
+            changes,
+            prune: PruneCounter::default(),
+        })
     }
 
     fn publish(&self, change: ControlChange) {
@@ -325,6 +332,8 @@ impl ControlStore for SqliteControlStore {
             .rows_affected()
             > 0;
         if deleted {
+            // Drops the deleted mock's counter (the others restart at a prune).
+            self.prune.clear();
             self.publish_mock(ws, name);
         }
         Ok(deleted)
@@ -611,7 +620,7 @@ impl ControlStore for SqliteControlStore {
         .bind(e.at)
         .fetch_one(&self.pool)
         .await?;
-        if id % RETENTION_PRUNE_INTERVAL == 0 {
+        if self.prune.tick(e.mock_id) {
             sqlx::query(
                 "DELETE FROM request_log WHERE mock_id = ?1 AND id NOT IN \
                  (SELECT id FROM request_log WHERE mock_id = ?1 ORDER BY id DESC LIMIT ?2)",

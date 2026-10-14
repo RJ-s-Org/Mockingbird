@@ -9,12 +9,13 @@ use async_trait::async_trait;
 use mb_ext::Extensions;
 use mb_protocols::{RequestRecord, RequestRecorder};
 use mb_state::{
-    MemoryStore, SessionInfo, SessionKey, StateChanged, StateError, StateStore, StoredResource,
+    MemoryStore, SessionInfo, SessionKey, SqlStateStore, StateChanged, StateError, StateStore,
+    StoredResource,
 };
 use mb_store::{
     ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
-    Mock, NewContractVersion, NewMock, NewRequestLogEntry, RequestLogEntry, RequestLogFilter,
-    ResourceSource, Scenario, SqliteControlStore, StoreError,
+    Mock, NewContractVersion, NewMock, NewRequestLogEntry, PgStore, RequestLogEntry,
+    RequestLogFilter, ResourceSource, Scenario, SqliteControlStore, StoreError,
 };
 use mockingbird::ops::{self, OpsState};
 use mockingbird::recorder::StoreRecorder;
@@ -509,4 +510,75 @@ fn otlp_disabled_without_endpoint() {
     unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
     let guard = telemetry::init("mockingbird-test").unwrap();
     assert!(!guard.otlp_enabled());
+}
+
+/// A state store whose database is unreachable fails fast: a request is
+/// served (statelessly) and `/readyz` answers within 3s, not after sqlx's
+/// default 30s acquire timeout; later requests skip the store at once.
+#[tokio::test]
+async fn unreachable_state_database_fails_fast() {
+    let store: Arc<dyn ControlStore> = stub_store().await;
+    orders_mock(&store).await;
+    let state: Arc<dyn StateStore> = Arc::new(
+        SqlStateStore::connect_lazy("postgres://mb@127.0.0.1:1/x", Duration::from_secs(60))
+            .unwrap(),
+    );
+    let deps = deps(store.clone(), state.clone(), None);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let data = serve(registry.router()).await;
+    let ops = serve(ops::router(ops_state(store, state, registry))).await;
+
+    let started = Instant::now();
+    let r = reqwest::get(format!("{data}/orders/orders/o1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "first request took {:?}",
+        started.elapsed()
+    );
+
+    let started = Instant::now();
+    let r = reqwest::get(format!("{data}/orders/orders/o2"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "a degraded mock must skip the store; took {:?}",
+        started.elapsed()
+    );
+
+    let started = Instant::now();
+    let r = reqwest::get(format!("{ops}/readyz")).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "readyz took {:?}",
+        started.elapsed()
+    );
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["status"], "degraded", "{body}");
+}
+
+/// `/readyz` reports an unreachable control database within 3s.
+#[tokio::test]
+async fn readyz_fails_fast_when_control_database_unreachable() {
+    let store: Arc<dyn ControlStore> =
+        Arc::new(PgStore::connect_lazy("postgres://mb@127.0.0.1:1/x").unwrap());
+    let ops = serve(ops::router(ops_state(
+        store,
+        memory_state(),
+        MockRegistry::new(),
+    )))
+    .await;
+    let started = Instant::now();
+    let r = reqwest::get(format!("{ops}/readyz")).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "readyz took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(r.status(), 503);
 }

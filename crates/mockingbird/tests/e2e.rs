@@ -251,3 +251,123 @@ async fn serve_binds_data_and_admin_ports() {
         assert_eq!(r.status(), 200, "{p}");
     }
 }
+
+/// Waits until `GET url` answers JSON satisfying `ok`, or fails after 5s.
+async fn wait_for_json(url: &str, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let body: Value = reqwest::get(url).await.unwrap().json().await.unwrap();
+        if ok(&body) {
+            return body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "GET {url}: still {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Breaking a profile a serving mock uses keeps the mock serving its
+/// previous version; the API warns about it and `/readyz` names the mock.
+#[tokio::test]
+async fn broken_profile_keeps_mock_serving() {
+    let app = build_app(
+        &args(vec![fixture()]),
+        Some(llm("http://127.0.0.1:9".into())),
+    )
+    .await
+    .unwrap();
+    let data = serve(app.data.clone()).await;
+    let admin = serve(app.admin.clone()).await;
+    let http = reqwest::Client::new();
+
+    let profile = json!({"base_url": "http://127.0.0.1:9", "model": "m", "timeout_ms": 500});
+    let r = http
+        .put(format!("{admin}/api/v1/llm-profiles/q"))
+        .json(&profile)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let r = http
+        .post(format!("{admin}/api/v1/mocks"))
+        .json(&json!({"name": "c", "llm_profile": "q"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let r = http
+        .post(format!("{admin}/api/v1/mocks/c/contracts"))
+        .header("content-type", "application/yaml")
+        .body(std::fs::read(fixture()).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while reqwest::get(format!("{data}/c/orders"))
+        .await
+        .unwrap()
+        .status()
+        != 200
+    {
+        assert!(std::time::Instant::now() < deadline, "c never mounted");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut broken = profile.clone();
+    broken["secret_ref"] = json!("env:MB_LLM_E2E_NOT_SET_41C7");
+    let r = http
+        .put(format!("{admin}/api/v1/llm-profiles/q"))
+        .json(&broken)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    let warnings = body["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("\"c\"")),
+        "{body}"
+    );
+
+    let ready = wait_for_json(&format!("{admin}/readyz"), |b| b["status"] == "degraded").await;
+    assert!(
+        ready["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().starts_with("mock c: ")),
+        "{ready}"
+    );
+    assert_eq!(
+        reqwest::get(format!("{data}/c/orders"))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+
+    // Deleting the profile still succeeds, with a warning.
+    let r = http
+        .delete(format!("{admin}/api/v1/llm-profiles/q"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert!(
+        body["warnings"][0].as_str().unwrap().contains("\"c\""),
+        "{body}"
+    );
+    assert_eq!(
+        reqwest::get(format!("{data}/c/orders"))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}

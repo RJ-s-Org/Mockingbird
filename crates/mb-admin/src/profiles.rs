@@ -1,8 +1,11 @@
 //! `/api/v1/llm-profiles…`. Profiles hold a `secret_ref` (`env:NAME` or
 //! `file:/path`), never a raw key, and the API never resolves it.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use mb_store::{DEFAULT_WORKSPACE, LlmProfile, ResourceSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -121,6 +124,53 @@ fn validate(name: &str, p: &PutProfile) -> ApiResult<()> {
     Ok(())
 }
 
+/// The result of a profile write: the profile, plus warnings about mocks
+/// the change may break.
+#[derive(Serialize, ToSchema, Debug)]
+pub struct ProfileWriteResult {
+    #[serde(flatten)]
+    pub profile: LlmProfileView,
+    /// One entry per mock that uses the profile (directly or through a
+    /// fallback chain). Such a mock is rebuilt; if that fails it keeps
+    /// serving its previous version and `/readyz` reports it.
+    pub warnings: Vec<String>,
+}
+
+/// The result of deleting a profile that mocks still use.
+#[derive(Serialize, ToSchema, Debug)]
+pub struct ProfileDeleteResult {
+    pub deleted: String,
+    /// One entry per mock that still uses the deleted profile.
+    pub warnings: Vec<String>,
+}
+
+/// Names of the mocks whose profile is `name` or falls back to it.
+async fn mocks_using(st: &AdminState, name: &str) -> ApiResult<Vec<String>> {
+    let fallbacks: HashMap<String, Option<String>> = st
+        .store
+        .list_profiles(DEFAULT_WORKSPACE)
+        .await?
+        .into_iter()
+        .map(|p| (p.name, p.fallback_profile))
+        .collect();
+    let mut users = Vec::new();
+    for mock in st.store.list_mocks(DEFAULT_WORKSPACE).await? {
+        let mut next = mock.llm_profile.clone();
+        let mut seen = HashSet::new();
+        while let Some(profile) = next {
+            if profile == name {
+                users.push(mock.name.clone());
+                break;
+            }
+            if !seen.insert(profile.clone()) {
+                break;
+            }
+            next = fallbacks.get(&profile).cloned().flatten();
+        }
+    }
+    Ok(users)
+}
+
 async fn find(st: &AdminState, name: &str) -> ApiResult<LlmProfile> {
     st.store
         .get_profile(DEFAULT_WORKSPACE, name)
@@ -163,7 +213,7 @@ pub async fn get_one(
     params(("name" = String, Path, description = "Profile name")),
     request_body = PutProfile,
     responses(
-        (status = 200, body = LlmProfileView),
+        (status = 200, body = ProfileWriteResult),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid profile, or a raw `api_key`", body = Problem, content_type = "application/problem+json"),
     )
@@ -172,7 +222,7 @@ pub async fn put(
     State(st): State<AdminState>,
     Path(name): Path<String>,
     Json(body): Json<Value>,
-) -> ApiResult<Json<LlmProfileView>> {
+) -> ApiResult<Json<ProfileWriteResult>> {
     if !valid_identifier(&name) {
         return Err(Problem::unprocessable(
             "profile names are 1-128 characters of [A-Za-z0-9._-]",
@@ -205,7 +255,20 @@ pub async fn put(
         source: ResourceSource::Api,
     };
     st.store.put_profile(&profile).await?;
-    Ok(Json(profile.into()))
+    let warnings = mocks_using(&st, &profile.name)
+        .await?
+        .into_iter()
+        .map(|mock| {
+            format!(
+                "mock {mock:?} uses LLM profile {:?} and is rebuilt; if that fails it keeps serving its previous version (see /readyz)",
+                profile.name
+            )
+        })
+        .collect();
+    Ok(Json(ProfileWriteResult {
+        profile: profile.into(),
+        warnings,
+    }))
 }
 
 #[utoipa::path(
@@ -214,19 +277,33 @@ pub async fn put(
     tag = "llm-profiles",
     params(("name" = String, Path, description = "Profile name")),
     responses(
-        (status = 204, description = "Deleted"),
+        (status = 204, description = "Deleted; no mock used the profile"),
+        (status = 200, description = "Deleted, but mocks still use the profile", body = ProfileDeleteResult),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
     )
 )]
-pub async fn delete(
-    State(st): State<AdminState>,
-    Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
+pub async fn delete(State(st): State<AdminState>, Path(name): Path<String>) -> ApiResult<Response> {
     let existing = find(&st, &name).await?;
     ensure_api_managed(&existing.source, format_args!("LLM profile {name:?}"))?;
     if st.store.delete_profile(DEFAULT_WORKSPACE, &name).await? {
-        Ok(StatusCode::NO_CONTENT)
+        let users = mocks_using(&st, &name).await?;
+        if users.is_empty() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        let warnings = users
+            .into_iter()
+            .map(|mock| {
+                format!(
+                    "mock {mock:?} uses the deleted LLM profile {name:?}; it keeps serving its previous version until it is fixed (see /readyz)"
+                )
+            })
+            .collect();
+        Ok(Json(ProfileDeleteResult {
+            deleted: name,
+            warnings,
+        })
+        .into_response())
     } else {
         Err(Problem::not_found(format!(
             "LLM profile {name:?} does not exist"

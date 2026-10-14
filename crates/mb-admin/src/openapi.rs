@@ -52,6 +52,8 @@ use crate::{
         scenarios::PutScenario,
         profiles::LlmProfileView,
         profiles::PutProfile,
+        profiles::ProfileWriteResult,
+        profiles::ProfileDeleteResult,
         sessions::SessionInfoView,
         sessions::StoredResourceView,
         requests::RequestLogView,

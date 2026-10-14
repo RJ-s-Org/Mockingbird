@@ -3,9 +3,9 @@
 //! Each adapter sits behind a cargo feature (`http-rest`, ...).
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use mb_engine::{Engine, ScenarioSpec};
 use mb_ext::Extensions;
@@ -38,6 +38,77 @@ impl ScenarioRuntime {
     }
 }
 
+/// A circuit breaker over a mock's state store calls.
+///
+/// While healthy every call uses the store. The first failure marks the
+/// mock degraded; from then on at most one call per retry interval tries
+/// the store (the others are served statelessly at once), until one
+/// succeeds and clears the mark.
+#[derive(Debug)]
+pub struct StateHealth {
+    degraded: AtomicBool,
+    /// When a call last tried the store while degraded.
+    last_attempt: Mutex<Option<Instant>>,
+    retry_interval: Duration,
+}
+
+impl StateHealth {
+    /// Default time between store attempts while degraded.
+    pub const DEFAULT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+    pub fn new(retry_interval: Duration) -> Self {
+        Self {
+            degraded: AtomicBool::new(false),
+            last_attempt: Mutex::new(None),
+            retry_interval,
+        }
+    }
+
+    /// Whether the state store is failing for this mock.
+    pub fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::Relaxed)
+    }
+
+    /// Whether a call may use the store now: always while healthy; while
+    /// degraded, only the first caller of each retry interval.
+    pub fn try_acquire(&self) -> bool {
+        if !self.is_degraded() {
+            return true;
+        }
+        let Ok(mut last) = self.last_attempt.lock() else {
+            return true;
+        };
+        let now = Instant::now();
+        match *last {
+            Some(at) if now.duration_since(at) < self.retry_interval => false,
+            _ => {
+                *last = Some(now);
+                true
+            }
+        }
+    }
+
+    /// A store call succeeded: the mock is healthy again.
+    pub fn record_success(&self) {
+        self.degraded.store(false, Ordering::Relaxed);
+    }
+
+    /// A store call failed: the mock is degraded, and the next attempt
+    /// waits a full retry interval from now.
+    pub fn record_failure(&self) {
+        if let Ok(mut last) = self.last_attempt.lock() {
+            *last = Some(Instant::now());
+        }
+        self.degraded.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Default for StateHealth {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_RETRY_INTERVAL)
+    }
+}
+
 /// Everything an adapter needs to serve one mock.
 pub struct MockRuntime {
     /// Mock name; also used as `SessionKey::mock`.
@@ -53,9 +124,9 @@ pub struct MockRuntime {
     pub ext: Extensions,
     /// Receives one [`RequestRecord`] per served call.
     pub recorder: Option<Arc<dyn RequestRecorder>>,
-    /// Set while the state store is failing; cleared by the next successful
-    /// state call. Calls are served statelessly meanwhile.
-    pub state_degraded: Arc<AtomicBool>,
+    /// The state store circuit breaker: degraded while the store is
+    /// failing, when calls are served statelessly.
+    pub state_health: Arc<StateHealth>,
 }
 
 impl MockRuntime {
@@ -76,7 +147,7 @@ impl MockRuntime {
             scenarios: HashMap::new(),
             ext: Extensions::default(),
             recorder: None,
-            state_degraded: Arc::new(AtomicBool::new(false)),
+            state_health: Arc::new(StateHealth::default()),
         }
     }
 }

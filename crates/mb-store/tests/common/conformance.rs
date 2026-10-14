@@ -7,8 +7,8 @@ use chrono::Utc;
 use mb_mcm::Bundle;
 use mb_store::{
     ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
-    NewContractVersion, NewMock, NewRequestLogEntry, RequestLogFilter, ResourceSource, Scenario,
-    ScenarioRules, StoreError,
+    NewContractVersion, NewMock, NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RequestLogFilter,
+    ResourceSource, Scenario, ScenarioRules, StoreError,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -25,6 +25,7 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     profile_crud(&store).await;
     request_log_filters_and_paginates(&store).await;
     request_log_retention_prunes(&store).await;
+    request_log_retention_prunes_interleaved_mocks(&store).await;
     changes_are_published(&store).await;
 }
 
@@ -700,6 +701,42 @@ async fn request_log_retention_prunes(store: &Arc<dyn ControlStore>) {
         "kept rows are the newest, contiguous: {:?}",
         remaining.iter().map(|e| e.id).collect::<Vec<_>>()
     );
+}
+
+/// Two mocks whose inserts strictly alternate both stay bounded: pruning is
+/// counted per mock, not keyed on the shared id sequence.
+async fn request_log_retention_prunes_interleaved_mocks(store: &Arc<dyn ControlStore>) {
+    let retention = 10;
+    let mocks = [
+        create(store, "interleave-a").await,
+        create(store, "interleave-b").await,
+    ];
+    for i in 0..300 {
+        store
+            .append_request_log(log_entry(mocks[i % 2].id, "s", "op", "faker"), retention)
+            .await
+            .expect("append");
+    }
+    let bound = usize::try_from(i64::from(retention) + RETENTION_PRUNE_INTERVAL).expect("bound");
+    for mock in &mocks {
+        let rows = store
+            .list_request_log(
+                mock.id,
+                &RequestLogFilter {
+                    limit: 500,
+                    ..RequestLogFilter::default()
+                },
+            )
+            .await
+            .expect("list");
+        assert!(
+            rows.len() <= bound,
+            "mock {}: {} rows remain, more than retention + interval ({bound})",
+            mock.name,
+            rows.len()
+        );
+        assert!(rows.len() >= 10, "{} rows remain", rows.len());
+    }
 }
 
 /// Next published change, failing (instead of hanging) if none arrives.

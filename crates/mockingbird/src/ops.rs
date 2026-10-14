@@ -1,6 +1,7 @@
 //! Ops endpoints on the admin port: `/healthz`, `/readyz` and `/metrics`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -25,8 +26,10 @@ pub struct OpsState {
 
 /// - `/healthz`: liveness, always `200 {"status":"ok"}`.
 /// - `/readyz`: `503 unavailable` when the control store is unreachable;
-///   `200 degraded` (with `reasons`) when the state store is unreachable or
-///   a mounted mock is serving statelessly; else `200 ready`.
+///   `200 degraded` (with `reasons`) when the state store is unreachable, a
+///   mock failed to rebuild (`mock <name>: <error>`; it keeps serving its
+///   previous version) or a mounted mock is serving statelessly; else
+///   `200 ready`. Each store ping is bounded by [`PING_TIMEOUT`].
 /// - `/metrics`: Prometheus text exposition.
 pub fn router(st: OpsState) -> Router {
     Router::new()
@@ -40,8 +43,24 @@ async fn healthz() -> Response {
     axum::Json(json!({"status": "ok"})).into_response()
 }
 
+/// Longest a `/readyz` store ping may take before it counts as failed.
+pub const PING_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Runs `ping` with [`PING_TIMEOUT`]; `Err` carries the reason.
+async fn ping_within<E: std::fmt::Display>(
+    ping: impl std::future::Future<Output = Result<(), E>>,
+) -> Result<(), String> {
+    match tokio::time::timeout(PING_TIMEOUT, ping).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!("no answer within {}s", PING_TIMEOUT.as_secs())),
+    }
+}
+
 async fn readyz(State(st): State<OpsState>) -> Response {
-    if let Err(error) = st.store.ping().await {
+    // Both pings run at once, each bounded, so readyz answers in ~2s at most.
+    let (control, state) = tokio::join!(ping_within(st.store.ping()), ping_within(st.state.ping()));
+    if let Err(error) = control {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             axum::Json(json!({
@@ -52,8 +71,11 @@ async fn readyz(State(st): State<OpsState>) -> Response {
             .into_response();
     }
     let mut reasons = Vec::new();
-    if let Err(error) = st.state.ping().await {
+    if let Err(error) = state {
         reasons.push(format!("state store unreachable: {error}"));
+    }
+    for (mock, error) in st.registry.failed_mocks() {
+        reasons.push(format!("mock {mock}: {error}"));
     }
     for mock in st.registry.degraded_mocks() {
         reasons.push(format!(

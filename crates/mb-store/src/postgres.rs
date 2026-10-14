@@ -13,8 +13,8 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange, ControlStore,
-    LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry, RETENTION_PRUNE_INTERVAL,
+    ACQUIRE_TIMEOUT, CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange,
+    ControlStore, LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
     RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError, now,
     sha256_hex, validate_mock_name, validate_route_prefix,
 };
@@ -36,6 +36,7 @@ const LOG_SELECT: &str = "id, mock_id, operation_id, session, method, path, stat
 pub struct PgStore {
     pool: PgPool,
     changes: broadcast::Sender<ControlChange>,
+    prune: PruneCounter,
 }
 
 impl PgStore {
@@ -44,12 +45,36 @@ impl PgStore {
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let options = PgConnectOptions::from_str(url)
             .map_err(|e| StoreError::Invalid(format!("postgres url: {e}")))?;
-        let pool = PgPoolOptions::new().connect_with(options).await?;
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(ACQUIRE_TIMEOUT)
+            .connect_with(options)
+            .await?;
         let mut migrator = sqlx::migrate!("./migrations/postgres");
         migrator.dangerous_set_table_name(MIGRATIONS_TABLE);
         migrator.run(&pool).await?;
         let (changes, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
-        Ok(Self { pool, changes })
+        Ok(Self {
+            pool,
+            changes,
+            prune: PruneCounter::default(),
+        })
+    }
+
+    /// A store whose pool connects on first use and which runs no
+    /// migrations (the schema must already exist). Unlike [`Self::connect`]
+    /// it succeeds while the database is unreachable.
+    pub fn connect_lazy(url: &str) -> Result<Self, StoreError> {
+        let options = PgConnectOptions::from_str(url)
+            .map_err(|e| StoreError::Invalid(format!("postgres url: {e}")))?;
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(ACQUIRE_TIMEOUT)
+            .connect_lazy_with(options);
+        let (changes, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
+        Ok(Self {
+            pool,
+            changes,
+            prune: PruneCounter::default(),
+        })
     }
 
     fn publish(&self, change: ControlChange) {
@@ -323,6 +348,8 @@ impl ControlStore for PgStore {
             .rows_affected()
             > 0;
         if deleted {
+            // Drops the deleted mock's counter (the others restart at a prune).
+            self.prune.clear();
             self.publish_mock(ws, name);
         }
         Ok(deleted)
@@ -626,19 +653,16 @@ impl ControlStore for PgStore {
         .bind(e.at)
         .fetch_one(&self.pool)
         .await?;
-        // Pruning is counted per mock (not keyed on the global id), so every
-        // mock is pruned once it holds RETENTION_PRUNE_INTERVAL rows beyond
-        // `retention`, however inserts from different mocks interleave.
-        sqlx::query(
-            "DELETE FROM request_log WHERE mock_id = $1 \
-             AND EXISTS (SELECT 1 FROM request_log WHERE mock_id = $1 ORDER BY id DESC OFFSET $3 LIMIT 1) \
-             AND id <= (SELECT id FROM request_log WHERE mock_id = $1 ORDER BY id DESC OFFSET $2 LIMIT 1)",
-        )
-        .bind(e.mock_id)
-        .bind(i64::from(retention))
-        .bind(i64::from(retention) + RETENTION_PRUNE_INTERVAL - 1)
-        .execute(&self.pool)
-        .await?;
+        if self.prune.tick(e.mock_id) {
+            sqlx::query(
+                "DELETE FROM request_log WHERE mock_id = $1 AND id <= \
+                 (SELECT id FROM request_log WHERE mock_id = $1 ORDER BY id DESC OFFSET $2 LIMIT 1)",
+            )
+            .bind(e.mock_id)
+            .bind(i64::from(retention))
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(id)
     }
 

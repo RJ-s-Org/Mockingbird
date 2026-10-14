@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use mb_import::compile;
 use mb_llm::{Provider, ScriptedProvider, Usage};
 use mb_mcm::Bundle;
 use mb_protocols::http_rest;
-use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder, ScenarioRuntime};
+use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder, ScenarioRuntime, StateHealth};
 use mb_state::{
     MemoryStore, SessionInfo, SessionKey, StateChanged, StateError, StateStore, StoredResource,
 };
@@ -245,10 +245,12 @@ async fn quota_rejection_maps_to_problem() {
 struct FlakyStore {
     inner: MemoryStore,
     failing: AtomicBool,
+    calls: AtomicUsize,
 }
 
 impl FlakyStore {
     fn check(&self) -> Result<(), StateError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.failing.load(Ordering::SeqCst) {
             Err(StateError::Backend("database is down".into()))
         } else {
@@ -314,13 +316,17 @@ async fn state_errors_degrade_to_stateless() {
     let store = Arc::new(FlakyStore {
         inner: MemoryStore::new(Duration::from_secs(3600)),
         failing: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
     });
-    let rt = Arc::new(runtime(None, store.clone()));
+    let mut rt = runtime(None, store.clone());
+    // Retry the store on every call, so recovery is seen at once.
+    rt.state_health = Arc::new(StateHealth::new(Duration::ZERO));
+    let rt = Arc::new(rt);
     let router = http_rest::router(Arc::clone(&rt));
 
     let resp = send(&router, get_with("/orders/o1", &[])).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(rt.state_degraded.load(Ordering::SeqCst));
+    assert!(rt.state_health.is_degraded());
 
     // A failing write is not a 5xx either.
     let req = Request::post("/orders")
@@ -328,12 +334,41 @@ async fn state_errors_degrade_to_stateless() {
         .body(Body::from(r#"{"customerId":"c1","total":10}"#))
         .unwrap();
     assert_eq!(send(&router, req).await.status(), StatusCode::CREATED);
-    assert!(rt.state_degraded.load(Ordering::SeqCst));
+    assert!(rt.state_health.is_degraded());
 
     store.failing.store(false, Ordering::SeqCst);
     let resp = send(&router, get_with("/orders/o1", &[])).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(!rt.state_degraded.load(Ordering::SeqCst));
+    assert!(!rt.state_health.is_degraded());
+}
+
+/// While degraded, the store is tried at most once per retry interval: the
+/// other calls are served statelessly without touching it.
+#[tokio::test]
+async fn degraded_state_is_retried_once_per_interval() {
+    let store = Arc::new(FlakyStore {
+        inner: MemoryStore::new(Duration::from_secs(3600)),
+        failing: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+    });
+    let rt = Arc::new(runtime(None, store.clone()));
+    let router = http_rest::router(Arc::clone(&rt));
+
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(rt.state_health.is_degraded());
+    assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+
+    for _ in 0..5 {
+        let resp = send(&router, get_with("/orders/o1", &[])).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        store.calls.load(Ordering::SeqCst),
+        1,
+        "calls within the retry interval must not touch the store"
+    );
+    assert!(rt.state_health.is_degraded());
 }
 
 #[derive(Default)]
@@ -441,6 +476,6 @@ fn new_runtime_defaults() {
     assert!(rt.header_overrides);
     assert!(rt.scenarios.is_empty());
     assert!(rt.recorder.is_none());
-    assert!(!rt.state_degraded.load(Ordering::SeqCst));
+    assert!(!rt.state_health.is_degraded());
     let _: &HashMap<String, ScenarioRuntime> = &rt.scenarios;
 }

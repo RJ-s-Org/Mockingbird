@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -740,27 +739,30 @@ fn reference_prefix(field: &str) -> Option<&str> {
 
 /// State-store access for one call. The first failing call marks the mock
 /// degraded and makes the rest of the call stateless; a successful call
-/// clears the mark.
+/// clears the mark. While degraded, [`crate::StateHealth`] lets one call per
+/// retry interval try the store; the rest skip it entirely.
 struct StateAccess<'a> {
     rt: &'a MockRuntime,
     failed: bool,
 }
 
 impl<'a> StateAccess<'a> {
+    /// A call skips the store while the breaker holds it off.
     fn new(rt: &'a MockRuntime) -> Self {
-        Self { rt, failed: false }
+        let failed = !rt.state_health.try_acquire();
+        Self { rt, failed }
     }
 
     /// `None` when the store is unavailable for this call.
     fn settle<T>(&mut self, result: Result<T, StateError>) -> Option<T> {
         match result {
             Ok(v) => {
-                self.rt.state_degraded.store(false, Ordering::Relaxed);
+                self.rt.state_health.record_success();
                 Some(v)
             }
             Err(e) => {
                 tracing::warn!(mock = %self.rt.name, error = %e, "state store failed; serving statelessly");
-                self.rt.state_degraded.store(true, Ordering::Relaxed);
+                self.rt.state_health.record_failure();
                 metrics::counter!("mb_state_errors_total", "mock" => self.rt.name.clone())
                     .increment(1);
                 self.failed = true;

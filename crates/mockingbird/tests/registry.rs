@@ -414,3 +414,45 @@ async fn moving_prefix_holder_mounts_skipped_mock() {
     assert_eq!(status_of(&base, "/x/ping").await, 200);
     assert_eq!(status_of(&base, "/y/orders").await, 200);
 }
+
+/// A mock whose rebuild fails keeps serving its previous version, and is
+/// reported as failed (for `/readyz`) until a rebuild succeeds.
+#[tokio::test]
+async fn failed_rebuild_keeps_serving_previous_version() {
+    let store = store().await;
+    let mut q = profile("q", "http://127.0.0.1:9".into(), None);
+    q.secret_ref = None;
+    store.put_profile(&q).await.unwrap();
+    let c = create_mock(&store, "c", "/c", Some("q")).await;
+    activate(&store, &c, &fixture_source()).await;
+    let mut deps = deps(store.clone());
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/c/orders").await, 200);
+    assert!(registry.failed_mocks().is_empty());
+
+    q.secret_ref = Some("env:MB_TEST_REGISTRY_NOT_SET_5D2B".into());
+    store.put_profile(&q).await.unwrap();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(status_of(&base, "/c/orders").await, 200);
+    registry.reload_mock(&deps, "c").await;
+    assert_eq!(status_of(&base, "/c/orders").await, 200);
+    let failed = registry.failed_mocks();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0, "c");
+    assert!(failed[0].1.contains("secret"), "{failed:?}");
+
+    // Fixing the profile clears the failure.
+    q.secret_ref = None;
+    store.put_profile(&q).await.unwrap();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(registry.failed_mocks().is_empty());
+    assert_eq!(status_of(&base, "/c/orders").await, 200);
+
+    // Deleting the mock unmounts it.
+    assert!(store.delete_mock(DEFAULT_WORKSPACE, "c").await.unwrap());
+    registry.reload_mock(&deps, "c").await;
+    assert_eq!(status_of(&base, "/c/orders").await, 404);
+}

@@ -1,14 +1,15 @@
 //! The set of mounted mocks, hot-swapped as the control store changes, and
 //! the data-plane dispatcher that routes requests to them by path prefix.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 use axum::Router;
 use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
+use mb_protocols::StateHealth;
 use mb_protocols::http_rest::{self, problem};
 use mb_store::{ControlChange, DEFAULT_WORKSPACE, Mock};
 use tokio::sync::{Mutex, broadcast};
@@ -22,13 +23,19 @@ struct Mounted {
     name: String,
     prefix: String,
     router: Router,
-    /// The runtime's `state_degraded` flag.
-    state_degraded: Arc<AtomicBool>,
+    /// The runtime's state store circuit breaker.
+    state_health: Arc<StateHealth>,
 }
 
 /// Mounted mocks, sorted by prefix length, longest first.
+///
+/// A mock whose rebuild fails keeps its previous version mounted and is
+/// listed in [`MockRegistry::failed_mocks`] until a rebuild succeeds; it is
+/// unmounted only when it is deleted or has no active contract.
 pub struct MockRegistry {
     mounted: ArcSwap<Vec<Mounted>>,
+    /// Mock name → why its last rebuild failed.
+    failed: std::sync::Mutex<BTreeMap<String, String>>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
     reload: Mutex<()>,
 }
@@ -37,11 +44,13 @@ impl MockRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             mounted: ArcSwap::from_pointee(Vec::new()),
+            failed: std::sync::Mutex::new(BTreeMap::new()),
             reload: Mutex::new(()),
         })
     }
 
-    /// Rebuilds every mock. A mock that fails to build is logged and skipped.
+    /// Rebuilds every mock. A mock that fails to build is logged, recorded
+    /// as failed and keeps its previous version mounted, if it had one.
     pub async fn reload_all(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let _guard = self.reload.lock().await;
         self.reload_all_locked(deps).await
@@ -51,10 +60,20 @@ impl MockRegistry {
     async fn reload_all_locked(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let mut mocks = deps.store.list_mocks(DEFAULT_WORKSPACE).await?;
         mocks.sort_by(|a, b| a.name.cmp(&b.name));
+        let current = self.mounted.load_full();
+        let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
         for mock in mocks {
-            let Some(mounted) = build_mounted(deps, &mock).await else {
-                continue;
+            let mounted = match build_mounted(deps, &mock).await {
+                Ok(Some(mounted)) => mounted,
+                Ok(None) => continue,
+                Err(error) => {
+                    failed.insert(mock.name.clone(), error);
+                    match current.iter().find(|m| m.name == mock.name) {
+                        Some(previous) => previous.clone(),
+                        None => continue,
+                    }
+                }
             };
             if let Some(holder) = next.iter().find(|m| m.prefix == mounted.prefix) {
                 tracing::error!(
@@ -68,22 +87,38 @@ impl MockRegistry {
             next.push(mounted);
         }
         self.publish(next);
+        if let Ok(mut slot) = self.failed.lock() {
+            *slot = failed;
+        }
         Ok(())
     }
 
-    /// Rebuilds one mock, unmounting it when it was deleted, has no active
-    /// contract or fails to build.
+    /// Rebuilds one mock, unmounting it when it was deleted or has no
+    /// active contract. When the build fails, the mock keeps its previous
+    /// version mounted and is recorded as failed.
     ///
     /// When the mock gives up a prefix it held (it is unmounted or moves to
     /// another prefix), a mock skipped earlier for colliding on that prefix
     /// may now be mountable, so every mock is rebuilt instead.
     pub async fn reload_mock(&self, deps: &RuntimeDeps, name: &str) {
         let _guard = self.reload.lock().await;
-        let mounted = match deps.store.get_mock(DEFAULT_WORKSPACE, name).await {
+        let built = match deps.store.get_mock(DEFAULT_WORKSPACE, name).await {
             Ok(Some(mock)) => build_mounted(deps, &mock).await,
-            Ok(None) => None,
+            Ok(None) => Ok(None),
             Err(error) => {
                 tracing::error!(mock = %name, %error, "cannot load mock; leaving it as it was");
+                return;
+            }
+        };
+        let mounted = match built {
+            Ok(mounted) => {
+                self.set_failed(name, None);
+                mounted
+            }
+            Err(error) => {
+                // Whatever is mounted (the previous version, or nothing)
+                // stays as it is.
+                self.set_failed(name, Some(error));
                 return;
             }
         };
@@ -189,6 +224,24 @@ impl MockRegistry {
             .collect()
     }
 
+    /// `(name, error)` of every mock whose last rebuild failed, sorted by
+    /// name. Such a mock serves its previous version, if it had one.
+    pub fn failed_mocks(&self) -> Vec<(String, String)> {
+        self.failed
+            .lock()
+            .map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    fn set_failed(&self, name: &str, error: Option<String>) {
+        if let Ok(mut failed) = self.failed.lock() {
+            match error {
+                Some(error) => failed.insert(name.to_string(), error),
+                None => failed.remove(name),
+            };
+        }
+    }
+
     /// Names of mounted mocks currently serving statelessly because their
     /// state store calls are failing, sorted.
     pub fn degraded_mocks(&self) -> Vec<String> {
@@ -196,7 +249,7 @@ impl MockRegistry {
             .mounted
             .load()
             .iter()
-            .filter(|m| m.state_degraded.load(Ordering::Relaxed))
+            .filter(|m| m.state_health.is_degraded())
             .map(|m| m.name.clone())
             .collect();
         names.sort();
@@ -263,26 +316,29 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
     Uri::builder().path_and_query(path_and_query).build()
 }
 
-async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Option<Mounted> {
+/// The mounted router for `mock`; `Ok(None)` when it has no active
+/// contract; `Err` (logged) when it cannot be built.
+async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted>, String> {
     let runtime = match build_runtime(deps, mock).await {
         Ok(Some(rt)) => rt,
-        Ok(None) => return None,
+        Ok(None) => return Ok(None),
         Err(error) => {
-            tracing::error!(mock = %mock.name, error = %format!("{error:#}"), "cannot build mock; skipped");
-            return None;
+            let error = format!("{error:#}");
+            tracing::error!(mock = %mock.name, %error, "cannot build mock; keeping any previous version mounted");
+            return Err(error);
         }
     };
-    let state_degraded = Arc::clone(&runtime.state_degraded);
+    let state_health = Arc::clone(&runtime.state_health);
     match http_rest::try_router(Arc::new(runtime)) {
-        Ok(router) => Some(Mounted {
+        Ok(router) => Ok(Some(Mounted {
             name: mock.name.clone(),
             prefix: mock.route_prefix.clone(),
             router,
-            state_degraded,
-        }),
+            state_health,
+        })),
         Err(error) => {
-            tracing::error!(mock = %mock.name, %error, "cannot route mock; skipped");
-            None
+            tracing::error!(mock = %mock.name, %error, "cannot route mock; keeping any previous version mounted");
+            Err(format!("cannot route the contract: {error}"))
         }
     }
 }

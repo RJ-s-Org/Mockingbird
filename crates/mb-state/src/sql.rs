@@ -27,6 +27,10 @@ use crate::{
 /// the same database.
 const MIGRATIONS_TABLE: &str = "_mb_state_migrations";
 
+/// How long a call waits for a pooled connection before failing, so an
+/// unreachable database fails fast instead of stalling every request.
+pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+
 const KEY_WHERE: &str = "workspace = $1 AND mock = $2 AND session = $3";
 
 impl From<sqlx::Error> for StateError {
@@ -143,11 +147,32 @@ impl SqlStateStore {
                 url.split(':').next().unwrap_or_default()
             )));
         };
+        Ok(Self::from_pool(pool, ttl))
+    }
+
+    /// A Postgres store whose pool connects on first use and which runs no
+    /// migrations (the schema must already exist). Unlike [`Self::connect`]
+    /// it succeeds while the database is unreachable.
+    pub fn connect_lazy(url: &str, ttl: Duration) -> Result<Self, StateError> {
+        if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+            return Err(StateError::Backend(
+                "connect_lazy supports postgres:// urls only".into(),
+            ));
+        }
+        let options = PgConnectOptions::from_str(url)
+            .map_err(|e| StateError::Backend(format!("postgres url: {e}")))?;
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(ACQUIRE_TIMEOUT)
+            .connect_lazy_with(options);
+        Ok(Self::from_pool(Pool::Pg(pool), ttl))
+    }
+
+    fn from_pool(pool: Pool, ttl: Duration) -> Self {
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
         let inner = Arc::new(Inner { pool, ttl_ms });
         spawn_sweeper(Arc::downgrade(&inner));
         let (tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
-        Ok(Self { inner, tx })
+        Self { inner, tx }
     }
 
     fn publish(&self, s: &SessionKey, resource_type: &str, id: &str, kind: ChangeKind) {
@@ -172,6 +197,7 @@ async fn connect_sqlite(url: &str) -> Result<SqlitePool, StateError> {
         // One connection that never closes, so every query sees the same
         // in-memory database for the store's whole lifetime.
         SqlitePoolOptions::new()
+            .acquire_timeout(ACQUIRE_TIMEOUT)
             .max_connections(1)
             .min_connections(1)
             .idle_timeout(None)
@@ -180,6 +206,7 @@ async fn connect_sqlite(url: &str) -> Result<SqlitePool, StateError> {
             .await?
     } else {
         SqlitePoolOptions::new()
+            .acquire_timeout(ACQUIRE_TIMEOUT)
             .connect_with(options.journal_mode(SqliteJournalMode::Wal))
             .await?
     };
@@ -192,7 +219,10 @@ async fn connect_sqlite(url: &str) -> Result<SqlitePool, StateError> {
 async fn connect_postgres(url: &str) -> Result<PgPool, StateError> {
     let options = PgConnectOptions::from_str(url)
         .map_err(|e| StateError::Backend(format!("postgres url: {e}")))?;
-    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_with(options)
+        .await?;
     // Runs under Postgres's advisory lock.
     let mut migrator = sqlx::migrate!("./migrations/postgres");
     migrator.dangerous_set_table_name(MIGRATIONS_TABLE);
