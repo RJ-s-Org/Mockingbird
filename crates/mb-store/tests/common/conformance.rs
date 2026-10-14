@@ -671,8 +671,9 @@ async fn request_log_filters_and_paginates(store: &Arc<dyn ControlStore>) {
 
 async fn request_log_retention_prunes(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "retention").await;
+    let mut newest = 0;
     for i in 0..250 {
-        store
+        newest = store
             .append_request_log(
                 log_entry(mock.id, &format!("s{}", i % 3), "op", "faker"),
                 10,
@@ -692,6 +693,24 @@ async fn request_log_retention_prunes(store: &Arc<dyn ControlStore>) {
         .expect("list");
     assert!(remaining.len() <= 110, "{} rows remain", remaining.len());
     assert!(remaining.len() >= 10, "{} rows remain", remaining.len());
+    // The newest rows are the ones kept, contiguous up to the last insert.
+    assert_eq!(remaining.first().map(|e| e.id), Some(newest));
+    assert!(
+        remaining.windows(2).all(|w| w[0].id == w[1].id + 1),
+        "kept rows are the newest, contiguous: {:?}",
+        remaining.iter().map(|e| e.id).collect::<Vec<_>>()
+    );
+}
+
+/// Next published change, failing (instead of hanging) if none arrives.
+async fn next_change(
+    rx: &mut tokio::sync::broadcast::Receiver<ControlChange>,
+    what: &str,
+) -> ControlChange {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what}: no change published within 5s"))
+        .unwrap_or_else(|e| panic!("{what}: {e}"))
 }
 
 async fn changes_are_published(store: &Arc<dyn ControlStore>) {
@@ -701,17 +720,17 @@ async fn changes_are_published(store: &Arc<dyn ControlStore>) {
         workspace: DEFAULT_WORKSPACE.into(),
         name: "published".into(),
     };
-    assert_eq!(rx.recv().await.expect("create change"), expected);
+    assert_eq!(next_change(&mut rx, "create change").await, expected);
 
     store
         .add_contract_version(mock.id, new_version(ContractStatus::Approved, "p"))
         .await
         .expect("add");
-    assert_eq!(rx.recv().await.expect("version change"), expected);
+    assert_eq!(next_change(&mut rx, "version change").await, expected);
 
     store
         .activate_contract_version(mock.id, 1)
         .await
         .expect("activate");
-    assert_eq!(rx.recv().await.expect("activate change"), expected);
+    assert_eq!(next_change(&mut rx, "activate change").await, expected);
 }

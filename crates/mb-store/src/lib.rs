@@ -3,6 +3,7 @@
 
 mod error;
 mod model;
+mod postgres;
 mod sqlite;
 
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use uuid::Uuid;
 
 pub use error::StoreError;
 pub use model::*;
+pub use postgres::PgStore;
 pub use sqlite::SqliteControlStore;
 
 /// Capacity of the [`ControlChange`] broadcast channel.
@@ -85,14 +87,13 @@ pub trait ControlStore: Send + Sync {
 
 /// Opens the store named by `url` and runs its migrations.
 ///
-/// Supported: `sqlite::memory:` and `sqlite://<path>` (created if missing).
+/// Supported: `sqlite::memory:`, `sqlite://<path>` (created if missing) and
+/// `postgres://…` / `postgresql://…`.
 pub async fn connect(url: &str) -> Result<Arc<dyn ControlStore>, StoreError> {
     if url.starts_with("sqlite:") {
         Ok(Arc::new(SqliteControlStore::connect(url).await?))
     } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-        Err(StoreError::Invalid(
-            "the postgres control store is not available in this build".into(),
-        ))
+        Ok(Arc::new(PgStore::connect(url).await?))
     } else {
         Err(StoreError::Invalid(format!(
             "unsupported storage url scheme (expected sqlite: or postgres://): {}",
