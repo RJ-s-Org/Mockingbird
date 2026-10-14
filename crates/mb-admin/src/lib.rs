@@ -30,13 +30,50 @@ pub const API_BASE: &str = "/api/v1";
 /// Where the OpenAPI document is served.
 pub const OPENAPI_PATH: &str = "/api/openapi.json";
 
+/// Default `server.api_secret_refs`: the secret references an LLM profile
+/// created or updated through the API may use.
+pub const DEFAULT_API_SECRET_REFS: [&str; 2] = ["env:MB_LLM_*", "env:*_API_KEY"];
+
 #[derive(Clone)]
 pub struct AdminState {
     pub store: Arc<dyn ControlStore>,
     pub state: Arc<dyn StateStore>,
+    /// Globs (`*` matches any run of characters) a profile's `secret_ref`
+    /// must match when written through the API (`server.api_secret_refs`).
+    pub api_secret_refs: Arc<Vec<String>>,
+}
+
+/// Whether `text` matches `pattern`, where `*` matches any run of
+/// characters (including none) and every other character itself.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti) = (0, 0);
+    // Where the last `*` was, and the text position it is matched up to.
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == b'*')
 }
 
 /// Mounts `/api/v1/*` and `/api/openapi.json`.
+///
+/// Every mutating request needs a non-CORS-safelisted `Content-Type`
+/// (`application/json`, or a JSON/YAML/OpenAPI type for contract uploads;
+/// otherwise 415), so a cross-site page cannot reach the API with a simple
+/// request.
 pub fn router(st: AdminState) -> Router {
     let api = Router::new()
         .route("/mocks", get(mocks::list).post(mocks::create))
@@ -150,4 +187,23 @@ fn valid_identifier(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn globs() {
+        assert!(glob_match("env:MB_LLM_*", "env:MB_LLM_API_KEY"));
+        assert!(glob_match("env:MB_LLM_*", "env:MB_LLM_"));
+        assert!(glob_match("env:*_API_KEY", "env:OPENAI_API_KEY"));
+        assert!(glob_match("env:*_API_KEY", "env:A_API_KEY_API_KEY"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(!glob_match("env:*_API_KEY", "env:HOME"));
+        assert!(!glob_match("env:*_API_KEY", "env:OPENAI_API_KEYS"));
+        assert!(!glob_match("env:MB_LLM_*", "file:/etc/passwd"));
+        assert!(!glob_match("env:X", "env:XY"));
+    }
 }

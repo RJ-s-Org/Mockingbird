@@ -7,7 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
-use mb_admin::{AdminState, router};
+use mb_admin::{AdminState, DEFAULT_API_SECRET_REFS, router};
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
@@ -49,11 +49,23 @@ impl Resp {
 }
 
 async fn harness() -> Harness {
+    harness_with(
+        DEFAULT_API_SECRET_REFS
+            .iter()
+            .map(|r| r.to_string())
+            .collect(),
+    )
+    .await
+}
+
+/// A harness whose API accepts the secret refs matching `api_secret_refs`.
+async fn harness_with(api_secret_refs: Vec<String>) -> Harness {
     let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let app = router(AdminState {
         store: store.clone(),
         state,
+        api_secret_refs: Arc::new(api_secret_refs),
     });
     Harness { app, store }
 }
@@ -128,7 +140,19 @@ impl Harness {
             Some(a) => format!("/api/v1/mocks/{mock}/contracts?activate={a}"),
             None => format!("/api/v1/mocks/{mock}/contracts"),
         };
-        self.raw(Method::POST, &uri, contract).await
+        self.send(
+            Method::POST,
+            &uri,
+            Body::from(contract.to_owned()),
+            Some("application/json"),
+        )
+        .await
+    }
+
+    /// `POST uri` with no body, as JSON (e.g. activation).
+    async fn post_empty_json(&self, uri: &str) -> Resp {
+        self.send(Method::POST, uri, Body::empty(), Some("application/json"))
+            .await
     }
 
     async fn active_version(&self, mock: &str) -> Value {
@@ -505,11 +529,7 @@ async fn activate_rollback() {
     assert_eq!(h.active_version("orders").await, 2);
 
     let r = h
-        .raw(
-            Method::POST,
-            "/api/v1/mocks/orders/contracts/1/activate",
-            "",
-        )
+        .post_empty_json("/api/v1/mocks/orders/contracts/1/activate")
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
     let body = r.json();
@@ -539,22 +559,17 @@ async fn activate_rollback() {
         )
         .await
         .unwrap();
-    h.raw(
-        Method::POST,
-        &format!("/api/v1/mocks/orders/contracts/{}/activate", draft.version),
-        "",
-    )
+    h.post_empty_json(&format!(
+        "/api/v1/mocks/orders/contracts/{}/activate",
+        draft.version
+    ))
     .await
     .assert_problem(StatusCode::CONFLICT);
     assert_eq!(h.active_version("orders").await, 1);
 
-    h.raw(
-        Method::POST,
-        "/api/v1/mocks/orders/contracts/99/activate",
-        "",
-    )
-    .await
-    .assert_problem(StatusCode::NOT_FOUND);
+    h.post_empty_json("/api/v1/mocks/orders/contracts/99/activate")
+        .await
+        .assert_problem(StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -639,9 +654,7 @@ async fn scenarios_crud() {
 
 #[tokio::test]
 async fn profiles_never_return_secret_values() {
-    // SAFETY: the variable name is unique to this test, and no other test
-    // reads or writes it.
-    unsafe { std::env::set_var("MB_ADMIN_TEST_PROFILE_KEY", "sk-123") };
+    // The API never resolves a secret_ref, so no variable needs setting.
     let h = harness().await;
 
     let r = h
@@ -651,7 +664,7 @@ async fn profiles_never_return_secret_values() {
             json!({
                 "base_url": "https://llm.example.com",
                 "model": "fast-1",
-                "secret_ref": "env:MB_ADMIN_TEST_PROFILE_KEY"
+                "secret_ref": "env:MB_LLM_ADMIN_TEST_PROFILE_KEY"
             }),
         )
         .await;
@@ -669,7 +682,7 @@ async fn profiles_never_return_secret_values() {
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
     assert!(
         r.text
-            .contains(r#""secret_ref":"env:MB_ADMIN_TEST_PROFILE_KEY""#),
+            .contains(r#""secret_ref":"env:MB_LLM_ADMIN_TEST_PROFILE_KEY""#),
         "{}",
         r.text
     );
@@ -713,7 +726,7 @@ async fn profiles_never_return_secret_values() {
         );
     }
 
-    // Absent is fine, and `file:` refs are accepted.
+    // Absent is fine.
     let r = h
         .json(
             Method::PUT,
@@ -723,14 +736,6 @@ async fn profiles_never_return_secret_values() {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
     assert_eq!(r.json()["secret_ref"], Value::Null);
-    let r = h
-        .json(
-            Method::PUT,
-            "/api/v1/llm-profiles/filed",
-            json!({ "base_url": "https://x", "model": "m", "secret_ref": "file:/run/secrets/llm" }),
-        )
-        .await;
-    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
 
     let r = h.delete("/api/v1/llm-profiles/fast").await;
     assert_eq!(r.status, StatusCode::NO_CONTENT);
@@ -740,6 +745,146 @@ async fn profiles_never_return_secret_values() {
     h.delete("/api/v1/llm-profiles/fast")
         .await
         .assert_problem(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_secret_refs_are_restricted() {
+    let h = harness().await;
+    let put = |secret_ref: &'static str| json!({ "base_url": "https://x", "model": "m", "secret_ref": secret_ref });
+    // The defaults: env:MB_LLM_* and env:*_API_KEY.
+    for ok in [
+        "env:MB_LLM_API_KEY",
+        "env:MB_LLM_OTHER",
+        "env:OPENAI_API_KEY",
+    ] {
+        let r = h.json(Method::PUT, "/api/v1/llm-profiles/p", put(ok)).await;
+        assert_eq!(r.status, StatusCode::OK, "{ok}: {}", r.text);
+    }
+    for bad in [
+        "env:HOME",
+        "env:AWS_SECRET_ACCESS_KEY",
+        "file:/etc/passwd",
+        "file:/run/secrets/llm",
+    ] {
+        let r = h
+            .json(Method::PUT, "/api/v1/llm-profiles/p", put(bad))
+            .await;
+        let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            p["detail"]
+                .as_str()
+                .unwrap()
+                .contains("secret_ref not allowed by server.api_secret_refs"),
+            "{bad}: {p}"
+        );
+        assert!(
+            !r.text.contains(bad),
+            "the rejected ref is echoed: {}",
+            r.text
+        );
+    }
+    // The profile kept its last accepted ref.
+    assert_eq!(
+        h.get("/api/v1/llm-profiles/p").await.json()["secret_ref"],
+        "env:OPENAI_API_KEY"
+    );
+
+    // A configured allowlist replaces the defaults.
+    let h = harness_with(vec!["file:/run/secrets/*".into()]).await;
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/p",
+            put("file:/run/secrets/llm"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    h.json(
+        Method::PUT,
+        "/api/v1/llm-profiles/p",
+        put("env:MB_LLM_API_KEY"),
+    )
+    .await
+    .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn mutations_require_non_simple_content_types() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    h.upload("orders", &contract_json("1.0"), None).await;
+
+    // JSON endpoints: a form, text or missing content type is 415.
+    let json_endpoints: [(Method, &str, &str); 6] = [
+        (Method::POST, "/api/v1/mocks", r#"{"name":"x"}"#),
+        (Method::PATCH, "/api/v1/mocks/orders", r#"{"persona":"p"}"#),
+        (
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/s",
+            r#"{"status":500}"#,
+        ),
+        (
+            Method::PUT,
+            "/api/v1/llm-profiles/p",
+            r#"{"base_url":"http://x","model":"m"}"#,
+        ),
+        (Method::PUT, "/api/v1/mocks/orders/sessions/s", "[]"),
+        (
+            Method::POST,
+            "/api/v1/mocks/orders/contracts/1/activate",
+            "",
+        ),
+    ];
+    for (method, uri, body) in json_endpoints {
+        for ct in [
+            None,
+            Some("text/plain"),
+            Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data; boundary=x"),
+        ] {
+            h.send(method.clone(), uri, Body::from(body), ct)
+                .await
+                .assert_problem(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+    }
+    let r = h
+        .post_empty_json("/api/v1/mocks/orders/contracts/1/activate")
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+
+    // Contract upload: JSON, YAML and OpenAPI media types only.
+    let uri = "/api/v1/mocks/orders/contracts";
+    for ct in [
+        None,
+        Some("text/plain"),
+        Some("application/x-www-form-urlencoded"),
+        Some("multipart/form-data; boundary=x"),
+        Some("application/octet-stream"),
+    ] {
+        h.send(Method::POST, uri, Body::from(contract_json("2.0")), ct)
+            .await
+            .assert_problem(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    for ct in [
+        "application/json",
+        "application/json; charset=utf-8",
+        "application/yaml",
+        "application/x-yaml",
+        "text/yaml",
+        "application/vnd.oai.openapi",
+        "application/vnd.oai.openapi+json",
+        "Application/VND.OAI.OpenAPI+YAML; version=3.0",
+    ] {
+        let r = h
+            .send(
+                Method::POST,
+                uri,
+                Body::from(contract_json("2.0")),
+                Some(ct),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{ct}: {}", r.text);
+    }
 }
 
 #[tokio::test]
@@ -964,7 +1109,7 @@ async fn file_managed_mock_is_read_only() {
     read_only(h.delete("/api/v1/mocks/filed").await);
     read_only(h.upload("filed", &contract_json("2.0"), Some(true)).await);
     read_only(
-        h.raw(Method::POST, "/api/v1/mocks/filed/contracts/1/activate", "")
+        h.post_empty_json("/api/v1/mocks/filed/contracts/1/activate")
             .await,
     );
     read_only(
@@ -1103,7 +1248,12 @@ async fn errors_are_problem_json() {
 
     // An oversized contract upload.
     let huge = "x".repeat(10 * 1024 * 1024 + 1);
-    h.raw(Method::POST, "/api/v1/mocks/orders/contracts", &huge)
-        .await
-        .assert_problem(StatusCode::PAYLOAD_TOO_LARGE);
+    h.send(
+        Method::POST,
+        "/api/v1/mocks/orders/contracts",
+        Body::from(huge),
+        Some("application/yaml"),
+    )
+    .await
+    .assert_problem(StatusCode::PAYLOAD_TOO_LARGE);
 }

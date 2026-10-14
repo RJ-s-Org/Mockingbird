@@ -136,6 +136,40 @@ pub struct Query<T>(pub T);
 #[from_request(via(axum::extract::Path), rejection(Problem))]
 pub struct Path<T>(pub T);
 
+/// The lowercased media type of a `Content-Type` value, without parameters.
+pub fn media_type(content_type: Option<&axum::http::HeaderValue>) -> Option<String> {
+    let text = content_type?.to_str().ok()?;
+    let media = text.split(';').next().unwrap_or_default().trim();
+    (!media.is_empty()).then(|| media.to_ascii_lowercase())
+}
+
+/// A 415 problem naming the media types `what` accepts.
+pub fn unsupported_media_type(what: &str, accepted: &str) -> Problem {
+    Problem::new(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        format!("{what} requires Content-Type {accepted}"),
+    )
+}
+
+/// Requires `Content-Type: application/json` on a request whose body is
+/// ignored (e.g. activation), so a cross-site form or no-cors `fetch` (which
+/// can only send CORS-safelisted content types) cannot trigger it.
+pub struct RequireJson;
+
+impl<S: Send + Sync> FromRequestParts<S> for RequireJson {
+    type Rejection = Problem;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match media_type(parts.headers.get(header::CONTENT_TYPE)).as_deref() {
+            Some("application/json") => Ok(RequireJson),
+            _ => Err(unsupported_media_type("this endpoint", "application/json")),
+        }
+    }
+}
+
 /// Fallback for unknown routes.
 pub async fn not_found() -> Problem {
     Problem::not_found("no such admin endpoint")

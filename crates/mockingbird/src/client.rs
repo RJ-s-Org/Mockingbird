@@ -194,8 +194,31 @@ async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, Cl
     if args.activate {
         url.set_query(Some("activate=true"));
     }
-    api.request(Method::POST, url, Some(Body::Bytes(source)))
-        .await
+    let content_type = contract_media_type(&args.contract, &source);
+    api.request(
+        Method::POST,
+        url,
+        Some(Body::Bytes {
+            bytes: source,
+            content_type,
+        }),
+    )
+    .await
+}
+
+/// The upload media type for a contract: by extension (`.json`, `.yaml`,
+/// `.yml`), else JSON when the document starts with `{`, else YAML.
+fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("json") => "application/json",
+        Some("yaml" | "yml") => "application/yaml",
+        _ if source.trim_ascii_start().starts_with(b"{") => "application/json",
+        _ => "application/yaml",
+    }
 }
 
 fn read(path: &Path) -> anyhow::Result<Vec<u8>> {
@@ -204,7 +227,10 @@ fn read(path: &Path) -> anyhow::Result<Vec<u8>> {
 
 enum Body {
     Json(Value),
-    Bytes(Vec<u8>),
+    Bytes {
+        bytes: Vec<u8>,
+        content_type: &'static str,
+    },
 }
 
 struct AdminClient {
@@ -254,9 +280,12 @@ impl AdminClient {
         let mut req = self.http.request(method, url.clone());
         req = match body {
             Some(Body::Json(v)) => req.json(&v),
-            Some(Body::Bytes(b)) => req
-                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-                .body(b),
+            Some(Body::Bytes {
+                bytes,
+                content_type,
+            }) => req
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(bytes),
             None => req,
         };
         let resp = req
@@ -274,5 +303,32 @@ impl AdminClient {
         let value = serde_json::from_str(&text)
             .with_context(|| format!("the Admin API sent a non-JSON {status} response"))?;
         Ok(Some(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::contract_media_type;
+
+    #[test]
+    fn contract_media_types() {
+        assert_eq!(
+            contract_media_type(Path::new("a.JSON"), b"openapi: 3.0.0"),
+            "application/json"
+        );
+        assert_eq!(
+            contract_media_type(Path::new("a.yml"), b"{}"),
+            "application/yaml"
+        );
+        assert_eq!(
+            contract_media_type(Path::new("contract"), b"  \n{\"openapi\": \"3.0.0\"}"),
+            "application/json"
+        );
+        assert_eq!(
+            contract_media_type(Path::new("contract"), b"openapi: 3.0.0"),
+            "application/yaml"
+        );
     }
 }

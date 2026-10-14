@@ -371,3 +371,61 @@ async fn broken_profile_keeps_mock_serving() {
         200
     );
 }
+
+async fn admin_status(app: &axum::Router, host: Option<&str>) -> (u16, String) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::get("/api/v1/mocks");
+    if let Some(host) = host {
+        req = req.header("host", host);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    (resp.status().as_u16(), ct)
+}
+
+/// On a loopback bind the admin port answers only to loopback host names,
+/// which blocks DNS rebinding.
+#[tokio::test]
+async fn admin_rejects_foreign_host_on_loopback() {
+    let mut a = args(vec![fixture()]);
+    a.offline = true;
+    let app = build_app(&a, None).await.unwrap();
+    for host in [
+        "evil.example",
+        "evil.example:9090",
+        "127.0.0.1.evil.example",
+        "localhost.evil.example:9090",
+        "10.0.0.1:9090",
+    ] {
+        let (status, ct) = admin_status(&app.admin, Some(host)).await;
+        assert_eq!(status, 421, "{host}");
+        assert_eq!(ct, "application/problem+json", "{host}");
+    }
+    for host in [
+        "localhost",
+        "LocalHost:9090",
+        "127.0.0.1",
+        "127.0.0.1:9090",
+        "[::1]",
+        "[::1]:9090",
+    ] {
+        assert_eq!(admin_status(&app.admin, Some(host)).await.0, 200, "{host}");
+    }
+    assert_eq!(admin_status(&app.admin, None).await.0, 200);
+
+    // A non-loopback bind (with --insecure-no-auth) does not check.
+    let mut a = args(vec![fixture()]);
+    a.offline = true;
+    a.host = Some("0.0.0.0".parse().unwrap());
+    a.insecure_no_auth = true;
+    let app = build_app(&a, None).await.unwrap();
+    assert_eq!(admin_status(&app.admin, Some("evil.example")).await.0, 200);
+}

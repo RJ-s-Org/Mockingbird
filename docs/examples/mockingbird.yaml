@@ -7,6 +7,10 @@ server:
   port: 8080               # data plane; MB_PORT / --port
   admin_port: 9090         # Admin API and /healthz, /readyz, /metrics; MB_ADMIN_PORT / --admin-port
   insecure_no_auth: false  # --insecure-no-auth
+  # Secret references an LLM profile may use when it is created or updated
+  # through the Admin API (globs, * = any characters). Anything else is a 422.
+  # Profiles declared in this file are not restricted. Read at startup.
+  api_secret_refs: ["env:MB_LLM_*", "env:*_API_KEY"]
 
 storage:
   url: "sqlite::memory:"   # sqlite::memory:, sqlite://<path> or postgres://…; MB_STORAGE_URL / --storage-url

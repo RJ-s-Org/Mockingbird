@@ -44,6 +44,11 @@ pub struct ServerConfig {
     /// Admin API and ops endpoints.
     pub admin_port: u16,
     pub insecure_no_auth: bool,
+    /// Globs (`*` = any run of characters) an LLM profile's secret
+    /// reference must match when it is created or updated through the
+    /// Admin API. Profiles in this file are not restricted. Read at
+    /// startup.
+    pub api_secret_refs: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +58,10 @@ impl Default for ServerConfig {
             port: 8080,
             admin_port: 9090,
             insecure_no_auth: false,
+            api_secret_refs: mb_admin::DEFAULT_API_SECRET_REFS
+                .iter()
+                .map(|r| r.to_string())
+                .collect(),
         }
     }
 }

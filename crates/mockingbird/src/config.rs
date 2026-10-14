@@ -323,6 +323,7 @@ pub async fn build_app_with(
     let mut admin = mb_admin::router(mb_admin::AdminState {
         store: store.clone(),
         state: state.clone(),
+        api_secret_refs: Arc::new(cfg.server.api_secret_refs.clone()),
     })
     .merge(ops::router(OpsState {
         store: store.clone(),
@@ -332,6 +333,11 @@ pub async fn build_app_with(
     }));
     if let Some(routes) = ext.admin_hooks.routes() {
         admin = admin.merge(routes);
+    }
+    if cfg.server.host.is_loopback() {
+        admin = admin.layer(axum::middleware::from_fn(
+            crate::host_guard::require_loopback_host,
+        ));
     }
 
     let watch = match (&args.config, args.watch) {

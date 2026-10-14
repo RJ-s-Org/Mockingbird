@@ -1,5 +1,7 @@
 //! `/api/v1/llm-profiles…`. Profiles hold a `secret_ref` (`env:NAME` or
-//! `file:/path`), never a raw key, and the API never resolves it.
+//! `file:/path`), never a raw key, and the API never resolves it. A ref
+//! written through the API must match one of the `server.api_secret_refs`
+//! globs; profiles from the config file are not restricted.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,7 +14,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::problem::{ApiResult, Json, Path, Problem};
-use crate::{AdminState, Source, ensure_api_managed, valid_identifier};
+use crate::{AdminState, Source, ensure_api_managed, glob_match, valid_identifier};
 
 /// Body keys that would carry a raw secret.
 const RAW_KEY_FIELDS: [&str; 2] = ["api_key", "apiKey"];
@@ -215,7 +217,7 @@ pub async fn get_one(
     responses(
         (status = 200, body = ProfileWriteResult),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid profile, or a raw `api_key`", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid profile, a raw `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs`", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn put(
@@ -241,6 +243,15 @@ pub async fn put(
     let body: PutProfile =
         serde_json::from_value(body).map_err(|e| Problem::unprocessable(e.to_string()))?;
     validate(&name, &body)?;
+    if let Some(r) = &body.secret_ref
+        && !st.api_secret_refs.iter().any(|g| glob_match(g, r))
+    {
+        // The ref is not echoed: it may be a pasted secret.
+        return Err(Problem::unprocessable(format!(
+            "secret_ref not allowed by server.api_secret_refs (allowed: {})",
+            st.api_secret_refs.join(", ")
+        )));
+    }
     let profile = LlmProfile {
         workspace: DEFAULT_WORKSPACE.into(),
         name,

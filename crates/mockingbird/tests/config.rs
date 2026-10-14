@@ -105,6 +105,10 @@ fn loads_full_example_config() {
     assert_eq!(cfg.server.port, 8080);
     assert_eq!(cfg.server.admin_port, 9090);
     assert!(!cfg.server.insecure_no_auth);
+    assert_eq!(
+        cfg.server.api_secret_refs,
+        ["env:MB_LLM_*", "env:*_API_KEY"]
+    );
 
     assert_eq!(cfg.storage.url, "sqlite::memory:");
     assert_eq!(cfg.storage.state_url.as_deref(), Some("memory"));
@@ -165,6 +169,10 @@ fn defaults_and_unknown_keys() {
     let cfg = ws.load("mocks:\n  orders:\n    contract: orders.yaml\n");
     assert_eq!(cfg.server.port, 8080);
     assert_eq!(cfg.server.admin_port, 9090);
+    assert_eq!(
+        cfg.server.api_secret_refs,
+        mb_admin::DEFAULT_API_SECRET_REFS
+    );
     assert_eq!(cfg.storage.url, "sqlite::memory:");
     assert_eq!(cfg.storage.state_url, None);
     assert_eq!(cfg.observability.request_log_retention, 1000);

@@ -3,7 +3,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use mb_mcm::{Binding, Bundle, Effect, HttpMethod, OperationKind};
@@ -11,11 +11,25 @@ use mb_store::{ContractStatus, ContractVersion, Mock, NewContractVersion};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::problem::{ApiResult, Json, Path, Problem, Query};
+use crate::problem::{
+    ApiResult, Json, Path, Problem, Query, RequireJson, media_type, unsupported_media_type,
+};
 use crate::{AdminState, VersionStatus, ensure_api_managed};
 
 /// Largest accepted contract upload.
 pub const MAX_CONTRACT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Media types a contract upload may declare. None is CORS-safelisted, so
+/// a cross-site page cannot upload without a preflight.
+pub const CONTRACT_MEDIA_TYPES: [&str; 7] = [
+    "application/json",
+    "application/yaml",
+    "application/x-yaml",
+    "text/yaml",
+    "application/vnd.oai.openapi",
+    "application/vnd.oai.openapi+json",
+    "application/vnd.oai.openapi+yaml",
+];
 
 #[derive(Deserialize, IntoParams, Debug)]
 #[into_params(parameter_in = Query)]
@@ -143,15 +157,23 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
     tag = "contracts",
     params(("mock" = String, Path, description = "Mock name"), UploadParams),
     request_body(
-        content = String,
-        description = "OpenAPI 3.x or Swagger 2.0 document, JSON or YAML, at most 10 MiB",
-        content_type = "application/octet-stream"
+        description = "OpenAPI 3.x or Swagger 2.0 document, JSON or YAML, at most 10 MiB. Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml or application/vnd.oai.openapi(+json|+yaml).",
+        content(
+            (String = "application/json"),
+            (String = "application/yaml"),
+            (String = "application/x-yaml"),
+            (String = "text/yaml"),
+            (String = "application/vnd.oai.openapi"),
+            (String = "application/vnd.oai.openapi+json"),
+            (String = "application/vnd.oai.openapi+yaml"),
+        )
     ),
     responses(
         (status = 201, body = UploadResult),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
         (status = 413, body = Problem, content_type = "application/problem+json"),
+        (status = 415, description = "Not a JSON, YAML or OpenAPI media type", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The contract does not compile", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -159,8 +181,19 @@ pub async fn upload(
     State(st): State<AdminState>,
     Path(mock): Path<String>,
     Query(params): Query<UploadParams>,
+    headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
+    let media = media_type(headers.get(header::CONTENT_TYPE));
+    if !media
+        .as_deref()
+        .is_some_and(|m| CONTRACT_MEDIA_TYPES.contains(&m))
+    {
+        return Err(unsupported_media_type(
+            "a contract upload",
+            &CONTRACT_MEDIA_TYPES.join(", "),
+        ));
+    }
     let m = st.mock(&mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     let source = axum::body::to_bytes(body, MAX_CONTRACT_BYTES)
@@ -297,11 +330,13 @@ pub async fn source(
         (status = 200, description = "Now the only active version; the previous one is approved", body = ContractVersionSummary),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "A draft, or managed by config file", body = Problem, content_type = "application/problem+json"),
+        (status = 415, description = "Content-Type is not application/json (the body is ignored)", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn activate(
     State(st): State<AdminState>,
     Path((mock, number)): Path<(String, i64)>,
+    _json: RequireJson,
 ) -> ApiResult<Json<ContractVersionSummary>> {
     let m = st.mock(&mock).await?;
     let v = version(&st, &m, number).await?;
