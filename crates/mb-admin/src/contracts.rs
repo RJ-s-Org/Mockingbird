@@ -207,8 +207,20 @@ pub async fn upload(
             )
         })?
         .to_vec();
-    let bundle = mb_import::compile(&source)
-        .map_err(|e| Problem::unprocessable(format!("contract does not compile: {e}")))?;
+    // Compiling a large contract is CPU-bound: keep it off the runtime.
+    let (source, compiled) = tokio::task::spawn_blocking(move || {
+        let compiled = mb_import::compile(&source);
+        (source, compiled)
+    })
+    .await
+    .map_err(|e| {
+        Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("contract compilation did not finish: {e}"),
+        )
+    })?;
+    let bundle =
+        compiled.map_err(|e| Problem::unprocessable(format!("contract does not compile: {e}")))?;
     let operations = bundle.operations.len();
 
     let added = st

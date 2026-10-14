@@ -1,10 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mb_ext::Extensions;
+use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
@@ -272,6 +273,19 @@ async fn swap_during_inflight_requests() {
     assert_eq!(status_of(&base, "/orders/ping").await, 200);
 }
 
+/// Resolves secret references from a fixed map.
+struct FixedSecrets(HashMap<String, String>);
+
+#[async_trait::async_trait]
+impl SecretStore for FixedSecrets {
+    async fn resolve(&self, reference: &str) -> Result<String, ExtError> {
+        self.0
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| ExtError::SecretNotFound(reference.to_string()))
+    }
+}
+
 fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
     LlmProfile {
         workspace: DEFAULT_WORKSPACE.into(),
@@ -290,9 +304,6 @@ fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
 
 #[tokio::test]
 async fn profile_secret_resolved_and_fallback_chain() {
-    // SAFETY: no other test in this binary reads or writes this variable.
-    unsafe { std::env::set_var("MB_TEST_REGISTRY_LLM_KEY", "sekrit") };
-
     let primary = MockServer::start().await;
     wiremock::Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -326,6 +337,11 @@ async fn profile_secret_resolved_and_fallback_chain() {
 
     let mut deps = deps(store);
     deps.offline = false;
+    // The secret is injected rather than set in the process environment.
+    deps.ext.secrets = Arc::new(FixedSecrets(HashMap::from([(
+        "env:MB_TEST_REGISTRY_LLM_KEY".to_string(),
+        "sekrit".to_string(),
+    )])));
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
     let base = serve(registry.router()).await;

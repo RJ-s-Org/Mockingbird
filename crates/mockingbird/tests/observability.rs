@@ -596,13 +596,21 @@ async fn metrics_exposes_request_counters() {
     assert_eq!(r.status(), 200);
     let text = r.text().await.unwrap();
     assert!(text.contains("mb_requests_total"), "{text}");
+    assert!(
+        text.contains("# TYPE mb_request_duration_seconds histogram"),
+        "{text}"
+    );
+    assert!(
+        text.contains("mb_request_duration_seconds_bucket{")
+            && text.contains("le=\"0.005\"")
+            && text.contains("le=\"10\""),
+        "{text}"
+    );
 }
 
 #[test]
 fn otlp_disabled_without_endpoint() {
-    // SAFETY: no other test in this binary reads or writes this variable.
-    unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
-    let guard = telemetry::init("mockingbird-test").unwrap();
+    let guard = telemetry::init_with("mockingbird-test", None).unwrap();
     assert!(!guard.otlp_enabled());
 }
 
@@ -675,4 +683,43 @@ async fn readyz_fails_fast_when_control_database_unreachable() {
         started.elapsed()
     );
     assert_eq!(r.status(), 503);
+}
+
+/// Graceful shutdown writes every queued request-log entry before it
+/// returns, and gives up after its timeout when the store hangs.
+#[tokio::test]
+async fn recorder_shutdown_drains_queue() {
+    let stub = stub_store().await;
+    let store: Arc<dyn ControlStore> = stub.clone();
+    let mock = orders_mock(&store).await;
+    let recorder = StoreRecorder::new(store.clone(), 1000, Vec::new());
+    for n in 0..200 {
+        recorder.record(record("orders", n));
+    }
+    recorder.shutdown(Duration::from_secs(5)).await;
+    let entries = store
+        .list_request_log(
+            mock.id,
+            &RequestLogFilter {
+                limit: 500,
+                ..RequestLogFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 200);
+    // Records after shutdown are dropped, not queued.
+    recorder.record(record("orders", 999));
+    assert_eq!(recorder.dropped(), 1);
+
+    stub.stall_append.store(true, Ordering::Relaxed);
+    let stalled = StoreRecorder::new(store, 1000, Vec::new());
+    stalled.record(record("orders", 1));
+    let started = Instant::now();
+    stalled.shutdown(Duration::from_millis(200)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
 }

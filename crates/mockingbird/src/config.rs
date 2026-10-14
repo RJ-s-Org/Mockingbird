@@ -124,6 +124,21 @@ pub struct App {
     pub config: FileConfig,
     /// Present with `--watch`; dropping it stops watching.
     pub watch: Option<WatchGuard>,
+    /// The request log writer.
+    pub recorder: Arc<StoreRecorder>,
+}
+
+/// How long [`App::shutdown`] waits for the request log to drain.
+pub const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl App {
+    /// Graceful shutdown: stops watching the config file and writes the
+    /// queued request-log entries (waiting at most
+    /// [`SHUTDOWN_DRAIN_TIMEOUT`]).
+    pub async fn shutdown(self) {
+        drop(self.watch);
+        self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT).await;
+    }
 }
 
 /// The zero-config [`FileConfig`] for `serve a.yaml [b.yaml]`: SQLite in
@@ -192,6 +207,7 @@ pub fn apply_flags(cfg: &mut FileConfig, args: &ServeArgs) {
     }
     if let Some(port) = args.admin_port {
         cfg.server.admin_port = port;
+        cfg.server.admin_port_explicit = true;
     }
     if args.insecure_no_auth {
         cfg.server.insecure_no_auth = true;
@@ -247,6 +263,27 @@ pub fn missing_env_api_key(cfg: &FileConfig, offline: bool) -> bool {
             .ok()
             .filter(|v| !v.is_empty())
             .is_none()
+}
+
+/// Binds the admin listener. When the port was not set explicitly and is
+/// already in use, logs a warning and returns `None`: the data plane still
+/// serves, without the Admin API and ops endpoints. Any other failure, or
+/// a busy explicitly set port, is an error.
+pub async fn bind_admin(
+    addr: std::net::SocketAddr,
+    explicit: bool,
+) -> anyhow::Result<Option<tokio::net::TcpListener>> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok(Some(listener)),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !explicit => {
+            tracing::warn!(
+                "admin port {addr} is in use; continuing without the Admin API and ops endpoints \
+                 (set --admin-port, MB_ADMIN_PORT or server.admin_port to choose another)"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(anyhow!("cannot bind {addr}: {e}")),
+    }
 }
 
 /// [`build_app_with`] with the self-hosted [`Extensions`].
@@ -348,7 +385,7 @@ pub async fn build_app_with(
                 apply_flags(cfg, &flags);
                 Ok(())
             });
-            let applied = applied_hook(registry.clone(), deps, recorder);
+            let applied = applied_hook(registry.clone(), deps, recorder.clone());
             Some(watch::spawn_with_hook(
                 path.clone(),
                 store.clone(),
@@ -365,6 +402,7 @@ pub async fn build_app_with(
         registry,
         config: cfg,
         watch,
+        recorder,
     })
 }
 

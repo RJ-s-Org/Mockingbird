@@ -5,13 +5,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use mb_protocols::{RequestRecord, RequestRecorder};
 use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, NewRequestLogEntry};
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc};
 use uuid::Uuid;
 
 /// Records waiting to be written; beyond this, new records are dropped.
@@ -36,6 +37,10 @@ pub const PREVIEW_BYTES: usize = 1024;
 /// before they are queued.
 pub struct StoreRecorder {
     queue: mpsc::Sender<RequestRecord>,
+    /// Tells the writer to drain the queue and stop.
+    stop: Arc<Notify>,
+    /// The writer task, taken by [`StoreRecorder::shutdown`].
+    writer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     settings: Arc<ArcSwap<Settings>>,
     live: broadcast::Sender<RequestRecord>,
     dropped: AtomicU64,
@@ -65,9 +70,12 @@ impl StoreRecorder {
             settings: Arc::clone(&settings),
             live: live.clone(),
         };
-        tokio::spawn(writer.run(rx));
+        let stop = Arc::new(Notify::new());
+        let handle = tokio::spawn(writer.run(rx, Arc::clone(&stop)));
         Arc::new(Self {
             queue,
+            stop,
+            writer: std::sync::Mutex::new(Some(handle)),
             settings,
             live,
             dropped: AtomicU64::new(0),
@@ -86,6 +94,23 @@ impl StoreRecorder {
     /// Redacted records as they are written.
     pub fn live(&self) -> broadcast::Receiver<RequestRecord> {
         self.live.subscribe()
+    }
+
+    /// Stops accepting records and waits, at most `timeout`, for the writer
+    /// to write the ones already queued. Later records are dropped. Call it
+    /// on graceful shutdown so the tail of the request log is not lost.
+    pub async fn shutdown(&self, timeout: Duration) {
+        let handle = self.writer.lock().ok().and_then(|mut w| w.take());
+        let Some(handle) = handle else {
+            return;
+        };
+        self.stop.notify_one();
+        if tokio::time::timeout(timeout, handle).await.is_err() {
+            tracing::warn!(
+                "request log writer did not drain within {}s; remaining entries are lost",
+                timeout.as_secs()
+            );
+        }
     }
 
     /// Records dropped because the queue was full.
@@ -138,11 +163,19 @@ struct Writer {
 }
 
 impl Writer {
-    async fn run(mut self, mut rx: mpsc::Receiver<RequestRecord>) {
+    async fn run(mut self, mut rx: mpsc::Receiver<RequestRecord>, stop: Arc<Notify>) {
         let mut changes_open = true;
         loop {
             tokio::select! {
                 biased;
+                () = stop.notified() => {
+                    // Refuse new records, then write the queued ones.
+                    rx.close();
+                    while let Some(record) = rx.recv().await {
+                        self.write(record).await;
+                    }
+                    break;
+                }
                 change = self.changes.recv(), if changes_open => match change {
                     Ok(ControlChange::Mock { name, .. }) => {
                         self.ids.remove(&name);

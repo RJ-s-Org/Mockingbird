@@ -45,11 +45,12 @@ async fn allow_all_admits() {
 
 #[tokio::test]
 async fn env_secret_resolves() {
-    let name = "MB_EXT_TEST_SECRET_ENV_RESOLVES_7F3A";
-    // SAFETY: the variable name is unique to this test, so no other thread reads or writes it.
-    unsafe { std::env::set_var(name, "hunter2") };
+    // Reads a variable every test process has, so no test mutates the
+    // environment (set_var races with concurrent readers).
+    let name = "PATH";
+    let expected = std::env::var(name).expect("PATH is set");
     let value = EnvFileSecrets.resolve(&format!("env:{name}")).await;
-    assert_eq!(value.ok().as_deref(), Some("hunter2"));
+    assert_eq!(value.ok(), Some(expected));
 }
 
 #[tokio::test]

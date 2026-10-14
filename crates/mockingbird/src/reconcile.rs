@@ -22,6 +22,9 @@ pub struct ReconcileReport {
     pub deleted: Vec<String>,
     /// `(mock, version)` of every contract version added and activated.
     pub new_versions: Vec<(String, i64)>,
+    /// Problems the change may cause but that did not stop it (also logged
+    /// at warn level), e.g. API mocks left using a deleted file profile.
+    pub warnings: Vec<String>,
 }
 
 impl ReconcileReport {
@@ -99,15 +102,60 @@ pub async fn reconcile(
     }
     report.deleted.sort();
 
-    for (name, profile) in &existing_profiles {
-        if profile.source == ResourceSource::File && !cfg.llm.profiles.contains_key(name) {
+    let removed: Vec<&String> = existing_profiles
+        .iter()
+        .filter(|(name, p)| {
+            p.source == ResourceSource::File && !cfg.llm.profiles.contains_key(*name)
+        })
+        .map(|(name, _)| name)
+        .collect();
+    if !removed.is_empty() {
+        // Mocks the API owns are not in the file, so nothing above stopped
+        // them from using a profile the file no longer declares.
+        let api_mocks: Vec<&Mock> = existing_mocks
+            .values()
+            .filter(|m| m.source == ResourceSource::Api)
+            .collect();
+        for name in removed {
             store
                 .delete_profile(ws, name)
                 .await
                 .with_context(|| format!("deleting LLM profile {name:?}"))?;
+            let mut users: Vec<&str> = api_mocks
+                .iter()
+                .filter(|m| uses_profile(m, name, &existing_profiles))
+                .map(|m| m.name.as_str())
+                .collect();
+            users.sort_unstable();
+            if !users.is_empty() {
+                let warning = format!(
+                    "LLM profile {name:?} was removed from the config file but API mocks still use it: {}",
+                    users.join(", ")
+                );
+                tracing::warn!("{warning}");
+                report.warnings.push(warning);
+            }
         }
     }
     Ok(report)
+}
+
+/// Whether `mock`'s profile is `profile` or falls back to it.
+fn uses_profile(mock: &Mock, profile: &str, profiles: &HashMap<String, LlmProfile>) -> bool {
+    let mut seen = HashSet::new();
+    let mut next = mock.llm_profile.as_deref();
+    while let Some(name) = next {
+        if name == profile {
+            return true;
+        }
+        if !seen.insert(name) {
+            return false;
+        }
+        next = profiles
+            .get(name)
+            .and_then(|p| p.fallback_profile.as_deref());
+    }
+    false
 }
 
 async fn validate<'a>(
@@ -173,18 +221,18 @@ async fn validate<'a>(
             bail!("mock {name:?}: LLM profile {profile:?} does not exist");
         }
 
-        let source = std::fs::read(&mock.contract).with_context(|| {
-            format!(
-                "mock {name:?}: cannot read contract {}",
-                mock.contract.display()
-            )
-        })?;
-        let bundle = mb_import::compile(&source).with_context(|| {
-            format!(
-                "mock {name:?}: cannot compile contract {}",
-                mock.contract.display()
-            )
-        })?;
+        // File reads and compilation block: keep them off the runtime.
+        let path = mock.contract.clone();
+        let (source, bundle) = tokio::task::spawn_blocking(move || {
+            let source = std::fs::read(&path)
+                .with_context(|| format!("cannot read contract {}", path.display()))?;
+            let bundle = mb_import::compile(&source)
+                .with_context(|| format!("cannot compile contract {}", path.display()))?;
+            anyhow::Ok((source, bundle))
+        })
+        .await
+        .context("reading the contract did not finish")?
+        .with_context(|| format!("mock {name:?}"))?;
         let operations: HashSet<&str> = bundle.operations.iter().map(|o| o.id.as_str()).collect();
 
         let api_scenarios: HashSet<String> = match existing {

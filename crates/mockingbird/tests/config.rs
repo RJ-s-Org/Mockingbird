@@ -9,7 +9,7 @@ use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
     ResourceSource, Scenario, ScenarioRules,
 };
-use mockingbird::config::{App, ServeArgs, apply_flags, build_app};
+use mockingbird::config::{App, ServeArgs, apply_flags, bind_admin, build_app};
 use mockingbird::file_config::{self, FileConfig};
 use mockingbird::reconcile::reconcile;
 use serde_json::{Value, json};
@@ -907,4 +907,73 @@ async fn watch_reload_changes_redact_fields() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Only an explicitly chosen admin port must be free: a busy default one
+/// is skipped (the data plane still serves).
+#[tokio::test]
+async fn busy_default_admin_port_is_skipped() {
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = held.local_addr().unwrap();
+    assert!(bind_admin(addr, false).await.unwrap().is_none());
+    let err = bind_admin(addr, true).await.unwrap_err();
+    assert!(format!("{err:#}").contains(&addr.to_string()), "{err:#}");
+    drop(held);
+    assert!(bind_admin(addr, false).await.unwrap().is_some());
+}
+
+#[test]
+fn admin_port_explicitness() {
+    let ws = Workspace::new();
+    assert!(!ws.load("mocks: {}\n").server.admin_port_explicit);
+    assert!(!ws.load("server:\n  port: 1\n").server.admin_port_explicit);
+    let cfg = ws.load("server:\n  admin_port: 9191\n");
+    assert!(cfg.server.admin_port_explicit);
+    assert_eq!(cfg.server.admin_port, 9191);
+
+    let mut cfg = FileConfig::default();
+    file_config::apply_env_from(&mut cfg, |k| {
+        (k == "MB_ADMIN_PORT").then(|| "9192".to_string())
+    })
+    .unwrap();
+    assert!(cfg.server.admin_port_explicit);
+
+    let mut cfg = FileConfig::default();
+    apply_flags(
+        &mut cfg,
+        &ServeArgs {
+            admin_port: Some(9193),
+            ..ServeArgs::default()
+        },
+    );
+    assert!(cfg.server.admin_port_explicit);
+}
+
+/// Removing a file profile that API mocks still use succeeds, with a
+/// warning naming them.
+#[tokio::test]
+async fn removing_file_profile_used_by_api_mock_warns() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load("llm:\n  profiles:\n    fp: {base_url: http://x, model: m}\n");
+    reconcile(store.as_ref(), &cfg).await.unwrap();
+    let mut manual = api_mock(&store, "manual").await;
+    manual.llm_profile = Some("fp".into());
+    store.update_mock(&manual).await.unwrap();
+    api_mock(&store, "unrelated").await;
+
+    let report = reconcile(store.as_ref(), &ws.load("mocks: {}\n"))
+        .await
+        .unwrap();
+    assert_eq!(report.warnings.len(), 1, "{report:?}");
+    assert!(report.warnings[0].contains("\"fp\""), "{report:?}");
+    assert!(report.warnings[0].contains("manual"), "{report:?}");
+    assert!(!report.warnings[0].contains("unrelated"), "{report:?}");
+    assert!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "fp")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

@@ -49,6 +49,11 @@ pub struct ServerConfig {
     /// Admin API. Profiles in this file are not restricted. Read at
     /// startup.
     pub api_secret_refs: Vec<String>,
+    /// Whether `admin_port` was set explicitly (config file key,
+    /// `MB_ADMIN_PORT` or `--admin-port`). When it was not, a busy default
+    /// port is skipped with a warning instead of failing startup.
+    #[serde(skip)]
+    pub admin_port_explicit: bool,
 }
 
 impl Default for ServerConfig {
@@ -62,6 +67,7 @@ impl Default for ServerConfig {
                 .iter()
                 .map(|r| r.to_string())
                 .collect(),
+            admin_port_explicit: false,
         }
     }
 }
@@ -259,6 +265,7 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
             .map_err(|e| anyhow!("{e}"))
             .with_context(|| format!("cannot parse config file {}", path.display()))?
     };
+    cfg.server.admin_port_explicit = admin_port_in(&text);
     let dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -276,6 +283,24 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
         }
     }
     Ok(cfg)
+}
+
+/// Whether a config document sets `server.admin_port`.
+fn admin_port_in(text: &str) -> bool {
+    #[derive(Deserialize, Default)]
+    struct Probe {
+        #[serde(default)]
+        server: Option<ProbeServer>,
+    }
+    #[derive(Deserialize, Default)]
+    struct ProbeServer {
+        #[serde(default)]
+        admin_port: Option<serde::de::IgnoredAny>,
+    }
+    serde_saphyr::from_str::<Probe>(text)
+        .ok()
+        .and_then(|p| p.server)
+        .is_some_and(|s| s.admin_port.is_some())
 }
 
 /// Applies the `MB_*` environment variables (see [`apply_env_from`]).
@@ -301,6 +326,7 @@ pub fn apply_env_from(
     }
     if let Some(v) = get("MB_ADMIN_PORT") {
         cfg.server.admin_port = v.parse().with_context(|| format!("MB_ADMIN_PORT={v:?}"))?;
+        cfg.server.admin_port_explicit = true;
     }
     if let Some(v) = get("MB_STORAGE_URL") {
         cfg.storage.url = v;

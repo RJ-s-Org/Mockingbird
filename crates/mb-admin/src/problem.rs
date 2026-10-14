@@ -74,8 +74,44 @@ impl IntoResponse for Problem {
     fn into_response(self) -> Response {
         let status = self.status_code();
         let body = serde_json::to_vec(&self).unwrap_or_default();
-        (status, [(header::CONTENT_TYPE, PROBLEM_CONTENT_TYPE)], body).into_response()
+        let mut resp =
+            (status, [(header::CONTENT_TYPE, PROBLEM_CONTENT_TYPE)], body).into_response();
+        if status.is_server_error() {
+            resp.extensions_mut().insert(ProblemDetail(self.detail));
+        }
+        resp
     }
+}
+
+/// The detail of a 5xx [`Problem`], attached to its response for
+/// [`log_server_errors`].
+#[derive(Clone, Debug)]
+pub struct ProblemDetail(pub String);
+
+/// Middleware: logs every 5xx answer at error level with the request's
+/// method and path, and the problem detail when there is one.
+pub async fn log_server_errors(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let resp = next.run(req).await;
+    if resp.status().is_server_error() {
+        let detail = resp
+            .extensions()
+            .get::<ProblemDetail>()
+            .map(|d| d.0.as_str())
+            .unwrap_or_default();
+        tracing::error!(
+            %method,
+            %path,
+            status = resp.status().as_u16(),
+            %detail,
+            "admin request failed"
+        );
+    }
+    resp
 }
 
 impl From<StoreError> for Problem {
@@ -181,4 +217,71 @@ pub async fn method_not_allowed() -> Problem {
         StatusCode::METHOD_NOT_ALLOWED,
         "method not allowed on this endpoint",
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use mb_store::StoreError;
+    use tower::ServiceExt;
+
+    use super::{ApiResult, Problem, log_server_errors};
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buf {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn failing() -> ApiResult<()> {
+        Err(Problem::from(StoreError::Db("database is on fire".into())))
+    }
+
+    async fn missing() -> ApiResult<()> {
+        Err(Problem::not_found("nope"))
+    }
+
+    #[tokio::test]
+    async fn server_errors_are_logged_with_path() {
+        let buf = Buf::default();
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let app = Router::new()
+            .route("/api/v1/mocks", get(failing))
+            .route("/api/v1/other", get(missing))
+            .layer(axum::middleware::from_fn(log_server_errors));
+        for uri in ["/api/v1/mocks", "/api/v1/other"] {
+            app.clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+        }
+        let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("/api/v1/mocks"), "{logs}");
+        assert!(logs.contains("database is on fire"), "{logs}");
+        assert!(
+            !logs.contains("/api/v1/other"),
+            "4xx must not be logged: {logs}"
+        );
+    }
 }

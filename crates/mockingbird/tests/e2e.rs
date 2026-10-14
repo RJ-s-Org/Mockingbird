@@ -429,3 +429,43 @@ async fn admin_rejects_foreign_host_on_loopback() {
     let app = build_app(&a, None).await.unwrap();
     assert_eq!(admin_status(&app.admin, Some("evil.example")).await.0, 200);
 }
+
+/// Zero-config serving survives a busy default admin port; an explicitly
+/// chosen busy admin port is still fatal.
+#[tokio::test]
+async fn busy_default_admin_port_still_serves_data_plane() {
+    // Hold 9090 (or find it already held by someone else).
+    let _held = std::net::TcpListener::bind("127.0.0.1:9090").ok();
+    let port = free_port();
+    let _child = Child(
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+            .env_remove("MB_LLM_API_KEY")
+            .env_remove("MB_ADMIN_PORT")
+            .args(["serve", "--offline", "--port"])
+            .arg(port.to_string())
+            .arg(fixture())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let data = format!("http://127.0.0.1:{port}/orders");
+    while reqwest::get(&data).await.is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(reqwest::get(&data).await.unwrap().status(), 200);
+
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = held.local_addr().unwrap().port();
+    bin()
+        .args(["serve", "--offline", "--port"])
+        .arg(free_port().to_string())
+        .arg("--admin-port")
+        .arg(busy.to_string())
+        .arg(fixture())
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!("127.0.0.1:{busy}")));
+}

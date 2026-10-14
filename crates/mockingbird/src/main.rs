@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use mockingbird::client::{self, ClientCommand, ClientError};
 use mockingbird::config::{
-    Cli, Command, LlmEnv, ServeArgs, build_app, missing_env_api_key, resolve_config,
+    Cli, Command, LlmEnv, ServeArgs, bind_admin, build_app, missing_env_api_key, resolve_config,
 };
 use mockingbird::telemetry;
 
@@ -114,12 +114,15 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
     let data_listener = tokio::net::TcpListener::bind(data_addr)
         .await
         .map_err(|e| anyhow::anyhow!("cannot bind {data_addr}: {e}"))?;
-    let admin_listener = tokio::net::TcpListener::bind(admin_addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("cannot bind {admin_addr}: {e}"))?;
+    let admin_listener = bind_admin(admin_addr, cfg.server.admin_port_explicit).await?;
 
     let app = build_app(&args, Some(llm)).await?;
-    tracing::info!("data plane on http://{data_addr}, admin API on http://{admin_addr}");
+    match &admin_listener {
+        Some(_) => {
+            tracing::info!("data plane on http://{data_addr}, admin API on http://{admin_addr}")
+        }
+        None => tracing::info!("data plane on http://{data_addr}, no admin API"),
+    }
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
@@ -131,12 +134,21 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
     };
     let data = axum::serve(data_listener, app.data.clone())
         .with_graceful_shutdown(stopped(stop_rx.clone()));
-    let admin =
-        axum::serve(admin_listener, app.admin.clone()).with_graceful_shutdown(stopped(stop_rx));
+    let admin_router = app.admin.clone();
+    let admin = async move {
+        match admin_listener {
+            Some(listener) => {
+                axum::serve(listener, admin_router)
+                    .with_graceful_shutdown(stopped(stop_rx))
+                    .await
+            }
+            None => Ok(()),
+        }
+    };
     let (data, admin) = tokio::join!(data, admin);
     data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
     admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
-    drop(app);
+    app.shutdown().await;
     Ok(())
 }
 

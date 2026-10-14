@@ -122,6 +122,7 @@ pub fn router(st: AdminState) -> Router {
         .route(OPENAPI_PATH, get(openapi::serve))
         .fallback(problem::not_found)
         .method_not_allowed_fallback(problem::method_not_allowed)
+        .layer(axum::middleware::from_fn(problem::log_server_errors))
         .with_state(st)
 }
 

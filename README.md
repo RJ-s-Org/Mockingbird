@@ -47,7 +47,7 @@ Check a contract without serving it:
 mockingbird validate orders.yaml
 ```
 
-Mockingbird listens on two ports: the data plane (the mocks) on `127.0.0.1:8080`, and the Admin API plus ops endpoints on `127.0.0.1:9090`.
+Mockingbird listens on two ports: the data plane (the mocks) on `127.0.0.1:8080`, and the Admin API plus ops endpoints on `127.0.0.1:9090`. If you did not choose an admin port (`--admin-port`, `MB_ADMIN_PORT` or `server.admin_port`) and 9090 is already taken, Mockingbird logs a warning and serves the data plane without the admin port; a port you chose explicitly must be free.
 
 ## Config file
 
@@ -118,6 +118,8 @@ The Admin API lives under `http://127.0.0.1:9090/api/v1`; its OpenAPI document i
 | LLM profiles | `GET /llm-profiles`, `GET/PUT/DELETE /llm-profiles/{name}` |
 | Sessions | `GET /mocks/{mock}/sessions`, `GET/PUT/DELETE …/sessions/{session}` (export, seed, reset) |
 | Request log | `GET /mocks/{mock}/requests` |
+
+The request log keeps the newest `observability.request_log_retention` calls per mock. Fields named in `observability.redact_fields` are redacted anywhere in recorded JSON and form bodies; multipart bodies are not recorded, and a request or response body over 64 KiB is replaced by `{"truncated": true, "bytes": N, "preview": "…"}`. Queued entries are written before a graceful shutdown completes (for up to 5 s).
 
 Changes take effect on the data plane without a restart: activating a contract version or editing a mock swaps its runtime in place.
 
