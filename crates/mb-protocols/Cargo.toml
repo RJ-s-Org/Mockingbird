@@ -11,8 +11,23 @@ workspace = true
 
 [features]
 default = ["http-rest"]
-http-rest = ["dep:axum", "dep:matchit"]
+http-rest = ["dep:axum", "dep:matchit", "dep:humantime", "dep:serde_urlencoded", "dep:thiserror"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
+humantime = { workspace = true, optional = true }
 matchit = { workspace = true, optional = true }
+mb-engine.workspace = true
+mb-mcm.workspace = true
+mb-state.workspace = true
+serde_json.workspace = true
+serde_urlencoded = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mb-import.workspace = true
+mb-llm = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
+tower.workspace = true
