@@ -105,6 +105,8 @@ struct CallLog {
     response: Option<Value>,
     /// Injected latency, slept after the call is recorded.
     delay: Option<Duration>,
+    /// The body media type the matched operation declares (`x-content-type`).
+    declared_body_type: Option<String>,
 }
 
 impl CallLog {
@@ -119,6 +121,7 @@ impl CallLog {
             completion_tokens: 0,
             response: None,
             delay: None,
+            declared_body_type: None,
         }
     }
 
@@ -219,6 +222,13 @@ async fn serve(
         );
     };
     let validators = st.inputs.get(&op_id);
+    log.declared_body_type = op
+        .input
+        .body
+        .as_ref()
+        .and_then(|s| s.get("x-content-type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     // 2. Decode and validate.
     let mut errors = Vec::new();
@@ -422,7 +432,10 @@ async fn report(
             request: json!({
                 "query": recorded_query(uri),
                 "headers": recorded_headers(headers),
-                "body": recorded_body(raw_body),
+                "body": recorded_body(
+                    raw_body,
+                    media_type(headers).or(log.declared_body_type.clone()).as_deref(),
+                ),
             }),
             response: log.response.clone(),
         });
@@ -567,7 +580,7 @@ fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
         };
     }
     if content_type == Some(FORM_CONTENT_TYPE) {
-        return serde_urlencoded::from_bytes::<Vec<(String, String)>>(raw)
+        return form_pairs(raw)
             .map(|pairs| Some(Value::Object(coerce_params(group(pairs), schema))))
             .map_err(|e| format!("body: not valid form data: {e}"));
     }
@@ -921,6 +934,11 @@ fn recorded_headers(headers: &HeaderMap) -> Map<String, Value> {
 fn recorded_query(uri: &Uri) -> Value {
     let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
         .unwrap_or_default();
+    Value::Object(string_params(pairs))
+}
+
+/// `pairs` as an object of strings; repeated keys become arrays of strings.
+fn string_params(pairs: Vec<(String, String)>) -> Map<String, Value> {
     group(pairs)
         .into_iter()
         .map(|(k, mut values)| {
@@ -931,14 +949,43 @@ fn recorded_query(uri: &Uri) -> Value {
             };
             (k, v)
         })
-        .collect::<Map<_, _>>()
-        .into()
+        .collect()
 }
 
-/// The request body as recorded: JSON when it parses, else text, else null.
-fn recorded_body(raw: &[u8]) -> Value {
+/// Decodes an `application/x-www-form-urlencoded` body.
+fn form_pairs(raw: &[u8]) -> Result<Vec<(String, String)>, serde_urlencoded::de::Error> {
+    serde_urlencoded::from_bytes::<Vec<(String, String)>>(raw)
+}
+
+/// The lowercased media type of the request's `Content-Type`, without
+/// parameters.
+fn media_type(headers: &HeaderMap) -> Option<String> {
+    let ct = headers.get(header::CONTENT_TYPE)?.to_str().ok()?;
+    let media = ct.split(';').next().unwrap_or_default().trim();
+    (!media.is_empty()).then(|| media.to_ascii_lowercase())
+}
+
+/// Recorded in place of a multipart body.
+const MULTIPART_OMITTED: &str = "[multipart omitted]";
+/// Recorded in place of a form body that does not decode.
+const FORM_UNDECODABLE: &str = "[undecodable form body omitted]";
+
+/// The request body as recorded, given its media type: a form body as an
+/// object of its fields (so field redaction applies), a multipart body as
+/// [`MULTIPART_OMITTED`], otherwise JSON when it parses, else text, else
+/// null.
+fn recorded_body(raw: &[u8], media_type: Option<&str>) -> Value {
+    if media_type == Some(MULTIPART_CONTENT_TYPE) {
+        return Value::String(MULTIPART_OMITTED.into());
+    }
     if raw.iter().all(u8::is_ascii_whitespace) {
         return Value::Null;
+    }
+    if media_type == Some(FORM_CONTENT_TYPE) {
+        return match form_pairs(raw) {
+            Ok(pairs) => Value::Object(string_params(pairs)),
+            Err(_) => Value::String(FORM_UNDECODABLE.into()),
+        };
     }
     serde_json::from_slice(raw)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(raw).into_owned()))

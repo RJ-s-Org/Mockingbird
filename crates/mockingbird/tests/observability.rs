@@ -363,6 +363,100 @@ async fn request_log_redacts_fields() {
     assert_eq!(tailed.request["body"]["password"], "[redacted]");
 }
 
+/// The newest request-log entry of `mock`, waiting up to 2s for one.
+async fn newest_entry(store: &Arc<dyn ControlStore>, mock: &Mock) -> RequestLogEntry {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let entries = store
+            .list_request_log(
+                mock.id,
+                &RequestLogFilter {
+                    limit: 1,
+                    ..RequestLogFilter::default()
+                },
+            )
+            .await
+            .unwrap();
+        if let Some(e) = entries.into_iter().next() {
+            return e;
+        }
+        assert!(Instant::now() < deadline, "no request log entry within 2s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Serves `orders` with a [`StoreRecorder`] using the default settings.
+async fn recorded_orders() -> (Arc<dyn ControlStore>, Mock, String) {
+    let store: Arc<dyn ControlStore> = stub_store().await;
+    let mock = orders_mock(&store).await;
+    let recorder = StoreRecorder::new(store.clone(), 1000, vec!["password".into(), "token".into()]);
+    let deps = deps(store.clone(), memory_state(), Some(recorder));
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    (store, mock, base)
+}
+
+/// Form bodies are recorded decoded, so their fields are redacted too;
+/// multipart bodies are not recorded.
+#[tokio::test]
+async fn request_log_redacts_form_bodies() {
+    let (store, mock, base) = recorded_orders().await;
+    let http = reqwest::Client::new();
+    http.post(format!("{base}/orders/orders"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("customerId=c1&password=hunter2&tag=a&tag=b")
+        .send()
+        .await
+        .unwrap();
+    let entry = newest_entry(&store, &mock).await;
+    let body = &entry.request["body"];
+    assert_eq!(body["password"], "[redacted]", "{body}");
+    assert_eq!(body["customerId"], "c1", "{body}");
+    assert_eq!(body["tag"], json!(["a", "b"]), "{body}");
+    assert!(!entry.request.to_string().contains("hunter2"));
+
+    http.post(format!("{base}/orders/orders"))
+        .header("content-type", "multipart/form-data; boundary=X")
+        .body(
+            "--X\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nhunter2\r\n--X--\r\n",
+        )
+        .send()
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let entry = loop {
+        let e = newest_entry(&store, &mock).await;
+        if e.request["body"] != body.clone() {
+            break e;
+        }
+        assert!(Instant::now() < deadline, "multipart call not recorded");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(entry.request["body"], "[multipart omitted]");
+    assert!(!entry.request.to_string().contains("hunter2"));
+}
+
+/// Bodies over 64 KiB are replaced with a short, redacted preview.
+#[tokio::test]
+async fn request_log_truncates_large_bodies() {
+    let (store, mock, base) = recorded_orders().await;
+    let big = "x".repeat(70 * 1024);
+    reqwest::Client::new()
+        .post(format!("{base}/orders/orders"))
+        .json(&json!({"password": "hunter2", "customerId": "c1", "total": 1, "notes": big}))
+        .send()
+        .await
+        .unwrap();
+    let entry = newest_entry(&store, &mock).await;
+    let body = &entry.request["body"];
+    assert_eq!(body["truncated"], true, "{}", &body.to_string()[..200]);
+    assert!(body["bytes"].as_u64().unwrap() > 70 * 1024, "{body}");
+    let preview = body["preview"].as_str().unwrap();
+    assert!(preview.len() <= 1024, "{}", preview.len());
+    assert!(!entry.request.to_string().contains("hunter2"));
+}
+
 #[test]
 fn redact_matches_keys_case_insensitively_everywhere() {
     let mut v = json!({

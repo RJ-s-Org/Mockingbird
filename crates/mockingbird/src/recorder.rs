@@ -23,9 +23,17 @@ pub const LIVE_CAPACITY: usize = 1024;
 /// Replacement for the value of a redacted field.
 pub const REDACTED: &str = "[redacted]";
 
+/// Largest recorded request or response body, as serialized JSON; a larger
+/// one is replaced by [`truncate_body`].
+pub const MAX_RECORDED_BODY_BYTES: usize = 64 * 1024;
+
+/// Bytes of a truncated body kept as its preview.
+pub const PREVIEW_BYTES: usize = 1024;
+
 /// Writes [`RequestRecord`]s to the request log through a bounded queue
 /// drained by one background task, so [`RequestRecorder::record`] never
-/// waits on the store.
+/// waits on the store. Records are redacted and their bodies truncated
+/// before they are queued.
 pub struct StoreRecorder {
     queue: mpsc::Sender<RequestRecord>,
     settings: Arc<ArcSwap<Settings>>,
@@ -87,7 +95,21 @@ impl StoreRecorder {
 }
 
 impl RequestRecorder for StoreRecorder {
-    fn record(&self, r: RequestRecord) {
+    /// Redacts and truncates the record, then queues it for the writer.
+    fn record(&self, mut r: RequestRecord) {
+        {
+            let settings = self.settings.load();
+            redact(&mut r.request, &settings.redact_fields);
+            if let Some(response) = &mut r.response {
+                redact(response, &settings.redact_fields);
+            }
+        }
+        if let Some(body) = r.request.get_mut("body") {
+            truncate_body(body);
+        }
+        if let Some(response) = &mut r.response {
+            truncate_body(response);
+        }
         // `Closed` means the writer task is gone (its runtime shut down).
         if let Err(mpsc::error::TrySendError::Full(r) | mpsc::error::TrySendError::Closed(r)) =
             self.queue.try_send(r)
@@ -137,12 +159,10 @@ impl Writer {
         }
     }
 
-    async fn write(&mut self, mut r: RequestRecord) {
+    /// Writes a record that [`StoreRecorder::record`] already redacted and
+    /// truncated.
+    async fn write(&mut self, r: RequestRecord) {
         let settings = self.settings.load_full();
-        redact(&mut r.request, &settings.redact_fields);
-        if let Some(response) = &mut r.response {
-            redact(response, &settings.redact_fields);
-        }
         // No receivers is not an error: nobody is tailing.
         let _ = self.live.send(r.clone());
 
@@ -192,6 +212,28 @@ impl Writer {
             }
         }
     }
+}
+
+/// Replaces a body whose serialized JSON exceeds
+/// [`MAX_RECORDED_BODY_BYTES`] with `{"truncated": true, "bytes": N,
+/// "preview": "<first PREVIEW_BYTES of the JSON>"}`. Run it after
+/// [`redact`], so the preview holds no redacted values.
+pub fn truncate_body(body: &mut Value) {
+    let Ok(text) = serde_json::to_string(body) else {
+        return;
+    };
+    if text.len() <= MAX_RECORDED_BODY_BYTES {
+        return;
+    }
+    let mut end = PREVIEW_BYTES.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    *body = serde_json::json!({
+        "truncated": true,
+        "bytes": text.len(),
+        "preview": &text[..end],
+    });
 }
 
 /// Replaces with `"[redacted]"` the value of every object key, at any depth
