@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rjs-git/mockingbird"
+version = "0.1.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }
+axum = "0.8"
+matchit = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+jsonschema = { version = "0.58", default-features = false }
+rand = "0.10"
+async-trait = "0.1"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+humantime = "2"
+serde_urlencoded = "0.7"
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+
+# dev
+wiremock = "0.6"
+proptest = "1"
+insta = { version = "1", features = ["yaml", "redactions"] }
+tower = { version = "0.5", features = ["util"] }
+assert_cmd = "2"
+tempfile = "3"
+
+# internal
+mb-mcm = { path = "crates/mb-mcm" }
+mb-import = { path = "crates/mb-import" }
+mb-llm = { path = "crates/mb-llm" }
+mb-engine = { path = "crates/mb-engine" }
+mb-state = { path = "crates/mb-state" }
+mb-protocols = { path = "crates/mb-protocols" }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
