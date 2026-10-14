@@ -34,13 +34,14 @@ struct Harness {
 fn harness(script: Option<Vec<Result<String, LlmError>>>, header_overrides: bool) -> Harness {
     let provider = script.map(|s| Arc::new(ScriptedProvider::new(s)));
     let dyn_provider = provider.clone().map(|p| p as Arc<dyn Provider>);
-    let rt = Arc::new(MockRuntime {
-        name: "orders".into(),
-        bundle: orders(),
-        engine: Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
-        state: Arc::new(MemoryStore::new(Duration::from_secs(3600))),
-        header_overrides,
-    });
+    let mut rt = MockRuntime::new(
+        "orders",
+        orders(),
+        Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.header_overrides = header_overrides;
+    let rt = Arc::new(rt);
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
         rt,
@@ -339,13 +340,12 @@ async fn fallback_source_header() {
 /// A runtime for an inline contract, served offline (faker only).
 fn offline_contract(src: &str) -> Harness {
     let bundle = Arc::new(compile(src.as_bytes()).unwrap());
-    let rt = Arc::new(MockRuntime {
-        name: "inline".into(),
+    let rt = Arc::new(MockRuntime::new(
+        "inline",
         bundle,
-        engine: Arc::new(Engine::new(None, EngineConfig::default())),
-        state: Arc::new(MemoryStore::new(Duration::from_secs(3600))),
-        header_overrides: true,
-    });
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ));
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
         rt,

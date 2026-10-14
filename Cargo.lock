@@ -1721,14 +1721,17 @@ dependencies = [
 name = "mb-protocols"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "humantime",
  "matchit 0.9.2",
  "mb-engine",
+ "mb-ext",
  "mb-import",
  "mb-llm",
  "mb-mcm",
  "mb-state",
+ "metrics",
  "serde_json",
  "serde_urlencoded",
  "thiserror",
