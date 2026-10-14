@@ -1,0 +1,195 @@
+//! `--watch`: re-reads the config file and reconciles the store whenever
+//! the file or one of its contracts changes.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::Context;
+use mb_store::ControlStore;
+use notify::RecursiveMode;
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use tokio::sync::mpsc;
+
+use crate::file_config::{self, FileConfig};
+use crate::reconcile::reconcile;
+
+/// How long the file system must be quiet before a reload.
+pub const DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Prepares a freshly loaded config before it is reconciled (e.g. applies
+/// environment variables and flags).
+pub type Prepare = Arc<dyn Fn(&mut FileConfig) -> anyhow::Result<()> + Send + Sync>;
+
+/// Keeps the watch running; dropping it stops watching.
+pub struct WatchGuard {
+    _watcher: Arc<Mutex<Watcher>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+type Debounced = Debouncer<notify::RecommendedWatcher, RecommendedCache>;
+
+/// The debouncer with the directories it watches and the files of interest.
+struct Watcher {
+    debouncer: Debounced,
+    dirs: HashSet<PathBuf>,
+    files: HashSet<PathBuf>,
+}
+
+impl Watcher {
+    /// Starts watching `path` (through its directory).
+    fn add(&mut self, path: &Path) -> anyhow::Result<()> {
+        let Some((dir, file)) = normalize(path) else {
+            return Ok(());
+        };
+        if self.dirs.insert(dir.clone()) {
+            self.debouncer
+                .watch(&dir, RecursiveMode::NonRecursive)
+                .with_context(|| format!("cannot watch {}", dir.display()))?;
+        }
+        self.files.insert(file);
+        Ok(())
+    }
+
+    fn concerns(&self, paths: &[PathBuf]) -> bool {
+        paths.iter().any(|p| {
+            self.files.contains(p) || normalize(p).is_some_and(|(_, f)| self.files.contains(&f))
+        })
+    }
+}
+
+/// `(directory, file)` with the directory canonicalized, so the file
+/// matches the paths the watcher reports.
+fn normalize(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let absolute = std::path::absolute(path).ok()?;
+    let dir = absolute.parent()?;
+    let name = absolute.file_name()?;
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let file = dir.join(name);
+    Some((dir, file))
+}
+
+/// Watches `config_path` and its contracts, reconciling the store after
+/// each change settles (debounced by [`DEBOUNCE`]) with the `MB_*`
+/// environment variables applied. A config that fails to load or
+/// reconcile is logged and the previous state kept.
+///
+/// Must be called inside a Tokio runtime.
+pub fn spawn(config_path: PathBuf, store: Arc<dyn ControlStore>) -> anyhow::Result<WatchGuard> {
+    spawn_with(config_path, store, Arc::new(file_config::apply_env))
+}
+
+/// [`spawn`] with a custom `prepare` step in place of applying the
+/// environment.
+pub fn spawn_with(
+    config_path: PathBuf,
+    store: Arc<dyn ControlStore>,
+    prepare: Prepare,
+) -> anyhow::Result<WatchGuard> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+    let debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
+        match result {
+            Ok(events) => {
+                let paths = events
+                    .into_iter()
+                    .flat_map(|e| e.event.paths)
+                    .collect::<Vec<_>>();
+                if !paths.is_empty() {
+                    // A closed channel means the watch is being dropped.
+                    let _ = tx.send(paths);
+                }
+            }
+            Err(errors) => {
+                for error in errors {
+                    tracing::warn!(%error, "config watch error");
+                }
+            }
+        }
+    })
+    .context("starting the config file watcher")?;
+
+    // Directories are watched rather than files, so editors that replace a
+    // file by renaming a new one over it are still seen.
+    let mut watcher = Watcher {
+        debouncer,
+        dirs: HashSet::new(),
+        files: HashSet::new(),
+    };
+    watcher.add(&config_path)?;
+    if let Ok(cfg) = file_config::load(&config_path) {
+        for path in contract_paths(&cfg) {
+            watcher.add(&path)?;
+        }
+    }
+    let watcher = Arc::new(Mutex::new(watcher));
+
+    let shared = Arc::clone(&watcher);
+    let task = tokio::spawn(async move {
+        while let Some(paths) = rx.recv().await {
+            let relevant = match shared.lock() {
+                Ok(w) => w.concerns(&paths),
+                Err(_) => return,
+            };
+            if !relevant {
+                continue;
+            }
+            match load_and_reconcile(&config_path, store.as_ref(), &prepare).await {
+                Ok((cfg, report)) => {
+                    if let Ok(mut w) = shared.lock() {
+                        for path in contract_paths(&cfg) {
+                            if let Err(error) = w.add(&path) {
+                                tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
+                            }
+                        }
+                    }
+                    if report.is_empty() {
+                        tracing::debug!(config = %config_path.display(), "config reloaded; no changes");
+                    } else {
+                        tracing::info!(
+                            config = %config_path.display(),
+                            created = ?report.created,
+                            updated = ?report.updated,
+                            deleted = ?report.deleted,
+                            new_versions = ?report.new_versions,
+                            "config reloaded"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(
+                        config = %config_path.display(),
+                        error = %format!("{error:#}"),
+                        "config reload failed; keeping the previous state"
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(WatchGuard {
+        _watcher: watcher,
+        task,
+    })
+}
+
+async fn load_and_reconcile(
+    config_path: &Path,
+    store: &dyn ControlStore,
+    prepare: &Prepare,
+) -> anyhow::Result<(FileConfig, crate::reconcile::ReconcileReport)> {
+    let mut cfg = file_config::load(config_path)?;
+    prepare(&mut cfg)?;
+    let report = reconcile(store, &cfg).await?;
+    Ok((cfg, report))
+}
+
+fn contract_paths(cfg: &FileConfig) -> Vec<PathBuf> {
+    cfg.mocks.values().map(|m| m.contract.clone()).collect()
+}

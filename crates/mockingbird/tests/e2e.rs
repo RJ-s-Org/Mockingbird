@@ -14,12 +14,13 @@ fn fixture() -> PathBuf {
 
 fn args(contracts: Vec<PathBuf>) -> ServeArgs {
     ServeArgs {
-        host: "127.0.0.1".parse().unwrap(),
-        port: 0,
+        host: Some("127.0.0.1".parse().unwrap()),
+        port: Some(0),
         insecure_no_auth: false,
         offline: false,
-        llm_timeout: "3s".parse().unwrap(),
+        llm_timeout: Some("3s".parse().unwrap()),
         contracts,
+        ..ServeArgs::default()
     }
 }
 
@@ -65,7 +66,10 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
         .mount(&mock)
         .await;
 
-    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri()))).unwrap();
+    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri())))
+        .await
+        .unwrap()
+        .data;
     let base = serve(app).await;
     let http = reqwest::Client::new();
 
@@ -106,7 +110,10 @@ async fn e2e_llm_down_falls_back() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&mock)
         .await;
-    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri()))).unwrap();
+    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri())))
+        .await
+        .unwrap()
+        .data;
     let base = serve(app).await;
 
     let r = reqwest::get(format!("{base}/orders/x")).await.unwrap();
@@ -130,7 +137,7 @@ async fn multiple_contracts_are_prefixed() {
     std::fs::copy(fixture(), &b).unwrap();
     let mut args = args(vec![a, b]);
     args.offline = true;
-    let base = serve(build_app(&args, None).unwrap()).await;
+    let base = serve(build_app(&args, None).await.unwrap().data).await;
 
     for p in ["/a/orders", "/b/orders"] {
         let r = reqwest::get(format!("{base}{p}")).await.unwrap();
@@ -150,7 +157,7 @@ async fn health_endpoint_is_reserved_and_outside_mock_prefixes() {
     for contracts in [vec![fixture()], vec![a, b]] {
         let mut args = args(contracts);
         args.offline = true;
-        let base = serve(build_app(&args, None).unwrap()).await;
+        let base = serve(build_app(&args, None).await.unwrap().data).await;
         let r = reqwest::get(format!("{base}/__mockingbird/healthz"))
             .await
             .unwrap();
@@ -195,4 +202,52 @@ fn validate_prints_operations() {
         .success()
         .stdout(predicates::str::contains("createOrder"))
         .stdout(predicates::str::contains("getOrder"));
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Kills the server process when dropped.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn serve_binds_data_and_admin_ports() {
+    let (port, admin_port) = (free_port(), free_port());
+    let _child = Child(
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+            .env_remove("MB_LLM_API_KEY")
+            .args(["serve", "--offline", "--port"])
+            .arg(port.to_string())
+            .arg("--admin-port")
+            .arg(admin_port.to_string())
+            .arg(fixture())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let data = format!("http://127.0.0.1:{port}/orders");
+    while reqwest::get(&data).await.is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(reqwest::get(&data).await.unwrap().status(), 200);
+    for p in ["/healthz", "/api/v1/mocks"] {
+        let r = reqwest::get(format!("http://127.0.0.1:{admin_port}{p}"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{p}");
+    }
 }

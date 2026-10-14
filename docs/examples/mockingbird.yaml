@@ -1,0 +1,56 @@
+# Mockingbird configuration: every key, with its default where it has one.
+# Precedence: this file < MB_* environment variables < command-line flags.
+# Run with: mockingbird serve -c docs/examples/mockingbird.yaml [--watch]
+
+server:
+  host: 127.0.0.1          # MB_HOST / --host; non-loopback needs insecure_no_auth
+  port: 8080               # data plane; MB_PORT / --port
+  admin_port: 9090         # Admin API and /healthz, /readyz, /metrics; MB_ADMIN_PORT / --admin-port
+  insecure_no_auth: false  # --insecure-no-auth
+
+storage:
+  url: "sqlite::memory:"   # sqlite::memory:, sqlite://<path> or postgres://…; MB_STORAGE_URL / --storage-url
+  state_url: memory        # session state; omitted = same as url; "memory" = in-process
+  session_ttl: 24h
+
+llm:
+  default_profile: deepseek   # used by mocks that name no profile; MB_LLM_* override profile "default"
+  profiles:
+    deepseek:
+      base_url: https://api.deepseek.com
+      model: deepseek-chat
+      api_key: env:DEEPSEEK_API_KEY   # a secret reference (env:NAME or file:/path), never the key itself
+      json_schema: false
+      timeout: 3s
+      temperature: 0.7
+      max_tokens: 2048
+      fallback: local
+    local:
+      base_url: http://127.0.0.1:11434/v1
+      model: llama3.2
+      json_schema: true
+      timeout: 10s
+      temperature: 0.2
+      max_tokens: 1024
+
+observability:
+  request_log_retention: 1000   # entries kept per mock
+  redact_fields: [password, token, secret, authorization, apiKey, api_key]
+
+mocks:
+  orders:
+    contract: ../../fixtures/openapi/orders-3.0.yaml   # relative to this file
+    route_prefix: /orders-api                          # default: /<name>
+    persona: A small online shop selling hiking gear.
+    llm_profile: deepseek                              # default: llm.default_profile
+    header_overrides: true                             # honour X-Mockingbird-* request headers
+    scenarios:
+      out-of-stock:
+        instructions: Every product is out of stock.
+        status: 409
+        latency: 250ms
+        set:
+          status: pending
+        operations: [createOrder]
+      slow:
+        latency: 2s

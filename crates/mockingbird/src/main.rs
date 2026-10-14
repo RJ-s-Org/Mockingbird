@@ -2,19 +2,22 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use clap::Parser;
-use mockingbird::config::{Cli, Command, LlmEnv, ServeArgs, build_app};
+use mockingbird::config::{
+    Cli, Command, LlmEnv, ServeArgs, build_app, missing_env_api_key, resolve_config,
+};
+use mockingbird::telemetry;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    // Kept alive until exit so buffered spans are flushed.
+    let _telemetry = match telemetry::init("mockingbird") {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("warning: telemetry disabled: {e:#}");
+            None
+        }
+    };
     let result = match cli.cmd {
         Command::Serve(args) => serve(args).await,
         Command::Validate { contract } => validate(&contract),
@@ -71,22 +74,42 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
 }
 
 async fn serve(args: ServeArgs) -> Result<(), Failure> {
-    args.check_bind().map_err(Failure::Usage)?;
     let llm = LlmEnv::from_env();
-    if !args.offline && llm.api_key.is_none() {
+    let cfg = resolve_config(&args, Some(&llm))?;
+    cfg.server.check_bind().map_err(Failure::Usage)?;
+    if missing_env_api_key(&cfg, args.offline) {
         return Err(Failure::Usage(
             "MB_LLM_API_KEY is not set (use --offline for faker-only mode)".into(),
         ));
     }
-    let app = build_app(&args, Some(llm))?;
-    let addr = SocketAddr::new(args.host, args.port);
-    let listener = tokio::net::TcpListener::bind(addr)
+    let data_addr = SocketAddr::new(cfg.server.host, cfg.server.port);
+    let admin_addr = SocketAddr::new(cfg.server.host, cfg.server.admin_port);
+    let data_listener = tokio::net::TcpListener::bind(data_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("cannot bind {addr}: {e}"))?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .map_err(|e| anyhow::anyhow!("cannot bind {data_addr}: {e}"))?;
+    let admin_listener = tokio::net::TcpListener::bind(admin_addr)
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(|e| anyhow::anyhow!("cannot bind {admin_addr}: {e}"))?;
+
+    let app = build_app(&args, Some(llm)).await?;
+    tracing::info!("data plane on http://{data_addr}, admin API on http://{admin_addr}");
+
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    });
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
+    let data = axum::serve(data_listener, app.data.clone())
+        .with_graceful_shutdown(stopped(stop_rx.clone()));
+    let admin =
+        axum::serve(admin_listener, app.admin.clone()).with_graceful_shutdown(stopped(stop_rx));
+    let (data, admin) = tokio::join!(data, admin);
+    data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
+    admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
+    drop(app);
     Ok(())
 }
 

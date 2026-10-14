@@ -41,6 +41,9 @@ opentelemetry-otlp = { version = "0.33", default-features = false, features = ["
 tracing-opentelemetry = { version = "0.34", default-features = false }
 arc-swap = "1"
 json-patch = { version = "4", default-features = false }
+humantime-serde = "1"
+notify = "8"
+notify-debouncer-full = "0.6"
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
