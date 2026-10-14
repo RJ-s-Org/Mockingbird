@@ -28,11 +28,39 @@ impl Faker {
     }
 
     pub fn fake(&self, schema_with_defs: &Value, rng: &mut impl Rng) -> Value {
-        self.gen_value(schema_with_defs, schema_with_defs, 0, rng)
+        self.fake_with_branch(schema_with_defs, None, rng)
     }
 
-    fn gen_value<R: Rng>(&self, root: &Value, schema: &Value, depth: usize, rng: &mut R) -> Value {
-        let flat = flatten(root, schema, 0);
+    /// Like [`Faker::fake`], but the outermost `oneOf`/`anyOf` choice is
+    /// branch `branch` (modulo the branch count) instead of a random one.
+    /// Callers that validate the output can try each branch in turn.
+    pub fn fake_with_branch(
+        &self,
+        schema_with_defs: &Value,
+        branch: Option<usize>,
+        rng: &mut impl Rng,
+    ) -> Value {
+        self.gen_value(schema_with_defs, schema_with_defs, 0, branch, rng)
+    }
+
+    fn gen_value<R: Rng>(
+        &self,
+        root: &Value,
+        schema: &Value,
+        depth: usize,
+        branch: Option<usize>,
+        rng: &mut R,
+    ) -> Value {
+        let at_limit = depth >= self.max_depth;
+        // Absolute cutoff: past it, containers are emitted empty so that even
+        // an unsatisfiable required self-reference terminates.
+        let hard_limit = depth >= self.max_depth + HARD_DEPTH_SLACK;
+        let pick = match branch {
+            Some(i) => Pick::Forced(i),
+            None if at_limit => Pick::Shallow,
+            None => Pick::Random,
+        };
+        let flat = flatten(root, schema, 0, pick, rng);
         let Some(s) = flat.as_object() else {
             // `true` accepts anything, `false` accepts nothing.
             return Value::String(word(rng));
@@ -48,8 +76,7 @@ impl Faker {
         }
 
         let types = type_names(s);
-        let at_limit = depth >= self.max_depth;
-        if (at_limit || depth >= self.max_depth + HARD_DEPTH_SLACK) && types.contains(&"null") {
+        if at_limit && types.contains(&"null") {
             return Value::Null;
         }
 
@@ -66,6 +93,8 @@ impl Faker {
             "integer" => fake_integer(s, rng),
             "number" => fake_number(s, rng),
             "string" => Value::String(fake_string(s, rng)),
+            "array" if hard_limit => Value::Array(Vec::new()),
+            "object" if hard_limit => Value::Object(Map::new()),
             "array" => self.fake_array(root, s, depth, at_limit, rng),
             "object" => self.fake_object(root, s, depth, at_limit, rng),
             _ => Value::String(word(rng)),
@@ -92,13 +121,16 @@ impl Faker {
             let sub = props.and_then(|p| p.get(*name)).unwrap_or(&any);
             out.insert(
                 (*name).to_string(),
-                self.gen_value(root, sub, depth + 1, rng),
+                self.gen_value(root, sub, depth + 1, None, rng),
             );
         }
         if !at_limit && let Some(props) = props {
             for (name, sub) in props {
                 if !out.contains_key(name) {
-                    out.insert(name.clone(), self.gen_value(root, sub, depth + 1, rng));
+                    out.insert(
+                        name.clone(),
+                        self.gen_value(root, sub, depth + 1, None, rng),
+                    );
                 }
             }
         }
@@ -127,11 +159,11 @@ impl Faker {
         let items = s.get("items").unwrap_or(&any);
         let mut out: Vec<Value> = Vec::with_capacity(len);
         for _ in 0..len {
-            let mut candidate = self.gen_value(root, items, depth + 1, rng);
+            let mut candidate = self.gen_value(root, items, depth + 1, None, rng);
             if unique {
                 let mut tries = 0;
                 while out.contains(&candidate) && tries < 32 {
-                    candidate = self.gen_value(root, items, depth + 1, rng);
+                    candidate = self.gen_value(root, items, depth + 1, None, rng);
                     tries += 1;
                 }
             }
@@ -168,9 +200,21 @@ fn infer_type(s: &Map<String, Value>) -> &'static str {
     }
 }
 
-/// Resolve `$ref` (against the root's `$defs`), and merge `allOf` and the
-/// first `oneOf`/`anyOf` branch into a single schema object.
-fn flatten(root: &Value, schema: &Value, hops: usize) -> Value {
+/// How [`flatten`] chooses among `oneOf`/`anyOf` branches.
+#[derive(Clone, Copy)]
+enum Pick {
+    /// This branch index (modulo the branch count).
+    Forced(usize),
+    /// A uniformly random branch.
+    Random,
+    /// The branch with the fewest required references, so that recursion
+    /// past the depth limit converges on a leaf.
+    Shallow,
+}
+
+/// Resolve `$ref` (against the root's `$defs`), and merge `allOf` and one
+/// `oneOf`/`anyOf` branch (chosen by `pick`) into a single schema object.
+fn flatten<R: Rng>(root: &Value, schema: &Value, hops: usize, pick: Pick, rng: &mut R) -> Value {
     let Some(obj) = schema.as_object() else {
         return schema.clone();
     };
@@ -183,18 +227,27 @@ fn flatten(root: &Value, schema: &Value, hops: usize) -> Value {
     if let Some(Value::String(r)) = obj.get("$ref")
         && let Some(target) = resolve_ref(root, r)
     {
-        extras.push(flatten(root, target, hops + 1));
+        extras.push(flatten(root, target, hops + 1, pick, rng));
     }
     if let Some(Value::Array(all)) = obj.get("allOf") {
         for sub in all {
-            extras.push(flatten(root, sub, hops + 1));
+            extras.push(flatten(root, sub, hops + 1, pick, rng));
         }
     }
     for key in ["oneOf", "anyOf"] {
         if let Some(Value::Array(branches)) = obj.get(key)
-            && let Some(first) = branches.first()
+            && !branches.is_empty()
         {
-            extras.push(flatten(root, first, hops + 1));
+            let index = match pick {
+                Pick::Forced(i) => i % branches.len(),
+                Pick::Random => rng.random_range(0..branches.len()),
+                Pick::Shallow => branches
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, b)| branch_cost(root, b, 0))
+                    .map_or(0, |(i, _)| i),
+            };
+            extras.push(flatten(root, &branches[index], hops + 1, pick, rng));
         }
     }
 
@@ -214,11 +267,78 @@ fn flatten(root: &Value, schema: &Value, hops: usize) -> Value {
     Value::Object(out)
 }
 
+/// How many references a minimal instance of `schema` must expand: one per
+/// `$ref` in a required position (required properties, non-empty arrays),
+/// with the schema's own top-level `$ref`/`allOf`/`oneOf`/`anyOf` followed.
+/// Used to steer recursion towards terminating branches.
+fn branch_cost(root: &Value, schema: &Value, hops: usize) -> usize {
+    const UNBOUNDED: usize = 1 << 16;
+    let Some(obj) = schema.as_object() else {
+        return 0;
+    };
+    if hops > 8 {
+        return UNBOUNDED;
+    }
+    let mut cost = 0usize;
+    if let Some(Value::String(r)) = obj.get("$ref")
+        && let Some(target) = resolve_ref(root, r)
+    {
+        cost = cost.saturating_add(branch_cost(root, target, hops + 1));
+    }
+    if let Some(Value::Array(all)) = obj.get("allOf") {
+        for sub in all {
+            cost = cost.saturating_add(branch_cost(root, sub, hops + 1));
+        }
+    }
+    for key in ["oneOf", "anyOf"] {
+        if let Some(Value::Array(branches)) = obj.get(key)
+            && let Some(min) = branches
+                .iter()
+                .map(|b| branch_cost(root, b, hops + 1))
+                .min()
+        {
+            cost = cost.saturating_add(min);
+        }
+    }
+    let member = |m: &Value| -> usize {
+        if m.get("$ref").is_some() {
+            1
+        } else {
+            branch_cost(root, m, hops + 1)
+        }
+    };
+    let props = obj.get("properties").and_then(Value::as_object);
+    if let Some(Value::Array(required)) = obj.get("required") {
+        for name in required.iter().filter_map(Value::as_str) {
+            if let Some(p) = props.and_then(|p| p.get(name)) {
+                cost = cost.saturating_add(member(p));
+            }
+        }
+    }
+    if obj.get("minItems").and_then(Value::as_u64).unwrap_or(0) > 0
+        && let Some(items) = obj.get("items")
+    {
+        cost = cost.saturating_add(member(items));
+    }
+    cost
+}
+
 fn merge_keyword(out: &mut Map<String, Value>, key: String, value: Value) {
     match (key.as_str(), out.get_mut(&key), &value) {
         ("properties", Some(Value::Object(existing)), Value::Object(incoming)) => {
+            // A property declared on both sides must satisfy both (e.g. a
+            // base `petType: string` narrowed by a branch to `const: cat`).
             for (k, v) in incoming {
-                existing.entry(k.clone()).or_insert_with(|| v.clone());
+                match existing.get_mut(k) {
+                    None => {
+                        existing.insert(k.clone(), v.clone());
+                    }
+                    Some(current) if current != v => {
+                        let both = json!({"allOf": [current.clone(), v.clone()]});
+                        *current = both;
+                    }
+                    Some(_) => {}
+                }
             }
         }
         ("required", Some(Value::Array(existing)), Value::Array(incoming)) => {
@@ -277,10 +397,17 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         .and_then(Value::as_u64)
         .map(|m| m as usize);
     let mut out = word(rng);
-    while out.chars().count() < min {
-        out.push(char::from(b'a' + rng.random_range(0..26u8)));
+    let mut len = out.chars().count();
+    if len < min {
+        out.reserve(min - len);
+        while len < min {
+            out.push(char::from(b'a' + rng.random_range(0..26u8)));
+            len += 1;
+        }
     }
-    if let Some(max) = max {
+    if let Some(max) = max
+        && len > max
+    {
         out = out.chars().take(max).collect();
     }
     out
@@ -382,7 +509,11 @@ fn fake_number<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> Value {
         if b.lo_exclusive && k_lo * m <= b.lo {
             k_lo += 1.0;
         }
-        let k_hi = ((b.hi / m).floor()).min(k_lo + 1000.0);
+        let mut k_hi = (b.hi / m).floor();
+        if b.hi_exclusive && k_hi * m >= b.hi {
+            k_hi -= 1.0;
+        }
+        let k_hi = k_hi.min(k_lo + 1000.0);
         let k = if k_hi >= k_lo {
             k_lo + rng.random_range(0..=((k_hi - k_lo) as i64)) as f64
         } else {

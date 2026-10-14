@@ -327,3 +327,65 @@ async fn fallback_source_header() {
     assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
     assert_eq!(header_str(&resp, "content-type"), "application/json");
 }
+
+/// A runtime for an inline contract, served offline (faker only).
+fn offline_contract(src: &str) -> Harness {
+    let bundle = Arc::new(compile(src.as_bytes()).unwrap());
+    let rt = Arc::new(MockRuntime {
+        name: "inline".into(),
+        bundle,
+        engine: Arc::new(Engine::new(None, EngineConfig::default())),
+        state: Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        header_overrides: true,
+    });
+    Harness {
+        router: http_rest::router(Arc::clone(&rt)),
+        rt,
+        provider: None,
+    }
+}
+
+const EXPR_CONTRACT: &str = r##"
+openapi: 3.1.0
+info: {title: Expr API, version: "1"}
+paths:
+  /expr:
+    get:
+      operationId: getExpr
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Expr"}
+components:
+  schemas:
+    Expr:
+      oneOf:
+        - $ref: "#/components/schemas/And"
+        - $ref: "#/components/schemas/Leaf"
+    And:
+      type: object
+      required: [left, right]
+      properties:
+        left: {$ref: "#/components/schemas/Expr"}
+        right: {$ref: "#/components/schemas/Expr"}
+    Leaf:
+      type: object
+      required: [value]
+      properties:
+        value: {type: integer}
+"##;
+
+#[tokio::test]
+async fn recursive_one_of_contract_does_not_crash() {
+    let h = offline_contract(EXPR_CONTRACT);
+    for _ in 0..20 {
+        let resp = send(&h, get("/expr")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_json(resp).await.is_object());
+    }
+    // The process (and runtime) survived; a second request still works.
+    assert_eq!(send(&h, get("/expr")).await.status(), StatusCode::OK);
+    assert_eq!(h.rt.name, "inline");
+}

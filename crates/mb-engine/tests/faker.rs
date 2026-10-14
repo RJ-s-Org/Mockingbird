@@ -136,3 +136,128 @@ proptest! {
         prop_assert!(validator.validate(&v).is_ok(), "schema {s} value {v}: {:?}", validator.validate(&v));
     }
 }
+
+/// `Expr: oneOf [And{left: Expr, right: Expr (required)}, Leaf]` — only the
+/// leaf branch terminates.
+pub fn expr_schema() -> Value {
+    json!({
+        "$ref": "#/$defs/Expr",
+        "$defs": {
+            "Expr": {"oneOf": [{"$ref": "#/$defs/And"}, {"$ref": "#/$defs/Leaf"}]},
+            "And": {
+                "type": "object",
+                "required": ["op", "left", "right"],
+                "properties": {
+                    "op": {"const": "and"},
+                    "left": {"$ref": "#/$defs/Expr"},
+                    "right": {"$ref": "#/$defs/Expr"}
+                }
+            },
+            "Leaf": {
+                "type": "object",
+                "required": ["value"],
+                "properties": {"value": {"type": "integer"}}
+            }
+        }
+    })
+}
+
+#[test]
+fn fakes_required_recursive_one_of_without_overflow() {
+    let schema = expr_schema();
+    let validator = SchemaValidator::new(&schema).unwrap();
+    for depth in [0usize, 1, 3, 6] {
+        for seed in 0..50u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let v = Faker::new(depth).fake(&schema, &mut rng);
+            assert!(
+                validator.validate(&v).is_ok(),
+                "depth {depth} seed {seed}: {v}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hard_depth_cutoff_terminates_unsatisfiable_recursion() {
+    // A required self-reference has no finite instance; the faker must still
+    // return (with some value) instead of overflowing the stack.
+    let schema = json!({
+        "$ref": "#/$defs/Node",
+        "$defs": {"Node": {
+            "type": "object",
+            "required": ["next"],
+            "properties": {"next": {"$ref": "#/$defs/Node"}}
+        }}
+    });
+    let mut rng = StdRng::seed_from_u64(7);
+    let v = Faker::new(4).fake(&schema, &mut rng);
+    assert!(v.is_object());
+}
+
+#[test]
+fn fakes_number_multiple_of_with_exclusive_maximum() {
+    let schema = json!({"type": "number", "multipleOf": 0.5, "minimum": 0, "exclusiveMaximum": 1});
+    let validator = SchemaValidator::new(&schema).unwrap();
+    for seed in 0..200u64 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let v = Faker::default().fake(&schema, &mut rng);
+        assert!(validator.validate(&v).is_ok(), "seed {seed}: {v}");
+    }
+}
+
+#[test]
+fn fakes_long_min_length_in_linear_time() {
+    let schema = json!({"type": "string", "minLength": 300_000});
+    let start = std::time::Instant::now();
+    let mut rng = StdRng::seed_from_u64(1);
+    let v = Faker::default().fake(&schema, &mut rng);
+    assert_eq!(v.as_str().unwrap().chars().count(), 300_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// Discriminator-style polymorphism: the base declares `petType: string`,
+/// each branch narrows it to a distinct constant.
+pub fn pet_schema() -> Value {
+    json!({
+        "$ref": "#/$defs/Pet",
+        "$defs": {
+            "Pet": {
+                "type": "object",
+                "required": ["petType", "name"],
+                "properties": {"petType": {"type": "string"}, "name": {"type": "string"}},
+                "oneOf": [{"$ref": "#/$defs/Cat"}, {"$ref": "#/$defs/Dog"}]
+            },
+            "Cat": {
+                "type": "object",
+                "required": ["petType", "name"],
+                "properties": {"petType": {"const": "cat"}, "name": {"type": "string"}}
+            },
+            "Dog": {
+                "type": "object",
+                "required": ["petType", "name"],
+                "properties": {"petType": {"enum": ["dog"]}, "name": {"type": "string"}}
+            }
+        }
+    })
+}
+
+#[test]
+fn fakes_each_one_of_branch_validly() {
+    let schema = pet_schema();
+    let validator = SchemaValidator::new(&schema).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for branch in 0..2usize {
+        for seed in 0..20u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let v = Faker::default().fake_with_branch(&schema, Some(branch), &mut rng);
+            assert!(validator.validate(&v).is_ok(), "branch {branch}: {v}");
+            seen.insert(v["petType"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(seen.len(), 2, "{seen:?}");
+}
