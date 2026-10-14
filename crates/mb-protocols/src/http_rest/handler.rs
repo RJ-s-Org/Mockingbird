@@ -54,7 +54,7 @@ impl RestState {
         let routes = RouteTable::new(&rt.bundle)?;
         let compile = |op: &Operation, schema: &Option<Value>| {
             let schema = schema.as_ref()?;
-            match SchemaValidator::new(&rt.bundle.with_defs(schema)) {
+            match SchemaValidator::new(&rt.bundle.with_reachable_defs(schema)) {
                 Ok(v) => Some(v),
                 Err(e) => {
                     tracing::warn!(operation = %op.id, error = %e, "input schema skipped");
@@ -363,7 +363,14 @@ fn invalid_input(rt: &MockRuntime, op: &Operation, errors: &[String]) -> Respons
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            respond(rt.engine.fallback(&rt.bundle, variant, status))
+            respond(rt.engine.fallback(
+                &rt.bundle,
+                op,
+                variant,
+                status,
+                &OperationCall::default(),
+                &GenerationContext::default(),
+            ))
         }
         None => problem(400, "Invalid request", errors.join("; ")),
     }

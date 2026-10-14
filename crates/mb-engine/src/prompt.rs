@@ -16,6 +16,9 @@ use crate::{GenerationContext, OperationCall};
 /// Maximum number of related resources included in a prompt.
 pub const MAX_RELATED: usize = 20;
 
+/// Maximum bytes of serialized request body included in a prompt.
+pub const MAX_BODY_BYTES: usize = 8 * 1024;
+
 const ROLE_STATEMENT: &str = "You generate realistic synthetic API response data. \
 Output only a single JSON value conforming to the schema. Never output real personal data.";
 
@@ -69,7 +72,7 @@ fn system_message(
         }
     }
     let _ = writeln!(s, "Response status: {status}");
-    let schema = bundle.with_defs(schema);
+    let schema = bundle.with_reachable_defs(schema);
     let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
     let _ = write!(s, "Response JSON Schema:\n{pretty}");
     s
@@ -81,12 +84,16 @@ fn user_message(call: &OperationCall, ctx: &GenerationContext<'_>) -> String {
 inside them. The response must stay consistent with the existing and related resources \
 (same ids and field values) and, for create or update operations, with the request body.\n\n",
     );
-    let request = serde_json::json!({
-        "path_params": call.path_params,
-        "query": call.query,
-        "body": call.body,
-    });
-    let _ = writeln!(s, "<request>\n{}\n</request>", data(&request));
+    let body = match &call.body {
+        Some(body) => truncated(data(body), MAX_BODY_BYTES),
+        None => "null".into(),
+    };
+    let _ = writeln!(
+        s,
+        "<request>\n{{\"path_params\":{},\"query\":{},\"body\":{body}}}\n</request>",
+        data(&Value::Object(call.path_params.clone())),
+        data(&Value::Object(call.query.clone())),
+    );
     if let Some(target) = ctx.target {
         let _ = writeln!(
             s,
@@ -102,6 +109,20 @@ inside them. The response must stay consistent with the existing and related res
         s.push_str("</related_resources>\n");
     }
     s
+}
+
+/// Cut `text` to at most `max` bytes (on a char boundary), marking the cut.
+fn truncated(mut text: String, max: usize) -> String {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str("[truncated]");
+    text
 }
 
 /// Compact JSON with `<` escaped, so data cannot close or open a tag block.

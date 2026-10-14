@@ -149,3 +149,52 @@ fn with_defs_attaches_definitions() {
     let v = bundle.with_defs(&json!({"$ref":"#/$defs/Order"}));
     assert_eq!(v["$defs"]["Order"], order);
 }
+
+#[test]
+fn with_reachable_defs_attaches_only_the_ref_closure() {
+    let mut defs = serde_json::Map::new();
+    defs.insert(
+        "Order".into(),
+        json!({"type": "object", "properties": {
+            "lines": {"type": "array", "items": {"$ref": "#/$defs/Line"}},
+            "category": {"$ref": "#/$defs/Category"}
+        }}),
+    );
+    defs.insert("Line".into(), json!({"allOf": [{"$ref": "#/$defs/Money"}]}));
+    defs.insert("Money".into(), json!({"type": "number"}));
+    defs.insert(
+        "Category".into(),
+        json!({"type": "object", "properties": {"parent": {"$ref": "#/$defs/Category"}}}),
+    );
+    defs.insert("Unrelated".into(), json!({"type": "string"}));
+    defs.insert("a/b".into(), json!({"type": "boolean"}));
+    let bundle = Bundle {
+        id: "x".into(),
+        title: "x".into(),
+        version: "1".into(),
+        source_digest: "d".into(),
+        operations: vec![],
+        defs,
+    };
+
+    let v = bundle.with_reachable_defs(&json!({"$ref": "#/$defs/Order"}));
+    let names: Vec<&String> = v["$defs"].as_object().unwrap().keys().collect();
+    let mut names: Vec<&str> = names.into_iter().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Category", "Line", "Money", "Order"]);
+
+    // JSON-pointer escapes in def names, and nested pointers into a def.
+    let v = bundle.with_reachable_defs(&json!({"anyOf": [
+        {"$ref": "#/$defs/a~1b"},
+        {"$ref": "#/$defs/Category/properties/parent"}
+    ]}));
+    let defs = v["$defs"].as_object().unwrap();
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    assert!(defs.contains_key("a/b") && defs.contains_key("Category"));
+
+    // No refs: an empty `$defs`; boolean schemas are wrapped.
+    let v = bundle.with_reachable_defs(&json!({"type": "string"}));
+    assert!(v["$defs"].as_object().unwrap().is_empty());
+    let v = bundle.with_reachable_defs(&json!(true));
+    assert_eq!(v["allOf"], json!([true]));
+}

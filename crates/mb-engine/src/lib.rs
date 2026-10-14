@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role};
-use mb_mcm::{Bundle, Operation, OperationKind, OutputVariant, StatusSelector};
+use mb_mcm::{Bundle, Effect, Operation, OperationKind, OutputVariant, StatusSelector};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
 
@@ -91,6 +91,10 @@ pub struct EngineConfig {
     pub faker_depth: usize,
 }
 
+/// Faker attempts (cycling through top-level `oneOf`/`anyOf` branches and
+/// fresh random draws) before an unvalidated fallback body is accepted.
+const FALLBACK_ATTEMPTS: usize = 12;
+
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
@@ -155,8 +159,8 @@ impl Engine {
         };
 
         let validator = self.validator(bundle, op, status, schema)?;
-        let mut response = match &self.provider {
-            None => self.fallback(bundle, variant, status),
+        let response = match &self.provider {
+            None => self.fake_response(bundle, variant, status, schema, Some(&validator)),
             Some(provider) => {
                 let messages = build_messages(
                     bundle,
@@ -168,8 +172,8 @@ impl Engine {
                     self.config.persona.as_deref(),
                 );
                 let format = ResponseFormat::JsonSchema {
-                    name: op.id.clone(),
-                    schema: bundle.with_defs(schema),
+                    name: format_name(&op.id),
+                    schema: bundle.with_reachable_defs(schema),
                 };
                 match self
                     .generate_with_llm(provider.as_ref(), &validator, messages, &format)
@@ -183,33 +187,77 @@ impl Engine {
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
-                        self.fallback(bundle, variant, status)
+                        self.fake_response(bundle, variant, status, schema, Some(&validator))
                     }
                 }
             }
         };
-
-        if matches!(op.kind, OperationKind::Query)
-            && (200..300).contains(&status)
-            && let Some(target) = ctx.target
-            && let Some(body) = response.body.take()
-        {
-            response.body = Some(overlay_target(&validator, target, body));
-        }
-        Ok(response)
+        Ok(reflect(&validator, op, call, &ctx, response))
     }
 
-    /// A faker-generated response for `variant`, tagged `Fallback`.
+    /// A faker-generated response for `variant`, tagged `Fallback`. The body
+    /// is validated against the variant's schema (retrying other branches and
+    /// draws) and, for 2xx responses, made consistent with the request and
+    /// state exactly like an LLM response would be.
     pub fn fallback(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        variant: &OutputVariant,
+        status: u16,
+        call: &OperationCall,
+        ctx: &GenerationContext<'_>,
+    ) -> GeneratedResponse {
+        let Some(schema) = &variant.schema else {
+            return GeneratedResponse {
+                status,
+                content_type: variant.content_type.clone(),
+                body: None,
+                source: Source::Fallback,
+            };
+        };
+        match self.validator(bundle, op, status, schema) {
+            Ok(validator) => {
+                let response =
+                    self.fake_response(bundle, variant, status, schema, Some(&validator));
+                reflect(&validator, op, call, ctx, response)
+            }
+            Err(e) => {
+                tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
+                self.fake_response(bundle, variant, status, schema, None)
+            }
+        }
+    }
+
+    fn fake_response(
         &self,
         bundle: &Bundle,
         variant: &OutputVariant,
         status: u16,
+        schema: &Value,
+        validator: Option<&SchemaValidator>,
     ) -> GeneratedResponse {
-        let body = variant.schema.as_ref().map(|schema| {
-            let schema = bundle.with_defs(schema);
-            Faker::new(self.config.faker_depth).fake(&schema, &mut rand::rng())
-        });
+        let schema = bundle.with_reachable_defs(schema);
+        let faker = Faker::new(self.config.faker_depth);
+        let mut rng = rand::rng();
+        let mut first: Option<Value> = None;
+        let mut body = None;
+        for attempt in 0..FALLBACK_ATTEMPTS {
+            let candidate = faker.fake_with_branch(&schema, Some(attempt), &mut rng);
+            match validator {
+                Some(v) if v.validate(&candidate).is_err() => {
+                    first.get_or_insert(candidate);
+                }
+                _ => {
+                    body = Some(candidate);
+                    break;
+                }
+            }
+        }
+        if body.is_none() {
+            tracing::warn!(status, "faker output does not validate against the schema");
+            body = first;
+        }
         GeneratedResponse {
             status,
             content_type: variant.content_type.clone(),
@@ -229,7 +277,7 @@ impl Engine {
         if let Some(v) = self.validators.get(&key) {
             return Ok(Arc::clone(&v));
         }
-        let v = Arc::new(SchemaValidator::new(&bundle.with_defs(schema))?);
+        let v = Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(schema))?);
         self.validators.insert(key, Arc::clone(&v));
         Ok(v)
     }
@@ -295,6 +343,132 @@ fn check(validator: &SchemaValidator, text: &str) -> Result<Value, Vec<String>> 
     let value = extract_json(text).ok_or_else(|| vec!["output is not valid JSON".to_string()])?;
     validator.validate(&value)?;
     Ok(value)
+}
+
+/// A `response_format` name matching `^[a-zA-Z0-9_-]{1,64}$`.
+fn format_name(id: &str) -> String {
+    let name: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    if name.is_empty() {
+        "response".into()
+    } else {
+        name
+    }
+}
+
+/// Make a 2xx body consistent with the request and state (spec §1.2,
+/// criterion 4): queries reflect the stored target, creates reflect the
+/// request body, updates reflect the target then the request body, and the
+/// identity field always equals the path id. Every merge is validated; an
+/// invalid one keeps the best valid value.
+fn reflect(
+    validator: &SchemaValidator,
+    op: &Operation,
+    call: &OperationCall,
+    ctx: &GenerationContext<'_>,
+    mut response: GeneratedResponse,
+) -> GeneratedResponse {
+    if !(200..300).contains(&response.status) {
+        return response;
+    }
+    let Some(body) = response.body.take() else {
+        return response;
+    };
+    let body = match op.kind {
+        OperationKind::Query => match ctx.target {
+            Some(target) => overlay_target(validator, target, body),
+            None => body,
+        },
+        OperationKind::Command(Effect::Create) => overlay(validator, body, call.body.as_ref()),
+        OperationKind::Command(Effect::Update) => {
+            let body = overlay(validator, body, ctx.target.map(|t| &t.data));
+            overlay(validator, body, call.body.as_ref())
+        }
+        OperationKind::Command(_) => body,
+    };
+    response.body = Some(force_identity(validator, op, call, body));
+    response
+}
+
+/// Overlay `fields`' top-level members onto an object `base`: all at once if
+/// that validates, else each member that keeps the object valid.
+fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> Value {
+    let (Value::Object(base_obj), Some(Value::Object(fields))) = (&base, fields) else {
+        return base;
+    };
+    let mut merged = base_obj.clone();
+    for (k, v) in fields {
+        merged.insert(k.clone(), v.clone());
+    }
+    let merged = Value::Object(merged);
+    if validator.validate(&merged).is_ok() {
+        return merged;
+    }
+    let mut best = base;
+    for (k, v) in fields {
+        let mut candidate = best.clone();
+        if let Value::Object(obj) = &mut candidate {
+            obj.insert(k.clone(), v.clone());
+        }
+        if validator.validate(&candidate).is_ok() {
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// Set `body[identity.field]` to the path id, as a string or (when the
+/// schema wants one) a number.
+fn force_identity(
+    validator: &SchemaValidator,
+    op: &Operation,
+    call: &OperationCall,
+    body: Value,
+) -> Value {
+    let Some(identity) = &op.identity else {
+        return body;
+    };
+    let Some(id) = identity
+        .path_param
+        .as_ref()
+        .and_then(|p| call.path_params.get(p))
+    else {
+        return body;
+    };
+    if !body.is_object() || body.get(&identity.field) == Some(id) {
+        return body;
+    }
+    let mut candidates = vec![id.clone()];
+    match id {
+        Value::String(s) => {
+            if let Ok(n) = s.parse::<i64>() {
+                candidates.push(Value::from(n));
+            } else if let Some(n) = s.parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
+                candidates.push(Value::Number(n));
+            }
+        }
+        Value::Number(n) => candidates.push(Value::String(n.to_string())),
+        _ => {}
+    }
+    for candidate in candidates {
+        let mut forced = body.clone();
+        if let Value::Object(obj) = &mut forced {
+            obj.insert(identity.field.clone(), candidate);
+        }
+        if validator.validate(&forced).is_ok() {
+            return forced;
+        }
+    }
+    body
 }
 
 /// Overlay the stored resource's top-level fields onto a generated object.

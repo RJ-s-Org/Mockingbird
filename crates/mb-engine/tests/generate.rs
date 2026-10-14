@@ -32,6 +32,14 @@ fn valid_order() -> Value {
     })
 }
 
+/// `valid_order()` as served for path id `o1`: the identity field follows
+/// the path (spec §1.2, criterion 4).
+fn valid_order_at_o1() -> Value {
+    let mut v = valid_order();
+    v["id"] = json!("o1");
+    v
+}
+
 fn call(op: &str) -> OperationCall {
     let mut path_params = Map::new();
     path_params.insert("orderId".into(), json!("o1"));
@@ -72,7 +80,7 @@ async fn valid_llm_output_is_llm_source() {
         .unwrap();
     assert_eq!(out.source, Source::Llm);
     assert_eq!(out.status, 200);
-    assert_eq!(out.body, Some(valid_order()));
+    assert_eq!(out.body, Some(valid_order_at_o1()));
     assert_eq!(out.source.to_string(), "llm");
     assert_eq!(provider.requests().len(), 1);
 }
@@ -149,7 +157,7 @@ async fn extracts_json_from_fenced_output() {
         .await
         .unwrap();
     assert_eq!(out.source, Source::Llm);
-    assert_eq!(out.body, Some(valid_order()));
+    assert_eq!(out.body, Some(valid_order_at_o1()));
 }
 
 #[tokio::test]
@@ -325,4 +333,259 @@ fn extract_json_variants() {
         Some(json!({"a": {"b": 2}}))
     );
     assert_eq!(extract_json("no json here"), None);
+}
+
+fn offline() -> Engine {
+    Engine::new(None, EngineConfig::default())
+}
+
+fn inline(src: &str) -> Bundle {
+    compile(src.as_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn offline_create_reflects_request_body() {
+    let bundle = orders();
+    let op = bundle.operation("createOrder").unwrap();
+    let mut c = call("createOrder");
+    c.path_params.clear();
+    c.body = Some(json!({"customerId": "c1", "total": 10}));
+    for _ in 0..20 {
+        let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+        let body = out.body.unwrap();
+        assert_eq!(body["customerId"], "c1", "{body}");
+        assert_eq!(body["total"], 10, "{body}");
+        validator(&bundle, "Order").validate(&body).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn llm_create_reflects_request_body() {
+    let bundle = orders();
+    let op = bundle.operation("createOrder").unwrap();
+    let mut c = call("createOrder");
+    c.path_params.clear();
+    c.body = Some(json!({"customerId": "c1", "total": 10}));
+    let (_p, engine) = scripted(vec![Ok(json!({
+        "id": "o1", "customerId": "someone-else", "status": "pending", "total": 99
+    })
+    .to_string())]);
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.source, Source::Llm);
+    let body = out.body.unwrap();
+    assert_eq!(body["id"], "o1");
+    assert_eq!(body["customerId"], "c1");
+    assert_eq!(body["total"], 10);
+}
+
+#[tokio::test]
+async fn update_keeps_identity_and_applies_body() {
+    let bundle = orders();
+    let op = bundle.operation("updateOrder").unwrap();
+    let target = StoredResource {
+        resource_type: "orders".into(),
+        id: "o1".into(),
+        data: json!({"id": "o1", "customerId": "c9", "status": "shipped", "total": 5}),
+    };
+    let mut c = call("updateOrder");
+    c.body = Some(json!({"customerId": "c2", "total": 7}));
+    let context = GenerationContext {
+        target: Some(&target),
+        ..ctx()
+    };
+    // Fallback path.
+    let out = offline().generate(&bundle, op, &c, context).await.unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(body["id"], "o1", "{body}");
+    assert_eq!(body["status"], "shipped", "{body}");
+    assert_eq!(body["customerId"], "c2", "{body}");
+    assert_eq!(body["total"], 7, "{body}");
+    // LLM path: an LLM that invents a new id is corrected.
+    let (_p, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let out = engine.generate(&bundle, op, &c, context).await.unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(body["id"], "o1", "{body}");
+    assert_eq!(body["customerId"], "c2", "{body}");
+}
+
+#[tokio::test]
+async fn get_without_state_uses_path_id() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let mut c = call("getOrder");
+    c.path_params.insert("orderId".into(), json!("abc"));
+    let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.body.unwrap()["id"], "abc");
+    let (_p, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.body.unwrap()["id"], "abc");
+}
+
+#[tokio::test]
+async fn integer_identity_is_forced_as_number() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /items/{itemId}:
+    get:
+      operationId: getItem
+      parameters: [{name: itemId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties: {id: {type: integer}}
+"#,
+    );
+    let op = bundle.operation("getItem").unwrap();
+    let mut c = call("getItem");
+    c.path_params.clear();
+    c.path_params.insert("itemId".into(), json!("42"));
+    let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.body.unwrap()["id"], json!(42));
+}
+
+const PET_CONTRACT: &str = r##"
+openapi: 3.1.0
+info: {title: Pets, version: "1"}
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pet"}
+  /n:
+    get:
+      operationId: getN
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {type: integer, minimum: 0, maximum: 10}
+                  - {type: integer, minimum: 5, maximum: 100}
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [petType, name]
+      properties:
+        petType: {type: string}
+        name: {type: string}
+      oneOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+    Cat:
+      type: object
+      required: [petType, name]
+      properties:
+        petType: {const: cat}
+        name: {type: string}
+    Dog:
+      type: object
+      required: [petType, name]
+      properties:
+        petType: {type: string, enum: [dog]}
+        name: {type: string}
+"##;
+
+#[tokio::test]
+async fn fallback_output_validates_for_one_of() {
+    let bundle = inline(PET_CONTRACT);
+    for (id, def) in [
+        ("getPet", json!({"$ref": "#/$defs/Pet"})),
+        ("getN", Value::Null),
+    ] {
+        let op = bundle.operation(id).unwrap();
+        let schema = if def.is_null() {
+            op.success_output().unwrap().schema.clone().unwrap()
+        } else {
+            def
+        };
+        let v = SchemaValidator::new(&bundle.with_defs(&schema)).unwrap();
+        for _ in 0..50 {
+            let out = offline()
+                .generate(&bundle, op, &call(id), ctx())
+                .await
+                .unwrap();
+            let body = out.body.unwrap();
+            assert!(
+                v.validate(&body).is_ok(),
+                "{id}: {body} {:?}",
+                v.validate(&body)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn prompt_and_format_carry_only_reachable_defs() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    let req = &provider.requests()[0];
+    let system = &req.messages[0].content;
+    assert!(system.contains("\"Category\""), "{system}");
+    assert!(!system.contains("\"NewOrder\""), "{system}");
+    match &req.response_format {
+        mb_llm::ResponseFormat::JsonSchema { schema, .. } => {
+            let defs = schema["$defs"].as_object().unwrap();
+            assert!(defs.contains_key("Order") && defs.contains_key("Category"));
+            assert!(!defs.contains_key("NewOrder") && !defs.contains_key("Error"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn prompt_truncates_large_request_body() {
+    let bundle = orders();
+    let op = bundle.operation("createOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let mut c = call("createOrder");
+    c.body = Some(json!({"customerId": "é".repeat(20_000), "total": 1}));
+    engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let user = &provider.requests()[0].messages[1].content;
+    assert!(user.contains("[truncated]"), "{}", &user[..200]);
+    assert!(user.len() < 10 * 1024, "{}", user.len());
+}
+
+#[tokio::test]
+async fn response_format_name_is_sanitized() {
+    let bundle = orders();
+    let mut op = bundle.operation("getOrder").unwrap().clone();
+    op.id = format!("get order/{{id}}.v2!{}", "x".repeat(100));
+    let (provider, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    engine
+        .generate(&bundle, &op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    match &provider.requests()[0].response_format {
+        mb_llm::ResponseFormat::JsonSchema { name, .. } => {
+            assert!(!name.is_empty() && name.len() <= 64, "{name}");
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{name}"
+            );
+            assert!(name.starts_with("get_order__id__v2_"), "{name}");
+        }
+        other => panic!("{other:?}"),
+    }
 }

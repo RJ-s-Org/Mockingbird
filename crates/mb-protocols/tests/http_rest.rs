@@ -136,14 +136,17 @@ async fn sessions_isolate_state() {
             .is_some()
     );
 
-    // The script is exhausted, so session `b` is served by the faker.
+    // The script is exhausted, so session `b` is served by the faker. The
+    // id follows the path, but none of session `a`'s stored fields leak.
     let req = Request::get("/orders/o1")
         .header("x-mockingbird-session", "b")
         .body(Body::empty())
         .unwrap();
     let resp = send(&h, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_ne!(body_json(resp).await["id"], "o1");
+    let body = body_json(resp).await;
+    assert_eq!(body["id"], "o1");
+    assert_ne!(body["customerId"], "c1", "{body}");
     assert!(
         h.rt.state
             .get(&session("b"), "orders", "o1")
@@ -388,4 +391,56 @@ async fn recursive_one_of_contract_does_not_crash() {
     // The process (and runtime) survived; a second request still works.
     assert_eq!(send(&h, get("/expr")).await.status(), StatusCode::OK);
     assert_eq!(h.rt.name, "inline");
+}
+
+fn put_json(uri: &str, body: &str) -> Request<Body> {
+    Request::put(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn offline_writes_are_reflected() {
+    let h = offline();
+    let resp = send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["customerId"], "c1", "{created}");
+    assert_eq!(created["total"], 10, "{created}");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let resp = send(&h, get(&format!("/orders/{id}"))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["id"], id.as_str());
+    assert_eq!(body["customerId"], "c1", "{body}");
+
+    let resp = send(
+        &h,
+        put_json(&format!("/orders/{id}"), r#"{"customerId":"c2","total":5}"#),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["id"], id.as_str(), "{body}");
+    assert_eq!(body["customerId"], "c2", "{body}");
+    assert_eq!(body["status"], created["status"], "{body}");
+
+    let resp = send(&h, get(&format!("/orders/{id}"))).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["id"], id.as_str());
+    assert_eq!(body["customerId"], "c2", "{body}");
+}
+
+#[tokio::test]
+async fn get_unknown_id_returns_path_id() {
+    let h = offline();
+    let resp = send(&h, get("/orders/abc")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["id"], "abc");
 }

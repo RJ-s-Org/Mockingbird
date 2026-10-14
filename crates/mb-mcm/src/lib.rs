@@ -118,20 +118,69 @@ impl Bundle {
     /// Clone `schema` with this bundle's definitions attached as `$defs`, so
     /// it can be validated or faked standalone.
     pub fn with_defs(&self, schema: &Value) -> Value {
-        let mut out = schema.clone();
-        match out.as_object_mut() {
-            Some(obj) => {
-                obj.insert("$defs".into(), Value::Object(self.defs.clone()));
-                out
+        attach_defs(schema, self.defs.clone())
+    }
+
+    /// Like [`Bundle::with_defs`], but attaches only the definitions
+    /// reachable from `schema` through `#/$defs/...` references (the
+    /// transitive closure), keeping prompts and validators small.
+    pub fn with_reachable_defs(&self, schema: &Value) -> Value {
+        let mut reachable = Map::new();
+        let mut pending: Vec<String> = Vec::new();
+        collect_def_refs(schema, &mut pending);
+        while let Some(name) = pending.pop() {
+            if reachable.contains_key(&name) {
+                continue;
             }
-            // Boolean schemas (`true`/`false`) cannot carry `$defs`; wrap them.
-            None => {
-                let mut obj = Map::new();
-                obj.insert("allOf".into(), Value::Array(vec![out]));
-                obj.insert("$defs".into(), Value::Object(self.defs.clone()));
-                Value::Object(obj)
+            if let Some(def) = self.defs.get(&name) {
+                collect_def_refs(def, &mut pending);
+                reachable.insert(name, def.clone());
             }
         }
+        attach_defs(schema, reachable)
+    }
+}
+
+fn attach_defs(schema: &Value, defs: Map<String, Value>) -> Value {
+    let mut out = schema.clone();
+    match out.as_object_mut() {
+        Some(obj) => {
+            obj.insert("$defs".into(), Value::Object(defs));
+            out
+        }
+        // Boolean schemas (`true`/`false`) cannot carry `$defs`; wrap them.
+        None => {
+            let mut obj = Map::new();
+            obj.insert("allOf".into(), Value::Array(vec![out]));
+            obj.insert("$defs".into(), Value::Object(defs));
+            Value::Object(obj)
+        }
+    }
+}
+
+/// Push the definition name of every `#/$defs/<name>[/...]` reference in
+/// `value` (JSON-pointer unescaped).
+fn collect_def_refs(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(obj) => {
+            for (k, v) in obj {
+                if k == "$ref"
+                    && let Some(r) = v.as_str()
+                    && let Some(rest) = r.strip_prefix("#/$defs/")
+                {
+                    let name = rest.split('/').next().unwrap_or(rest);
+                    out.push(name.replace("~1", "/").replace("~0", "~"));
+                } else {
+                    collect_def_refs(v, out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                collect_def_refs(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
