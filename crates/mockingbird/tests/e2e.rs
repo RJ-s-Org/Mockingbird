@@ -140,6 +140,26 @@ async fn multiple_contracts_are_prefixed() {
     assert_eq!(r.status(), 404);
 }
 
+#[tokio::test]
+async fn health_endpoint_is_reserved_and_outside_mock_prefixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    std::fs::copy(fixture(), &a).unwrap();
+    std::fs::copy(fixture(), &b).unwrap();
+    for contracts in [vec![fixture()], vec![a, b]] {
+        let mut args = args(contracts);
+        args.offline = true;
+        let base = serve(build_app(&args, None).unwrap()).await;
+        let r = reqwest::get(format!("{base}/__mockingbird/healthz"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body: Value = r.json().await.unwrap();
+        assert_eq!(body, json!({"status": "ok"}));
+    }
+}
+
 fn bin() -> Command {
     let mut cmd = Command::cargo_bin("mockingbird").unwrap();
     cmd.env_remove("MB_LLM_API_KEY");

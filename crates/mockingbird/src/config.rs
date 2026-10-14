@@ -14,6 +14,9 @@ use mb_protocols::MockRuntime;
 use mb_protocols::http_rest;
 use mb_state::{MemoryStore, StateStore};
 
+/// Health check path; reserved so it cannot collide with contract paths.
+pub const HEALTH_PATH: &str = "/__mockingbird/healthz";
+
 /// Default session time-to-live.
 const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -118,7 +121,10 @@ pub fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<Router
 
     let multi = args.contracts.len() > 1;
     let mut seen = std::collections::HashSet::new();
-    let mut app = Router::new();
+    let mut app = Router::new().route(
+        HEALTH_PATH,
+        axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+    );
     for path in &args.contracts {
         let name = mock_name(path)?;
         if !seen.insert(name.clone()) {
