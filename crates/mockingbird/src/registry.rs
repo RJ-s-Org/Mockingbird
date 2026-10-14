@@ -2,6 +2,7 @@
 //! the data-plane dispatcher that routes requests to them by path prefix.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 use axum::Router;
@@ -21,6 +22,8 @@ struct Mounted {
     name: String,
     prefix: String,
     router: Router,
+    /// The runtime's `state_degraded` flag.
+    state_degraded: Arc<AtomicBool>,
 }
 
 /// Mounted mocks, sorted by prefix length, longest first.
@@ -186,6 +189,20 @@ impl MockRegistry {
             .collect()
     }
 
+    /// Names of mounted mocks currently serving statelessly because their
+    /// state store calls are failing, sorted.
+    pub fn degraded_mocks(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .mounted
+            .load()
+            .iter()
+            .filter(|m| m.state_degraded.load(Ordering::Relaxed))
+            .map(|m| m.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     fn publish(&self, mut next: Vec<Mounted>) {
         next.sort_by(|a, b| {
             b.prefix
@@ -255,11 +272,13 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Option<Mounted> {
             return None;
         }
     };
+    let state_degraded = Arc::clone(&runtime.state_degraded);
     match http_rest::try_router(Arc::new(runtime)) {
         Ok(router) => Some(Mounted {
             name: mock.name.clone(),
             prefix: mock.route_prefix.clone(),
             router,
+            state_degraded,
         }),
         Err(error) => {
             tracing::error!(mock = %mock.name, %error, "cannot route mock; skipped");
