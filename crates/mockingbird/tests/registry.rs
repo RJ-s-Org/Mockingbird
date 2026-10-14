@@ -359,3 +359,58 @@ async fn fallback_profile_cycle_errors() {
         .expect("a cyclic fallback chain must fail");
     assert!(err.to_string().contains("cycle"), "{err:#}");
 }
+
+/// Two mocks on `/x`: `a` sorts first and holds it, `b` is skipped.
+async fn colliding_pair() -> (Arc<dyn ControlStore>, RuntimeDeps, Arc<MockRegistry>, Mock) {
+    let store = store().await;
+    let a = create_mock(&store, "a", "/x", None).await;
+    activate(&store, &a, &fixture_source()).await;
+    let b = create_mock(&store, "b", "/x", None).await;
+    activate(&store, &b, &fixture_v2_source()).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        registry.mounted(),
+        vec![("a".to_string(), "/x".to_string())]
+    );
+    (store, deps, registry, a)
+}
+
+#[tokio::test]
+async fn deleting_prefix_holder_mounts_skipped_mock() {
+    let (store, deps, registry, _a) = colliding_pair().await;
+    let base = serve(registry.router()).await;
+    // `/ping` exists only in `b`'s contract.
+    assert_eq!(status_of(&base, "/x/ping").await, 404);
+
+    assert!(store.delete_mock(DEFAULT_WORKSPACE, "a").await.unwrap());
+    registry.reload_mock(&deps, "a").await;
+
+    assert_eq!(
+        registry.mounted(),
+        vec![("b".to_string(), "/x".to_string())]
+    );
+    assert_eq!(status_of(&base, "/x/ping").await, 200);
+}
+
+#[tokio::test]
+async fn moving_prefix_holder_mounts_skipped_mock() {
+    let (store, deps, registry, a) = colliding_pair().await;
+    let base = serve(registry.router()).await;
+
+    let mut moved = a.clone();
+    moved.route_prefix = "/y".into();
+    store.update_mock(&moved).await.unwrap();
+    registry.reload_mock(&deps, "a").await;
+
+    assert_eq!(
+        registry.mounted(),
+        vec![
+            ("a".to_string(), "/y".to_string()),
+            ("b".to_string(), "/x".to_string()),
+        ]
+    );
+    assert_eq!(status_of(&base, "/x/ping").await, 200);
+    assert_eq!(status_of(&base, "/y/orders").await, 200);
+}

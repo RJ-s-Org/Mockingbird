@@ -41,6 +41,11 @@ impl MockRegistry {
     /// Rebuilds every mock. A mock that fails to build is logged and skipped.
     pub async fn reload_all(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let _guard = self.reload.lock().await;
+        self.reload_all_locked(deps).await
+    }
+
+    /// [`Self::reload_all`] for a caller that already holds `self.reload`.
+    async fn reload_all_locked(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let mut mocks = deps.store.list_mocks(DEFAULT_WORKSPACE).await?;
         mocks.sort_by(|a, b| a.name.cmp(&b.name));
         let mut next: Vec<Mounted> = Vec::new();
@@ -65,6 +70,10 @@ impl MockRegistry {
 
     /// Rebuilds one mock, unmounting it when it was deleted, has no active
     /// contract or fails to build.
+    ///
+    /// When the mock gives up a prefix it held (it is unmounted or moves to
+    /// another prefix), a mock skipped earlier for colliding on that prefix
+    /// may now be mountable, so every mock is rebuilt instead.
     pub async fn reload_mock(&self, deps: &RuntimeDeps, name: &str) {
         let _guard = self.reload.lock().await;
         let mounted = match deps.store.get_mock(DEFAULT_WORKSPACE, name).await {
@@ -75,6 +84,30 @@ impl MockRegistry {
                 return;
             }
         };
+
+        let held = self
+            .mounted
+            .load()
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| m.prefix.clone());
+        let released = match (&held, &mounted) {
+            (Some(old), Some(new)) => *old != new.prefix,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if released {
+            match self.reload_all_locked(deps).await {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::error!(
+                        mock = %name,
+                        error = %format!("{error:#}"),
+                        "cannot reload mocks after a prefix was released; reloading this mock only"
+                    );
+                }
+            }
+        }
 
         let mut next: Vec<Mounted> = self
             .mounted
