@@ -1,0 +1,24 @@
+[package]
+name = "mb-ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Extension traits (and self-hosted defaults) that mockingbird-cloud builds against"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+http.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
