@@ -11,7 +11,14 @@ workspace = true
 
 [features]
 default = ["http-rest"]
-http-rest = ["dep:axum", "dep:matchit", "dep:humantime", "dep:serde_urlencoded", "dep:thiserror"]
+http-rest = [
+    "dep:axum",
+    "dep:matchit",
+    "dep:humantime",
+    "dep:serde_urlencoded",
+    "dep:thiserror",
+    "dep:tower-http",
+]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -24,6 +31,7 @@ serde_json.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 tokio.workspace = true
+tower-http = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]

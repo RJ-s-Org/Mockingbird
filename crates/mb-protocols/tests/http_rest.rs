@@ -444,3 +444,175 @@ async fn get_unknown_id_returns_path_id() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["id"], "abc");
 }
+
+const FORM_CONTRACT: &str = r#"{
+  "swagger": "2.0",
+  "info": {"title": "Pets", "version": "1"},
+  "paths": {
+    "/pets": {"post": {
+      "operationId": "addPet",
+      "consumes": ["application/x-www-form-urlencoded"],
+      "parameters": [
+        {"name": "name", "in": "formData", "type": "string", "required": true},
+        {"name": "age", "in": "formData", "type": "integer"}
+      ],
+      "responses": {"201": {"description": "Created", "schema": {
+        "type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}
+      }}}
+    }},
+    "/upload": {"post": {
+      "operationId": "upload",
+      "consumes": ["multipart/form-data"],
+      "parameters": [{"name": "file", "in": "formData", "type": "file", "required": true}],
+      "responses": {"204": {"description": "Stored"}}
+    }}
+  }
+}"#;
+
+fn post_form(uri: &str, content_type: &str, body: &str) -> Request<Body> {
+    Request::post(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn form_data_bodies_are_decoded() {
+    let h = offline_contract(FORM_CONTRACT);
+    let form = "application/x-www-form-urlencoded";
+    let resp = send(&h, post_form("/pets", form, "name=rex&age=3")).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(body_json(resp).await["name"], "rex");
+
+    let resp = send(&h, post_form("/pets", form, "name=rex&age=old")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = send(&h, post_form("/pets", form, "age=3")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let multipart = "--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nhello\r\n--XyZ--\r\n";
+    let resp = send(
+        &h,
+        post_form("/upload", "multipart/form-data; boundary=XyZ", multipart),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn cors_preflight_and_simple_requests() {
+    let h = offline();
+    let req = Request::options("/orders")
+        .header(header::ORIGIN, "http://localhost:3000")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "content-type,x-mockingbird-session",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&h, req).await;
+    assert!(
+        matches!(resp.status(), StatusCode::OK | StatusCode::NO_CONTENT),
+        "{}",
+        resp.status()
+    );
+    assert_eq!(header_str(&resp, "access-control-allow-origin"), "*");
+    assert!(resp.headers().contains_key("access-control-allow-methods"));
+    assert!(resp.headers().contains_key("access-control-allow-headers"));
+
+    let req = Request::get("/orders/o1")
+        .header(header::ORIGIN, "http://localhost:3000")
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&h, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header_str(&resp, "access-control-allow-origin"), "*");
+    let exposed = header_str(&resp, "access-control-expose-headers").to_ascii_lowercase();
+    assert!(exposed.contains("x-mockingbird-source"), "{exposed}");
+}
+
+const ONLY_404_CONTRACT: &str = r#"
+openapi: 3.0.3
+info: {title: T, version: "1"}
+paths:
+  /items/{id}:
+    get:
+      operationId: getItem
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/vnd.api+json:
+              schema: {type: object, properties: {id: {type: string}}}
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: {type: object, required: [gone], properties: {gone: {type: boolean}}}
+        "409":
+          description: Conflict
+          content:
+            application/problem+json:
+              schema: {type: object, required: [title], properties: {title: {type: string}}}
+  /notes:
+    post:
+      operationId: addNote
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {text: {type: string}}}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {type: object, properties: {text: {type: string}}}
+"#;
+
+#[tokio::test]
+async fn invalid_input_ignores_unrelated_4xx_variants() {
+    let h = offline_contract(ONLY_404_CONTRACT);
+    let resp = send(&h, get("/items/a?limit=abc")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
+    assert_eq!(body_json(resp).await["title"], "Invalid request");
+}
+
+#[tokio::test]
+async fn responses_use_declared_json_content_type() {
+    let h = offline_contract(ONLY_404_CONTRACT);
+    let resp = send(&h, get("/items/a")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/vnd.api+json"
+    );
+
+    let req = Request::get("/items/a")
+        .header("x-mockingbird-status", "409")
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&h, req).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
+}
+
+#[tokio::test]
+async fn optional_request_body_may_be_omitted() {
+    let h = offline_contract(ONLY_404_CONTRACT);
+    let req = Request::post("/notes").body(Body::empty()).unwrap();
+    assert_eq!(send(&h, req).await.status(), StatusCode::CREATED);
+    // A required body is still enforced.
+    let h = offline();
+    let req = Request::post("/orders").body(Body::empty()).unwrap();
+    assert_eq!(send(&h, req).await.status(), StatusCode::BAD_REQUEST);
+}

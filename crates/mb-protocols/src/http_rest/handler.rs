@@ -25,6 +25,8 @@ const DEFAULT_SESSION: &str = "default";
 const WORKSPACE: &str = "default";
 const MAX_LATENCY: Duration = Duration::from_secs(30);
 const LIST_CONTEXT_LIMIT: usize = 20;
+const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
 
 /// Headers never forwarded to the engine (they may carry credentials).
 const SENSITIVE_HEADERS: [&str; 6] = [
@@ -120,7 +122,7 @@ pub(crate) async fn handle(
             Map::new()
         }
     };
-    let body = match decode_body(op, &method, &raw_body) {
+    let body = match decode_body(op, &raw_body) {
         Ok(body) => body,
         Err(e) => {
             errors.push(e);
@@ -322,21 +324,34 @@ fn coerce(raw: &str, schema: Option<&Value>) -> Value {
     Value::String(raw.to_string())
 }
 
-/// A JSON body. It is required when the operation declares one and the
-/// method carries a payload.
-fn decode_body(op: &Operation, method: &Method, raw: &[u8]) -> Result<Option<Value>, String> {
-    let declared = op.input.body.is_some();
+/// The request body, decoded per the operation's body schema: JSON by
+/// default, `application/x-www-form-urlencoded` (Swagger 2 `formData`)
+/// coerced through the schema, and `multipart/form-data` passed through
+/// unvalidated as no body. A missing body is an error only when the
+/// contract marks it required.
+fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
+    let schema = op.input.body.as_ref();
+    let content_type = schema
+        .and_then(|s| s.get("x-content-type"))
+        .and_then(Value::as_str);
+    if content_type == Some(MULTIPART_CONTENT_TYPE) {
+        return Ok(None);
+    }
     if raw.iter().all(u8::is_ascii_whitespace) {
-        let required = declared && matches!(*method, Method::POST | Method::PUT | Method::PATCH);
-        return if required {
-            Err("body: a JSON request body is required".into())
+        return if op.input.body_required {
+            Err("body: a request body is required".into())
         } else {
             Ok(None)
         };
     }
+    if content_type == Some(FORM_CONTENT_TYPE) {
+        return serde_urlencoded::from_bytes::<Vec<(String, String)>>(raw)
+            .map(|pairs| Some(Value::Object(coerce_params(group(pairs), schema))))
+            .map_err(|e| format!("body: not valid form data: {e}"));
+    }
     match serde_json::from_slice(raw) {
         Ok(v) => Ok(Some(v)),
-        Err(e) if declared => Err(format!("body: not valid JSON: {e}")),
+        Err(e) if schema.is_some() => Err(format!("body: not valid JSON: {e}")),
         Err(_) => Ok(None),
     }
 }
@@ -354,10 +369,21 @@ fn check(
     }
 }
 
-/// The contract's 400/422 error shape if it declares one, else problem+json.
-/// Never calls the LLM.
+/// The contract's 400, 422 or `default` error shape if it declares one, else
+/// problem+json 400. Never calls the LLM.
 fn invalid_input(rt: &MockRuntime, op: &Operation, errors: &[String]) -> Response {
-    match op.error_output(&[400, 422]).filter(|v| v.schema.is_some()) {
+    let declared = [
+        StatusSelector::Code(400),
+        StatusSelector::Code(422),
+        StatusSelector::Default,
+    ]
+    .into_iter()
+    .find_map(|selector| {
+        op.outputs
+            .iter()
+            .find(|o| o.status == selector && o.schema.is_some())
+    });
+    match declared {
         Some(variant) => {
             let status = match variant.status {
                 StatusSelector::Code(c) => c,
@@ -598,9 +624,14 @@ fn respond(generated: GeneratedResponse) -> Response {
     *resp.status_mut() = status;
     let headers = resp.headers_mut();
     if generated.body.is_some() {
+        let declared = generated
+            .content_type
+            .as_deref()
+            .filter(|ct| is_json_media(ct))
+            .and_then(|ct| HeaderValue::from_str(ct).ok());
         headers.insert(
             header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
+            declared.unwrap_or_else(|| HeaderValue::from_static("application/json")),
         );
     }
     headers.insert(
@@ -608,6 +639,17 @@ fn respond(generated: GeneratedResponse) -> Response {
         HeaderValue::from_static(generated.source.as_str()),
     );
     resp
+}
+
+/// `application/json` or any `+json` media type (parameters allowed).
+fn is_json_media(ct: &str) -> bool {
+    let base = ct
+        .split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase();
+    base == "application/json" || base.ends_with("+json")
 }
 
 #[cfg(test)]
