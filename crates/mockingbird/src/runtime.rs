@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
+use arc_swap::ArcSwapOption;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec};
 use mb_ext::{Extensions, Tenancy};
 use mb_llm::{FallbackProvider, OpenAiCompatible, OpenAiConfig, Provider};
@@ -25,8 +26,37 @@ pub struct RuntimeDeps {
     pub recorder: Option<Arc<dyn RequestRecorder>>,
     /// Faker only: no LLM provider is built.
     pub offline: bool,
-    /// Profile for mocks that name none.
-    pub default_profile: Option<String>,
+    /// Profile for mocks that name none. Shared with the config watcher,
+    /// which swaps it when a reload changes `llm.default_profile`.
+    pub default_profile: DefaultProfile,
+}
+
+/// The profile used by mocks that name none: a shared, swappable cell, so
+/// a config reload can change it for every holder at once.
+#[derive(Clone, Default)]
+pub struct DefaultProfile(Arc<ArcSwapOption<String>>);
+
+impl DefaultProfile {
+    pub fn new(name: Option<String>) -> Self {
+        Self(Arc::new(ArcSwapOption::from(name.map(Arc::new))))
+    }
+
+    /// The current default profile name.
+    pub fn get(&self) -> Option<String> {
+        self.0.load().as_deref().cloned()
+    }
+
+    /// Replaces the default profile; returns whether it changed.
+    pub fn set(&self, name: Option<String>) -> bool {
+        let previous = self.0.swap(name.clone().map(Arc::new));
+        previous.as_deref() != name.as_ref()
+    }
+}
+
+impl From<Option<String>> for DefaultProfile {
+    fn from(name: Option<String>) -> Self {
+        Self::new(name)
+    }
 }
 
 /// The runtime serving `mock`'s active contract, or `None` when it has none.
@@ -122,10 +152,8 @@ fn profile_name(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<String
         tenant: "default".into(),
         workspace: mock.workspace.clone(),
     };
-    let configured = mock
-        .llm_profile
-        .as_deref()
-        .or(deps.default_profile.as_deref());
+    let default_profile = deps.default_profile.get();
+    let configured = mock.llm_profile.as_deref().or(default_profile.as_deref());
     deps.ext
         .providers
         .choose(&tenancy, &mock.name, configured)

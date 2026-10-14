@@ -2,7 +2,9 @@
 //! the file or one of its contracts changes.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,6 +23,13 @@ pub const DEBOUNCE: Duration = Duration::from_millis(500);
 /// Prepares a freshly loaded config before it is reconciled (e.g. applies
 /// environment variables and flags).
 pub type Prepare = Arc<dyn Fn(&mut FileConfig) -> anyhow::Result<()> + Send + Sync>;
+
+/// Runs after a reload has been reconciled into the store, with the config
+/// that was applied, to update the settings kept outside the store (the
+/// default LLM profile, request-log settings). Reloads are serialised: the
+/// next one waits for the returned future.
+pub type Applied =
+    Arc<dyn Fn(FileConfig) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Keeps the watch running; dropping it stops watching.
 pub struct WatchGuard {
@@ -93,6 +102,16 @@ pub fn spawn_with(
     store: Arc<dyn ControlStore>,
     prepare: Prepare,
 ) -> anyhow::Result<WatchGuard> {
+    spawn_with_hook(config_path, store, prepare, None)
+}
+
+/// [`spawn_with`] that also runs `applied` after each successful reload.
+pub fn spawn_with_hook(
+    config_path: PathBuf,
+    store: Arc<dyn ControlStore>,
+    prepare: Prepare,
+    applied: Option<Applied>,
+) -> anyhow::Result<WatchGuard> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     let debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
         match result {
@@ -148,6 +167,9 @@ pub fn spawn_with(
                                 tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
                             }
                         }
+                    }
+                    if let Some(applied) = &applied {
+                        applied(cfg).await;
                     }
                     if report.is_empty() {
                         tracing::debug!(config = %config_path.display(), "config reloaded; no changes");

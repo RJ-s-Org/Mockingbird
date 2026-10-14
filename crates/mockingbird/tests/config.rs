@@ -736,3 +736,134 @@ async fn zero_config_matches_p1_behaviour() {
         assert_eq!(r.status(), 200, "{p}");
     }
 }
+
+const RENAMED_DEFAULT: &str = r#"
+llm:
+  default_profile: deepseek
+  profiles:
+    deepseek:
+      base_url: http://127.0.0.1:1
+      model: m
+mocks:
+  orders:
+    contract: orders.yaml
+"#;
+
+/// A reload that renames the default profile (deleting the old one) keeps
+/// the mocks that name no profile mounted: they follow the new default.
+#[tokio::test]
+async fn watch_reload_changes_default_profile() {
+    let ws = Workspace::new();
+    ws.write(RENAMED_DEFAULT);
+    // Online: offline mode would never load the profile.
+    let app = start(ServeArgs {
+        offline: false,
+        ..config_args(&ws, true)
+    })
+    .await;
+    let mounted = |app: &Running| -> Vec<String> {
+        app._app
+            .registry
+            .mounted()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
+    assert_eq!(mounted(&app), ["orders"]);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ws.write(&RENAMED_DEFAULT.replace("deepseek", "ds"));
+
+    let http = reqwest::Client::new();
+    let admin = &app.admin;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let old = http
+            .get(format!("{admin}/api/v1/llm-profiles/deepseek"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        let new = http
+            .get(format!("{admin}/api/v1/llm-profiles/ds"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        if old == 404 && new == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not reloaded: {old} {new}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Let the registry apply the profile changes.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(mounted(&app), ["orders"]);
+    let r = reqwest::get(format!("{}/orders/orders", app.data))
+        .await
+        .unwrap();
+    assert_ne!(r.status(), 404);
+}
+
+const REDACT_ALPHA: &str = r#"
+observability:
+  redact_fields: [alpha]
+mocks:
+  orders:
+    contract: orders.yaml
+"#;
+
+/// The newest request-log entry's request body after one POST.
+async fn post_and_log(app: &Running) -> Value {
+    let http = reqwest::Client::new();
+    let marker = uuid::Uuid::new_v4().to_string();
+    http.post(format!("{}/orders/orders", app.data))
+        .json(&json!({"alpha": "a", "beta": "b", "marker": marker}))
+        .send()
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let r = http
+            .get(format!("{}/api/v1/mocks/orders/requests", app.admin))
+            .send()
+            .await
+            .unwrap();
+        let entries: Vec<Value> = r.json().await.unwrap();
+        if let Some(e) = entries
+            .iter()
+            .find(|e| e["request"]["body"]["marker"] == marker.as_str())
+        {
+            return e["request"]["body"].clone();
+        }
+        assert!(Instant::now() < deadline, "no request log entry");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn watch_reload_changes_redact_fields() {
+    let ws = Workspace::new();
+    ws.write(REDACT_ALPHA);
+    let app = start(config_args(&ws, true)).await;
+    let body = post_and_log(&app).await;
+    assert_eq!(body["alpha"], "[redacted]");
+    assert_eq!(body["beta"], "b");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ws.write(&REDACT_ALPHA.replace("[alpha]", "[beta]"));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let body = post_and_log(&app).await;
+        if body["beta"] == "[redacted]" {
+            assert_eq!(body["alpha"], "a");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "redact_fields not reloaded: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

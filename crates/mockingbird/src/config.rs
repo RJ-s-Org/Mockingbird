@@ -15,7 +15,7 @@ use crate::file_config::{self, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMoc
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
 use crate::registry::MockRegistry;
-use crate::runtime::RuntimeDeps;
+use crate::runtime::{DefaultProfile, RuntimeDeps};
 use crate::watch::{self, WatchGuard};
 use crate::{reconcile, telemetry};
 
@@ -286,13 +286,13 @@ pub async fn build_app_with(
         store: store.clone(),
         state: state.clone(),
         ext: ext.clone(),
-        recorder: Some(recorder),
+        recorder: Some(recorder.clone()),
         offline: args.offline,
-        default_profile: cfg.llm.default_profile.clone(),
+        default_profile: DefaultProfile::new(cfg.llm.default_profile.clone()),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await?;
-    registry.spawn_watcher(deps);
+    registry.spawn_watcher(deps.clone());
     for (name, prefix) in registry.mounted() {
         tracing::info!(
             "serving {name} at http://{}:{}{prefix}",
@@ -331,7 +331,13 @@ pub async fn build_app_with(
                 apply_flags(cfg, &flags);
                 Ok(())
             });
-            Some(watch::spawn_with(path.clone(), store.clone(), prepare)?)
+            let applied = applied_hook(registry.clone(), deps, recorder);
+            Some(watch::spawn_with_hook(
+                path.clone(),
+                store.clone(),
+                prepare,
+                Some(applied),
+            )?)
         }
         _ => None,
     };
@@ -342,6 +348,36 @@ pub async fn build_app_with(
         registry,
         config: cfg,
         watch,
+    })
+}
+
+/// Applies the settings a reload changed that live outside the store: the
+/// request-log settings, and the default LLM profile, rebuilding every mock
+/// when it changed (mocks naming no profile resolve it at build time).
+fn applied_hook(
+    registry: Arc<MockRegistry>,
+    deps: RuntimeDeps,
+    recorder: Arc<StoreRecorder>,
+) -> watch::Applied {
+    Arc::new(move |cfg: FileConfig| {
+        let registry = registry.clone();
+        let deps = deps.clone();
+        let recorder = recorder.clone();
+        Box::pin(async move {
+            recorder.set_settings(
+                cfg.observability.request_log_retention,
+                cfg.observability.redact_fields,
+            );
+            if deps.default_profile.set(cfg.llm.default_profile) {
+                tracing::info!(
+                    default_profile = ?deps.default_profile.get(),
+                    "default LLM profile changed; rebuilding mocks"
+                );
+                if let Err(error) = registry.reload_all(&deps).await {
+                    tracing::error!(error = %format!("{error:#}"), "cannot reload mocks");
+                }
+            }
+        })
     })
 }
 

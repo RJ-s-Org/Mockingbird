@@ -256,7 +256,7 @@ fn deps(
         ext: Extensions::default(),
         recorder,
         offline: true,
-        default_profile: None,
+        default_profile: None.into(),
     }
 }
 

@@ -58,7 +58,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         ext: Extensions::default(),
         recorder: None,
         offline: true,
-        default_profile: None,
+        default_profile: None.into(),
     }
 }
 

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use arc_swap::ArcSwap;
 use chrono::Utc;
 use mb_protocols::{RequestRecord, RequestRecorder};
 use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, NewRequestLogEntry};
@@ -27,6 +28,7 @@ pub const REDACTED: &str = "[redacted]";
 /// waits on the store.
 pub struct StoreRecorder {
     queue: mpsc::Sender<RequestRecord>,
+    settings: Arc<ArcSwap<Settings>>,
     live: broadcast::Sender<RequestRecord>,
     dropped: AtomicU64,
 }
@@ -44,20 +46,33 @@ impl StoreRecorder {
     ) -> Arc<Self> {
         let (queue, rx) = mpsc::channel(QUEUE_CAPACITY);
         let (live, _) = broadcast::channel(LIVE_CAPACITY);
+        let settings = Arc::new(ArcSwap::from_pointee(Settings {
+            retention,
+            redact_fields,
+        }));
         let writer = Writer {
             changes: store.subscribe(),
             store,
             ids: HashMap::new(),
-            retention,
-            redact_fields,
+            settings: Arc::clone(&settings),
             live: live.clone(),
         };
         tokio::spawn(writer.run(rx));
         Arc::new(Self {
             queue,
+            settings,
             live,
             dropped: AtomicU64::new(0),
         })
+    }
+
+    /// Replaces the retention and the redacted fields; records written from
+    /// now on use the new values.
+    pub fn set_settings(&self, retention: u32, redact_fields: Vec<String>) {
+        self.settings.store(Arc::new(Settings {
+            retention,
+            redact_fields,
+        }));
     }
 
     /// Redacted records as they are written.
@@ -83,6 +98,12 @@ impl RequestRecorder for StoreRecorder {
     }
 }
 
+/// Request-log settings that a config reload may change.
+struct Settings {
+    retention: u32,
+    redact_fields: Vec<String>,
+}
+
 /// The background half of a [`StoreRecorder`].
 struct Writer {
     store: Arc<dyn ControlStore>,
@@ -90,8 +111,7 @@ struct Writer {
     /// Mock name → id. An entry is evicted when the mock changes, so a mock
     /// deleted and recreated under the same name is looked up afresh.
     ids: HashMap<String, Uuid>,
-    retention: u32,
-    redact_fields: Vec<String>,
+    settings: Arc<ArcSwap<Settings>>,
     live: broadcast::Sender<RequestRecord>,
 }
 
@@ -118,9 +138,10 @@ impl Writer {
     }
 
     async fn write(&mut self, mut r: RequestRecord) {
-        redact(&mut r.request, &self.redact_fields);
+        let settings = self.settings.load_full();
+        redact(&mut r.request, &settings.redact_fields);
         if let Some(response) = &mut r.response {
-            redact(response, &self.redact_fields);
+            redact(response, &settings.redact_fields);
         }
         // No receivers is not an error: nobody is tailing.
         let _ = self.live.send(r.clone());
@@ -143,7 +164,11 @@ impl Writer {
             response: r.response,
             at: Utc::now(),
         };
-        if let Err(error) = self.store.append_request_log(entry, self.retention).await {
+        if let Err(error) = self
+            .store
+            .append_request_log(entry, settings.retention)
+            .await
+        {
             // The cached id may belong to a mock deleted since.
             self.ids.remove(&r.mock);
             tracing::warn!(mock = %r.mock, %error, "cannot write request log entry");
