@@ -39,6 +39,8 @@ llm:
 
 observability:
   request_log_retention: 1000   # entries kept per mock
+  # A key is redacted when, lowercased and without _ - . , it contains one of
+  # these: token also hides access_token, refresh_token (and tokenizer_version).
   redact_fields: [password, token, secret, authorization, apiKey, api_key]
 
 mocks:

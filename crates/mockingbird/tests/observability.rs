@@ -475,6 +475,62 @@ fn redact_matches_keys_case_insensitively_everywhere() {
     );
 }
 
+/// A key is redacted when, normalized (lowercased, `_` `-` `.` removed),
+/// it contains a normalized redact field.
+#[test]
+fn redact_matches_keys_containing_a_field() {
+    let fields: Vec<String> = ["password", "token", "secret", "apiKey"]
+        .map(String::from)
+        .to_vec();
+    let mut v = json!({
+        "access_token": "a",
+        "refresh_token": "r",
+        "client_secret": "c",
+        "new_password": "n",
+        "x-api-key": "k",
+        "API.KEY": "k2",
+        "tokenizer_version": "v",
+        "total": 3,
+        "nested": [{"Access-Token": "t", "total": 4}]
+    });
+    mockingbird::recorder::redact(&mut v, &fields);
+    assert_eq!(
+        v,
+        json!({
+            "access_token": "[redacted]",
+            "refresh_token": "[redacted]",
+            "client_secret": "[redacted]",
+            "new_password": "[redacted]",
+            "x-api-key": "[redacted]",
+            "API.KEY": "[redacted]",
+            "tokenizer_version": "[redacted]",
+            "total": 3,
+            "nested": [{"Access-Token": "[redacted]", "total": 4}]
+        })
+    );
+}
+
+/// Form-body and query keys containing a redact field are redacted too.
+#[tokio::test]
+async fn request_log_redacts_compound_form_and_query_keys() {
+    let (store, mock, base) = recorded_orders().await;
+    reqwest::Client::new()
+        .post(format!("{base}/orders/orders?access_token=q1&total=5"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("customerId=c1&new_password=hunter2&refresh_token=r1")
+        .send()
+        .await
+        .unwrap();
+    let entry = newest_entry(&store, &mock).await;
+    let body = &entry.request["body"];
+    assert_eq!(body["new_password"], "[redacted]", "{body}");
+    assert_eq!(body["refresh_token"], "[redacted]", "{body}");
+    assert_eq!(body["customerId"], "c1", "{body}");
+    let query = &entry.request["query"];
+    assert_eq!(query["access_token"], "[redacted]", "{query}");
+    assert_eq!(query["total"], "5", "{query}");
+}
+
 #[tokio::test]
 async fn recorder_drops_when_full_without_blocking() {
     let stub = stub_store().await;

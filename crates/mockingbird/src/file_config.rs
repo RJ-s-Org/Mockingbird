@@ -175,7 +175,9 @@ impl FileProfile {
 pub struct ObservabilityConfig {
     /// Request-log entries kept per mock.
     pub request_log_retention: u32,
-    /// JSON keys (any depth, case-insensitive) whose values are redacted.
+    /// Redacted keys: a recorded JSON, form or query key (any depth) is
+    /// redacted when, lowercased and without `_`, `-` and `.`, it contains
+    /// one of these normalized the same way (`token` matches `access_token`).
     pub redact_fields: Vec<String>,
 }
 

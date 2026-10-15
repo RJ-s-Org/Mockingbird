@@ -270,23 +270,45 @@ pub fn truncate_body(body: &mut Value) {
 }
 
 /// Replaces with `"[redacted]"` the value of every object key, at any depth
-/// (arrays included), that equals one of `fields` ignoring ASCII case.
+/// (arrays included), that contains one of `fields` once both are
+/// normalized (ASCII-lowercased, with `_`, `-` and `.` removed). So `token`
+/// redacts `access_token` and `Refresh-Token`, and `apiKey` redacts
+/// `api_key` and `x-api-key`; it also redacts `tokenizer_version`, erring
+/// on the side of hiding a value.
 pub fn redact(value: &mut Value, fields: &[String]) {
+    let fields: Vec<String> = fields
+        .iter()
+        .map(|f| normalize_key(f))
+        .filter(|f| !f.is_empty())
+        .collect();
+    redact_normalized(value, &fields);
+}
+
+fn redact_normalized(value: &mut Value, fields: &[String]) {
     match value {
         Value::Object(map) => {
             for (key, v) in map.iter_mut() {
-                if fields.iter().any(|f| f.eq_ignore_ascii_case(key)) {
+                let key = normalize_key(key);
+                if fields.iter().any(|f| key.contains(f.as_str())) {
                     *v = Value::String(REDACTED.to_string());
                 } else {
-                    redact(v, fields);
+                    redact_normalized(v, fields);
                 }
             }
         }
         Value::Array(items) => {
             for v in items {
-                redact(v, fields);
+                redact_normalized(v, fields);
             }
         }
         _ => {}
     }
+}
+
+/// `key` ASCII-lowercased without `_`, `-` and `.`.
+fn normalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| !matches!(c, '_' | '-' | '.'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
