@@ -760,17 +760,42 @@ fn reference_prefix(field: &str) -> Option<&str> {
 /// State-store access for one call. The first failing call marks the mock
 /// degraded and makes the rest of the call stateless; a successful call
 /// clears the mark. While degraded, [`crate::StateHealth`] lets one call per
-/// retry interval try the store; the rest skip it entirely.
+/// retry interval try the store; the rest skip it entirely. The breaker is
+/// consulted lazily, on the first actual store call, so a call that never
+/// touches the store does not use up the retry.
 struct StateAccess<'a> {
     rt: &'a MockRuntime,
-    failed: bool,
+    gate: Gate,
+}
+
+/// Whether this call may use the store.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// No store call yet; the breaker has not been asked.
+    Unasked,
+    Open,
+    /// Held off by the breaker, or a store call failed.
+    Closed,
 }
 
 impl<'a> StateAccess<'a> {
-    /// A call skips the store while the breaker holds it off.
     fn new(rt: &'a MockRuntime) -> Self {
-        let failed = !rt.state_health.try_acquire();
-        Self { rt, failed }
+        Self {
+            rt,
+            gate: Gate::Unasked,
+        }
+    }
+
+    /// Whether the next store call may run, asking the breaker on first use.
+    fn open(&mut self) -> bool {
+        if self.gate == Gate::Unasked {
+            self.gate = if self.rt.state_health.try_acquire() {
+                Gate::Open
+            } else {
+                Gate::Closed
+            };
+        }
+        self.gate == Gate::Open
     }
 
     /// `None` when the store is unavailable for this call.
@@ -785,14 +810,14 @@ impl<'a> StateAccess<'a> {
                 self.rt.state_health.record_failure();
                 metrics::counter!("mb_state_errors_total", "mock" => self.rt.name.clone())
                     .increment(1);
-                self.failed = true;
+                self.gate = Gate::Closed;
                 None
             }
         }
     }
 
     async fn get(&mut self, s: &SessionKey, t: &str, id: &str) -> Option<StoredResource> {
-        if self.failed {
+        if !self.open() {
             return None;
         }
         let r = self.rt.state.get(s, t, id).await;
@@ -800,7 +825,7 @@ impl<'a> StateAccess<'a> {
     }
 
     async fn list(&mut self, s: &SessionKey, t: &str, limit: usize) -> Vec<StoredResource> {
-        if self.failed {
+        if !self.open() {
             return Vec::new();
         }
         let r = self.rt.state.list(s, t, limit).await;
@@ -808,14 +833,14 @@ impl<'a> StateAccess<'a> {
     }
 
     async fn upsert(&mut self, s: &SessionKey, r: StoredResource) {
-        if !self.failed {
+        if self.open() {
             let r = self.rt.state.upsert(s, r).await;
             self.settle(r);
         }
     }
 
     async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) {
-        if !self.failed {
+        if self.open() {
             let r = self.rt.state.delete(s, t, id).await;
             self.settle(r);
         }

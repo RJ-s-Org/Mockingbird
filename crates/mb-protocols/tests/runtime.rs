@@ -424,6 +424,51 @@ async fn degraded_state_is_retried_once_per_interval() {
     assert!(rt.state_health.is_degraded());
 }
 
+/// A degraded mock's probe goes to the first call that actually uses the
+/// store: a stateless call in the same interval does not consume it.
+#[tokio::test]
+async fn stateless_calls_do_not_consume_the_state_probe() {
+    let store = Arc::new(FlakyStore {
+        inner: MemoryStore::new(Duration::from_secs(3600)),
+        failing: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+    });
+    // listOrders made stateless: no resource type, so nothing to list.
+    let mut bundle = (*orders()).clone();
+    for op in &mut bundle.operations {
+        if op.id == "listOrders" {
+            op.resource_type = None;
+        }
+    }
+    let mut rt = MockRuntime::new(
+        "orders",
+        Arc::new(bundle),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        store.clone() as Arc<dyn StateStore>,
+    );
+    rt.state_health = Arc::new(StateHealth::new(Duration::from_millis(100)));
+    let rt = Arc::new(rt);
+    let router = http_rest::router(Arc::clone(&rt));
+
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(rt.state_health.is_degraded());
+    assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+    store.failing.store(false, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // A stateless call: nothing to read or write.
+    let resp = send(&router, get_with("/orders", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+
+    // The stateful call in the same interval gets the probe.
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(store.calls.load(Ordering::SeqCst) >= 2);
+    assert!(!rt.state_health.is_degraded());
+}
+
 #[derive(Default)]
 struct Collect {
     records: Mutex<Vec<RequestRecord>>,
