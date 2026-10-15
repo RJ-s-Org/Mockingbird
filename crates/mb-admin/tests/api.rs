@@ -8,12 +8,15 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use mb_admin::{AdminState, DEFAULT_API_SECRET_REFS, router};
-use mb_state::{MemoryStore, StateStore};
+use mb_state::{
+    MemoryStore, SessionInfo, SessionKey, StateChanged, StateError, StateStore, StoredResource,
+};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
     NewRequestLogEntry, ResourceSource, Scenario, ScenarioRules,
 };
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 use tower::ServiceExt;
 
 struct Harness {
@@ -60,8 +63,13 @@ async fn harness() -> Harness {
 
 /// A harness whose API accepts the secret refs matching `api_secret_refs`.
 async fn harness_with(api_secret_refs: Vec<String>) -> Harness {
-    let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    harness_full(api_secret_refs, state).await
+}
+
+/// A harness over the given state store.
+async fn harness_full(api_secret_refs: Vec<String>, state: Arc<dyn StateStore>) -> Harness {
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let app = router(AdminState {
         store: store.clone(),
         state,
@@ -960,6 +968,79 @@ async fn deleting_a_mock_resets_its_state() {
         h.get("/api/v1/mocks/shop/sessions/alice").await.json(),
         json!([])
     );
+}
+
+/// A memory state store whose `reset_mock` fails.
+struct ResetFails(MemoryStore);
+
+#[async_trait::async_trait]
+impl StateStore for ResetFails {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, StateError> {
+        self.0.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.0.list(s, t, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+        self.0.upsert(s, r).await
+    }
+    async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
+        self.0.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.0.reset(s).await
+    }
+    async fn reset_mock(&self, _: &str, _: &str) -> Result<(), StateError> {
+        Err(StateError::Backend("state backend down".into()))
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.0.touch(s).await
+    }
+    async fn sessions(&self, w: &str, m: &str) -> Result<Vec<SessionInfo>, StateError> {
+        self.0.sessions(w, m).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+        self.0.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, r: Vec<StoredResource>) -> Result<(), StateError> {
+        self.0.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), StateError> {
+        self.0.ping().await
+    }
+    fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
+        self.0.subscribe()
+    }
+}
+
+/// A failed state reset leaves the mock in place, so the DELETE can be
+/// retried.
+#[tokio::test]
+async fn failed_state_reset_keeps_the_mock() {
+    let state: Arc<dyn StateStore> =
+        Arc::new(ResetFails(MemoryStore::new(Duration::from_secs(3600))));
+    let refs = DEFAULT_API_SECRET_REFS
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+    let h = harness_full(refs, state).await;
+    h.create_mock("shop").await;
+
+    h.delete("/api/v1/mocks/shop")
+        .await
+        .assert_problem(StatusCode::SERVICE_UNAVAILABLE);
+    let r = h.get("/api/v1/mocks/shop").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
 }
 
 #[tokio::test]

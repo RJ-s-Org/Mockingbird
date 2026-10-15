@@ -96,16 +96,17 @@ pub async fn reconcile(
 
     for (name, mock) in &existing_mocks {
         if mock.source == ResourceSource::File && !cfg.mocks.contains_key(name) {
-            store
-                .delete_mock(ws, name)
-                .await
-                .with_context(|| format!("deleting mock {name:?}"))?;
-            // Its sessions go too, so a new mock of the same name starts empty.
+            // Its sessions go first, so a new mock of the same name starts
+            // empty and a failed reset leaves the mock for the next reload.
             state
                 .reset_mock(ws, name)
                 .await
                 .map_err(|e| anyhow!("{e}"))
-                .with_context(|| format!("resetting the state of deleted mock {name:?}"))?;
+                .with_context(|| format!("resetting the state of mock {name:?}"))?;
+            store
+                .delete_mock(ws, name)
+                .await
+                .with_context(|| format!("deleting mock {name:?}"))?;
             report.deleted.push(name.clone());
         }
     }
