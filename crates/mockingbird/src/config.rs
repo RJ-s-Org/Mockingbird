@@ -144,7 +144,7 @@ impl App {
 /// The zero-config [`FileConfig`] for `serve a.yaml [b.yaml]`: SQLite in
 /// memory; one mock per contract named after its file stem (lowercased,
 /// other invalid characters replaced by `-`), at `/` for a single contract
-/// or `/<stem>` for several; and, unless `--offline`, a default profile
+/// or `/<mock name>` for several; and, unless `--offline`, a default profile
 /// from `llm` whose key is the reference `env:MB_LLM_API_KEY`.
 pub fn zero_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<FileConfig> {
     let mut cfg = FileConfig::default();
@@ -157,7 +157,7 @@ pub fn zero_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<Fil
                 .with_context(|| format!("cannot resolve {}", path.display()))?,
         );
         mock.route_prefix = Some(if multi {
-            format!("/{stem}")
+            format!("/{name}")
         } else {
             "/".to_string()
         });

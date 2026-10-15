@@ -778,6 +778,30 @@ async fn zero_config_matches_p1_behaviour() {
     }
 }
 
+/// Several zero-config contracts are mounted at `/<mock name>`, the
+/// sanitized stem, so a file name with a space still serves (as in P1).
+#[tokio::test]
+async fn zero_config_prefixes_use_sanitized_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let pet = dir.path().join("pet store.yaml");
+    let orders = dir.path().join("orders.yaml");
+    std::fs::copy(fixture(), &pet).unwrap();
+    std::fs::copy(fixture(), &orders).unwrap();
+    let app = start(ServeArgs {
+        offline: true,
+        contracts: vec![pet, orders],
+        ..ServeArgs::default()
+    })
+    .await;
+
+    for prefix in ["/pet-store", "/orders"] {
+        let r = reqwest::get(format!("{}{prefix}/orders", app.data))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{prefix}");
+    }
+}
+
 const RENAMED_DEFAULT: &str = r#"
 llm:
   default_profile: deepseek
