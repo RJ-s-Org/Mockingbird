@@ -113,6 +113,26 @@ async fn invalid_session_header_400() {
     }
 }
 
+/// An empty (or blank) session header means the default session, as in P1.
+#[tokio::test]
+async fn empty_session_header_is_default_session() {
+    let collect = Arc::new(Collect::default());
+    let mut rt = offline();
+    rt.recorder = Some(collect.clone());
+    let router = http_rest::router(Arc::new(rt));
+    for blank in ["", "  "] {
+        let resp = send(
+            &router,
+            get_with("/orders/o1", &[("x-mockingbird-session", blank)]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "session {blank:?}");
+    }
+    let records = collect.records.lock().unwrap().clone();
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|r| r.session == "default"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn scenario_header_applies_instructions_status_latency_and_set() {
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(order("o1").to_string())]));

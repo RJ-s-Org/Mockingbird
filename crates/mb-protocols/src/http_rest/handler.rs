@@ -666,7 +666,8 @@ impl Overrides {
         if !enabled {
             return Ok(out);
         }
-        if let Some(s) = header_text(headers, SESSION_HEADER)? {
+        // An empty value means the default session.
+        if let Some(s) = header_text(headers, SESSION_HEADER)?.filter(|s| !s.is_empty()) {
             if !is_session_id(s) {
                 return Err(format!(
                     "X-Mockingbird-Session must be 1-{MAX_SESSION_LEN} characters of \
@@ -695,7 +696,8 @@ impl Overrides {
     }
 }
 
-/// 1-128 characters of `[A-Za-z0-9._-]`.
+/// 1-128 characters of `[A-Za-z0-9._-]`. (An empty header is the default
+/// session and never reaches this check.)
 fn is_session_id(s: &str) -> bool {
     (1..=MAX_SESSION_LEN).contains(&s.len())
         && s.bytes()
