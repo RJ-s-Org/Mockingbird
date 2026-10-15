@@ -102,7 +102,13 @@ struct CallLog {
     source: Option<&'static str>,
     prompt_tokens: u32,
     completion_tokens: u32,
+    /// The response body, kept only when `record` is set.
     response: Option<Value>,
+    /// The request body as decoded as JSON by `serve`, kept only when
+    /// `record` is set, so the record need not parse it again.
+    request_body: Option<Value>,
+    /// Whether a recorder will receive this call's record.
+    record: bool,
     /// Injected latency, slept after the call is recorded.
     delay: Option<Duration>,
     /// The body media type the matched operation declares (`x-content-type`).
@@ -110,7 +116,7 @@ struct CallLog {
 }
 
 impl CallLog {
-    fn new() -> Self {
+    fn new(record: bool) -> Self {
         Self {
             operation_id: None,
             session: DEFAULT_SESSION.into(),
@@ -120,6 +126,8 @@ impl CallLog {
             prompt_tokens: 0,
             completion_tokens: 0,
             response: None,
+            request_body: None,
+            record,
             delay: None,
             declared_body_type: None,
         }
@@ -129,7 +137,9 @@ impl CallLog {
     fn problem(&mut self, status: u16, title: &str, detail: impl Into<String>) -> Response {
         let (code, body) = problem_body(status, title, detail.into());
         let resp = render(code, &body);
-        self.response = Some(body);
+        if self.record {
+            self.response = Some(body);
+        }
         resp
     }
 
@@ -138,8 +148,11 @@ impl CallLog {
         self.source = Some(generated.source.as_str());
         self.prompt_tokens = generated.usage.prompt_tokens;
         self.completion_tokens = generated.usage.completion_tokens;
-        self.response = generated.body.clone();
-        respond(generated)
+        let resp = respond(&generated);
+        if self.record {
+            self.response = generated.body;
+        }
+        resp
     }
 
     fn rejected(&mut self, r: Rejection) -> Response {
@@ -175,7 +188,7 @@ pub(crate) async fn handle(
         source = Empty,
     );
     let started = Instant::now();
-    let mut log = CallLog::new();
+    let mut log = CallLog::new(rt.recorder.is_some());
     let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
         .instrument(span.clone())
         .await;
@@ -184,13 +197,12 @@ pub(crate) async fn handle(
     if let Some(source) = log.source {
         span.record("source", source);
     }
-    let latency = started.elapsed() + log.delay.unwrap_or_default();
-    report(
-        rt, &method, &uri, &headers, &raw_body, &log, status, latency,
-    )
-    .instrument(span.clone())
-    .await;
-    if let Some(delay) = log.delay {
+    let delay = log.delay;
+    let latency = started.elapsed() + delay.unwrap_or_default();
+    report(rt, &method, &uri, &headers, &raw_body, log, status, latency)
+        .instrument(span.clone())
+        .await;
+    if let Some(delay) = delay {
         tokio::time::sleep(delay).instrument(span).await;
     }
     resp
@@ -374,11 +386,26 @@ async fn serve(
         && let Some(t) = resource_type
     {
         write_state(
-            &mut state, &session, op, t, target_id, &generated, call.body,
+            &mut state,
+            &session,
+            op,
+            t,
+            target_id,
+            &generated,
+            call.body.as_ref(),
         )
         .await;
     }
     state.touch(&session).await;
+    // Kept for the record only when `serve` decoded it as JSON.
+    if log.record
+        && !matches!(
+            log.declared_body_type.as_deref(),
+            Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)
+        )
+    {
+        log.request_body = call.body;
+    }
 
     // 8. Respond (the handler sleeps `delay` after recording).
     log.delay = delay;
@@ -393,7 +420,7 @@ async fn report(
     uri: &Uri,
     headers: &HeaderMap,
     raw_body: &[u8],
-    log: &CallLog,
+    log: CallLog,
     status: u16,
     latency: Duration,
 ) {
@@ -424,10 +451,11 @@ async fn report(
         });
     }
     if let Some(recorder) = &rt.recorder {
+        let media = media_type(headers).or(log.declared_body_type);
         recorder.record(RequestRecord {
             mock: rt.name.clone(),
-            operation_id: log.operation_id.clone(),
-            session: log.session.clone(),
+            operation_id: log.operation_id,
+            session: log.session,
             method: method.as_str().to_string(),
             path: uri.path().to_string(),
             status,
@@ -438,13 +466,10 @@ async fn report(
             request: json!({
                 "query": recorded_query(uri),
                 "headers": recorded_headers(headers),
-                "body": recorded_body(
-                    raw_body,
-                    media_type(headers).or(log.declared_body_type.clone()).as_deref(),
-                ),
+                "body": request_body_record(raw_body, media.as_deref(), log.request_body),
             }),
             request_body_bytes: Some(raw_body.len()),
-            response: log.response.clone(),
+            response: log.response,
         });
     }
 }
@@ -913,9 +938,9 @@ async fn write_state(
     resource_type: &str,
     target_id: Option<String>,
     generated: &GeneratedResponse,
-    request_body: Option<Value>,
+    request_body: Option<&Value>,
 ) {
-    let data = generated.body.clone().or(request_body);
+    let data = generated.body.clone().or_else(|| request_body.cloned());
     match op.kind {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
@@ -1045,7 +1070,19 @@ fn recorded_body(raw: &[u8], media_type: Option<&str>) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(raw).into_owned()))
 }
 
-fn respond(generated: GeneratedResponse) -> Response {
+/// The request body for the record: the JSON `serve` already decoded
+/// (`decoded`) unless the media type calls for form or multipart handling,
+/// else [`recorded_body`] of the raw bytes.
+fn request_body_record(raw: &[u8], media_type: Option<&str>, decoded: Option<Value>) -> Value {
+    match decoded {
+        Some(body) if !matches!(media_type, Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)) => {
+            body
+        }
+        _ => recorded_body(raw, media_type),
+    }
+}
+
+fn respond(generated: &GeneratedResponse) -> Response {
     let Ok(status) = StatusCode::from_u16(generated.status) else {
         return problem(
             500,
@@ -1118,6 +1155,55 @@ mod tests {
         assert_eq!(
             out,
             json!({"n": 3, "x": 1.5, "b": true, "s": "7", "tags": [1, 2], "free": "b"})
+        );
+    }
+
+    fn generated() -> GeneratedResponse {
+        GeneratedResponse {
+            status: 200,
+            content_type: None,
+            body: Some(json!({"id": "o1"})),
+            source: mb_engine::Source::Fallback,
+            usage: Default::default(),
+        }
+    }
+
+    /// Without a recorder the response body is not kept for the record.
+    #[test]
+    fn call_log_keeps_bodies_only_for_a_recorder() {
+        let mut log = CallLog::new(false);
+        let resp = log.generated(generated());
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(log.response.is_none());
+        log.problem(404, "Not Found", "nope");
+        assert!(log.response.is_none());
+
+        let mut log = CallLog::new(true);
+        log.generated(generated());
+        assert_eq!(log.response, Some(json!({"id": "o1"})));
+    }
+
+    /// The record reuses the body `serve` decoded as JSON, but decodes
+    /// form and multipart bodies (and anything not decoded) from the raw
+    /// bytes.
+    #[test]
+    fn recorded_body_reuses_decoded_json() {
+        let decoded = Some(json!({"reused": true}));
+        assert_eq!(
+            request_body_record(br#"{"raw":1}"#, Some("application/json"), decoded.clone()),
+            json!({"reused": true})
+        );
+        assert_eq!(
+            request_body_record(b"a=1", Some(FORM_CONTENT_TYPE), decoded.clone()),
+            json!({"a": "1"})
+        );
+        assert_eq!(
+            request_body_record(b"x", Some(MULTIPART_CONTENT_TYPE), decoded),
+            json!(MULTIPART_OMITTED)
+        );
+        assert_eq!(
+            request_body_record(br#"{"raw":1}"#, None, None),
+            json!({"raw": 1})
         );
     }
 
