@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};
 use mb_mcm::Bundle;
+use mb_state::StateStore;
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
     ResourceSource, Scenario, ScenarioRules, validate_mock_name, validate_route_prefix,
@@ -46,7 +47,8 @@ struct Prepared<'a> {
     bundle: Bundle,
 }
 
-/// Makes the store match `cfg`.
+/// Makes the store match `cfg`. Deleting a file mock also resets its
+/// session state in `state`.
 ///
 /// The whole config is validated first (names, prefixes, profile
 /// references, secret references, contracts and scenario operations, and
@@ -54,6 +56,7 @@ struct Prepared<'a> {
 /// returns `Err` with nothing applied.
 pub async fn reconcile(
     store: &dyn ControlStore,
+    state: &dyn StateStore,
     cfg: &FileConfig,
 ) -> anyhow::Result<ReconcileReport> {
     let ws = DEFAULT_WORKSPACE;
@@ -97,6 +100,12 @@ pub async fn reconcile(
                 .delete_mock(ws, name)
                 .await
                 .with_context(|| format!("deleting mock {name:?}"))?;
+            // Its sessions go too, so a new mock of the same name starts empty.
+            state
+                .reset_mock(ws, name)
+                .await
+                .map_err(|e| anyhow!("{e}"))
+                .with_context(|| format!("resetting the state of deleted mock {name:?}"))?;
             report.deleted.push(name.clone());
         }
     }

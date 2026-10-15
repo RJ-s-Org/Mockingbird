@@ -887,6 +887,43 @@ async fn mutations_require_non_simple_content_types() {
     }
 }
 
+/// Deleting a mock drops its session state: a new mock with the same name
+/// starts with none.
+#[tokio::test]
+async fn deleting_a_mock_resets_its_state() {
+    let h = harness().await;
+    h.create_mock("shop").await;
+    let fixtures = json!([{ "resource_type": "orders", "id": "1", "data": { "id": "1" } }]);
+    for session in ["alice", "bob"] {
+        let r = h
+            .json(
+                Method::PUT,
+                &format!("/api/v1/mocks/shop/sessions/{session}"),
+                fixtures.clone(),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+    }
+    assert_eq!(
+        h.get("/api/v1/mocks/shop/sessions")
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let r = h.delete("/api/v1/mocks/shop").await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+    h.create_mock("shop").await;
+    assert_eq!(h.get("/api/v1/mocks/shop/sessions").await.json(), json!([]));
+    assert_eq!(
+        h.get("/api/v1/mocks/shop/sessions/alice").await.json(),
+        json!([])
+    );
+}
+
 #[tokio::test]
 async fn sessions_export_seed_reset() {
     let h = harness().await;

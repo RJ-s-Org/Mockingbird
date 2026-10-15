@@ -223,9 +223,10 @@ pub async fn patch(
     tag = "mocks",
     params(("mock" = String, Path, description = "Mock name")),
     responses(
-        (status = 204, description = "Deleted with its versions, scenarios and request log"),
+        (status = 204, description = "Deleted with its versions, scenarios, request log and session state"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Mock deleted, but its session state could not be reset", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn delete(
@@ -234,9 +235,10 @@ pub async fn delete(
 ) -> ApiResult<StatusCode> {
     let m = st.mock(&mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
-    if st.store.delete_mock(DEFAULT_WORKSPACE, &mock).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(Problem::not_found(format!("mock {mock:?} does not exist")))
+    if !st.store.delete_mock(DEFAULT_WORKSPACE, &mock).await? {
+        return Err(Problem::not_found(format!("mock {mock:?} does not exist")));
     }
+    // Its sessions go too, so a new mock of the same name starts empty.
+    st.state.reset_mock(DEFAULT_WORKSPACE, &mock).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

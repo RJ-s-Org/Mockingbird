@@ -412,6 +412,17 @@ impl StateStore for SqlStateStore {
         Ok(())
     }
 
+    async fn reset_mock(&self, workspace: &str, mock: &str) -> Result<(), StateError> {
+        on_pool!(&self.inner.pool, |p| {
+            sqlx::query("DELETE FROM state_sessions WHERE workspace = $1 AND mock = $2")
+                .bind(workspace)
+                .bind(mock)
+                .execute(p)
+                .await?;
+        });
+        Ok(())
+    }
+
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch_existing(s).await.map(|_| ())
     }

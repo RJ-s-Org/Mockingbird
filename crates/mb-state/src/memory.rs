@@ -223,6 +223,13 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    async fn reset_mock(&self, workspace: &str, mock: &str) -> Result<(), StateError> {
+        self.inner
+            .sessions
+            .retain(|k, _| !(k.workspace == workspace && k.mock == mock));
+        Ok(())
+    }
+
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch_existing(s);
         Ok(())

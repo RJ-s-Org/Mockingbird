@@ -17,6 +17,7 @@ pub async fn run_all(store: Arc<dyn StateStore>) {
     sessions_are_isolated(&store).await;
     delete_removes_and_reports(&store).await;
     reset_clears_session(&store).await;
+    reset_mock_clears_every_session(&store).await;
     publishes_changes(&store).await;
     upsert_replaces_and_moves_to_front(&store).await;
     reads_do_not_create_sessions(&store).await;
@@ -140,6 +141,58 @@ async fn reset_clears_session(st: &Arc<dyn StateStore>) {
     );
     // Resetting an unknown session is fine.
     st.reset(&key("reset", "nope")).await.expect("reset");
+}
+
+async fn reset_mock_clears_every_session(st: &Arc<dyn StateStore>) {
+    for session in ["a", "b"] {
+        st.upsert(&key("reset-mock", session), res("order", "1", json!({})))
+            .await
+            .expect("upsert");
+    }
+    // Another mock, and the same mock name in another workspace, keep theirs.
+    st.upsert(&key("reset-mock-other", "a"), res("order", "1", json!({})))
+        .await
+        .expect("upsert");
+    let other_ws = SessionKey {
+        workspace: "other-ws".into(),
+        mock: "reset-mock".into(),
+        session: "a".into(),
+    };
+    st.upsert(&other_ws, res("order", "1", json!({})))
+        .await
+        .expect("upsert");
+
+    st.reset_mock("default", "reset-mock")
+        .await
+        .expect("reset_mock");
+    assert!(
+        st.sessions("default", "reset-mock")
+            .await
+            .expect("sessions")
+            .is_empty()
+    );
+    assert!(
+        st.get(&key("reset-mock", "a"), "order", "1")
+            .await
+            .expect("get")
+            .is_none()
+    );
+    assert!(
+        st.get(&key("reset-mock-other", "a"), "order", "1")
+            .await
+            .expect("get")
+            .is_some()
+    );
+    assert!(
+        st.get(&other_ws, "order", "1")
+            .await
+            .expect("get")
+            .is_some()
+    );
+    // Resetting a mock with no state is fine.
+    st.reset_mock("default", "reset-mock-none")
+        .await
+        .expect("reset_mock");
 }
 
 async fn publishes_changes(st: &Arc<dyn StateStore>) {

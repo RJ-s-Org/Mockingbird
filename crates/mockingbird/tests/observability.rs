@@ -166,6 +166,9 @@ impl StateStore for FailingState {
     async fn reset(&self, _: &SessionKey) -> Result<(), StateError> {
         Err(down())
     }
+    async fn reset_mock(&self, _: &str, _: &str) -> Result<(), StateError> {
+        Err(down())
+    }
     async fn touch(&self, _: &SessionKey) -> Result<(), StateError> {
         Err(down())
     }

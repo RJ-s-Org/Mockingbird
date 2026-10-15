@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
     ResourceSource, Scenario, ScenarioRules,
@@ -24,6 +25,11 @@ fn fixture() -> PathBuf {
 
 async fn store() -> Arc<dyn ControlStore> {
     mb_store::connect("sqlite::memory:").await.unwrap()
+}
+
+/// A state store for reconciles whose state does not matter.
+fn no_state() -> Arc<dyn StateStore> {
+    Arc::new(MemoryStore::new(Duration::from_secs(3600)))
 }
 
 /// A temp dir holding `orders.yaml` (the fixture) and `mockingbird.yaml`.
@@ -258,7 +264,9 @@ async fn reconcile_creates_and_activates() {
     let cfg = ws.load(BASIC);
     let store = store().await;
 
-    let report = reconcile(store.as_ref(), &cfg).await.unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
     assert_eq!(report.created, ["orders"]);
     assert!(report.updated.is_empty() && report.deleted.is_empty());
     assert_eq!(report.new_versions, [("orders".to_string(), 1)]);
@@ -294,7 +302,9 @@ async fn reconcile_creates_and_activates() {
     assert_eq!(profile.timeout_ms, 3000);
 
     // Applying the same file again changes nothing.
-    let again = reconcile(store.as_ref(), &cfg).await.unwrap();
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
     assert!(again.created.is_empty(), "{again:?}");
     assert!(again.updated.is_empty(), "{again:?}");
     assert!(again.new_versions.is_empty(), "{again:?}");
@@ -305,13 +315,17 @@ async fn reconcile_new_contract_digest_new_version() {
     let ws = Workspace::new();
     let cfg = ws.load(BASIC);
     let store = store().await;
-    reconcile(store.as_ref(), &cfg).await.unwrap();
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
 
     let mut source = std::fs::read_to_string(fixture()).unwrap();
     source.push_str("\n# edited\n");
     std::fs::write(ws.dir.path().join("orders.yaml"), source).unwrap();
 
-    let report = reconcile(store.as_ref(), &cfg).await.unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
     assert_eq!(report.updated, ["orders"]);
     assert_eq!(report.new_versions, [("orders".to_string(), 2)]);
     let mock = store
@@ -388,7 +402,9 @@ async fn reconcile_keeps_api_resources() {
 
     // A file mock may use an API-owned profile.
     let cfg = ws.load("mocks:\n  orders:\n    contract: orders.yaml\n    llm_profile: api-prof\n");
-    reconcile(store.as_ref(), &cfg).await.unwrap();
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
 
     // An API scenario added to the file mock survives reconciles.
     let orders = store
@@ -408,7 +424,9 @@ async fn reconcile_keeps_api_resources() {
         .unwrap();
 
     let cfg = ws.load("mocks: {}\n");
-    let report = reconcile(store.as_ref(), &cfg).await.unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
     assert_eq!(report.deleted, ["orders"]);
     assert!(
         store
@@ -427,10 +445,14 @@ async fn reconcile_keeps_api_resources() {
 
     // Declaring a mock or profile whose name an API resource holds fails.
     let cfg = ws.load("mocks:\n  manual:\n    contract: orders.yaml\n");
-    let err = reconcile(store.as_ref(), &cfg).await.unwrap_err();
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
     assert!(format!("{err:#}").contains("manual"), "{err:#}");
     let cfg = ws.load("llm:\n  profiles:\n    api-prof: {base_url: http://x, model: m}\n");
-    let err = reconcile(store.as_ref(), &cfg).await.unwrap_err();
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
     assert!(format!("{err:#}").contains("api-prof"), "{err:#}");
     let manual = store
         .get_mock(DEFAULT_WORKSPACE, "manual")
@@ -460,7 +482,9 @@ async fn reconcile_rejects_prefix_clash_with_api_mock() {
     let cfg = ws.load(
         "llm:\n  profiles:\n    extra: {base_url: http://x, model: m}\nmocks:\n  orders:\n    contract: orders.yaml\n    route_prefix: /manual\n",
     );
-    let err = reconcile(store.as_ref(), &cfg).await.unwrap_err();
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
     let text = format!("{err:#}");
     assert!(
         text.contains("/manual") && text.contains("manual"),
@@ -486,7 +510,7 @@ async fn reconcile_rejects_prefix_clash_with_api_mock() {
 async fn reconcile_deletes_removed_file_mocks() {
     let ws = Workspace::new();
     let store = store().await;
-    let report = reconcile(store.as_ref(), &ws.load(TWO_MOCKS))
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &ws.load(TWO_MOCKS))
         .await
         .unwrap();
     let mut created = report.created.clone();
@@ -502,7 +526,9 @@ mocks:
   orders: {contract: orders.yaml, llm_profile: main}
 "#,
     );
-    let report = reconcile(store.as_ref(), &cfg).await.unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
     assert_eq!(report.deleted, ["billing"]);
     let names: Vec<String> = store
         .list_mocks(DEFAULT_WORKSPACE)
@@ -554,7 +580,9 @@ async fn invalid_config_applies_nothing() {
     for yaml in invalid {
         let cfg = ws.load(yaml);
         assert!(
-            reconcile(store.as_ref(), &cfg).await.is_err(),
+            reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+                .await
+                .is_err(),
             "accepted: {yaml}"
         );
         assert!(
@@ -574,9 +602,13 @@ async fn invalid_config_applies_nothing() {
     }
 
     // A failed reconcile leaves the previous state alone.
-    reconcile(store.as_ref(), &ws.load(BASIC)).await.unwrap();
+    reconcile(store.as_ref(), no_state().as_ref(), &ws.load(BASIC))
+        .await
+        .unwrap();
     let cfg = ws.load(invalid[0]);
-    reconcile(store.as_ref(), &cfg).await.unwrap_err();
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
     let names: Vec<String> = store
         .list_mocks(DEFAULT_WORKSPACE)
         .await
@@ -973,6 +1005,40 @@ fn admin_port_explicitness() {
     assert!(cfg.server.admin_port_explicit);
 }
 
+/// Removing a file mock from the config drops its session state too.
+#[tokio::test]
+async fn reconcile_deleting_a_mock_resets_its_state() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let state = no_state();
+    reconcile(store.as_ref(), state.as_ref(), &ws.load(BASIC))
+        .await
+        .unwrap();
+    let key = SessionKey {
+        workspace: DEFAULT_WORKSPACE.into(),
+        mock: "orders".into(),
+        session: "alice".into(),
+    };
+    let order = StoredResource {
+        resource_type: "orders".into(),
+        id: "1".into(),
+        data: json!({"id": "1"}),
+    };
+    state.upsert(&key, order).await.unwrap();
+
+    let report = reconcile(store.as_ref(), state.as_ref(), &ws.load("mocks: {}\n"))
+        .await
+        .unwrap();
+    assert_eq!(report.deleted, ["orders"]);
+    assert!(
+        state
+            .sessions(DEFAULT_WORKSPACE, "orders")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// Removing a file profile that API mocks still use succeeds, with a
 /// warning naming them.
 #[tokio::test]
@@ -980,13 +1046,15 @@ async fn removing_file_profile_used_by_api_mock_warns() {
     let ws = Workspace::new();
     let store = store().await;
     let cfg = ws.load("llm:\n  profiles:\n    fp: {base_url: http://x, model: m}\n");
-    reconcile(store.as_ref(), &cfg).await.unwrap();
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
     let mut manual = api_mock(&store, "manual").await;
     manual.llm_profile = Some("fp".into());
     store.update_mock(&manual).await.unwrap();
     api_mock(&store, "unrelated").await;
 
-    let report = reconcile(store.as_ref(), &ws.load("mocks: {}\n"))
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &ws.load("mocks: {}\n"))
         .await
         .unwrap();
     assert_eq!(report.warnings.len(), 1, "{report:?}");

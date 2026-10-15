@@ -344,6 +344,10 @@ impl StateStore for FlakyStore {
         self.check()?;
         self.inner.reset(s).await
     }
+    async fn reset_mock(&self, w: &str, m: &str) -> Result<(), StateError> {
+        self.check()?;
+        self.inner.reset_mock(w, m).await
+    }
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.check()?;
         self.inner.touch(s).await
@@ -505,6 +509,9 @@ impl StateStore for TouchSpy {
     }
     async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.reset(s).await
+    }
+    async fn reset_mock(&self, w: &str, m: &str) -> Result<(), StateError> {
+        self.inner.reset_mock(w, m).await
     }
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.touches.fetch_add(1, Ordering::SeqCst);

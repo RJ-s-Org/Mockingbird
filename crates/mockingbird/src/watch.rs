@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
+use mb_state::StateStore;
 use mb_store::ControlStore;
 use notify::RecursiveMode;
 use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
@@ -91,8 +92,12 @@ fn normalize(path: &Path) -> Option<(PathBuf, PathBuf)> {
 /// reconcile is logged and the previous state kept.
 ///
 /// Must be called inside a Tokio runtime.
-pub fn spawn(config_path: PathBuf, store: Arc<dyn ControlStore>) -> anyhow::Result<WatchGuard> {
-    spawn_with(config_path, store, Arc::new(file_config::apply_env))
+pub fn spawn(
+    config_path: PathBuf,
+    store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
+) -> anyhow::Result<WatchGuard> {
+    spawn_with(config_path, store, state, Arc::new(file_config::apply_env))
 }
 
 /// [`spawn`] with a custom `prepare` step in place of applying the
@@ -100,15 +105,17 @@ pub fn spawn(config_path: PathBuf, store: Arc<dyn ControlStore>) -> anyhow::Resu
 pub fn spawn_with(
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
     prepare: Prepare,
 ) -> anyhow::Result<WatchGuard> {
-    spawn_with_hook(config_path, store, prepare, None)
+    spawn_with_hook(config_path, store, state, prepare, None)
 }
 
 /// [`spawn_with`] that also runs `applied` after each successful reload.
 pub fn spawn_with_hook(
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
     prepare: Prepare,
     applied: Option<Applied>,
 ) -> anyhow::Result<WatchGuard> {
@@ -159,7 +166,7 @@ pub fn spawn_with_hook(
             if !relevant {
                 continue;
             }
-            match load_and_reconcile(&config_path, store.as_ref(), &prepare).await {
+            match load_and_reconcile(&config_path, store.as_ref(), state.as_ref(), &prepare).await {
                 Ok((cfg, report)) => {
                     if let Ok(mut w) = shared.lock() {
                         for path in contract_paths(&cfg) {
@@ -204,11 +211,12 @@ pub fn spawn_with_hook(
 async fn load_and_reconcile(
     config_path: &Path,
     store: &dyn ControlStore,
+    state: &dyn StateStore,
     prepare: &Prepare,
 ) -> anyhow::Result<(FileConfig, crate::reconcile::ReconcileReport)> {
     let mut cfg = file_config::load(config_path)?;
     prepare(&mut cfg)?;
-    let report = reconcile(store, &cfg).await?;
+    let report = reconcile(store, state, &cfg).await?;
     Ok((cfg, report))
 }
 

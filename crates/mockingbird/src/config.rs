@@ -320,7 +320,7 @@ pub async fn build_app_with(
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| "opening the state store")?;
 
-    let report = reconcile::reconcile(store.as_ref(), &cfg)
+    let report = reconcile::reconcile(store.as_ref(), state.as_ref(), &cfg)
         .await
         .context("applying the configuration")?;
     tracing::debug!(?report, "configuration applied");
@@ -364,7 +364,7 @@ pub async fn build_app_with(
     })
     .merge(ops::router(OpsState {
         store: store.clone(),
-        state,
+        state: state.clone(),
         registry: registry.clone(),
         prometheus,
     }));
@@ -389,6 +389,7 @@ pub async fn build_app_with(
             Some(watch::spawn_with_hook(
                 path.clone(),
                 store.clone(),
+                state.clone(),
                 prepare,
                 Some(applied),
             )?)

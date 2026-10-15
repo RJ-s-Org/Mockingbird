@@ -94,6 +94,9 @@ pub trait StateStore: Send + Sync {
     ) -> Result<bool, StateError>;
     /// Removes the session and all its resources. Publishes no change events.
     async fn reset(&self, s: &SessionKey) -> Result<(), StateError>;
+    /// Removes every session of a mock with all its resources (the mock was
+    /// deleted). Publishes no change events.
+    async fn reset_mock(&self, workspace: &str, mock: &str) -> Result<(), StateError>;
     /// Refreshes a live session's `last_touched`. A no-op for an unknown or
     /// expired session: never creates or revives one.
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError>;
