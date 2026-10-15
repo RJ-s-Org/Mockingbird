@@ -443,6 +443,7 @@ async fn report(
                     media_type(headers).or(log.declared_body_type.clone()).as_deref(),
                 ),
             }),
+            request_body_bytes: Some(raw_body.len()),
             response: log.response.clone(),
         });
     }

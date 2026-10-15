@@ -1,6 +1,6 @@
-//! The request log writer: a [`RequestRecorder`] that redacts each record
-//! and appends it to the control store off the request path, and fans it
-//! out to live subscribers (the console's request tail).
+//! The request log writer: a [`RequestRecorder`] that queues each record
+//! and, off the request path, redacts it, appends it to the control store
+//! and fans it out to live subscribers (the console's request tail).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,8 +24,9 @@ pub const LIVE_CAPACITY: usize = 1024;
 /// Replacement for the value of a redacted field.
 pub const REDACTED: &str = "[redacted]";
 
-/// Largest recorded request or response body, as serialized JSON; a larger
-/// one is replaced by [`truncate_body`].
+/// Largest recorded request or response body, as serialized JSON (or, for
+/// a request body, as raw bytes); a larger one is replaced by a marker
+/// (see [`truncate_body`]).
 pub const MAX_RECORDED_BODY_BYTES: usize = 64 * 1024;
 
 /// Bytes of a truncated body kept as its preview.
@@ -33,8 +34,8 @@ pub const PREVIEW_BYTES: usize = 1024;
 
 /// Writes [`RequestRecord`]s to the request log through a bounded queue
 /// drained by one background task, so [`RequestRecorder::record`] never
-/// waits on the store. Records are redacted and their bodies truncated
-/// before they are queued.
+/// waits on the store and does no heavy work: the writer redacts records
+/// and truncates their bodies before storing and broadcasting them.
 pub struct StoreRecorder {
     queue: mpsc::Sender<RequestRecord>,
     /// Tells the writer to drain the queue and stop.
@@ -91,7 +92,7 @@ impl StoreRecorder {
         }));
     }
 
-    /// Redacted records as they are written.
+    /// Redacted, truncated records as they are written.
     pub fn live(&self) -> broadcast::Receiver<RequestRecord> {
         self.live.subscribe()
     }
@@ -120,20 +121,17 @@ impl StoreRecorder {
 }
 
 impl RequestRecorder for StoreRecorder {
-    /// Redacts and truncates the record, then queues it for the writer.
+    /// Queues the record for the writer. The only work done here is a
+    /// cheap bound: a request body whose raw size is known to exceed
+    /// [`MAX_RECORDED_BODY_BYTES`] is replaced by `{"truncated": true,
+    /// "bytes": N}` (no preview: it could not be redacted unparsed).
     fn record(&self, mut r: RequestRecord) {
+        if let Some(bytes) = r
+            .request_body_bytes
+            .filter(|n| *n > MAX_RECORDED_BODY_BYTES)
+            && let Some(body) = r.request.get_mut("body")
         {
-            let settings = self.settings.load();
-            redact(&mut r.request, &settings.redact_fields);
-            if let Some(response) = &mut r.response {
-                redact(response, &settings.redact_fields);
-            }
-        }
-        if let Some(body) = r.request.get_mut("body") {
-            truncate_body(body);
-        }
-        if let Some(response) = &mut r.response {
-            truncate_body(response);
+            *body = serde_json::json!({"truncated": true, "bytes": bytes});
         }
         // `Closed` means the writer task is gone (its runtime shut down).
         if let Err(mpsc::error::TrySendError::Full(r) | mpsc::error::TrySendError::Closed(r)) =
@@ -192,10 +190,19 @@ impl Writer {
         }
     }
 
-    /// Writes a record that [`StoreRecorder::record`] already redacted and
-    /// truncated.
-    async fn write(&mut self, r: RequestRecord) {
+    /// Redacts and truncates a record, then broadcasts and stores it.
+    async fn write(&mut self, mut r: RequestRecord) {
         let settings = self.settings.load_full();
+        redact(&mut r.request, &settings.redact_fields);
+        if let Some(response) = &mut r.response {
+            redact(response, &settings.redact_fields);
+        }
+        if let Some(body) = r.request.get_mut("body") {
+            truncate_body(body);
+        }
+        if let Some(response) = &mut r.response {
+            truncate_body(response);
+        }
         // No receivers is not an error: nobody is tailing.
         let _ = self.live.send(r.clone());
 

@@ -300,6 +300,7 @@ fn record(mock: &str, n: usize) -> RequestRecord {
         prompt_tokens: 0,
         completion_tokens: 0,
         request: json!({"query": {}, "headers": {}, "body": null}),
+        request_body_bytes: None,
         response: None,
     }
 }
@@ -443,7 +444,8 @@ async fn request_log_redacts_form_bodies() {
     assert!(!entry.request.to_string().contains("hunter2"));
 }
 
-/// Bodies over 64 KiB are replaced with a short, redacted preview.
+/// Request bodies over 64 KiB are replaced with a marker holding their
+/// size and no (unredacted) preview.
 #[tokio::test]
 async fn request_log_truncates_large_bodies() {
     let (store, mock, base) = recorded_orders().await;
@@ -458,9 +460,71 @@ async fn request_log_truncates_large_bodies() {
     let body = &entry.request["body"];
     assert_eq!(body["truncated"], true, "{}", &body.to_string()[..200]);
     assert!(body["bytes"].as_u64().unwrap() > 70 * 1024, "{body}");
-    let preview = body["preview"].as_str().unwrap();
-    assert!(preview.len() <= 1024, "{}", preview.len());
+    assert!(body.get("preview").is_none(), "{body}");
     assert!(!entry.request.to_string().contains("hunter2"));
+}
+
+/// `record` only queues: redacting and serializing a huge record happen on
+/// the writer, which still stores and broadcasts it redacted and truncated.
+#[tokio::test]
+async fn record_does_no_heavy_work_on_the_request_path() {
+    let store: Arc<dyn ControlStore> = stub_store().await;
+    let mock = orders_mock(&store).await;
+    let recorder = StoreRecorder::new(store.clone(), 1000, vec!["password".into(), "token".into()]);
+    let mut live = recorder.live();
+
+    let notes = "x".repeat(5 * 1024 * 1024);
+    let raw_len = notes.len() + 40;
+    let big_record = || {
+        // A large response: many small objects, each with a redacted field.
+        let response: Vec<Value> = (0..100_000)
+            .map(|n| json!({"n": n, "token": "sekret"}))
+            .collect();
+        let mut r = record("orders", 1);
+        r.request = json!({
+            "query": {"access_token": "q"},
+            "headers": {},
+            "body": {"password": "hunter2", "notes": notes.clone()},
+        });
+        r.request_body_bytes = Some(raw_len);
+        r.response = Some(Value::Array(response));
+        r
+    };
+
+    // The fastest of a few calls, so a descheduled test thread under a
+    // parallel test run does not fail it; serializing and redacting on
+    // this path takes hundreds of milliseconds in a debug build.
+    let mut fastest = Duration::MAX;
+    for _ in 0..3 {
+        let r = big_record();
+        let started = Instant::now();
+        recorder.record(r);
+        fastest = fastest.min(started.elapsed());
+    }
+    assert!(
+        fastest < Duration::from_millis(50),
+        "record took {fastest:?}"
+    );
+
+    let entry = newest_entry(&store, &mock).await;
+    let tailed = tokio::time::timeout(Duration::from_secs(5), live.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for (request, response) in [
+        (&entry.request, entry.response.as_ref().unwrap()),
+        (&tailed.request, tailed.response.as_ref().unwrap()),
+    ] {
+        assert_eq!(request["body"]["truncated"], true);
+        assert_eq!(request["body"]["bytes"], raw_len);
+        assert_eq!(request["query"]["access_token"], "[redacted]");
+        assert!(!request.to_string().contains("hunter2"));
+        assert_eq!(response["truncated"], true);
+        let preview = response["preview"].as_str().unwrap();
+        assert!(preview.len() <= 1024);
+        assert!(preview.contains("[redacted]"), "{preview}");
+        assert!(!response.to_string().contains("sekret"));
+    }
 }
 
 #[test]

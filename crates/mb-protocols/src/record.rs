@@ -23,12 +23,16 @@ pub struct RequestRecord {
     pub completion_tokens: u32,
     /// `{query, headers, body}`; sensitive headers are left out.
     pub request: Value,
+    /// Byte length of the raw request body, when known, so a recorder can
+    /// bound a large body without serializing it.
+    pub request_body_bytes: Option<usize>,
     /// The response body, when it is JSON.
     pub response: Option<Value>,
 }
 
 /// Sink for [`RequestRecord`]s. Called on the request path, so it must not
-/// block: implementors that do I/O spawn it.
+/// block or do heavy work (serializing, redacting): implementors hand the
+/// record to a background task.
 pub trait RequestRecorder: Send + Sync {
     fn record(&self, r: RequestRecord);
 }
