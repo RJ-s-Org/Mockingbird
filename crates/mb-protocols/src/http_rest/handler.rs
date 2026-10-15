@@ -309,7 +309,12 @@ async fn serve(
             Some(s) => s.applies_to(&op.id).then_some(s),
         },
     };
-    let forced_status = overrides.status.or_else(|| scenario.and_then(|s| s.status));
+    // A scenario's status applies only where the contract declares it; the
+    // header override is used as given (an undeclared one is a 400).
+    let scenario_status = scenario
+        .and_then(|s| s.status)
+        .filter(|code| op.output_for_status(*code).is_some());
+    let forced_status = overrides.status.or(scenario_status);
     let delay = overrides
         .latency
         .or_else(|| scenario.and_then(|s| s.latency))
