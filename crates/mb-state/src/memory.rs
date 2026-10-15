@@ -75,17 +75,23 @@ impl Inner {
         now.saturating_duration_since(d.last_touched) >= self.ttl
     }
 
-    /// Fetches a live session and refreshes it. Never creates one; an
+    /// Fetches a live session without refreshing it. Never creates one; an
     /// expired session is purged and reported as absent.
-    fn touch_existing(&self, s: &SessionKey) -> Option<Entry<'_>> {
+    fn live(&self, s: &SessionKey) -> Option<Entry<'_>> {
         let now = Instant::now();
-        let mut entry = self.sessions.get_mut(s)?;
+        let entry = self.sessions.get_mut(s)?;
         if self.expired(&entry, now) {
             drop(entry);
             self.sessions
                 .remove_if(s, |_, d| self.expired(d, Instant::now()));
             return None;
         }
+        Some(entry)
+    }
+
+    /// [`Inner::live`], refreshing the session.
+    fn touch_existing(&self, s: &SessionKey) -> Option<Entry<'_>> {
+        let mut entry = self.live(s)?;
         entry.touch();
         Some(entry)
     }
@@ -159,7 +165,7 @@ impl StateStore for MemoryStore {
         resource_type: &str,
         id: &str,
     ) -> Result<Option<StoredResource>, StateError> {
-        Ok(self.inner.touch_existing(s).and_then(|entry| {
+        Ok(self.inner.live(s).and_then(|entry| {
             entry
                 .resources
                 .get(&(resource_type.to_string(), id.to_string()))
@@ -175,7 +181,7 @@ impl StateStore for MemoryStore {
     ) -> Result<Vec<StoredResource>, StateError> {
         Ok(self
             .inner
-            .touch_existing(s)
+            .live(s)
             .map(|entry| {
                 entry
                     .sorted(|t| t == resource_type)
@@ -217,6 +223,11 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.touch_existing(s);
+        Ok(())
+    }
+
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         let now = Instant::now();
         let mut live: Vec<(Instant, SessionInfo)> = self
@@ -246,7 +257,7 @@ impl StateStore for MemoryStore {
     async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
         Ok(self
             .inner
-            .touch_existing(s)
+            .live(s)
             .map(|entry| {
                 let mut all: Vec<StoredResource> = entry.sorted(|_| true).cloned().collect();
                 all.reverse();

@@ -64,10 +64,11 @@ pub struct StateChanged {
 
 /// Session-scoped resource store.
 ///
-/// Reads (`get`, `list`, `export`) never create a session; on an existing
-/// session they refresh its `last_touched`. Only `upsert` and `seed` create
-/// one. A session untouched for longer than the store's TTL is invisible and
-/// is swept; a later write starts it afresh.
+/// Reads (`get`, `list`, `export`) never create a session and never refresh
+/// its `last_touched`; [`StateStore::touch`] does that (callers touch once
+/// per request that used state), as do writes. Only `upsert` and `seed`
+/// create a session. A session untouched for longer than the store's TTL is
+/// invisible and is swept; a later write starts it afresh.
 #[async_trait]
 pub trait StateStore: Send + Sync {
     async fn get(
@@ -93,6 +94,9 @@ pub trait StateStore: Send + Sync {
     ) -> Result<bool, StateError>;
     /// Removes the session and all its resources. Publishes no change events.
     async fn reset(&self, s: &SessionKey) -> Result<(), StateError>;
+    /// Refreshes a live session's `last_touched`. A no-op for an unknown or
+    /// expired session: never creates or revives one.
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError>;
     /// Live sessions of a mock, most recently touched first.
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError>;
     /// All resources of a session, oldest first (so [`StateStore::seed`]

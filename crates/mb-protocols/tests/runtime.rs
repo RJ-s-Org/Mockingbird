@@ -344,6 +344,10 @@ impl StateStore for FlakyStore {
         self.check()?;
         self.inner.reset(s).await
     }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.check()?;
+        self.inner.touch(s).await
+    }
     async fn sessions(&self, w: &str, m: &str) -> Result<Vec<SessionInfo>, StateError> {
         self.check()?;
         self.inner.sessions(w, m).await
@@ -467,6 +471,89 @@ async fn stateless_calls_do_not_consume_the_state_probe() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(store.calls.load(Ordering::SeqCst) >= 2);
     assert!(!rt.state_health.is_degraded());
+}
+
+/// Counts `touch` calls on a memory store.
+struct TouchSpy {
+    inner: MemoryStore,
+    touches: AtomicUsize,
+}
+
+#[async_trait]
+impl StateStore for TouchSpy {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, StateError> {
+        self.inner.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.list(s, t, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+        self.inner.upsert(s, r).await
+    }
+    async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
+        self.inner.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.reset(s).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.touches.fetch_add(1, Ordering::SeqCst);
+        self.inner.touch(s).await
+    }
+    async fn sessions(&self, w: &str, m: &str) -> Result<Vec<SessionInfo>, StateError> {
+        self.inner.sessions(w, m).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, r: Vec<StoredResource>) -> Result<(), StateError> {
+        self.inner.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), StateError> {
+        Ok(())
+    }
+    fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
+        self.inner.subscribe()
+    }
+}
+
+/// A request that reads state touches its session exactly once (reads
+/// themselves no longer refresh it); a write refreshes it itself, so a
+/// request touches at most once.
+#[tokio::test]
+async fn a_request_touches_its_session_at_most_once() {
+    let store = Arc::new(TouchSpy {
+        inner: MemoryStore::new(Duration::from_secs(3600)),
+        touches: AtomicUsize::new(0),
+    });
+    let router = http_rest::router(Arc::new(runtime(None, store.clone())));
+
+    let req = Request::post("/orders")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"customerId":"c1","total":10}"#))
+        .unwrap();
+    assert_eq!(send(&router, req).await.status(), StatusCode::CREATED);
+    assert!(store.touches.load(Ordering::SeqCst) <= 1);
+
+    store.touches.store(0, Ordering::SeqCst);
+    let resp = send(&router, get_with("/orders", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(store.touches.load(Ordering::SeqCst), 1);
+
+    store.touches.store(0, Ordering::SeqCst);
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(store.touches.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Default)]

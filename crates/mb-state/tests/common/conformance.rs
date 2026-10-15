@@ -186,6 +186,7 @@ async fn reads_do_not_create_sessions(st: &Arc<dyn StateStore>) {
     assert!(st.get(&k, "order", "1").await.expect("get").is_none());
     assert!(st.list(&k, "order", 10).await.expect("list").is_empty());
     assert!(st.export(&k).await.expect("export").is_empty());
+    st.touch(&k).await.expect("touch");
     assert!(
         st.sessions("default", "reads")
             .await
@@ -223,9 +224,21 @@ async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>) {
     assert_eq!(summary, [("b", 1), ("a", 3)], "last_touched desc");
     assert!(s[0].last_touched >= s[1].last_touched);
 
-    // A read of an existing session refreshes last_touched.
+    // Reads do not refresh last_touched.
     tokio::time::sleep(Duration::from_millis(20)).await;
     st.get(&a, "order", "1").await.expect("get");
+    st.list(&a, "order", 10).await.expect("list");
+    st.export(&a).await.expect("export");
+    let s = st.sessions("default", "counts").await.expect("sessions");
+    assert_eq!(
+        s.iter().map(|i| i.session.as_str()).collect::<Vec<_>>(),
+        ["b", "a"],
+        "reads must not refresh a session"
+    );
+
+    // `touch` does.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    st.touch(&a).await.expect("touch");
     let s = st.sessions("default", "counts").await.expect("sessions");
     assert_eq!(
         s.iter().map(|i| i.session.as_str()).collect::<Vec<_>>(),
@@ -287,6 +300,8 @@ async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>) {
 }
 
 /// Real-time TTL check. `store` must have been built with a 1 s TTL.
+///
+/// `touch` extends a session's life; reads alone do not.
 pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
     let k = key("ttl", "a");
     store
@@ -294,10 +309,19 @@ pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
         .await
         .expect("upsert");
     assert!(store.get(&k, "order", "1").await.expect("get").is_some());
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    store.touch(&k).await.expect("touch");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // 1.3 s after the write, alive thanks to the touch.
+    assert!(store.get(&k, "order", "1").await.expect("get").is_some());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // 1.2 s after the touch: the read in between did not extend it.
     assert!(store.get(&k, "order", "1").await.expect("get").is_none());
     assert!(store.list(&k, "order", 10).await.expect("list").is_empty());
     assert!(store.export(&k).await.expect("export").is_empty());
+    // Touching an expired session does not revive it.
+    store.touch(&k).await.expect("touch");
+    assert!(store.get(&k, "order", "1").await.expect("get").is_none());
     assert!(
         store
             .sessions("default", "ttl")

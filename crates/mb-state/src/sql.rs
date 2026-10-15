@@ -3,7 +3,8 @@
 //! Timestamps are Unix epoch milliseconds (wall clock). Each session row keeps
 //! a counter that hands every upserted resource a recency sequence, which
 //! orders `list` (newest first) and `export` (oldest first). Resource data is
-//! TEXT holding JSON on SQLite and JSONB on Postgres.
+//! TEXT holding JSON on SQLite and JSONB on Postgres. Reads check that the
+//! session is live but never refresh it; `touch` and writes do.
 
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
@@ -32,6 +33,17 @@ const MIGRATIONS_TABLE: &str = "_mb_state_migrations";
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 
 const KEY_WHERE: &str = "workspace = $1 AND mock = $2 AND session = $3";
+
+/// Limits a `state_resources` query keyed by [`KEY_WHERE`] to a live
+/// session; `{cutoff}` is replaced with the cutoff's placeholder.
+const LIVE_SESSION: &str = "EXISTS (SELECT 1 FROM state_sessions ss \
+     WHERE ss.workspace = $1 AND ss.mock = $2 AND ss.session = $3 \
+     AND ss.last_touched > {cutoff})";
+
+/// [`LIVE_SESSION`] with its cutoff bound to `$N`.
+fn live_session(n: u8) -> String {
+    LIVE_SESSION.replace("{cutoff}", &format!("${n}"))
+}
 
 impl From<sqlx::Error> for StateError {
     fn from(e: sqlx::Error) -> Self {
@@ -255,13 +267,12 @@ impl StateStore for SqlStateStore {
         resource_type: &str,
         id: &str,
     ) -> Result<Option<StoredResource>, StateError> {
-        if !self.inner.touch_existing(s).await? {
-            return Ok(None);
-        }
         let sql = format!(
             "SELECT resource_type, id, data FROM state_resources \
-             WHERE {KEY_WHERE} AND resource_type = $4 AND id = $5"
+             WHERE {KEY_WHERE} AND resource_type = $4 AND id = $5 AND {}",
+            live_session(6)
         );
+        let cutoff = self.inner.cutoff(now_ms());
         Ok(on_pool!(&self.inner.pool, |p| {
             let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(&s.workspace)
@@ -269,6 +280,7 @@ impl StateStore for SqlStateStore {
                 .bind(&s.session)
                 .bind(resource_type)
                 .bind(id)
+                .bind(cutoff)
                 .fetch_optional(p)
                 .await?;
             match row {
@@ -284,13 +296,12 @@ impl StateStore for SqlStateStore {
         resource_type: &str,
         limit: usize,
     ) -> Result<Vec<StoredResource>, StateError> {
-        if !self.inner.touch_existing(s).await? {
-            return Ok(Vec::new());
-        }
         let sql = format!(
             "SELECT resource_type, id, data FROM state_resources \
-             WHERE {KEY_WHERE} AND resource_type = $4 ORDER BY seq DESC LIMIT $5"
+             WHERE {KEY_WHERE} AND resource_type = $4 AND {} ORDER BY seq DESC LIMIT $5",
+            live_session(6)
         );
+        let cutoff = self.inner.cutoff(now_ms());
         Ok(on_pool!(&self.inner.pool, |p| {
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(&s.workspace)
@@ -298,6 +309,7 @@ impl StateStore for SqlStateStore {
                 .bind(&s.session)
                 .bind(resource_type)
                 .bind(to_i64(limit))
+                .bind(cutoff)
                 .fetch_all(p)
                 .await?;
             let mut out = Vec::with_capacity(rows.len());
@@ -400,6 +412,10 @@ impl StateStore for SqlStateStore {
         Ok(())
     }
 
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.touch_existing(s).await.map(|_| ())
+    }
+
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         let cutoff = self.inner.cutoff(now_ms());
         let sql = "SELECT s.session AS session, s.last_touched AS last_touched, \
@@ -442,18 +458,18 @@ impl StateStore for SqlStateStore {
     }
 
     async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
-        if !self.inner.touch_existing(s).await? {
-            return Ok(Vec::new());
-        }
         let sql = format!(
             "SELECT resource_type, id, data FROM state_resources \
-             WHERE {KEY_WHERE} ORDER BY seq ASC"
+             WHERE {KEY_WHERE} AND {} ORDER BY seq ASC",
+            live_session(4)
         );
+        let cutoff = self.inner.cutoff(now_ms());
         Ok(on_pool!(&self.inner.pool, |p| {
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(&s.workspace)
                 .bind(&s.mock)
                 .bind(&s.session)
+                .bind(cutoff)
                 .fetch_all(p)
                 .await?;
             let mut out = Vec::with_capacity(rows.len());

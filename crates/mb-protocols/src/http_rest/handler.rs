@@ -378,6 +378,7 @@ async fn serve(
         )
         .await;
     }
+    state.touch(&session).await;
 
     // 8. Respond (the handler sleeps `delay` after recording).
     log.delay = delay;
@@ -766,6 +767,10 @@ fn reference_prefix(field: &str) -> Option<&str> {
 struct StateAccess<'a> {
     rt: &'a MockRuntime,
     gate: Gate,
+    /// A read succeeded, so the session needs a [`StateAccess::touch`].
+    read: bool,
+    /// A write succeeded; writes refresh the session themselves.
+    wrote: bool,
 }
 
 /// Whether this call may use the store.
@@ -783,6 +788,18 @@ impl<'a> StateAccess<'a> {
         Self {
             rt,
             gate: Gate::Unasked,
+            read: false,
+            wrote: false,
+        }
+    }
+
+    /// Keeps the session alive once per call: reads do not refresh it, so a
+    /// call that only read touches it here. A no-op when nothing was read,
+    /// when a write already refreshed it, or when the store is unavailable.
+    async fn touch(&mut self, s: &SessionKey) {
+        if self.read && !self.wrote && self.gate == Gate::Open {
+            let r = self.rt.state.touch(s).await;
+            self.settle(r);
         }
     }
 
@@ -821,7 +838,9 @@ impl<'a> StateAccess<'a> {
             return None;
         }
         let r = self.rt.state.get(s, t, id).await;
-        self.settle(r).flatten()
+        let found = self.settle(r);
+        self.read |= found.is_some();
+        found.flatten()
     }
 
     async fn list(&mut self, s: &SessionKey, t: &str, limit: usize) -> Vec<StoredResource> {
@@ -829,20 +848,22 @@ impl<'a> StateAccess<'a> {
             return Vec::new();
         }
         let r = self.rt.state.list(s, t, limit).await;
-        self.settle(r).unwrap_or_default()
+        let found = self.settle(r);
+        self.read |= found.is_some();
+        found.unwrap_or_default()
     }
 
     async fn upsert(&mut self, s: &SessionKey, r: StoredResource) {
         if self.open() {
             let r = self.rt.state.upsert(s, r).await;
-            self.settle(r);
+            self.wrote |= self.settle(r).is_some();
         }
     }
 
     async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) {
         if self.open() {
             let r = self.rt.state.delete(s, t, id).await;
-            self.settle(r);
+            self.wrote |= self.settle(r).is_some();
         }
     }
 }
