@@ -652,6 +652,44 @@ async fn scenarios_crud() {
     );
 }
 
+/// With an active contract, a scenario's operations must exist in it; with
+/// none, any operation ids are accepted.
+#[tokio::test]
+async fn scenario_operations_are_checked_against_the_contract() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let put = |ops: Value| {
+        let h = &h;
+        async move {
+            h.json(
+                Method::PUT,
+                "/api/v1/mocks/orders/scenarios/s",
+                json!({ "operations": ops }),
+            )
+            .await
+        }
+    };
+
+    // No contract yet: accepted.
+    let r = put(json!(["anything"])).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+
+    let r = h
+        .upload("orders", &contract_json("1.0.0"), Some(true))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    let r = put(json!(["listOrders"])).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+
+    let body = put(json!(["zzz", "listOrders", "aaa"]))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    let detail = body["detail"].as_str().unwrap();
+    assert!(detail.contains("\"aaa\", \"zzz\""), "{detail}");
+    assert!(!detail.contains("listOrders"), "{detail}");
+}
+
 #[tokio::test]
 async fn profiles_never_return_secret_values() {
     // The API never resolves a secret_ref, so no variable needs setting.

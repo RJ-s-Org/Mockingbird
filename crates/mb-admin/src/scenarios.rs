@@ -53,6 +53,8 @@ pub struct PutScenario {
     /// A JSON object of fields forced into the response body.
     #[schema(value_type = Option<Object>)]
     pub set: Option<Value>,
+    /// Operation ids the scenario applies to; empty means all. When the
+    /// mock has an active contract, each must be one of its operations.
     #[serde(default)]
     pub operations: Vec<String>,
 }
@@ -98,7 +100,7 @@ pub async fn list(
         (status = 200, body = ScenarioView),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
-        (status = 422, body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid scenario, or operations unknown to the active contract", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn put(
@@ -120,6 +122,22 @@ pub async fn put(
     }
     if body.set.as_ref().is_some_and(|s| !s.is_object()) {
         return Err(Problem::unprocessable("set must be a JSON object"));
+    }
+    // Without an active contract there is nothing to check against yet.
+    if let Some(contract) = st.store.active_contract(m.id).await? {
+        let mut unknown: Vec<&str> = body
+            .operations
+            .iter()
+            .map(String::as_str)
+            .filter(|op| contract.bundle.operation(op).is_none())
+            .collect();
+        if !unknown.is_empty() {
+            unknown.sort_unstable();
+            unknown.dedup();
+            return Err(Problem::unprocessable(format!(
+                "the active contract of mock {mock:?} has no operations {unknown:?}"
+            )));
+        }
     }
     let scenario = Scenario {
         mock_id: m.id,
