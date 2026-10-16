@@ -12,10 +12,14 @@ use mb_ext::Extensions;
 use mb_mcm::Bundle;
 use mb_state::StateStore;
 
+mod dp_auth;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 mod record;
 
+pub use dp_auth::{
+    API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
+};
 pub use record::{RequestRecord, RequestRecorder};
 
 /// A saved scenario as the data plane applies it (spec §7.1).
@@ -114,6 +118,9 @@ impl Default for StateHealth {
 pub struct MockRuntime {
     /// Mock name; also used as `SessionKey::mock`.
     pub name: String,
+    /// The mock's workspace; used as `SessionKey::workspace`, in request
+    /// records and to verify data-plane keys.
+    pub workspace: String,
     pub bundle: Arc<Bundle>,
     pub engine: Arc<Engine>,
     pub state: Arc<dyn StateStore>,
@@ -128,11 +135,17 @@ pub struct MockRuntime {
     /// The state store circuit breaker: degraded while the store is
     /// failing, when calls are served statelessly.
     pub state_health: Arc<StateHealth>,
+    /// How data-plane callers authenticate. Defaults to no auth.
+    pub data_plane_auth: DataPlaneAuth,
+    /// Verifies keys in [`DataPlaneAuthMode::ApiKey`] mode; without it every
+    /// key is rejected.
+    pub data_plane_keys: Option<Arc<dyn DataPlaneKeys>>,
 }
 
 impl MockRuntime {
-    /// A runtime with header overrides enabled, no scenarios, the
-    /// self-hosted extensions and no recorder.
+    /// A runtime in workspace `default` with header overrides enabled, no
+    /// scenarios, the self-hosted extensions, no recorder and no data-plane
+    /// auth.
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
@@ -141,6 +154,7 @@ impl MockRuntime {
     ) -> Self {
         Self {
             name: name.into(),
+            workspace: "default".into(),
             bundle,
             engine,
             state,
@@ -149,6 +163,8 @@ impl MockRuntime {
             ext: Extensions::default(),
             recorder: None,
             state_health: Arc::new(StateHealth::default()),
+            data_plane_auth: DataPlaneAuth::default(),
+            data_plane_keys: None,
         }
     }
 }

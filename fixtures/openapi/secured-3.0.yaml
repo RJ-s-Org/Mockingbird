@@ -1,0 +1,166 @@
+openapi: 3.0.3
+info:
+  title: Secured Widgets
+  version: 1.0.0
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    basicAuth:
+      type: http
+      scheme: basic
+    queryKey:
+      type: apiKey
+      in: query
+      name: apikey
+    cookieKey:
+      type: apiKey
+      in: cookie
+      name: session_id
+    headerKey:
+      type: apiKey
+      in: header
+      name: X-Partner-Key
+    oauth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.example.com/token
+          scopes:
+            widgets:read: Read widgets
+            widgets:write: Write widgets
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://auth.example.com/.well-known/openid-configuration
+    mtls:
+      type: mutualTLS
+  schemas:
+    Widget:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        name: { type: string }
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      summary: List widgets (document-level bearer)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Widget" }
+    post:
+      operationId: createWidget
+      summary: Create a widget (basic)
+      security:
+        - basicAuth: []
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Widget" }
+  /widgets/search:
+    get:
+      operationId: searchWidgets
+      summary: Search widgets (API key in query overrides the global bearer)
+      security:
+        - queryKey: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Widget" }
+  /widgets/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getWidget
+      summary: Get a widget (authentication optional)
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Widget" }
+    put:
+      operationId: updateWidget
+      summary: Update a widget (cookie and header API keys together)
+      security:
+        - cookieKey: []
+          headerKey: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Widget" }
+    delete:
+      operationId: deleteWidget
+      summary: Delete a widget (OAuth 2 with scopes)
+      security:
+        - oauth: [widgets:write]
+      responses:
+        "204":
+          description: Deleted
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health (unsecured)
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+  /me:
+    get:
+      operationId: getMe
+      summary: Current user (OpenID Connect)
+      security:
+        - oidc: [openid, profile]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sub: { type: string }
+  /admin:
+    get:
+      operationId: getAdmin
+      summary: Admin (unknown mutualTLS scheme is skipped)
+      security:
+        - mtls: []
+        - basicAuth: []
+          mtls: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }

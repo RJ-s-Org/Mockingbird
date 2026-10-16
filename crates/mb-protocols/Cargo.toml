@@ -21,7 +21,10 @@ http-rest = [
 ]
 
 [dependencies]
+async-trait.workspace = true
 axum = { workspace = true, optional = true }
+base64.workspace = true
+http.workspace = true
 humantime = { workspace = true, optional = true }
 matchit = { workspace = true, optional = true }
 metrics.workspace = true
@@ -37,7 +40,6 @@ tower-http = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }

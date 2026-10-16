@@ -6,6 +6,7 @@ use crate::openapi3::{
     METHODS, OperationIds, check_refs, deref, escape, invalid, is_json_media, slug,
 };
 use crate::schema::normalize_schema;
+use crate::security::compile_security;
 use mb_mcm::{Binding, Bundle, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -242,6 +243,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                 resource_type: infer_resource_type(path),
                 identity: None,
                 semantic_hints: Vec::new(),
+                security: compile_security(doc, op, "/securityDefinitions", &at)?,
             };
             op_out.identity = infer_identity(
                 &op_out.kind,

@@ -4,6 +4,7 @@
 mod heuristics;
 mod openapi3;
 mod schema;
+mod security;
 mod swagger2;
 
 use mb_mcm::Bundle;

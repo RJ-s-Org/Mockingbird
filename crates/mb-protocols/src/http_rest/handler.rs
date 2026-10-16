@@ -19,7 +19,11 @@ use tracing::field::Empty;
 
 use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
-use crate::{MockRuntime, RequestRecord, ScenarioRuntime};
+use crate::dp_auth::{api_key_challenge, passthrough_challenge};
+use crate::{
+    API_KEY_QUERY_PARAM, DataPlaneAuthMode, MockRuntime, RequestRecord, ScenarioRuntime,
+    passthrough_satisfied,
+};
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
@@ -27,7 +31,6 @@ const LATENCY_HEADER: &str = "x-mockingbird-latency";
 const SCENARIO_HEADER: &str = "x-mockingbird-scenario";
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const DEFAULT_SESSION: &str = "default";
-const WORKSPACE: &str = "default";
 const MAX_LATENCY: Duration = Duration::from_secs(30);
 const MAX_SESSION_LEN: usize = 128;
 const LIST_CONTEXT_LIMIT: usize = 20;
@@ -51,6 +54,9 @@ pub(crate) struct RestState {
     rt: Arc<MockRuntime>,
     routes: RouteTable,
     inputs: HashMap<String, InputValidators>,
+    /// The lowercased data-plane key header in `api_key` mode: read for the
+    /// key, never forwarded or recorded.
+    key_header: Option<String>,
 }
 
 #[derive(Default)]
@@ -86,7 +92,25 @@ impl RestState {
                 (op.id.clone(), v)
             })
             .collect();
-        Ok(Self { rt, routes, inputs })
+        let key_header = (rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey)
+            .then(|| rt.data_plane_auth.header.to_ascii_lowercase());
+        Ok(Self {
+            rt,
+            routes,
+            inputs,
+            key_header,
+        })
+    }
+
+    /// The raw query pairs, without the data-plane key parameter in
+    /// `api_key` mode (it never reaches the engine or the record).
+    fn public_query(&self, pairs: &[(String, String)]) -> Vec<(String, String)> {
+        let strip = self.key_header.is_some();
+        pairs
+            .iter()
+            .filter(|(k, _)| !(strip && k == API_KEY_QUERY_PARAM))
+            .cloned()
+            .collect()
     }
 }
 
@@ -199,9 +223,11 @@ pub(crate) async fn handle(
     }
     let delay = log.delay;
     let latency = started.elapsed() + delay.unwrap_or_default();
-    report(rt, &method, &uri, &headers, &raw_body, log, status, latency)
-        .instrument(span.clone())
-        .await;
+    report(
+        &st, &method, &uri, &headers, &raw_body, log, status, latency,
+    )
+    .instrument(span.clone())
+    .await;
     if let Some(delay) = delay {
         tokio::time::sleep(delay).instrument(span).await;
     }
@@ -250,14 +276,15 @@ async fn serve(
             .map(|(k, v)| (k, vec![v.as_str().unwrap_or_default().to_string()])),
         op.input.path.as_ref(),
     );
-    let query = match serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
-    {
-        Ok(pairs) => coerce_params(group(pairs), op.input.query.as_ref()),
-        Err(e) => {
-            errors.push(format!("query: {e}"));
-            Map::new()
-        }
-    };
+    let raw_query =
+        match serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or("")) {
+            Ok(pairs) => pairs,
+            Err(e) => {
+                errors.push(format!("query: {e}"));
+                Vec::new()
+            }
+        };
+    let query = coerce_params(group(st.public_query(&raw_query)), op.input.query.as_ref());
     let body = match decode_body(op, raw_body) {
         Ok(body) => body,
         Err(e) => {
@@ -300,6 +327,9 @@ async fn serve(
     if let Err(r) = admitted {
         return log.rejected(r);
     }
+    if let Some(resp) = authenticate(st, op, headers, &raw_query, log).await {
+        return resp;
+    }
 
     // 4. Overrides and scenario.
     let overrides = match Overrides::parse(headers, rt.header_overrides) {
@@ -334,7 +364,7 @@ async fn serve(
 
     // 5. State read.
     let session = SessionKey {
-        workspace: WORKSPACE.into(),
+        workspace: rt.workspace.clone(),
         mock: rt.name.clone(),
         session: overrides.session,
     };
@@ -360,7 +390,7 @@ async fn serve(
         operation_id: op.id.clone(),
         path_params,
         query,
-        headers: forwarded_headers(headers),
+        headers: forwarded_headers(headers, st.key_header.as_deref()),
         body,
     };
     let ctx = GenerationContext {
@@ -415,7 +445,7 @@ async fn serve(
 /// Report a served call to the usage sink and the request recorder.
 #[allow(clippy::too_many_arguments)]
 async fn report(
-    rt: &MockRuntime,
+    st: &RestState,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -424,6 +454,7 @@ async fn report(
     status: u16,
     latency: Duration,
 ) {
+    let rt = &st.rt;
     let operation_id = log.operation_id.clone().unwrap_or_default();
     // Calls that never reached admission are still attributed to a tenant.
     let tenancy = match (&log.tenancy, log.admitted_or_rejected) {
@@ -453,6 +484,7 @@ async fn report(
     if let Some(recorder) = &rt.recorder {
         let media = media_type(headers).or(log.declared_body_type);
         recorder.record(RequestRecord {
+            workspace: rt.workspace.clone(),
             mock: rt.name.clone(),
             operation_id: log.operation_id,
             session: log.session,
@@ -464,14 +496,72 @@ async fn report(
             prompt_tokens: log.prompt_tokens,
             completion_tokens: log.completion_tokens,
             request: json!({
-                "query": recorded_query(uri),
-                "headers": recorded_headers(headers),
+                "query": recorded_query(st, uri),
+                "headers": recorded_headers(headers, st.key_header.as_deref()),
                 "body": request_body_record(raw_body, media.as_deref(), log.request_body),
             }),
             request_body_bytes: Some(raw_body.len()),
             response: log.response,
         });
     }
+}
+
+/// The data-plane auth check (spec §11.2): `None` when the call may
+/// proceed, else the 401 problem with its `WWW-Authenticate` challenge.
+async fn authenticate(
+    st: &RestState,
+    op: &Operation,
+    headers: &HeaderMap,
+    raw_query: &[(String, String)],
+    log: &mut CallLog,
+) -> Option<Response> {
+    let rt = &st.rt;
+    let (challenge, detail) = match rt.data_plane_auth.mode {
+        DataPlaneAuthMode::None => return None,
+        DataPlaneAuthMode::ApiKey => {
+            let from_header = st
+                .key_header
+                .as_deref()
+                .and_then(|h| headers.get(h))
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|k| !k.is_empty());
+            let key = from_header.or_else(|| {
+                raw_query
+                    .iter()
+                    .find(|(k, v)| k == API_KEY_QUERY_PARAM && !v.is_empty())
+                    .map(|(_, v)| v.as_str())
+            });
+            let valid = match (key, &rt.data_plane_keys) {
+                (Some(key), Some(keys)) => keys.verify(&rt.workspace, key).await,
+                _ => false,
+            };
+            if valid {
+                return None;
+            }
+            (
+                api_key_challenge(&rt.data_plane_auth.header),
+                "a valid data-plane API key is required".to_string(),
+            )
+        }
+        DataPlaneAuthMode::PassthroughValidate => {
+            if passthrough_satisfied(&op.security, headers, raw_query) {
+                return None;
+            }
+            (
+                passthrough_challenge(&op.security),
+                format!(
+                    "operation {} requires the credentials its contract declares",
+                    op.id
+                ),
+            )
+        }
+    };
+    let mut resp = log.problem(401, "Unauthorized", detail);
+    if let Ok(v) = HeaderValue::from_str(&challenge) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+    }
+    Some(resp)
 }
 
 /// 404 when no operation has this path, 405 when only the method differs.
@@ -982,13 +1072,20 @@ fn is_sensitive(name: &str) -> bool {
 }
 
 /// Non-sensitive, UTF-8 request headers, optionally keeping
-/// `X-Mockingbird-*` override headers.
-fn safe_headers(headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value> {
+/// `X-Mockingbird-*` override headers. `key_header` (lowercase) is the
+/// runtime's data-plane key header, also sensitive.
+fn safe_headers(
+    headers: &HeaderMap,
+    keep_overrides: bool,
+    key_header: Option<&str>,
+) -> Map<String, Value> {
     headers
         .iter()
         .filter(|(name, _)| {
             let n = name.as_str();
-            !is_sensitive(n) && (keep_overrides || !n.starts_with("x-mockingbird-"))
+            !is_sensitive(n)
+                && key_header != Some(n)
+                && (keep_overrides || !n.starts_with("x-mockingbird-"))
         })
         .filter_map(|(name, v)| {
             Some((
@@ -1000,20 +1097,21 @@ fn safe_headers(headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value>
 }
 
 /// Headers forwarded to the prompt.
-fn forwarded_headers(headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(headers, false)
+fn forwarded_headers(headers: &HeaderMap, key_header: Option<&str>) -> Map<String, Value> {
+    safe_headers(headers, false, key_header)
 }
 
 /// Headers kept in the request record (overrides included).
-fn recorded_headers(headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(headers, true)
+fn recorded_headers(headers: &HeaderMap, key_header: Option<&str>) -> Map<String, Value> {
+    safe_headers(headers, true, key_header)
 }
 
-/// The raw query as recorded: repeated keys become arrays of strings.
-fn recorded_query(uri: &Uri) -> Value {
+/// The raw query as recorded (without a data-plane key): repeated keys
+/// become arrays of strings.
+fn recorded_query(st: &RestState, uri: &Uri) -> Value {
     let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
         .unwrap_or_default();
-    Value::Object(string_params(pairs))
+    Value::Object(string_params(st.public_query(&pairs)))
 }
 
 /// `pairs` as an object of strings; repeated keys become arrays of strings.

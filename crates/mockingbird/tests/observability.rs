@@ -361,6 +361,7 @@ fn ops_state(
 
 fn record(mock: &str, n: usize) -> RequestRecord {
     RequestRecord {
+        workspace: "default".into(),
         mock: mock.into(),
         operation_id: Some("listOrders".into()),
         session: "default".into(),
