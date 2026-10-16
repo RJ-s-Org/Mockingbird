@@ -3,6 +3,9 @@ all-features = true
 
 [advisories]
 version = 2
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing attack affects private-key decryption; Mockingbird only verifies signatures (openidconnect) and signs in tests" },
+]
 
 [licenses]
 version = 2

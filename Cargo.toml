@@ -48,6 +48,9 @@ utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 subtle = "2"
 base64 = "0.22"
 hmac = "0.12"
+openidconnect = { version = "4.0", default-features = false }
+jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
+rsa = { version = "0.9", features = ["pem"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev
@@ -72,3 +75,9 @@ mb-auth = { path = "crates/mb-auth" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+# RSA key generation in the `testing` OIDC provider is very slow unoptimized.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
