@@ -18,6 +18,7 @@ hmac.workspace = true
 mb-auth.workspace = true
 mb-import.workspace = true
 mb-mcm.workspace = true
+mb-protocols.workspace = true
 mb-state.workspace = true
 mb-store.workspace = true
 metrics.workspace = true
@@ -32,6 +33,7 @@ utoipa.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower.workspace = true
 tracing-subscriber.workspace = true

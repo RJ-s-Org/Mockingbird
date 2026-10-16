@@ -458,7 +458,7 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
             aliases += 1;
         }
     }
-    assert_eq!(aliases, 22, "every mock and profile operation has an alias");
+    assert_eq!(aliases, 23, "every mock and profile operation has an alias");
     assert!(paths["/api/v1/mocks"]["post"]["deprecated"] == true);
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();

@@ -2,7 +2,7 @@
 //! contract versions, scenarios, LLM profiles, sessions and the request log
 //! under `/api/v1/workspaces/{ws}` (the P2 paths under `/api/v1` act on
 //! `default`), plus each workspace's API keys and audit log and the global
-//! audit log at `/api/v1/audit`, described by the OpenAPI document at
+//! audit log at `/api/v1/audit`, and the live request tail over SSE, described by the OpenAPI document at
 //! `/api/openapi.json`. Every successful mutation writes one audit event.
 //! Every `/api/v1` request is authenticated and checked against the caller's
 //! workspace role. Every error is an RFC 9457 `application/problem+json`
@@ -22,6 +22,7 @@ pub mod access;
 mod apikeys;
 mod audit;
 mod contracts;
+mod live;
 mod mocks;
 mod openapi;
 pub mod problem;
@@ -35,6 +36,7 @@ mod workspaces;
 pub use access::{CurrentPrincipal, WsAccess};
 pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
 pub use audit::{AuditEventView, Auditor, spawn_retention};
+pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
 pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
@@ -61,11 +63,15 @@ pub struct AdminState {
     pub auth: Arc<dyn Authenticate>,
     /// Records every successful mutation.
     pub audit: Auditor,
+    /// Subscribes to served data-plane calls for the live request tail;
+    /// `None` answers the tail with 503.
+    pub live: Option<LiveSubscribe>,
 }
 
 impl AdminState {
     /// A state with [`LocalAuth`] (`auth.mode: none`), the
-    /// [`DEFAULT_API_SECRET_REFS`] and an [`Auditor`] without a webhook.
+    /// [`DEFAULT_API_SECRET_REFS`], an [`Auditor`] without a webhook and no
+    /// live request feed.
     pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
         Self {
             audit: Auditor::new(store.clone(), None),
@@ -78,6 +84,7 @@ impl AdminState {
                     .collect(),
             ),
             auth: Arc::new(LocalAuth),
+            live: None,
         }
     }
 }
@@ -160,7 +167,8 @@ pub fn router(st: AdminState) -> Router {
                 .put(sessions::seed)
                 .delete(sessions::reset),
         )
-        .route("/mocks/{mock}/requests", get(requests::list));
+        .route("/mocks/{mock}/requests", get(requests::list))
+        .route("/mocks/{mock}/requests/stream", get(live::stream));
     // Workspace-only resources: no P2 alias for `default`.
     let workspace_only: Router<AdminState> = resources
         .clone()

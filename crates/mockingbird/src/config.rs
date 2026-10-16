@@ -362,6 +362,10 @@ pub async fn build_app_with(
     let prometheus = telemetry::install_prometheus()?;
     let mut admin = mb_admin::router(mb_admin::AdminState {
         api_secret_refs: Arc::new(cfg.server.api_secret_refs.clone()),
+        live: Some({
+            let recorder = recorder.clone();
+            Arc::new(move || recorder.live())
+        }),
         ..mb_admin::AdminState::new(store.clone(), state.clone())
     })
     .merge(ops::router(OpsState {
