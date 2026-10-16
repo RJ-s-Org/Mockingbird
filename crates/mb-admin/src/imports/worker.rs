@@ -29,7 +29,8 @@ const MOCK_DELETED: &str = "the mock was deleted";
 /// The actor of `import.complete` when the job records no creator.
 const SYSTEM_ACTOR: &str = "system";
 
-/// The running worker tasks; dropping this aborts them.
+/// The running worker tasks; dropping this aborts them and the import
+/// pipelines they are running.
 pub struct ImportWorkers {
     handles: Vec<JoinHandle<()>>,
 }
@@ -39,6 +40,16 @@ impl Drop for ImportWorkers {
         for h in &self.handles {
             h.abort();
         }
+    }
+}
+
+/// A spawned task that is aborted when this handle is dropped, so it never
+/// outlives the task awaiting it.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -187,9 +198,12 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         store: st.store.clone(),
         job: job.id,
     };
-    // A panic in the pipeline becomes a JoinError instead of killing the worker.
-    let run = tokio::spawn(async move { run_import(input, llm.as_ref(), &opts, &observer).await });
-    let draft = match run.await {
+    // A panic in the pipeline becomes a JoinError instead of killing the
+    // worker; aborting the worker (shutdown) aborts the pipeline with it.
+    let mut run = AbortOnDrop(tokio::spawn(async move {
+        run_import(input, llm.as_ref(), &opts, &observer).await
+    }));
+    let draft = match (&mut run.0).await {
         Err(e) => {
             tracing::error!(job = %job.id, error = %e, "import pipeline panicked");
             return fail(st, job, UNEXPECTED_ERROR.to_string()).await;

@@ -126,6 +126,37 @@ impl Provider for PanickingProvider {
     }
 }
 
+/// Never answers; records when a call starts and when its future is dropped.
+#[derive(Default)]
+struct HangingProvider {
+    entered: std::sync::atomic::AtomicBool,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct SetOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Provider for HangingProvider {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            json_schema: true,
+            json_mode: true,
+        }
+    }
+
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let _guard = SetOnDrop(self.dropped.clone());
+        self.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
 fn fixture(rel: &str) -> Vec<u8> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures")
@@ -1023,4 +1054,37 @@ async fn jobs_listed_newest_first() {
             first["id"].as_str().unwrap()
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_workers_aborts_a_running_pipeline() {
+    use std::sync::atomic::Ordering;
+    let provider = Arc::new(HangingProvider::default());
+    let mut h = harness_with(Some(provider.clone())).await;
+    h.st.imports.settings.poll_interval = Duration::from_millis(20);
+    h.app = router(h.st.clone());
+    let workers = spawn_import_workers(&h.st);
+    h.call(
+        "editor",
+        Method::POST,
+        &format!("{BASE}/pets/imports"),
+        Some(json!({ "kind": "markdown", "text": md_text() })),
+    )
+    .await
+    .expect(StatusCode::ACCEPTED, "create");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !provider.entered.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "no LLM call started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(workers);
+    // Well before the call's own 5 s timeout would drop it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while !provider.dropped.load(Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pipeline outlived its worker"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
