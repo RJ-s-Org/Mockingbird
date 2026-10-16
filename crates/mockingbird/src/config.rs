@@ -401,6 +401,7 @@ pub async fn build_app_with(
         ..mb_admin::AdminState::new(store.clone(), state.clone())
     };
     let metrics_gate = (!cfg.auth.public_metrics).then(|| admin_state.clone());
+    let hooks_auth = admin_state.clone();
     // In `oidc` mode only authenticated callers see why `/readyz` is not ready.
     let readyz_auth = (cfg.auth.mode == AuthMode::Oidc).then(|| admin_state.auth.clone());
     let console = mb_console::router().layer(axum::middleware::from_fn_with_state(
@@ -418,7 +419,11 @@ pub async fn build_app_with(
         metrics_gate,
     ));
     if let Some(routes) = ext.admin_hooks.routes() {
-        admin = admin.merge(routes);
+        // Extension routes get the same authentication as the Admin API.
+        admin = admin.merge(routes.layer(axum::middleware::from_fn_with_state(
+            hooks_auth,
+            mb_admin::authenticate,
+        )));
     }
     // Any other path is the console, behind the same credentials as the API.
     admin = admin.fallback_service(console);

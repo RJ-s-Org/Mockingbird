@@ -35,7 +35,7 @@ mod sessions;
 mod webhook;
 mod workspaces;
 
-pub use access::{CurrentPrincipal, WsAccess};
+pub use access::{CurrentPrincipal, WsAccess, authenticate};
 pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
 pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
 pub use auth_routes::{

@@ -353,3 +353,76 @@ async fn console_served_behind_login() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(!body.contains("<html"), "{body}");
 }
+
+/// An extension route that echoes the caller's subject.
+struct EchoHook;
+
+impl mb_ext::AdminHooks for EchoHook {
+    fn routes(&self) -> Option<axum::Router> {
+        Some(axum::Router::new().route(
+            "/api/v1/ext/whoami",
+            axum::routing::get(
+                |axum::Extension(p): axum::Extension<mb_auth::Principal>| async move { p.subject },
+            ),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn admin_hook_routes_are_authenticated() {
+    let provider = MockOidcProvider::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let reference = format!(
+        "env:MB_TEST_OIDC_SECRET_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let yaml = format!(
+        "auth:\n  mode: oidc\n  external_url: http://mb.example.com\n  oidc:\n    issuer: {}\n    client_id: {}\n    client_secret: {reference}\n",
+        provider.issuer(),
+        MockOidcProvider::CLIENT_ID
+    );
+    let path = dir.path().join("mockingbird.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    let args = ServeArgs {
+        config: Some(path),
+        offline: true,
+        ..ServeArgs::default()
+    };
+    let ext = Extensions {
+        secrets: Arc::new(OneSecret(reference)),
+        admin_hooks: Arc::new(EchoHook),
+        ..Extensions::default()
+    };
+    let h = Harness {
+        app: build_app_with(&args, None, ext).await.unwrap(),
+        provider,
+        external_host: "mb.example.com".to_string(),
+        _dir: dir,
+    };
+
+    let (status, body) = h.send("GET", "/api/v1/ext/whoami", None, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, _) = h
+        .send("GET", "/api/v1/ext/whoami", None, Some("garbage"), None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let token = h.jwt("alice", &["mb:default:viewer"]);
+    let (status, body) = h
+        .send("GET", "/api/v1/ext/whoami", None, Some(&token), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "alice");
+
+    // The hook's routes do not change the console fallback or the probes.
+    let req = Request::builder()
+        .uri("/w/default/mocks")
+        .header(header::HOST, &h.external_host)
+        .header(header::ACCEPT, "text/html")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.app.admin.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    let (status, _) = h.send("GET", "/healthz", None, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+}
