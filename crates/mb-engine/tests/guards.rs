@@ -424,3 +424,68 @@ async fn oversized_llm_body_falls_back_without_repair() {
     assert_eq!(provider.requests().len(), 1);
     assert!(response.body.is_some());
 }
+
+/// Streams report no usage, so the engine charges an estimate of
+/// `ceil((prompt bytes + streamed bytes) / 4)` once the provider stream
+/// closes, including when the consumer drops the stream early.
+#[tokio::test]
+async fn stream_spends_estimated_tokens() {
+    let bundle = stream_bundle();
+    let op = bundle.operation("getContact").unwrap().clone();
+    let line = format!("{}\n", contact("a@example.com"));
+    let open = |chunks: Vec<String>| {
+        let budget = Arc::new(TestBudget::default());
+        let guards = EngineGuards {
+            budget: Some(budget.clone()),
+            ..EngineGuards::default()
+        };
+        let provider = Arc::new(
+            ScriptedProvider::new(Vec::new())
+                .with_streams(vec![Ok(chunks.into_iter().map(Ok).collect())]),
+        );
+        let dyn_provider: Arc<dyn Provider> = provider.clone();
+        let engine = engine(dyn_provider, Duration::from_secs(3), guards);
+        (budget, provider, engine)
+    };
+    let prompt_bytes = |provider: &ScriptedProvider| -> usize {
+        provider.stream_requests()[0]
+            .messages
+            .iter()
+            .map(|m| m.content.len())
+            .sum()
+    };
+
+    // Fully consumed.
+    let (budget, provider, engine) = open(vec![line.clone(), line.clone()]);
+    let items: Vec<_> = engine
+        .generate_stream(
+            Arc::clone(&bundle),
+            &op,
+            call(),
+            StreamContext::default(),
+            Some(2),
+        )
+        .unwrap()
+        .collect()
+        .await;
+    assert!(items.iter().all(|i| i.source == Source::Llm));
+    let expected = (prompt_bytes(&provider) + 2 * line.len()).div_ceil(4) as u64;
+    assert_eq!(budget.spent.load(Ordering::SeqCst), expected);
+
+    // Dropped after the first item: only what was received is charged.
+    let (budget, provider, engine) = open(vec![line.clone(), line.clone(), line.clone()]);
+    let mut stream = engine
+        .generate_stream(
+            Arc::clone(&bundle),
+            &op,
+            call(),
+            StreamContext::default(),
+            Some(3),
+        )
+        .unwrap();
+    assert_eq!(stream.next().await.unwrap().source, Source::Llm);
+    assert_eq!(budget.spent.load(Ordering::SeqCst), 0, "charged on close");
+    drop(stream);
+    let expected = (prompt_bytes(&provider) + line.len()).div_ceil(4) as u64;
+    assert_eq!(budget.spent.load(Ordering::SeqCst), expected);
+}

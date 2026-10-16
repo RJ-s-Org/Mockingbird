@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, TextStream};
+use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, TextStream, Usage};
 use mb_mcm::{Bundle, Operation};
 use serde_json::Value;
 use tokio::time::Instant;
@@ -112,9 +112,34 @@ enum Upstream {
     Open {
         stream: TextStream,
         splitter: LineSplitter,
+        meter: StreamMeter,
     },
     /// Offline, finished, failed or timed out: only the faker remains.
     Closed,
+}
+
+/// Charges an open provider stream to the token budget when it closes
+/// (ends, fails, times out, is released or dropped). `TextStream` carries
+/// no usage, so tokens are estimated as `ceil(bytes / 4)` of the prompt and
+/// of the text received.
+struct StreamMeter {
+    engine: Arc<Engine>,
+    prompt_bytes: usize,
+    completion_bytes: usize,
+}
+
+impl Drop for StreamMeter {
+    fn drop(&mut self) {
+        let estimate = |bytes: usize| u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX);
+        let total = self.prompt_bytes + self.completion_bytes;
+        // Round the sum, not each half, so the charge is ceil(total / 4).
+        let prompt_tokens = estimate(self.prompt_bytes);
+        let completion_tokens = estimate(total).saturating_sub(prompt_tokens);
+        self.engine.spend(Usage {
+            prompt_tokens,
+            completion_tokens,
+        });
+    }
 }
 
 struct StreamState {
@@ -190,11 +215,17 @@ impl StreamState {
                             continue;
                         }
                     }
+                    let prompt_bytes = request.messages.iter().map(|m| m.content.len()).sum();
                     match tokio::time::timeout_at(deadline, provider.stream(request)).await {
                         Ok(Ok(stream)) => {
                             self.upstream = Upstream::Open {
                                 stream,
                                 splitter: LineSplitter::new(),
+                                meter: StreamMeter {
+                                    engine: Arc::clone(&self.engine),
+                                    prompt_bytes,
+                                    completion_bytes: 0,
+                                },
                             };
                         }
                         Ok(Err(e)) => self.give_up(&e.to_string()),
@@ -204,10 +235,16 @@ impl StreamState {
                 Upstream::Open {
                     mut stream,
                     mut splitter,
+                    mut meter,
                 } => match tokio::time::timeout_at(deadline, stream.next()).await {
                     Ok(Some(Ok(delta))) => {
+                        meter.completion_bytes += delta.len();
                         self.lines.extend(splitter.push(&delta));
-                        self.upstream = Upstream::Open { stream, splitter };
+                        self.upstream = Upstream::Open {
+                            stream,
+                            splitter,
+                            meter,
+                        };
                     }
                     Ok(None) => self.lines.extend(splitter.finish()),
                     Ok(Some(Err(e))) => self.give_up(&e.to_string()),
