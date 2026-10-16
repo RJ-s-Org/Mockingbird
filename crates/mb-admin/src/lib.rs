@@ -24,6 +24,7 @@ mod apikeys;
 mod audit;
 mod auth_routes;
 mod contracts;
+pub mod imports;
 mod live;
 mod login_limit;
 mod mocks;
@@ -41,6 +42,12 @@ pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
 pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
 pub use auth_routes::{
     LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
+};
+pub use imports::llm::{LlmResolver, OfflineLlm};
+pub use imports::worker::{ImportWorkers, run_next_import, spawn_import_workers};
+pub use imports::{
+    CreateImport, ImportJobView, ImportKindSchema, ImportProgressView, ImportSettings,
+    ImportStatusSchema, Imports, MAX_IMPORT_REQUEST_BYTES, UPLOAD_HEADER,
 };
 pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
 pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUPPRESSED_METRIC};
@@ -84,12 +91,17 @@ pub struct AdminState {
     pub web_auth: Option<WebAuth>,
     /// Rate limit for `auth.login_failed` audit events.
     pub login_failures: Arc<LoginFailureLimiter>,
+    /// LLM access of imports and draft previews ([`OfflineLlm`] by default).
+    pub llm: Arc<dyn LlmResolver>,
+    /// Import settings and the worker wake-up signal.
+    pub imports: Imports,
 }
 
 impl AdminState {
     /// A state with [`LocalAuth`] (`auth.mode: none`), the
     /// [`DEFAULT_API_SECRET_REFS`], an [`Auditor`] without a webhook, no
-    /// live request feed and no browser login.
+    /// live request feed, no browser login, no LLM ([`OfflineLlm`]) and the
+    /// default [`ImportSettings`].
     pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
         Self {
             audit: Auditor::new(store.clone(), None),
@@ -106,6 +118,8 @@ impl AdminState {
             live_recheck: DEFAULT_LIVE_RECHECK,
             web_auth: None,
             login_failures: Arc::new(LoginFailureLimiter::new()),
+            llm: Arc::new(OfflineLlm),
+            imports: Imports::default(),
         }
     }
 }
@@ -149,6 +163,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// otherwise 415), so a cross-site page cannot reach the API with a simple
 /// request.
 pub fn router(st: AdminState) -> Router {
+    let import_body_limit = axum::extract::DefaultBodyLimit::max(MAX_IMPORT_REQUEST_BYTES);
     let resources: Router<AdminState> = Router::new()
         .route("/mocks", get(mocks::list).post(mocks::create))
         .route(
@@ -190,7 +205,17 @@ pub fn router(st: AdminState) -> Router {
                 .delete(sessions::reset),
         )
         .route("/mocks/{mock}/requests", get(requests::list))
-        .route("/mocks/{mock}/requests/stream", get(live::stream));
+        .route("/mocks/{mock}/requests/stream", get(live::stream))
+        .route(
+            "/mocks/{mock}/imports",
+            get(imports::list)
+                .post(imports::create)
+                .layer(import_body_limit),
+        )
+        .route(
+            "/mocks/{mock}/imports/{job}",
+            get(imports::get_one).delete(imports::cancel),
+        );
     // Workspace-only resources: no P2 alias for `default`.
     let workspace_only: Router<AdminState> = resources
         .clone()

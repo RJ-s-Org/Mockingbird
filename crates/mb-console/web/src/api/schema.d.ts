@@ -178,6 +178,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mocks/{mock}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["imports_list_default"];
+        put?: never;
+        /** @deprecated */
+        post: operations["imports_create_default"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/imports/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["imports_get_one_default"];
+        put?: never;
+        post?: never;
+        /** @deprecated */
+        delete: operations["imports_cancel_default"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mocks/{mock}/requests": {
         parameters: {
             query?: never;
@@ -494,6 +530,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["imports_list"];
+        put?: never;
+        post: operations["imports_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/imports/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["imports_get_one"];
+        put?: never;
+        post?: never;
+        delete: operations["imports_cancel"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/mocks/{mock}/requests": {
         parameters: {
             query?: never;
@@ -685,6 +753,21 @@ export interface components {
             /** @description Acts as a sysadmin; only a sysadmin can create such a key. */
             sysadmin?: boolean;
         };
+        /**
+         * @description A JSON import request: exactly one of `url`, `text` and
+         *     `content_base64`.
+         */
+        CreateImport: {
+            /** @description The document, base64-encoded, at most 20 MiB decoded. */
+            content_base64?: string | null;
+            /** @description The document's file name, shown as the job's source. */
+            filename?: string | null;
+            kind?: components["schemas"]["ImportKindSchema"] | null;
+            /** @description The document itself, at most 20 MiB. */
+            text?: string | null;
+            /** @description An http(s) URL to fetch. `kind` must be absent or `url`. */
+            url?: string | null;
+        };
         /** @description A new mock. Mocks created through the API always have `source = api`. */
         CreateMock: {
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
@@ -729,6 +812,53 @@ export interface components {
          * @enum {string}
          */
         DataPlaneAuthMode: "none" | "api_key" | "passthrough_validate";
+        /** @description An import job. */
+        ImportJobView: {
+            /** Format: date-time */
+            created_at: string;
+            created_by?: string | null;
+            /** @description Why a `failed` job failed. */
+            error?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["ImportKindSchema"];
+            mock: string;
+            progress: components["schemas"]["ImportProgressView"];
+            /**
+             * Format: int64
+             * @description The draft contract version a `done` job produced.
+             */
+            result_version?: number | null;
+            /** @description The file name or URL imported. */
+            source_name?: string | null;
+            /** Format: date-time */
+            started_at?: string | null;
+            status: components["schemas"]["ImportStatusSchema"];
+        };
+        /**
+         * @description What an import reads.
+         * @enum {string}
+         */
+        ImportKindSchema: "markdown" | "html" | "pdf" | "text" | "har" | "postman" | "url";
+        /** @description How far a job has got. */
+        ImportProgressView: {
+            /** Format: int32 */
+            done: number;
+            /**
+             * @description `queued`, `fetching`, `extracting`, `analyzing`, `summarizing` or
+             *     `assembling`.
+             */
+            phase: string;
+            /** Format: int32 */
+            total: number;
+        };
+        /**
+         * @description Where an import job is.
+         * @enum {string}
+         */
+        ImportStatusSchema: "queued" | "running" | "done" | "failed" | "canceled";
         /**
          * @description The OpenAPI schema of [`KeyScope`] (which lives in `mb-auth`).
          * @enum {string}
@@ -1684,6 +1814,194 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_list_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The newest 50 jobs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_create_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        /** @description Either `application/json` (`CreateImport`), or `multipart/form-data` with part `file` (its file name becomes the job's source) and optional part `kind`, which must carry the header `X-Mockingbird-Upload` (any value). The input is at most 20 MiB; the request at most 28 MiB. Without a kind, the kind is detected from the content and file name. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateImport"];
+                "multipart/form-data": number[];
+            };
+        };
+        responses: {
+            /** @description Queued; `Location` names the job */
+            202: {
+                headers: {
+                    /** @description The job's URL */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Neither JSON nor multipart with the upload header */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_get_one_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_cancel_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Canceled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The job has already finished */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3096,6 +3414,202 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The newest 50 jobs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        /** @description Either `application/json` (`CreateImport`), or `multipart/form-data` with part `file` (its file name becomes the job's source) and optional part `kind`, which must carry the header `X-Mockingbird-Upload` (any value). The input is at most 20 MiB; the request at most 28 MiB. Without a kind, the kind is detected from the content and file name. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateImport"];
+                "multipart/form-data": number[];
+            };
+        };
+        responses: {
+            /** @description Queued; `Location` names the job */
+            202: {
+                headers: {
+                    /** @description The job's URL */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Neither JSON nor multipart with the upload header */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Canceled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The job has already finished */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

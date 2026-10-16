@@ -1419,6 +1419,8 @@ async fn openapi_lists_all_paths() {
         ),
         ("/api/v1/mocks/{mock}/requests", &["get"]),
         ("/api/v1/mocks/{mock}/requests/stream", &["get"]),
+        ("/api/v1/mocks/{mock}/imports", &["get", "post"]),
+        ("/api/v1/mocks/{mock}/imports/{job}", &["get", "delete"]),
     ];
     for (path, methods) in expected {
         let item = &doc["paths"][*path];

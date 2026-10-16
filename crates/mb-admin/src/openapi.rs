@@ -11,13 +11,13 @@ use utoipa::openapi::path::{Operation, ParameterIn, PathItem};
 use utoipa::openapi::{Deprecated, RefOr};
 
 use crate::{
-    API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, contracts, live, mocks, problem,
-    profiles, requests, scenarios, sessions, workspaces,
+    API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, contracts, imports, live, mocks,
+    problem, profiles, requests, scenarios, sessions, workspaces,
 };
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, scenarios, LLM profiles, sessions, the request log and its live SSE tail, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only); `GET /api/v1/me` describes the caller. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
+    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, import jobs, scenarios, LLM profiles, sessions, the request log and its live SSE tail, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only); `GET /api/v1/me` describes the caller. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
     paths(
         workspaces::list,
         workspaces::create,
@@ -34,6 +34,10 @@ use crate::{
         contracts::get_one,
         contracts::source,
         contracts::activate,
+        imports::create,
+        imports::list,
+        imports::get_one,
+        imports::cancel,
         scenarios::list,
         scenarios::put,
         scenarios::delete,
@@ -71,6 +75,11 @@ use crate::{
         contracts::ContractVersionSummary,
         contracts::ContractVersionDetail,
         contracts::OperationSummary,
+        imports::ImportKindSchema,
+        imports::ImportStatusSchema,
+        imports::CreateImport,
+        imports::ImportProgressView,
+        imports::ImportJobView,
         scenarios::ScenarioView,
         scenarios::PutScenario,
         profiles::LlmProfileView,
@@ -95,6 +104,7 @@ use crate::{
         (name = "workspaces"),
         (name = "mocks"),
         (name = "contracts"),
+        (name = "imports"),
         (name = "scenarios"),
         (name = "llm-profiles"),
         (name = "sessions"),
