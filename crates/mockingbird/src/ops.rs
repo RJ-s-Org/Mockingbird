@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use mb_admin::AdminState;
 use mb_auth::Authenticate;
-use mb_state::StateStore;
+use mb_state::{Bus, StateStore};
 use mb_store::ControlStore;
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::json;
@@ -28,6 +28,9 @@ pub struct OpsState {
     /// none`); otherwise only callers it authenticates do, and anyone
     /// else gets just `{"status": ...}`.
     pub readyz_auth: Option<Arc<dyn Authenticate>>,
+    /// The cross-node bus, whose health `/readyz` reports; `None` without
+    /// one.
+    pub bus: Option<Arc<dyn Bus>>,
 }
 
 /// - `/healthz`: liveness, always `200 {"status":"ok"}`.
@@ -38,7 +41,8 @@ pub struct OpsState {
 ///   previous version), a mock's channels are not all working (`mock
 ///   <label>: <reason>`, e.g. an unreachable broker), a mounted mock is
 ///   serving statelessly or a mock's daily token budget is exhausted
-///   (`mock <label>: daily token budget exhausted`); else `200 ready`. Each store ping is bounded by
+///   (`mock <label>: daily token budget exhausted`), or the cross-node bus
+///   is disconnected (`bus: <reason>`); else `200 ready`. Each store ping is bounded by
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
@@ -94,6 +98,9 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
             let mut reasons = Vec::new();
             if let Err(error) = state {
                 reasons.push(format!("state store unreachable: {error}"));
+            }
+            if let Some(Err(reason)) = st.bus.as_ref().map(|bus| bus.health()) {
+                reasons.push(format!("bus: {reason}"));
             }
             for (mock, error) in st.registry.failed_mocks() {
                 reasons.push(format!("mock {mock}: {error}"));

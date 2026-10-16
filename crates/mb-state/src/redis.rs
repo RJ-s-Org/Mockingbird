@@ -196,6 +196,7 @@ impl RedisStateStore {
             resource_type: resource_type.to_string(),
             id: id.to_string(),
             kind,
+            origin: crate::ChangeOrigin::Local,
         });
     }
 

@@ -13,6 +13,7 @@ use mb_engine::GenerationLimiter;
 use mb_engine::pii::Scrubber;
 use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_protocols::events::{Brokers, EventDeps};
+use mb_state::{Bus, StateStore};
 use mb_store::ControlStore;
 
 use crate::client::ClientCommand;
@@ -21,6 +22,7 @@ use crate::events::{RegistryChannels, StoreLease};
 use crate::file_config::{
     self, AuthConfig, AuthMode, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile,
 };
+use crate::ha::Ha;
 use crate::host_guard::HostPolicy;
 use crate::import_llm::RuntimeLlm;
 use crate::maintenance::Maintenance;
@@ -167,6 +169,11 @@ pub struct App {
     pub maintenance: Maintenance,
     /// The import worker pool; dropping it stops the workers.
     pub import_workers: mb_admin::ImportWorkers,
+    /// The cross-node bus and its bridges.
+    pub ha: Arc<Ha>,
+    /// The state store the mocks and the Admin API use, its change feed
+    /// shared across nodes (see [`Ha::shared_state`]).
+    pub state: Arc<dyn StateStore>,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
@@ -377,7 +384,29 @@ pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<
 pub async fn build_app_with(
     args: &ServeArgs,
     llm: Option<LlmEnv>,
+    ext: Extensions,
+) -> anyhow::Result<App> {
+    build_app_on(args, llm, ext, None).await
+}
+
+/// [`build_app_with`] on the given cross-node bus instead of the one the
+/// configuration names; the node id is the bus's (tests join several nodes
+/// to one [`mb_state::MemoryBusHub`]).
+#[doc(hidden)]
+pub async fn build_app_with_bus(
+    args: &ServeArgs,
+    llm: Option<LlmEnv>,
+    ext: Extensions,
+    bus: Arc<dyn Bus>,
+) -> anyhow::Result<App> {
+    build_app_on(args, llm, ext, Some(bus)).await
+}
+
+async fn build_app_on(
+    args: &ServeArgs,
+    llm: Option<LlmEnv>,
     mut ext: Extensions,
+    bus: Option<Arc<dyn Bus>>,
 ) -> anyhow::Result<App> {
     let cfg = resolve_config(args, llm.as_ref())?;
     if let Some(key) = llm.as_ref().and_then(|l| l.api_key.clone()) {
@@ -395,6 +424,14 @@ pub async fn build_app_with(
         .await
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| "opening the state store")?;
+    // One id names this node on the bus and as the scheduler lease holder.
+    let ha = match bus {
+        Some(bus) => Ha::start_with_bus(bus, store.clone()).await,
+        None => Ha::start(&cfg, store.clone(), uuid::Uuid::new_v4().to_string())
+            .await
+            .context("connecting the cross-node bus")?,
+    };
+    let state = ha.shared_state(state);
 
     let broker_configs = file_config::broker_configs(&cfg).context("applying the configuration")?;
     // Before anything is applied, so a bad auth setup changes nothing.
@@ -411,6 +448,7 @@ pub async fn build_app_with(
         cfg.observability.request_log_retention,
         cfg.observability.redact_fields.clone(),
     );
+    recorder.clone().with_bus(ha.clone());
     let (protocols, stream) = cfg.protocol_settings();
     let scrubber = match cfg.scrubber_config() {
         Some(pii) => Some(Arc::new(
@@ -435,7 +473,7 @@ pub async fn build_app_with(
             lease: Arc::new(StoreLease {
                 store: store.clone(),
             }),
-            holder: uuid::Uuid::new_v4().to_string(),
+            holder: ha.node_id.clone(),
         },
         limiter: GenerationLimiter::new(cfg.limits.max_concurrent_generations),
         scrubber,
@@ -443,8 +481,10 @@ pub async fn build_app_with(
     };
     let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();
+    // Subscribe before the first load, so no change after it is missed.
+    let changes = ha.changes();
     registry.reload_all(&deps).await?;
-    registry.spawn_watcher(deps.clone());
+    registry.spawn_watcher(deps.clone(), changes);
     for (workspace, name, prefix) in registry.mounted() {
         let name = mock_label(&workspace, &name);
         tracing::info!(
@@ -526,6 +566,7 @@ pub async fn build_app_with(
                 registry: registry.clone(),
                 prometheus,
                 readyz_auth,
+                bus: Some(ha.bus.clone()),
             },
             metrics_gate,
         ))
@@ -586,6 +627,8 @@ pub async fn build_app_with(
         brokers,
         maintenance,
         import_workers,
+        ha,
+        state,
     })
 }
 

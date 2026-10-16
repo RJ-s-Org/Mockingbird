@@ -196,7 +196,12 @@ async fn activation_change_reloads() {
     let deps = deps(store.clone());
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
-    let _watcher = registry.spawn_watcher(deps);
+    let ha = mockingbird::ha::Ha::start_with_bus(
+        mb_state::LocalBus::new("test".into()),
+        deps.store.clone(),
+    )
+    .await;
+    let _watcher = registry.spawn_watcher(deps, ha.changes());
     let base = serve(registry.router()).await;
     assert_eq!(status_of(&base, "/orders/ping").await, 404);
 
@@ -212,7 +217,12 @@ async fn delete_unmounts() {
     let deps = deps(store.clone());
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
-    let _watcher = registry.spawn_watcher(deps);
+    let ha = mockingbird::ha::Ha::start_with_bus(
+        mb_state::LocalBus::new("test".into()),
+        deps.store.clone(),
+    )
+    .await;
+    let _watcher = registry.spawn_watcher(deps, ha.changes());
     let base = serve(registry.router()).await;
     assert_eq!(status_of(&base, "/orders/orders").await, 200);
 
@@ -756,7 +766,12 @@ async fn grpc_mock_removed_on_delete() {
     let deps = deps(store.clone());
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
-    let _watcher = registry.spawn_watcher(deps);
+    let ha = mockingbird::ha::Ha::start_with_bus(
+        mb_state::LocalBus::new("test".into()),
+        deps.store.clone(),
+    )
+    .await;
+    let _watcher = registry.spawn_watcher(deps, ha.changes());
     assert_eq!(grpc_services(&registry).len(), 1);
 
     assert!(

@@ -23,6 +23,7 @@ use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
 use crate::budget::StoreTokenBudget;
+use crate::ha::HubEvent;
 use crate::runtime::{RuntimeDeps, build_runtime_with_budget};
 
 /// How a mock is named in logs and `/readyz`: `name` in the default
@@ -270,20 +271,25 @@ impl MockRegistry {
         self.publish(next).await;
     }
 
-    /// Applies control-plane changes as they are published: a mock change
-    /// (in any workspace) reloads that mock; a workspace or profile change,
-    /// or missed changes, reload all.
-    pub fn spawn_watcher(self: &Arc<Self>, deps: RuntimeDeps) -> tokio::task::JoinHandle<()> {
-        let mut changes = deps.store.subscribe();
+    /// Applies control-plane changes as the HA hub delivers them (see
+    /// [`Ha::changes`](crate::ha::Ha::changes)): a mock change (in any
+    /// workspace, from any node) reloads that mock; a workspace or profile
+    /// change, a resync request, or missed changes, reload all.
+    pub fn spawn_watcher(
+        self: &Arc<Self>,
+        deps: RuntimeDeps,
+        mut changes: broadcast::Receiver<HubEvent>,
+    ) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(self);
         tokio::spawn(async move {
             loop {
                 match changes.recv().await {
-                    Ok(ControlChange::Mock { workspace, name }) => {
+                    Ok(HubEvent::Change(ControlChange::Mock { workspace, name })) => {
                         registry.reload_mock(&deps, &workspace, &name).await;
                     }
-                    Ok(ControlChange::Workspace { .. })
-                    | Ok(ControlChange::Profile { .. })
+                    Ok(HubEvent::Change(ControlChange::Workspace { .. }))
+                    | Ok(HubEvent::Change(ControlChange::Profile { .. }))
+                    | Ok(HubEvent::Resync)
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Err(error) = registry.reload_all(&deps).await {
                             tracing::error!(%error, "cannot reload mocks");

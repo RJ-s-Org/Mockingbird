@@ -502,6 +502,7 @@ fn ops_state(
         registry,
         prometheus: telemetry::install_prometheus().unwrap(),
         readyz_auth: None,
+        bus: None,
     }
 }
 
@@ -932,6 +933,7 @@ async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
     let store: Arc<dyn ControlStore> = stub.clone();
     let base = serve(ops::router(OpsState {
         readyz_auth: Some(Arc::new(OnlyOk)),
+        bus: None,
         ..ops_state(store, failing_state(), MockRegistry::new())
     }))
     .await;
@@ -1012,6 +1014,7 @@ async fn metrics_exposes_request_counters() {
         registry,
         prometheus,
         readyz_auth: None,
+        bus: None,
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();

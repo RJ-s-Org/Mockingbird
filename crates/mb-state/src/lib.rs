@@ -60,12 +60,24 @@ pub enum ChangeKind {
     Deleted,
 }
 
+/// Where a [`StateChanged`] was made: on this node, or on another node and
+/// relayed over the cross-node bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ChangeOrigin {
+    #[default]
+    Local,
+    Remote,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateChanged {
     pub session: SessionKey,
     pub resource_type: String,
     pub id: String,
     pub kind: ChangeKind,
+    /// Stores publish [`ChangeOrigin::Local`]; a bus-aware wrapper marks
+    /// changes relayed from other nodes [`ChangeOrigin::Remote`].
+    pub origin: ChangeOrigin,
 }
 
 /// Session-scoped resource store.

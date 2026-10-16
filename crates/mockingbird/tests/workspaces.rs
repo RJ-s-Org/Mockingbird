@@ -499,7 +499,12 @@ async fn workspace_force_delete_unmounts() {
     .await;
     let deps = deps(store.clone(), None);
     let (registry, base) = served(&deps).await;
-    let _watcher = registry.spawn_watcher(deps);
+    let ha = mockingbird::ha::Ha::start_with_bus(
+        mb_state::LocalBus::new("test".into()),
+        deps.store.clone(),
+    )
+    .await;
+    let _watcher = registry.spawn_watcher(deps, ha.changes());
     assert_eq!(status_of(&base, "/b/orders").await, 200);
 
     assert!(store.delete_workspace(TEAM_A, true).await.unwrap());
