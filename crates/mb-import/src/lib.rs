@@ -1,6 +1,7 @@
-//! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0) into the Mockingbird
-//! Contract Model.
+//! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0, GraphQL SDL and
+//! introspection) into the Mockingbird Contract Model.
 
+mod graphql;
 mod heuristics;
 mod openapi3;
 mod schema;
@@ -13,6 +14,12 @@ use serde_json::Value;
 pub enum SourceFormat {
     OpenApi3,
     Swagger2,
+    GraphqlSdl,
+    GraphqlIntrospection,
+    Proto,
+    FileDescriptorSet,
+    Wsdl11,
+    Archive,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -61,11 +68,57 @@ pub fn parse_document(bytes: &[u8]) -> Result<Value, ImportError> {
     serde_saphyr::from_slice::<Value>(bytes).map_err(|e| ImportError::Parse(e.to_string()))
 }
 
-/// Parse, detect the format, and dispatch to the matching compiler.
+/// Markers of GraphQL SDL text.
+const SDL_MARKERS: [&str; 4] = [
+    "type Query",
+    "schema {",
+    "type Mutation",
+    "type Subscription",
+];
+
+/// Whether a JSON document is a GraphQL introspection result
+/// (`/__schema` or `/data/__schema`).
+fn is_introspection(doc: &Value) -> bool {
+    doc.get("__schema").is_some() || doc.pointer("/data/__schema").is_some()
+}
+
+/// Detect the source format of uploaded bytes.
+pub fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
+    if let Ok(doc) = serde_json::from_slice::<Value>(bytes) {
+        if is_introspection(&doc) {
+            return Ok(SourceFormat::GraphqlIntrospection);
+        }
+        return detect_format(&doc);
+    }
+    let yaml = serde_saphyr::from_slice::<Value>(bytes);
+    if let Ok(doc) = &yaml
+        && let Ok(format) = detect_format(doc)
+    {
+        return Ok(format);
+    }
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && SDL_MARKERS.iter().any(|m| text.contains(m))
+    {
+        return Ok(SourceFormat::GraphqlSdl);
+    }
+    match yaml {
+        Ok(doc) => detect_format(&doc),
+        Err(e) => Err(ImportError::Parse(e.to_string())),
+    }
+}
+
+/// Detect the format and dispatch to the matching compiler.
 pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
-    let doc = parse_document(bytes)?;
-    match detect_format(&doc)? {
-        SourceFormat::OpenApi3 => openapi3::compile(&doc, bytes),
-        SourceFormat::Swagger2 => swagger2::compile(&doc, bytes),
+    match sniff(bytes)? {
+        SourceFormat::OpenApi3 => openapi3::compile(&parse_document(bytes)?, bytes),
+        SourceFormat::Swagger2 => swagger2::compile(&parse_document(bytes)?, bytes),
+        SourceFormat::GraphqlSdl => graphql::compile_sdl(bytes),
+        SourceFormat::GraphqlIntrospection => {
+            graphql::compile_introspection(&parse_document(bytes)?, bytes)
+        }
+        format @ (SourceFormat::Proto
+        | SourceFormat::FileDescriptorSet
+        | SourceFormat::Wsdl11
+        | SourceFormat::Archive) => Err(ImportError::Unsupported(format!("{format:?}"))),
     }
 }

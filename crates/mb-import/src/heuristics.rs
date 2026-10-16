@@ -80,3 +80,93 @@ pub(crate) fn infer_identity(
         input_field: None,
     })
 }
+
+/// Verb prefixes of operation names, with the kind each implies.
+const VERBS: [(&[&str], OperationKind); 4] = [
+    (
+        &["get", "list", "find", "search", "query", "fetch", "read"],
+        OperationKind::Query,
+    ),
+    (
+        &["create", "add", "insert", "new", "register"],
+        OperationKind::Command(Effect::Create),
+    ),
+    (
+        &["update", "set", "modify", "edit", "patch", "replace"],
+        OperationKind::Command(Effect::Update),
+    ),
+    (
+        &["delete", "remove", "cancel", "destroy"],
+        OperationKind::Command(Effect::Delete),
+    ),
+];
+
+/// The verb prefix of `name` and the kind it implies. The prefix matches
+/// case-insensitively and must be followed by an uppercase letter, `_` or
+/// the end of the name.
+fn verb_prefix(name: &str) -> Option<(&str, &OperationKind)> {
+    VERBS.iter().find_map(|(verbs, kind)| {
+        verbs.iter().find_map(|verb| {
+            let (head, rest) = name.split_at_checked(verb.len())?;
+            let boundary = rest
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_ascii_uppercase() || c == '_');
+            (head.eq_ignore_ascii_case(verb) && boundary).then_some((rest, kind))
+        })
+    })
+}
+
+/// The operation kind implied by a verb-prefixed name (`getUser`,
+/// `create_order`), else `default`.
+pub(crate) fn kind_from_name(name: &str, default: OperationKind) -> OperationKind {
+    verb_prefix(name).map_or(default, |(_, kind)| kind.clone())
+}
+
+/// The resource a name refers to: the name without its verb prefix,
+/// lowercased, with one trailing `s` (not `ss`) dropped; `None` if empty.
+pub(crate) fn resource_from_name(name: &str) -> Option<String> {
+    let rest = verb_prefix(name).map_or(name, |(rest, _)| rest);
+    let mut resource = rest.trim_start_matches('_').to_lowercase();
+    if resource.ends_with('s') && !resource.ends_with("ss") {
+        resource.pop();
+    }
+    (!resource.is_empty()).then_some(resource)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heuristics_kind_and_resource_from_name() {
+        let other = || OperationKind::Command(Effect::Other);
+        assert_eq!(kind_from_name("getUser", other()), OperationKind::Query);
+        assert_eq!(resource_from_name("getUser").as_deref(), Some("user"));
+        assert_eq!(
+            kind_from_name("Add", other()),
+            OperationKind::Command(Effect::Create)
+        );
+        assert_eq!(resource_from_name("Add"), None);
+        assert_eq!(
+            kind_from_name("settle", OperationKind::Query),
+            OperationKind::Query
+        );
+        assert_eq!(resource_from_name("settle").as_deref(), Some("settle"));
+        assert_eq!(kind_from_name("listOrders", other()), OperationKind::Query);
+        assert_eq!(resource_from_name("listOrders").as_deref(), Some("order"));
+        assert_eq!(
+            kind_from_name("remove_item", other()),
+            OperationKind::Command(Effect::Delete)
+        );
+        assert_eq!(resource_from_name("remove_item").as_deref(), Some("item"));
+        assert_eq!(
+            kind_from_name("SetStatus", other()),
+            OperationKind::Command(Effect::Update)
+        );
+        assert_eq!(kind_from_name("newsletter", other()), other());
+        assert_eq!(resource_from_name("addAddress").as_deref(), Some("address"));
+        assert_eq!(resource_from_name("search"), None);
+        assert_eq!(kind_from_name("ébauche", other()), other());
+    }
+}
