@@ -357,6 +357,7 @@ fn ops_state(
         state,
         registry,
         prometheus: telemetry::install_prometheus().unwrap(),
+        readyz_auth: None,
     }
 }
 
@@ -749,6 +750,67 @@ async fn readyz_reports_degraded_state_store() {
     );
 }
 
+/// Accepts exactly `Authorization: Bearer ok`.
+struct OnlyOk;
+
+#[async_trait]
+impl mb_auth::Authenticate for OnlyOk {
+    async fn authenticate(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<Option<mb_auth::Principal>, mb_auth::AuthError> {
+        match headers.get("authorization").map(|v| v.as_bytes()) {
+            Some(b"Bearer ok") => Ok(Some(mb_auth::Principal::local())),
+            Some(_) => Err(mb_auth::AuthError::Unauthenticated("bad".into())),
+            None => Ok(None),
+        }
+    }
+}
+
+#[tokio::test]
+async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
+    let stub = stub_store().await;
+    let store: Arc<dyn ControlStore> = stub.clone();
+    let base = serve(ops::router(OpsState {
+        readyz_auth: Some(Arc::new(OnlyOk)),
+        ..ops_state(store, failing_state(), MockRegistry::new())
+    }))
+    .await;
+    let client = reqwest::Client::new();
+    let readyz = |auth: Option<&'static str>| {
+        let mut req = client.get(format!("{base}/readyz"));
+        if let Some(a) = auth {
+            req = req.header("authorization", a);
+        }
+        async move {
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+
+    // Degraded: the state store is down.
+    for anonymous in [None, Some("Bearer wrong")] {
+        assert_eq!(
+            readyz(anonymous).await,
+            (200, json!({"status": "degraded"}))
+        );
+    }
+    let (status, body) = readyz(Some("Bearer ok")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "degraded");
+    assert!(
+        body["reasons"][0].as_str().unwrap().contains("state store"),
+        "{body}"
+    );
+
+    // Unavailable: the control store is down too.
+    stub.ping_fails.store(true, Ordering::Relaxed);
+    assert_eq!(readyz(None).await, (503, json!({"status": "unavailable"})));
+    let (status, body) = readyz(Some("Bearer ok")).await;
+    assert_eq!(status, 503);
+    assert!(!body["reasons"].as_array().unwrap().is_empty(), "{body}");
+}
+
 #[tokio::test]
 async fn readyz_unavailable_when_control_store_down() {
     let stub = stub_store().await;
@@ -790,6 +852,7 @@ async fn metrics_exposes_request_counters() {
         state,
         registry,
         prometheus,
+        readyz_auth: None,
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();

@@ -282,7 +282,7 @@ On the admin port:
 | Path | Meaning |
 | --- | --- |
 | `/healthz` | Liveness: the process is up. |
-| `/readyz` | Readiness: 503 `unavailable` when the control store is unreachable; otherwise 200 with `ready`, or `degraded` plus reasons when the state store is failing and mocks serve statelessly, or a mock failed to rebuild and serves its previous version. Each store ping is bounded to 2 s. |
+| `/readyz` | Readiness: 503 `unavailable` when the control store is unreachable; otherwise 200 with `ready`, or `degraded` plus reasons when the state store is failing and mocks serve statelessly, or a mock failed to rebuild and serves its previous version. Each store ping is bounded to 2 s. In `auth.mode: oidc` the reasons are shown only to callers with valid credentials; anyone else gets just the status. |
 | `/metrics` | Prometheus metrics: requests, latency, LLM tokens and outcomes, request-log drops. |
 
 The data plane keeps `/__mockingbird/healthz`. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces over OTLP (HTTP/protobuf).

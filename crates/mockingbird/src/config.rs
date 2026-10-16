@@ -401,6 +401,8 @@ pub async fn build_app_with(
         ..mb_admin::AdminState::new(store.clone(), state.clone())
     };
     let metrics_gate = (!cfg.auth.public_metrics).then(|| admin_state.clone());
+    // In `oidc` mode only authenticated callers see why `/readyz` is not ready.
+    let readyz_auth = (cfg.auth.mode == AuthMode::Oidc).then(|| admin_state.auth.clone());
     let console = mb_console::router().layer(axum::middleware::from_fn_with_state(
         admin_state.clone(),
         mb_admin::console_gate,
@@ -411,6 +413,7 @@ pub async fn build_app_with(
             state: state.clone(),
             registry: registry.clone(),
             prometheus,
+            readyz_auth,
         },
         metrics_gate,
     ));
