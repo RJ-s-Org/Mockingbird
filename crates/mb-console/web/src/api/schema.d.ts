@@ -1674,9 +1674,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
+            /** @description The uploaded source bytes, always as an application/octet-stream attachment named <mock>-v<version>.<ext>, so a browser never renders them. The sniffed type is in X-Mockingbird-Source-Type: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
             200: {
                 headers: {
+                    /** @description attachment; filename="<mock>-v<version>.<ext>" */
+                    "Content-Disposition"?: string;
+                    /** @description The sniffed media type of the source */
+                    "X-Mockingbird-Source-Type"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3086,9 +3090,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
+            /** @description The uploaded source bytes, always as an application/octet-stream attachment named <mock>-v<version>.<ext>, so a browser never renders them. The sniffed type is in X-Mockingbird-Source-Type: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
             200: {
                 headers: {
+                    /** @description attachment; filename="<mock>-v<version>.<ext>" */
+                    "Content-Disposition"?: string;
+                    /** @description The sniffed media type of the source */
+                    "X-Mockingbird-Source-Type"?: string;
                     [name: string]: unknown;
                 };
                 content: {

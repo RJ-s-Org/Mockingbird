@@ -27,6 +27,7 @@ struct Harness {
 struct Resp {
     status: StatusCode,
     content_type: String,
+    headers: axum::http::HeaderMap,
     text: String,
 }
 
@@ -101,12 +102,14 @@ impl Harness {
             .get("content-type")
             .map(|v| v.to_str().unwrap().to_owned())
             .unwrap_or_default();
+        let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         Resp {
             status,
             content_type,
+            headers,
             text: String::from_utf8_lossy(&bytes).into_owned(),
         }
     }
@@ -1593,7 +1596,11 @@ async fn upload_graphql_proto_wsdl_and_archive() {
             .get(&format!("/api/v1/mocks/{mock}/contracts/1/source"))
             .await;
         assert_eq!(r.status, StatusCode::OK, "{mock}");
-        assert_eq!(r.content_type, source_type, "{mock}");
+        assert_eq!(r.content_type, "application/octet-stream", "{mock}");
+        assert_eq!(
+            r.headers["x-mockingbird-source-type"], source_type,
+            "{mock}"
+        );
     }
 
     // A descriptor set uploads as application/x-protobuf; text/plain stays
@@ -1653,4 +1660,60 @@ async fn grpc_contract_detail_lists_protocol_target_kind() {
     assert_eq!(list["kind"], "stream-server", "{list}");
     assert_eq!(list["method"], "", "{list}");
     assert_eq!(list["path"], "", "{list}");
+}
+
+/// A WSDL whose documentation embeds an XHTML script: served inline as
+/// XML it would run same-origin with the console's session cookie.
+#[tokio::test]
+async fn contract_source_is_an_inert_attachment() {
+    let h = harness().await;
+    h.create_mock("calc").await;
+    let wsdl = String::from_utf8(fixture("wsdl/calculator.wsdl")).unwrap();
+    let evil = wsdl.replacen(
+        "<wsdl:types>",
+        "<wsdl:documentation><html:script xmlns:html=\"http://www.w3.org/1999/xhtml\">alert(document.cookie)</html:script></wsdl:documentation><wsdl:types>",
+        1,
+    );
+    assert_ne!(evil, wsdl, "the fixture has a <wsdl:types> element");
+    let r = h
+        .upload_bytes("calc", evil.clone().into_bytes(), "application/wsdl+xml")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    let r = h.get("/api/v1/mocks/calc/contracts/1/source").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.text, evil);
+    assert_eq!(r.content_type, "application/octet-stream");
+    assert_eq!(
+        r.headers["content-disposition"],
+        r#"attachment; filename="calc-v1.wsdl""#
+    );
+    assert_eq!(r.headers["x-mockingbird-source-type"], "application/xml");
+    assert_eq!(r.headers["x-content-type-options"], "nosniff");
+    assert_eq!(
+        r.headers["content-security-policy"],
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
+    );
+}
+
+/// Every `/api` response, success or problem, public or not, carries
+/// `nosniff` and a sandboxing CSP: API responses are never rendered.
+#[tokio::test]
+async fn api_responses_are_never_rendered() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    for uri in [
+        "/api/v1/mocks",
+        "/api/v1/mocks/nope",
+        "/api/openapi.json",
+        "/api/nothing-here",
+    ] {
+        let r = h.get(uri).await;
+        assert_eq!(r.headers["x-content-type-options"], "nosniff", "{uri}");
+        assert_eq!(
+            r.headers["content-security-policy"],
+            "default-src 'none'; frame-ancestors 'none'; sandbox",
+            "{uri}"
+        );
+    }
 }

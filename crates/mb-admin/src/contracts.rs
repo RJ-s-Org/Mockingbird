@@ -3,7 +3,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
@@ -378,7 +378,12 @@ pub async fn get_one(
         ("version" = i64, Path, description = "Contract version number"),
     ),
     responses(
-        (status = 200, description = "The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml.", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = 200, description = "The uploaded source bytes, always as an application/octet-stream attachment named <mock>-v<version>.<ext>, so a browser never renders them. The sniffed type is in X-Mockingbird-Source-Type: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml.", body = Vec<u8>, content_type = "application/octet-stream",
+            headers(
+                ("Content-Disposition" = String, description = "attachment; filename=\"<mock>-v<version>.<ext>\""),
+                ("X-Mockingbird-Source-Type" = String, description = "The sniffed media type of the source"),
+            )
+        ),
         (status = 404, body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -393,8 +398,74 @@ pub async fn source(
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
     let v = version(&st, &m, number).await?;
-    let content_type = source_content_type(&v.source);
-    Ok(([(header::CONTENT_TYPE, content_type)], v.source).into_response())
+    // Served as an inert download: stored sources are caller-supplied, and
+    // an XML or HTML-looking one rendered inline would run script with the
+    // console's session (the API's nosniff and sandbox CSP apply too).
+    let filename = format!(
+        "{}-v{}.{}",
+        download_name(&m.name),
+        v.version,
+        source_extension(&v.source)
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    headers.insert(
+        SOURCE_TYPE_HEADER,
+        HeaderValue::from_static(source_content_type(&v.source)),
+    );
+    Ok((headers, v.source).into_response())
+}
+
+/// Carries the sniffed media type of a downloaded contract source.
+const SOURCE_TYPE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source-type");
+
+/// `name` reduced to `[A-Za-z0-9._-]` (mock names already are), for a
+/// quoted `Content-Disposition` file name.
+fn download_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The file extension of stored contract source bytes, by sniffing.
+fn source_extension(source: &[u8]) -> &'static str {
+    if source.starts_with(b"PK\x03\x04") {
+        return "zip";
+    }
+    if source.starts_with(&[0x1f, 0x8b]) {
+        return "tar.gz";
+    }
+    let text = std::str::from_utf8(source)
+        .map(|t| t.trim_start_matches('\u{feff}').trim_start())
+        .ok();
+    let json = text.is_some_and(|t| t.starts_with('{'));
+    match mb_import::sniff(source) {
+        Ok(SourceFormat::OpenApi3 | SourceFormat::Swagger2) if json => "json",
+        Ok(SourceFormat::OpenApi3 | SourceFormat::Swagger2) => "yaml",
+        Ok(SourceFormat::GraphqlSdl) => "graphql",
+        Ok(SourceFormat::GraphqlIntrospection) => "json",
+        Ok(SourceFormat::Proto) => "proto",
+        Ok(SourceFormat::FileDescriptorSet) => "pb",
+        Ok(SourceFormat::Wsdl11) => "wsdl",
+        Ok(SourceFormat::Archive) | Err(_) => match text {
+            None => "bin",
+            Some(t) if t.starts_with('<') => "xml",
+            Some(_) if json => "json",
+            Some(_) => "txt",
+        },
+    }
 }
 
 /// The content type of stored contract source bytes, by sniffing.
@@ -467,4 +538,42 @@ pub async fn activate(
         )
         .await;
     Ok(Json(view))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn fixture(path: &str) -> Vec<u8> {
+        std::fs::read(format!(
+            "{}/../../fixtures/{path}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn source_extensions_follow_the_sniffed_format() {
+        let cases = [
+            ("graphql/starwars.graphql", "graphql"),
+            ("proto/route_guide.proto", "proto"),
+            ("wsdl/calculator.wsdl", "wsdl"),
+            ("openapi/orders-3.0.yaml", "yaml"),
+        ];
+        for (path, ext) in cases {
+            assert_eq!(source_extension(&fixture(path)), ext, "{path}");
+        }
+        assert_eq!(source_extension(b"PK\x03\x04rest"), "zip");
+        assert_eq!(source_extension(&[0x1f, 0x8b, 0]), "tar.gz");
+        assert_eq!(source_extension(b"{\"openapi\": \"3.0.3\"}"), "json");
+        assert_eq!(source_extension(&[0xff, 0xfe, 0x00]), "bin");
+    }
+
+    #[test]
+    fn download_names_are_header_safe() {
+        assert_eq!(download_name("orders-v2"), "orders-v2");
+        assert_eq!(download_name("a\"b;c d"), "a_b_c_d");
+    }
 }
