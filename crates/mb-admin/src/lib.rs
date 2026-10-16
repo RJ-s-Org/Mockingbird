@@ -57,6 +57,9 @@ pub const OPENAPI_PATH: &str = "/api/openapi.json";
 /// created or updated through the API may use.
 pub const DEFAULT_API_SECRET_REFS: [&str; 2] = ["env:MB_LLM_*", "env:*_API_KEY"];
 
+/// Default [`AdminState::live_recheck`].
+pub const DEFAULT_LIVE_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct AdminState {
     pub store: Arc<dyn ControlStore>,
@@ -71,6 +74,10 @@ pub struct AdminState {
     /// Subscribes to served data-plane calls for the live request tail;
     /// `None` answers the tail with 503.
     pub live: Option<LiveSubscribe>,
+    /// How often an open live tail re-authenticates its caller and re-checks
+    /// its Read permission, ending the stream when either fails
+    /// ([`DEFAULT_LIVE_RECHECK`]).
+    pub live_recheck: std::time::Duration,
     /// Browser login (`/auth/*`); `None` in `auth.mode: none`.
     pub web_auth: Option<WebAuth>,
 }
@@ -92,6 +99,7 @@ impl AdminState {
             ),
             auth: Arc::new(LocalAuth),
             live: None,
+            live_recheck: DEFAULT_LIVE_RECHECK,
             web_auth: None,
         }
     }

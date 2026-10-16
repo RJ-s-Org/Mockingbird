@@ -1,8 +1,8 @@
 //! The live request tail: `GET …/mocks/{mock}/requests/stream` over SSE.
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
@@ -18,8 +18,12 @@ use tokio::sync::broadcast;
 use tower::ServiceExt;
 
 /// `Bearer viewer` → viewer of `default`; `Bearer team-editor` → editor of
-/// `team-a` only; `Bearer sysadmin` → sysadmin.
-struct TestAuth;
+/// `team-a` only; `Bearer sysadmin` → sysadmin. A token in `revoked` is
+/// rejected.
+#[derive(Clone, Default)]
+struct TestAuth {
+    revoked: Arc<Mutex<HashSet<String>>>,
+}
 
 fn principal(subject: &str, sysadmin: bool, roles: &[(&str, Role)]) -> Principal {
     Principal {
@@ -45,6 +49,9 @@ impl Authenticate for TestAuth {
             .unwrap()
             .strip_prefix("Bearer ")
             .unwrap_or_default();
+        if self.revoked.lock().unwrap().contains(name) {
+            return Err(AuthError::Unauthenticated("revoked".into()));
+        }
         let p = match name {
             "viewer" => principal(name, false, &[("default", Role::Viewer)]),
             "team-editor" => principal(name, false, &[("team-a", Role::Editor)]),
@@ -58,11 +65,17 @@ impl Authenticate for TestAuth {
 struct Harness {
     app: Router,
     tx: broadcast::Sender<RequestRecord>,
+    auth: TestAuth,
 }
 
 /// Mocks `orders` and `other` in `default`, and `orders` in `team-a`; the
 /// live feed is a broadcast channel of `capacity` (`None`: no live feed).
 async fn harness(capacity: Option<usize>) -> Harness {
+    harness_with(capacity, Duration::from_secs(30)).await
+}
+
+/// [`harness`] with streams re-checking their caller every `recheck`.
+async fn harness_with(capacity: Option<usize>, recheck: Duration) -> Harness {
     let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let (tx, _) = broadcast::channel(capacity.unwrap_or(16));
@@ -70,12 +83,14 @@ async fn harness(capacity: Option<usize>) -> Harness {
         let tx = tx.clone();
         Arc::new(move || tx.subscribe()) as LiveSubscribe
     });
+    let auth = TestAuth::default();
     let app = router(AdminState {
-        auth: Arc::new(TestAuth),
+        auth: Arc::new(auth.clone()),
         live,
+        live_recheck: recheck,
         ..AdminState::new(store, state)
     });
-    let h = Harness { app, tx };
+    let h = Harness { app, tx, auth };
     for (uri, body) in [
         ("/api/v1/workspaces", json!({ "name": "team-a" })),
         ("/api/v1/mocks", json!({ "name": "orders" })),
@@ -120,6 +135,31 @@ impl Harness {
 
     fn send(&self, r: RequestRecord) {
         self.tx.send(r).unwrap();
+    }
+
+    fn revoke(&self, token: &str) {
+        self.auth.revoked.lock().unwrap().insert(token.to_string());
+    }
+}
+
+/// Reads `body` until it ends, failing after 2 s; returns the `event:`
+/// names seen.
+async fn read_to_end(body: &mut Body) -> Vec<String> {
+    let mut seen = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .unwrap_or_else(|_| panic!("stream still open; saw {seen:?}"));
+        let Some(frame) = frame else {
+            return seen;
+        };
+        if let Ok(data) = frame.unwrap().into_data() {
+            for line in std::str::from_utf8(&data).unwrap().lines() {
+                if let Some(v) = line.strip_prefix("event:") {
+                    seen.push(v.trim().to_string());
+                }
+            }
+        }
     }
 }
 
@@ -278,6 +318,56 @@ async fn lagged_subscriber_gets_lagged_event() {
     let last = rest.pop().unwrap();
     assert_eq!(last.event, "request");
     assert_eq!(last.data["session"], "later");
+}
+
+#[tokio::test]
+async fn stream_ends_when_credential_revoked() {
+    let h = harness_with(Some(16), Duration::from_millis(100)).await;
+    let mut body = h.get("viewer", STREAM).await.into_body();
+    h.send(record("default", "orders", "listOrders", "s1", "llm"));
+    assert_eq!(read_events(&mut body, 1).await[0].event, "request");
+    h.revoke("viewer");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    // The stream is closed (or closes) without delivering this call.
+    let _ =
+        h.tx.send(record("default", "orders", "listOrders", "s2", "llm"));
+    let seen = read_to_end(&mut body).await;
+    assert!(!seen.contains(&"request".to_string()), "{seen:?}");
+}
+
+#[tokio::test]
+async fn stream_ends_when_workspace_deleted() {
+    let h = harness_with(Some(16), Duration::from_millis(100)).await;
+    let mut body = h
+        .get(
+            "sysadmin",
+            "/api/v1/workspaces/team-a/mocks/orders/requests/stream",
+        )
+        .await
+        .into_body();
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::delete("/api/v1/workspaces/team-a?force=true")
+                .header(header::AUTHORIZATION, "Bearer sysadmin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let seen = read_to_end(&mut body).await;
+    assert!(seen.is_empty(), "{seen:?}");
+}
+
+#[tokio::test]
+async fn stream_stays_open_while_credential_valid() {
+    let h = harness_with(Some(16), Duration::from_millis(50)).await;
+    let mut body = h.get("viewer", STREAM).await.into_body();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    h.send(record("default", "orders", "listOrders", "s1", "llm"));
+    assert_eq!(read_events(&mut body, 1).await[0].event, "request");
 }
 
 #[tokio::test]

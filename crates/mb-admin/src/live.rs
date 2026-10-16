@@ -5,23 +5,29 @@
 //! sent as `event: request` with a [`LiveRequestView`]. A subscriber that
 //! falls behind the feed gets `event: lagged` with `{"dropped": N}` and the
 //! stream continues with the records still buffered.
+//!
+//! The caller is authenticated only once by the middleware, so an open
+//! stream re-runs authentication with the request's own headers and
+//! re-checks Read on the workspace and that the mock still exists every
+//! [`AdminState::live_recheck`]. When any check fails (a revoked or expired
+//! key, an ended session, a lost role, a deleted workspace or mock) the
+//! stream ends.
 
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_protocols::RequestRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::{Stream, StreamExt};
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AdminState;
@@ -121,6 +127,7 @@ impl From<RequestRecord> for LiveRequestView {
 pub async fn stream(
     State(st): State<AdminState>,
     access: WsAccess,
+    headers: HeaderMap,
     Path(MockPath { mock }): Path<MockPath>,
     Query(q): Query<StreamQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
@@ -132,17 +139,67 @@ pub async fn stream(
             "the live request feed is not available",
         )
     })?;
-    let (ws, mock) = (access.ws, m.name);
-    let events = BroadcastStream::new(subscribe()).filter_map(move |item| match item {
-        Ok(r) if r.workspace == ws && r.mock == mock && q.matches(&r) => {
-            request_event(LiveRequestView::from(r))
+    let feed = subscribe();
+    let (out, events) = mpsc::channel(16);
+    tokio::spawn(forward(st, headers, access.ws, m.name, q, feed, out));
+    Ok(Sse::new(ReceiverStream::new(events)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE)))
+}
+
+/// Forwards the matching records of `feed` to `out` until the subscriber
+/// disconnects, the feed closes, or a periodic [`still_allowed`] check fails.
+async fn forward(
+    st: AdminState,
+    headers: HeaderMap,
+    ws: String,
+    mock: String,
+    q: StreamQuery,
+    mut feed: broadcast::Receiver<RequestRecord>,
+    out: mpsc::Sender<Result<Event, Infallible>>,
+) {
+    let period = st.live_recheck.max(Duration::from_millis(10));
+    let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let event = tokio::select! {
+            () = out.closed() => return,
+            _ = recheck.tick() => {
+                if still_allowed(&st, &headers, &ws, &mock).await {
+                    continue;
+                }
+                tracing::debug!(workspace = %ws, mock = %mock, "ending a live tail: the caller lost access");
+                return;
+            }
+            item = feed.recv() => match item {
+                Ok(r) if r.workspace == ws && r.mock == mock && q.matches(&r) => {
+                    match request_event(LiveRequestView::from(r)) {
+                        Some(event) => event,
+                        None => continue,
+                    }
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(dropped)) => Ok(Event::default()
+                    .event("lagged")
+                    .data(serde_json::json!({ "dropped": dropped }).to_string())),
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+        };
+        if out.send(event).await.is_err() {
+            return;
         }
-        Ok(_) => None,
-        Err(BroadcastStreamRecvError::Lagged(dropped)) => Some(Ok(Event::default()
-            .event("lagged")
-            .data(serde_json::json!({ "dropped": dropped }).to_string()))),
-    });
-    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE)))
+    }
+}
+
+/// Whether the credentials in `headers` still authenticate a caller with
+/// Read on `ws`, and `ws` and its mock `mock` still exist.
+async fn still_allowed(st: &AdminState, headers: &HeaderMap, ws: &str, mock: &str) -> bool {
+    let Ok(Some(principal)) = st.auth.authenticate(headers).await else {
+        return false;
+    };
+    if !principal.can(ws, Permission::Read) {
+        return false;
+    }
+    matches!(st.store.get_workspace(ws).await, Ok(Some(_)))
+        && matches!(st.store.get_mock(ws, mock).await, Ok(Some(_)))
 }
 
 fn request_event(view: LiveRequestView) -> Option<Result<Event, Infallible>> {
