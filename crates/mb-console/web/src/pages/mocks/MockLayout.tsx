@@ -12,7 +12,7 @@ const TABS = [
   { to: "/w/$ws/mocks/$mock/contracts", label: "Contracts" },
   { to: "/w/$ws/mocks/$mock/scenarios", label: "Scenarios" },
   { to: "/w/$ws/mocks/$mock/sessions", label: "Sessions" },
-  { to: "/w/$ws/mocks/$mock/requests", label: "Requests" },
+  { to: "/w/$ws/mocks/$mock/requests", label: "Live requests" },
 ] as const;
 
 /** A mock's header (name, source, active version) and its tabs. */

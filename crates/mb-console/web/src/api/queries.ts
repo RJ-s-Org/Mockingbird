@@ -66,6 +66,9 @@ export const keys = {
   contracts: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "contracts"] as const,
   contract: (ws: string, mock: string, version: number) => ["ws", ws, "mocks", mock, "contracts", version] as const,
   profiles: (ws: string) => ["ws", ws, "llm-profiles"] as const,
+  scenarios: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "scenarios"] as const,
+  sessions: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "sessions"] as const,
+  session: (ws: string, mock: string, session: string) => ["ws", ws, "mocks", mock, "sessions", session] as const,
 };
 
 /** The mocks of `ws`. */
@@ -134,17 +137,25 @@ export function useContracts(ws: string, mock: string) {
   });
 }
 
-/** One contract version with its operations. */
-export function useContract(ws: string, mock: string, version: number) {
+/** One contract version with its operations; idle while `version` is unknown. */
+export function useContract(ws: string, mock: string, version: number | null | undefined) {
   return useQuery({
-    queryKey: keys.contract(ws, mock, version),
+    queryKey: keys.contract(ws, mock, version ?? 0),
     queryFn: async (): Promise<ContractDetail> =>
       unwrap(
         await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}", {
-          params: { path: { ws, mock, version } },
+          params: { path: { ws, mock, version: version ?? 0 } },
         }),
       ),
+    enabled: version != null,
   });
+}
+
+/** The operation ids of a mock's active contract, in contract order (empty without one). */
+export function useActiveOperations(ws: string, mock: string): string[] {
+  const m = useMock(ws, mock);
+  const contract = useContract(ws, mock, m.data?.active_version);
+  return contract.data?.operations.map((o) => o.id) ?? [];
 }
 
 /** The upload Content-Type for a contract file name, by extension. */
@@ -209,4 +220,107 @@ export function useProfiles(ws: string) {
 export function contractSourceUrl(ws: string, mock: string, version: number): string {
   const e = encodeURIComponent;
   return `/api/v1/workspaces/${e(ws)}/mocks/${e(mock)}/contracts/${version}/source`;
+}
+
+export type Scenario = components["schemas"]["ScenarioView"];
+export type PutScenario = components["schemas"]["PutScenario"];
+export type SessionInfo = components["schemas"]["SessionInfoView"];
+export type StoredResource = components["schemas"]["StoredResourceView"];
+
+/** The scenarios of a mock. */
+export function useScenarios(ws: string, mock: string) {
+  return useQuery({
+    queryKey: keys.scenarios(ws, mock),
+    queryFn: async (): Promise<Scenario[]> =>
+      unwrap(
+        await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/scenarios", { params: { path: { ws, mock } } }),
+      ),
+  });
+}
+
+/** `PUT …/scenarios/{name}` with the full scenario; refreshes the list. */
+export function usePutScenario(ws: string, mock: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ name, body }: { name: string; body: PutScenario }): Promise<Scenario> =>
+      unwrap(
+        await api.PUT("/api/v1/workspaces/{ws}/mocks/{mock}/scenarios/{name}", {
+          params: { path: { ws, mock, name } },
+          body,
+        }),
+      ),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.scenarios(ws, mock) }),
+  });
+}
+
+/** `DELETE …/scenarios/{name}`; refreshes the list. */
+export function useDeleteScenario(ws: string, mock: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (name: string): Promise<void> => {
+      unwrap(
+        await api.DELETE("/api/v1/workspaces/{ws}/mocks/{mock}/scenarios/{name}", {
+          params: { path: { ws, mock, name } },
+        }),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.scenarios(ws, mock) }),
+  });
+}
+
+/** The live sessions of a mock, most recently touched first. */
+export function useSessions(ws: string, mock: string) {
+  return useQuery({
+    queryKey: keys.sessions(ws, mock),
+    queryFn: async (): Promise<SessionInfo[]> =>
+      unwrap(await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/sessions", { params: { path: { ws, mock } } })),
+  });
+}
+
+/** `GET …/sessions/{session}`: the session's resources, oldest first. */
+export async function fetchSessionExport(ws: string, mock: string, session: string): Promise<StoredResource[]> {
+  return unwrap(
+    await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/sessions/{session}", {
+      params: { path: { ws, mock, session } },
+    }),
+  );
+}
+
+/** One session's export. */
+export function useSessionExport(ws: string, mock: string, session: string) {
+  return useQuery({
+    queryKey: keys.session(ws, mock, session),
+    queryFn: () => fetchSessionExport(ws, mock, session),
+  });
+}
+
+/** `DELETE …/sessions/{session}`: forgets its resources; refreshes the list. */
+export function useResetSession(ws: string, mock: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (session: string): Promise<void> => {
+      unwrap(
+        await api.DELETE("/api/v1/workspaces/{ws}/mocks/{mock}/sessions/{session}", {
+          params: { path: { ws, mock, session } },
+        }),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.sessions(ws, mock) }),
+  });
+}
+
+/** `PUT …/sessions/{session}`: replaces its resources; refreshes the list. */
+export function useSeedSession(ws: string, mock: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ session, resources }: { session: string; resources: StoredResource[] }): Promise<void> => {
+      unwrap(
+        await api.PUT("/api/v1/workspaces/{ws}/mocks/{mock}/sessions/{session}", {
+          params: { path: { ws, mock, session } },
+          body: resources,
+        }),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.sessions(ws, mock) }),
+  });
 }

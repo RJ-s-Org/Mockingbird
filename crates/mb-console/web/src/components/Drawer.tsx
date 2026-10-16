@@ -25,7 +25,10 @@ export function Drawer({ title, onClose, children }: { title: string; onClose: (
             Close
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto p-6">{children}</div>
+        {/* Focusable, so keyboard users can scroll long content. */}
+        <div tabIndex={0} className="flex-1 overflow-y-auto p-6">
+          {children}
+        </div>
       </div>
     </div>
   );

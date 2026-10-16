@@ -12,9 +12,12 @@ import { Layout } from "./components/Layout";
 import { ProblemAlert } from "./components/ProblemAlert";
 import { Home, Pending } from "./pages/Home";
 import { Contracts } from "./pages/mocks/Contracts";
+import { LiveRequests } from "./pages/mocks/LiveRequests";
 import { MockLayout } from "./pages/mocks/MockLayout";
 import { MocksList } from "./pages/mocks/MocksList";
 import { Overview } from "./pages/mocks/Overview";
+import { Scenarios } from "./pages/mocks/Scenarios";
+import { Sessions } from "./pages/mocks/Sessions";
 import { NotFound } from "./pages/NotFound";
 
 export interface RouterContext {
@@ -87,13 +90,6 @@ const mockIndexRoute = createRoute({
   },
 });
 
-const mockTab = <P extends string>(path: P, title: string) =>
-  createRoute({
-    getParentRoute: () => mockRoute,
-    path,
-    component: () => <Pending title={title} />,
-  });
-
 const mockOverviewRoute = createRoute({
   getParentRoute: () => mockRoute,
   path: "/overview",
@@ -112,9 +108,32 @@ const mockContractsRoute = createRoute({
   },
 });
 
-const mockScenariosRoute = mockTab("/scenarios", "Scenarios");
-const mockSessionsRoute = mockTab("/sessions", "Sessions");
-const mockRequestsRoute = mockTab("/requests", "Requests");
+const mockScenariosRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/scenarios",
+  component: function ScenariosPage() {
+    const { ws, mock } = mockScenariosRoute.useParams();
+    return <Scenarios ws={ws} mock={mock} />;
+  },
+});
+
+const mockSessionsRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/sessions",
+  component: function SessionsPage() {
+    const { ws, mock } = mockSessionsRoute.useParams();
+    return <Sessions ws={ws} mock={mock} />;
+  },
+});
+
+const mockRequestsRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/requests",
+  component: function LiveRequestsPage() {
+    const { ws, mock } = mockRequestsRoute.useParams();
+    return <LiveRequests ws={ws} mock={mock} />;
+  },
+});
 
 const profilesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
