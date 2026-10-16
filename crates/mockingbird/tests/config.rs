@@ -601,6 +601,8 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )
@@ -789,6 +791,8 @@ async fn reconcile_rejects_grpc_service_clashes() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )
@@ -1557,6 +1561,8 @@ async fn reconcile_same_name_two_workspaces() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
             },
         )
@@ -1633,6 +1639,8 @@ async fn reconcile_prefix_collision_across_workspaces_errors() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
             },
         )

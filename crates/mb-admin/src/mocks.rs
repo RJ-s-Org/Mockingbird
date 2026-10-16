@@ -5,7 +5,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
-use mb_store::{DataPlaneAuthConfig, Mock, NewMock, ResourceSource, validate_route_prefix};
+use mb_store::{
+    ChaosSettings, DataPlaneAuthConfig, Mock, MockLimits, NewMock, ResourceSource,
+    validate_route_prefix,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -39,6 +42,65 @@ pub enum DataPlaneAuthModeSchema {
     PassthroughValidate,
 }
 
+/// The OpenAPI schema of [`ChaosSettings`] (which lives in `mb-store`).
+#[derive(ToSchema)]
+#[schema(as = ChaosSettings)]
+#[allow(dead_code)]
+pub struct ChaosSchema {
+    /// Probability (0–1) that a call answers with an injected error.
+    #[serde(default)]
+    #[schema(minimum = 0.0, maximum = 1.0)]
+    error_rate: f64,
+    /// Uniformly random added latency.
+    latency_jitter: Option<LatencyJitterSchema>,
+    /// Probability (0–1) that a streamed response is cut short.
+    #[serde(default)]
+    #[schema(minimum = 0.0, maximum = 1.0)]
+    drop_stream_rate: f64,
+}
+
+/// The OpenAPI schema of `LatencyJitter`.
+#[derive(ToSchema)]
+#[schema(as = LatencyJitter)]
+#[allow(dead_code)]
+pub struct LatencyJitterSchema {
+    min_ms: u64,
+    /// At most 30000 and at least `min_ms`.
+    #[schema(maximum = 30000)]
+    max_ms: u64,
+}
+
+/// The OpenAPI schema of [`MockLimits`] (which lives in `mb-store`). Unset
+/// fields fall back to the global limits (or to no limit).
+#[derive(ToSchema)]
+#[schema(as = MockLimits)]
+#[allow(dead_code)]
+pub struct MockLimitsSchema {
+    rate_limit: Option<RateLimitSchema>,
+    /// Tokens per UTC day across all replicas; at least 1.
+    #[schema(minimum = 1)]
+    daily_token_budget: Option<u64>,
+    /// In bytes, 1024–67108864.
+    #[schema(minimum = 1024, maximum = 67108864)]
+    max_request_bytes: Option<u64>,
+    /// In bytes, 1024–16777216.
+    #[schema(minimum = 1024, maximum = 16777216)]
+    max_response_bytes: Option<u64>,
+}
+
+/// The OpenAPI schema of `RateLimit`: a token bucket.
+#[derive(ToSchema)]
+#[schema(as = RateLimit)]
+#[allow(dead_code)]
+pub struct RateLimitSchema {
+    /// Greater than 0, at most 100000.
+    #[schema(maximum = 100000)]
+    requests_per_second: f64,
+    /// 1–100000.
+    #[schema(minimum = 1, maximum = 100000)]
+    burst: u32,
+}
+
 /// Path of one mock.
 #[derive(Deserialize, Debug)]
 pub struct MockPath {
@@ -57,6 +119,12 @@ pub struct MockView {
     pub header_overrides: bool,
     #[schema(value_type = DataPlaneAuthSchema)]
     pub data_plane_auth: DataPlaneAuthConfig,
+    /// Fault injection; absent when none is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ChaosSchema>)]
+    pub chaos: Option<ChaosSettings>,
+    #[schema(value_type = MockLimitsSchema)]
+    pub limits: MockLimits,
     pub source: Source,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -76,6 +144,8 @@ impl MockView {
             llm_profile: m.llm_profile,
             header_overrides: m.header_overrides,
             data_plane_auth: m.data_plane_auth,
+            chaos: m.chaos,
+            limits: m.limits,
             created_at: m.created_at,
             updated_at: m.updated_at,
             active_version,
@@ -99,6 +169,14 @@ pub struct CreateMock {
     #[serde(default)]
     #[schema(value_type = Option<DataPlaneAuthSchema>)]
     pub data_plane_auth: DataPlaneAuthConfig,
+    /// Fault injection; none by default.
+    #[serde(default)]
+    #[schema(value_type = Option<ChaosSchema>)]
+    pub chaos: Option<ChaosSettings>,
+    /// Defaults to `{}` (the global limits).
+    #[serde(default)]
+    #[schema(value_type = Option<MockLimitsSchema>)]
+    pub limits: MockLimits,
 }
 
 fn default_true() -> bool {
@@ -119,6 +197,13 @@ pub struct PatchMock {
     pub header_overrides: Option<bool>,
     #[schema(value_type = Option<DataPlaneAuthSchema>)]
     pub data_plane_auth: Option<DataPlaneAuthConfig>,
+    /// `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<ChaosSchema>)]
+    pub chaos: Option<Option<ChaosSettings>>,
+    /// Replaces the whole object.
+    #[schema(value_type = Option<MockLimitsSchema>)]
+    pub limits: Option<MockLimits>,
 }
 
 /// Distinguishes an explicit `null` (`Some(None)`) from an absent field (`None`).
@@ -182,7 +267,7 @@ pub async fn list(
     responses(
         (status = 201, body = MockView),
         (status = 409, description = "The mock already exists, or another mock has its route prefix", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid name or route prefix", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid name, route prefix, chaos or limits", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn create(
@@ -208,6 +293,8 @@ pub async fn create(
                 header_overrides: body.header_overrides,
                 source: ResourceSource::Api,
                 data_plane_auth: body.data_plane_auth,
+                chaos: body.chaos,
+                limits: body.limits,
             },
         )
         .await?;
@@ -260,7 +347,7 @@ pub async fn get_one(
         (status = 200, body = MockView),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file, or another mock has the route prefix", body = Problem, content_type = "application/problem+json"),
-        (status = 422, body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid route prefix, chaos or limits", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn patch(
@@ -289,6 +376,12 @@ pub async fn patch(
     }
     if let Some(auth) = body.data_plane_auth {
         m.data_plane_auth = auth;
+    }
+    if let Some(chaos) = body.chaos {
+        m.chaos = chaos;
+    }
+    if let Some(limits) = body.limits {
+        m.limits = limits;
     }
     let updated = view(&st, st.store.update_mock(&m).await?).await?;
     access

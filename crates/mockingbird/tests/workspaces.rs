@@ -76,6 +76,8 @@ async fn mock_in(
                 llm_profile: profile.map(str::to_string),
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig {
                     mode: auth,
                     ..DataPlaneAuthConfig::default()

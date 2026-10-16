@@ -93,6 +93,8 @@ async fn setup() -> Setup {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig {
                     mode: DataPlaneAuthMode::ApiKey,
                     ..DataPlaneAuthConfig::default()
@@ -326,6 +328,8 @@ async fn orders_mock(store: &Arc<dyn ControlStore>, ws: &str, prefix: &str) -> M
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
             },
         )

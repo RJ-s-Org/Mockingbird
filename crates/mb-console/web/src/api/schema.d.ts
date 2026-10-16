@@ -860,6 +860,20 @@ export interface components {
              */
             triggers: Record<string, never>[];
         };
+        /** @description The OpenAPI schema of [`ChaosSettings`] (which lives in `mb-store`). */
+        ChaosSettings: {
+            /**
+             * Format: double
+             * @description Probability (0–1) that a streamed response is cut short.
+             */
+            drop_stream_rate?: number;
+            /**
+             * Format: double
+             * @description Probability (0–1) that a call answers with an injected error.
+             */
+            error_rate?: number;
+            latency_jitter?: components["schemas"]["LatencyJitter"] | null;
+        };
         /** @description A contract version's metadata, operations and channels. */
         ContractVersionDetail: {
             /** @description The contract's `info.version`. */
@@ -910,9 +924,11 @@ export interface components {
         };
         /** @description A new mock. Mocks created through the API always have `source = api`. */
         CreateMock: {
+            chaos?: components["schemas"]["ChaosSettings"] | null;
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
             /** @description Whether callers may steer responses with `X-Mockingbird-*` headers. */
             header_overrides?: boolean;
+            limits?: components["schemas"]["MockLimits"] | null;
             llm_profile?: string | null;
             /** @description `^[a-z0-9][a-z0-9-]{0,62}$` */
             name: string;
@@ -964,6 +980,16 @@ export interface components {
          * @enum {string}
          */
         KeyScope: "admin" | "data-plane";
+        /** @description The OpenAPI schema of `LatencyJitter`. */
+        LatencyJitter: {
+            /**
+             * Format: int64
+             * @description At most 30000 and at least `min_ms`.
+             */
+            max_ms: number;
+            /** Format: int64 */
+            min_ms: number;
+        };
         /** @description One served call, as sent in an `event: request`. */
         LiveRequestView: {
             /**
@@ -1023,6 +1049,28 @@ export interface components {
             name: string;
             role: components["schemas"]["Role"];
         };
+        /**
+         * @description The OpenAPI schema of [`MockLimits`] (which lives in `mb-store`). Unset
+         *     fields fall back to the global limits (or to no limit).
+         */
+        MockLimits: {
+            /**
+             * Format: int64
+             * @description Tokens per UTC day across all replicas; at least 1.
+             */
+            daily_token_budget?: number | null;
+            /**
+             * Format: int64
+             * @description In bytes, 1024–67108864.
+             */
+            max_request_bytes?: number | null;
+            /**
+             * Format: int64
+             * @description In bytes, 1024–16777216.
+             */
+            max_response_bytes?: number | null;
+            rate_limit?: components["schemas"]["RateLimit"] | null;
+        };
         /** @description A mock with the number of its active contract version. */
         MockView: {
             /**
@@ -1030,12 +1078,14 @@ export interface components {
              * @description `null` until a contract version is activated.
              */
             active_version?: number | null;
+            chaos?: components["schemas"]["ChaosSettings"] | null;
             /** Format: date-time */
             created_at: string;
             data_plane_auth: components["schemas"]["DataPlaneAuthConfig"];
             header_overrides: boolean;
             /** Format: uuid */
             id: string;
+            limits: components["schemas"]["MockLimits"];
             llm_profile?: string | null;
             name: string;
             persona?: string | null;
@@ -1067,8 +1117,10 @@ export interface components {
         };
         /** @description JSON merge patch of a mock: absent fields are kept, `null` clears. */
         PatchMock: {
+            chaos?: components["schemas"]["ChaosSettings"] | null;
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
             header_overrides?: boolean | null;
+            limits?: components["schemas"]["MockLimits"] | null;
             llm_profile?: string | null;
             persona?: string | null;
             route_prefix?: string | null;
@@ -1175,6 +1227,7 @@ export interface components {
         };
         /** @description The full scenario; absent fields are cleared. */
         PutScenario: {
+            chaos?: components["schemas"]["ChaosSettings"] | null;
             instructions?: string | null;
             /** Format: int64 */
             latency_ms?: number | null;
@@ -1201,6 +1254,19 @@ export interface components {
              *     `X-Mockingbird-Stream-Items` overrides it.
              */
             stream_items?: number | null;
+        };
+        /** @description The OpenAPI schema of `RateLimit`: a token bucket. */
+        RateLimit: {
+            /**
+             * Format: int32
+             * @description 1–100000.
+             */
+            burst: number;
+            /**
+             * Format: double
+             * @description Greater than 0, at most 100000.
+             */
+            requests_per_second: number;
         };
         /** @description One recorded request, with redacted request and response bodies. */
         RequestLogView: {
@@ -1233,6 +1299,7 @@ export interface components {
         Role: "viewer" | "editor" | "admin" | "owner";
         /** @description A named scenario of a mock. */
         ScenarioView: {
+            chaos?: components["schemas"]["ChaosSettings"] | null;
             /** @description Extra instructions for the LLM. */
             instructions?: string | null;
             /**
@@ -1617,7 +1684,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name or route prefix */
+            /** @description Invalid name, route prefix, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -1746,6 +1813,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Invalid route prefix, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3351,7 +3419,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name or route prefix */
+            /** @description Invalid name, route prefix, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3486,6 +3554,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Invalid route prefix, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;

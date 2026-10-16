@@ -20,8 +20,8 @@ use crate::{
     DEFAULT_WORKSPACE, LlmProfile, Mock, MockEventSettings, NewAuditEvent, NewContractVersion,
     NewMock, NewRequestLogEntry, PruneCounter, RequestKind, RequestLogEntry, RequestLogFilter,
     ResourceSource, Scenario, ScenarioRules, StoreError, Workspace, lease_times, missing_workspace,
-    now, sha256_hex, validate_header_name, validate_mock_name, validate_route_prefix,
-    validate_workspace_name,
+    now, sha256_hex, validate_header_name, validate_mock_name, validate_mock_settings,
+    validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -29,10 +29,11 @@ use crate::{
 const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 
 const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
-     data_plane_auth, created_at, updated_at";
+     data_plane_auth, created_at, updated_at, chaos, limits";
 /// [`MOCK_COLUMNS`] with JSON read back as text.
 const MOCK_SELECT: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
-     data_plane_auth::text AS data_plane_auth, created_at, updated_at";
+     data_plane_auth::text AS data_plane_auth, created_at, updated_at, chaos::text AS chaos, \
+     limits::text AS limits";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str =
     "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at";
@@ -179,6 +180,8 @@ fn from_i64<T: TryFrom<i64>>(value: i64, field: &str) -> Result<T, StoreError> {
 fn mock_from_row(row: &PgRow) -> Result<Mock, StoreError> {
     let source: String = row.try_get("source")?;
     let data_plane_auth: String = row.try_get("data_plane_auth")?;
+    let chaos: Option<String> = row.try_get("chaos")?;
+    let limits: String = row.try_get("limits")?;
     Ok(Mock {
         id: row.try_get("id")?,
         workspace: row.try_get("workspace")?,
@@ -189,6 +192,8 @@ fn mock_from_row(row: &PgRow) -> Result<Mock, StoreError> {
         header_overrides: row.try_get("header_overrides")?,
         source: ResourceSource::parse(&source)?,
         data_plane_auth: serde_json::from_str(&data_plane_auth)?,
+        chaos: chaos.map(|c| serde_json::from_str(&c)).transpose()?,
+        limits: serde_json::from_str(&limits)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -521,7 +526,10 @@ impl ControlStore for PgStore {
         let route_prefix = m.route_prefix.unwrap_or_else(|| format!("/{}", m.name));
         validate_route_prefix(&route_prefix)?;
         validate_header_name(&m.data_plane_auth.header)?;
+        validate_mock_settings(m.chaos.as_ref(), &m.limits)?;
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
+        let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
+        let limits = serde_json::to_string(&m.limits)?;
         let at = now();
         let mock = Mock {
             id: Uuid::new_v4(),
@@ -533,13 +541,15 @@ impl ControlStore for PgStore {
             header_overrides: m.header_overrides,
             source: m.source,
             data_plane_auth: m.data_plane_auth,
+            chaos: m.chaos,
+            limits: m.limits,
             created_at: at,
             updated_at: at,
         };
         let mut tx = self.pool.begin().await?;
         lock_workspace(&mut tx, ws).await?;
         let sql = format!(
-            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11)"
+            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12::jsonb, $13::jsonb)"
         );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(mock.id)
@@ -553,6 +563,8 @@ impl ControlStore for PgStore {
             .bind(data_plane_auth)
             .bind(mock.created_at)
             .bind(mock.updated_at)
+            .bind(chaos)
+            .bind(limits)
             .execute(&mut *tx)
             .await
             .map_err(mock_name_conflict(&mock.name))?;
@@ -565,7 +577,10 @@ impl ControlStore for PgStore {
         validate_mock_name(&m.name)?;
         validate_route_prefix(&m.route_prefix)?;
         validate_header_name(&m.data_plane_auth.header)?;
+        validate_mock_settings(m.chaos.as_ref(), &m.limits)?;
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
+        let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
+        let limits = serde_json::to_string(&m.limits)?;
         let mut tx = self.pool.begin().await?;
         let sql = format!("SELECT {MOCK_SELECT} FROM mocks WHERE id = $1 FOR UPDATE");
         let existing = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -585,8 +600,8 @@ impl ControlStore for PgStore {
         };
         sqlx::query(
             "UPDATE mocks SET name = $1, route_prefix = $2, persona = $3, llm_profile = $4, \
-             header_overrides = $5, source = $6, data_plane_auth = $7::json, updated_at = $8 \
-             WHERE id = $9",
+             header_overrides = $5, source = $6, data_plane_auth = $7::json, updated_at = $8, \
+             chaos = $10::jsonb, limits = $11::jsonb WHERE id = $9",
         )
         .bind(&updated.name)
         .bind(&updated.route_prefix)
@@ -597,6 +612,8 @@ impl ControlStore for PgStore {
         .bind(data_plane_auth)
         .bind(updated.updated_at)
         .bind(updated.id)
+        .bind(chaos)
+        .bind(limits)
         .execute(&mut *tx)
         .await
         .map_err(mock_name_conflict(&updated.name))?;
@@ -783,6 +800,9 @@ impl ControlStore for PgStore {
     }
 
     async fn put_scenario(&self, s: &Scenario) -> Result<(), StoreError> {
+        if let Some(chaos) = &s.rules.chaos {
+            chaos.validate().map_err(StoreError::Invalid)?;
+        }
         let rules = serde_json::to_string(&s.rules)?;
         let mut tx = self.pool.begin().await?;
         let (ws, name) = require_locked_mock_key(&mut tx, s.mock_id, LOCK_KEEP).await?;
@@ -971,6 +991,46 @@ impl ControlStore for PgStore {
             .iter()
             .map(log_from_row)
             .collect()
+    }
+
+    async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError> {
+        let sql = format!("SELECT {LOG_SELECT} FROM request_log WHERE id = $1");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(log_from_row)
+            .transpose()
+    }
+
+    async fn add_token_usage(
+        &self,
+        mock_id: Uuid,
+        day: chrono::NaiveDate,
+        tokens: u64,
+    ) -> Result<u64, StoreError> {
+        let total: i64 = sqlx::query_scalar(
+            "INSERT INTO token_usage (mock_id, day, tokens) VALUES ($1, $2, $3) \
+             ON CONFLICT (mock_id, day) DO UPDATE SET tokens = token_usage.tokens + excluded.tokens \
+             RETURNING tokens",
+        )
+        .bind(mock_id)
+        .bind(day)
+        .bind(to_i64(tokens, "tokens")?)
+        .fetch_one(&self.pool)
+        .await?;
+        from_i64(total, "tokens")
+    }
+
+    async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError> {
+        let total: Option<i64> =
+            sqlx::query_scalar("SELECT tokens FROM token_usage WHERE mock_id = $1 AND day = $2")
+                .bind(mock_id)
+                .bind(day)
+                .fetch_optional(&self.pool)
+                .await?;
+        total.map_or(Ok(0), |t| from_i64(t, "tokens"))
     }
 
     async fn list_channel_settings(

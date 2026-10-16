@@ -491,6 +491,8 @@ async fn apply_mock(
                         llm_profile: p.mock.llm_profile.clone(),
                         header_overrides: p.mock.header_overrides,
                         source: ResourceSource::File,
+                        chaos: None,
+                        limits: Default::default(),
                         data_plane_auth: p.mock.data_plane_auth.clone(),
                     },
                 )
@@ -577,6 +579,8 @@ async fn apply_mock(
                     "stream_item_interval",
                     s.stream_item_interval,
                 )?,
+                // File-config chaos arrives with the P7 config surface.
+                chaos: None,
             },
             source: ResourceSource::File,
         };

@@ -86,6 +86,8 @@ async fn create_mock(
                 llm_profile: profile.map(str::to_string),
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )
@@ -724,6 +726,8 @@ async fn grpc_service_holder_survives_cross_workspace_newcomer() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )

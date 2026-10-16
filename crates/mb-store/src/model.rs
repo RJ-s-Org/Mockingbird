@@ -72,6 +72,11 @@ pub struct Mock {
     pub source: ResourceSource,
     #[serde(default)]
     pub data_plane_auth: DataPlaneAuthConfig,
+    /// Fault injection; `None` injects nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chaos: Option<ChaosSettings>,
+    #[serde(default)]
+    pub limits: MockLimits,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -87,6 +92,147 @@ pub struct NewMock {
     pub source: ResourceSource,
     #[serde(default)]
     pub data_plane_auth: DataPlaneAuthConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chaos: Option<ChaosSettings>,
+    #[serde(default)]
+    pub limits: MockLimits,
+}
+
+/// Bounds of a uniformly random added latency, in milliseconds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct LatencyJitter {
+    pub min_ms: u64,
+    pub max_ms: u64,
+}
+
+/// A mock's (or scenario's) fault injection.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct ChaosSettings {
+    /// Probability (0–1) that a call answers with an injected error.
+    #[serde(default)]
+    pub error_rate: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_jitter: Option<LatencyJitter>,
+    /// Probability (0–1) that a streamed response is cut short.
+    #[serde(default)]
+    pub drop_stream_rate: f64,
+}
+
+impl ChaosSettings {
+    /// Upper bound of `latency_jitter.max_ms`.
+    pub const MAX_JITTER_MS: u64 = 30_000;
+
+    /// Checks the ranges; the message names the offending field.
+    pub fn validate(&self) -> Result<(), String> {
+        unit_rate("chaos.error_rate", self.error_rate)?;
+        unit_rate("chaos.drop_stream_rate", self.drop_stream_rate)?;
+        if let Some(j) = &self.latency_jitter {
+            if j.min_ms > j.max_ms {
+                return Err(format!(
+                    "chaos.latency_jitter.min_ms ({}) must not exceed chaos.latency_jitter.max_ms ({})",
+                    j.min_ms, j.max_ms
+                ));
+            }
+            if j.max_ms > Self::MAX_JITTER_MS {
+                return Err(format!(
+                    "chaos.latency_jitter.max_ms must be at most {} (30 s)",
+                    Self::MAX_JITTER_MS
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `true` when these settings never inject anything.
+    pub fn is_noop(&self) -> bool {
+        self.error_rate <= 0.0
+            && self.drop_stream_rate <= 0.0
+            && self.latency_jitter.as_ref().is_none_or(|j| j.max_ms == 0)
+    }
+}
+
+fn unit_rate(field: &str, rate: f64) -> Result<(), String> {
+    if (0.0..=1.0).contains(&rate) {
+        Ok(())
+    } else {
+        Err(format!("{field} must be between 0 and 1"))
+    }
+}
+
+/// A token bucket: `burst` calls at once, refilled at `requests_per_second`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct RateLimit {
+    pub requests_per_second: f64,
+    pub burst: u32,
+}
+
+/// A mock's admission limits. Unset fields fall back to the global ones
+/// (or to no limit).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct MockLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+    /// Tokens per UTC day, across all replicas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_token_budget: Option<u64>,
+    /// In bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
+    /// In bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<u64>,
+}
+
+impl MockLimits {
+    pub const MAX_REQUESTS_PER_SECOND: f64 = 100_000.0;
+    pub const MAX_BURST: u32 = 100_000;
+    pub const MIN_BYTES: u64 = 1024;
+    pub const MAX_REQUEST_BYTES: u64 = 67_108_864;
+    pub const MAX_RESPONSE_BYTES: u64 = 16_777_216;
+
+    /// Checks the ranges; the message names the offending field.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(r) = &self.rate_limit {
+            // Written so that NaN fails too.
+            if !(r.requests_per_second > 0.0
+                && r.requests_per_second <= Self::MAX_REQUESTS_PER_SECOND)
+            {
+                return Err(format!(
+                    "limits.rate_limit.requests_per_second must be greater than 0 and at most {}",
+                    Self::MAX_REQUESTS_PER_SECOND
+                ));
+            }
+            if !(1..=Self::MAX_BURST).contains(&r.burst) {
+                return Err(format!(
+                    "limits.rate_limit.burst must be between 1 and {}",
+                    Self::MAX_BURST
+                ));
+            }
+        }
+        if self.daily_token_budget == Some(0) {
+            return Err("limits.daily_token_budget must be at least 1".into());
+        }
+        byte_cap(
+            "limits.max_request_bytes",
+            self.max_request_bytes,
+            Self::MAX_REQUEST_BYTES,
+        )?;
+        byte_cap(
+            "limits.max_response_bytes",
+            self.max_response_bytes,
+            Self::MAX_RESPONSE_BYTES,
+        )
+    }
+}
+
+fn byte_cap(field: &str, value: Option<u64>, max: u64) -> Result<(), String> {
+    match value {
+        Some(v) if !(MockLimits::MIN_BYTES..=max).contains(&v) => Err(format!(
+            "{field} must be between {} and {max} bytes",
+            MockLimits::MIN_BYTES
+        )),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -135,6 +281,9 @@ pub struct ScenarioRules {
     /// Pause between streamed items, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_item_interval_ms: Option<u64>,
+    /// Replaces the mock's chaos while the scenario applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chaos: Option<ChaosSettings>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

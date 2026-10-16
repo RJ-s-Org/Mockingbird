@@ -157,6 +157,20 @@ impl ControlStore for StubControl {
     ) -> Result<Vec<RequestLogEntry>, StoreError> {
         self.inner.list_request_log(mock_id, f).await
     }
+    async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError> {
+        self.inner.get_request_log(id).await
+    }
+    async fn add_token_usage(
+        &self,
+        mock_id: Uuid,
+        day: chrono::NaiveDate,
+        tokens: u64,
+    ) -> Result<u64, StoreError> {
+        self.inner.add_token_usage(mock_id, day, tokens).await
+    }
+    async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError> {
+        self.inner.token_usage(mock_id, day).await
+    }
     async fn list_channel_settings(
         &self,
         mock_id: Uuid,
@@ -339,6 +353,8 @@ async fn orders_mock(store: &Arc<dyn ControlStore>) -> Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )

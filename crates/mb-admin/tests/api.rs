@@ -1354,6 +1354,8 @@ async fn file_managed_mock_is_read_only() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::File,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )

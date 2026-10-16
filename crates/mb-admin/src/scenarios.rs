@@ -3,14 +3,14 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use mb_auth::Permission;
-use mb_store::{ResourceSource, Scenario, ScenarioRules};
+use mb_store::{ChaosSettings, ResourceSource, Scenario, ScenarioRules};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::access::WsAccess;
 use crate::audit::snapshot;
-use crate::mocks::MockPath;
+use crate::mocks::{ChaosSchema, MockPath};
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, valid_identifier};
 
@@ -36,6 +36,10 @@ pub struct ScenarioView {
     /// Pause between streamed items, in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_item_interval_ms: Option<u64>,
+    /// Replaces the mock's chaos while the scenario applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ChaosSchema>)]
+    pub chaos: Option<ChaosSettings>,
     pub source: Source,
 }
 
@@ -51,6 +55,7 @@ impl From<Scenario> for ScenarioView {
             operations: s.rules.operations,
             stream_items: s.rules.stream_items,
             stream_item_interval_ms: s.rules.stream_item_interval_ms,
+            chaos: s.rules.chaos,
         }
     }
 }
@@ -77,6 +82,10 @@ pub struct PutScenario {
     /// Pause between streamed items, in milliseconds.
     #[serde(default)]
     pub stream_item_interval_ms: Option<u64>,
+    /// Replaces the mock's chaos while the scenario applies.
+    #[serde(default)]
+    #[schema(value_type = Option<ChaosSchema>)]
+    pub chaos: Option<ChaosSettings>,
 }
 
 /// Path of one scenario.
@@ -167,6 +176,9 @@ pub async fn put(
     if body.set.as_ref().is_some_and(|s| !s.is_object()) {
         return Err(Problem::unprocessable("set must be a JSON object"));
     }
+    if let Some(chaos) = &body.chaos {
+        chaos.validate().map_err(Problem::unprocessable)?;
+    }
     // Without an active contract there is nothing to check against yet.
     if let Some(contract) = st.store.active_contract(m.id).await? {
         let mut unknown: Vec<&str> = body
@@ -194,6 +206,7 @@ pub async fn put(
             operations: body.operations,
             stream_items: body.stream_items,
             stream_item_interval_ms: body.stream_item_interval_ms,
+            chaos: body.chaos,
         },
         source: ResourceSource::Api,
     };
