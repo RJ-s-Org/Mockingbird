@@ -46,14 +46,16 @@ pub struct RegistryChannels {
 impl ChannelControl for RegistryChannels {
     async fn publish(
         &self,
+        ws: &str,
         mock: &str,
         channel: &str,
         count: usize,
         context: Option<Value>,
     ) -> Result<Vec<PublishedMessage>, ChannelControlError> {
-        let Some(runtime) = self.registry.channel_runtime(mock) else {
+        let Some(runtime) = self.registry.channel_runtime(ws, mock) else {
             return Err(ChannelControlError::NotRunning(format!(
-                "mock {mock} has no running channels"
+                "mock {} has no running channels",
+                crate::registry::mock_label(ws, mock)
             )));
         };
         let published = runtime
@@ -72,8 +74,8 @@ impl ChannelControl for RegistryChannels {
             .collect())
     }
 
-    fn activity(&self, mock: &str) -> BTreeMap<String, ChannelActivityView> {
-        let Some(runtime) = self.registry.channel_runtime(mock) else {
+    fn activity(&self, ws: &str, mock: &str) -> BTreeMap<String, ChannelActivityView> {
+        let Some(runtime) = self.registry.channel_runtime(ws, mock) else {
             return BTreeMap::new();
         };
         runtime

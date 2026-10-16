@@ -129,7 +129,7 @@ The importer detects a contract's format from its bytes (the file name does not 
 | WSDL 1.1 (with inline or bundled XSD) | an XML `definitions` root in the WSDL 1.1 namespace | SOAP 1.1 and 1.2 at `<prefix><address path>`, the path of each service's `soap:address`; `GET <prefix><address path>?wsdl` returns the WSDL with its addresses pointing at the mock. |
 | zip or tar.gz archive | the zip or gzip magic bytes | The contract inside: all `.proto` files compiled together, else the single `.wsdl` with its XSDs, else the `.graphql`/`.graphqls`/`.gql` files joined as one schema, else the single file. See [Archive uploads](#archive-uploads). |
 
-Operation ids, as scenarios' `operations` lists and the request log use them, are `Query.<field>` / `Mutation.<field>` / `Subscription.<field>` for GraphQL, `<Service>.<Method>` for gRPC (`<package>.<Service>.<Method>` when the short form collides), and `<operation>` for SOAP (`<Service>.<operation>` on collision). Each gRPC service is served by one mock; when two mocks declare the same service, the one whose name sorts first wins and the other is reported in `/readyz` as failed.
+Operation ids, as scenarios' `operations` lists and the request log use them, are `Query.<field>` / `Mutation.<field>` / `Subscription.<field>` for GraphQL, `<Service>.<Method>` for gRPC (`<package>.<Service>.<Method>` when the short form collides), and `<operation>` for SOAP (`<Service>.<operation>` on collision). Each gRPC service is served by one mock across every workspace (the gRPC listener is shared): uploading with activation, or activating, a contract whose services another mock's active contract serves is a 409, and a config file declaring such a clash is rejected. If a clash reaches the data plane anyway, the mock already serving the service keeps it and the newcomer is reported in `/readyz` as failed. gRPC reflection lists only the services the caller's data-plane key reaches (plus mocks without data-plane auth) and needs a valid key when any gRPC mock is in `api_key` mode.
 
 ### Examples
 
@@ -331,16 +331,18 @@ Every produced and consumed message appears in the mock's request log (`kind: ev
 
 ### Admin API and CLI
 
-| Endpoint | Meaning |
-| --- | --- |
-| `GET /mocks/{mock}/channels` | the channels with their effective settings and activity |
-| `GET /mocks/{mock}/channels/{channel}` | one channel with its message, key, header and parameter schemas |
-| `PUT /mocks/{mock}/channels/{channel}` | `{"enabled": true, "triggers": [...]}`; `triggers: null` restores the contract's |
-| `POST /mocks/{mock}/channels/{channel}/publish` | `{"count": 3, "context": {...}}`: generate and publish now (1–100 messages) |
-| `GET/PUT /mocks/{mock}/event-settings` | `{"broker": "rabbit"}`; `null` picks automatically |
-| `GET /brokers` | the configured brokers and their status |
+Paths below are relative to `/api/v1/workspaces/{ws}` (and, for workspace `default`, to the deprecated `/api/v1` aliases), except `/api/v1/brokers`:
 
-Settings of mocks declared in the config file are read-only through the API (409).
+| Endpoint | Role | Meaning |
+| --- | --- | --- |
+| `GET /mocks/{mock}/channels` | viewer | the channels with their effective settings and activity |
+| `GET /mocks/{mock}/channels/{channel}` | viewer | one channel with its message, key, header and parameter schemas |
+| `PUT /mocks/{mock}/channels/{channel}` | editor | `{"enabled": true, "triggers": [...]}`; `triggers: null` restores the contract's (audited as `channel.update`) |
+| `POST /mocks/{mock}/channels/{channel}/publish` | editor | `{"count": 3, "context": {...}}`: generate and publish now, 1–100 messages (audited as `channel.publish`) |
+| `GET/PUT /mocks/{mock}/event-settings` | viewer / editor | `{"broker": "rabbit"}`; `null` picks automatically (`PUT` audited as `event_settings.update`) |
+| `GET /api/v1/brokers` | any authenticated caller | the configured brokers and their status (global, read-only) |
+
+Settings of mocks declared in the config file are read-only through the API (409). The `channels` and `brokers` CLI commands use the `default` workspace paths.
 
 ```sh
 mockingbird channels list orders
@@ -355,6 +357,8 @@ mockingbird brokers list
 ### WebSocket channels
 
 A `ws` channel is served on the data plane at `<prefix><path>`, the mock's route prefix followed by the channel's address. Messages the mock publishes go to every client connected to that path; messages clients send are consumed like broker messages, and their replies go back to the sending client only.
+
+WebSocket channels honour the mock's `data_plane_auth` like every other protocol: in `api_key` mode the upgrade request needs a data-plane key of the mock's workspace in the key header (default `x-api-key`) or the `api_key` query parameter; without one it is answered `401` (with a `WWW-Authenticate` challenge) and recorded in the mock's request log as a refused `event` call. Event records (produced, consumed and refused) belong to the mock's workspace and are listed under `/api/v1/workspaces/{ws}/mocks/{mock}/requests?kind=event`.
 
 ```sh
 mockingbird serve --offline fixtures/asyncapi/chat-ws-2.6.yaml   # channel /chat, mounted at /
@@ -397,7 +401,7 @@ The Admin API lives under `http://127.0.0.1:9090/api/v1`; its OpenAPI document i
 | Resource | Endpoints |
 | --- | --- |
 | Mocks | `GET/POST /mocks`, `GET/PATCH/DELETE /mocks/{mock}` |
-| Contracts | `GET/POST /mocks/{mock}/contracts`, `GET …/contracts/{version}`, `GET …/{version}/source`, `POST …/{version}/activate` |
+| Contracts | `GET/POST /mocks/{mock}/contracts`, `GET …/contracts/{version}`, `GET …/{version}/source` (an `application/octet-stream` attachment; the sniffed type is in `X-Mockingbird-Source-Type`), `POST …/{version}/activate` |
 | Scenarios | `GET /mocks/{mock}/scenarios`, `PUT/DELETE …/scenarios/{name}` |
 | LLM profiles | `GET /llm-profiles`, `GET/PUT/DELETE /llm-profiles/{name}` |
 | Sessions | `GET /mocks/{mock}/sessions`, `GET/PUT/DELETE …/sessions/{session}` (export, seed, reset) |
@@ -412,11 +416,11 @@ If a change breaks a mock (for example an LLM profile it uses now names a secret
 
 ### Admin port safety
 
-There is no authentication yet (it arrives later), so the admin port defends itself against browsers and pasted configs:
+Besides authentication (see [Console and auth](#console-and-auth)), the admin port defends itself against browsers and pasted configs:
 
-- **Host check.** While the admin port is bound to a loopback address (the default), it answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (any port); anything else gets `421 Misdirected Request`. This blocks DNS-rebinding attacks from web pages.
+- **Host check.** While the admin port is bound to a loopback address (the default), it answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (any port); in `oidc` mode it answers only to the host of `auth.external_url`. Anything else gets `421 Misdirected Request`, except the ops endpoints. This blocks DNS-rebinding attacks from web pages.
 - **Content types.** Every mutating request needs `Content-Type: application/json` (activation too, whose body is ignored), and a contract upload needs `application/json`, `application/yaml`, `application/x-yaml`, `text/yaml`, `application/vnd.oai.openapi` (`+json`/`+yaml`), `application/graphql`, `text/x-protobuf`, `application/x-protobuf`, `application/xml`, `text/xml`, `application/wsdl+xml`, `application/zip`, `application/gzip` or `application/octet-stream`; anything else is a `415`. A cross-site form or no-cors request cannot send these, so a web page cannot change mocks behind your back. The CLI client sets them for you; with curl, pass `-H 'content-type: application/json'` (or `application/yaml` for a YAML contract).
-- **Secret references.** An LLM profile created or updated through the API may only use secret references matching `server.api_secret_refs` (globs; default `["env:MB_LLM_*", "env:*_API_KEY"]`); `file:` references and other variables are rejected with `422 secret_ref not allowed by server.api_secret_refs`. Profiles in the config file are not restricted. Widen the list in `mockingbird.yaml` if you need to:
+- **Secret references.** An LLM profile created or updated through the API may only use secret references matching `server.api_secret_refs` (globs; default `["env:MB_LLM_*", "env:*_API_KEY"]`); `file:` references and other variables are rejected with `422 secret_ref not allowed by server.api_secret_refs`. Profiles in the config file are not restricted. Only a sysadmin may set or change a profile's `secret_ref`, or change the `base_url` of a profile that has one (`403` otherwise): a workspace admin can still create profiles without a secret and change a profile's other fields, but cannot point a secret at a host of their choosing. Widen the list in `mockingbird.yaml` if you need to:
 
   ```yaml
   server:
@@ -455,6 +459,124 @@ mockingbird import --as calc calculator.zip
 
 An archive is at most 20 MiB, holds at most 500 files and unpacks to at most 64 MiB. It is unpacked in memory only: absolute paths, `..`, links and devices are rejected, and when every file shares one top-level directory, that directory is stripped. Nested archives are not supported. The CLI picks the upload's media type from the file extension (`.graphql`, `.proto`, `.pb`/`.desc`, `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz`, `.json`, `.yaml`).
 
+## Console and auth
+
+The admin port serves a web console at `/` (for example http://127.0.0.1:9090): mocks, contracts, scenarios, sessions, the live request tail, LLM profiles, API keys, the audit log and server status. It is built from `crates/mb-console/web` and embedded in the binary.
+
+### Auth modes
+
+`auth.mode` is `none` (the default) or `oidc`.
+
+- **`none`:** every admin request acts as the local sysadmin (subject `local`). Fine on loopback; binding another address needs `--insecure-no-auth`.
+- **`oidc`:** the console logs in through an OpenID Connect provider (Rauthy by default; any compliant provider works), and API callers send `Authorization: Bearer <token>`, either an OIDC access token (JWT) or a Mockingbird API key. Any bind address is allowed, and the admin port only answers to the host of `auth.external_url`.
+
+```yaml
+auth:
+  mode: oidc
+  external_url: https://mockingbird.example.com   # where browsers reach the admin port
+  session_ttl: 12h                                 # absolute console session lifetime (max 30d)
+  sysadmin_subjects: ["3f2c…"]                     # OIDC `sub` values that are always sysadmin
+  public_metrics: true                             # serve /metrics without credentials
+  oidc:
+    issuer: https://auth.example.com/auth/v1/      # exactly the discovery `issuer` (Rauthy's ends in /)
+    client_id: mockingbird
+    client_secret: env:MB_OIDC_CLIENT_SECRET       # env:NAME or file:/path
+    scopes: [openid, profile, email, groups]       # default
+    roles_claim: groups                            # default
+    group_prefix: mb                               # default
+    audience: mockingbird                          # `aud` of bearer JWTs; default: client_id
+audit:
+  retention_days: 365                              # 1..=3650
+  webhook_url: https://hooks.example.com/mockingbird
+  webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET
+```
+
+Register `<external_url>/auth/callback` as the client's redirect URI and `<external_url>/` as its post-logout redirect URI. `/healthz`, `/readyz`, `/auth/login`, `/auth/callback` and `/api/openapi.json` are always public, and `/metrics` is too unless `public_metrics: false`. An unauthenticated API call gets a `401` problem; a browser opening a console page is redirected to the login.
+
+### Roles and groups
+
+Each workspace grants one of `viewer < editor < admin < owner`:
+
+| Role | Can |
+| --- | --- |
+| `viewer` | read everything in the workspace except API keys |
+| `editor` | also change mocks, contracts, scenarios, and seed or reset sessions |
+| `admin` | also manage LLM profiles and API keys |
+| `owner` | also update or delete the workspace |
+
+A **sysadmin** is `owner` in every workspace, and is the only one who can create workspaces or read the global audit log.
+
+Roles come from the `roles_claim` claim (default `groups`) of the ID token or JWT, as strings `<prefix>:<workspace>:<role>` and `<prefix>:sysadmin`. With the default prefix `mb`, a user in the groups `mb:payments:editor` and `mb:default:viewer` is an editor of `payments` and a viewer of `default`, and `mb:sysadmin` makes a sysadmin.
+
+### API keys
+
+Workspace admins create keys in the console (**API keys**) or with `POST /api/v1/workspaces/{ws}/api-keys`; only users (or the Local principal in `auth.mode: none`) can, never another API key. A key has a role (at most its creator's), optional expiry, and scopes:
+
+- **`admin`** (the default): the key authenticates Admin API calls, with its role, like a user.
+- **`data-plane`**: the key unlocks mocks whose `data_plane_auth.mode` is `api_key` (see below).
+
+The token, `mbk_<key_id>_<secret>`, is shown once; only a hash is stored. The CLI client sends one with `--token` (or `MB_ADMIN_TOKEN`):
+
+```sh
+mockingbird --admin-url https://mockingbird.example.com --token "$MB_ADMIN_TOKEN" mocks list
+```
+
+A mock can require a data-plane key on every call:
+
+```yaml
+mocks:
+  orders:
+    contract: ./orders.yaml
+    data_plane_auth: { mode: api_key, header: x-api-key }   # or ?api_key=…
+```
+
+A call without a valid, unrevoked `data-plane` key of the mock's workspace (or a sysadmin key) gets `401`. The key is never passed to the engine or recorded. `mode: passthrough_validate` instead requires credentials in the form the contract's security requirements declare, without verifying them against any issuer (only OpenAPI and Swagger contracts declare any).
+
+Data-plane auth applies to every protocol: a GraphQL request is admitted (tenant, quota) and then answered `401` before it executes, and the refusal is logged; a GraphQL subscription connection is authenticated once, by the key header or `?api_key=` on the upgrade request (an invalid key is a `401` with no upgrade) or by the `connection_init` payload (the key header name, `api_key` or `apiKey`), and is otherwise refused with close code `4401` (`graphql-transport-ws`) or a `connection_error` (`graphql-ws`); the payload's credential members are never forwarded or logged. A gRPC call reads the key from its request metadata (e.g. `x-api-key: mbk_…`) and fails with `UNAUTHENTICATED`, and a SOAP call (and `GET ?wsdl`) reads it from its HTTP headers and gets a `401` client Fault (`401` problem for the WSDL). The `?api_key=` parameter works for REST, SSE and GraphQL over HTTP and WebSocket.
+
+### Workspaces
+
+Every resource lives in a workspace: `/api/v1/workspaces/{ws}/mocks…`, `…/llm-profiles…`, `…/api-keys…` and `…/audit`. `GET /api/v1/workspaces` lists them, `POST` creates one (sysadmin), and `GET /api/v1/me` shows the caller's roles. Workspace names follow the mock-name rule (`^[a-z0-9][a-z0-9-]{0,62}$`). The `default` workspace always exists and cannot be deleted. Route prefixes stay unique across all workspaces. A mock in the config file picks its workspace with `workspace:` (default `default`).
+
+The P2 paths `/api/v1/mocks…` and `/api/v1/llm-profiles…` still work and act on `default`. They are **deprecated** (and marked so in the OpenAPI document); use the workspace paths.
+
+### Audit log
+
+Every successful change writes one audit event: the actor, the action (`mock.create`, `contract.upload`, `session.reset`, `api_key.create`, `auth.login`, …), the target, and before/after snapshots. Events never contain secrets or tokens. Read them in the console (**Audit**), with `GET /api/v1/workspaces/{ws}/audit` (filters `action`, `actor`, `before`, `limit`), or for all workspaces with `GET /api/v1/audit` (sysadmin). Add `format=jsonl` to export them as JSON Lines. Events older than `audit.retention_days` are pruned daily. Failed console logins (`auth.login_failed`) are audited at most once per source address per 10 s and 100 times per minute overall; the rest only count in `mb_auth_login_failed_suppressed_total`.
+
+With `audit.webhook_url` set, every event is also POSTed there as JSON. Delivery never blocks a request: it is queued, and a failed attempt is retried up to 3 times; when the queue is full the event is dropped and `mb_audit_webhook_dropped_total` goes up. The body is signed with `audit.webhook_secret` in `X-Mockingbird-Signature: sha256=<hex HMAC-SHA256(secret, body)>`. Verify it over the raw body, in constant time:
+
+```python
+import hashlib, hmac
+
+def verify(secret: bytes, body: bytes, header: str) -> bool:
+    expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header)
+```
+
+### Compose quickstart
+
+`deploy/compose` runs Mockingbird with Postgres and Rauthy, with OIDC login already set up:
+
+```sh
+docker compose -f deploy/compose/docker-compose.yml up
+```
+
+Open http://localhost:9090 and log in as `demo@localhost.test` / `Demo-Passw0rd-123!` (a sysadmin and an admin of `default`). The data plane is on http://localhost:8080. **The stack's secrets are published dev values: use it only on your own machine.** See [deploy/compose/README.md](deploy/compose/README.md) for details and manual setup steps.
+
+### Console development
+
+```sh
+cd crates/mb-console/web
+npm ci
+npm run dev        # Vite dev server; proxies the API to a mockingbird on 127.0.0.1:9090
+npm test           # Vitest
+npm run e2e        # Playwright against the binary with auth.mode: none
+npm run build      # into crates/mb-console/dist, which the next cargo build embeds
+```
+
+Without a console build, `cargo build` embeds a placeholder page, so Rust work never needs Node. After changing the Admin API, run `npm run check:api` to regenerate the TypeScript types from the OpenAPI document.
+
 ## Ops endpoints
 
 On the admin port:
@@ -462,7 +584,7 @@ On the admin port:
 | Path | Meaning |
 | --- | --- |
 | `/healthz` | Liveness: the process is up. |
-| `/readyz` | Readiness: 503 `unavailable` when the control store is unreachable; otherwise 200 with `ready`, or `degraded` plus reasons when the state store is failing and mocks serve statelessly, or a mock failed to rebuild and serves its previous version. Each store ping is bounded to 2 s. |
+| `/readyz` | Readiness: 503 `unavailable` when the control store is unreachable; otherwise 200 with `ready`, or `degraded` plus reasons when the state store is failing and mocks serve statelessly, or a mock failed to rebuild and serves its previous version. Each store ping is bounded to 2 s. In `auth.mode: oidc` the reasons are shown only to callers with valid credentials; anyone else gets just the status. |
 | `/metrics` | Prometheus metrics: requests, latency, LLM tokens and outcomes, request-log drops. |
 
 The data plane keeps `/__mockingbird/healthz`. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces over OTLP (HTTP/protobuf).
@@ -489,7 +611,7 @@ docker run --rm mockingbird --version
 
 This builds the full image (Kafka, AMQP and MQTT); `--build-arg FEATURES=--no-default-features` builds the slim one (see [Images](#images)).
 
-The image exposes ports 8080 (data plane), 9090 (Admin API and ops) and 50051 (gRPC). It runs as a non-root user and, like the binary, binds loopback unless told otherwise. There is no auth yet, so binding all interfaces needs `--insecure-no-auth`; only do this on a trusted network:
+The image builds the console too and exposes ports 8080 (data plane), 9090 (Admin API, console and ops) and 50051 (gRPC). It runs as a non-root user and, like the binary, binds loopback unless told otherwise. With `auth.mode: none`, binding all interfaces needs `--insecure-no-auth`; only do this on a trusted network (or use `oidc`, as in the [Compose stack](deploy/compose/README.md)):
 
 ```sh
 docker run --rm -p 8080:8080 -p 9090:9090 -p 50051:50051 \
@@ -514,7 +636,7 @@ With a config file, mount it and its contracts and pass `-c`; use Postgres (`MB_
 | `--admin-port` | `9090` | Admin API and ops port. |
 | `--grpc-port` | `50051` | gRPC port (h2c), shared by every gRPC mock. |
 | `--storage-url` | `sqlite::memory:` | Control-plane storage. |
-| `--insecure-no-auth` | off | Permit a non-loopback bind (there is no auth yet). |
+| `--insecure-no-auth` | off | Permit a non-loopback bind with `auth.mode: none`. |
 | `--offline` | off | Faker only; no LLM calls. |
 | `--llm-timeout` | `3s` | LLM timeout of the default profile before falling back. |
 
@@ -524,6 +646,7 @@ With a config file, mount it and its contracts and pass `-c`; use Postgres (`MB_
 | --- | --- | --- |
 | `MB_HOST`, `MB_PORT`, `MB_ADMIN_PORT`, `MB_GRPC_PORT`, `MB_STORAGE_URL` | see flags | Same as the flags; flags win. |
 | `MB_ADMIN_URL` | `http://127.0.0.1:9090` | Admin API used by the CLI client. |
+| `MB_ADMIN_TOKEN` | none | API key the CLI client sends (`--token`). |
 | `MB_LLM_API_KEY` | none | API key of the default profile. Required unless `--offline`; local endpoints such as Ollama accept any dummy value. |
 | `MB_LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible base URL. |
 | `MB_LLM_MODEL` | `deepseek-chat` | Model name. |

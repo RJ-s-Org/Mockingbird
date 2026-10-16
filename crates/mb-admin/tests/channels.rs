@@ -12,7 +12,7 @@ use mb_admin::channels::{
     BrokerView, ChannelActivityView, ChannelControl, ChannelControlError, PublishedMessage,
     SharedChannelControl,
 };
-use mb_admin::{AdminState, DEFAULT_API_SECRET_REFS, router};
+use mb_admin::{AdminState, router};
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, NewContractVersion, NewMock, ResourceSource,
@@ -22,7 +22,8 @@ use tower::ServiceExt;
 
 const ORDERS: &str = include_str!("../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
 
-type Call = (String, String, usize, Option<Value>);
+/// `(workspace, mock, channel, count, context)`.
+type Call = (String, String, String, usize, Option<Value>);
 
 #[derive(Default)]
 struct FakeControl {
@@ -34,12 +35,14 @@ struct FakeControl {
 impl ChannelControl for FakeControl {
     async fn publish(
         &self,
+        ws: &str,
         mock: &str,
         channel: &str,
         count: usize,
         context: Option<Value>,
     ) -> Result<Vec<PublishedMessage>, ChannelControlError> {
         self.calls.lock().unwrap().push((
+            ws.to_owned(),
             mock.to_owned(),
             channel.to_owned(),
             count,
@@ -59,7 +62,7 @@ impl ChannelControl for FakeControl {
             .collect())
     }
 
-    fn activity(&self, _mock: &str) -> BTreeMap<String, ChannelActivityView> {
+    fn activity(&self, _ws: &str, _mock: &str) -> BTreeMap<String, ChannelActivityView> {
         BTreeMap::from([(
             "orderCreated".into(),
             ChannelActivityView {
@@ -127,16 +130,7 @@ impl Resp {
 async fn harness(with_control: bool) -> Harness {
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let store = mb_store::connect("sqlite::memory:").await.unwrap();
-    let mut app = router(AdminState {
-        store: store.clone(),
-        state,
-        api_secret_refs: Arc::new(
-            DEFAULT_API_SECRET_REFS
-                .iter()
-                .map(|r| r.to_string())
-                .collect(),
-        ),
-    });
+    let mut app = router(AdminState::new(store.clone(), state));
     let control = with_control.then(|| Arc::new(FakeControl::default()));
     if let Some(c) = &control {
         let shared: SharedChannelControl = c.clone();
@@ -457,6 +451,7 @@ async fn put_on_file_mock_409() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::File,
+                data_plane_auth: Default::default(),
             },
         )
         .await
@@ -544,6 +539,7 @@ async fn publish_calls_control() {
     assert_eq!(
         *h.fake().calls.lock().unwrap(),
         vec![(
+            DEFAULT_WORKSPACE.to_string(),
             "orders".to_string(),
             "orderCreated".to_string(),
             2,
@@ -561,8 +557,8 @@ async fn publish_calls_control() {
         .await
         .ok();
     assert_eq!(r["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(h.fake().calls.lock().unwrap()[1].2, 1);
-    assert_eq!(h.fake().calls.lock().unwrap()[1].3, None);
+    assert_eq!(h.fake().calls.lock().unwrap()[1].3, 1);
+    assert_eq!(h.fake().calls.lock().unwrap()[1].4, None);
 
     // A JSON content type is required; context must be an object.
     h.send(

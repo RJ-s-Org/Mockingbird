@@ -1,13 +1,16 @@
-//! `/api/v1/mocks/{mock}/requests`: the request log.
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/requests`: the request log.
 
 use axum::extract::State;
 use chrono::{DateTime, Utc};
+use mb_auth::Permission;
 use mb_store::{RequestKind, RequestLogEntry, RequestLogFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AdminState;
+use crate::access::WsAccess;
+use crate::mocks::MockPath;
 use crate::problem::{ApiResult, Json, Path, Problem, Query};
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -72,9 +75,13 @@ impl From<RequestLogEntry> for RequestLogView {
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/requests",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/requests",
     tag = "requests",
-    params(("mock" = String, Path, description = "Mock name"), RequestsQuery),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        RequestsQuery,
+    ),
     responses(
         (status = 200, description = "Newest first", body = Vec<RequestLogView>),
         (status = 400, body = Problem, content_type = "application/problem+json"),
@@ -83,9 +90,12 @@ impl From<RequestLogEntry> for RequestLogView {
 )]
 pub async fn list(
     State(st): State<AdminState>,
-    Path(mock): Path<String>,
+    access: WsAccess,
+    Path(MockPath { mock }): Path<MockPath>,
     Query(q): Query<RequestsQuery>,
 ) -> ApiResult<Json<Vec<RequestLogView>>> {
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let kind = q
         .kind
         .as_deref()
@@ -94,7 +104,6 @@ pub async fn list(
                 .ok_or_else(|| Problem::bad_request(format!("unknown request kind {k:?}")))
         })
         .transpose()?;
-    let m = st.mock(&mock).await?;
     let filter = RequestLogFilter {
         operation_id: q.operation,
         session: q.session,

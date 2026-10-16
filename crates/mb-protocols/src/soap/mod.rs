@@ -26,9 +26,10 @@ use tracing::Instrument;
 use tracing::field::Empty;
 
 use crate::call::{
-    self, CallPlan, DEFAULT_SESSION, PlanError, PlanFailure, Report, forwarded_headers,
+    self, CallPlan, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
     recorded_headers,
 };
+use crate::dp_auth::authenticate_contract;
 use crate::{MockRuntime, MountPrefix};
 
 mod envelope;
@@ -166,6 +167,15 @@ async fn handle(State(st): State<Arc<SoapState>>, req: Request) -> Response {
                 .await
         }
         Method::GET if is_wsdl_query(parts.uri.query()) => {
+            // The WSDL describes every operation: it needs the same
+            // credentials as calling them (HTTP headers only).
+            if let Err(u) = authenticate_contract(&st.rt, &parts.headers, &[]).await {
+                let mut resp = problem(401, "Unauthorized", u.detail);
+                if let Ok(v) = HeaderValue::from_str(&u.challenge) {
+                    resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+                }
+                return resp;
+            }
             let prefix = parts
                 .extensions
                 .get::<MountPrefix>()
@@ -224,6 +234,8 @@ struct Answer {
     /// Recorded response.
     record: Value,
     retry_after: Option<Duration>,
+    /// The `WWW-Authenticate` challenge of a data-plane auth failure.
+    www_authenticate: Option<String>,
 }
 
 impl Answer {
@@ -245,6 +257,7 @@ impl Answer {
             source: None,
             record: json!({ "fault": { "client": client, "message": message } }),
             retry_after: None,
+            www_authenticate: None,
         }
     }
 
@@ -304,7 +317,7 @@ async fn serve_call(
     report.latency = started.elapsed();
     if rt.recorder.is_some() {
         report.request = json!({
-            "headers": recorded_headers(&headers),
+            "headers": recorded_headers(rt, &headers),
             "body": decoded.unwrap_or_else(|| Value::String(UNDECODABLE.into())),
         });
         report.response = Some(answer.record);
@@ -324,6 +337,13 @@ async fn serve_call(
     if let Some(after) = answer.retry_after {
         let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
         h.insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    }
+    if let Some(v) = answer
+        .www_authenticate
+        .as_deref()
+        .and_then(|c| HeaderValue::from_str(c).ok())
+    {
+        h.insert(header::WWW_AUTHENTICATE, v);
     }
     resp
 }
@@ -384,7 +404,8 @@ async fn answer(
     }
 
     report.admission_ran = true;
-    let plan = match call::plan(rt, op, headers).await {
+    // SOAP credentials travel in HTTP headers only.
+    let plan = match call::plan(rt, op, headers, Presented::default()).await {
         Ok(plan) => plan,
         Err(PlanFailure {
             error,
@@ -404,7 +425,7 @@ async fn answer(
 
     let call = OperationCall {
         operation_id: op.id.clone(),
-        headers: forwarded_headers(headers),
+        headers: forwarded_headers(rt, headers),
         body: input,
         ..Default::default()
     };
@@ -431,6 +452,7 @@ async fn answer(
                         source: Some(generated.source),
                         record: body,
                         retry_after: None,
+                        www_authenticate: None,
                     },
                     Err(e) => Answer::fault(version, 500, e),
                 }
@@ -503,6 +525,11 @@ fn plan_fault(version: Version, error: PlanError, mock: &str) -> Answer {
         PlanError::Rejected(r) => {
             let mut answer = Answer::fault(version, r.status, r.detail);
             answer.retry_after = r.retry_after;
+            answer
+        }
+        PlanError::Unauthorized(u) => {
+            let mut answer = Answer::fault(version, 401, u.detail).with_http(401);
+            answer.www_authenticate = Some(u.challenge);
             answer
         }
         PlanError::BadOverride(detail) => Answer::fault(version, 400, detail),

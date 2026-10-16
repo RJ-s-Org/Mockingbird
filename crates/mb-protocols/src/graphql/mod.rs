@@ -14,13 +14,15 @@ use async_graphql::Request;
 use async_graphql::parser::types::{DocumentOperations, OperationType};
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{FromRequestParts, Request as HttpRequest, State, WebSocketUpgrade};
+use axum::extract::{FromRequestParts, Query, Request as HttpRequest, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
-use crate::MockRuntime;
+use mb_ext::Tenancy;
+
+use crate::{DataPlaneAuthMode, MockRuntime, call};
 
 mod resolve;
 mod schema;
@@ -83,9 +85,14 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             format!("no GraphQL endpoint at {}", uri.path()),
         );
     }
+    let query = Query::<Vec<(String, String)>>::try_from_uri(&uri)
+        .map(|q| q.0)
+        .unwrap_or_default();
     if method == Method::GET && is_websocket_upgrade(&headers) {
         return match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
-            Ok(upgrade) => subscription::upgrade(st.schema.clone(), &st.rt, upgrade, headers),
+            Ok(upgrade) => {
+                subscription::upgrade(st.schema.clone(), &st.rt, upgrade, headers, query).await
+            }
             Err(rejection) => rejection.into_response(),
         };
     }
@@ -125,7 +132,79 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             return resp;
         }
     };
-    execute(&st, request, &method, headers).await
+    // Data-plane auth: in `api_key` mode the whole request is admitted
+    // (tenant, then quota) and then its key checked once, before anything
+    // runs (a 429/401 problem, as for REST, reported like any call); root
+    // fields are then not admitted again. Each root field still runs the
+    // per-operation checks of the shared pipeline.
+    let admitted = if st.rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey {
+        match admit_request(&st.rt, &request, &method, &headers, &query).await {
+            Ok(tenancy) => Some(tenancy),
+            Err(resp) => return resp,
+        }
+    } else {
+        None
+    };
+    execute(&st, request, &method, headers, admitted).await
+}
+
+/// Admits a whole request and checks its data-plane key; a refusal is
+/// answered with a problem and reported (without the key).
+async fn admit_request(
+    rt: &MockRuntime,
+    request: &Request,
+    method: &Method,
+    headers: &HeaderMap,
+    query: &[(String, String)],
+) -> Result<Tenancy, Response> {
+    let started = tokio::time::Instant::now();
+    let operation_id = request.operation_name.clone().unwrap_or_default();
+    let (resp, tenancy) = match call::admit(rt, &operation_id, headers).await {
+        Err((r, tenancy)) => {
+            let mut resp = problem(r.status, &r.title, r.detail);
+            if let Some(after) = r.retry_after {
+                let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+                resp.headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+            }
+            (resp, tenancy)
+        }
+        Ok(tenancy) => match call::check_key(rt, headers, query).await {
+            Ok(()) => return Ok(tenancy),
+            Err(u) => {
+                let mut resp = problem(401, "Unauthorized", u.detail);
+                if let Ok(v) = HeaderValue::from_str(&u.challenge) {
+                    resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+                }
+                (resp, Some(tenancy))
+            }
+        },
+    };
+    let status = resp.status().as_u16();
+    let report = call::Report {
+        operation_id: None,
+        session: call::DEFAULT_SESSION.into(),
+        method: method.as_str().to_string(),
+        path: rt.protocols.graphql_path.clone(),
+        status,
+        source: None,
+        usage: Default::default(),
+        latency: started.elapsed(),
+        tenancy,
+        admission_ran: true,
+        request: if rt.recorder.is_some() {
+            json!({
+                "variables": request.variables,
+                "headers": call::recorded_headers(rt, headers),
+            })
+        } else {
+            Value::Null
+        },
+        request_body_bytes: None,
+        response: None,
+    };
+    call::report(rt, headers, report).await;
+    Err(resp)
 }
 
 /// Runs `request`, then sleeps the largest injected latency of its root
@@ -135,12 +214,14 @@ async fn execute(
     request: Request,
     method: &Method,
     headers: HeaderMap,
+    admitted: Option<Tenancy>,
 ) -> Response {
     let variables = serde_json::to_value(&request.variables).unwrap_or(Value::Null);
     let call = Arc::new(resolve::HttpCall::new(
         headers,
         method.as_str().to_string(),
         variables,
+        admitted,
     ));
     let mut response = st.schema.execute(request.data(Arc::clone(&call))).await;
     let collected = call.collected();

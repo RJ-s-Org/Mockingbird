@@ -8,6 +8,7 @@
 //! stream is dropped.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_graphql::Data;
 use async_graphql::dynamic::{
@@ -16,7 +17,7 @@ use async_graphql::dynamic::{
 use async_graphql::http::{WebSocket, WebSocketProtocols, WsMessage};
 use async_graphql::parser::types::{FieldDefinition, Type};
 use axum::extract::WebSocketUpgrade;
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use axum::response::Response;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, PollNext};
@@ -31,48 +32,144 @@ use tracing::{Instrument, Span};
 use super::MAX_BODY_BYTES;
 use super::resolve::{Failure, Shapes, forced_message, project};
 use super::schema::{input_value, type_ref};
-use crate::MockRuntime;
-use crate::call::{self, CallPlan, DEFAULT_SESSION, Report, forwarded_headers, recorded_headers};
+use crate::call::{
+    self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
+};
 use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
+use crate::{DataPlaneAuthMode, MockRuntime};
 
 /// The subprotocols served, in order of preference.
 const SUBPROTOCOLS: [&str; 2] = ["graphql-transport-ws", "graphql-ws"];
 
-/// One WebSocket connection's override headers, shared by its
-/// subscriptions through the connection data.
+/// One WebSocket connection's credentials and override headers, shared by
+/// its subscriptions through the connection data.
 struct WsCall {
+    /// The upgrade request's headers overlaid by the `connection_init`
+    /// payload, credentials included: used only to admit and authenticate
+    /// each subscription, never forwarded or recorded.
+    auth_headers: HeaderMap,
+    /// [`WsCall::auth_headers`] without the payload's credential members:
+    /// what the prompt and the request record may see (after the usual
+    /// redaction).
     headers: HeaderMap,
+    /// The upgrade URL's query pairs (passthrough query API keys).
+    query: Vec<(String, String)>,
+    /// The connection presented a valid data-plane key (`api_key` mode).
+    key_verified: bool,
 }
+
+/// `connection_init` payload members that carry a data-plane key, besides
+/// the mock's key header.
+const PAYLOAD_KEY_MEMBERS: [&str; 2] = ["api_key", "apiKey"];
+/// Close code for a connection refused by data-plane auth.
+const CLOSE_UNAUTHORIZED: u16 = 4401;
 
 /// Upgrades a `GET` at the GraphQL path to a subscription channel. The
 /// override headers are `headers` (the upgrade request's), overlaid by
 /// the string-valued keys of the `connection_init` payload.
-pub(crate) fn upgrade(
+///
+/// In `api_key` mode the connection is authenticated before any
+/// subscription runs: by a key in the key header or the `api_key` query
+/// parameter of the upgrade request (an invalid one is a `401` problem,
+/// with no upgrade), else by the `connection_init` payload (the key header
+/// name, `api_key` or `apiKey`); without a valid key the connection is
+/// refused with a `connection_error` (`graphql-ws`) or close code 4401
+/// (`graphql-transport-ws`). Refusals are reported as `401` calls.
+pub(crate) async fn upgrade(
     schema: Schema,
-    rt: &MockRuntime,
+    rt: &Arc<MockRuntime>,
     upgrade: WebSocketUpgrade,
     headers: HeaderMap,
+    query: Vec<(String, String)>,
 ) -> Response {
+    let mut key_verified = false;
+    if rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey
+        && crate::dp_auth::presented_key(rt, &headers, &query).is_some()
+    {
+        match call::check_key(rt, &headers, &query).await {
+            Ok(()) => key_verified = true,
+            Err(u) => {
+                report_refusal(rt, &headers, &u.detail).await;
+                let mut resp = super::problem(401, "Unauthorized", u.detail);
+                if let Ok(v) = HeaderValue::from_str(&u.challenge) {
+                    resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+                }
+                return resp;
+            }
+        }
+    }
     let cfg = ChannelConfig {
         subprotocols: SUBPROTOCOLS.to_vec(),
         keepalive: rt.protocols.ws_keepalive,
         max_message_bytes: MAX_BODY_BYTES,
     };
-    serve_channel(upgrade, cfg, move |io| run(schema, io, headers))
+    let rt = Arc::clone(rt);
+    serve_channel(upgrade, cfg, move |io| {
+        run(schema, io, rt, headers, query, key_verified)
+    })
 }
 
-async fn run(schema: Schema, io: ChannelIo, headers: HeaderMap) {
+/// Reports a connection refused by data-plane auth as a `401` call.
+async fn report_refusal(rt: &MockRuntime, headers: &HeaderMap, detail: &str) {
+    let report = Report {
+        operation_id: None,
+        session: DEFAULT_SESSION.into(),
+        method: "GET".into(),
+        path: rt.protocols.graphql_path.clone(),
+        status: 401,
+        source: None,
+        usage: Default::default(),
+        latency: Default::default(),
+        tenancy: None,
+        admission_ran: false,
+        request: if rt.recorder.is_some() {
+            json!({"headers": recorded_headers(rt, headers)})
+        } else {
+            Value::Null
+        },
+        request_body_bytes: None,
+        response: rt
+            .recorder
+            .is_some()
+            .then(|| json!({"message": detail, "extensions": {"code": "UNAUTHENTICATED"}})),
+    };
+    call::report(rt, headers, report).await;
+}
+
+async fn run(
+    schema: Schema,
+    io: ChannelIo,
+    rt: Arc<MockRuntime>,
+    headers: HeaderMap,
+    query: Vec<(String, String)>,
+    key_verified: bool,
+) {
     // Without a negotiated subprotocol, speak the current one.
     let protocol = io
         .protocol
         .as_deref()
         .and_then(|p| p.parse().ok())
         .unwrap_or(WebSocketProtocols::GraphQLWS);
+    let refused = Arc::new(AtomicBool::new(false));
+    let refused_init = Arc::clone(&refused);
     let messages = WebSocket::new(schema, io.incoming, protocol).on_connection_init(
         move |payload| async move {
+            let (auth_headers, headers) = overlay(&rt, headers, &payload);
+            let api_key = rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey;
+            if api_key
+                && !key_verified
+                && let Err(u) = call::check_key(&rt, &auth_headers, &[]).await
+            {
+                refused_init.store(true, Ordering::Relaxed);
+                report_refusal(&rt, &headers, &u.detail).await;
+                return Err(async_graphql::Error::new(u.detail));
+            }
             let mut data = Data::default();
             data.insert(Arc::new(WsCall {
-                headers: overlay(headers, &payload),
+                auth_headers,
+                headers,
+                query,
+                key_verified: api_key,
             }));
             Ok(data)
         },
@@ -81,6 +178,15 @@ async fn run(schema: Schema, io: ChannelIo, headers: HeaderMap) {
     while let Some(message) = messages.next().await {
         let (out, last) = match message {
             WsMessage::Text(text) => (Outbound::Text(text), false),
+            // `graphql-transport-ws` answers a refused `connection_init`
+            // with a close frame: make it say why.
+            WsMessage::Close(_, _) if refused.load(Ordering::Relaxed) => (
+                Outbound::Close {
+                    code: CLOSE_UNAUTHORIZED,
+                    reason: "Unauthorized".into(),
+                },
+                true,
+            ),
             WsMessage::Close(code, reason) => (Outbound::Close { code, reason }, true),
         };
         if io.outgoing.send(out).await.is_err() || last {
@@ -89,25 +195,52 @@ async fn run(schema: Schema, io: ChannelIo, headers: HeaderMap) {
     }
 }
 
-/// `headers` with each string member of `payload` set as a header; names
-/// or values that cannot be headers are skipped.
-fn overlay(mut headers: HeaderMap, payload: &Value) -> HeaderMap {
+/// `headers` with each string member of `payload` set as a header (names
+/// or values that cannot be headers are skipped), twice: with every
+/// member, for authentication, and without the credential members (the
+/// mock's key header, `api_key`, `apiKey`, `authorization` and any other
+/// credential-like name), for the prompt and the record. In the first,
+/// an `api_key`/`apiKey` member also fills the key header when the
+/// payload does not set it.
+fn overlay(rt: &MockRuntime, headers: HeaderMap, payload: &Value) -> (HeaderMap, HeaderMap) {
+    let mut auth = headers.clone();
+    let mut public = headers;
     let Some(members) = payload.as_object() else {
-        return headers;
+        return (auth, public);
     };
+    let names = rt.credential_names();
     for (name, value) in members {
         let Some(value) = value.as_str() else {
             continue;
         };
-        let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.to_ascii_lowercase().as_bytes()),
+        let lower = name.to_ascii_lowercase();
+        let (Ok(header), Ok(value)) = (
+            HeaderName::from_bytes(lower.as_bytes()),
             HeaderValue::from_str(value),
         ) else {
             continue;
         };
-        headers.insert(name, value);
+        let credential = PAYLOAD_KEY_MEMBERS.contains(&name.as_str())
+            || names.headers.contains(&lower)
+            || call::is_sensitive(&lower);
+        if !credential {
+            public.insert(header.clone(), value.clone());
+        }
+        auth.insert(header, value);
     }
-    headers
+    if let Some(key_header) = names.key_header.as_deref()
+        && !auth.contains_key(key_header)
+        && let Some(key) = PAYLOAD_KEY_MEMBERS
+            .iter()
+            .find_map(|m| members.get(*m).and_then(Value::as_str))
+        && let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(key_header.as_bytes()),
+            HeaderValue::from_str(key),
+        )
+    {
+        auth.insert(name, value);
+    }
+    (auth, public)
 }
 
 /// A subscription root field serving operation `op_id`, or answering an
@@ -138,9 +271,9 @@ pub(crate) fn field(
                 )
                 .error);
             };
-            let headers = ctx.data::<Arc<WsCall>>()?.headers.clone();
+            let conn = Arc::clone(ctx.data::<Arc<WsCall>>()?);
             let args = arguments(&ctx);
-            let items = open(rt, op_id, ty, shapes, headers, args).await?;
+            let items = open(rt, op_id, ty, shapes, conn, args).await?;
             Ok(items.map(|r| r.map(widen)))
         })
     });
@@ -176,7 +309,7 @@ async fn open(
     op_id: String,
     ty: Type,
     shapes: Arc<Shapes>,
-    headers: HeaderMap,
+    conn: Arc<WsCall>,
     args: Map<String, Value>,
 ) -> async_graphql::Result<Items> {
     let span = tracing::info_span!(
@@ -198,17 +331,25 @@ async fn open(
         session: DEFAULT_SESSION.into(),
         tenancy: None,
         request: if rt.recorder.is_some() {
-            json!({"args": args, "headers": recorded_headers(&headers)})
+            json!({"args": args, "headers": recorded_headers(&rt, &conn.headers)})
         } else {
             Value::Null
         },
-        headers,
+        headers: conn.headers.clone(),
         status: 200,
         error: None,
         items: 0,
         source: None,
     };
-    let plan = match call::plan(&rt, &op, &report.headers)
+    // Each subscription is admitted and checked against the upgrade
+    // request's headers overlaid by the `connection_init` payload; in
+    // `api_key` mode the connection's key was verified once already.
+    let presented = Presented {
+        query: &conn.query,
+        key_verified: conn.key_verified,
+        admitted: None,
+    };
+    let plan = match call::plan(&rt, &op, &conn.auth_headers, presented)
         .instrument(span.clone())
         .await
     {
@@ -248,7 +389,7 @@ async fn open(
     let feed = call::change_feed(&rt, plan.session.clone(), &op).map(Piece::Changed);
     let call = OperationCall {
         operation_id: op.id.clone(),
-        headers: forwarded_headers(&report.headers),
+        headers: forwarded_headers(&rt, &conn.headers),
         body: Some(Value::Object(args)),
         ..Default::default()
     };

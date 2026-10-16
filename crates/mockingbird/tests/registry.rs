@@ -63,6 +63,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         recorder: None,
         offline: true,
         default_profile: None.into(),
+        data_plane_keys: None,
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
@@ -85,6 +86,7 @@ async fn create_mock(
                 llm_profile: profile.map(str::to_string),
                 header_overrides: true,
                 source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
             },
         )
         .await
@@ -152,7 +154,11 @@ async fn serves_active_contract_at_prefix() {
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(
         registry.mounted(),
-        vec![("orders".to_string(), "/orders".to_string())]
+        vec![(
+            "default".to_string(),
+            "orders".to_string(),
+            "/orders".to_string()
+        )]
     );
 
     let base = serve(registry.router()).await;
@@ -228,8 +234,8 @@ async fn longest_prefix_wins() {
     assert_eq!(
         registry.mounted(),
         vec![
-            ("a".to_string(), "/a".to_string()),
-            ("root".to_string(), "/".to_string()),
+            ("default".to_string(), "a".to_string(), "/a".to_string()),
+            ("default".to_string(), "root".to_string(), "/".to_string()),
         ]
     );
     let base = serve(registry.router()).await;
@@ -271,7 +277,9 @@ async fn swap_during_inflight_requests() {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     activate(&store, &mock, &fixture_v2_source()).await;
-    registry.reload_mock(&deps, "orders").await;
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "orders")
+        .await;
 
     for h in inflight {
         assert_eq!(h.await.unwrap(), 200);
@@ -394,7 +402,7 @@ async fn colliding_pair() -> (Arc<dyn ControlStore>, RuntimeDeps, Arc<MockRegist
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(
         registry.mounted(),
-        vec![("a".to_string(), "/x".to_string())]
+        vec![("default".to_string(), "a".to_string(), "/x".to_string())]
     );
     (store, deps, registry, a)
 }
@@ -407,11 +415,11 @@ async fn deleting_prefix_holder_mounts_skipped_mock() {
     assert_eq!(status_of(&base, "/x/ping").await, 404);
 
     assert!(store.delete_mock(DEFAULT_WORKSPACE, "a").await.unwrap());
-    registry.reload_mock(&deps, "a").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "a").await;
 
     assert_eq!(
         registry.mounted(),
-        vec![("b".to_string(), "/x".to_string())]
+        vec![("default".to_string(), "b".to_string(), "/x".to_string())]
     );
     assert_eq!(status_of(&base, "/x/ping").await, 200);
 }
@@ -424,13 +432,13 @@ async fn moving_prefix_holder_mounts_skipped_mock() {
     let mut moved = a.clone();
     moved.route_prefix = "/y".into();
     store.update_mock(&moved).await.unwrap();
-    registry.reload_mock(&deps, "a").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "a").await;
 
     assert_eq!(
         registry.mounted(),
         vec![
-            ("a".to_string(), "/y".to_string()),
-            ("b".to_string(), "/x".to_string()),
+            ("default".to_string(), "a".to_string(), "/y".to_string()),
+            ("default".to_string(), "b".to_string(), "/x".to_string()),
         ]
     );
     assert_eq!(status_of(&base, "/x/ping").await, 200);
@@ -459,7 +467,7 @@ async fn failed_rebuild_keeps_serving_previous_version() {
     store.put_profile(&q).await.unwrap();
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(status_of(&base, "/c/orders").await, 200);
-    registry.reload_mock(&deps, "c").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "c").await;
     assert_eq!(status_of(&base, "/c/orders").await, 200);
     let failed = registry.failed_mocks();
     assert_eq!(failed.len(), 1, "{failed:?}");
@@ -475,7 +483,7 @@ async fn failed_rebuild_keeps_serving_previous_version() {
 
     // Deleting the mock unmounts it.
     assert!(store.delete_mock(DEFAULT_WORKSPACE, "c").await.unwrap());
-    registry.reload_mock(&deps, "c").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "c").await;
     assert_eq!(status_of(&base, "/c/orders").await, 404);
 }
 
@@ -561,7 +569,7 @@ async fn graphql_mock_served_at_prefix() {
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(
         registry.mounted(),
-        vec![("gh".to_string(), "/gh".to_string())]
+        vec![("default".to_string(), "gh".to_string(), "/gh".to_string())]
     );
     let base = serve(registry.router()).await;
 
@@ -623,11 +631,11 @@ async fn grpc_mock_published_to_grpc_server() {
     assert!(registry.failed_mocks().is_empty());
 }
 
-/// A service already served by a mock that sorts first by name skips the
-/// later mock, which is reported as failed; the skipped mock takes over
-/// when the holder goes away.
+/// A service already served by a mock stays with it: a newcomer serving
+/// the same service is skipped and reported as failed, whatever the names'
+/// order, and takes over only when the holder goes away.
 #[tokio::test]
-async fn grpc_service_collision_skips_later_mock() {
+async fn grpc_service_collision_keeps_the_holder() {
     let store = store().await;
     let b = create_mock(&store, "b-routes", "/b", None).await;
     activate(&store, &b, &fixture_text("proto/route_guide.proto")).await;
@@ -639,49 +647,36 @@ async fn grpc_service_collision_skips_later_mock() {
         services(&[("routeguide.RouteGuide", "b-routes")])
     );
 
-    // `a-routes` sorts first, so it takes the service over.
+    // `a-routes` sorts first but arrives second: `b-routes` keeps it.
     let a = create_mock(&store, "a-routes", "/a", None).await;
     activate(&store, &a, &fixture_text("proto/route_guide.proto")).await;
-    registry.reload_mock(&deps, "a-routes").await;
+    registry.reload_mock(&deps, "default", "a-routes").await;
     assert_eq!(
         grpc_services(&registry),
-        services(&[("routeguide.RouteGuide", "a-routes")])
+        services(&[("routeguide.RouteGuide", "b-routes")])
     );
     let failed = registry.failed_mocks();
     assert_eq!(failed.len(), 1, "{failed:?}");
-    assert_eq!(failed[0].0, "b-routes");
+    assert_eq!(failed[0].0, "a-routes");
     assert_eq!(
         failed[0].1,
-        "service routeguide.RouteGuide is already served by mock a-routes"
+        "service routeguide.RouteGuide is already served by mock b-routes"
     );
 
-    // A full reload keeps the same winner.
+    // Neither a full reload nor a rebuild of the holder moves it.
     registry.reload_all(&deps).await.unwrap();
+    registry.reload_mock(&deps, "default", "b-routes").await;
+    registry.reload_mock(&deps, "default", "a-routes").await;
     assert_eq!(
         grpc_services(&registry),
-        services(&[("routeguide.RouteGuide", "a-routes")])
+        services(&[("routeguide.RouteGuide", "b-routes")])
     );
     assert_eq!(registry.failed_mocks().len(), 1);
 
     // A mock serving other services is unaffected.
     let hello = create_mock(&store, "hello", "/hello", None).await;
     activate(&store, &hello, &fixture_text("proto/helloworld.proto")).await;
-    registry.reload_mock(&deps, "hello").await;
-    assert_eq!(
-        grpc_services(&registry),
-        services(&[
-            ("helloworld.Greeter", "hello"),
-            ("routeguide.RouteGuide", "a-routes"),
-        ])
-    );
-
-    assert!(
-        store
-            .delete_mock(DEFAULT_WORKSPACE, "a-routes")
-            .await
-            .unwrap()
-    );
-    registry.reload_mock(&deps, "a-routes").await;
+    registry.reload_mock(&deps, "default", "hello").await;
     assert_eq!(
         grpc_services(&registry),
         services(&[
@@ -689,7 +684,61 @@ async fn grpc_service_collision_skips_later_mock() {
             ("routeguide.RouteGuide", "b-routes"),
         ])
     );
+
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "b-routes")
+            .await
+            .unwrap()
+    );
+    registry.reload_mock(&deps, "default", "b-routes").await;
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[
+            ("helloworld.Greeter", "hello"),
+            ("routeguide.RouteGuide", "a-routes"),
+        ])
+    );
     assert!(registry.failed_mocks().is_empty());
+}
+
+/// A mock in another workspace cannot take a service over either, even
+/// when its workspace sorts first.
+#[tokio::test]
+async fn grpc_service_holder_survives_cross_workspace_newcomer() {
+    let store = store().await;
+    let holder = create_mock(&store, "routes", "/routes", None).await;
+    activate(&store, &holder, &fixture_text("proto/route_guide.proto")).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+
+    store.create_workspace("aaa", "aaa").await.unwrap();
+    let thief = store
+        .create_mock(
+            "aaa",
+            NewMock {
+                name: "routes".into(),
+                route_prefix: Some("/aaa-routes".into()),
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    activate(&store, &thief, &fixture_text("proto/route_guide.proto")).await;
+    registry.reload_mock(&deps, "aaa", "routes").await;
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[("routeguide.RouteGuide", "routes")])
+    );
+    let failed = registry.failed_mocks();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0, "aaa/routes");
 }
 
 #[tokio::test]
@@ -755,10 +804,14 @@ async fn asyncapi_mock_mounts_with_channel_runtime() {
         registry.failed_mocks()
     );
     let channels = registry
-        .channel_runtime("orders")
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
         .expect("a channel runtime");
     assert_eq!(channels.broker_name().as_deref(), Some("mem"));
-    assert!(registry.channel_runtime("nobody").is_none());
+    assert!(
+        registry
+            .channel_runtime(DEFAULT_WORKSPACE, "nobody")
+            .is_none()
+    );
     assert!(
         registry.event_issues().is_empty(),
         "{:?}",
@@ -782,7 +835,9 @@ async fn settings_change_restarts_runtime() {
     let deps = event_deps(store.clone());
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
-    let before = registry.channel_runtime("orders").unwrap();
+    let before = registry
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
+        .unwrap();
     assert_eq!(
         before
             .publish_manual("orderCreated", 1, None)
@@ -803,9 +858,13 @@ async fn settings_change_restarts_runtime() {
         })
         .await
         .unwrap();
-    registry.reload_mock(&deps, "orders").await;
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "orders")
+        .await;
 
-    let after = registry.channel_runtime("orders").unwrap();
+    let after = registry
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
+        .unwrap();
     assert!(!Arc::ptr_eq(&before, &after));
     assert_eq!(
         after.publish_manual("orderCreated", 1, None).await,

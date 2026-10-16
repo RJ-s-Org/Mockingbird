@@ -1,5 +1,5 @@
-//! The per-call pipeline every adapter shares: override headers, admission
-//! and scenario lookup ([`plan`]), state reads and writes around generation
+//! The per-call pipeline every adapter shares: admission, data-plane auth,
+//! override headers and scenario lookup ([`plan`]), state reads and writes around generation
 //! ([`generate_once`], [`open_stream`]), state change feeds
 //! ([`change_feed`]) and usage/request-log reporting ([`report`]).
 
@@ -20,6 +20,8 @@ use mb_state::{ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
 
+pub(crate) use crate::dp_auth::Unauthorized;
+use crate::dp_auth::{authenticate, verify_key};
 use crate::{MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime};
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -27,7 +29,6 @@ const STATUS_HEADER: &str = "x-mockingbird-status";
 const LATENCY_HEADER: &str = "x-mockingbird-latency";
 const SCENARIO_HEADER: &str = "x-mockingbird-scenario";
 pub(crate) const DEFAULT_SESSION: &str = "default";
-const WORKSPACE: &str = "default";
 const MAX_LATENCY: Duration = Duration::from_secs(30);
 const MAX_SESSION_LEN: usize = 128;
 const MAX_STREAM_ITEMS: usize = 10_000;
@@ -144,11 +145,80 @@ pub(crate) struct CallPlan<'a> {
     pub tenancy: Tenancy,
 }
 
+/// The credentials a call presents beyond its headers (for gRPC: its
+/// metadata; for SOAP: its HTTP headers).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Presented<'a> {
+    /// The raw query pairs, which may carry an `api_key` parameter or a
+    /// query API key the contract declares. Empty for protocols without a
+    /// query.
+    pub query: &'a [(String, String)],
+    /// The adapter already checked the data-plane key for the whole request
+    /// (see [`check_key`]).
+    pub key_verified: bool,
+    /// The adapter already admitted the whole request (tenant, then quota)
+    /// before checking its key; the call is not admitted again.
+    pub admitted: Option<&'a Tenancy>,
+}
+
+/// Admission for a whole request (`tenants.resolve`, then `quota.admit`)
+/// with operation id `operation_id`, for adapters that check the
+/// data-plane key once per request ([`check_key`]) and must admit first.
+/// `Err` carries the tenancy when it resolved.
+#[cfg_attr(not(feature = "graphql"), allow(dead_code))]
+pub(crate) async fn admit(
+    rt: &MockRuntime,
+    operation_id: &str,
+    headers: &HeaderMap,
+) -> Result<Tenancy, (Rejection, Option<Tenancy>)> {
+    let call_info = CallInfo {
+        mock: &rt.name,
+        operation_id,
+        headers,
+    };
+    let tenancy = rt
+        .ext
+        .tenants
+        .resolve(&call_info)
+        .await
+        .map_err(|r| (r, None))?;
+    match rt.ext.quota.admit(&tenancy, &call_info).await {
+        Ok(()) => Ok(tenancy),
+        Err(r) => Err((r, Some(tenancy))),
+    }
+}
+
+/// The data-plane key check of `api_key` mode for a whole request, for
+/// adapters that answer it once before planning each call (GraphQL over
+/// HTTP); `Ok` in every other mode.
+#[cfg_attr(not(feature = "graphql"), allow(dead_code))]
+pub(crate) async fn check_key(
+    rt: &MockRuntime,
+    headers: &HeaderMap,
+    query: &[(String, String)],
+) -> Result<(), Unauthorized> {
+    verify_key(rt, headers, query).await
+}
+
+/// `pairs` without the mock's credential query parameters: they never
+/// reach the engine or the record.
+#[cfg_attr(not(feature = "http-rest"), allow(dead_code))]
+pub(crate) fn public_query(rt: &MockRuntime, pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let secret = &rt.credential_names().query;
+    pairs
+        .iter()
+        .filter(|(k, _)| !secret.contains(k))
+        .cloned()
+        .collect()
+}
+
 /// Why a call cannot be served.
 #[derive(Debug)]
 pub(crate) enum PlanError {
     /// Tenancy resolution or the quota refused the call.
     Rejected(Rejection),
+    /// Data-plane auth refused the call (`401`).
+    Unauthorized(Unauthorized),
     /// An override header is unusable; carries the problem detail.
     BadOverride(String),
     /// `X-Mockingbird-Scenario` names no scenario of this mock; carries
@@ -177,26 +247,49 @@ impl PlanFailure {
     }
 }
 
-/// Admission (`tenants.resolve`, then `quota.admit`), then override
-/// headers, then the scenario. Header status and latency beat the
+/// Admission (`tenants.resolve`, then `quota.admit`, unless
+/// [`Presented::admitted`]), then data-plane auth
+/// (spec §11.2), then override headers, then the scenario. Header status and latency beat the
 /// scenario's; a scenario status applies only where `op` declares it.
 /// Records the session on the current span.
 pub(crate) async fn plan<'a>(
     rt: &'a MockRuntime,
     op: &'a Operation,
     headers: &HeaderMap,
+    presented: Presented<'_>,
 ) -> Result<CallPlan<'a>, PlanFailure> {
     let call_info = CallInfo {
         mock: &rt.name,
         operation_id: &op.id,
         headers,
     };
-    let tenancy = match rt.ext.tenants.resolve(&call_info).await {
-        Ok(t) => t,
-        Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
+    let tenancy = match presented.admitted {
+        Some(t) => t.clone(),
+        None => {
+            let tenancy = match rt.ext.tenants.resolve(&call_info).await {
+                Ok(t) => t,
+                Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
+            };
+            if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+                return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
+            }
+            tenancy
+        }
     };
-    if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
-        return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
+    let auth = authenticate(
+        rt,
+        &op.id,
+        &op.security,
+        headers,
+        presented.query,
+        presented.key_verified,
+    )
+    .await;
+    if let Err(unauthorized) = auth {
+        return Err(PlanFailure::new(
+            PlanError::Unauthorized(unauthorized),
+            Some(tenancy),
+        ));
     }
 
     let overrides = match Overrides::parse(headers, rt.header_overrides) {
@@ -238,7 +331,7 @@ pub(crate) async fn plan<'a>(
     Ok(CallPlan {
         op,
         session: SessionKey {
-            workspace: WORKSPACE.into(),
+            workspace: rt.workspace.clone(),
             mock: rt.name.clone(),
             session: overrides.session,
         },
@@ -490,6 +583,7 @@ pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
     }
     if let Some(recorder) = &rt.recorder {
         recorder.record(RequestRecord {
+            workspace: rt.workspace.clone(),
             mock: rt.name.clone(),
             operation_id: r.operation_id,
             session: r.session,
@@ -519,21 +613,38 @@ fn request_kind(protocol: Protocol) -> RequestKind {
     }
 }
 
-fn is_sensitive(name: &str) -> bool {
-    SENSITIVE_HEADERS.contains(&name)
-        || ["token", "secret", "password", "api-key"]
-            .iter()
-            .any(|s| name.contains(s))
+/// Substrings that mark a header name as carrying credentials, matched
+/// case-insensitively (header names from a GraphQL `connection_init`
+/// payload may use any spelling, e.g. `apiKey`).
+const SENSITIVE_PATTERNS: [&str; 8] = [
+    "token",
+    "secret",
+    "password",
+    "api-key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+];
+
+pub(crate) fn is_sensitive(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    SENSITIVE_HEADERS.contains(&name.as_str())
+        || SENSITIVE_PATTERNS.iter().any(|s| name.contains(s))
 }
 
 /// Non-sensitive, UTF-8 request headers, optionally keeping
-/// `X-Mockingbird-*` override headers.
-fn safe_headers(headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value> {
+/// `X-Mockingbird-*` override headers. The mock's credential headers
+/// ([`MockRuntime::credential_names`]) are sensitive too.
+fn safe_headers(rt: &MockRuntime, headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value> {
+    let secret = &rt.credential_names().headers;
     headers
         .iter()
         .filter(|(name, _)| {
             let n = name.as_str();
-            !is_sensitive(n) && (keep_overrides || !n.starts_with("x-mockingbird-"))
+            !is_sensitive(n)
+                && !secret.contains(n)
+                && (keep_overrides || !n.starts_with("x-mockingbird-"))
         })
         .filter_map(|(name, v)| {
             Some((
@@ -545,13 +656,13 @@ fn safe_headers(headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value>
 }
 
 /// Headers forwarded to the prompt.
-pub(crate) fn forwarded_headers(headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(headers, false)
+pub(crate) fn forwarded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<String, Value> {
+    safe_headers(rt, headers, false)
 }
 
 /// Headers kept in the request record (overrides included).
-pub(crate) fn recorded_headers(headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(headers, true)
+pub(crate) fn recorded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<String, Value> {
+    safe_headers(rt, headers, true)
 }
 
 /// The target (when `target_id` is set) and the related resources.
@@ -788,6 +899,62 @@ mod tests {
     }
 
     #[test]
+    fn credential_like_headers_are_sensitive_in_any_case() {
+        for name in [
+            "api_key",
+            "apikey",
+            "apiKey",
+            "x-apikey",
+            "x-api-key",
+            "X-API-KEY",
+            "x-api_key",
+            "authorization",
+            "Authorization",
+            "proxy-authorization",
+            "cookie",
+            "Cookie",
+            "x-cookie-jar",
+            "x-auth-token",
+            "my-secret",
+            "x-password",
+        ] {
+            assert!(is_sensitive(name), "{name}");
+        }
+        for name in ["x-trace", "x-mockingbird-session", "accept", "user-agent"] {
+            assert!(!is_sensitive(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn credential_names_follow_data_plane_auth_changes() {
+        use crate::{DataPlaneAuth, DataPlaneAuthMode};
+        let bundle = Arc::new(compile(STREAM_CONTRACT.as_bytes()).unwrap());
+        let mut rt = MockRuntime::new(
+            "t",
+            bundle,
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::new(MemoryStore::new(Duration::from_secs(60))),
+        );
+        // Reading the names before auth is configured must not pin them.
+        assert!(rt.credential_names().headers.is_empty());
+        rt.set_data_plane_auth(DataPlaneAuth {
+            mode: DataPlaneAuthMode::ApiKey,
+            header: "x-tenant-pass".into(),
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant-pass", "k".parse().unwrap());
+        headers.insert("x-trace", "t".parse().unwrap());
+        let forwarded = forwarded_headers(&rt, &headers);
+        assert!(!forwarded.contains_key("x-tenant-pass"), "{forwarded:?}");
+        assert!(forwarded.contains_key("x-trace"), "{forwarded:?}");
+        assert!(public_query(&rt, &[("api_key".into(), "k".into())]).is_empty());
+
+        rt.set_data_plane_auth(DataPlaneAuth::default());
+        assert!(rt.credential_names().headers.is_empty());
+        assert!(forwarded_headers(&rt, &headers).contains_key("x-tenant-pass"));
+    }
+
+    #[test]
     fn reference_fields() {
         assert_eq!(reference_prefix("customerId"), Some("customer"));
         assert_eq!(reference_prefix("customer_id"), Some("customer"));
@@ -832,7 +999,7 @@ paths:
 
     fn session(name: &str) -> SessionKey {
         SessionKey {
-            workspace: WORKSPACE.into(),
+            workspace: "default".into(),
             mock: "ticks".into(),
             session: name.into(),
         }
@@ -923,7 +1090,7 @@ paths:
         let op = &rt.bundle.operations[0];
         let mut headers = HeaderMap::new();
         headers.insert(SCENARIO_HEADER, "two".parse().unwrap());
-        let plan = plan(&rt, op, &headers).await.unwrap();
+        let plan = plan(&rt, op, &headers, Presented::default()).await.unwrap();
         assert_eq!(plan.stream_items, Some(2));
         let call = OperationCall {
             operation_id: op.id.clone(),
@@ -939,7 +1106,9 @@ paths:
 
         // The header beats the scenario.
         headers.insert(STREAM_ITEMS_HEADER, "3".parse().unwrap());
-        let plan = super::plan(&rt, op, &headers).await.unwrap();
+        let plan = super::plan(&rt, op, &headers, Presented::default())
+            .await
+            .unwrap();
         assert_eq!(plan.stream_items, Some(3));
     }
 }

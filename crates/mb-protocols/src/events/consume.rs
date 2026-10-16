@@ -10,7 +10,7 @@ use mb_state::{SessionKey, StoredResource};
 use serde_json::{Map, Value, json};
 
 use super::produce::find_header;
-use super::runtime::{ChannelInner, DEFAULT_SESSION, Flow, Origin, PublishError, WORKSPACE};
+use super::runtime::{ChannelInner, DEFAULT_SESSION, Flow, Origin, PublishError};
 use super::{BrokerError, HEADER_HOP, InMessage, MAX_HOPS, MAX_MESSAGE_BYTES};
 use crate::ws::Outbound;
 use crate::{RequestKind, RequestRecord};
@@ -156,7 +156,7 @@ impl ChannelInner {
                     match self
                         .rt
                         .engine
-                        .validate_message(&self.rt.bundle, channel, &payload)
+                        .validate_message(self.rt.bundle(), channel, &payload)
                     {
                         Err(errors) => (
                             422,
@@ -190,6 +190,7 @@ impl ChannelInner {
 
         if let Some(recorder) = &self.rt.recorder {
             recorder.record(RequestRecord {
+                workspace: self.rt.workspace.clone(),
                 mock: self.rt.name.clone(),
                 operation_id: Some(channel.id.clone()),
                 session,
@@ -236,7 +237,7 @@ impl ChannelInner {
             return Some(format!("skipped: no {}", effect.id_field));
         };
         let key = SessionKey {
-            workspace: WORKSPACE.into(),
+            workspace: self.rt.workspace.clone(),
             mock: self.rt.name.clone(),
             session: session.to_string(),
         };
@@ -289,7 +290,7 @@ impl ChannelInner {
         if hop >= MAX_HOPS {
             return Some("skipped: hop limit".into());
         }
-        let Some(target) = self.rt.bundle.channel(&reply.channel) else {
+        let Some(target) = self.rt.bundle().channel(&reply.channel) else {
             return Some(format!(
                 "error: {}",
                 PublishError::UnknownChannel(reply.channel.clone())

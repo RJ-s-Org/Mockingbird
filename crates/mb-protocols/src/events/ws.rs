@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::WebSocketUpgrade;
-use axum::http::{StatusCode, Uri};
+use axum::extract::{Query, WebSocketUpgrade};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures::future::BoxFuture;
@@ -17,9 +17,11 @@ use mb_mcm::{Channel, ChannelBinding, Direction};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 
-use super::runtime::ChannelInner;
+use super::runtime::{ChannelInner, DEFAULT_SESSION};
 use super::{InMessage, MAX_MESSAGE_BYTES, address_matches};
+use crate::dp_auth::{Unauthorized, verify_key};
 use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
+use crate::{RequestKind, RequestRecord};
 
 /// Close code sent when the mock's channel runtime is replaced or dropped.
 pub const CLOSE_RUNTIME_REPLACED: u16 = 1012;
@@ -61,7 +63,7 @@ fn route_path(template: &str) -> String {
 /// The routes of the enabled WebSocket channels of `inner`, by route path.
 pub(crate) fn router(inner: &Arc<ChannelInner>) -> Option<Router> {
     let mut routes: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for channel in &inner.rt.bundle.channels {
+    for channel in &inner.rt.bundle().channels {
         if let Some(path) = served_path(inner, channel) {
             let templates = routes.entry(route_path(path)).or_default();
             if !templates.iter().any(|t| t == path) {
@@ -78,19 +80,27 @@ pub(crate) fn router(inner: &Arc<ChannelInner>) -> Option<Router> {
         let templates = Arc::new(templates);
         router = router.route(
             &route,
-            get(move |upgrade: WebSocketUpgrade, uri: Uri| {
-                upgrade_channel(inner, templates, upgrade, uri)
-            }),
+            get(
+                move |upgrade: WebSocketUpgrade, uri: Uri, headers: HeaderMap| {
+                    upgrade_channel(inner, templates, upgrade, uri, headers)
+                },
+            ),
         );
     }
     Some(router)
 }
 
+/// Upgrades a request on a WebSocket channel path. In the mock's `api_key`
+/// data-plane auth mode the upgrade needs a valid data-plane key of the
+/// mock's workspace, in the key header or the `api_key` query parameter,
+/// like every other protocol; without one it is answered `401` (with a
+/// `WWW-Authenticate` challenge) and recorded as a refused event call.
 async fn upgrade_channel(
     inner: Arc<ChannelInner>,
     templates: Arc<Vec<String>>,
     upgrade: WebSocketUpgrade,
     uri: Uri,
+    headers: HeaderMap,
 ) -> Response {
     let path = uri.path().to_string();
     if path.len() > MAX_PATH_BYTES {
@@ -103,9 +113,16 @@ async fn upgrade_channel(
     if matched.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let query = Query::<Vec<(String, String)>>::try_from_uri(&uri)
+        .map(|q| q.0)
+        .unwrap_or_default();
+    if let Err(refused) = verify_key(&inner.rt, &headers, &query).await {
+        record_refusal(&inner, &headers, &path, &refused.detail);
+        return unauthorized(refused);
+    }
     let subscribers: Vec<Channel> = inner
         .rt
-        .bundle
+        .bundle()
         .channels
         .iter()
         .filter(|c| c.direction == Direction::Subscribe)
@@ -124,6 +141,53 @@ async fn upgrade_channel(
     serve_channel(upgrade, cfg, move |io| {
         session(inner, Arc::new(subscribers), path, hub, io)
     })
+}
+
+/// A `401` problem carrying the challenge of `refused`.
+fn unauthorized(refused: Unauthorized) -> Response {
+    let body = serde_json::json!({
+        "type": "about:blank",
+        "title": "Unauthorized",
+        "status": 401,
+        "detail": refused.detail,
+    });
+    let mut resp = (
+        StatusCode::UNAUTHORIZED,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        body.to_string(),
+    )
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&refused.challenge) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+    }
+    resp
+}
+
+/// Records an upgrade refused by data-plane auth as a `401` event call of
+/// the mock (credential headers and the query are left out).
+fn record_refusal(inner: &ChannelInner, headers: &HeaderMap, path: &str, detail: &str) {
+    let Some(recorder) = &inner.rt.recorder else {
+        return;
+    };
+    recorder.record(RequestRecord {
+        workspace: inner.rt.workspace.clone(),
+        mock: inner.rt.name.clone(),
+        operation_id: None,
+        session: DEFAULT_SESSION.into(),
+        method: "GET".into(),
+        path: path.to_string(),
+        status: 401,
+        source: None,
+        latency: std::time::Duration::ZERO,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        request: serde_json::json!({
+            "headers": crate::call::recorded_headers(&inner.rt, headers),
+        }),
+        request_body_bytes: None,
+        response: Some(serde_json::json!({"detail": detail})),
+        kind: RequestKind::Event,
+    });
 }
 
 /// The texts of `rx`, skipping lagged ones; `None` once its sender is gone.
@@ -221,7 +285,7 @@ async fn handle_text(
                 inner
                     .rt
                     .engine
-                    .validate_message(&inner.rt.bundle, c, &payload)
+                    .validate_message(inner.rt.bundle(), c, &payload)
                     .is_ok()
             })
             .unwrap_or(first),

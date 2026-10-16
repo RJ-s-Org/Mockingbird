@@ -1,16 +1,17 @@
-//! `/api/v1/mocks/{mock}/channels…`, `/api/v1/mocks/{mock}/event-settings`
-//! and `/api/v1/brokers`: inspect and configure a mock's event channels,
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/channels…`,
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/event-settings` (with their P2
+//! aliases under `/api/v1/mocks/…` for workspace `default`) and
+//! `/api/v1/brokers`: inspect and configure a mock's event channels,
 //! publish on demand, pick the mock's broker and list the brokers.
+//!
+//! Reading needs the viewer role in the workspace; changing settings and
+//! publishing need editor. `channel.update`, `channel.publish` and
+//! `event_settings.update` are audited. The broker list is global and
+//! read-only; any authenticated caller may read it.
 //!
 //! Runtime actions (publishing, activity counters, the broker list) go
 //! through a [`ChannelControl`] passed as an `axum::Extension<SharedChannelControl>`;
 //! without one, publishing answers 503 and activity and brokers are empty.
-//!
-//! P3 note: these routes use the P2 single-workspace shape. When this
-//! branch merges with P3 they move under `/api/v1/workspaces/{ws}/…` and
-//! gain RBAC and audit events; the controller resolves that move. Every
-//! handler reaches the store through [`AdminState::mock`], so the move is
-//! mechanical.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,14 +22,25 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use chrono::{DateTime, Utc};
+use mb_auth::Permission;
 use mb_mcm::{Bundle, Channel, Direction, Trigger};
 use mb_store::{ChannelSettings, Mock, MockEventSettings, ResourceSource};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::{OpenApi, ToSchema};
 
+use crate::access::{CurrentPrincipal, WsAccess};
+use crate::audit::snapshot;
+use crate::mocks::MockPath;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, ensure_api_managed};
+
+/// Path of one channel.
+#[derive(Deserialize, Debug)]
+pub struct ChannelPath {
+    pub mock: String,
+    pub channel: String,
+}
 
 /// Most messages one manual publish may generate.
 const MAX_PUBLISH_COUNT: u32 = 100;
@@ -84,16 +96,19 @@ pub enum ChannelControlError {
 /// The event runtime, as seen by the Admin API.
 #[async_trait]
 pub trait ChannelControl: Send + Sync {
-    /// Generates and publishes `count` messages on `channel` of `mock`.
+    /// Generates and publishes `count` messages on `channel` of mock
+    /// `mock` in workspace `ws`.
     async fn publish(
         &self,
+        ws: &str,
         mock: &str,
         channel: &str,
         count: usize,
         context: Option<Value>,
     ) -> Result<Vec<PublishedMessage>, ChannelControlError>;
-    /// Channel id → counters for `mock`'s running channels.
-    fn activity(&self, mock: &str) -> BTreeMap<String, ChannelActivityView>;
+    /// Channel id → counters for the running channels of mock `mock` in
+    /// workspace `ws`.
+    fn activity(&self, ws: &str, mock: &str) -> BTreeMap<String, ChannelActivityView>;
     /// The configured brokers.
     fn brokers(&self) -> Vec<BrokerView>;
 }
@@ -217,7 +232,9 @@ pub struct PutEventSettings {
 )]
 pub struct ChannelsDoc;
 
-/// The channel, event-settings and broker routes (relative to `/api/v1`).
+/// The channel and event-settings routes of a workspace (relative to
+/// `/api/v1/workspaces/{ws}`, and to `/api/v1` for the `default` aliases).
+/// [`brokers`] is mounted at `/api/v1/brokers` by the router.
 pub fn routes() -> Router<AdminState> {
     Router::new()
         .route("/mocks/{mock}/channels", get(list))
@@ -227,7 +244,6 @@ pub fn routes() -> Router<AdminState> {
             "/mocks/{mock}/event-settings",
             get(get_event_settings).put(put_event_settings),
         )
-        .route("/brokers", get(brokers))
 }
 
 fn source_name(source: &ResourceSource) -> &'static str {
@@ -308,28 +324,34 @@ async fn settings_row(st: &AdminState, m: &Mock, id: &str) -> ApiResult<Option<C
         .find(|s| s.channel_id == id))
 }
 
-fn activity_of(control: &Control, mock: &str, id: &str) -> Option<ChannelActivityView> {
+fn activity_of(control: &Control, ws: &str, mock: &str, id: &str) -> Option<ChannelActivityView> {
     control
         .as_ref()
-        .and_then(|Extension(c)| c.activity(mock).remove(id))
+        .and_then(|Extension(c)| c.activity(ws, mock).remove(id))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/channels",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/channels",
     tag = "channels",
-    params(("mock" = String, Path, description = "Mock name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+    ),
     responses(
         (status = 200, description = "The active contract's channels, in contract order; empty without an active contract", body = Vec<ChannelView>),
+        (status = 403, body = Problem, content_type = "application/problem+json"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn list(
     State(st): State<AdminState>,
+    access: WsAccess,
     control: Control,
-    Path(mock): Path<String>,
+    Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<Json<Vec<ChannelView>>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let Some(bundle) = active_bundle(&st, &m).await? else {
         return Ok(Json(Vec::new()));
     };
@@ -342,7 +364,7 @@ pub async fn list(
         .collect();
     let mut activity = control
         .as_ref()
-        .map(|Extension(c)| c.activity(&mock))
+        .map(|Extension(c)| c.activity(&access.ws, &mock))
         .unwrap_or_default();
     let views = bundle
         .channels
@@ -354,23 +376,27 @@ pub async fn list(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/channels/{channel}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/channels/{channel}",
     tag = "channels",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("channel" = String, Path, description = "Channel id"),
     ),
     responses(
         (status = 200, body = ChannelDetail),
+        (status = 403, body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock, no active contract, or no such channel", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn get_one(
     State(st): State<AdminState>,
+    access: WsAccess,
     control: Control,
-    Path((mock, id)): Path<(String, String)>,
+    Path(ChannelPath { mock, channel: id }): Path<ChannelPath>,
 ) -> ApiResult<Json<ChannelDetail>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let bundle = active_bundle(&st, &m).await?;
     let channel = bundle
         .as_ref()
@@ -381,7 +407,7 @@ pub async fn get_one(
             ))
         })?;
     let row = settings_row(&st, &m, &id).await?;
-    let activity = activity_of(&control, &mock, &id);
+    let activity = activity_of(&control, &access.ws, &mock, &id);
     let base = view(channel, row.as_ref(), activity)?;
     let with_defs = |schema: &Value| {
         bundle
@@ -405,9 +431,10 @@ pub async fn get_one(
 
 #[utoipa::path(
     put,
-    path = "/api/v1/mocks/{mock}/channels/{channel}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/channels/{channel}",
     tag = "channels",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("channel" = String, Path, description = "Channel id"),
     ),
@@ -422,16 +449,23 @@ pub async fn get_one(
 )]
 pub async fn put(
     State(st): State<AdminState>,
+    access: WsAccess,
     control: Control,
-    Path((mock, id)): Path<(String, String)>,
+    Path(ChannelPath { mock, channel: id }): Path<ChannelPath>,
     Json(body): Json<PutChannel>,
 ) -> ApiResult<Json<ChannelView>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     let channel = find_channel(&st, &m, &id).await?;
-    if let Some(existing) = settings_row(&st, &m, &id).await? {
+    let existing = settings_row(&st, &m, &id).await?;
+    if let Some(existing) = &existing {
         ensure_api_managed(&existing.source, format_args!("channel {id:?}"))?;
     }
+    let before = existing
+        .as_ref()
+        .map(|e| view(&channel, Some(e), None))
+        .transpose()?;
     let triggers = match body.triggers {
         None => None,
         Some(values) => {
@@ -457,8 +491,18 @@ pub async fn put(
         updated_at: Utc::now(),
     };
     st.store.put_channel_settings(&row).await?;
-    let activity = activity_of(&control, &mock, &id);
-    Ok(Json(view(&channel, Some(&row), activity)?))
+    let after = view(&channel, Some(&row), None)?;
+    access
+        .audit(
+            &st.audit,
+            "channel.update",
+            format!("channel:{mock}/{id}"),
+            before.as_ref().and_then(snapshot),
+            snapshot(&after),
+        )
+        .await;
+    let activity = activity_of(&control, &access.ws, &mock, &id);
+    Ok(Json(ChannelView { activity, ..after }))
 }
 
 fn control_problem(err: ChannelControlError) -> Problem {
@@ -479,15 +523,17 @@ fn control_problem(err: ChannelControlError) -> Problem {
 
 #[utoipa::path(
     post,
-    path = "/api/v1/mocks/{mock}/channels/{channel}/publish",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/channels/{channel}/publish",
     tag = "channels",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("channel" = String, Path, description = "Channel id"),
     ),
     request_body = PublishRequest,
     responses(
         (status = 200, body = PublishResult),
+        (status = 403, body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such mock or channel", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The channel is not one the mock publishes", body = Problem, content_type = "application/problem+json"),
         (status = 415, body = Problem, content_type = "application/problem+json"),
@@ -498,11 +544,13 @@ fn control_problem(err: ChannelControlError) -> Problem {
 )]
 pub async fn publish(
     State(st): State<AdminState>,
+    access: WsAccess,
     control: Control,
-    Path((mock, id)): Path<(String, String)>,
+    Path(ChannelPath { mock, channel: id }): Path<ChannelPath>,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<Json<PublishResult>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let count = body.count.unwrap_or(1);
     if !(1..=MAX_PUBLISH_COUNT).contains(&count) {
         return Err(Problem::unprocessable(format!(
@@ -518,28 +566,48 @@ pub async fn publish(
             "Event runtime not available",
         ));
     };
+    let context = body.context.clone();
     let messages = control
-        .publish(&m.name, &id, count as usize, body.context)
+        .publish(&access.ws, &m.name, &id, count as usize, body.context)
         .await
         .map_err(control_problem)?;
+    access
+        .audit(
+            &st.audit,
+            "channel.publish",
+            format!("channel:{mock}/{id}"),
+            None,
+            Some(serde_json::json!({
+                "count": count,
+                "context": context,
+                "addresses": messages.iter().map(|m| m.address.as_str()).collect::<Vec<_>>(),
+            })),
+        )
+        .await;
     Ok(Json(PublishResult { messages }))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/event-settings",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/event-settings",
     tag = "channels",
-    params(("mock" = String, Path, description = "Mock name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+    ),
     responses(
         (status = 200, body = EventSettingsView),
+        (status = 403, body = Problem, content_type = "application/problem+json"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn get_event_settings(
     State(st): State<AdminState>,
-    Path(mock): Path<String>,
+    access: WsAccess,
+    Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<Json<EventSettingsView>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let view = match st.store.get_event_settings(m.id).await? {
         Some(s) => EventSettingsView {
             broker: s.broker,
@@ -555,9 +623,12 @@ pub async fn get_event_settings(
 
 #[utoipa::path(
     put,
-    path = "/api/v1/mocks/{mock}/event-settings",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/event-settings",
     tag = "channels",
-    params(("mock" = String, Path, description = "Mock name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+    ),
     request_body = PutEventSettings,
     responses(
         (status = 200, body = EventSettingsView),
@@ -569,13 +640,16 @@ pub async fn get_event_settings(
 )]
 pub async fn put_event_settings(
     State(st): State<AdminState>,
+    access: WsAccess,
     control: Control,
-    Path(mock): Path<String>,
+    Path(MockPath { mock }): Path<MockPath>,
     Json(body): Json<PutEventSettings>,
 ) -> ApiResult<Json<EventSettingsView>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
-    if let Some(existing) = st.store.get_event_settings(m.id).await? {
+    let existing = st.store.get_event_settings(m.id).await?;
+    if let Some(existing) = &existing {
         ensure_api_managed(
             &existing.source,
             format_args!("event settings of mock {mock:?}"),
@@ -595,10 +669,24 @@ pub async fn put_event_settings(
         updated_at: Utc::now(),
     };
     st.store.put_event_settings(&row).await?;
-    Ok(Json(EventSettingsView {
+    let view = EventSettingsView {
         broker: row.broker,
         source: "api".into(),
-    }))
+    };
+    let before = existing.map(|e| EventSettingsView {
+        broker: e.broker,
+        source: source_name(&e.source).into(),
+    });
+    access
+        .audit(
+            &st.audit,
+            "event_settings.update",
+            format!("mock:{mock}"),
+            before.as_ref().and_then(snapshot),
+            snapshot(&view),
+        )
+        .await;
+    Ok(Json(view))
 }
 
 #[utoipa::path(
@@ -607,9 +695,10 @@ pub async fn put_event_settings(
     tag = "brokers",
     responses(
         (status = 200, description = "The configured brokers, sorted by name", body = Vec<BrokerView>),
+        (status = 401, body = Problem, content_type = "application/problem+json"),
     )
 )]
-pub async fn brokers(control: Control) -> Json<Vec<BrokerView>> {
+pub async fn brokers(_caller: CurrentPrincipal, control: Control) -> Json<Vec<BrokerView>> {
     let mut list = control.map(|Extension(c)| c.brokers()).unwrap_or_default();
     list.sort_by(|a, b| a.name.cmp(&b.name));
     Json(list)

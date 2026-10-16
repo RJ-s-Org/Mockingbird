@@ -166,10 +166,15 @@ impl From<reqwest::Error> for ClientError {
     }
 }
 
-/// Runs `cmd` against the Admin API at `admin_url`. Returns the JSON to
+/// Runs `cmd` against the Admin API at `admin_url`, sending
+/// `Authorization: Bearer <token>` when `token` is set. Returns the JSON to
 /// print, or `None` when the API answered without a body.
-pub async fn run(admin_url: &str, cmd: ClientCommand) -> Result<Option<Value>, ClientError> {
-    let api = AdminClient::new(admin_url)?;
+pub async fn run(
+    admin_url: &str,
+    token: Option<&str>,
+    cmd: ClientCommand,
+) -> Result<Option<Value>, ClientError> {
+    let api = AdminClient::new(admin_url, token)?;
     match cmd {
         ClientCommand::Mocks(MocksCommand::List) => api.send(Method::GET, &["mocks"], None).await,
         ClientCommand::Mocks(MocksCommand::Get { name }) => {
@@ -430,10 +435,11 @@ enum Body {
 struct AdminClient {
     base: Url,
     http: reqwest::Client,
+    token: Option<String>,
 }
 
 impl AdminClient {
-    fn new(admin_url: &str) -> anyhow::Result<Self> {
+    fn new(admin_url: &str, token: Option<&str>) -> anyhow::Result<Self> {
         let base =
             Url::parse(admin_url).with_context(|| format!("invalid admin URL {admin_url:?}"))?;
         if base.cannot_be_a_base() {
@@ -442,6 +448,7 @@ impl AdminClient {
         Ok(Self {
             base,
             http: reqwest::Client::new(),
+            token: token.filter(|t| !t.is_empty()).map(str::to_string),
         })
     }
 
@@ -472,6 +479,9 @@ impl AdminClient {
         body: Option<Body>,
     ) -> Result<Option<Value>, ClientError> {
         let mut req = self.http.request(method, url.clone());
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
         req = match body {
             Some(Body::Json(v)) => req.json(&v),
             Some(Body::Bytes {

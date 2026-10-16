@@ -5,6 +5,7 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use mb_auth::AuthError;
 use mb_state::StateError;
 use mb_store::StoreError;
 use serde::Serialize;
@@ -14,6 +15,9 @@ pub const PROBLEM_CONTENT_TYPE: &str = "application/problem+json";
 
 /// Title of the 409 returned when a `source=file` resource is mutated.
 pub const MANAGED_BY_FILE: &str = "Managed by config file";
+
+/// `WWW-Authenticate` value of every 401 admin answer.
+pub const WWW_AUTHENTICATE: &str = "Bearer realm=\"mockingbird\"";
 
 /// An RFC 9457 problem details document.
 #[derive(Serialize, ToSchema, Debug, Clone)]
@@ -56,6 +60,15 @@ impl Problem {
         Self::new(StatusCode::BAD_REQUEST, detail)
     }
 
+    /// A 401; its response carries [`WWW_AUTHENTICATE`].
+    pub fn unauthorized(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, detail)
+    }
+
+    pub fn forbidden(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, detail)
+    }
+
     /// The 409 for a mutation of a `source=file` resource.
     pub fn managed_by_file(what: impl std::fmt::Display) -> Self {
         Self::titled(
@@ -76,6 +89,12 @@ impl IntoResponse for Problem {
         let body = serde_json::to_vec(&self).unwrap_or_default();
         let mut resp =
             (status, [(header::CONTENT_TYPE, PROBLEM_CONTENT_TYPE)], body).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            resp.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                header::HeaderValue::from_static(WWW_AUTHENTICATE),
+            );
+        }
         if status.is_server_error() {
             resp.extensions_mut().insert(ProblemDetail(self.detail));
         }
@@ -121,6 +140,25 @@ impl From<StoreError> for Problem {
             StoreError::Conflict(d) => Problem::conflict(d),
             StoreError::Invalid(d) => Problem::unprocessable(d),
             StoreError::Db(d) => Problem::new(StatusCode::INTERNAL_SERVER_ERROR, d),
+        }
+    }
+}
+
+/// The detail of every 502 caused by the identity provider.
+pub const UPSTREAM_DETAIL: &str = "identity provider unavailable";
+
+impl From<AuthError> for Problem {
+    fn from(err: AuthError) -> Self {
+        match err {
+            AuthError::Unauthenticated(d) => Problem::unauthorized(d),
+            AuthError::Forbidden(d) => Problem::forbidden(d),
+            AuthError::Invalid(d) => Problem::bad_request(d),
+            AuthError::Upstream(chain) => {
+                // The chain can name provider URLs: log it, answer generically.
+                tracing::warn!(error = %chain, "identity provider unavailable");
+                Problem::new(StatusCode::BAD_GATEWAY, UPSTREAM_DETAIL)
+            }
+            AuthError::Store(e) => e.into(),
         }
     }
 }

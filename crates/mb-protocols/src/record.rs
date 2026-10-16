@@ -31,6 +31,8 @@ impl RequestKind {
 /// One served data-plane call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestRecord {
+    /// The mock's workspace.
+    pub workspace: String,
     pub mock: String,
     /// `None` when no operation matched (404/405).
     pub operation_id: Option<String>,

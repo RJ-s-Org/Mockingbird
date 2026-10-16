@@ -42,6 +42,14 @@ jobs:
       MB_TEST_KAFKA_URL: localhost:9092
     steps:
       - uses: actions/checkout@v4
+      # The console is built first, so mb-console embeds the real build
+      # instead of its placeholder page.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mb-console/web/package-lock.json
+      - run: npm --prefix crates/mb-console/web ci && npm --prefix crates/mb-console/web run build
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97"
@@ -52,13 +60,65 @@ jobs:
       - run: cargo test --workspace --all-features
       - name: Check the slim binary
         run: cargo check -p mockingbird --no-default-features
-      - name: Check each mb-protocols feature alone
+
+  # Each mb-protocols feature (and none) must build on its own, warnings
+  # included (P4 Global Constraints; P5 adds the event features).
+  protocol-features:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [none, http-rest, sse, websocket, graphql, grpc, soap, events, mqtt, amqp, kafka]
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: protocols-${{ matrix.features }}
+      - name: cargo check -p mb-protocols (${{ matrix.features }})
+        env:
+          FEATURES: ${{ matrix.features }}
         run: |
-          for f in http-rest sse websocket graphql grpc soap events mqtt amqp kafka; do
-            echo "::group::mb-protocols --features $f"
-            cargo check -p mb-protocols --no-default-features --features "$f"
-            echo "::endgroup::"
-          done
+          if [ "$FEATURES" = none ]; then
+            cargo check -p mb-protocols --no-default-features
+          else
+            cargo check -p mb-protocols --no-default-features --features "$FEATURES"
+          fi
+
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/mb-console/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mb-console/web/package-lock.json
+      # check:api and the local e2e suite run the mockingbird binary.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm run check:api
+      - run: npx playwright install --with-deps chromium && npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: console-playwright-report
+          path: crates/mb-console/web/playwright-report
+          if-no-files-found: ignore
 
   deny:
     runs-on: ubuntu-latest
@@ -94,3 +154,44 @@ jobs:
         run: |
           docker run --rm mockingbird:ci --version
           docker run --rm mockingbird:ci-slim --version
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the Compose stack (Postgres, Rauthy, Mockingbird)
+        run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait --wait-timeout 300
+      - name: Wait for Mockingbird
+        run: |
+          for _ in $(seq 1 90); do
+            if curl -fsS http://localhost:9090/readyz; then exit 0; fi
+            sleep 2
+          done
+          echo "Mockingbird was not ready within 180 s" >&2
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mb-console/web/package-lock.json
+      - name: Rauthy login flow
+        working-directory: crates/mb-console/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test -c playwright.rauthy.config.ts
+      - name: Compose logs
+        if: failure()
+        run: |
+          docker compose -f deploy/compose/docker-compose.yml ps -a
+          for service in rauthy rauthy-bootstrap mockingbird postgres; do
+            echo "::group::$service logs"
+            docker compose -f deploy/compose/docker-compose.yml logs --no-color --timestamps "$service"
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rauthy-playwright-report
+          path: crates/mb-console/web/playwright-report
+          if-no-files-found: ignore

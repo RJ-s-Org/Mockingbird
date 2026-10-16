@@ -19,8 +19,6 @@ use crate::MockRuntime;
 
 /// The session produced messages and state effects use by default.
 pub(crate) const DEFAULT_SESSION: &str = "default";
-/// The workspace of every session key.
-pub(crate) const WORKSPACE: &str = "default";
 /// Most messages one manual publish generates.
 const MAX_MANUAL_COUNT: usize = 100;
 /// Manual publishes generated at once.
@@ -259,9 +257,9 @@ pub(crate) struct ChannelInner {
 
 impl ChannelInner {
     fn new(rt: Arc<MockRuntime>, deps: EventDeps, setup: EventSetup) -> Self {
-        let resolution = resolve_broker(&rt.bundle, &deps.brokers, &setup);
+        let resolution = resolve_broker(rt.bundle(), &deps.brokers, &setup);
         let activity = rt
-            .bundle
+            .bundle()
             .channels
             .iter()
             .map(|c| (c.id.clone(), ChannelActivity::default()))
@@ -467,14 +465,14 @@ impl ChannelRuntime {
     /// publishes. Must run inside a Tokio runtime.
     pub fn start(rt: Arc<MockRuntime>, deps: EventDeps, setup: EventSetup) -> Arc<Self> {
         let inner = Arc::new(ChannelInner::new(rt, deps, setup));
-        for channel in &inner.rt.bundle.channels {
+        for channel in &inner.rt.bundle().channels {
             if let ChannelBinding::WebSocket { path } = &channel.binding {
                 inner.hub.open(path);
             }
         }
         let mut tasks = JoinSet::new();
         if let Some(broker) = &inner.broker {
-            for channel in &inner.rt.bundle.channels {
+            for channel in &inner.rt.bundle().channels {
                 if channel.direction != Direction::Subscribe
                     || is_websocket(&channel.binding)
                     || !inner.enabled(channel)
@@ -511,7 +509,7 @@ impl ChannelRuntime {
         context: Option<Value>,
     ) -> Result<Vec<Published>, PublishError> {
         let inner = &self.inner;
-        let Some(ch) = inner.rt.bundle.channel(channel) else {
+        let Some(ch) = inner.rt.bundle().channel(channel) else {
             return Err(PublishError::UnknownChannel(channel.to_string()));
         };
         if ch.direction == Direction::Subscribe {

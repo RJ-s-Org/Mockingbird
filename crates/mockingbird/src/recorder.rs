@@ -10,7 +10,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use mb_protocols::{RequestRecord, RequestRecorder};
-use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, NewRequestLogEntry};
+use mb_store::{ControlChange, ControlStore, NewRequestLogEntry};
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast, mpsc};
 use uuid::Uuid;
@@ -153,9 +153,10 @@ struct Settings {
 struct Writer {
     store: Arc<dyn ControlStore>,
     changes: broadcast::Receiver<ControlChange>,
-    /// Mock name → id. An entry is evicted when the mock changes, so a mock
-    /// deleted and recreated under the same name is looked up afresh.
-    ids: HashMap<String, Uuid>,
+    /// `(workspace, mock name)` → id. An entry is evicted when the mock
+    /// changes, so a mock deleted and recreated under the same name is
+    /// looked up afresh.
+    ids: HashMap<(String, String), Uuid>,
     settings: Arc<ArcSwap<Settings>>,
     live: broadcast::Sender<RequestRecord>,
 }
@@ -175,8 +176,8 @@ impl Writer {
                     break;
                 }
                 change = self.changes.recv(), if changes_open => match change {
-                    Ok(ControlChange::Mock { name, .. }) => {
-                        self.ids.remove(&name);
+                    Ok(ControlChange::Mock { workspace, name }) => {
+                        self.ids.remove(&(workspace, name));
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => self.ids.clear(),
@@ -206,7 +207,7 @@ impl Writer {
         // No receivers is not an error: nobody is tailing.
         let _ = self.live.send(r.clone());
 
-        let Some(mock_id) = self.mock_id(&r.mock).await else {
+        let Some(mock_id) = self.mock_id(&r.workspace, &r.mock).await else {
             return;
         };
         let entry = NewRequestLogEntry {
@@ -231,24 +232,25 @@ impl Writer {
             .await
         {
             // The cached id may belong to a mock deleted since.
-            self.ids.remove(&r.mock);
-            tracing::warn!(mock = %r.mock, %error, "cannot write request log entry");
+            self.ids.remove(&(r.workspace.clone(), r.mock.clone()));
+            tracing::warn!(workspace = %r.workspace, mock = %r.mock, %error, "cannot write request log entry");
             metrics::counter!("mb_request_log_errors_total", "mock" => r.mock).increment(1);
         }
     }
 
-    async fn mock_id(&mut self, name: &str) -> Option<Uuid> {
-        if let Some(id) = self.ids.get(name) {
+    async fn mock_id(&mut self, workspace: &str, name: &str) -> Option<Uuid> {
+        let key = (workspace.to_string(), name.to_string());
+        if let Some(id) = self.ids.get(&key) {
             return Some(*id);
         }
-        match self.store.get_mock(DEFAULT_WORKSPACE, name).await {
+        match self.store.get_mock(workspace, name).await {
             Ok(Some(mock)) => {
-                self.ids.insert(name.to_string(), mock.id);
+                self.ids.insert(key, mock.id);
                 Some(mock.id)
             }
             Ok(None) => None,
             Err(error) => {
-                tracing::warn!(mock = %name, %error, "cannot resolve mock for request log");
+                tracing::warn!(%workspace, mock = %name, %error, "cannot resolve mock for request log");
                 None
             }
         }

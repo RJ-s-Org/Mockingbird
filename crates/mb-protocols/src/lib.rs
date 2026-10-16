@@ -24,6 +24,16 @@ use mb_state::StateStore;
     allow(dead_code)
 )]
 mod call;
+#[cfg_attr(
+    not(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    )),
+    allow(dead_code)
+)]
+mod dp_auth;
 #[cfg(feature = "events")]
 pub mod events;
 #[cfg(feature = "graphql")]
@@ -38,6 +48,10 @@ pub mod soap;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
+use dp_auth::CredentialNames;
+pub use dp_auth::{
+    API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
+};
 pub use record::{RequestKind, RequestRecord, RequestRecorder};
 
 /// Request header capping how many items a streamed response carries
@@ -181,7 +195,12 @@ impl Default for StateHealth {
 pub struct MockRuntime {
     /// Mock name; also used as `SessionKey::mock`.
     pub name: String,
-    pub bundle: Arc<Bundle>,
+    /// The mock's workspace; used as `SessionKey::workspace`, in request
+    /// records and to verify data-plane keys.
+    pub workspace: String,
+    /// The compiled contract; fixed at construction (see
+    /// [`MockRuntime::bundle`]).
+    bundle: Arc<Bundle>,
     pub engine: Arc<Engine>,
     pub state: Arc<dyn StateStore>,
     /// Honour `X-Mockingbird-*` override headers. Defaults to `true`.
@@ -195,11 +214,22 @@ pub struct MockRuntime {
     /// The state store circuit breaker: degraded while the store is
     /// failing, when calls are served statelessly.
     pub state_health: Arc<StateHealth>,
+    /// How data-plane callers authenticate. Defaults to no auth; changed
+    /// only through [`MockRuntime::set_data_plane_auth`], which keeps
+    /// `credential_names` in step.
+    data_plane_auth: DataPlaneAuth,
+    /// Verifies keys in [`DataPlaneAuthMode::ApiKey`] mode; without it every
+    /// key is rejected.
+    pub data_plane_keys: Option<Arc<dyn DataPlaneKeys>>,
     /// Protocol knobs (GraphQL limits, keepalives, gRPC message size).
     pub protocols: ProtocolSettings,
     /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
     /// process begins to shut down. Never fires by default.
     pub shutdown: Shutdown,
+    /// The credential header and query names derived from
+    /// `data_plane_auth` and `bundle`, recomputed whenever either changes
+    /// (see [`MockRuntime::credential_names`]).
+    credential_names: CredentialNames,
 }
 
 /// A process stop signal that open-ended streams end on, so a graceful
@@ -229,16 +259,20 @@ impl Shutdown {
 }
 
 impl MockRuntime {
-    /// A runtime with header overrides enabled, no scenarios, the
-    /// self-hosted extensions, no recorder and default protocol settings.
+    /// A runtime in workspace `default` with header overrides enabled, no
+    /// scenarios, the self-hosted extensions, no recorder, no data-plane
+    /// auth and default protocol settings.
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
         engine: Arc<Engine>,
         state: Arc<dyn StateStore>,
     ) -> Self {
+        let data_plane_auth = DataPlaneAuth::default();
+        let credential_names = CredentialNames::new(&data_plane_auth, &bundle);
         Self {
             name: name.into(),
+            workspace: "default".into(),
             bundle,
             engine,
             state,
@@ -247,8 +281,42 @@ impl MockRuntime {
             ext: Extensions::default(),
             recorder: None,
             state_health: Arc::new(StateHealth::default()),
+            data_plane_auth,
+            data_plane_keys: None,
             protocols: ProtocolSettings::default(),
             shutdown: Shutdown::default(),
+            credential_names,
         }
+    }
+
+    /// The compiled contract this runtime serves.
+    pub fn bundle(&self) -> &Arc<Bundle> {
+        &self.bundle
+    }
+
+    /// How data-plane callers authenticate.
+    pub fn data_plane_auth(&self) -> &DataPlaneAuth {
+        &self.data_plane_auth
+    }
+
+    /// Sets how data-plane callers authenticate, recomputing the
+    /// credential names derived from it at once.
+    pub fn set_data_plane_auth(&mut self, auth: DataPlaneAuth) {
+        self.credential_names = CredentialNames::new(&auth, &self.bundle);
+        self.data_plane_auth = auth;
+    }
+
+    /// [`MockRuntime::set_data_plane_auth`], builder style.
+    pub fn with_data_plane_auth(mut self, auth: DataPlaneAuth) -> Self {
+        self.set_data_plane_auth(auth);
+        self
+    }
+
+    /// The request headers and query parameters that carry this mock's
+    /// data-plane credentials: never forwarded to the engine or recorded.
+    /// Computed eagerly from `data_plane_auth` and `bundle`, which can only
+    /// change through [`MockRuntime::set_data_plane_auth`].
+    pub(crate) fn credential_names(&self) -> &CredentialNames {
+        &self.credential_names
     }
 }

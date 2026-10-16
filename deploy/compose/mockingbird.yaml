@@ -1,0 +1,16 @@
+# Mockingbird in the Compose stack (docker-compose.yml): Postgres storage and
+# OIDC login through Rauthy. llm.default_profile is left out; the stack starts
+# Mockingbird with --offline, so no LLM key is needed.
+storage:
+  url: postgres://postgres:postgres@postgres:5432/postgres
+
+auth:
+  mode: oidc
+  external_url: http://localhost:9090
+  oidc:
+    # Exactly the `issuer` of Rauthy's discovery document, trailing slash
+    # included: the OIDC client compares it as a string.
+    issuer: http://localhost:8081/auth/v1/
+    client_id: mockingbird
+    # Written by rauthy-bootstrap.sh into the shared `bootstrap` volume.
+    client_secret: file:/bootstrap/client_secret

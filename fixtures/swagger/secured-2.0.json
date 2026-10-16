@@ -1,0 +1,56 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Secured Items", "version": "1.0.0" },
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "securityDefinitions": {
+    "apiKeyHeader": { "type": "apiKey", "in": "header", "name": "X-API-Key" },
+    "basicAuth": { "type": "basic" },
+    "oauth": {
+      "type": "oauth2",
+      "flow": "implicit",
+      "authorizationUrl": "https://auth.example.com/authorize",
+      "scopes": { "items:read": "Read items" }
+    }
+  },
+  "security": [{ "apiKeyHeader": [] }],
+  "paths": {
+    "/items": {
+      "get": {
+        "operationId": "listItems",
+        "responses": {
+          "200": { "description": "OK", "schema": { "type": "array", "items": { "$ref": "#/definitions/Item" } } }
+        }
+      },
+      "post": {
+        "operationId": "createItem",
+        "security": [{ "basicAuth": [] }],
+        "responses": {
+          "201": { "description": "Created", "schema": { "$ref": "#/definitions/Item" } }
+        }
+      }
+    },
+    "/items/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "type": "string" }],
+      "get": {
+        "operationId": "getItem",
+        "security": [{ "oauth": ["items:read"] }],
+        "responses": {
+          "200": { "description": "OK", "schema": { "$ref": "#/definitions/Item" } }
+        }
+      },
+      "delete": {
+        "operationId": "deleteItem",
+        "security": [],
+        "responses": { "204": { "description": "Deleted" } }
+      }
+    }
+  },
+  "definitions": {
+    "Item": {
+      "type": "object",
+      "required": ["id"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+    }
+  }
+}

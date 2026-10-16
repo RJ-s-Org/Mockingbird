@@ -156,7 +156,7 @@ impl ChannelInner {
         };
 
         let engine = &self.rt.engine;
-        let bundle = &self.rt.bundle;
+        let bundle = self.rt.bundle();
         let generated = match engine.generate_message(bundle, channel, &ctx).await {
             Ok(generated) => generated,
             Err(e) => {
@@ -206,7 +206,7 @@ impl ChannelInner {
         let mut target = resolve_binding(&channel.binding, &params);
         let redirect_to = self
             .rt
-            .bundle
+            .bundle()
             .channels
             .iter()
             .filter_map(|c| c.reply.as_ref())
@@ -348,6 +348,7 @@ impl ChannelInner {
         }
         if let Some(recorder) = &rt.recorder {
             recorder.record(RequestRecord {
+                workspace: rt.workspace.clone(),
                 mock: rt.name.clone(),
                 operation_id: Some(r.channel.id.clone()),
                 session: r.session,

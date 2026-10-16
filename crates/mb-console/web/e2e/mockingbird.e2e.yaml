@@ -1,0 +1,17 @@
+# The binary behind the local Playwright suite: no auth, in-memory storage,
+# one read-only file mock.
+server:
+  port: 18080
+  admin_port: 19090
+
+storage:
+  url: "sqlite::memory:"
+
+auth:
+  mode: none
+
+mocks:
+  files:
+    workspace: default
+    contract: ../../../../fixtures/openapi/orders-3.0.yaml
+    route_prefix: /files

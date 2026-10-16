@@ -55,6 +55,7 @@ async fn run(admin: &str, args: &[&str]) -> Output {
             .arg(&admin)
             .args(&args)
             .env_remove("MB_ADMIN_URL")
+            .env_remove("MB_ADMIN_TOKEN")
             .output()
             .unwrap();
         Output {
@@ -251,7 +252,15 @@ async fn import_directory_uploads_archive() {
     let source = reqwest::get(format!("{admin}/api/v1/mocks/orders/contracts/1/source"))
         .await
         .unwrap();
-    assert_eq!(source.headers()["content-type"], "application/gzip");
+    assert_eq!(source.headers()["content-type"], "application/octet-stream");
+    assert_eq!(
+        source.headers()["x-mockingbird-source-type"],
+        "application/gzip"
+    );
+    assert_eq!(
+        source.headers()["content-disposition"],
+        r#"attachment; filename="orders-v1.tar.gz""#
+    );
     let bytes = source.bytes().await.unwrap();
     assert_eq!(
         bytes.as_ref(),

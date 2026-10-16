@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use super::MAX_HOPS;
-use super::runtime::{ChannelInner, Origin, WORKSPACE};
+use super::runtime::{ChannelInner, Origin};
 
 /// Grants the scheduler lease of a mock to one holder at a time.
 #[async_trait]
@@ -56,7 +56,7 @@ struct ChannelTriggers {
 pub(crate) fn spawn_triggers(inner: &Arc<ChannelInner>, tasks: &mut JoinSet<()>) {
     let active: Vec<ChannelTriggers> = inner
         .rt
-        .bundle
+        .bundle()
         .channels
         .iter()
         .filter(|c| c.direction == Direction::Publish)
@@ -243,7 +243,7 @@ async fn run_state_changes(
             }
             Err(broadcast::error::RecvError::Closed) => return,
         };
-        if change.session.workspace != WORKSPACE || change.session.mock != inner.rt.name {
+        if change.session.workspace != inner.rt.workspace || change.session.mock != inner.rt.name {
             continue;
         }
         // A change made by a consumed message continues its hop count, so
