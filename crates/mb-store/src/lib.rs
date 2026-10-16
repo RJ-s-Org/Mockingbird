@@ -212,6 +212,37 @@ pub trait ControlStore: Send + Sync {
         outcome: ImportOutcome,
         now: DateTime<Utc>,
     ) -> Result<bool, StoreError>;
+    /// Adds `v` as a draft of `mock_id` (like
+    /// [`Self::add_draft_contract_version`]) and ends job `id` as `done` with
+    /// that version, atomically: `Ok(None)`, with nothing stored, unless the
+    /// job is `running` and belongs to the mock. Backends override the
+    /// default, which is not atomic.
+    async fn complete_import_job(
+        &self,
+        id: Uuid,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        let running = self
+            .get_import_job(id)
+            .await?
+            .is_some_and(|j| j.mock_id == mock_id && j.status == ImportJobStatus::Running);
+        if !running {
+            return Ok(None);
+        }
+        let version = self
+            .add_draft_contract_version(mock_id, v, draft_meta)
+            .await?;
+        let outcome = ImportOutcome::Done {
+            version: version.version,
+        };
+        Ok(self
+            .finish_import_job(id, outcome, now)
+            .await?
+            .then_some(version))
+    }
     /// Moves a `queued` or `running` job to `canceled` and clears its input;
     /// `false` otherwise.
     async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError>;

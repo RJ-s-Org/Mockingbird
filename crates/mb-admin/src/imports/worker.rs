@@ -11,8 +11,8 @@ use mb_import::smart::{
     ImportInput, ImportKind, ImportObserver, ImportOptions, Phase, SmartError, run_import,
 };
 use mb_store::{
-    ContractStatus, ControlStore, ImportJob, ImportJobStatus, ImportOutcome, ImportProgress,
-    NewAuditEvent, NewContractVersion, StoreError,
+    ContractStatus, ControlStore, ImportJob, ImportOutcome, ImportProgress, NewAuditEvent,
+    NewContractVersion, StoreError,
 };
 use serde_json::json;
 use tokio::task::JoinHandle;
@@ -202,15 +202,6 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         Ok(Ok(draft)) => draft,
     };
 
-    let still_running = st
-        .store
-        .get_import_job(job.id)
-        .await?
-        .is_some_and(|j| j.status == ImportJobStatus::Running);
-    if !still_running {
-        count("canceled");
-        return Ok(());
-    }
     let meta = match serde_json::to_value(&draft.meta) {
         Ok(meta) => meta,
         Err(e) => return fail(st, job, format!("the draft metadata is invalid: {e}")).await,
@@ -222,9 +213,13 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         .usage
         .prompt_tokens
         .saturating_add(draft.meta.usage.completion_tokens);
-    let added = st
+    // The draft is stored only if the job is still running, in the same
+    // transaction that marks it done: a cancel or stale sweep that won the
+    // race leaves no orphaned draft and no audit event.
+    let completed = st
         .store
-        .add_draft_contract_version(
+        .complete_import_job(
+            job.id,
             mock.id,
             NewContractVersion {
                 source: draft.source,
@@ -233,15 +228,17 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
                 created_by: job.created_by.clone(),
             },
             meta,
+            Utc::now(),
         )
         .await;
-    let version = match added {
-        Ok(v) => v.version,
+    let version = match completed {
+        Ok(Some(v)) => v.version,
+        Ok(None) => {
+            count("canceled");
+            return Ok(());
+        }
         Err(e) => return fail(st, job, format!("the draft could not be stored: {e}")).await,
     };
-    st.store
-        .finish_import_job(job.id, ImportOutcome::Done { version }, Utc::now())
-        .await?;
     count("done");
     metrics::counter!("mb_import_tokens_total").increment(tokens);
     st.audit

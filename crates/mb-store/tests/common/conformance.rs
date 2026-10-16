@@ -60,6 +60,7 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     prune_finished_jobs(&store).await;
     jobs_listed_newest_first_and_cascade_with_mock(&store).await;
     import_job_for_missing_mock_not_found(&store).await;
+    complete_import_job_stores_draft_only_while_running(&store).await;
 }
 
 fn new_mock(name: &str) -> NewMock {
@@ -2319,4 +2320,71 @@ async fn import_job_for_missing_mock_not_found(store: &Arc<dyn ControlStore>) {
         .await
         .expect_err("missing mock");
     assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+}
+
+async fn complete_import_job_stores_draft_only_while_running(store: &Arc<dyn ControlStore>) {
+    drain_queue(store).await;
+    let mock = create(store, "jobs-complete").await;
+    let job = create_job(store, mock.id, b"c").await;
+    store.claim_import_job(now_us()).await.expect("claim");
+    let at = now_us();
+    let meta = draft_meta("imported");
+    let draft = store
+        .complete_import_job(
+            job.id,
+            mock.id,
+            new_version(ContractStatus::Draft, "imported"),
+            meta.clone(),
+            at,
+        )
+        .await
+        .expect("complete")
+        .expect("the job was running");
+    assert_eq!(draft.version, 1);
+    assert_eq!(draft.status, ContractStatus::Draft);
+    assert_eq!(draft.draft_meta.as_ref(), Some(&meta));
+    let done = store
+        .get_import_job(job.id)
+        .await
+        .expect("get")
+        .expect("job");
+    assert_eq!(done.status, ImportJobStatus::Done);
+    assert_eq!(done.result_version, Some(1));
+    assert_eq!(done.finished_at, Some(at));
+    assert_eq!(store.import_job_input(job.id).await.expect("input"), None);
+
+    // A job that is no longer running (canceled, failed as stale, queued,
+    // already done or unknown) stores nothing.
+    let canceled = create_job(store, mock.id, b"x").await;
+    store.claim_import_job(now_us()).await.expect("claim");
+    assert!(
+        store
+            .cancel_import_job(canceled.id, now_us())
+            .await
+            .expect("cancel")
+    );
+    let queued = create_job(store, mock.id, b"q").await;
+    for id in [canceled.id, queued.id, job.id, Uuid::new_v4()] {
+        let got = store
+            .complete_import_job(
+                id,
+                mock.id,
+                new_version(ContractStatus::Draft, "late"),
+                draft_meta("late"),
+                now_us(),
+            )
+            .await
+            .expect("complete");
+        assert_eq!(got, None, "job {id}");
+    }
+    let versions = store.list_contract_versions(mock.id).await.expect("list");
+    assert_eq!(versions.len(), 1, "{versions:?}");
+    let got = store
+        .get_import_job(canceled.id)
+        .await
+        .expect("get")
+        .expect("job");
+    assert_eq!(got.status, ImportJobStatus::Canceled);
+    assert_eq!(got.result_version, None);
+    drain_queue(store).await;
 }

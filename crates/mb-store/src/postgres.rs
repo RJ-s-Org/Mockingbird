@@ -1432,6 +1432,48 @@ impl ControlStore for PgStore {
             > 0)
     }
 
+    async fn complete_import_job(
+        &self,
+        id: Uuid,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        require_draft_status(&v)?;
+        let mut tx = self.pool.begin().await?;
+        // The mock first, then the job: the order a mock delete locks them.
+        if locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let running: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM import_jobs WHERE id = $1 AND mock_id = $2 AND status = 'running' \
+             FOR UPDATE",
+        )
+        .bind(id)
+        .bind(mock_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if running.is_none() {
+            return Ok(None);
+        }
+        let version = insert_version(&mut tx, mock_id, v, Some(draft_meta)).await?;
+        sqlx::query(
+            "UPDATE import_jobs SET status = 'done', result_version = $1, error = NULL, \
+             input = ''::bytea, finished_at = $2, updated_at = $2 WHERE id = $3",
+        )
+        .bind(version.version)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(version))
+    }
+
     async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {
         Ok(sqlx::query(
             "UPDATE import_jobs SET status = 'canceled', input = ''::bytea, finished_at = $1, \

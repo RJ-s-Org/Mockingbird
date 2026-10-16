@@ -127,19 +127,31 @@ impl SqliteControlStore {
         v: NewContractVersion,
         draft_meta: Option<Value>,
     ) -> Result<ContractVersion, StoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let version = Self::insert_version_in(&mut tx, mock_id, v, draft_meta).await?;
+        tx.commit().await?;
+        Ok(version)
+    }
+
+    /// [`Self::insert_version`] inside the caller's transaction.
+    async fn insert_version_in(
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Option<Value>,
+    ) -> Result<ContractVersion, StoreError> {
         let bundle = serde_json::to_string(&v.bundle)?;
         let meta = draft_meta.as_ref().map(serde_json::to_string).transpose()?;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let next: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM contract_versions WHERE mock_id = ?",
         )
         .bind(mock_id.to_string())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if v.status == ContractStatus::Active {
             sqlx::query("UPDATE contract_versions SET status = 'approved' WHERE mock_id = ? AND status = 'active'")
                 .bind(mock_id.to_string())
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
         let version = ContractVersion {
@@ -168,9 +180,8 @@ impl SqliteControlStore {
             .bind(&version.created_by)
             .bind(version.created_at)
             .bind(meta)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
         Ok(version)
     }
 
@@ -1380,6 +1391,41 @@ impl ControlStore for SqliteControlStore {
         .await?
         .rows_affected()
             > 0)
+    }
+
+    async fn complete_import_job(
+        &self,
+        id: Uuid,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        require_draft_status(&v)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let running: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM import_jobs WHERE id = ? AND mock_id = ? AND status = 'running'",
+        )
+        .bind(id.to_string())
+        .bind(mock_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if running.is_none() {
+            return Ok(None);
+        }
+        let version = Self::insert_version_in(&mut tx, mock_id, v, Some(draft_meta)).await?;
+        sqlx::query(
+            "UPDATE import_jobs SET status = 'done', result_version = ?, error = NULL, \
+             input = X'', finished_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(version.version)
+        .bind(now)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(version))
     }
 
     async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {

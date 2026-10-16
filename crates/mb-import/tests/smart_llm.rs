@@ -13,6 +13,7 @@ use mb_import::smart::merge::merge_operations;
 use mb_import::smart::model::{
     DraftOperation, DraftParam, DraftResponse, DraftWarning, ParamLocation, Provenance,
 };
+use mb_import::smart::{ImportObserver, NoopObserver, Phase, SmartError};
 use mb_llm::{HopSettings, LlmError, ResponseFormat, Role, ScriptedProvider, Usage};
 use serde_json::{Value, json};
 
@@ -371,7 +372,10 @@ async fn summarize_fills_missing_only() {
     ]})
     .to_string())]));
     let mut budget = TokenBudget::new(100_000);
-    let warnings = summarize_operations(&llm(provider.clone()), &mut ops, &mut budget).await;
+    let warnings =
+        summarize_operations(&llm(provider.clone()), &mut ops, &mut budget, &NoopObserver)
+            .await
+            .unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(ops[0].summary.as_deref(), Some("List pets"));
     assert_eq!(ops[0].description.as_deref(), Some("All pets"));
@@ -383,14 +387,18 @@ async fn summarize_fills_missing_only() {
 
     let mut ops = vec![op("/owners", 0.9, "a")];
     let provider = Arc::new(ScriptedProvider::new(vec![Err(LlmError::Timeout)]));
-    let warnings = summarize_operations(&llm(provider), &mut ops, &mut budget).await;
+    let warnings = summarize_operations(&llm(provider), &mut ops, &mut budget, &NoopObserver)
+        .await
+        .unwrap();
     assert_eq!(codes(&warnings), vec!["summaries_skipped"]);
     assert_eq!(ops[0].summary, None);
 
     let mut ops = vec![op("/owners", 0.9, "a")];
     let provider = Arc::new(ScriptedProvider::new(vec![]));
     let mut tiny = TokenBudget::new(10);
-    let warnings = summarize_operations(&llm(provider.clone()), &mut ops, &mut tiny).await;
+    let warnings = summarize_operations(&llm(provider.clone()), &mut ops, &mut tiny, &NoopObserver)
+        .await
+        .unwrap();
     assert_eq!(codes(&warnings), vec!["summaries_skipped"]);
     assert!(provider.requests().is_empty());
 }
@@ -462,4 +470,78 @@ fn implicated_operations_follow_pointers_and_ids() {
         message: "missing required field".into(),
     }];
     assert!(implicated_operations(&unrelated, &ops, &ids).is_empty());
+}
+
+/// Records every progress report; cancels at report number `cancel_at`.
+struct Reports {
+    cancel_at: usize,
+    seen: std::sync::Mutex<Vec<(Phase, u32, u32)>>,
+}
+
+#[async_trait::async_trait]
+impl ImportObserver for Reports {
+    async fn progress(&self, phase: Phase, done: u32, total: u32) -> bool {
+        let mut seen = self.seen.lock().unwrap();
+        seen.push((phase, done, total));
+        seen.len() < self.cancel_at
+    }
+}
+
+fn summary_answer() -> Result<String, LlmError> {
+    Ok(json!({"operations": []}).to_string())
+}
+
+/// Long summarising runs report progress before every batch, which keeps
+/// the job fresh for the stale sweep and lets a cancel stop it.
+#[tokio::test]
+async fn summarize_reports_each_batch_and_honours_cancel() {
+    let ops: Vec<DraftOperation> = (0..85)
+        .map(|i| op(&format!("/r{i}/items"), 1.0, "entry"))
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        summary_answer(),
+        summary_answer(),
+        summary_answer(),
+    ]));
+    let observer = Reports {
+        cancel_at: usize::MAX,
+        seen: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut budget = TokenBudget::new(1_000_000);
+    summarize_operations(
+        &llm(provider.clone()),
+        &mut ops.clone(),
+        &mut budget,
+        &observer,
+    )
+    .await
+    .unwrap();
+    assert_eq!(provider.requests().len(), 3);
+    assert_eq!(
+        *observer.seen.lock().unwrap(),
+        vec![
+            (Phase::Summarizing, 0, 3),
+            (Phase::Summarizing, 1, 3),
+            (Phase::Summarizing, 2, 3)
+        ]
+    );
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        summary_answer(),
+        summary_answer(),
+    ]));
+    let observer = Reports {
+        cancel_at: 2,
+        seen: std::sync::Mutex::new(Vec::new()),
+    };
+    let err = summarize_operations(
+        &llm(provider.clone()),
+        &mut ops.clone(),
+        &mut budget,
+        &observer,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, SmartError::Canceled), "{err:?}");
+    assert_eq!(provider.requests().len(), 1);
 }

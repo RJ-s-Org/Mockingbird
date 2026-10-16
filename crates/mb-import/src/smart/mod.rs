@@ -220,7 +220,7 @@ fn compile_error(issues: &[DraftIssue]) -> SmartError {
     ))
 }
 
-async fn report(
+pub(crate) async fn report(
     observer: &dyn ImportObserver,
     phase: Phase,
     done: usize,
@@ -397,8 +397,8 @@ pub async fn run_import_with(
             _ => postman::import_postman(&bytes)?,
         };
         if let Some(llm) = llm {
-            report(observer, Phase::Summarizing, 0, 1).await?;
-            let warnings = summarize_operations(llm, &mut recorded.operations, &mut budget).await;
+            let warnings =
+                summarize_operations(llm, &mut recorded.operations, &mut budget, observer).await?;
             recorded.warnings.extend(warnings);
         }
         Extracted {

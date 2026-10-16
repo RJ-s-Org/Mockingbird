@@ -17,6 +17,7 @@ use super::model::{
     ParamLocation, Provenance, TokenUsage,
 };
 use super::paths::{normalize_path, path_key};
+use super::{ImportObserver, Phase, SmartError, report};
 
 /// Most operations accepted from one chunk.
 pub const MAX_OPERATIONS_PER_CHUNK: usize = 100;
@@ -660,11 +661,15 @@ fn summary_line(op: &DraftOperation) -> String {
 /// Fills missing summaries and descriptions of recorded operations, 40 per
 /// call. Failed or unaffordable batches yield one `summaries_skipped`
 /// warning.
+///
+/// Reports `Summarizing` progress before each batch (batch index, batch
+/// count); `Err(Canceled)` when the observer cancels.
 pub async fn summarize_operations(
     llm: &ExtractLlm,
     ops: &mut [DraftOperation],
     budget: &mut TokenBudget,
-) -> Vec<DraftWarning> {
+    observer: &dyn ImportObserver,
+) -> Result<Vec<DraftWarning>, SmartError> {
     let pending: Vec<usize> = ops
         .iter()
         .enumerate()
@@ -673,7 +678,9 @@ pub async fn summarize_operations(
         .collect();
     let mut skipped = 0usize;
     let mut reasons: Vec<String> = Vec::new();
-    for batch in pending.chunks(SUMMARY_BATCH) {
+    let batches = pending.len().div_ceil(SUMMARY_BATCH);
+    for (n, batch) in pending.chunks(SUMMARY_BATCH).enumerate() {
+        report(observer, Phase::Summarizing, n, batches).await?;
         let system = format!(
             "You write documentation for HTTP API operations. For each operation listed by the \
              user, write a summary of at most {SUMMARY_CHARS} characters and a one-sentence \
@@ -718,16 +725,16 @@ pub async fn summarize_operations(
         }
     }
     if skipped == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    vec![DraftWarning::new(
+    Ok(vec![DraftWarning::new(
         "summaries_skipped",
         format!(
             "summaries of {skipped} operation{} were skipped: {}",
             if skipped == 1 { "" } else { "s" },
             reasons.join("; ")
         ),
-    )]
+    )])
 }
 
 fn push_reason(reasons: &mut Vec<String>, reason: String) {
