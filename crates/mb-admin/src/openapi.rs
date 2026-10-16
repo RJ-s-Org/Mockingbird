@@ -11,13 +11,13 @@ use utoipa::openapi::path::{Operation, ParameterIn, PathItem};
 use utoipa::openapi::{Deprecated, RefOr};
 
 use crate::{
-    API_BASE, Source, VersionStatus, contracts, mocks, problem, profiles, requests, scenarios,
-    sessions, workspaces,
+    API_BASE, Source, VersionStatus, apikeys, audit, contracts, mocks, problem, profiles, requests,
+    scenarios, sessions, workspaces,
 };
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, scenarios, LLM profiles, sessions and the request log. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
+    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, scenarios, LLM profiles, sessions, the request log, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only). The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
     paths(
         workspaces::list,
         workspaces::create,
@@ -46,6 +46,11 @@ use crate::{
         sessions::seed,
         sessions::reset,
         requests::list,
+        apikeys::list,
+        apikeys::create,
+        apikeys::revoke,
+        audit::list,
+        audit::list_global,
     ),
     components(schemas(
         problem::Problem,
@@ -73,6 +78,12 @@ use crate::{
         sessions::SessionInfoView,
         sessions::StoredResourceView,
         requests::RequestLogView,
+        apikeys::KeyScopeSchema,
+        apikeys::CreateApiKey,
+        apikeys::ApiKeyView,
+        apikeys::CreatedApiKey,
+        audit::AuditEventView,
+        audit::AuditFormat,
     )),
     tags(
         (name = "workspaces"),
@@ -82,6 +93,8 @@ use crate::{
         (name = "llm-profiles"),
         (name = "sessions"),
         (name = "requests"),
+        (name = "api-keys"),
+        (name = "audit"),
     )
 )]
 pub struct ApiDoc;

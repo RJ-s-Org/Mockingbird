@@ -2202,19 +2202,25 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "hmac 0.12.1",
  "mb-auth",
  "mb-import",
  "mb-mcm",
  "mb-state",
  "mb-store",
+ "metrics",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
+ "tokio-stream",
  "tower",
  "tracing",
  "tracing-subscriber",
  "utoipa",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -4480,6 +4486,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::access::WsAccess;
+use crate::audit::snapshot;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed};
 
@@ -210,7 +211,17 @@ pub async fn create(
             },
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(MockView::new(created, None))))
+    let view = MockView::new(created, None);
+    access
+        .audit(
+            &st.audit,
+            "mock.create",
+            format!("mock:{}", view.name),
+            None,
+            snapshot(&view),
+        )
+        .await;
+    Ok((StatusCode::CREATED, Json(view)))
 }
 
 #[utoipa::path(
@@ -261,6 +272,7 @@ pub async fn patch(
     access.require(Permission::Edit)?;
     let mut m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
+    let before = snapshot(&view(&st, m.clone()).await?);
     if let Some(prefix) = body.route_prefix {
         validate_route_prefix(&prefix)?;
         ensure_prefix_free(&st, &prefix, Some((&m.workspace, &m.name))).await?;
@@ -278,8 +290,17 @@ pub async fn patch(
     if let Some(auth) = body.data_plane_auth {
         m.data_plane_auth = auth;
     }
-    let updated = st.store.update_mock(&m).await?;
-    Ok(Json(view(&st, updated).await?))
+    let updated = view(&st, st.store.update_mock(&m).await?).await?;
+    access
+        .audit(
+            &st.audit,
+            "mock.update",
+            format!("mock:{mock}"),
+            before,
+            snapshot(&updated),
+        )
+        .await;
+    Ok(Json(updated))
 }
 
 #[utoipa::path(
@@ -305,11 +326,21 @@ pub async fn delete(
     access.require(Permission::Edit)?;
     let m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
+    let before = snapshot(&view(&st, m).await?);
     // Its sessions go first, so a new mock of the same name starts empty and
     // a failed reset (503) leaves the mock in place for a retry.
     st.state.reset_mock(&access.ws, &mock).await?;
     if !st.store.delete_mock(&access.ws, &mock).await? {
         return Err(Problem::not_found(format!("mock {mock:?} does not exist")));
     }
+    access
+        .audit(
+            &st.audit,
+            "mock.delete",
+            format!("mock:{mock}"),
+            before,
+            None,
+        )
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }

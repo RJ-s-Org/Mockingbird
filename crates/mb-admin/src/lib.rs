@@ -1,7 +1,9 @@
 //! Mockingbird Admin REST API: workspaces, and in each workspace mocks,
 //! contract versions, scenarios, LLM profiles, sessions and the request log
 //! under `/api/v1/workspaces/{ws}` (the P2 paths under `/api/v1` act on
-//! `default`), described by the OpenAPI document at `/api/openapi.json`.
+//! `default`), plus each workspace's API keys and audit log and the global
+//! audit log at `/api/v1/audit`, described by the OpenAPI document at
+//! `/api/openapi.json`. Every successful mutation writes one audit event.
 //! Every `/api/v1` request is authenticated and checked against the caller's
 //! workspace role. Every error is an RFC 9457 `application/problem+json`
 //! document.
@@ -17,6 +19,8 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 pub mod access;
+mod apikeys;
+mod audit;
 mod contracts;
 mod mocks;
 mod openapi;
@@ -25,12 +29,16 @@ mod profiles;
 mod requests;
 mod scenarios;
 mod sessions;
+mod webhook;
 mod workspaces;
 
 pub use access::{CurrentPrincipal, WsAccess};
+pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
+pub use audit::{AuditEventView, Auditor, spawn_retention};
 pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
+pub use webhook::{WebhookSink, signature};
 pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
 
 /// Admin API base path.
@@ -51,13 +59,16 @@ pub struct AdminState {
     pub api_secret_refs: Arc<Vec<String>>,
     /// Resolves the caller of every `/api/v1` request.
     pub auth: Arc<dyn Authenticate>,
+    /// Records every successful mutation.
+    pub audit: Auditor,
 }
 
 impl AdminState {
-    /// A state with [`LocalAuth`] (`auth.mode: none`) and the
-    /// [`DEFAULT_API_SECRET_REFS`].
+    /// A state with [`LocalAuth`] (`auth.mode: none`), the
+    /// [`DEFAULT_API_SECRET_REFS`] and an [`Auditor`] without a webhook.
     pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
         Self {
+            audit: Auditor::new(store.clone(), None),
             store,
             state,
             api_secret_refs: Arc::new(
@@ -150,6 +161,12 @@ pub fn router(st: AdminState) -> Router {
                 .delete(sessions::reset),
         )
         .route("/mocks/{mock}/requests", get(requests::list));
+    // Workspace-only resources: no P2 alias for `default`.
+    let workspace_only: Router<AdminState> = resources
+        .clone()
+        .route("/api-keys", get(apikeys::list).post(apikeys::create))
+        .route("/api-keys/{key_id}", axum::routing::delete(apikeys::revoke))
+        .route("/audit", get(audit::list));
 
     let api = Router::new()
         .route(
@@ -162,8 +179,9 @@ pub fn router(st: AdminState) -> Router {
                 .patch(workspaces::patch)
                 .delete(workspaces::delete),
         )
-        .nest("/workspaces/{ws}", resources.clone())
+        .nest("/workspaces/{ws}", workspace_only)
         .merge(resources)
+        .route("/audit", get(audit::list_global))
         .route_layer(axum::middleware::from_fn_with_state(
             st.clone(),
             access::authenticate,

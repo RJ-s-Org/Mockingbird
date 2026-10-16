@@ -1337,12 +1337,15 @@ async fn openapi_lists_all_paths() {
             assert!(item[*m].is_object(), "{m} {path} missing");
         }
     }
-    // The P2 paths; the workspace-scoped ones are covered in workspaces.rs.
+    // The P2 paths; the workspace-scoped ones are covered in workspaces.rs
+    // and the global audit log in audit.rs.
     let documented: usize = doc["paths"]
         .as_object()
         .unwrap()
         .iter()
-        .filter(|(path, _)| !path.starts_with("/api/v1/workspaces"))
+        .filter(|(path, _)| {
+            !path.starts_with("/api/v1/workspaces") && path.as_str() != "/api/v1/audit"
+        })
         .map(|(_, item)| item.as_object().unwrap().len())
         .sum();
     let listed: usize = expected.iter().map(|(_, m)| m.len()).sum();

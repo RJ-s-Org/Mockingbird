@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::access::WsAccess;
+use crate::audit::snapshot;
 use crate::mocks::MockPath;
 use crate::problem::{
     ApiResult, Json, Path, Problem, Query, RequireJson, media_type, unsupported_media_type,
@@ -260,14 +261,21 @@ pub async fn upload(
     } else {
         added
     };
-    Ok((
-        StatusCode::CREATED,
-        Json(UploadResult {
-            version: stored.version,
-            status: VersionStatus::from(&stored.status),
-            operations,
-        }),
-    ))
+    let result = UploadResult {
+        version: stored.version,
+        status: VersionStatus::from(&stored.status),
+        operations,
+    };
+    access
+        .audit(
+            &st.audit,
+            "contract.upload",
+            format!("contract:{mock}@{}", result.version),
+            None,
+            snapshot(&result),
+        )
+        .await;
+    Ok((StatusCode::CREATED, Json(result)))
 }
 
 #[utoipa::path(
@@ -398,5 +406,15 @@ pub async fn activate(
         )));
     }
     let active = st.store.activate_contract_version(m.id, number).await?;
-    Ok(Json((&active).into()))
+    let view = ContractVersionSummary::from(&active);
+    access
+        .audit(
+            &st.audit,
+            "contract.activate",
+            format!("contract:{mock}@{number}"),
+            None,
+            snapshot(&view),
+        )
+        .await;
+    Ok(Json(view))
 }

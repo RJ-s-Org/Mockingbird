@@ -9,6 +9,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::access::WsAccess;
+use crate::audit::snapshot;
 use crate::mocks::MockPath;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, valid_identifier};
@@ -132,7 +133,8 @@ pub async fn put(
             "scenario names are 1-128 characters of [A-Za-z0-9._-]",
         ));
     }
-    if let Some(existing) = find(&st, m.id, &name).await? {
+    let existing = find(&st, m.id, &name).await?;
+    if let Some(existing) = &existing {
         ensure_api_managed(&existing.source, format_args!("scenario {name:?}"))?;
     }
     if body.status.is_some_and(|s| !(100..=599).contains(&s)) {
@@ -170,7 +172,17 @@ pub async fn put(
         source: ResourceSource::Api,
     };
     st.store.put_scenario(&scenario).await?;
-    Ok(Json(scenario.into()))
+    let view = ScenarioView::from(scenario);
+    access
+        .audit(
+            &st.audit,
+            "scenario.put",
+            format!("scenario:{mock}/{}", view.name),
+            existing.map(ScenarioView::from).as_ref().and_then(snapshot),
+            snapshot(&view),
+        )
+        .await;
+    Ok(Json(view))
 }
 
 #[utoipa::path(
@@ -198,7 +210,17 @@ pub async fn delete(
     let missing = || Problem::not_found(format!("mock {mock:?} has no scenario {name:?}"));
     let existing = find(&st, m.id, &name).await?.ok_or_else(missing)?;
     ensure_api_managed(&existing.source, format_args!("scenario {name:?}"))?;
+    let before = snapshot(&ScenarioView::from(existing));
     if st.store.delete_scenario(m.id, &name).await? {
+        access
+            .audit(
+                &st.audit,
+                "scenario.delete",
+                format!("scenario:{mock}/{name}"),
+                before,
+                None,
+            )
+            .await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(missing())

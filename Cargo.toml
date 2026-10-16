@@ -48,6 +48,7 @@ utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 subtle = "2"
 base64 = "0.22"
 hmac = "0.12"
+tokio-stream = { version = "0.1", features = ["sync"] }
 openidconnect = { version = "4.0", default-features = false }
 jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 rsa = { version = "0.9", features = ["pem"] }

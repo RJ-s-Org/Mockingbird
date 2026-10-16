@@ -165,9 +165,20 @@ pub async fn seed(
 ) -> ApiResult<StatusCode> {
     access.require(Permission::Edit)?;
     let key = key(&st, &access.ws, path).await?;
+    let resources = body.len();
     st.state
         .seed(&key, body.into_iter().map(Into::into).collect())
         .await?;
+    // The seeded data is not recorded, only how much of it there was.
+    access
+        .audit(
+            &st.audit,
+            "session.seed",
+            format!("session:{}/{}", key.mock, key.session),
+            None,
+            Some(serde_json::json!({ "resources": resources })),
+        )
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -195,5 +206,14 @@ pub async fn reset(
     access.require(Permission::Edit)?;
     let key = key(&st, &access.ws, path).await?;
     st.state.reset(&key).await?;
+    access
+        .audit(
+            &st.audit,
+            "session.reset",
+            format!("session:{}/{}", key.mock, key.session),
+            None,
+            None,
+        )
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }

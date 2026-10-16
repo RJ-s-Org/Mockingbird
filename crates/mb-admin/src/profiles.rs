@@ -15,6 +15,7 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 use crate::access::WsAccess;
+use crate::audit::snapshot;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, glob_match, valid_identifier};
 
@@ -253,7 +254,8 @@ pub async fn put(
             "profile names are 1-128 characters of [A-Za-z0-9._-]",
         ));
     }
-    if let Some(existing) = st.store.get_profile(&access.ws, &name).await? {
+    let existing = st.store.get_profile(&access.ws, &name).await?;
+    if let Some(existing) = &existing {
         ensure_api_managed(&existing.source, format_args!("LLM profile {name:?}"))?;
     }
     if let Some(obj) = body.as_object()
@@ -299,8 +301,21 @@ pub async fn put(
             )
         })
         .collect();
+    let view = LlmProfileView::from(profile);
+    access
+        .audit(
+            &st.audit,
+            "profile.put",
+            format!("profile:{}", view.name),
+            existing
+                .map(LlmProfileView::from)
+                .as_ref()
+                .and_then(snapshot),
+            snapshot(&view),
+        )
+        .await;
     Ok(Json(ProfileWriteResult {
-        profile: profile.into(),
+        profile: view,
         warnings,
     }))
 }
@@ -329,6 +344,15 @@ pub async fn delete(
     let existing = find(&st, &access.ws, &name).await?;
     ensure_api_managed(&existing.source, format_args!("LLM profile {name:?}"))?;
     if st.store.delete_profile(&access.ws, &name).await? {
+        access
+            .audit(
+                &st.audit,
+                "profile.delete",
+                format!("profile:{name}"),
+                snapshot(&LlmProfileView::from(existing)),
+                None,
+            )
+            .await;
         let users = mocks_using(&st, &access.ws, &name).await?;
         if users.is_empty() {
             return Ok(StatusCode::NO_CONTENT.into_response());

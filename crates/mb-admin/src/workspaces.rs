@@ -1,7 +1,7 @@
 //! `/api/v1/workspaces` and `/api/v1/workspaces/{ws}`.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::{Permission, Principal, Role};
@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AdminState;
-use crate::access::{CurrentPrincipal, WsAccess};
+use crate::access::{CurrentPrincipal, WsAccess, request_id};
+use crate::audit::snapshot;
 use crate::problem::{ApiResult, Json, Problem, Query};
 
 /// Longest accepted `display_name`, in characters.
@@ -120,6 +121,7 @@ pub async fn list(
 pub async fn create(
     State(st): State<AdminState>,
     CurrentPrincipal(principal): CurrentPrincipal,
+    headers: HeaderMap,
     Json(body): Json<CreateWorkspace>,
 ) -> ApiResult<impl IntoResponse> {
     if !principal.sysadmin {
@@ -128,10 +130,19 @@ pub async fn create(
     let display_name = body.display_name.unwrap_or_else(|| body.name.clone());
     validate_display_name(&display_name)?;
     let created = st.store.create_workspace(&body.name, &display_name).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(WorkspaceView::new(created, &principal)),
-    ))
+    let view = WorkspaceView::new(created, &principal);
+    st.audit
+        .record_by(
+            &principal,
+            Some(view.name.clone()),
+            request_id(&headers),
+            "workspace.create",
+            format!("workspace:{}", view.name),
+            None,
+            snapshot(&view),
+        )
+        .await;
+    Ok((StatusCode::CREATED, Json(view)))
 }
 
 #[utoipa::path(
@@ -177,11 +188,26 @@ pub async fn patch(
 ) -> ApiResult<Json<WorkspaceView>> {
     access.require(Permission::ManageWorkspace)?;
     validate_display_name(&body.display_name)?;
+    let before = st
+        .store
+        .get_workspace(&access.ws)
+        .await?
+        .map(|w| WorkspaceView::new(w, &access.principal));
     let updated = st
         .store
         .update_workspace(&access.ws, &body.display_name)
         .await?;
-    Ok(Json(WorkspaceView::new(updated, &access.principal)))
+    let view = WorkspaceView::new(updated, &access.principal);
+    access
+        .audit(
+            &st.audit,
+            "workspace.update",
+            format!("workspace:{}", access.ws),
+            before.as_ref().and_then(snapshot),
+            snapshot(&view),
+        )
+        .await;
+    Ok(Json(view))
 }
 
 #[utoipa::path(
@@ -208,6 +234,11 @@ pub async fn delete(
         return Err(Problem::conflict("the default workspace cannot be deleted"));
     }
     let force = params.force.unwrap_or(false);
+    let before = st
+        .store
+        .get_workspace(ws)
+        .await?
+        .map(|w| WorkspaceView::new(w, &access.principal));
     if force {
         // Session state goes first, so a failed reset (503) leaves the
         // workspace in place for a retry.
@@ -216,6 +247,15 @@ pub async fn delete(
         }
     }
     if st.store.delete_workspace(ws, force).await? {
+        access
+            .audit(
+                &st.audit,
+                "workspace.delete",
+                format!("workspace:{ws}"),
+                before.as_ref().and_then(snapshot),
+                None,
+            )
+            .await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(Problem::not_found(format!(

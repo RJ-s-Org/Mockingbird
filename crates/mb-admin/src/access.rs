@@ -83,7 +83,7 @@ fn no_access(ws: &str) -> Problem {
 }
 
 /// The request id of a request (see [`WsAccess::request_id`]).
-fn request_id(headers: &HeaderMap) -> String {
+pub(crate) fn request_id(headers: &HeaderMap) -> String {
     headers
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
