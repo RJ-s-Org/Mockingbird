@@ -36,6 +36,10 @@ pub enum LeaderBackend {
     Postgres(String),
     /// A `redis://` or `rediss://` URL.
     Redis(String),
+    /// Leadership set from outside through the paired `watch::Sender`
+    /// (tests flip it by hand).
+    #[doc(hidden)]
+    Manual(watch::Receiver<bool>),
 }
 
 /// Renewal and lease timings; [`Default`] gives the production values.
@@ -107,6 +111,14 @@ impl Leadership {
                 return Ok(Self {
                     rx,
                     _always: Some(tx),
+                    task: None,
+                    release: None,
+                });
+            }
+            LeaderBackend::Manual(rx) => {
+                return Ok(Self {
+                    rx,
+                    _always: None,
                     task: None,
                     release: None,
                 });

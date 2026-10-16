@@ -112,6 +112,16 @@ pub trait BrokerClient: Send + Sync {
         binding: &ChannelBinding,
         group: &str,
     ) -> Result<MessageStream, BrokerError>;
+    /// [`BrokerClient::subscribe`] when several nodes consume the same
+    /// channel and each message should reach one of them (default: the
+    /// consumer group already shares the messages).
+    async fn subscribe_shared(
+        &self,
+        binding: &ChannelBinding,
+        group: &str,
+    ) -> Result<MessageStream, BrokerError> {
+        self.subscribe(binding, group).await
+    }
     /// Flush queued messages (default: nothing to flush).
     async fn flush(&self, _timeout: Duration) {}
     /// Whether the client can still be used. A client that cannot (its

@@ -111,6 +111,7 @@ fn start(enabled: bool, triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -
         brokers,
         lease,
         holder: "replica-1".into(),
+        shared_subscriptions: false,
     };
     let setup = EventSetup {
         broker: None,
@@ -119,6 +120,7 @@ fn start(enabled: bool, triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -
             ChannelSetup { enabled, triggers },
         )]),
         lease_key: "default/orders".into(),
+        mode: Default::default(),
     };
     let channels = ChannelRuntime::start(Arc::new(rt), deps, setup);
     Harness {
@@ -355,11 +357,13 @@ async fn state_effect_and_trigger_on_one_topic_stay_bounded() {
         brokers,
         lease: ScriptedLease::new(vec![Ok(true)]),
         holder: "replica-1".into(),
+        shared_subscriptions: false,
     };
     let setup = EventSetup {
         broker: None,
         channels: HashMap::new(),
         lease_key: "default/loop".into(),
+        mode: Default::default(),
     };
     let _channels = ChannelRuntime::start(Arc::new(rt), deps, setup);
     // Let the consumer subscribe.
@@ -416,6 +420,7 @@ fn start_chat(triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -> Harness 
         brokers,
         lease,
         holder: "replica-2".into(),
+        shared_subscriptions: false,
     };
     let setup = EventSetup {
         broker: None,
@@ -427,6 +432,7 @@ fn start_chat(triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -> Harness 
             },
         )]),
         lease_key: "default/chat".into(),
+        mode: Default::default(),
     };
     let channels = ChannelRuntime::start(Arc::new(rt), deps, setup);
     Harness {

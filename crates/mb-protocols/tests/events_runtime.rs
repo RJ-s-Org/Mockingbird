@@ -9,8 +9,8 @@ use mb_engine::{Engine, EngineConfig, Source};
 use mb_ext::EnvFileSecrets;
 use mb_mcm::{Bundle, ChannelBinding, Direction, Reply};
 use mb_protocols::events::{
-    BrokerConfig, BrokerKind, Brokers, ChannelRuntime, ChannelSetup, EventDeps, EventSetup,
-    InMessage, MemoryBroker, PublishError, PublishFailure,
+    BrokerConfig, BrokerKind, Brokers, ChannelMode, ChannelRuntime, ChannelSetup, EventDeps,
+    EventSetup, InMessage, MemoryBroker, PublishError, PublishFailure, WS_PUBLISH_ON_DATA_NODES,
 };
 use mb_protocols::{MockRuntime, RequestKind, RequestRecord, RequestRecorder};
 use mb_state::{MemoryStore, SessionKey, StateStore};
@@ -599,4 +599,53 @@ async fn dropping_runtime_stops_consumers() {
         .inject(&binding, incoming(br#"{"orderId":"o5"}"#, &[]));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(h.records.records().is_empty());
+}
+
+#[tokio::test]
+async fn publish_only_runtime_starts_nothing_but_publishes_to_brokers() {
+    let bundle = orders();
+    let binding = cancel_binding(&bundle);
+    let h = runtime_with(
+        bundle,
+        EventSetup {
+            mode: ChannelMode::PublishOnly,
+            ..EventSetup::default()
+        },
+    );
+    settle().await;
+    assert!(h.broker.subscribed_groups().is_empty());
+    h.broker
+        .inject(&binding, incoming(br#"{"orderId":"o1"}"#, &[]));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.broker.published().is_empty());
+
+    let published = h
+        .channels
+        .publish_manual("orderCancelled", 1, None)
+        .await
+        .unwrap();
+    assert_eq!(published.len(), 1);
+    assert_eq!(h.broker.published().len(), 1);
+}
+
+#[tokio::test]
+async fn publish_only_runtime_refuses_websocket_publish() {
+    let chat = mb_import::compile(include_bytes!(
+        "../../../fixtures/asyncapi/chat-ws-2.6.yaml"
+    ))
+    .unwrap();
+    let h = runtime_with(
+        chat,
+        EventSetup {
+            mode: ChannelMode::PublishOnly,
+            ..EventSetup::default()
+        },
+    );
+    assert!(h.channels.ws_router().is_none());
+    assert_eq!(
+        h.channels.publish_manual("chatMessage", 1, None).await,
+        Err(PublishFailure::from(PublishError::NotPublishable(
+            WS_PUBLISH_ON_DATA_NODES.into()
+        )))
+    );
 }

@@ -481,6 +481,7 @@ fn deps(
         limiter: mb_engine::GenerationLimiter::new(64),
         scrubber: None,
         limits: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     }
 }
 
@@ -503,6 +504,8 @@ fn ops_state(
         prometheus: telemetry::install_prometheus().unwrap(),
         readyz_auth: None,
         bus: None,
+        role: mockingbird::file_config::Role::All,
+        leader: tokio::sync::watch::channel(true).1,
     }
 }
 
@@ -953,7 +956,10 @@ async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
     for anonymous in [None, Some("Bearer wrong")] {
         assert_eq!(
             readyz(anonymous).await,
-            (200, json!({"status": "degraded"}))
+            (
+                200,
+                json!({"status": "degraded", "role": "all", "leader": true})
+            )
         );
     }
     let (status, body) = readyz(Some("Bearer ok")).await;
@@ -966,7 +972,13 @@ async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
 
     // Unavailable: the control store is down too.
     stub.ping_fails.store(true, Ordering::Relaxed);
-    assert_eq!(readyz(None).await, (503, json!({"status": "unavailable"})));
+    assert_eq!(
+        readyz(None).await,
+        (
+            503,
+            json!({"status": "unavailable", "role": "all", "leader": true})
+        )
+    );
     let (status, body) = readyz(Some("Bearer ok")).await;
     assert_eq!(status, 503);
     assert!(!body["reasons"].as_array().unwrap().is_empty(), "{body}");
@@ -1015,6 +1027,8 @@ async fn metrics_exposes_request_counters() {
         prometheus,
         readyz_auth: None,
         bus: None,
+        role: mockingbird::file_config::Role::All,
+        leader: tokio::sync::watch::channel(true).1,
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();

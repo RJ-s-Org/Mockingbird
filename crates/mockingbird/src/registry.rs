@@ -14,17 +14,17 @@ use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
 use mb_mcm::{Channel, ChannelBinding, Direction, Protocol};
-use mb_protocols::events::{ChannelRuntime, ChannelSetup, EventSetup};
+use mb_protocols::events::{ChannelMode, ChannelRuntime, ChannelSetup, EventSetup};
 use mb_protocols::grpc::{GrpcError, GrpcMock, GrpcServer};
 use mb_protocols::http_rest::{self, problem};
 use mb_protocols::{MountPrefix, StateHealth, graphql, soap};
-use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, Mock};
+use mb_store::{ControlChange, DEFAULT_WORKSPACE, Mock};
 use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
 use crate::budget::StoreTokenBudget;
 use crate::ha::HubEvent;
-use crate::runtime::{RuntimeDeps, build_runtime_with_budget};
+use crate::runtime::{RuntimeDeps, ServeMode, build_runtime_with_budget};
 
 /// How a mock is named in logs and `/readyz`: `name` in the default
 /// workspace, `workspace/name` elsewhere.
@@ -595,7 +595,7 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
     let events = if channels.is_empty() {
         None
     } else {
-        let setup = event_setup(deps.store.as_ref(), mock, &channels)
+        let setup = event_setup(deps, mock, &channels)
             .await
             .map_err(|error| {
                 let error = format!("{error:#}");
@@ -650,13 +650,14 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
 
 /// The stored event settings of `mock`: its broker and, by channel id,
 /// each stored channel's `enabled` and triggers (the contract's when the
-/// stored row keeps them).
+/// stored row keeps them), in the channel mode `deps.mode` calls for.
 async fn event_setup(
-    store: &dyn ControlStore,
+    deps: &RuntimeDeps,
     mock: &Mock,
     channels: &[Channel],
 ) -> anyhow::Result<EventSetup> {
     use anyhow::Context as _;
+    let store = deps.store.as_ref();
     let broker = store
         .get_event_settings(mock.id)
         .await
@@ -687,6 +688,10 @@ async fn event_setup(
         broker,
         channels,
         lease_key: mock.id.to_string(),
+        mode: match deps.mode {
+            ServeMode::Full => ChannelMode::Full,
+            ServeMode::ControlOnly => ChannelMode::PublishOnly,
+        },
     })
 }
 

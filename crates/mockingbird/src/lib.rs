@@ -15,5 +15,6 @@ pub mod reconcile;
 pub mod recorder;
 pub mod registry;
 pub mod runtime;
+pub mod server;
 pub mod telemetry;
 pub mod watch;

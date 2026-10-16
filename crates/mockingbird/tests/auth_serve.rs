@@ -267,9 +267,11 @@ async fn host_guard_allows_external_host_only() {
         let (status, body) = h.send("GET", path, Some("10.0.0.5"), None, None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
         if path == "/readyz" {
-            // Anonymous callers in oidc mode get the status only.
+            // Anonymous callers in oidc mode get no reasons (the status,
+            // role and leader flag only).
             let body: Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+            assert!(body.get("reasons").is_none(), "{body}");
+            assert_eq!(body.as_object().unwrap().len(), 3, "{body}");
         }
     }
 }

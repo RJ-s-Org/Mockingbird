@@ -75,6 +75,19 @@ async fn always_is_leader() {
     assert!(*l.watch().borrow());
 }
 
+#[tokio::test]
+async fn manual_follows_its_sender() {
+    let (tx, rx) = watch::channel(false);
+    let l = Leadership::start(LeaderBackend::Manual(rx), "control", "n1".into())
+        .await
+        .expect("start");
+    assert!(!l.is_leader());
+    let mut w = l.watch();
+    tx.send(true).expect("send");
+    wait_for(&mut w, true, Duration::from_secs(1)).await;
+    assert!(l.is_leader());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_leader_single_holder() {
     let Some(url) = env_url(PG_VAR) else { return };

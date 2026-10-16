@@ -70,6 +70,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         limiter: mb_engine::GenerationLimiter::new(64),
         scrubber: None,
         limits: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     }
 }
 
@@ -846,6 +847,31 @@ async fn asyncapi_mock_mounts_with_channel_runtime() {
         .unwrap();
     assert_eq!(r.status(), 404);
     assert_eq!(r.headers()["content-type"], "application/problem+json");
+}
+
+#[tokio::test]
+async fn control_only_mode_starts_no_consumers() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &orders_asyncapi_source()).await;
+    let mut deps = event_deps(store);
+    deps.mode = mockingbird::runtime::ServeMode::ControlOnly;
+    let broker = deps.events.brokers.memory("mem").unwrap();
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let channels = registry
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
+        .expect("a channel runtime for manual publish");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(broker.subscribed_groups().is_empty());
+    assert_eq!(
+        channels
+            .publish_manual("orderCreated", 1, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -42,6 +42,17 @@ pub fn stop_open_streams() {
     STOP.send_replace(true);
 }
 
+/// What the mock runtimes of a node run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServeMode {
+    /// Everything (roles `all` and `data`).
+    Full,
+    /// Role `control`: the runtimes are built for manual publish only;
+    /// their channel runtimes are
+    /// [`PublishOnly`](mb_protocols::events::ChannelMode::PublishOnly).
+    ControlOnly,
+}
+
 /// Everything shared by the runtimes of all mocks.
 #[derive(Clone)]
 pub struct RuntimeDeps {
@@ -70,6 +81,8 @@ pub struct RuntimeDeps {
     pub scrubber: Option<Arc<Scrubber>>,
     /// The global `limits:`, for mocks that set none of their own.
     pub limits: LimitsConfig,
+    /// What the runtimes run (see [`ServeMode`]).
+    pub mode: ServeMode,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so

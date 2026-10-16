@@ -36,9 +36,11 @@ const MAX_PACKET_BYTES: u32 = 2 * MAX_MESSAGE_BYTES as u32;
 const HEADER_CORRELATION: &str = "correlation_id";
 /// The header carrying an MQTT 5 response topic.
 const HEADER_RESPONSE_TOPIC: &str = "response_topic";
-/// A live subscription: its MQTT filter and where to deliver.
+/// A live subscription: its MQTT filter, the filter it was subscribed
+/// with (a shared subscription's `$share/...` form) and where to deliver.
 struct Subscription {
     filter: String,
+    subscribed: String,
     qos: QoS,
     tx: SubscriptionSender,
 }
@@ -78,6 +80,8 @@ impl Link {
 /// the client drops.
 pub struct MqttClient {
     client: AsyncClient,
+    /// The shared-subscription group: the broker's `client_id_prefix`.
+    share_group: String,
     subs: Subscriptions,
     link: Arc<Link>,
     event_loop: tokio::task::JoinHandle<()>,
@@ -103,6 +107,13 @@ pub(crate) fn mqtt_filter(topic_template: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// The MQTT 5 shared subscription of `filter` in `group`:
+/// `$share/<group>/<filter>`; the broker delivers each message to one
+/// member of the group.
+pub(crate) fn shared_filter(group: &str, filter: &str) -> String {
+    format!("$share/{group}/{filter}")
 }
 
 /// Whether `topic` matches the MQTT topic `filter` (`+` one level, `#`
@@ -239,7 +250,7 @@ fn resubscribe(client: &AsyncClient, subs: &Mutex<Vec<Subscription>>) {
     let mut filters: Vec<(String, QoS)> = lock(subs)
         .iter()
         .filter(|sub| !sub.tx.is_closed())
-        .map(|sub| (sub.filter.clone(), sub.qos))
+        .map(|sub| (sub.subscribed.clone(), sub.qos))
         .collect();
     filters.sort_by(|a, b| a.0.cmp(&b.0));
     filters.dedup_by(|a, b| a.0 == b.0);
@@ -323,10 +334,44 @@ impl MqttClient {
         ));
         Ok(Self {
             client,
+            share_group: cfg.client_id_prefix.clone(),
             subs,
             link,
             event_loop,
         })
+    }
+}
+
+impl MqttClient {
+    async fn subscribe_as(
+        &self,
+        binding: &ChannelBinding,
+        shared: bool,
+    ) -> Result<MessageStream, BrokerError> {
+        let Some((topic, level, _)) = mqtt_binding(binding) else {
+            return Err(BrokerError::Unsupported(
+                "an mqtt broker serves only mqtt bindings".into(),
+            ));
+        };
+        let filter = mqtt_filter(topic);
+        let subscribed = if shared {
+            shared_filter(&self.share_group, &filter)
+        } else {
+            filter.clone()
+        };
+        let qos = qos(level);
+        let (tx, rx) = subscription("mqtt", &filter);
+        lock(&self.subs).push(Subscription {
+            filter,
+            subscribed: subscribed.clone(),
+            qos,
+            tx,
+        });
+        self.client
+            .subscribe(subscribed, qos)
+            .await
+            .map_err(|e| BrokerError::Subscribe(e.to_string()))?;
+        Ok(rx)
     }
 }
 
@@ -372,24 +417,17 @@ impl BrokerClient for MqttClient {
         binding: &ChannelBinding,
         _group: &str,
     ) -> Result<MessageStream, BrokerError> {
-        let Some((topic, level, _)) = mqtt_binding(binding) else {
-            return Err(BrokerError::Unsupported(
-                "an mqtt broker serves only mqtt bindings".into(),
-            ));
-        };
-        let filter = mqtt_filter(topic);
-        let qos = qos(level);
-        let (tx, rx) = subscription("mqtt", &filter);
-        lock(&self.subs).push(Subscription {
-            filter: filter.clone(),
-            qos,
-            tx,
-        });
-        self.client
-            .subscribe(filter, qos)
-            .await
-            .map_err(|e| BrokerError::Subscribe(e.to_string()))?;
-        Ok(rx)
+        self.subscribe_as(binding, false).await
+    }
+
+    /// Subscribes to `$share/<client_id_prefix>/<topic>`, so the nodes
+    /// sharing a broker each get some of the messages.
+    async fn subscribe_shared(
+        &self,
+        binding: &ChannelBinding,
+        _group: &str,
+    ) -> Result<MessageStream, BrokerError> {
+        self.subscribe_as(binding, true).await
     }
 
     /// Send what is queued: a `Disconnect` is queued behind the pending
@@ -435,6 +473,15 @@ mod tests {
         assert_eq!(mqtt_filter("sensors/{id}/t"), "sensors/+/t");
         assert_eq!(mqtt_filter("{a}/{b}"), "+/+");
         assert_eq!(mqtt_filter("plain/topic"), "plain/topic");
+    }
+
+    #[test]
+    fn mqtt_shared_subscription_topic() {
+        assert_eq!(
+            shared_filter("mockingbird", &mqtt_filter("sensors/{id}/t")),
+            "$share/mockingbird/sensors/+/t"
+        );
+        assert_eq!(shared_filter("mb", "plain/topic"), "$share/mb/plain/topic");
     }
 
     #[test]

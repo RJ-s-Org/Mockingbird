@@ -36,6 +36,7 @@ fn deps(store: Arc<dyn ControlStore>, offline: bool, default_profile: Option<&st
         limiter: mb_engine::GenerationLimiter::new(64),
         scrubber: None,
         limits: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     }
 }
 
