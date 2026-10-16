@@ -43,6 +43,34 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
 
+  # Each mb-protocols feature (and none) must build on its own, warnings
+  # included (P4 Global Constraints).
+  protocol-features:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [none, http-rest, sse, websocket, graphql, grpc, soap]
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: protocols-${{ matrix.features }}
+      - name: cargo check -p mb-protocols (${{ matrix.features }})
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          if [ "$FEATURES" = none ]; then
+            cargo check -p mb-protocols --no-default-features
+          else
+            cargo check -p mb-protocols --no-default-features --features "$FEATURES"
+          fi
+
   console:
     runs-on: ubuntu-latest
     defaults:
