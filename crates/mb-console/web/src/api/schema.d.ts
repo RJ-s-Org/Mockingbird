@@ -1014,7 +1014,10 @@ export interface components {
              * @description The draft contract version a `done` job produced.
              */
             result_version?: number | null;
-            /** @description The file name or URL imported. */
+            /**
+             * @description The file name (control characters removed) or URL (query values
+             *     replaced by `REDACTED`, fragment dropped) imported.
+             */
             source_name?: string | null;
             /** Format: date-time */
             started_at?: string | null;
@@ -2216,6 +2219,17 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The quota refused the preview (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The mock's LLM is unavailable */
             502: {
                 headers: {
@@ -2366,6 +2380,17 @@ export interface operations {
             /** @description Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM */
             422: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mock has `import.max_active_jobs_per_mock` queued or running jobs, or the quota refused the import (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4034,6 +4059,17 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The quota refused the preview (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The mock's LLM is unavailable */
             502: {
                 headers: {
@@ -4190,6 +4226,17 @@ export interface operations {
             /** @description Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM */
             422: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mock has `import.max_active_jobs_per_mock` queued or running jobs, or the quota refused the import (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
