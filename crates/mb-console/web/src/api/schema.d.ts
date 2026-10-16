@@ -1130,6 +1130,15 @@ export interface operations {
                     "application/json": components["schemas"]["ProfileWriteResult"];
                 };
             };
+            /** @description Not an admin of the workspace, or not a sysadmin when setting or changing `secret_ref` or the `base_url` of a profile with one */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Managed by config file */
             409: {
                 headers: {
@@ -2527,6 +2536,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProfileWriteResult"];
+                };
+            };
+            /** @description Not an admin of the workspace, or not a sysadmin when setting or changing `secret_ref` or the `base_url` of a profile with one */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Managed by config file */
