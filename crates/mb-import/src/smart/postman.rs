@@ -13,7 +13,9 @@ use super::model::{
     DraftBody, DraftOperation, DraftParam, DraftResponse, DraftWarning, EXCERPT_CHARS,
     MAX_PROVENANCE, ParamLocation, Provenance, RecordedImport,
 };
-use super::paths::{infer_templates, is_id_like, normalize_path, path_key};
+use super::paths::{
+    Shape, infer_templates_with, is_id_like, normalize_path, path_key, slug_warning,
+};
 use super::redact::{REDACTED, is_sensitive_name, redact};
 
 /// Confidence of an operation whose path has an inferred slug parameter.
@@ -115,7 +117,19 @@ pub fn import_postman(bytes: &[u8]) -> Result<RecordedImport, SmartError> {
         all_paths.extend(item.examples.iter().filter_map(|e| e.path.clone()));
     }
     let all_paths: Vec<String> = all_paths.into_iter().collect();
-    let templates = infer_templates(&all_paths);
+    // The first JSON success body of each path, from the examples.
+    let mut shapes: BTreeMap<String, Shape> = BTreeMap::new();
+    for item in &items {
+        for example in &item.examples {
+            if let (200..=299, Some(body)) = (example.status, &example.body) {
+                let path = example.path.as_ref().unwrap_or(&item.path);
+                shapes
+                    .entry(path.clone())
+                    .or_insert_with(|| Shape::of(body));
+            }
+        }
+    }
+    let templates = infer_templates_with(&all_paths, &shapes);
     let template_of = |path: &str| {
         templates
             .get(path)
@@ -136,10 +150,12 @@ pub fn import_postman(bytes: &[u8]) -> Result<RecordedImport, SmartError> {
             }
         }
     }
-    let operations = groups
-        .into_iter()
-        .map(|(template, items)| build_operation(&template, &items, &template_of))
-        .collect();
+    let mut operations = Vec::new();
+    for (template, items) in groups {
+        let (operation, slug) = build_operation(&template, &items, &template_of);
+        warnings.extend(slug);
+        operations.push(operation);
+    }
 
     Ok(RecordedImport {
         title,
@@ -468,22 +484,26 @@ fn parse_example(example: &Value) -> Option<Example> {
 }
 
 /// One operation from the items sharing a merge key: union of examples,
-/// parameters and tags; the first summary and description win.
+/// parameters and tags; the first summary and description win. With a
+/// warning when its path has slug parameters.
 fn build_operation(
     template: &str,
     items: &[&Item],
     template_of: &dyn Fn(&str) -> String,
-) -> DraftOperation {
+) -> (DraftOperation, Option<DraftWarning>) {
     let mut tags: Vec<String> = Vec::new();
     for tag in items.iter().filter_map(|i| i.tag.as_ref()) {
         if !tags.contains(tag) {
             tags.push(tag.clone());
         }
     }
-    let (mut parameters, slug) = path_parameters(template, items, template_of);
+    let (mut parameters, slugs) = path_parameters(template, items, template_of);
     parameters.extend(query_parameters(items));
-    DraftOperation {
-        method: items.first().map(|i| i.method.clone()).unwrap_or_default(),
+    let slug = !slugs.is_empty();
+    let method = items.first().map(|i| i.method.clone()).unwrap_or_default();
+    let warning = slug.then(|| slug_warning(&format!("{method} {template}"), &slugs));
+    let operation = DraftOperation {
+        method,
         path: template.to_string(),
         operation_id: None,
         summary: items.iter().find_map(|i| i.summary.clone()),
@@ -502,7 +522,8 @@ fn build_operation(
                 excerpt: i.excerpt.clone(),
             })
             .collect(),
-    }
+    };
+    (operation, warning)
 }
 
 fn segments(path: &str) -> Vec<&str> {
@@ -513,8 +534,8 @@ fn braced_name(segment: &str) -> Option<&str> {
     segment.strip_prefix('{').and_then(|s| s.strip_suffix('}'))
 }
 
-/// Path parameters in path order, and whether any was inferred from a slug
-/// (a literal, non-id segment of a request path).
+/// Path parameters in path order, and the ones inferred from a slug (a
+/// literal, non-id segment of a request path) with their values.
 ///
 /// Values come from `url.variable`, from literal request paths, and from
 /// the `originalRequest` paths of examples that map onto the same template.
@@ -522,7 +543,7 @@ fn path_parameters(
     template: &str,
     items: &[&Item],
     template_of: &dyn Fn(&str) -> String,
-) -> (Vec<DraftParam>, bool) {
+) -> (Vec<DraftParam>, Vec<(String, Vec<String>)>) {
     let key = path_key("GET", template);
     // (concrete path, its item when it is the request path)
     let mut concrete: Vec<(&str, Option<&Item>)> = Vec::new();
@@ -536,13 +557,14 @@ fn path_parameters(
             }
         }
     }
-    let mut slug = false;
+    let mut slugs = Vec::new();
     let mut params = Vec::new();
     for (pos, segment) in segments(template).iter().enumerate() {
         let Some(name) = braced_name(segment) else {
             continue;
         };
         let mut values: Vec<&str> = Vec::new();
+        let mut slug_values: Vec<String> = Vec::new();
         for (path, request) in &concrete {
             let Some(value) = segments(path).get(pos).copied() else {
                 continue;
@@ -554,14 +576,17 @@ fn path_parameters(
                 continue;
             }
             if request.is_some() && !is_id_like(value) {
-                slug = true;
+                slug_values.push(value.to_string());
             }
             values.push(value);
         }
         values.retain(|v| usable_value(v));
         params.push(scalar_param(name, ParamLocation::Path, true, &values));
+        if !slug_values.is_empty() {
+            slugs.push((name.to_string(), slug_values));
+        }
     }
-    (params, slug)
+    (params, slugs)
 }
 
 /// Not empty and not a `{{variable}}` reference.

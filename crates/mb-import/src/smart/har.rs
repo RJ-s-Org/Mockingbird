@@ -15,7 +15,7 @@ use super::model::{
     DraftBody, DraftOperation, DraftParam, DraftResponse, DraftWarning, EXCERPT_CHARS,
     MAX_PROVENANCE, ParamLocation, Provenance, RecordedImport,
 };
-use super::paths::{infer_templates, is_id_like, normalize_path};
+use super::paths::{Shape, infer_templates_with, is_id_like, normalize_path, slug_warning};
 use super::redact::{is_sensitive_name, redact};
 
 /// Confidence of an operation whose path has an inferred slug parameter.
@@ -108,7 +108,16 @@ pub fn import_har(bytes: &[u8]) -> Result<RecordedImport, SmartError> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let templates = infer_templates(&paths);
+    // The first JSON success body recorded for each path.
+    let mut shapes: BTreeMap<String, Shape> = BTreeMap::new();
+    for entry in &kept {
+        if let (200..=299, ResponseBody::Json(_, Some(body))) = (entry.status, &entry.response) {
+            shapes
+                .entry(entry.path.clone())
+                .or_insert_with(|| Shape::of(body));
+        }
+    }
+    let templates = infer_templates_with(&paths, &shapes);
     let mut groups: BTreeMap<(String, String), Vec<&Entry>> = BTreeMap::new();
     for entry in &kept {
         let template = templates
@@ -119,10 +128,12 @@ pub fn import_har(bytes: &[u8]) -> Result<RecordedImport, SmartError> {
             .or_default()
             .push(entry);
     }
-    let operations: Vec<DraftOperation> = groups
-        .into_iter()
-        .map(|((path, method), entries)| build_operation(method, path, &entries))
-        .collect();
+    let mut operations: Vec<DraftOperation> = Vec::new();
+    for ((path, method), entries) in groups {
+        let (operation, slug) = build_operation(method, path, &entries);
+        warnings.extend(slug);
+        operations.push(operation);
+    }
 
     let host = kept
         .first()
@@ -267,8 +278,15 @@ fn dominant_origin(entries: &[Entry]) -> Option<String> {
     best.map(|(origin, _)| origin)
 }
 
-fn build_operation(method: String, path: String, entries: &[&Entry]) -> DraftOperation {
-    let (mut parameters, slug) = path_parameters(&path, entries);
+/// The operation, and a warning when its path has slug parameters.
+fn build_operation(
+    method: String,
+    path: String,
+    entries: &[&Entry],
+) -> (DraftOperation, Option<DraftWarning>) {
+    let (mut parameters, slugs) = path_parameters(&path, entries);
+    let slug = !slugs.is_empty();
+    let warning = slug.then(|| slug_warning(&format!("{method} {path}"), &slugs));
     parameters.extend(query_parameters(entries));
     let target_url = |e: &Entry| {
         let mut url = e.url.clone();
@@ -292,7 +310,7 @@ fn build_operation(method: String, path: String, entries: &[&Entry]) -> DraftOpe
                 .collect(),
         })
         .collect();
-    DraftOperation {
+    let operation = DraftOperation {
         method,
         path,
         operation_id: None,
@@ -304,18 +322,22 @@ fn build_operation(method: String, path: String, entries: &[&Entry]) -> DraftOpe
         responses: responses(entries),
         confidence: if slug { SLUG_CONFIDENCE } else { 1.0 },
         provenance,
-    }
+    };
+    (operation, warning)
 }
 
-/// Path parameters in path order, and whether any of them is a slug (a
-/// parameter with a concrete value that is not id-like).
-fn path_parameters(template: &str, entries: &[&Entry]) -> (Vec<DraftParam>, bool) {
+/// Path parameters in path order, and the slug ones (a parameter with a
+/// concrete value that is not id-like) with their values.
+fn path_parameters(
+    template: &str,
+    entries: &[&Entry],
+) -> (Vec<DraftParam>, Vec<(String, Vec<String>)>) {
     let template_segments: Vec<&str> = template.split('/').filter(|s| !s.is_empty()).collect();
     let concrete: Vec<Vec<&str>> = entries
         .iter()
         .map(|e| e.path.split('/').filter(|s| !s.is_empty()).collect())
         .collect();
-    let mut slug = false;
+    let mut slugs = Vec::new();
     let mut params = Vec::new();
     for (pos, segment) in template_segments.iter().enumerate() {
         let Some(name) = segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
@@ -325,7 +347,10 @@ fn path_parameters(template: &str, entries: &[&Entry]) -> (Vec<DraftParam>, bool
             .iter()
             .filter_map(|segs| segs.get(pos).copied())
             .collect();
-        slug |= values.iter().any(|v| !is_id_like(v));
+        if values.iter().any(|v| !is_id_like(v)) {
+            let shown = values.iter().map(|v| (*v).to_string()).collect();
+            slugs.push((name.to_string(), shown));
+        }
         let schema = infer_scalar(&values);
         let examples = typed_examples(&values, &schema);
         params.push(DraftParam {
@@ -337,7 +362,7 @@ fn path_parameters(template: &str, entries: &[&Entry]) -> (Vec<DraftParam>, bool
             examples,
         });
     }
-    (params, slug)
+    (params, slugs)
 }
 
 /// Query parameters sorted by name; required iff present in every entry.

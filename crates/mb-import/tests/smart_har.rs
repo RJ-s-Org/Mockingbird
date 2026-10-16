@@ -347,3 +347,120 @@ fn har_rejects_non_har() {
 fn har_petstore_snapshot() {
     insta::assert_yaml_snapshot!(petstore());
 }
+
+fn har_of(entries: &[(&str, serde_json::Value)]) -> Vec<u8> {
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|(path, body)| {
+            json!({
+                "request": {"method": "GET", "url": format!("https://x.test{path}"), "queryString": []},
+                "response": {"status": 200, "content": {
+                    "mimeType": "application/json", "text": body.to_string()
+                }}
+            })
+        })
+        .collect();
+    json!({"log": {"version": "1.2", "entries": entries}})
+        .to_string()
+        .into_bytes()
+}
+
+fn paths_of(import: &RecordedImport) -> Vec<String> {
+    let mut paths: Vec<String> = import
+        .operations
+        .iter()
+        .map(|o| format!("{} {}", o.method, o.path))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// `/api/users/42` shows `users` is a collection name, so the sibling list
+/// endpoints stay separate operations instead of becoming `/api/{apiId}`.
+#[test]
+fn sibling_collections_are_not_merged() {
+    assert_eq!(
+        templates(&[
+            "/api/users",
+            "/api/orders",
+            "/api/products",
+            "/api/users/42",
+            "/api/orders/7"
+        ]),
+        vec![
+            "/api/users",
+            "/api/orders",
+            "/api/products",
+            "/api/users/{userId}",
+            "/api/orders/{orderId}"
+        ]
+    );
+    let import = import_har(&har_of(&[
+        ("/api/users", json!([{"id": 1, "name": "a"}])),
+        ("/api/orders", json!([{"id": 7, "total": 3}])),
+        ("/api/products", json!([{"sku": "x", "price": 2}])),
+        ("/api/users/42", json!({"id": 42, "name": "a"})),
+        ("/api/orders/7", json!({"id": 7, "total": 3})),
+    ]))
+    .unwrap();
+    assert_eq!(
+        paths_of(&import),
+        vec![
+            "GET /api/orders",
+            "GET /api/orders/{orderId}",
+            "GET /api/products",
+            "GET /api/users",
+            "GET /api/users/{userId}"
+        ]
+    );
+    assert!(import.operations.iter().all(|o| o.confidence == 1.0));
+}
+
+/// Without item endpoints, sibling lists whose responses have different
+/// shapes are still different resources.
+#[test]
+fn sibling_lists_with_different_shapes_stay_apart() {
+    let import = import_har(&har_of(&[
+        ("/api/users", json!([{"id": 1, "name": "a", "email": "e"}])),
+        (
+            "/api/orders",
+            json!([{"orderNo": 7, "total": 3, "lines": []}]),
+        ),
+        ("/api/products", json!({"items": [], "next": null})),
+    ]))
+    .unwrap();
+    assert_eq!(
+        paths_of(&import),
+        vec!["GET /api/orders", "GET /api/products", "GET /api/users"]
+    );
+}
+
+/// A slug template that is kept says so in a warning.
+#[test]
+fn kept_slug_template_warns() {
+    let import = import_har(&har_of(&[
+        ("/users/alice", json!({"login": "alice", "name": "A"})),
+        ("/users/bob", json!({"login": "bob", "name": "B"})),
+        ("/users/carol", json!({"login": "carol"})),
+    ]))
+    .unwrap();
+    assert_eq!(paths_of(&import), vec!["GET /users/{userId}"]);
+    let warning = import
+        .warnings
+        .iter()
+        .find(|w| w.code == "conflicting_schemas")
+        .expect("a warning about the inferred parameter");
+    assert_eq!(warning.operation.as_deref(), Some("GET /users/{userId}"));
+    assert!(warning.message.contains("userId"), "{}", warning.message);
+    assert!(warning.message.contains("alice"), "{}", warning.message);
+}
+
+/// A literal after a slug is not a collection marker: `/pets/rex/toys`
+/// still templates, and the response-shape rule only applies with shapes.
+#[test]
+fn slugs_before_literals_still_template() {
+    assert_eq!(
+        templates(&["/pets/rex/toys", "/pets/fido/toys", "/pets/max/toys"]),
+        vec!["/pets/{petId}/toys"; 3]
+    );
+}

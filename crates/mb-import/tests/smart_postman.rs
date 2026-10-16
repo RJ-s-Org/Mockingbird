@@ -290,3 +290,78 @@ fn slug_parameter_lowers_confidence() {
     assert_eq!(redirect.confidence, 1.0);
     assert_eq!(redirect.parameters[0].name, "next");
 }
+
+fn collection(items: Vec<serde_json::Value>) -> RecordedImport {
+    let doc = json!({
+        "info": {
+            "name": "Shop",
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+        },
+        "item": items
+    });
+    import_postman(&serde_json::to_vec(&doc).unwrap()).unwrap()
+}
+
+/// A request whose single example answers `body`.
+fn answered(path: &str, body: serde_json::Value) -> serde_json::Value {
+    json!({"name": path, "request": {"method": "GET", "url": {"raw": format!("{{{{host}}}}{path}")}},
+           "response": [{"code": 200, "body": body.to_string()}]})
+}
+
+fn paths_of(import: &RecordedImport) -> Vec<String> {
+    let mut paths: Vec<String> = import.operations.iter().map(|o| o.path.clone()).collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn sibling_collections_are_not_merged() {
+    let import = collection(vec![
+        answered("/api/users", json!([{"id": 1}])),
+        answered("/api/orders", json!([{"id": 1}])),
+        answered("/api/products", json!([{"id": 1}])),
+        answered("/api/users/42", json!({"id": 42})),
+    ]);
+    assert_eq!(
+        paths_of(&import),
+        vec![
+            "/api/orders",
+            "/api/products",
+            "/api/users",
+            "/api/users/{userId}"
+        ]
+    );
+}
+
+#[test]
+fn sibling_lists_with_different_shapes_stay_apart() {
+    let import = collection(vec![
+        answered("/api/users", json!([{"id": 1, "name": "a", "email": "e"}])),
+        answered(
+            "/api/orders",
+            json!([{"orderNo": 7, "total": 3, "lines": []}]),
+        ),
+        answered("/api/products", json!({"items": [], "next": null})),
+    ]);
+    assert_eq!(
+        paths_of(&import),
+        vec!["/api/orders", "/api/products", "/api/users"]
+    );
+}
+
+#[test]
+fn kept_slug_template_warns() {
+    let import = collection(vec![
+        answered("/teams/red", json!({"name": "red", "size": 3})),
+        answered("/teams/blue", json!({"name": "blue", "size": 4})),
+        answered("/teams/green", json!({"name": "green"})),
+    ]);
+    assert_eq!(paths_of(&import), vec!["/teams/{teamId}"]);
+    let warning = import
+        .warnings
+        .iter()
+        .find(|w| w.code == "conflicting_schemas")
+        .expect("a warning about the inferred parameter");
+    assert_eq!(warning.operation.as_deref(), Some("GET /teams/{teamId}"));
+    assert!(warning.message.contains("teamId"), "{}", warning.message);
+}
