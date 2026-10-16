@@ -67,3 +67,7 @@ mb-llm = { workspace = true, features = ["testing"] }
 [[test]]
 name = "smart_text"
 required-features = ["smart"]
+
+[[test]]
+name = "smart_fetch"
+required-features = ["smart"]

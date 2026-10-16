@@ -2,6 +2,7 @@
 //! HAR recordings and Postman collections into reviewable draft contracts.
 
 pub mod chunk;
+pub mod fetch;
 pub mod model;
 pub mod text;
 
@@ -29,6 +30,12 @@ pub enum SmartError {
     Canceled,
     #[error("the draft does not compile: {0}")]
     Compile(String),
+}
+
+impl From<fetch::FetchError> for SmartError {
+    fn from(e: fetch::FetchError) -> Self {
+        SmartError::Fetch(e.to_string())
+    }
 }
 
 /// Kind of an uploaded file from its name and bytes; None when unknown.
