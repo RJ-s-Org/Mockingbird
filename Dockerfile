@@ -51,6 +51,14 @@ RUN find crates -name '*.rs' -exec touch {} + \
  && cargo build --release --locked -p mockingbird $FEATURES
 
 FROM gcr.io/distroless/cc-debian12:nonroot
+# OCI labels. The release workflow passes the release version (without the
+# leading `v`) and the commit SHA.
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/rjs-git/mockingbird" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=builder /src/target/release/mockingbird /usr/local/bin/mockingbird
 # Data plane, Admin API / ops and gRPC. All bind 127.0.0.1 unless told otherwise:
 #   docker run -p 8080:8080 -p 9090:9090 -p 50051:50051 IMAGE serve --host 0.0.0.0 --insecure-no-auth ...
