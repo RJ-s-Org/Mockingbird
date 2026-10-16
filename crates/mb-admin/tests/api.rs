@@ -1408,6 +1408,18 @@ async fn openapi_lists_all_paths() {
             "/api/v1/mocks/{mock}/contracts/{version}/activate",
             &["post"],
         ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/draft",
+            &["get", "put"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/approve",
+            &["post"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/preview",
+            &["post"],
+        ),
         ("/api/v1/mocks/{mock}/scenarios", &["get"]),
         ("/api/v1/mocks/{mock}/scenarios/{name}", &["put", "delete"]),
         ("/api/v1/llm-profiles", &["get"]),

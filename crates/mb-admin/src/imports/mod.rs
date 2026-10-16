@@ -108,7 +108,7 @@ impl ImportKindSchema {
         }
     }
 
-    fn from_job_kind(kind: &str) -> Self {
+    pub(crate) fn from_job_kind(kind: &str) -> Self {
         match ImportKind::parse(kind) {
             Some(ImportKind::Markdown) => Self::Markdown,
             Some(ImportKind::Html) => Self::Html,

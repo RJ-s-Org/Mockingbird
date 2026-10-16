@@ -24,6 +24,7 @@ mod apikeys;
 mod audit;
 mod auth_routes;
 mod contracts;
+mod drafts;
 pub mod imports;
 mod live;
 mod login_limit;
@@ -184,6 +185,18 @@ pub fn router(st: AdminState) -> Router {
         .route(
             "/mocks/{mock}/contracts/{version}/activate",
             post(contracts::activate),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/draft",
+            get(drafts::get_draft).put(drafts::put_draft),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/approve",
+            post(drafts::approve),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/preview",
+            post(drafts::preview),
         )
         .route("/mocks/{mock}/scenarios", get(scenarios::list))
         .route(

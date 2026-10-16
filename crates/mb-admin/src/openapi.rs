@@ -11,8 +11,8 @@ use utoipa::openapi::path::{Operation, ParameterIn, PathItem};
 use utoipa::openapi::{Deprecated, RefOr};
 
 use crate::{
-    API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, contracts, imports, live, mocks,
-    problem, profiles, requests, scenarios, sessions, workspaces,
+    API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, contracts, drafts, imports, live,
+    mocks, problem, profiles, requests, scenarios, sessions, workspaces,
 };
 
 #[derive(OpenApi)]
@@ -34,6 +34,10 @@ use crate::{
         contracts::get_one,
         contracts::source,
         contracts::activate,
+        drafts::get_draft,
+        drafts::put_draft,
+        drafts::approve,
+        drafts::preview,
         imports::create,
         imports::list,
         imports::get_one,
@@ -75,6 +79,18 @@ use crate::{
         contracts::ContractVersionSummary,
         contracts::ContractVersionDetail,
         contracts::OperationSummary,
+        drafts::ProvenanceView,
+        drafts::DraftOperationView,
+        drafts::DraftWarningView,
+        drafts::TokenUsageView,
+        drafts::DraftMetaView,
+        drafts::DraftDiffView,
+        drafts::DraftView,
+        drafts::PutDraft,
+        drafts::DraftIssueView,
+        drafts::DraftProblem,
+        drafts::PreviewRequest,
+        drafts::PreviewResponse,
         imports::ImportKindSchema,
         imports::ImportStatusSchema,
         imports::CreateImport,
