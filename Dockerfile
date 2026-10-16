@@ -21,11 +21,13 @@ FROM rust:1.97-bookworm AS builder
 WORKDIR /src
 COPY --from=manifests /manifests ./
 # Build the dependencies against stub sources (an empty lib per crate, a
-# stub `main` for the binary, and an empty file per declared test target).
+# stub `main` for the binary, a no-op build script where one is declared, and
+# an empty file per declared test target).
 RUN for manifest in crates/*/Cargo.toml; do \
         dir="$(dirname "$manifest")"; \
         mkdir -p "$dir/src" "$dir/tests"; \
         touch "$dir/src/lib.rs"; \
+        if grep -q '^build *=' "$manifest"; then echo 'fn main() {}' > "$dir/build.rs"; fi; \
         awk '/^\[\[test\]\]/{t=1; next} /^\[/{t=0} t && $1=="name"{gsub(/"/,"",$3); print $3}' "$manifest" \
           | while read -r name; do touch "$dir/tests/$name.rs"; done; \
     done \
