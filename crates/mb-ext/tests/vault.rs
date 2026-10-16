@@ -1,5 +1,7 @@
 //! `vault:` secret references against a wiremock'd Vault KV v2 API.
 
+mod support;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -182,4 +184,59 @@ async fn malformed_vault_refs_are_bad_refs() {
             "{reference}: {err:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn default_secrets_builds_vault_lazily_and_warns_once() {
+    let counter = support::EventCounter::default();
+    let _guard = tracing::subscriber::set_default(counter.subscriber());
+    // VAULT_ADDR set but no token: unusable, which eager construction would
+    // have logged immediately.
+    let store = DefaultSecrets::from_vars(|name| {
+        (name == "VAULT_ADDR").then(|| "http://127.0.0.1:1".to_string())
+    });
+    assert_eq!(counter.count(), 0, "construction logged");
+
+    let reference = "vault:secret/mockingbird#k";
+    for _ in 0..3 {
+        let err = store.resolve(reference).await;
+        assert!(
+            matches!(&err, Err(ExtError::BadSecretRef(r)) if r == reference),
+            "{err:?}"
+        );
+    }
+    assert_eq!(
+        counter.count(),
+        1,
+        "the bad Vault env is logged exactly once"
+    );
+    // env:/file: are unaffected.
+    let path = std::env::var("PATH").expect("PATH is set");
+    assert_eq!(store.resolve("env:PATH").await.ok(), Some(path));
+}
+
+#[tokio::test]
+async fn default_secrets_resolves_vault_refs_lazily() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"data": {"k": "v"}}})),
+        )
+        .mount(&server)
+        .await;
+    let addr = server.uri();
+    let store = DefaultSecrets::from_vars(|name| match name {
+        "VAULT_ADDR" => Some(addr.clone()),
+        "VAULT_TOKEN" => Some("t".to_string()),
+        _ => None,
+    });
+    assert_eq!(
+        store
+            .resolve("vault:secret/mockingbird#k")
+            .await
+            .ok()
+            .as_deref(),
+        Some("v")
+    );
 }

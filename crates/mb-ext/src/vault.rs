@@ -215,19 +215,45 @@ impl SecretStore for VaultSecrets {
     }
 }
 
+/// The Vault variables [`DefaultSecrets`] snapshots at construction.
+const VAULT_VARS: [&str; 5] = [
+    "VAULT_ADDR",
+    "VAULT_TOKEN",
+    "VAULT_TOKEN_FILE",
+    "VAULT_NAMESPACE",
+    "VAULT_CACERT",
+];
+
 /// The self-hosted [`SecretStore`]: `env:` and `file:` through
 /// [`EnvFileSecrets`], and `vault:` through [`VaultSecrets`] when `VAULT_ADDR`
 /// is set. Without Vault, `vault:` references are
 /// [`ExtError::BadSecretRef`].
-#[derive(Debug)]
+///
+/// Construction only snapshots the `VAULT_*` variables: the Vault client
+/// (CA bundle, HTTP client) is built on the first `vault:` resolve, so
+/// building a `DefaultSecrets` (and so [`crate::Extensions::default`]) does
+/// no I/O and logs nothing. A Vault configuration that cannot be used is
+/// logged once, on that first resolve, and Vault is disabled.
 pub struct DefaultSecrets {
     files: EnvFileSecrets,
-    vault: Option<VaultSecrets>,
+    vars: Vec<(&'static str, String)>,
+    vault: tokio::sync::OnceCell<Option<VaultSecrets>>,
+}
+
+impl fmt::Debug for DefaultSecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.vars.iter().map(|(name, _)| *name).collect();
+        f.debug_struct("DefaultSecrets")
+            .field("vault_vars", &names)
+            .field("vault", &self.vault.get())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DefaultSecrets {
     /// Reads the Vault configuration from the process environment. A Vault
-    /// configuration that cannot be used is logged and Vault is disabled.
+    /// configuration that cannot be used is logged (on the first `vault:`
+    /// resolve) and Vault is disabled.
     pub fn from_env() -> Self {
         Self::from_vars(|name| std::env::var(name).ok())
     }
@@ -235,17 +261,42 @@ impl DefaultSecrets {
     /// Like [`DefaultSecrets::from_env`], reading the variables through `var`
     /// instead of the process environment.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
-        let vault = match VaultSecrets::from_vars(var) {
-            Ok(vault) => vault,
-            Err(e) => {
-                tracing::warn!(error = %e, "Vault secret references disabled");
-                None
-            }
-        };
+        let vars = VAULT_VARS
+            .iter()
+            .filter_map(|name| var(name).map(|value| (*name, value)))
+            .collect();
         Self {
             files: EnvFileSecrets,
-            vault,
+            vars,
+            vault: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// The Vault client, built (off the async workers) on first use.
+    async fn vault(&self) -> Option<&VaultSecrets> {
+        self.vault
+            .get_or_init(|| async {
+                let vars = self.vars.clone();
+                let lookup = move |name: &str| {
+                    vars.iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, v)| v.clone())
+                };
+                let built = tokio::task::spawn_blocking(move || VaultSecrets::from_vars(lookup))
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(ExtError::Other(format!("building the Vault client: {e}")))
+                    });
+                match built {
+                    Ok(vault) => vault,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Vault secret references disabled");
+                        None
+                    }
+                }
+            })
+            .await
+            .as_ref()
     }
 }
 
@@ -253,7 +304,7 @@ impl DefaultSecrets {
 impl SecretStore for DefaultSecrets {
     async fn resolve(&self, reference: &str) -> Result<String, ExtError> {
         if reference.starts_with("vault:") {
-            return match &self.vault {
+            return match self.vault().await {
                 Some(vault) => vault.resolve(reference).await,
                 None => Err(ExtError::BadSecretRef(reference.to_string())),
             };
