@@ -443,20 +443,19 @@ impl CallState {
         req: tonic::Request<Streaming<DynamicMessage>>,
     ) -> UnaryResult {
         self.invoked.store(true, Ordering::SeqCst);
-        let (metadata, _, mut inbound) = req.into_parts();
+        let (metadata, _, inbound) = req.into_parts();
         let mut rep = self.reporter(metadata.into_headers());
         let outcome = async {
             let plan = self.start(&mut rep).await?;
-            let mut messages = Vec::new();
-            while let Some(message) = inbound.message().await.map_err(Failure::request)? {
-                messages.push(message_json(&message));
-            }
-            let last = messages.last().cloned();
+            let messages = inbound.map(|m| m.map(|m| message_json(&m)));
+            let request_stream = last_items(messages, REQUEST_STREAM_ITEMS)
+                .await
+                .map_err(Failure::request)?;
+            let last = request_stream.back().cloned();
             if let Some(body) = &last {
                 rep.set_body(body);
             }
-            let skip = messages.len().saturating_sub(REQUEST_STREAM_ITEMS);
-            let request_stream = messages.split_off(skip);
+            let request_stream = Vec::from(request_stream);
             let call = self.operation_call(&rep.headers, last);
             let reply = self.one_item(&plan, call, request_stream).await?;
             sleep(plan.delay).await;
@@ -924,11 +923,69 @@ fn first_oneof_members(desc: &MessageDescriptor, value: &mut Value) {
     }
 }
 
+/// The last `keep` items of `items`, read to its end, in order. At most
+/// `keep` items are held at any time, however long the stream is.
+async fn last_items<T, E>(
+    items: impl futures::Stream<Item = Result<T, E>>,
+    keep: usize,
+) -> Result<VecDeque<T>, E> {
+    let mut kept = VecDeque::with_capacity(keep);
+    let mut items = std::pin::pin!(items);
+    while let Some(item) = items.next().await {
+        let item = item?;
+        if keep == 0 {
+            continue;
+        }
+        if kept.len() == keep {
+            kept.pop_front();
+        }
+        kept.push_back(item);
+    }
+    Ok(kept)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
+
+    /// Counts live instances, and the most ever alive at once.
+    struct Tracked(Arc<(AtomicUsize, AtomicUsize)>, usize);
+
+    impl Tracked {
+        fn new(counts: &Arc<(AtomicUsize, AtomicUsize)>, n: usize) -> Self {
+            let live = counts.0.fetch_add(1, Ordering::SeqCst) + 1;
+            counts.1.fetch_max(live, Ordering::SeqCst);
+            Self(Arc::clone(counts), n)
+        }
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn client_stream_keeps_only_the_last_items_while_reading() {
+        let counts = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+        let c = Arc::clone(&counts);
+        let items = stream::iter(0..100_000).map(move |n| Ok::<_, Status>(Tracked::new(&c, n)));
+        let kept = last_items(items, REQUEST_STREAM_ITEMS).await.unwrap();
+        let numbers: Vec<usize> = kept.iter().map(|t| t.1).collect();
+        let expected: Vec<usize> = (100_000 - REQUEST_STREAM_ITEMS..100_000).collect();
+        assert_eq!(numbers, expected);
+        let peak = counts.1.load(Ordering::SeqCst);
+        assert!(peak <= REQUEST_STREAM_ITEMS + 1, "{peak} messages held at once");
+
+        let failing = stream::iter([Ok(1), Err(Status::internal("x"))]);
+        assert!(last_items(failing, 2).await.is_err());
+        let empty = stream::iter(Vec::<Result<u8, Status>>::new());
+        assert!(last_items(empty, 2).await.unwrap().is_empty());
+    }
 
     const ONEOFS: &str = r#"
 syntax = "proto3";
