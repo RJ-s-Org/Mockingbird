@@ -1620,7 +1620,7 @@ fn compose_config_is_a_valid_oidc_config() {
     );
     assert_eq!(cfg.llm.default_profile, None);
     let oidc = cfg.auth.oidc.as_ref().unwrap();
-    assert_eq!(oidc.issuer, "http://localhost:8081/auth/v1");
+    assert_eq!(oidc.issuer, "http://localhost:8081/auth/v1/");
     assert_eq!(oidc.client_id, "mockingbird");
     assert_eq!(
         oidc.client_secret.as_deref(),

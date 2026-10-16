@@ -19,12 +19,17 @@ test("log in through Rauthy, serve a mock and find it all in the audit log", asy
   // 1. The console sends an anonymous browser to Rauthy.
   await page.goto("/");
   await expect(page).toHaveURL(/^http:\/\/localhost:8081\/auth\/v1\//);
-  // verify against Rauthy 0.37 login UI
-  await page.getByLabel(/e-?mail/i).fill(DEMO_EMAIL);
-  // verify against Rauthy 0.37 login UI
-  await page.getByLabel(/password/i).fill(DEMO_PASSWORD);
-  // verify against Rauthy 0.37 login UI
-  await page.getByRole("button", { name: /login|sign in/i }).click();
+  // Rauthy 0.37's login (frontend/src/routes/oidc/authorize/+page.svelte) is two
+  // steps: submit the e-mail alone, and only for a password account does it then
+  // show the password field. The passkey button outside the form is also named
+  // "Login", so the submit button is looked up inside the form.
+  const login = page.locator("form").filter({ has: page.getByLabel("E-Mail", { exact: true }) });
+  await login.getByLabel("E-Mail", { exact: true }).fill(DEMO_EMAIL);
+  await login.getByRole("button", { name: "Login", exact: true }).click();
+  const password = login.getByLabel("Password", { exact: true });
+  await expect(password).toBeVisible();
+  await password.fill(DEMO_PASSWORD);
+  await login.getByRole("button", { name: "Login", exact: true }).click();
 
   // 2. Back in the console, in the default workspace; create mock `e2e`.
   await expect(page).toHaveURL(/^http:\/\/localhost:9090\/w\/default\/mocks$/, { timeout: 30_000 });

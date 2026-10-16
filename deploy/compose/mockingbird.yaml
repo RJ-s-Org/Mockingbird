@@ -8,7 +8,9 @@ auth:
   mode: oidc
   external_url: http://localhost:9090
   oidc:
-    issuer: http://localhost:8081/auth/v1
+    # Exactly the `issuer` of Rauthy's discovery document, trailing slash
+    # included: the OIDC client compares it as a string.
+    issuer: http://localhost:8081/auth/v1/
     client_id: mockingbird
     # Written by rauthy-bootstrap.sh into the shared `bootstrap` volume.
     client_secret: file:/bootstrap/client_secret

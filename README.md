@@ -322,7 +322,7 @@ auth:
   sysadmin_subjects: ["3f2c…"]                     # OIDC `sub` values that are always sysadmin
   public_metrics: true                             # serve /metrics without credentials
   oidc:
-    issuer: https://auth.example.com/auth/v1
+    issuer: https://auth.example.com/auth/v1/      # exactly the discovery `issuer` (Rauthy's ends in /)
     client_id: mockingbird
     client_secret: env:MB_OIDC_CLIENT_SECRET       # env:NAME or file:/path
     scopes: [openid, profile, email, groups]       # default

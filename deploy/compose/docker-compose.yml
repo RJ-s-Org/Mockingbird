@@ -31,10 +31,16 @@ services:
   rauthy:
     image: ghcr.io/sebadob/rauthy:0.37.1
     environment:
-      # verify against Rauthy 0.37 docs: issuer is http://localhost:8081/auth/v1 with LISTEN_SCHEME=http
+      # Plain HTTP on 8081: the issuer is http://localhost:8081/auth/v1/ (Rauthy
+      # always ends it with a slash; mockingbird.yaml must match it exactly).
       LISTEN_SCHEME: http
       LISTEN_PORT_HTTP: "8081"
       PUB_URL: localhost:8081
+      # Required since there is no config.toml: Rauthy panics at startup with
+      # "`webauthn.rp_id` is missing" / "`webauthn.rp_origin` is missing".
+      # The origin must include the port.
+      RP_ID: localhost
+      RP_ORIGIN: http://localhost:8081
       COOKIE_MODE: danger-insecure
       # Rauthy's metrics listener defaults to 9090, Mockingbird's admin port.
       METRICS_ENABLE: "false"
@@ -47,8 +53,10 @@ services:
       BOOTSTRAP_ADMIN_EMAIL: admin@localhost.test
       BOOTSTRAP_ADMIN_PASSWORD_PLAIN: Admin-Passw0rd-123!
       # base64 of {"name":"bootstrap","exp":null,"access":[{"group":"Clients"|"Groups"|"Users"|"Roles",
-      #   "access_rights":["read","create","update","delete"]}, ...]}
-      BOOTSTRAP_API_KEY: eyJuYW1lIjoiYm9vdHN0cmFwIiwiZXhwIjpudWxsLCJhY2Nlc3MiOlt7Imdyb3VwIjoiQ2xpZW50cyIsImFjY2Vzc19yaWdodHMiOlsicmVhZCIsImNyZWF0ZSIsInVwZGF0ZSIsImRlbGV0ZSJdfSx7Imdyb3VwIjoiR3JvdXBzIiwiYWNjZXNzX3JpZ2h0cyI6WyJyZWFkIiwiY3JlYXRlIiwidXBkYXRlIiwiZGVsZXRlIl19LHsiZ3JvdXAiOiJVc2VycyIsImFjY2Vzc19yaWdodHMiOlsicmVhZCIsImNyZWF0ZSIsInVwZGF0ZSIsImRlbGV0ZSJdfSx7Imdyb3VwIjoiUm9sZXMiLCJhY2Nlc3NfcmlnaHRzIjpbInJlYWQiLCJjcmVhdGUiLCJ1cGRhdGUiLCJkZWxldGUiXX1dfQ==
+      #   "access_rights":["read","create","update","delete"]}, ...,
+      #   {"group":"Secrets","access_rights":["read","update"]}]}
+      # (Secrets: PUT /clients/{id}/secret needs Secrets/update.)
+      BOOTSTRAP_API_KEY: eyJuYW1lIjoiYm9vdHN0cmFwIiwiZXhwIjpudWxsLCJhY2Nlc3MiOlt7Imdyb3VwIjoiQ2xpZW50cyIsImFjY2Vzc19yaWdodHMiOlsicmVhZCIsImNyZWF0ZSIsInVwZGF0ZSIsImRlbGV0ZSJdfSx7Imdyb3VwIjoiR3JvdXBzIiwiYWNjZXNzX3JpZ2h0cyI6WyJyZWFkIiwiY3JlYXRlIiwidXBkYXRlIiwiZGVsZXRlIl19LHsiZ3JvdXAiOiJVc2VycyIsImFjY2Vzc19yaWdodHMiOlsicmVhZCIsImNyZWF0ZSIsInVwZGF0ZSIsImRlbGV0ZSJdfSx7Imdyb3VwIjoiUm9sZXMiLCJhY2Nlc3NfcmlnaHRzIjpbInJlYWQiLCJjcmVhdGUiLCJ1cGRhdGUiLCJkZWxldGUiXX0seyJncm91cCI6IlNlY3JldHMiLCJhY2Nlc3NfcmlnaHRzIjpbInJlYWQiLCJ1cGRhdGUiXX1dfQ==
       BOOTSTRAP_API_KEY_SECRET: pWZqB5bDOLJCI9hXxN4HNJsx417WaPv9oEFZQJqgrkz90VkC526TQSN6UgeIPxVQ
     volumes:
       - rauthy:/app/data
@@ -58,7 +66,9 @@ services:
       - "9090:9090" # Mockingbird console and Admin API
 
   # One-shot job: groups, the `mockingbird` client (its secret goes to the
-  # `bootstrap` volume) and the demo user. Safe to run again.
+  # `bootstrap` volume) and the demo user. Safe to run again. Rauthy's image is
+  # distroless (no shell or curl), so it has no healthcheck; this job waits for
+  # Rauthy's discovery document instead.
   rauthy-bootstrap:
     image: curlimages/curl:8.11.1
     network_mode: "service:rauthy"
