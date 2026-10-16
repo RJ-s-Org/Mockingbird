@@ -251,6 +251,81 @@ async fn data_plane_key_never_reaches_prompt_or_record() {
     }
 }
 
+#[tokio::test]
+async fn passthrough_declared_api_keys_never_reach_prompt_or_record() {
+    let widget = json!({"id": "w1", "name": "n"});
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(json!([widget]).to_string()),
+        Ok(widget.to_string()),
+    ]));
+    let collect = Arc::new(Collect::default());
+    let mut rt = runtime(
+        "widgets",
+        bundle("openapi/secured-3.0.yaml"),
+        Some(provider.clone() as Arc<dyn Provider>),
+        memory(),
+    );
+    rt.data_plane_auth = DataPlaneAuth {
+        mode: DataPlaneAuthMode::PassthroughValidate,
+        ..DataPlaneAuth::default()
+    };
+    rt.recorder = Some(collect.clone());
+    let router = http_rest::router(Arc::new(rt));
+
+    let resp = send(&router, get("/widgets/search?apikey=qsecret&x=1", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send(
+        &router,
+        req(
+            "PUT",
+            "/widgets/w1",
+            &[
+                ("cookie", "session_id=csecret"),
+                ("X-Partner-Key", "hsecret"),
+                ("x-trace", "t1"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let leaks = ["qsecret", "csecret", "hsecret"];
+    for (i, request) in requests.iter().enumerate() {
+        let prompt: String = request
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        for secret in leaks {
+            assert!(
+                !prompt.contains(secret),
+                "prompt {i} leaks {secret}: {prompt}"
+            );
+        }
+    }
+    let prompt: String = requests[0]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(
+        prompt.contains("\"x\""),
+        "the other query parameter is kept"
+    );
+
+    let records = collect.records.lock().unwrap().clone();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].request["query"], json!({"x": "1"}));
+    assert_eq!(records[1].request["headers"]["x-trace"], "t1");
+    for r in &records {
+        for secret in leaks {
+            assert!(!r.request.to_string().contains(secret), "{}", r.request);
+        }
+    }
+}
+
 type Headers = Vec<(&'static str, &'static str)>;
 
 #[tokio::test]

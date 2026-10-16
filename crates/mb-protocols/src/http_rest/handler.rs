@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +10,10 @@ use mb_engine::{
     EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator,
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
-use mb_mcm::{Binding, Effect, HttpMethod, Operation, OperationKind, StatusSelector};
+use mb_mcm::{
+    ApiKeyLocation, Binding, Effect, HttpMethod, Operation, OperationKind, SecurityScheme,
+    StatusSelector,
+};
 use mb_state::{SessionKey, StateError, StoredResource};
 use serde_json::{Map, Number, Value, json};
 use tokio::time::Instant;
@@ -57,6 +60,15 @@ pub(crate) struct RestState {
     /// The lowercased data-plane key header in `api_key` mode: read for the
     /// key, never forwarded or recorded.
     key_header: Option<String>,
+    /// Lowercased request headers that carry credentials for this mock
+    /// beyond [`SENSITIVE_HEADERS`]: the key header in `api_key` mode, every
+    /// header API key the contract declares in `passthrough_validate` mode.
+    /// Never forwarded or recorded.
+    secret_headers: HashSet<String>,
+    /// Query parameters that carry credentials: `api_key` in `api_key`
+    /// mode, every query API key the contract declares in
+    /// `passthrough_validate` mode. Never reach the engine or the record.
+    secret_query: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -94,21 +106,57 @@ impl RestState {
             .collect();
         let key_header = (rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey)
             .then(|| rt.data_plane_auth.header.to_ascii_lowercase());
+        let (mut secret_headers, mut secret_query) = (HashSet::new(), HashSet::new());
+        match rt.data_plane_auth.mode {
+            DataPlaneAuthMode::None => {}
+            DataPlaneAuthMode::ApiKey => {
+                secret_headers.extend(key_header.clone());
+                secret_query.insert(API_KEY_QUERY_PARAM.to_string());
+            }
+            DataPlaneAuthMode::PassthroughValidate => {
+                let declared = rt
+                    .bundle
+                    .operations
+                    .iter()
+                    .flat_map(|op| &op.security)
+                    .flat_map(|req| &req.schemes);
+                for scheme in declared {
+                    match scheme {
+                        SecurityScheme::ApiKey {
+                            location: ApiKeyLocation::Header,
+                            name,
+                        } => {
+                            secret_headers.insert(name.to_ascii_lowercase());
+                        }
+                        SecurityScheme::ApiKey {
+                            location: ApiKeyLocation::Query,
+                            name,
+                        } => {
+                            secret_query.insert(name.clone());
+                        }
+                        // The whole `Cookie` header is never forwarded.
+                        _ => {}
+                    }
+                }
+            }
+        }
         Ok(Self {
             rt,
             routes,
             inputs,
             key_header,
+            secret_headers,
+            secret_query,
         })
     }
 
-    /// The raw query pairs, without the data-plane key parameter in
-    /// `api_key` mode (it never reaches the engine or the record).
+    /// The raw query pairs without the credential parameters
+    /// ([`RestState::secret_query`]): they never reach the engine or the
+    /// record.
     fn public_query(&self, pairs: &[(String, String)]) -> Vec<(String, String)> {
-        let strip = self.key_header.is_some();
         pairs
             .iter()
-            .filter(|(k, _)| !(strip && k == API_KEY_QUERY_PARAM))
+            .filter(|(k, _)| !self.secret_query.contains(k))
             .cloned()
             .collect()
     }
@@ -390,7 +438,7 @@ async fn serve(
         operation_id: op.id.clone(),
         path_params,
         query,
-        headers: forwarded_headers(headers, st.key_header.as_deref()),
+        headers: forwarded_headers(headers, &st.secret_headers),
         body,
     };
     let ctx = GenerationContext {
@@ -497,7 +545,7 @@ async fn report(
             completion_tokens: log.completion_tokens,
             request: json!({
                 "query": recorded_query(st, uri),
-                "headers": recorded_headers(headers, st.key_header.as_deref()),
+                "headers": recorded_headers(headers, &st.secret_headers),
                 "body": request_body_record(raw_body, media.as_deref(), log.request_body),
             }),
             request_body_bytes: Some(raw_body.len()),
@@ -1072,19 +1120,19 @@ fn is_sensitive(name: &str) -> bool {
 }
 
 /// Non-sensitive, UTF-8 request headers, optionally keeping
-/// `X-Mockingbird-*` override headers. `key_header` (lowercase) is the
-/// runtime's data-plane key header, also sensitive.
+/// `X-Mockingbird-*` override headers. `secret` (lowercase) lists the
+/// mock's credential headers, also sensitive.
 fn safe_headers(
     headers: &HeaderMap,
     keep_overrides: bool,
-    key_header: Option<&str>,
+    secret: &HashSet<String>,
 ) -> Map<String, Value> {
     headers
         .iter()
         .filter(|(name, _)| {
             let n = name.as_str();
             !is_sensitive(n)
-                && key_header != Some(n)
+                && !secret.contains(n)
                 && (keep_overrides || !n.starts_with("x-mockingbird-"))
         })
         .filter_map(|(name, v)| {
@@ -1097,16 +1145,16 @@ fn safe_headers(
 }
 
 /// Headers forwarded to the prompt.
-fn forwarded_headers(headers: &HeaderMap, key_header: Option<&str>) -> Map<String, Value> {
-    safe_headers(headers, false, key_header)
+fn forwarded_headers(headers: &HeaderMap, secret: &HashSet<String>) -> Map<String, Value> {
+    safe_headers(headers, false, secret)
 }
 
 /// Headers kept in the request record (overrides included).
-fn recorded_headers(headers: &HeaderMap, key_header: Option<&str>) -> Map<String, Value> {
-    safe_headers(headers, true, key_header)
+fn recorded_headers(headers: &HeaderMap, secret: &HashSet<String>) -> Map<String, Value> {
+    safe_headers(headers, true, secret)
 }
 
-/// The raw query as recorded (without a data-plane key): repeated keys
+/// The raw query as recorded (without credential parameters): repeated keys
 /// become arrays of strings.
 fn recorded_query(st: &RestState, uri: &Uri) -> Value {
     let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
