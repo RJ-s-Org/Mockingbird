@@ -1,0 +1,280 @@
+//! GraphQL adapter: serves a bundle's queries and mutations from a dynamic
+//! schema built from the SDL the importer stored in the bundle.
+//!
+//! Every root field is one engine call (see [`resolve`]); nested fields
+//! project from the generated JSON. GraphQL parse and validation errors are
+//! answered `200 {errors}`; only transport-level failures (unknown path,
+//! wrong method, oversized or unparseable body) are problem documents.
+
+use std::sync::Arc;
+
+use async_graphql::Request;
+use async_graphql::parser::types::{DocumentOperations, OperationType};
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
+use serde_json::{Value, json};
+
+use crate::MockRuntime;
+
+mod resolve;
+mod schema;
+
+pub(crate) use schema::build_schema;
+
+/// The largest request body accepted.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+const PROBLEM_JSON: &str = "application/problem+json";
+const GRAPHQL_MEDIA_TYPE: &str = "application/graphql";
+
+/// Why a bundle cannot be served over GraphQL.
+#[derive(Debug, thiserror::Error)]
+pub enum GraphqlError {
+    #[error("bundle has no GraphQL schema")]
+    MissingSdl,
+    #[error("invalid GraphQL schema: {0}")]
+    Schema(String),
+}
+
+struct GraphqlState {
+    rt: Arc<MockRuntime>,
+    schema: async_graphql::dynamic::Schema,
+}
+
+/// A router serving `rt.bundle`'s GraphQL schema at
+/// `rt.protocols.graphql_path`, over `POST` and `GET`.
+pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, GraphqlError> {
+    let schema = build_schema(&rt)?;
+    let state = Arc::new(GraphqlState { rt, schema });
+    Ok(Router::new().fallback(handle).with_state(state))
+}
+
+/// The `extensions.code` of a field error standing for HTTP `status`.
+pub(crate) fn error_code(status: u16) -> &'static str {
+    match status {
+        400 => "BAD_USER_INPUT",
+        401 => "UNAUTHENTICATED",
+        403 => "FORBIDDEN",
+        404 => "NOT_FOUND",
+        409 => "CONFLICT",
+        429 => "RATE_LIMITED",
+        402..=499 => "BAD_REQUEST",
+        _ => "INTERNAL_SERVER_ERROR",
+    }
+}
+
+async fn handle(
+    State(st): State<Arc<GraphqlState>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if uri.path() != st.rt.protocols.graphql_path {
+        return problem(
+            404,
+            "Not Found",
+            format!("no GraphQL endpoint at {}", uri.path()),
+        );
+    }
+    let request = match method {
+        Method::GET => {
+            let request = match async_graphql::http::parse_query_string(uri.query().unwrap_or("")) {
+                Ok(r) => r,
+                Err(e) => return problem(400, "Invalid GraphQL request", e.to_string()),
+            };
+            if is_mutation(&request) {
+                let mut resp = problem(
+                    405,
+                    "Method Not Allowed",
+                    "mutations must be sent with POST",
+                );
+                resp.headers_mut()
+                    .insert(header::ALLOW, HeaderValue::from_static("POST"));
+                return resp;
+            }
+            request
+        }
+        Method::POST => match read_body(&headers, body).await {
+            Ok(bytes) => match parse_post(&headers, &bytes) {
+                Ok(r) => r,
+                Err(detail) => return problem(400, "Invalid GraphQL request", detail),
+            },
+            Err(resp) => return resp,
+        },
+        _ => {
+            let mut resp = problem(
+                405,
+                "Method Not Allowed",
+                format!("{method} is not supported; use GET or POST"),
+            );
+            resp.headers_mut()
+                .insert(header::ALLOW, HeaderValue::from_static("GET, POST"));
+            return resp;
+        }
+    };
+    execute(&st, request, &method, headers).await
+}
+
+/// Runs `request`, then sleeps the largest injected latency of its root
+/// fields (they have all been reported by then) and answers `200` JSON.
+async fn execute(
+    st: &GraphqlState,
+    request: Request,
+    method: &Method,
+    headers: HeaderMap,
+) -> Response {
+    let variables = serde_json::to_value(&request.variables).unwrap_or(Value::Null);
+    let call = Arc::new(resolve::HttpCall::new(
+        headers,
+        method.as_str().to_string(),
+        variables,
+    ));
+    let mut response = st.schema.execute(request.data(Arc::clone(&call))).await;
+    let collected = call.collected();
+    if !collected.sources.is_empty() {
+        let ext = json!({ "sources": collected.sources });
+        if let Ok(v) = async_graphql::Value::from_json(ext) {
+            response.extensions.insert("mockingbird".into(), v);
+        }
+    }
+    if let Some(delay) = collected.delay {
+        tokio::time::sleep(delay).await;
+    }
+    let body = match serde_json::to_vec(&response) {
+        Ok(b) => b,
+        Err(e) => return problem(500, "Internal Server Error", e.to_string()),
+    };
+    let mut resp = (StatusCode::OK, body).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Some(source) = collected.worst {
+        resp.headers_mut()
+            .insert(SOURCE_HEADER, HeaderValue::from_static(source.as_str()));
+    }
+    resp
+}
+
+/// The body, unless it exceeds [`MAX_BODY_BYTES`] (413) or cannot be read
+/// (400).
+async fn read_body(headers: &HeaderMap, body: Body) -> Result<Bytes, Response> {
+    let too_large = || {
+        problem(
+            413,
+            "Payload Too Large",
+            format!("GraphQL request bodies are limited to {MAX_BODY_BYTES} bytes"),
+        )
+    };
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > MAX_BODY_BYTES) {
+        return Err(too_large());
+    }
+    let mut stream = body.into_data_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| problem(400, "Invalid GraphQL request", format!("body: {e}")))?;
+        if buf.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(too_large());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
+}
+
+/// A `POST` body: raw query text for `application/graphql`, else the JSON
+/// `{query, variables, operationName}` envelope.
+fn parse_post(headers: &HeaderMap, body: &[u8]) -> Result<Request, String> {
+    let media = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_ascii_lowercase());
+    if media.as_deref() == Some(GRAPHQL_MEDIA_TYPE) {
+        let text = std::str::from_utf8(body).map_err(|e| format!("body is not UTF-8: {e}"))?;
+        return Ok(Request::new(text));
+    }
+    serde_json::from_slice::<Request>(body).map_err(|e| format!("body: {e}"))
+}
+
+/// Whether the operation `request` selects is a mutation. Anything that
+/// does not parse or select is left to the executor to report.
+fn is_mutation(request: &Request) -> bool {
+    let Ok(doc) = async_graphql::parser::parse_query(&request.query) else {
+        return false;
+    };
+    let selected = match (&doc.operations, request.operation_name.as_deref()) {
+        (DocumentOperations::Single(op), _) => Some(op),
+        (DocumentOperations::Multiple(ops), Some(name)) => ops.get(name),
+        (DocumentOperations::Multiple(ops), None) if ops.len() == 1 => ops.values().next(),
+        (DocumentOperations::Multiple(_), None) => None,
+    };
+    selected.is_some_and(|op| op.node.ty == OperationType::Mutation)
+}
+
+/// An RFC 9457 `application/problem+json` response.
+fn problem(status: u16, title: &str, detail: impl Into<String>) -> Response {
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let body = json!({
+        "type": "about:blank",
+        "title": title,
+        "status": code.as_u16(),
+        "detail": detail.into(),
+    });
+    let mut resp = (code, body.to_string()).into_response();
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
+    resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_codes() {
+        let cases = [
+            (400, "BAD_USER_INPUT"),
+            (401, "UNAUTHENTICATED"),
+            (403, "FORBIDDEN"),
+            (404, "NOT_FOUND"),
+            (409, "CONFLICT"),
+            (429, "RATE_LIMITED"),
+            (402, "BAD_REQUEST"),
+            (418, "BAD_REQUEST"),
+            (499, "BAD_REQUEST"),
+            (500, "INTERNAL_SERVER_ERROR"),
+            (503, "INTERNAL_SERVER_ERROR"),
+            (302, "INTERNAL_SERVER_ERROR"),
+        ];
+        for (status, code) in cases {
+            assert_eq!(error_code(status), code, "status {status}");
+        }
+    }
+
+    #[test]
+    fn mutation_detection() {
+        let req = |q: &str, name: Option<&str>| {
+            let mut r = Request::new(q);
+            r.operation_name = name.map(str::to_string);
+            r
+        };
+        assert!(is_mutation(&req("mutation { a }", None)));
+        assert!(!is_mutation(&req("{ a }", None)));
+        assert!(!is_mutation(&req("query Q { a }", None)));
+        let both = "query Q { a } mutation M { b }";
+        assert!(is_mutation(&req(both, Some("M"))));
+        assert!(!is_mutation(&req(both, Some("Q"))));
+        assert!(!is_mutation(&req(both, None)));
+        assert!(!is_mutation(&req("mutation {", None)));
+    }
+}

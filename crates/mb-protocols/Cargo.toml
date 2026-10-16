@@ -14,11 +14,12 @@ default = ["http-rest", "sse", "graphql", "grpc", "soap", "websocket"]
 http-rest = ["dep:matchit", "dep:serde_urlencoded", "dep:tower-http"]
 sse = ["http-rest"]
 websocket = ["axum/ws"]
-graphql = ["websocket"]
+graphql = ["websocket", "dep:async-graphql"]
 grpc = ["axum/http2"]
 soap = []
 
 [dependencies]
+async-graphql = { workspace = true, optional = true }
 axum.workspace = true
 futures.workspace = true
 humantime.workspace = true
