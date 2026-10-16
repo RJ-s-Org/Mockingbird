@@ -24,6 +24,9 @@ use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
 /// Close code sent when the mock's channel runtime is replaced or dropped.
 pub const CLOSE_RUNTIME_REPLACED: u16 = 1012;
 const CLOSE_REASON: &str = "mock reloaded";
+/// Longest request path matched against the channel templates; longer
+/// paths get 404 without matching.
+const MAX_PATH_BYTES: usize = 2048;
 
 /// The WebSocket path of `channel`, when it is an enabled WebSocket channel.
 fn served_path<'a>(inner: &ChannelInner, channel: &'a Channel) -> Option<&'a str> {
@@ -90,6 +93,9 @@ async fn upgrade_channel(
     uri: Uri,
 ) -> Response {
     let path = uri.path().to_string();
+    if path.len() > MAX_PATH_BYTES {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let matched: Vec<&String> = templates
         .iter()
         .filter(|t| address_matches(t, &path))

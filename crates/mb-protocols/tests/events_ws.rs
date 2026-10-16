@@ -260,3 +260,36 @@ async fn no_ws_channels_no_router() {
     let h = runtime(orders());
     assert!(h.channels.ws_router().is_none());
 }
+
+const ROOMS_SPEC: &str = r#"
+asyncapi: 2.6.0
+info: {title: Rooms, version: 1.0.0}
+servers:
+  local: {url: ws://localhost:8080, protocol: ws}
+channels:
+  /rooms/{a}-{b}:
+    parameters:
+      a: {schema: {type: string}}
+      b: {schema: {type: string}}
+    subscribe:
+      operationId: roomMessage
+      message:
+        payload: {type: object}
+"#;
+
+#[tokio::test]
+async fn ws_over_long_path_is_not_found() {
+    let h = runtime(mb_import::compile(ROOMS_SPEC.as_bytes()).unwrap());
+    let base = serve(&h).await;
+    // A matching path within the limit upgrades.
+    let ok = format!("{base}/rooms/x-y");
+    assert!(tokio_tungstenite::connect_async(ok).await.is_ok());
+    // An over-long one is refused with 404 before any matching.
+    let long = format!("{base}/rooms/{}-y", "x".repeat(4096));
+    match tokio_tungstenite::connect_async(long).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 404);
+        }
+        other => panic!("expected a 404, got {:?}", other.map(|_| ())),
+    }
+}

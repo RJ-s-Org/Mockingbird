@@ -129,25 +129,56 @@ pub fn address_matches(template: &str, actual: &str) -> bool {
     matches_from(&pieces(template), actual)
 }
 
+/// Runs in O(len(actual) × pieces): the set of positions reachable after
+/// each piece is tracked instead of backtracking.
 fn matches_from(pieces: &[Piece<'_>], actual: &str) -> bool {
-    let Some((first, rest)) = pieces.split_first() else {
-        return actual.is_empty();
-    };
-    match first {
-        Piece::Literal(text) => actual
-            .strip_prefix(text)
-            .is_some_and(|tail| matches_from(rest, tail)),
-        Piece::Param(_) => {
-            // The longest run of parameter characters, then backtrack.
-            let run = actual
-                .char_indices()
-                .find(|(_, c)| !is_param_char(*c))
-                .map_or(actual.len(), |(i, _)| i);
-            (1..=run)
-                .rev()
-                .any(|len| matches_from(rest, &actual[len..]))
-        }
+    let bytes = actual.as_bytes();
+    let n = bytes.len();
+    // run_end[p]: the end of the run of parameter characters from `p`.
+    // Parameter characters are ASCII, so byte positions are char bounds.
+    let mut run_end = vec![n; n + 1];
+    for p in (0..n).rev() {
+        run_end[p] = if is_param_char(char::from(bytes[p])) {
+            run_end[p + 1]
+        } else {
+            p
+        };
     }
+    let mut reach = vec![false; n + 1];
+    reach[0] = true;
+    for piece in pieces {
+        let mut next = vec![false; n + 1];
+        let mut any = false;
+        match piece {
+            Piece::Literal(text) => {
+                let text = text.as_bytes();
+                for p in (0..=n).filter(|&p| reach[p]) {
+                    if bytes[p..].starts_with(text) {
+                        next[p + text.len()] = true;
+                        any = true;
+                    }
+                }
+            }
+            Piece::Param(_) => {
+                // From `p`, one or more parameter characters: every end in
+                // `p+1 ..= run_end[p]`. Each position is marked once.
+                let mut marked = 0;
+                for p in (0..=n).filter(|&p| reach[p]) {
+                    let end = run_end[p];
+                    for q in (p + 1).max(marked + 1)..=end {
+                        next[q] = true;
+                        any = true;
+                    }
+                    marked = marked.max(end);
+                }
+            }
+        }
+        if !any {
+            return false;
+        }
+        reach = next;
+    }
+    reach[n]
 }
 
 /// A value for each parameter of `channel`'s address: the first source
@@ -272,5 +303,61 @@ mod tests {
         assert!(address_matches("a.{x}-{y}.b", "a.one-two.b"));
         assert!(address_matches("{x}", "a_b-c"));
         assert!(!address_matches("{x}", "a.b"));
+    }
+
+    /// Runs `f` on another thread; fails if it takes longer than `limit`.
+    fn within(limit: std::time::Duration, f: impl FnOnce() -> bool + Send + 'static) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(limit) {
+            Ok(result) => result,
+            Err(_) => panic!("matching took longer than {limit:?}"),
+        }
+    }
+
+    #[test]
+    fn address_matching_is_linear() {
+        let limit = std::time::Duration::from_secs(2);
+        // Adjacent placeholders on a long run that never matches.
+        let segment = "a".repeat(800);
+        let path = format!("/r/{segment}!");
+        assert!(!within(limit, move || address_matches(
+            "/r/{a}{b}{c}",
+            &path
+        )));
+        // Placeholders separated by '-' over a long run of '-'.
+        let segment = "a-".repeat(32_000);
+        let path = format!("/rooms/{segment}!");
+        assert!(!within(limit, move || address_matches(
+            "/rooms/{a}-{b}",
+            &path
+        )));
+        let segment = "a-".repeat(32_000);
+        let path = format!("/rooms/{segment}b");
+        assert!(within(limit, move || address_matches(
+            "/rooms/{a}-{b}",
+            &path
+        )));
+        let path = format!("/r/{}", "x".repeat(50_000));
+        assert!(within(limit, move || address_matches(
+            "/r/{a}{b}{c}",
+            &path
+        )));
+    }
+
+    #[test]
+    fn address_matches_more_shapes() {
+        assert!(address_matches("{a}{b}", "ab"));
+        assert!(!address_matches("{a}{b}", "a"));
+        assert!(address_matches("x{a}y", "xay"));
+        assert!(!address_matches("x{a}y", "xy"));
+        assert!(address_matches("{a}-{b}", "a-b-c"));
+        assert!(!address_matches("{a}-{b}", "a-"));
+        assert!(address_matches("/é/{a}", "/é/1"));
+        assert!(!address_matches("/{a}", "/é"));
+        assert!(address_matches("", ""));
+        assert!(!address_matches("", "x"));
     }
 }
