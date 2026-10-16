@@ -979,7 +979,10 @@ mod tests {
         let expected: Vec<usize> = (100_000 - REQUEST_STREAM_ITEMS..100_000).collect();
         assert_eq!(numbers, expected);
         let peak = counts.1.load(Ordering::SeqCst);
-        assert!(peak <= REQUEST_STREAM_ITEMS + 1, "{peak} messages held at once");
+        assert!(
+            peak <= REQUEST_STREAM_ITEMS + 1,
+            "{peak} messages held at once"
+        );
 
         let failing = stream::iter([Ok(1), Err(Status::internal("x"))]);
         assert!(last_items(failing, 2).await.is_err());

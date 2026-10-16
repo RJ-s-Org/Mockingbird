@@ -523,6 +523,72 @@ async fn reflection_lists_services() {
     }
 }
 
+/// Two single-file uploads are both named `main.proto` in their bundles;
+/// reflection must still list and resolve both services.
+#[tokio::test]
+async fn reflection_resolves_mocks_whose_files_share_a_name() {
+    use tonic_reflection::pb::v1;
+    use v1::server_reflection_request::MessageRequest;
+    use v1::server_reflection_response::MessageResponse;
+
+    let hello = format!(
+        "{}/../../fixtures/proto/helloworld.proto",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let hello = Arc::new(compile(&std::fs::read(hello).unwrap()).unwrap());
+    let (_server, channel) = serve(vec![
+        runtime("hello", hello, None),
+        runtime("routes", route_guide(), None),
+    ])
+    .await;
+    let mut client = v1::server_reflection_client::ServerReflectionClient::new(channel);
+    let requests = [
+        MessageRequest::ListServices(String::new()),
+        MessageRequest::FileContainingSymbol("helloworld.Greeter".into()),
+        MessageRequest::FileContainingSymbol("routeguide.RouteGuide".into()),
+    ];
+    let mut answers = Vec::new();
+    for request in requests {
+        let req = v1::ServerReflectionRequest {
+            host: String::new(),
+            message_request: Some(request),
+        };
+        let mut resp = client
+            .server_reflection_info(futures::stream::iter([req]))
+            .await
+            .unwrap()
+            .into_inner();
+        answers.push(
+            resp.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .message_response
+                .unwrap(),
+        );
+    }
+    let MessageResponse::ListServicesResponse(list) = &answers[0] else {
+        panic!("not a service list: {:?}", answers[0])
+    };
+    let names: Vec<&str> = list.service.iter().map(|s| s.name.as_str()).collect();
+    for name in ["helloworld.Greeter", "routeguide.RouteGuide"] {
+        assert!(names.contains(&name), "{name} in {names:?}");
+    }
+    let mut files = Vec::new();
+    for (answer, package) in answers[1..].iter().zip(["helloworld", "routeguide"]) {
+        let MessageResponse::FileDescriptorResponse(fds) = answer else {
+            panic!("{package}: {answer:?}")
+        };
+        let file = <prost_types::FileDescriptorProto as prost::Message>::decode(
+            fds.file_descriptor_proto[0].as_slice(),
+        )
+        .unwrap();
+        assert_eq!(file.package(), package);
+        files.push(file.name().to_string());
+    }
+    assert_ne!(files[0], files[1], "{files:?}");
+}
+
 #[tokio::test]
 async fn health_reports_serving() {
     use tonic_health::pb::health_check_response::ServingStatus;

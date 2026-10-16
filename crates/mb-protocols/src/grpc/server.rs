@@ -1,7 +1,7 @@
 //! The shared h2c server: routes calls to the published mocks and serves
 //! health and reflection.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
@@ -11,7 +11,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use prost::Message;
-use prost_types::FileDescriptorSet;
+use prost_types::{FileDescriptorProto, FileDescriptorSet};
 use tonic::Status;
 use tonic::codegen::Service;
 use tonic_health::ServingStatus;
@@ -133,6 +133,72 @@ impl GrpcServer {
     }
 }
 
+/// The union of each mock's descriptor set. A file whose name is already
+/// taken by a file with other content (two single-file uploads are both
+/// `main.proto`) is renamed `<mock>/<name>`, as is every file of that set
+/// importing a renamed file, and imports within the set are rewritten to
+/// match; identical files are kept once.
+fn union_descriptor_sets(sets: Vec<(String, FileDescriptorSet)>) -> FileDescriptorSet {
+    let mut union = FileDescriptorSet::default();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for (mock, set) in sets {
+        let differs = |f: &FileDescriptorProto| {
+            index
+                .get(f.name())
+                .is_some_and(|&i| union.file.get(i) != Some(f))
+        };
+        let mut renamed: HashSet<String> = set
+            .file
+            .iter()
+            .filter(|f| differs(f))
+            .map(|f| f.name().to_string())
+            .collect();
+        // A file importing a renamed file changes too.
+        loop {
+            let before = renamed.len();
+            for f in &set.file {
+                if f.dependency.iter().any(|d| renamed.contains(d)) {
+                    renamed.insert(f.name().to_string());
+                }
+            }
+            if renamed.len() == before {
+                break;
+            }
+        }
+        let rename = |name: &str| format!("{mock}/{name}");
+        for mut file in set.file {
+            if renamed.contains(file.name()) {
+                let new = rename(file.name());
+                tracing::info!(
+                    mock = %mock,
+                    file = file.name(),
+                    renamed = %new,
+                    "gRPC reflection: renamed a descriptor file whose name another mock uses"
+                );
+                file.name = Some(new);
+            }
+            for dep in &mut file.dependency {
+                if renamed.contains(dep.as_str()) {
+                    *dep = rename(dep);
+                }
+            }
+            match index.get(file.name()) {
+                Some(&i) if union.file.get(i) == Some(&file) => {}
+                Some(_) => tracing::warn!(
+                    mock = %mock,
+                    file = file.name(),
+                    "gRPC reflection: two descriptor files share a name; the first is reflected"
+                ),
+                None => {
+                    index.insert(file.name().to_string(), union.file.len());
+                    union.file.push(file);
+                }
+            }
+        }
+    }
+    union
+}
+
 async fn dispatch(State(server): State<Arc<GrpcServer>>, req: Request) -> Response {
     if !is_grpc(req.headers()) {
         return (
@@ -187,23 +253,20 @@ async fn call(mut router: Router, req: Request<Body>) -> Response {
 }
 
 /// Reflection (v1 and v1alpha) over the union of the mocks' descriptor
-/// sets, deduplicated by file name (first wins), plus the health service.
+/// sets (see [`union_descriptor_sets`]), plus the health service.
 fn reflection(mocks: &[Arc<GrpcMock>]) -> Result<Router, GrpcError> {
-    let mut seen = HashSet::new();
-    let mut union = FileDescriptorSet::default();
-    let sets = mocks
-        .iter()
-        .map(|m| m.descriptor_set())
-        .chain([tonic_health::pb::FILE_DESCRIPTOR_SET]);
-    for bytes in sets {
-        let set =
-            FileDescriptorSet::decode(bytes).map_err(|e| GrpcError::Descriptors(e.to_string()))?;
-        for file in set.file {
-            if seen.insert(file.name.clone().unwrap_or_default()) {
-                union.file.push(file);
-            }
-        }
+    let decode = |bytes: &[u8]| {
+        FileDescriptorSet::decode(bytes).map_err(|e| GrpcError::Descriptors(e.to_string()))
+    };
+    let mut sets = Vec::with_capacity(mocks.len() + 1);
+    for mock in mocks {
+        sets.push((mock.name().to_string(), decode(mock.descriptor_set())?));
     }
+    sets.push((
+        String::new(),
+        decode(tonic_health::pb::FILE_DESCRIPTOR_SET)?,
+    ));
+    let union = union_descriptor_sets(sets);
     let builder = || {
         tonic_reflection::server::Builder::configure().register_file_descriptor_set(union.clone())
     };
@@ -216,4 +279,70 @@ fn reflection(mocks: &[Arc<GrpcMock>]) -> Result<Router, GrpcError> {
     Ok(Router::new()
         .route_service(&format!("/{REFLECTION_V1}/{{*method}}"), v1)
         .route_service(&format!("/{REFLECTION_V1ALPHA}/{{*method}}"), v1alpha))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, package: &str, deps: &[&str]) -> FileDescriptorProto {
+        FileDescriptorProto {
+            name: Some(name.into()),
+            package: Some(package.into()),
+            dependency: deps.iter().map(|d| d.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn set(files: Vec<FileDescriptorProto>) -> FileDescriptorSet {
+        FileDescriptorSet { file: files }
+    }
+
+    #[test]
+    fn union_renames_clashing_files_and_their_importers() {
+        let shared = file("google/protobuf/empty.proto", "google.protobuf", &[]);
+        let a = set(vec![
+            shared.clone(),
+            file("common.proto", "a.common", &[]),
+            file(
+                "main.proto",
+                "a",
+                &["common.proto", "google/protobuf/empty.proto"],
+            ),
+        ]);
+        let b = set(vec![
+            shared.clone(),
+            file("common.proto", "b.common", &[]),
+            file(
+                "main.proto",
+                "a",
+                &["common.proto", "google/protobuf/empty.proto"],
+            ),
+            file("other.proto", "b.other", &["main.proto"]),
+        ]);
+        let union = union_descriptor_sets(vec![("a".into(), a), ("b".into(), b)]);
+        let names: Vec<&str> = union.file.iter().map(|f| f.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "google/protobuf/empty.proto",
+                "common.proto",
+                "main.proto",
+                "b/common.proto",
+                "b/main.proto",
+                "b/other.proto",
+            ]
+        );
+        // b's main.proto has the same bytes as a's but imports b's
+        // common.proto, so it is renamed too, and the imports follow.
+        assert_eq!(
+            union.file[4].dependency,
+            ["b/common.proto", "google/protobuf/empty.proto"]
+        );
+        assert_eq!(union.file[5].dependency, ["b/main.proto"]);
+        assert_eq!(
+            union.file[2].dependency,
+            ["common.proto", "google/protobuf/empty.proto"]
+        );
+    }
 }
