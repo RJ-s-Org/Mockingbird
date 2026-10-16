@@ -16,6 +16,7 @@ use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_import::smart::fetch::{FetchPolicy, validate_url};
+use mb_import::smart::redact::redacted_url;
 use mb_import::smart::{ImportKind, MAX_IMPORT_BYTES, SmartError, detect_kind};
 use mb_store::{ImportJob, ImportJobStatus, Mock, NewImportJob};
 use serde::{Deserialize, Serialize};
@@ -186,7 +187,8 @@ pub struct ImportJobView {
     pub id: Uuid,
     pub mock: String,
     pub kind: ImportKindSchema,
-    /// The file name or URL imported.
+    /// The file name (control characters removed) or URL (query values
+    /// replaced by `REDACTED`, fragment dropped) imported.
     pub source_name: Option<String>,
     pub status: ImportStatusSchema,
     pub progress: ImportProgressView,
@@ -250,6 +252,13 @@ fn too_large() -> Problem {
     )
 }
 
+/// `name` without control characters (which Postgres `TEXT` cannot hold
+/// in the case of NUL); `None` when nothing is left.
+fn clean_name(name: String) -> Option<String> {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    (!name.is_empty()).then_some(name)
+}
+
 /// A job of document `bytes`: the explicit kind, or the detected one.
 fn document_job(
     mock: &str,
@@ -260,6 +269,7 @@ fn document_job(
     if bytes.len() > MAX_IMPORT_BYTES {
         return Err(too_large());
     }
+    let filename = filename.and_then(clean_name);
     let kind = match kind.or_else(|| detect_kind(filename.as_deref(), &bytes)) {
         Some(kind) => kind,
         None => {
@@ -297,12 +307,14 @@ fn json_job(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
                 "a URL import takes no \"kind\" (or \"url\"): the kind is decided after fetching",
             ));
         }
-        validate_url(&url).map_err(|e| Problem::bad_request(e.to_string()))?;
+        let url = validate_url(&url).map_err(|e| Problem::bad_request(e.to_string()))?;
+        // Only the fetch sees the real URL (parsed, so control characters
+        // are percent-encoded); the stored and audited name is redacted.
         return Ok(NewJob {
             kind: URL_KIND.to_string(),
             document: None,
-            source_name: Some(url.clone()),
-            input: url.into_bytes(),
+            source_name: Some(redacted_url(&url)),
+            input: url.to_string().into_bytes(),
         });
     }
     if let Some(text) = body.text {

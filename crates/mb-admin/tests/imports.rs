@@ -793,13 +793,125 @@ async fn failed_job_reports_error() {
     assert!(h.run().await);
     let job = h.job("pets", view["id"].as_str().unwrap()).await;
     assert_eq!(job["status"], "failed", "{job}");
-    assert!(
-        job["error"]
-            .as_str()
-            .unwrap()
-            .contains("private or reserved"),
-        "{job}"
-    );
+    let error = job["error"].as_str().unwrap();
+    assert!(error.contains("destination not allowed"), "{job}");
+    assert!(!error.contains("127.0.0.1"), "{job}");
+}
+
+#[tokio::test]
+async fn url_import_stores_and_audits_redacted_url() {
+    let h = harness().await;
+    let url = "https://docs.example.com/api.md?X-Amz-Signature=s3cret&expires=9#t0ken";
+    let view = h
+        .call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/pets/imports"),
+            Some(json!({ "url": url })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "url import");
+    let redacted = "https://docs.example.com/api.md?X-Amz-Signature=REDACTED&expires=REDACTED";
+    assert_eq!(view["source_name"], redacted);
+    let id: Uuid = view["id"].as_str().unwrap().parse().unwrap();
+    let stored = h.st.store.get_import_job(id).await.unwrap().unwrap();
+    assert_eq!(stored.source_name.as_deref(), Some(redacted));
+    // The fetch still uses the real URL.
+    let input = h.st.store.import_job_input(id).await.unwrap().unwrap();
+    assert!(String::from_utf8(input).unwrap().contains("s3cret"));
+    let audit =
+        h.st.store
+            .list_audit(&AuditFilter {
+                action: Some("import.create".into()),
+                ..AuditFilter::default()
+            })
+            .await
+            .unwrap();
+    let after = audit[0].after.clone().unwrap().to_string();
+    assert!(after.contains("REDACTED"), "{after}");
+    assert!(!after.contains("s3cret") && !after.contains("t0ken"), "{after}");
+}
+
+/// The control stores to run backend-parity tests on: SQLite, and Postgres
+/// in a fresh schema when `MB_TEST_POSTGRES_URL` is set.
+async fn parity_stores() -> Vec<(&'static str, Arc<dyn ControlStore>)> {
+    let mut stores: Vec<(&'static str, Arc<dyn ControlStore>)> = vec![(
+        "sqlite",
+        mb_store::connect("sqlite::memory:").await.unwrap(),
+    )];
+    if let Ok(base) = std::env::var("MB_TEST_POSTGRES_URL") {
+        use sqlx::Connection;
+        let schema = format!("mb_admin_{}", Uuid::new_v4().simple());
+        let mut conn = sqlx::postgres::PgConnection::connect(&base).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=-c%20search_path%3D{schema}");
+        stores.push(("postgres", mb_store::connect(&url).await.unwrap()));
+    } else {
+        println!("postgres skipped: MB_TEST_POSTGRES_URL not set");
+    }
+    stores
+}
+
+#[tokio::test]
+async fn control_characters_in_names_are_stripped_on_every_backend() {
+    for (backend, store) in parity_stores().await {
+        let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let st = AdminState {
+            auth: Arc::new(TestAuth),
+            ..AdminState::new(store, state)
+        };
+        let h = Harness {
+            app: router(st.clone()),
+            st,
+        };
+        h.create_mock("pets").await;
+        let har = String::from_utf8(fixture("smart/petstore.har")).unwrap();
+        let view = h
+            .call(
+                "editor",
+                Method::POST,
+                &format!("{BASE}/pets/imports"),
+                Some(json!({ "kind": "har", "text": har, "filename": "pet\u{0}store\n.har\u{7f}" })),
+            )
+            .await
+            .expect(StatusCode::ACCEPTED, backend);
+        assert_eq!(view["source_name"], "petstore.har", "{backend}");
+        // Only control characters: no name at all.
+        let view = h
+            .call(
+                "editor",
+                Method::POST,
+                &format!("{BASE}/pets/imports"),
+                Some(json!({ "kind": "har", "text": har, "filename": "\u{0}\t" })),
+            )
+            .await
+            .expect(StatusCode::ACCEPTED, backend);
+        assert!(view["source_name"].is_null(), "{backend}: {view}");
+        // A URL is stored in its parsed (percent-encoded) form.
+        let view = h
+            .call(
+                "editor",
+                Method::POST,
+                &format!("{BASE}/pets/imports"),
+                Some(json!({ "url": "https://docs.example.com/a\u{0}b" })),
+            )
+            .await
+            .expect(StatusCode::ACCEPTED, backend);
+        assert_eq!(
+            view["source_name"], "https://docs.example.com/a%00b",
+            "{backend}"
+        );
+        let jobs = h
+            .call("viewer", Method::GET, &format!("{BASE}/pets/imports"), None)
+            .await
+            .expect(StatusCode::OK, backend);
+        assert_eq!(jobs.as_array().unwrap().len(), 3, "{backend}");
+    }
 }
 
 #[tokio::test]

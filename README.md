@@ -379,7 +379,8 @@ URL imports are fetched by the server, so they are guarded against server-side r
 
 - Only `http` and `https` URLs with a host and without credentials.
 - The host is resolved once and every address is checked before connecting; the connection is pinned to the checked addresses, so the name cannot be re-resolved elsewhere. Blocked: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, `240.0.0.0/4`, and for IPv6 `::`, `::1`, `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8` and `2001:db8::/32` (IPv4-mapped and NAT64 addresses are judged by their IPv4 address).
-- `import.url_allowlist` exempts a host name, a host suffix (`*.corp.example`) or an address range. A blocked fetch fails with a message naming the address and this setting.
+- `import.url_allowlist` exempts a host name, a host suffix (`*.corp.example`) or an address range. A blocked fetch fails with a generic "destination not allowed" message that names neither the host nor the address it resolved to, so URL imports cannot probe internal DNS; the server logs both at `warn` level.
+- Query values and the fragment are redacted (`?sig=REDACTED`) in everything stored or audited: the job's `source_name`, the draft's `source_name` and `source_url`, and the `import.create` audit event. The real URL is used only for the fetch.
 - At most 5 redirects, and each hop is validated and resolved again, exactly like the first request.
 - No proxy is used (proxy environment variables are ignored), the whole fetch takes at most 20 s and the body is at most 10 MiB.
 - The content type picks the reader: `text/html`, `text/markdown`, `text/plain`, `application/pdf`, or JSON that is a HAR file or a Postman collection.
