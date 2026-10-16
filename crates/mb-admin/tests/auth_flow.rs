@@ -780,3 +780,36 @@ async fn login_failure_detail_is_generic() {
     assert_eq!(p["detail"], "the identity provider reported an error");
     assert!(!r.text.contains("evil"), "{}", r.text);
 }
+
+#[tokio::test]
+async fn login_failed_audit_is_rate_limited_per_source() {
+    use axum::extract::ConnectInfo;
+    let h = harness().await;
+    // A failure of a login this browser started, from `peer`.
+    let fail = |peer: std::net::SocketAddr| {
+        let h = &h;
+        async move {
+            let started = h.start_login("/").await;
+            let state = MockOidcProvider::query_param(&started.url, "state").unwrap();
+            let mut req = Request::get(format!("/auth/callback?error=access_denied&state={state}"))
+                .header(
+                    "cookie",
+                    format!("mb_login={}", cookie_value(&started.state_cookie)),
+                )
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(peer));
+            let r = send(&h.app, req).await;
+            assert_eq!(r.problem(StatusCode::BAD_REQUEST)["title"], "Login failed");
+        }
+    };
+    let a: std::net::SocketAddr = "192.0.2.1:5000".parse().unwrap();
+    let b: std::net::SocketAddr = "192.0.2.2:5000".parse().unwrap();
+    fail(a).await;
+    // Same address, another port: still the same source.
+    fail("192.0.2.1:6000".parse().unwrap()).await;
+    fail(a).await;
+    assert_eq!(h.audit("auth.login_failed").await.len(), 1);
+    fail(b).await;
+    assert_eq!(h.audit("auth.login_failed").await.len(), 2);
+}

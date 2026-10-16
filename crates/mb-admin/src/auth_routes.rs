@@ -3,14 +3,15 @@
 //! admin sessions), `GET /api/v1/me`, and [`console_gate`], which guards the
 //! console and a private `/metrics`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::{Extension, Router};
 use mb_auth::{AuthError, Principal, PrincipalKind, Role, SESSION_COOKIE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -171,6 +172,7 @@ struct CallbackQuery {
 
 async fn callback(
     State(st): State<AdminState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> ApiResult<Response> {
@@ -183,8 +185,12 @@ async fn callback(
         Err((reason, attributable)) => {
             // Only a failure of a login this browser started is audited, so
             // anonymous requests cannot grow the audit log or fill the
-            // webhook queue.
-            if attributable {
+            // webhook queue. Those are rate limited too (per source address
+            // and overall); the excess is only counted.
+            let source = peer.map(|Extension(ConnectInfo(addr))| addr.ip());
+            if attributable && !st.login_failures.allow(source) {
+                tracing::warn!(%reason, "console login failed (audit event suppressed)");
+            } else if attributable {
                 tracing::warn!(%reason, "console login failed");
                 st.audit
                     .record(mb_store::NewAuditEvent {

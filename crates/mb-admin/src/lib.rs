@@ -25,6 +25,7 @@ mod audit;
 mod auth_routes;
 mod contracts;
 mod live;
+mod login_limit;
 mod mocks;
 mod openapi;
 pub mod problem;
@@ -42,6 +43,7 @@ pub use auth_routes::{
     LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
 };
 pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
+pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUPPRESSED_METRIC};
 pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
@@ -80,6 +82,8 @@ pub struct AdminState {
     pub live_recheck: std::time::Duration,
     /// Browser login (`/auth/*`); `None` in `auth.mode: none`.
     pub web_auth: Option<WebAuth>,
+    /// Rate limit for `auth.login_failed` audit events.
+    pub login_failures: Arc<LoginFailureLimiter>,
 }
 
 impl AdminState {
@@ -101,6 +105,7 @@ impl AdminState {
             live: None,
             live_recheck: DEFAULT_LIVE_RECHECK,
             web_auth: None,
+            login_failures: Arc::new(LoginFailureLimiter::new()),
         }
     }
 }

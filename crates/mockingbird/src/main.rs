@@ -148,9 +148,13 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
     let admin = async move {
         match admin_listener {
             Some(listener) => {
-                axum::serve(listener, admin_router)
-                    .with_graceful_shutdown(stopped(stop_rx))
-                    .await
+                // The peer address keys the login-failure audit rate limit.
+                axum::serve(
+                    listener,
+                    admin_router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(stopped(stop_rx))
+                .await
             }
             None => Ok(()),
         }

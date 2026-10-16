@@ -2218,6 +2218,7 @@ dependencies = [
  "mb-state",
  "mb-store",
  "metrics",
+ "metrics-util",
  "reqwest",
  "serde",
  "serde_json",

@@ -35,6 +35,7 @@ uuid.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 mb-auth = { workspace = true, features = ["testing"] }
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower.workspace = true
