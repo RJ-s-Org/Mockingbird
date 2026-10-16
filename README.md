@@ -249,7 +249,7 @@ The channel id is the operation id (`operationId` in 2.x, the operation key in 3
 
 ### Brokers
 
-Brokers are declared once in the config file and read at startup:
+Brokers are declared once in the config file and read at startup. With `--watch`, a reload whose `brokers:` section differs from the running one (a broker added, removed or changed) is rejected as a whole with `brokers changed: restart required`: nothing else in that edit is applied, the previous state stays, and the watch keeps running; restart Mockingbird to change brokers.
 
 ```yaml
 brokers:

@@ -403,7 +403,7 @@ pub async fn build_app_with(
         protocols,
         stream,
         events: EventDeps {
-            brokers: Brokers::new(broker_configs, ext.secrets.clone()),
+            brokers: Brokers::new(broker_configs.clone(), ext.secrets.clone()),
             lease: Arc::new(StoreLease {
                 store: store.clone(),
             }),
@@ -513,10 +513,13 @@ pub async fn build_app_with(
     let watch = match (&args.config, args.watch) {
         (Some(path), true) => {
             let flags = args.clone();
+            let initial_brokers = broker_configs.clone();
             let prepare: watch::Prepare = Arc::new(move |cfg: &mut FileConfig| {
                 file_config::apply_env(cfg)?;
                 apply_flags(cfg, &flags);
-                Ok(())
+                // Brokers are connected at startup only: a reload that
+                // changes them is rejected as a whole.
+                ensure_brokers_unchanged(&initial_brokers, cfg)
             });
             let applied = applied_hook(registry.clone(), deps, recorder.clone());
             Some(watch::spawn_with_hook(
@@ -670,6 +673,38 @@ fn applied_hook(
             }
         })
     })
+}
+
+/// `Ok` when `cfg`'s `brokers:` section validates to exactly `initial`
+/// (the brokers this process started with); otherwise an error saying
+/// "brokers changed: restart required" (and naming what changed), so a
+/// `--watch` reload that changes brokers is rejected and the previous
+/// state kept.
+pub fn ensure_brokers_unchanged(
+    initial: &[mb_protocols::events::BrokerConfig],
+    cfg: &FileConfig,
+) -> anyhow::Result<()> {
+    let next = file_config::broker_configs(cfg)?;
+    if next.as_slice() == initial {
+        return Ok(());
+    }
+    let names = |configs: &[mb_protocols::events::BrokerConfig]| {
+        configs
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let (old, new) = (names(initial), names(&next));
+    let added: Vec<_> = new.difference(&old).collect();
+    let removed: Vec<_> = old.difference(&new).collect();
+    let changed: Vec<_> = next
+        .iter()
+        .filter(|c| initial.iter().any(|i| i.name == c.name && i != *c))
+        .map(|c| &c.name)
+        .collect();
+    bail!(
+        "brokers changed: restart required (added {added:?}, removed {removed:?}, changed {changed:?}); the brokers are read at startup only"
+    )
 }
 
 /// Resolves `env:MB_LLM_API_KEY` to the key handed to [`build_app`], and

@@ -1095,6 +1095,70 @@ async fn invalid_reload_keeps_previous_state() {
     }
 }
 
+/// Brokers are read at startup: a reload whose `brokers:` differ is
+/// rejected as a whole (nothing else in it is applied), and the watch keeps
+/// running.
+#[tokio::test]
+async fn reload_changing_brokers_is_rejected() {
+    let with_brokers = |brokers: &str, scenario: &str| {
+        format!(
+            "brokers:\n{brokers}{}",
+            BASIC.replace("out-of-stock", scenario)
+        )
+    };
+    let local = "  local:\n    kind: memory\n";
+    let ws = Workspace::new();
+    ws.write(&with_brokers(local, "out-of-stock"));
+    let app = start(config_args(&ws, true)).await;
+    assert_eq!(app._app.brokers.names(), ["local"]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Adding a broker (with another change) is not applied.
+    ws.write(&with_brokers(
+        &format!("{local}  extra:\n    kind: memory\n"),
+        "sold-out",
+    ));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(scenario_names(&app.admin).await, ["out-of-stock"]);
+    assert_eq!(app._app.brokers.names(), ["local"]);
+
+    // Changing a broker's settings is rejected too.
+    ws.write(&with_brokers(
+        "  local:\n    kind: memory\n    client_id_prefix: other\n",
+        "sold-out",
+    ));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(scenario_names(&app.admin).await, ["out-of-stock"]);
+
+    // The same brokers again: the watch is still running and applies it.
+    ws.write(&with_brokers(local, "sold-out"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while scenario_names(&app.admin).await != ["sold-out"] {
+        assert!(Instant::now() < deadline, "not reloaded after the fix");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[test]
+fn broker_change_check_names_the_restart() {
+    let ws = Workspace::new();
+    let before = ws.load("brokers:\n  local:\n    kind: memory\n");
+    let initial = file_config::broker_configs(&before).unwrap();
+    assert!(mockingbird::config::ensure_brokers_unchanged(&initial, &before).is_ok());
+    for changed in [
+        "brokers:\n  local:\n    kind: memory\n  extra:\n    kind: memory\n",
+        "brokers: {}\n",
+        "brokers:\n  local:\n    kind: memory\n    client_id_prefix: x\n",
+    ] {
+        let cfg = ws.load(changed);
+        let e = mockingbird::config::ensure_brokers_unchanged(&initial, &cfg).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("brokers changed: restart required"),
+            "{changed}: {e:#}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn zero_config_matches_p1_behaviour() {
     let args = ServeArgs {
