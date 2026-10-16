@@ -1,3 +1,4 @@
+import { api } from "./client";
 import type { components } from "./schema";
 
 /** One served call, as the live tail sends it. */
@@ -25,6 +26,9 @@ export function streamUrl(ws: string, mock: string, filters: LiveFilters): strin
   return `/api/v1/workspaces/${e(ws)}/mocks/${e(mock)}/requests/stream${qs ? `?${qs}` : ""}`;
 }
 
+/** `EventSource.CLOSED`: the browser will not reconnect. */
+const CLOSED = 2;
+
 function parse(data: unknown): unknown {
   try {
     return typeof data === "string" ? JSON.parse(data) : undefined;
@@ -36,7 +40,11 @@ function parse(data: unknown): unknown {
 /**
  * Subscribes to a mock's live tail (`GET …/requests/stream`) with an
  * `EventSource`, which sends the session cookie and reconnects on its own.
- * `onError` is called whenever the connection drops. Returns `close()`.
+ * `onError` is called whenever the connection drops. When the browser gives
+ * up (the stream is `CLOSED`, e.g. after a 401 the stream cannot report), the
+ * session is checked with `GET /api/v1/me`, whose 401 sends the browser to
+ * `/auth/login?return_to=<current path>` (see the API client). Returns
+ * `close()`.
  */
 export function subscribeRequests(
   ws: string,
@@ -55,6 +63,13 @@ export function subscribeRequests(
     const dropped = Number(body?.dropped);
     if (Number.isFinite(dropped)) onEvent({ kind: "lagged", dropped });
   });
-  source.onerror = () => onError();
+  source.onerror = () => {
+    onError();
+    if (source.readyState === CLOSED) {
+      // A 401 redirects to the login in the client's middleware; any other
+      // failure leaves the page as it is.
+      api.GET("/api/v1/me").catch(() => {});
+    }
+  };
   return () => source.close();
 }
