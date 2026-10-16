@@ -284,6 +284,10 @@ fn build_operation(method: String, path: String, entries: &[&Entry]) -> DraftOpe
         let mut url = e.url.clone();
         url.set_query(None);
         url.set_fragment(None);
+        // Userinfo is a credential: never copy it into provenance. Both setters
+        // only fail for cannot-be-a-base URLs, which parse rejects (http(s) only).
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
         url
     };
     let provenance = entries

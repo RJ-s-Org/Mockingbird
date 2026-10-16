@@ -301,6 +301,27 @@ fn har_never_copies_credentials() {
 }
 
 #[test]
+fn har_never_copies_url_userinfo() {
+    let har = json!({"log": {"version": "1.2", "entries": [{
+        "request": {
+            "method": "GET",
+            "url": "https://alice:pa55word@api.example.com/x?token=q",
+            "queryString": []
+        },
+        "response": {"status": 200, "content": {"mimeType": "application/json", "text": "{\"a\":1}"}}
+    }]}});
+    let import = import_har(har.to_string().as_bytes()).unwrap();
+    let text = serde_json::to_string(&import).unwrap();
+    for secret in ["alice", "pa55word"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+    assert_eq!(
+        import.operations[0].provenance[0].excerpt,
+        "GET https://api.example.com/x → 200"
+    );
+}
+
+#[test]
 fn har_base64_content_decoded() {
     let import = petstore();
     let get = op(&import, "GET", "/api/pets/{petId}");
