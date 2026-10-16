@@ -27,7 +27,9 @@ async fn main() -> ExitCode {
         Command::Serve(args) => serve(args).await,
         Command::Validate { contract } => validate(&contract),
         Command::Openapi => openapi(),
-        Command::Client(cmd) => client(&cli.admin_url, cli.token.as_deref(), cmd).await,
+        Command::Client(cmd) => {
+            client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -57,8 +59,13 @@ impl From<anyhow::Error> for Failure {
 }
 
 /// Runs a client subcommand: JSON on stdout, problem details on stderr.
-async fn client(admin_url: &str, token: Option<&str>, cmd: ClientCommand) -> Result<(), Failure> {
-    match client::run(admin_url, token, cmd).await {
+async fn client(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    cmd: ClientCommand,
+) -> Result<(), Failure> {
+    match client::run(admin_url, token, workspace, cmd).await {
         Ok(Some(value)) => {
             let text = serde_json::to_string_pretty(&value).map_err(anyhow::Error::from)?;
             println!("{text}");

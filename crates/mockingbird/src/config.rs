@@ -47,6 +47,14 @@ pub struct Cli {
     /// API.
     #[arg(long, global = true, env = "MB_ADMIN_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
+    /// Workspace the client subcommands act on.
+    #[arg(
+        long,
+        global = true,
+        env = "MB_WORKSPACE",
+        default_value = mb_store::DEFAULT_WORKSPACE
+    )]
+    pub workspace: String,
     #[command(subcommand)]
     pub cmd: Command,
 }

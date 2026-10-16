@@ -46,18 +46,31 @@ impl Output {
 
 /// Runs the binary off the async runtime so the server keeps serving.
 async fn run(admin: &str, args: &[&str]) -> Output {
+    run_with(admin, args, &[], None).await
+}
+
+/// [`run`] with extra environment variables and optional stdin.
+async fn run_with(admin: &str, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> Output {
     let admin = admin.to_string();
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let stdin = stdin.map(str::to_string);
     tokio::task::spawn_blocking(move || {
-        let out = Command::cargo_bin("mockingbird")
-            .unwrap()
-            .arg("--admin-url")
+        let mut cmd = Command::cargo_bin("mockingbird").unwrap();
+        cmd.arg("--admin-url")
             .arg(&admin)
             .args(&args)
             .env_remove("MB_ADMIN_URL")
             .env_remove("MB_ADMIN_TOKEN")
-            .output()
-            .unwrap();
+            .env_remove("MB_WORKSPACE")
+            .envs(env);
+        if let Some(input) = stdin {
+            cmd.write_stdin(input);
+        }
+        let out = cmd.output().unwrap();
         Output {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -698,4 +711,214 @@ async fn channels_cli_round_trip() {
     )
     .await;
     assert_eq!(out.code, 2, "{}", out.stderr);
+}
+
+/// Creates workspace `name` over HTTP.
+async fn create_workspace(admin: &str, name: &str) {
+    let resp = reqwest::Client::new()
+        .post(format!("{admin}/api/v1/workspaces"))
+        .json(&json!({ "name": name }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+}
+
+/// The mock names `mocks list` prints.
+fn names(out: &Output) -> Vec<String> {
+    out.json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_flag_targets_workspace() {
+    let admin = admin_url().await;
+    create_workspace(&admin, "team-a").await;
+    let out = run(&admin, &["--workspace", "team-a", "mocks", "create", "m1"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+
+    let out = run(&admin, &["--workspace", "team-a", "mocks", "list"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(names(&out), ["m1"]);
+    let out = run(&admin, &["mocks", "list", "--workspace", "default"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(names(&out).is_empty(), "{}", out.stdout);
+    let out = run(&admin, &["mocks", "list"]).await;
+    assert!(names(&out).is_empty(), "{}", out.stdout);
+
+    let resp = reqwest::get(format!("{admin}/api/v1/workspaces/team-a/mocks/m1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mb_workspace_env_is_honoured() {
+    let admin = admin_url().await;
+    create_workspace(&admin, "team-b").await;
+    let env = [("MB_WORKSPACE", "team-b")];
+    let out = run_with(&admin, &["mocks", "create", "m2"], &env, None).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let out = run_with(&admin, &["mocks", "list"], &env, None).await;
+    assert_eq!(names(&out), ["m2"]);
+    let out = run(&admin, &["mocks", "list"]).await;
+    assert!(names(&out).is_empty(), "{}", out.stdout);
+    // The flag wins over the environment.
+    let out = run_with(
+        &admin,
+        &["--workspace", "default", "mocks", "list"],
+        &env,
+        None,
+    )
+    .await;
+    assert!(names(&out).is_empty(), "{}", out.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenarios_put_list_delete() {
+    let admin = admin_url().await;
+    create_workspace(&admin, "team-a").await;
+    let ws = ["--workspace", "team-a"];
+    let out = run(&admin, &[&ws[..], &["mocks", "create", "orders"]].concat()).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("slow.json");
+    std::fs::write(&file, r#"{"latency_ms": 250, "status": 503}"#).unwrap();
+    let out = run(
+        &admin,
+        &[
+            &ws[..],
+            &[
+                "scenarios",
+                "put",
+                "orders",
+                "slow",
+                "--file",
+                file.to_str().unwrap(),
+            ],
+        ]
+        .concat(),
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json()["latency_ms"], 250);
+
+    // `--file -` reads stdin.
+    let out = run_with(
+        &admin,
+        &[
+            &ws[..],
+            &["scenarios", "put", "orders", "chatty", "--file", "-"],
+        ]
+        .concat(),
+        &[],
+        Some(r#"{"instructions": "be chatty"}"#),
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+
+    let out = run(
+        &admin,
+        &[&ws[..], &["scenarios", "list", "orders"]].concat(),
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(names(&out), ["chatty", "slow"]);
+
+    let out = run(
+        &admin,
+        &[&ws[..], &["scenarios", "get", "orders", "slow"]].concat(),
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let slow = out.json();
+    assert_eq!(slow["name"], "slow");
+    assert_eq!(slow["status"], 503);
+
+    let out = run(
+        &admin,
+        &[&ws[..], &["scenarios", "delete", "orders", "slow"]].concat(),
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let out = run(
+        &admin,
+        &[&ws[..], &["scenarios", "list", "orders"]].concat(),
+    )
+    .await;
+    assert_eq!(names(&out), ["chatty"]);
+
+    // The scenarios live in team-a, not in default.
+    let out = run(&admin, &["scenarios", "list", "orders"]).await;
+    assert_eq!(out.code, 1, "{}", out.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scenarios_get_unknown_is_usage_error() {
+    let admin = admin_url().await;
+    let out = run(&admin, &["mocks", "create", "orders"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let out = run(&admin, &["scenarios", "get", "orders", "nope"]).await;
+    assert_eq!(out.code, 2, "stdout: {}", out.stdout);
+    assert!(
+        out.stderr
+            .contains("scenario nope not found in mock orders"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profiles_put_get_delete() {
+    let admin = admin_url().await;
+    create_workspace(&admin, "team-a").await;
+    let ws = ["--workspace", "team-a"];
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fast.json");
+    std::fs::write(
+        &file,
+        r#"{"base_url": "https://llm.example.com/v1", "model": "small", "timeout_ms": 1500}"#,
+    )
+    .unwrap();
+    let out = run(
+        &admin,
+        &[
+            &ws[..],
+            &["profiles", "put", "fast", "--file", file.to_str().unwrap()],
+        ]
+        .concat(),
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json()["model"], "small");
+
+    let out = run(&admin, &[&ws[..], &["profiles", "get", "fast"]].concat()).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json()["timeout_ms"], 1500);
+
+    let out = run(&admin, &[&ws[..], &["profiles", "list"]].concat()).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(names(&out).contains(&"fast".to_string()), "{}", out.stdout);
+    let out = run(&admin, &["profiles", "list"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(!names(&out).contains(&"fast".to_string()), "{}", out.stdout);
+
+    let out = run(&admin, &[&ws[..], &["profiles", "delete", "fast"]].concat()).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let out = run(&admin, &[&ws[..], &["profiles", "get", "fast"]].concat()).await;
+    assert_eq!(out.code, 1, "{}", out.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn brokers_list_stays_global() {
+    let admin = admin_url_with_memory_broker().await;
+    create_workspace(&admin, "team-a").await;
+    let out = run(&admin, &["--workspace", "team-a", "brokers", "list"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json()[0]["name"], "mem", "{}", out.stdout);
 }
