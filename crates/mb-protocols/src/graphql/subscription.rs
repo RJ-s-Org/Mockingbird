@@ -29,7 +29,6 @@ use tokio::time::Instant;
 use tracing::field::Empty;
 use tracing::{Instrument, Span};
 
-use super::MAX_BODY_BYTES;
 use super::resolve::{Failure, Shapes, forced_message, project};
 use super::schema::{input_value, type_ref};
 use crate::call::{
@@ -98,11 +97,7 @@ pub(crate) async fn upgrade(
             }
         }
     }
-    let cfg = ChannelConfig {
-        subprotocols: SUBPROTOCOLS.to_vec(),
-        keepalive: rt.protocols.ws_keepalive,
-        max_message_bytes: MAX_BODY_BYTES,
-    };
+    let cfg = ChannelConfig::for_mock(rt, SUBPROTOCOLS.to_vec());
     let rt = Arc::clone(rt);
     serve_channel(upgrade, cfg, move |io| {
         run(schema, io, rt, headers, query, key_verified)

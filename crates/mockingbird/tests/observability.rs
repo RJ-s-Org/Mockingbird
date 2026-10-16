@@ -478,6 +478,9 @@ fn deps(
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
     }
 }
 

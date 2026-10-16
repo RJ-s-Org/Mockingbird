@@ -34,7 +34,7 @@ use tracing::{Instrument, Span};
 
 use super::GrpcError;
 use super::codec::DynamicCodec;
-use super::status::Failure;
+use super::status::{Failure, oversized};
 use crate::call::{
     self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
 };
@@ -169,9 +169,10 @@ impl GrpcMock {
             source = Empty,
         );
         let limit = self.rt.protocols.grpc_max_message_bytes;
+        let decoding_limit = limit.min(self.rt.limits.max_request_bytes);
         let codec = DynamicCodec::new(method.desc.output(), method.desc.input());
         let mut grpc = Grpc::new(codec)
-            .max_decoding_message_size(limit)
+            .max_decoding_message_size(decoding_limit)
             .max_encoding_message_size(limit);
         let headers = req.headers().clone();
         let call = Arc::new(CallState {
@@ -191,6 +192,12 @@ impl GrpcMock {
         };
         if !call.invoked.load(Ordering::SeqCst) {
             call.report_rejected_request(headers, resp.headers()).await;
+            if let Some(status) = Status::from_header_map(resp.headers())
+                .as_ref()
+                .and_then(oversized)
+            {
+                return status.into_http();
+            }
         }
         resp.map(|inner| Body::new(WithSource { inner, call }))
     }

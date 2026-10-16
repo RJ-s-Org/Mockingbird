@@ -1,5 +1,6 @@
 //! Mockingbird command-line front end.
 
+pub mod budget;
 pub mod client;
 pub mod config;
 pub mod dp_keys;

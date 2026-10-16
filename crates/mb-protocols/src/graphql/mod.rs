@@ -30,8 +30,6 @@ mod subscription;
 
 pub(crate) use schema::build_schema;
 
-/// The largest request body accepted.
-const MAX_BODY_BYTES: usize = 1024 * 1024;
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const PROBLEM_JSON: &str = "application/problem+json";
 const GRAPHQL_MEDIA_TYPE: &str = "application/graphql";
@@ -114,12 +112,17 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             }
             request
         }
-        Method::POST => match read_body(&headers, body).await {
+        Method::POST => match read_body(&headers, body, st.rt.limits.max_request_bytes).await {
             Ok(bytes) => match parse_post(&headers, &bytes) {
                 Ok(r) => r,
                 Err(detail) => return problem(400, "Invalid GraphQL request", detail),
             },
-            Err(resp) => return resp,
+            Err(resp) => {
+                if resp.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    report_too_large(&st.rt, &method, &headers).await;
+                }
+                return resp;
+            }
         },
         _ => {
             let mut resp = problem(
@@ -258,21 +261,21 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
-/// The body, unless it exceeds [`MAX_BODY_BYTES`] (413) or cannot be read
+/// The body, unless it exceeds `limit` bytes (413) or cannot be read
 /// (400).
-async fn read_body(headers: &HeaderMap, body: Body) -> Result<Bytes, Response> {
+async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Bytes, Response> {
     let too_large = || {
         problem(
             413,
             "Payload Too Large",
-            format!("GraphQL request bodies are limited to {MAX_BODY_BYTES} bytes"),
+            format!("GraphQL request bodies are limited to {limit} bytes"),
         )
     };
     let declared = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|n| n > MAX_BODY_BYTES) {
+    if declared.is_some_and(|n| n > limit) {
         return Err(too_large());
     }
     let mut stream = body.into_data_stream();
@@ -280,12 +283,37 @@ async fn read_body(headers: &HeaderMap, body: Body) -> Result<Bytes, Response> {
     while let Some(chunk) = stream.next().await {
         let chunk =
             chunk.map_err(|e| problem(400, "Invalid GraphQL request", format!("body: {e}")))?;
-        if buf.len() + chunk.len() > MAX_BODY_BYTES {
+        if buf.len() + chunk.len() > limit {
             return Err(too_large());
         }
         buf.extend_from_slice(&chunk);
     }
     Ok(Bytes::from(buf))
+}
+
+/// Reports a request refused for its size as a `413` call (before
+/// admission, so it is attributed like an unrouted call).
+async fn report_too_large(rt: &MockRuntime, method: &Method, headers: &HeaderMap) {
+    let report = call::Report {
+        operation_id: None,
+        session: call::DEFAULT_SESSION.into(),
+        method: method.as_str().to_string(),
+        path: rt.protocols.graphql_path.clone(),
+        status: 413,
+        source: None,
+        usage: Default::default(),
+        latency: Default::default(),
+        tenancy: None,
+        admission_ran: false,
+        request: if rt.recorder.is_some() {
+            json!({"headers": call::recorded_headers(rt, headers)})
+        } else {
+            Value::Null
+        },
+        request_body_bytes: None,
+        response: None,
+    };
+    call::report(rt, headers, report).await;
 }
 
 /// A `POST` body: raw query text for `application/graphql`, else the JSON

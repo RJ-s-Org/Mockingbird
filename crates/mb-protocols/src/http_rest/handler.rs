@@ -6,6 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
+use futures::StreamExt;
 use mb_engine::{
     EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator, Source,
 };
@@ -140,12 +141,17 @@ impl CallLog {
 
     fn rejected(&mut self, r: Rejection) -> Response {
         let mut resp = self.problem(r.status, &r.title, r.detail);
-        if let Some(after) = r.retry_after {
-            let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from(secs));
-        }
+        set_retry_after(&mut resp, r.retry_after);
         resp
+    }
+}
+
+/// `Retry-After` in whole seconds, rounded up.
+fn set_retry_after(resp: &mut Response, after: Option<Duration>) {
+    if let Some(after) = after {
+        let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
     }
 }
 
@@ -159,7 +165,7 @@ pub(crate) async fn handle(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    raw_body: Bytes,
+    body: Body,
 ) -> Response {
     let rt = &st.rt;
     let span = tracing::info_span!(
@@ -172,9 +178,32 @@ pub(crate) async fn handle(
     );
     let started = Instant::now();
     let mut log = CallLog::new(rt.recorder.is_some());
-    let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
-        .instrument(span.clone())
-        .await;
+    let (resp, raw_body) = match read_body(&headers, body, rt.limits.max_request_bytes).await {
+        Ok(raw_body) => {
+            let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
+                .instrument(span.clone())
+                .await;
+            (resp, raw_body)
+        }
+        Err(error) => {
+            let found = to_http_method(&method).and_then(|m| st.routes.find(m, uri.path()));
+            if let Some((op_id, _)) = found {
+                span.record("operation", op_id.as_str());
+                log.operation_id = Some(op_id);
+            }
+            let resp = match error {
+                BodyError::TooLarge(limit) => log.problem(
+                    413,
+                    "Payload Too Large",
+                    format!("request bodies are limited to {limit} bytes"),
+                ),
+                BodyError::Unreadable(detail) => {
+                    log.problem(400, "Invalid request", format!("body: {detail}"))
+                }
+            };
+            (resp, Bytes::new())
+        }
+    };
     let status = resp.status().as_u16();
     span.record("status", status);
     if log.streaming {
@@ -192,6 +221,35 @@ pub(crate) async fn handle(
         tokio::time::sleep(delay).instrument(span).await;
     }
     resp
+}
+
+/// Why a request body was not read.
+enum BodyError {
+    /// Larger than the cap (in bytes).
+    TooLarge(usize),
+    Unreadable(String),
+}
+
+/// The body, unless its `Content-Length` or its collected length exceeds
+/// `limit` bytes, or it cannot be read.
+async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Bytes, BodyError> {
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > limit) {
+        return Err(BodyError::TooLarge(limit));
+    }
+    let mut stream = body.into_data_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| BodyError::Unreadable(e.to_string()))?;
+        if buf.len() + chunk.len() > limit {
+            return Err(BodyError::TooLarge(limit));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
 }
 
 async fn serve(
@@ -293,6 +351,14 @@ async fn serve(
             }
             return match error {
                 PlanError::Rejected(r) => log.rejected(r),
+                PlanError::RateLimited(r) => match call::declared_rate_limited(rt, op) {
+                    Some(generated) => {
+                        let mut resp = log.generated(generated);
+                        set_retry_after(&mut resp, r.retry_after);
+                        resp
+                    }
+                    None => log.rejected(r),
+                },
                 PlanError::Unauthorized(u) => {
                     let mut resp = log.problem(401, "Unauthorized", u.detail);
                     if let Ok(v) = HeaderValue::from_str(&u.challenge) {

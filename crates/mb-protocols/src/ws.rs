@@ -48,8 +48,22 @@ pub struct ChannelConfig {
     /// Interval between server pings.
     pub keepalive: Duration,
     /// The largest frame or message accepted; a larger one closes the
-    /// socket with 1009.
+    /// socket with 1009. Mock channels use the mock's request size cap
+    /// (see [`ChannelConfig::for_mock`]).
     pub max_message_bytes: usize,
+}
+
+impl ChannelConfig {
+    /// A mock's channel speaking `subprotocols`: the mock's keepalive, and
+    /// its request size cap (`limits.max_request_bytes`) as the largest
+    /// message.
+    pub fn for_mock(rt: &crate::MockRuntime, subprotocols: Vec<&'static str>) -> Self {
+        Self {
+            subprotocols,
+            keepalive: rt.protocols.ws_keepalive,
+            max_message_bytes: rt.limits.max_request_bytes,
+        }
+    }
 }
 
 /// Upgrades the connection and runs `handler` on it.

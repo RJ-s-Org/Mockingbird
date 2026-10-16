@@ -467,7 +467,9 @@ async fn oversized_message_rejected() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Code::OutOfRange, "{err:?}");
+    // Over the request size cap (the 1 MiB default here): gRPC servers
+    // answer RESOURCE_EXHAUSTED (tonic itself says OUT_OF_RANGE).
+    assert_eq!(err.code(), Code::ResourceExhausted, "{err:?}");
 }
 
 #[tokio::test]

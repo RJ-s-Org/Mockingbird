@@ -18,7 +18,8 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use mb_engine::{EngineError, OperationCall, SchemaValidator, Source};
+use mb_engine::{EngineError, GeneratedResponse, OperationCall, SchemaValidator, Source};
+use mb_ext::Rejection;
 use mb_mcm::{Binding, Operation, ProtocolPayload, StatusSelector};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -39,8 +40,6 @@ use envelope::{Element, Version};
 pub use xml_json::envelope_body_to_json;
 pub(crate) use xml_json::json_to_xml;
 
-/// The largest request body accepted.
-const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const SOAP_ACTION_HEADER: &str = "soapaction";
 const PROBLEM_JSON: &str = "application/problem+json";
@@ -367,9 +366,9 @@ async fn answer(
         )
         .with_http(415);
     };
-    let bytes = match read_body(headers, body).await {
+    let bytes = match read_body(headers, body, rt.limits.max_request_bytes).await {
         Ok(b) => b,
-        Err(fault) => return fault(version),
+        Err(error) => return error.fault(version),
     };
     report.request_body_bytes = Some(bytes.len());
     let Ok(text) = std::str::from_utf8(&bytes) else {
@@ -415,6 +414,11 @@ async fn answer(
             report.tenancy = tenancy;
             if let Some(s) = session {
                 report.session = s;
+            }
+            if let PlanError::RateLimited(r) = &error
+                && let Some(generated) = call::declared_rate_limited(rt, op)
+            {
+                return rate_limited_fault(rt, op, version, r, generated);
             }
             return plan_fault(version, error, &rt.name);
         }
@@ -522,7 +526,7 @@ fn engine_fault(version: Version, op: &Operation, e: EngineError) -> Answer {
 
 fn plan_fault(version: Version, error: PlanError, mock: &str) -> Answer {
     match error {
-        PlanError::Rejected(r) => {
+        PlanError::Rejected(r) | PlanError::RateLimited(r) => {
             let mut answer = Answer::fault(version, r.status, r.detail);
             answer.retry_after = r.retry_after;
             answer
@@ -539,6 +543,31 @@ fn plan_fault(version: Version, error: PlanError, mock: &str) -> Answer {
             format!("mock {mock} has no scenario {name:?}"),
         ),
     }
+}
+
+/// A rate-limited call of an operation declaring a `429` response: a
+/// Fault (HTTP 429, with `Retry-After`) whose detail is the engine's
+/// fallback for that response.
+fn rate_limited_fault(
+    rt: &MockRuntime,
+    op: &Operation,
+    version: Version,
+    rejection: &Rejection,
+    generated: GeneratedResponse,
+) -> Answer {
+    let body = generated.body.unwrap_or(Value::Null);
+    let detail = op
+        .output_for_status(429)
+        .and_then(|o| o.schema.as_ref())
+        .and_then(|schema| json_to_xml(&body, &rt.bundle.with_reachable_defs(schema)).ok());
+    let mut answer = Answer::fault(version, 429, rejection.detail.as_str()).with_http(429);
+    answer.xml = envelope::fault(version, true, &rejection.detail, detail.as_deref());
+    answer.source = Some(generated.source);
+    answer.retry_after = rejection.retry_after;
+    if let Some(fault) = answer.record.get_mut("fault") {
+        fault["detail"] = body;
+    }
+    answer
 }
 
 fn forced_message(status: u16) -> String {
@@ -607,33 +636,44 @@ fn version_and_action(headers: &HeaderMap) -> Option<(Version, Option<String>)> 
     }
 }
 
-/// The body, unless it exceeds [`MAX_BODY_BYTES`] (413) or cannot be read
-/// (400). The error builds the fault in the request's version.
-async fn read_body(headers: &HeaderMap, body: Body) -> Result<Vec<u8>, fn(Version) -> Answer> {
-    fn too_large(version: Version) -> Answer {
-        Answer::fault(
-            version,
-            413,
-            format!("SOAP request bodies are limited to {MAX_BODY_BYTES} bytes"),
-        )
-        .with_http(413)
+/// Why a request body was not read.
+enum BodyError {
+    /// Larger than the cap (in bytes).
+    TooLarge(usize),
+    Unreadable,
+}
+
+impl BodyError {
+    /// The fault answering it, in the request's version: a `413` Fault with
+    /// HTTP 413, or a `400` Fault.
+    fn fault(self, version: Version) -> Answer {
+        match self {
+            Self::TooLarge(limit) => Answer::fault(
+                version,
+                413,
+                format!("SOAP request bodies are limited to {limit} bytes"),
+            )
+            .with_http(413),
+            Self::Unreadable => Answer::fault(version, 400, "the request body could not be read"),
+        }
     }
-    fn unreadable(version: Version) -> Answer {
-        Answer::fault(version, 400, "the request body could not be read")
-    }
+}
+
+/// The body, unless it exceeds `limit` bytes or cannot be read.
+async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Vec<u8>, BodyError> {
     let declared = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|n| n > MAX_BODY_BYTES) {
-        return Err(too_large);
+    if declared.is_some_and(|n| n > limit) {
+        return Err(BodyError::TooLarge(limit));
     }
     let mut stream = body.into_data_stream();
     let mut buf = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| unreadable as fn(Version) -> Answer)?;
-        if buf.len() + chunk.len() > MAX_BODY_BYTES {
-            return Err(too_large);
+        let chunk = chunk.map_err(|_| BodyError::Unreadable)?;
+        if buf.len() + chunk.len() > limit {
+            return Err(BodyError::TooLarge(limit));
         }
         buf.extend_from_slice(&chunk);
     }

@@ -33,6 +33,9 @@ fn deps(store: Arc<dyn ControlStore>, offline: bool, default_profile: Option<&st
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
     }
 }
 

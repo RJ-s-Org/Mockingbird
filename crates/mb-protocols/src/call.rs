@@ -161,7 +161,8 @@ pub(crate) struct Presented<'a> {
     pub admitted: Option<&'a Tenancy>,
 }
 
-/// Admission for a whole request (`tenants.resolve`, then `quota.admit`)
+/// Admission for a whole request (`tenants.resolve`, then `quota.admit`,
+/// then the mock's rate limit)
 /// with operation id `operation_id`, for adapters that check the
 /// data-plane key once per request ([`check_key`]) and must admit first.
 /// `Err` carries the tenancy when it resolved.
@@ -178,10 +179,59 @@ pub(crate) async fn admit(
         .resolve(&call_info)
         .await
         .map_err(|r| (r, None))?;
-    match rt.ext.quota.admit(&tenancy, &call_info).await {
+    if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+        return Err((r, Some(tenancy)));
+    }
+    match rate_limit(rt) {
         Ok(()) => Ok(tenancy),
         Err(r) => Err((r, Some(tenancy))),
     }
+}
+
+/// The mock's rate limit (spec §7, step 2, after the quota): `Err` with
+/// the `429` rejection (and its `Retry-After`) when the bucket is empty.
+pub(crate) fn rate_limit(rt: &MockRuntime) -> Result<(), Rejection> {
+    let Some(limiter) = &rt.limits.rate else {
+        return Ok(());
+    };
+    limiter.try_acquire().map_err(|retry_after| {
+        metrics::counter!(crate::limits::RATE_LIMITED_METRIC, "mock" => rt.name.clone())
+            .increment(1);
+        Rejection::new(
+            429,
+            "Too Many Requests",
+            format!(
+                "mock {} allows {} requests/s (burst {})",
+                rt.name,
+                limiter.requests_per_second(),
+                limiter.burst()
+            ),
+        )
+        .with_retry_after(retry_after)
+    })
+}
+
+/// The answer to a rate-limited call of `op` when the contract declares a
+/// `429` response: the engine's fallback for that variant (never an LLM
+/// call). `None` when the operation declares no `429`.
+#[cfg_attr(not(any(feature = "http-rest", feature = "soap")), allow(dead_code))]
+pub(crate) fn declared_rate_limited(rt: &MockRuntime, op: &Operation) -> Option<GeneratedResponse> {
+    let variant = op
+        .outputs
+        .iter()
+        .find(|o| o.status == mb_mcm::StatusSelector::Code(429))?;
+    let ctx = GenerationContext {
+        forced_status: Some(429),
+        ..GenerationContext::default()
+    };
+    Some(rt.engine.fallback(
+        &rt.bundle,
+        op,
+        variant,
+        429,
+        &OperationCall::default(),
+        &ctx,
+    ))
 }
 
 /// The data-plane key check of `api_key` mode for a whole request, for
@@ -213,6 +263,8 @@ pub(crate) fn public_query(rt: &MockRuntime, pairs: &[(String, String)]) -> Vec<
 pub(crate) enum PlanError {
     /// Tenancy resolution or the quota refused the call.
     Rejected(Rejection),
+    /// The mock's rate limit refused the call (`429`, with `Retry-After`).
+    RateLimited(Rejection),
     /// Data-plane auth refused the call (`401`).
     Unauthorized(Unauthorized),
     /// An override header is unusable; carries the problem detail.
@@ -243,8 +295,8 @@ impl PlanFailure {
     }
 }
 
-/// Admission (`tenants.resolve`, then `quota.admit`, unless
-/// [`Presented::admitted`]), then data-plane auth
+/// Admission (`tenants.resolve`, then `quota.admit`, then the mock's rate
+/// limit, unless [`Presented::admitted`]), then data-plane auth
 /// (spec §11.2), then override headers, then the scenario. Header status and latency beat the
 /// scenario's; a scenario status applies only where `op` declares it.
 /// Records the session on the current span.
@@ -264,6 +316,9 @@ pub(crate) async fn plan<'a>(
             };
             if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
                 return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
+            }
+            if let Err(r) = rate_limit(rt) {
+                return Err(PlanFailure::new(PlanError::RateLimited(r), Some(tenancy)));
             }
             tenancy
         }

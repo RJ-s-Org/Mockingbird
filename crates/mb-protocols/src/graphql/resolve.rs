@@ -123,7 +123,7 @@ impl Failure {
     /// The field error for a failed [`call::plan`] of mock `mock`.
     pub(crate) fn plan(error: PlanError, mock: &str) -> Self {
         match error {
-            PlanError::Rejected(r) => Self::rejected(r),
+            PlanError::Rejected(r) | PlanError::RateLimited(r) => Self::rejected(r),
             PlanError::Unauthorized(u) => Self::new(401, u.detail),
             PlanError::BadOverride(detail) => Self::new(400, detail),
             PlanError::UnknownScenario(name) => {

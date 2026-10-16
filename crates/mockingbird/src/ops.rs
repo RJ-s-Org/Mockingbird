@@ -36,8 +36,9 @@ pub struct OpsState {
 ///   mock failed to rebuild (`mock <label>: <error>`, labelled by
 ///   [`mock_label`](crate::registry::mock_label); it keeps serving its
 ///   previous version), a mock's channels are not all working (`mock
-///   <label>: <reason>`, e.g. an unreachable broker) or a mounted mock is
-///   serving statelessly; else `200 ready`. Each store ping is bounded by
+///   <label>: <reason>`, e.g. an unreachable broker), a mounted mock is
+///   serving statelessly or a mock's daily token budget is exhausted
+///   (`mock <label>: daily token budget exhausted`); else `200 ready`. Each store ping is bounded by
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
@@ -100,6 +101,7 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
             for (mock, reason) in st.registry.event_issues() {
                 reasons.push(format!("mock {mock}: {reason}"));
             }
+            reasons.extend(st.registry.budget_issues());
             for mock in st.registry.degraded_mocks() {
                 reasons.push(format!(
                     "mock {mock}: state store failing, serving statelessly"

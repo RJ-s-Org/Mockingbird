@@ -18,7 +18,7 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 
 use super::runtime::{ChannelInner, DEFAULT_SESSION, WsClient};
-use super::{InMessage, MAX_MESSAGE_BYTES, address_matches};
+use super::{InMessage, address_matches};
 use crate::dp_auth::{Unauthorized, verify_key};
 use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
 use crate::{RequestKind, RequestRecord};
@@ -153,11 +153,7 @@ async fn upgrade_channel(
     // connected is missed. Every path is subscribed (the hub carries only
     // Publish channels' messages) so its close reaches every socket.
     let hub = stream::select_all(matched.iter().map(|t| hub_stream(inner.hub.subscribe(t))));
-    let cfg = ChannelConfig {
-        subprotocols: vec![],
-        keepalive: inner.rt.protocols.ws_keepalive,
-        max_message_bytes: MAX_MESSAGE_BYTES,
-    };
+    let cfg = ChannelConfig::for_mock(&inner.rt, vec![]);
     serve_channel(upgrade, cfg, move |io| {
         session(
             inner,

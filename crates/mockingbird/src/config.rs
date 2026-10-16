@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use axum::Router;
 use clap::{Parser, Subcommand};
 use mb_admin::channels::SharedChannelControl;
+use mb_engine::GenerationLimiter;
+use mb_engine::pii::Scrubber;
 use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_protocols::events::{Brokers, EventDeps};
 use mb_store::ControlStore;
@@ -410,6 +412,14 @@ pub async fn build_app_with(
         cfg.observability.redact_fields.clone(),
     );
     let (protocols, stream) = cfg.protocol_settings();
+    let scrubber = match cfg.scrubber_config() {
+        Some(pii) => Some(Arc::new(
+            Scrubber::new(&pii)
+                .map_err(|e| anyhow!("{e}"))
+                .context("building the PII scrubber")?,
+        )),
+        None => None,
+    };
     let deps = RuntimeDeps {
         store: store.clone(),
         state: state.clone(),
@@ -427,6 +437,9 @@ pub async fn build_app_with(
             }),
             holder: uuid::Uuid::new_v4().to_string(),
         },
+        limiter: GenerationLimiter::new(cfg.limits.max_concurrent_generations),
+        scrubber,
+        limits: cfg.limits.clone(),
     };
     let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();
