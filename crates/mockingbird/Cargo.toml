@@ -24,6 +24,7 @@ humantime.workspace = true
 humantime-serde.workspace = true
 mb-admin.workspace = true
 mb-auth.workspace = true
+mb-console.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
 serde.workspace = true

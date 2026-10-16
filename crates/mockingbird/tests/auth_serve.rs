@@ -307,3 +307,44 @@ async fn openapi_subcommand_prints_document() {
     assert!(paths.contains_key("/api/v1/mocks"));
     assert_eq!(paths["/api/v1/mocks"]["get"]["deprecated"], json!(true));
 }
+
+#[tokio::test]
+async fn console_served_behind_login() {
+    let h = harness().await;
+    let nav = |token: Option<String>| {
+        let mut req = Request::builder()
+            .uri("/w/default/mocks?q=1")
+            .header(header::HOST, &h.external_host)
+            .header(header::ACCEPT, "text/html,application/xhtml+xml");
+        if let Some(token) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        req.body(Body::empty()).unwrap()
+    };
+    let resp = h.app.admin.clone().oneshot(nav(None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(
+        resp.headers()[header::LOCATION],
+        "/auth/login?return_to=%2Fw%2Fdefault%2Fmocks%3Fq%3D1"
+    );
+
+    let viewer = h.jwt("alice", &["mb:default:viewer"]);
+    let resp = h
+        .app
+        .admin
+        .clone()
+        .oneshot(nav(Some(viewer)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()[header::CONTENT_SECURITY_POLICY],
+        "default-src 'self'; frame-ancestors 'none'"
+    );
+    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache");
+
+    // Unknown API paths stay problems, not the console.
+    let (status, body) = h.send("GET", "/api/v2/nope", None, None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(!body.contains("<html"), "{body}");
+}

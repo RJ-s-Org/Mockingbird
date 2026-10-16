@@ -49,6 +49,7 @@ subtle = "2"
 base64 = "0.22"
 hmac = "0.12"
 tokio-stream = { version = "0.1", features = ["sync"] }
+rust-embed = { version = "8.13", features = ["debug-embed", "mime-guess"] }
 openidconnect = { version = "4.0", default-features = false }
 jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 rsa = { version = "0.9", features = ["pem"] }
@@ -74,6 +75,7 @@ mb-ext = { path = "crates/mb-ext" }
 mb-store = { path = "crates/mb-store" }
 mb-admin = { path = "crates/mb-admin" }
 mb-auth = { path = "crates/mb-auth" }
+mb-console = { path = "crates/mb-console" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

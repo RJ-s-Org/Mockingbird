@@ -310,7 +310,8 @@ pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<
 /// `oidc` mode a failed provider discovery is an error) and the audit log,
 /// reconciles the configuration into the control store, mounts the mocks,
 /// starts the [`Maintenance`] jobs and builds both routers (the admin one
-/// behind the host guard, see [`HostPolicy`]); with `--watch`, starts
+/// serving the console as its fallback behind [`mb_admin::console_gate`],
+/// and behind the host guard, see [`HostPolicy`]); with `--watch`, starts
 /// watching the config file. `llm: None` (or `--offline`) means faker only
 /// in zero-config mode; `llm.api_key`, when set, is what the reference
 /// `env:MB_LLM_API_KEY` resolves to.
@@ -399,6 +400,10 @@ pub async fn build_app_with(
         ..mb_admin::AdminState::new(store.clone(), state.clone())
     };
     let metrics_gate = (!cfg.auth.public_metrics).then(|| admin_state.clone());
+    let console = mb_console::router().layer(axum::middleware::from_fn_with_state(
+        admin_state.clone(),
+        mb_admin::console_gate,
+    ));
     let mut admin = mb_admin::router(admin_state).merge(ops::router_with_metrics_gate(
         OpsState {
             store: store.clone(),
@@ -411,6 +416,8 @@ pub async fn build_app_with(
     if let Some(routes) = ext.admin_hooks.routes() {
         admin = admin.merge(routes);
     }
+    // Any other path is the console, behind the same credentials as the API.
+    admin = admin.fallback_service(console);
     if let Some(policy) = host_policy(&cfg)? {
         admin = admin.layer(axum::middleware::from_fn_with_state(
             policy,
