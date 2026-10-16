@@ -71,3 +71,7 @@ required-features = ["smart"]
 [[test]]
 name = "smart_fetch"
 required-features = ["smart"]
+
+[[test]]
+name = "smart_infer"
+required-features = ["smart"]

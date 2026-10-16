@@ -3,6 +3,7 @@
 
 pub mod chunk;
 pub mod fetch;
+pub mod infer;
 pub mod model;
 pub mod text;
 
