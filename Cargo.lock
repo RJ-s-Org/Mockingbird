@@ -2153,6 +2153,7 @@ dependencies = [
  "prost",
  "prost-reflect",
  "prost-types",
+ "quick-xml",
  "reqwest",
  "serde_json",
  "serde_urlencoded",

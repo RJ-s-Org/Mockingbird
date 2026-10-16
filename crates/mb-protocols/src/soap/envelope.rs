@@ -1,0 +1,474 @@
+//! SOAP on the wire: a minimal namespace-resolving XML DOM for requests,
+//! envelope and fault writers for responses, and the `?wsdl` address
+//! rewrite.
+//!
+//! DOCTYPE declarations are rejected and no entity is ever expanded: only
+//! the five predefined entities and character references are resolved.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use quick_xml::XmlVersion;
+use quick_xml::escape::{escape, resolve_predefined_entity};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::name::ResolveResult;
+use quick_xml::reader::{NsReader, Reader};
+
+pub(crate) const SOAP11_ENV_NS: &str = "http://schemas.xmlsoap.org/soap/envelope/";
+pub(crate) const SOAP12_ENV_NS: &str = "http://www.w3.org/2003/05/soap-envelope";
+pub(crate) const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+const WSDL_NS: &str = "http://schemas.xmlsoap.org/wsdl/";
+const WSDL_SOAP11_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap/";
+const WSDL_SOAP12_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap12/";
+/// Deeper documents are rejected.
+const MAX_DEPTH: usize = 256;
+pub(crate) const DOCTYPE_MESSAGE: &str = "DOCTYPE is not allowed";
+
+/// An expanded name: namespace URI (empty for none) and local name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QName {
+    pub ns: String,
+    pub local: String,
+}
+
+impl QName {
+    fn new(ns: &str, local: &str) -> Self {
+        QName {
+            ns: ns.to_owned(),
+            local: local.to_owned(),
+        }
+    }
+}
+
+/// In-scope prefix bindings (`""` is the default namespace).
+type Scope = Arc<BTreeMap<String, String>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct Element {
+    pub name: QName,
+    /// Attributes other than namespace declarations.
+    pub attrs: Vec<(QName, String)>,
+    pub children: Vec<Element>,
+    /// The element's own character data, concatenated.
+    pub text: String,
+    scope: Scope,
+}
+
+impl Element {
+    /// Whether the element carries `xsi:nil="true"`.
+    pub(crate) fn is_nil(&self) -> bool {
+        self.attrs
+            .iter()
+            .any(|(n, v)| n.ns == XSI_NS && n.local == "nil" && matches!(v.trim(), "true" | "1"))
+    }
+}
+
+fn split(raw: &str) -> (&str, &str) {
+    raw.split_once(':').unwrap_or(("", raw))
+}
+
+fn syntax(e: impl std::fmt::Display) -> String {
+    format!("malformed XML: {e}")
+}
+
+fn open(e: &BytesStart<'_>, parent: &Scope) -> Result<Element, String> {
+    let mut bindings: Option<BTreeMap<String, String>> = None;
+    let mut raw_attrs = Vec::new();
+    for attr in e.attributes() {
+        let attr = attr.map_err(syntax)?;
+        let key = attr.key.as_ref().to_owned();
+        let value = attr
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(syntax)?
+            .into_owned();
+        let declared = if key == "xmlns" {
+            Some(String::new())
+        } else {
+            key.strip_prefix("xmlns:").map(str::to_owned)
+        };
+        match declared {
+            Some(prefix) => {
+                bindings
+                    .get_or_insert_with(|| (**parent).clone())
+                    .insert(prefix, value);
+            }
+            None => raw_attrs.push((key, value)),
+        }
+    }
+    let scope = bindings.map_or_else(|| Arc::clone(parent), Arc::new);
+    let lookup = |prefix: &str| -> Result<String, String> {
+        if prefix == "xml" {
+            return Ok(XML_NS.to_owned());
+        }
+        scope
+            .get(prefix)
+            .cloned()
+            .ok_or_else(|| syntax(format!("unbound namespace prefix \"{prefix}\"")))
+    };
+    let raw_name = e.name().as_ref().to_owned();
+    let (prefix, local) = split(&raw_name);
+    let ns = if prefix.is_empty() {
+        scope.get("").cloned().unwrap_or_default()
+    } else {
+        lookup(prefix)?
+    };
+    let mut attrs = Vec::with_capacity(raw_attrs.len());
+    for (key, value) in raw_attrs {
+        let (prefix, local) = split(&key);
+        let ns = if prefix.is_empty() {
+            String::new()
+        } else {
+            lookup(prefix)?
+        };
+        attrs.push((QName::new(&ns, local), value));
+    }
+    Ok(Element {
+        name: QName::new(&ns, local),
+        attrs,
+        children: Vec::new(),
+        text: String::new(),
+        scope,
+    })
+}
+
+/// Parses `text` into its root element. The error is a fault string:
+/// [`DOCTYPE_MESSAGE`] for a DOCTYPE, else `malformed XML: …`.
+pub(crate) fn parse(text: &str) -> Result<Element, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().check_end_names = true;
+    let root_scope: Scope = Arc::new(BTreeMap::new());
+    let mut stack: Vec<Element> = Vec::new();
+    let mut root: Option<Element> = None;
+    loop {
+        match reader.read_event().map_err(syntax)? {
+            Event::DocType(_) => return Err(DOCTYPE_MESSAGE.into()),
+            Event::Start(e) => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(syntax(format!(
+                        "elements are nested deeper than {MAX_DEPTH}"
+                    )));
+                }
+                if root.is_some() && stack.is_empty() {
+                    return Err(syntax("more than one root element"));
+                }
+                let scope = stack.last().map_or(&root_scope, |p| &p.scope);
+                let el = open(&e, scope)?;
+                stack.push(el);
+            }
+            Event::Empty(e) => {
+                let scope = stack.last().map_or(&root_scope, |p| &p.scope);
+                let el = open(&e, scope)?;
+                match stack.last_mut() {
+                    Some(parent) => parent.children.push(el),
+                    None if root.is_none() => root = Some(el),
+                    None => return Err(syntax("more than one root element")),
+                }
+            }
+            Event::End(_) => {
+                let el = stack.pop().ok_or_else(|| syntax("unmatched end tag"))?;
+                match stack.last_mut() {
+                    Some(parent) => parent.children.push(el),
+                    None => root = Some(el),
+                }
+            }
+            Event::Text(t) => {
+                let content = t.xml10_content();
+                match stack.last_mut() {
+                    Some(el) => el.text.push_str(&content),
+                    None if content.trim().is_empty() => {}
+                    None => return Err(syntax("text outside the root element")),
+                }
+            }
+            Event::CData(t) => {
+                if let Some(el) = stack.last_mut() {
+                    el.text.push_str(&t.xml10_content());
+                }
+            }
+            Event::GeneralRef(r) => {
+                let resolved = match r.resolve_char_ref().map_err(syntax)? {
+                    Some(c) => c.to_string(),
+                    None => {
+                        let name = r.xml10_content();
+                        resolve_predefined_entity(&name)
+                            .ok_or_else(|| syntax(format!("undeclared entity \"&{name};\"")))?
+                            .to_owned()
+                    }
+                };
+                if let Some(el) = stack.last_mut() {
+                    el.text.push_str(&resolved);
+                }
+            }
+            Event::Comment(_) | Event::Decl(_) | Event::PI(_) => {}
+            Event::Eof => break,
+        }
+    }
+    if !stack.is_empty() {
+        return Err(syntax("unexpected end of document"));
+    }
+    root.ok_or_else(|| syntax("no root element"))
+}
+
+/// The first element child of the `Body` of the SOAP 1.1 or 1.2 envelope
+/// `text`. The error is a fault string.
+pub(crate) fn body_child(text: &str) -> Result<Element, String> {
+    let root = parse(text)?;
+    let ns = root.name.ns.as_str();
+    if root.name.local != "Envelope" || (ns != SOAP11_ENV_NS && ns != SOAP12_ENV_NS) {
+        return Err("the request is not a SOAP Envelope".into());
+    }
+    let ns = ns.to_owned();
+    let mut root = root;
+    let pos = root
+        .children
+        .iter()
+        .position(|c| c.name.ns == ns && c.name.local == "Body")
+        .ok_or("the Envelope has no Body")?;
+    let mut body = root.children.swap_remove(pos);
+    if body.children.is_empty() {
+        return Err("the Body is empty".into());
+    }
+    Ok(body.children.swap_remove(0))
+}
+
+/// The SOAP version of a request or response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Version {
+    V11,
+    V12,
+}
+
+impl Version {
+    fn ns(self) -> &'static str {
+        match self {
+            Version::V11 => SOAP11_ENV_NS,
+            Version::V12 => SOAP12_ENV_NS,
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Version::V11 => "soap",
+            Version::V12 => "env",
+        }
+    }
+
+    pub(crate) fn content_type(self) -> &'static str {
+        match self {
+            Version::V11 => "text/xml; charset=utf-8",
+            Version::V12 => "application/soap+xml; charset=utf-8",
+        }
+    }
+}
+
+/// An envelope whose Body holds `body` (already serialized XML).
+pub(crate) fn envelope(version: Version, body: &str) -> String {
+    let (p, ns) = (version.prefix(), version.ns());
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?><{p}:Envelope xmlns:{p}="{ns}"><{p}:Body>{body}</{p}:Body></{p}:Envelope>"#
+    )
+}
+
+/// A Fault envelope. `client` picks `Client`/`Sender` over
+/// `Server`/`Receiver`; `detail` is serialized XML.
+pub(crate) fn fault(version: Version, client: bool, message: &str, detail: Option<&str>) -> String {
+    let message = escape(message);
+    let p = version.prefix();
+    let body = match version {
+        Version::V11 => {
+            let code = if client { "Client" } else { "Server" };
+            let detail = detail.map_or(String::new(), |d| format!("<detail>{d}</detail>"));
+            format!(
+                "<{p}:Fault><faultcode>{p}:{code}</faultcode><faultstring>{message}</faultstring>{detail}</{p}:Fault>"
+            )
+        }
+        Version::V12 => {
+            let code = if client { "Sender" } else { "Receiver" };
+            let detail = detail.map_or(String::new(), |d| format!("<{p}:Detail>{d}</{p}:Detail>"));
+            format!(
+                r#"<{p}:Fault><{p}:Code><{p}:Value>{p}:{code}</{p}:Value></{p}:Code><{p}:Reason><{p}:Text xml:lang="en">{message}</{p}:Text></{p}:Reason>{detail}</{p}:Fault>"#
+            )
+        }
+    };
+    envelope(version, &body)
+}
+
+/// `wsdl` with the `location` of every `soap:address` / `soap12:address`
+/// set to `base` followed by the address path of the enclosing service
+/// (from `services`, else the path of the original location). Everything
+/// else is copied byte for byte.
+pub(crate) fn rewrite_wsdl(
+    wsdl: &str,
+    base: &str,
+    services: &HashMap<String, String>,
+) -> Result<String, String> {
+    let mut reader = NsReader::from_str(wsdl);
+    let mut out = String::with_capacity(wsdl.len() + 64);
+    let mut copied = 0usize;
+    let mut service: Option<String> = None;
+    loop {
+        let before = usize::try_from(reader.buffer_position()).map_err(syntax)?;
+        let (resolved, event) = reader.read_resolved_event().map_err(syntax)?;
+        let ns = match resolved {
+            ResolveResult::Bound(ns) => ns.0.to_owned(),
+            _ => String::new(),
+        };
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let local = e.local_name().as_ref().to_owned();
+                if ns == WSDL_NS && local == "service" {
+                    service = attr_value(e, "name")?;
+                }
+                if (ns == WSDL_SOAP11_NS || ns == WSDL_SOAP12_NS) && local == "address" {
+                    let after = usize::try_from(reader.buffer_position()).map_err(syntax)?;
+                    let start = wsdl[before..after]
+                        .find('<')
+                        .map(|i| before + i)
+                        .ok_or_else(|| syntax("address tag not found"))?;
+                    let original = attr_value(e, "location")?.unwrap_or_default();
+                    let path = service
+                        .as_ref()
+                        .and_then(|s| services.get(s).cloned())
+                        .unwrap_or_else(|| url_path(&original));
+                    out.push_str(&wsdl[copied..start]);
+                    out.push_str(&address_tag(
+                        e,
+                        &format!("{base}{path}"),
+                        matches!(event, Event::Empty(_)),
+                    )?);
+                    copied = after;
+                }
+            }
+            Event::End(ref e) if e.local_name().as_ref() == "service" => service = None,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    out.push_str(&wsdl[copied..]);
+    Ok(out)
+}
+
+fn attr_value(e: &BytesStart<'_>, local: &str) -> Result<Option<String>, String> {
+    for attr in e.attributes() {
+        let attr = attr.map_err(syntax)?;
+        if attr.key.as_ref() == local {
+            let v = attr
+                .normalized_value(XmlVersion::Implicit1_0)
+                .map_err(syntax)?;
+            return Ok(Some(v.into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// The tag `e` with its `location` attribute set to `location`.
+fn address_tag(e: &BytesStart<'_>, location: &str, empty: bool) -> Result<String, String> {
+    let mut tag = format!("<{}", e.name().as_ref());
+    let mut found = false;
+    for attr in e.attributes() {
+        let attr = attr.map_err(syntax)?;
+        let key = attr.key.as_ref();
+        if key == "location" {
+            found = true;
+            tag.push_str(&format!(" location=\"{}\"", escape(location)));
+        } else {
+            // Raw (still escaped) value; a `"` can only come from a
+            // single-quoted value.
+            let value = attr.value.replace('"', "&quot;");
+            tag.push_str(&format!(" {key}=\"{value}\""));
+        }
+    }
+    if !found {
+        tag.push_str(&format!(" location=\"{}\"", escape(location)));
+    }
+    tag.push_str(if empty { "/>" } else { ">" });
+    Ok(tag)
+}
+
+/// The path of an absolute URL (`/` when it has none); a relative
+/// reference is returned as given.
+fn url_path(url: &str) -> String {
+    let Some((_, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    match rest.find(['/', '?', '#']) {
+        Some(i) if rest[i..].starts_with('/') => {
+            let path = &rest[i..];
+            path.split(['?', '#']).next().unwrap_or(path).to_string()
+        }
+        _ => "/".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn body_child_of_both_versions() {
+        let el = body_child(&envelope(Version::V11, "<a xmlns=\"urn:x\"><b>1</b></a>")).unwrap();
+        assert_eq!(el.name, QName::new("urn:x", "a"));
+        assert_eq!(el.children[0].text, "1");
+        let el = body_child(&envelope(Version::V12, "<a/>")).unwrap();
+        assert_eq!(el.name, QName::new("", "a"));
+        assert_eq!(
+            body_child(&envelope(Version::V11, "")).unwrap_err(),
+            "the Body is empty"
+        );
+        assert_eq!(
+            body_child("<Envelope/>").unwrap_err(),
+            "the request is not a SOAP Envelope"
+        );
+        assert_eq!(body_child("<!DOCTYPE r><r/>").unwrap_err(), DOCTYPE_MESSAGE);
+        assert!(
+            body_child("<r>&e;</r>")
+                .unwrap_err()
+                .starts_with("malformed XML")
+        );
+    }
+
+    #[test]
+    fn faults_escape_their_message() {
+        let f = fault(Version::V11, true, "a < b", None);
+        assert!(f.contains(
+            "<faultcode>soap:Client</faultcode><faultstring>a &lt; b</faultstring></soap:Fault>"
+        ));
+        let f = fault(Version::V12, false, "x", Some("<d/>"));
+        assert!(f.contains("<env:Value>env:Receiver</env:Value>"));
+        assert!(f.contains("<env:Detail><d/></env:Detail>"));
+    }
+
+    #[test]
+    fn url_paths() {
+        assert_eq!(url_path("http://h:1/a/b?x#y"), "/a/b");
+        assert_eq!(url_path("http://h"), "/");
+        assert_eq!(url_path("http://h?x"), "/");
+        assert_eq!(url_path("/rel"), "/rel");
+    }
+
+    #[test]
+    fn rewrites_only_soap_addresses() {
+        let wsdl = r#"<d:definitions xmlns:d="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:h="http://schemas.xmlsoap.org/wsdl/http/">
+  <d:service name="A"><d:port name="p"><s:address location="http://old/x"/></d:port><d:port name="q"><h:address location="http://old/h"/></d:port></d:service>
+  <d:service name="B"><d:port name="p"><s:address location='http://old/y?z' extra="&amp;"></s:address></d:port></d:service>
+</d:definitions>"#;
+        let services = HashMap::from([("A".to_string(), "/a".to_string())]);
+        let out = rewrite_wsdl(wsdl, "http://h:1/m", &services).unwrap();
+        assert!(
+            out.contains(r#"<s:address location="http://h:1/m/a"/>"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"<h:address location="http://old/h"/>"#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"<s:address location="http://h:1/m/y" extra="&amp;"></s:address>"#),
+            "{out}"
+        );
+        assert!(out.starts_with("<d:definitions"));
+        assert!(out.ends_with("</d:definitions>"));
+    }
+}

@@ -26,7 +26,7 @@ grpc = [
     "dep:prost-reflect",
     "dep:tokio-stream",
 ]
-soap = []
+soap = ["dep:quick-xml"]
 
 [dependencies]
 async-graphql = { workspace = true, optional = true }
@@ -44,6 +44,7 @@ mb-state.workspace = true
 prost = { workspace = true, optional = true }
 prost-reflect = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
 serde_json.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
 thiserror.workspace = true

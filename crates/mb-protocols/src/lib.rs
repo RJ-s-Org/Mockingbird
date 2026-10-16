@@ -15,7 +15,12 @@ use mb_state::StateStore;
 
 // Until an adapter is compiled in, nothing calls the shared pipeline.
 #[cfg_attr(
-    not(any(feature = "http-rest", feature = "graphql", feature = "grpc")),
+    not(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    )),
     allow(dead_code)
 )]
 mod call;
@@ -26,6 +31,8 @@ pub mod grpc;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 mod record;
+#[cfg(feature = "soap")]
+pub mod soap;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
