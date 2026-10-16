@@ -81,3 +81,7 @@ required-features = ["smart"]
 [[test]]
 name = "smart_har"
 required-features = ["smart"]
+
+[[test]]
+name = "smart_postman"
+required-features = ["smart"]

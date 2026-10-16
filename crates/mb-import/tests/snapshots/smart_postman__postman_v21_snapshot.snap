@@ -1,0 +1,204 @@
+---
+source: crates/mb-import/tests/smart_postman.rs
+expression: petstore()
+---
+title: Petstore
+servers: []
+operations:
+  - method: GET
+    path: /pets
+    operation_id: ~
+    summary: List pets
+    description: Lists the pets in the store.
+    tags:
+      - Pets
+    parameters:
+      - name: limit
+        in: query
+        required: false
+        description: ~
+        schema:
+          type: integer
+        examples:
+          - 10
+    request: ~
+    responses:
+      - status: 200
+        description: ~
+        content_type: application/json
+        schema:
+          items:
+            properties:
+              id:
+                type: integer
+              name:
+                type: string
+              tag:
+                type: string
+            required:
+              - id
+              - name
+            type: object
+          type: array
+        examples:
+          - - id: 1
+              name: Rex
+              tag: dog
+            - id: 2
+              name: Tom
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: Pets / List pets
+        excerpt: "GET {{baseUrl}}/pets?limit=10&debug=1"
+  - method: GET
+    path: "/pets/{petId}"
+    operation_id: ~
+    summary: Get pet
+    description: Returns one pet by its id.
+    tags:
+      - Pets
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        description: ~
+        schema:
+          type: integer
+        examples:
+          - 42
+    request: ~
+    responses:
+      - status: 200
+        description: ~
+        content_type: application/json
+        schema:
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            tag:
+              type: string
+          required:
+            - id
+            - name
+            - tag
+          type: object
+        examples:
+          - id: 42
+            name: Rex
+            tag: dog
+      - status: 404
+        description: ~
+        content_type: application/problem+json
+        schema:
+          properties:
+            status:
+              type: integer
+            title:
+              type: string
+          required:
+            - status
+            - title
+          type: object
+        examples:
+          - status: 404
+            title: Not Found
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: Pets / Get pet
+        excerpt: "GET {{baseUrl}}/pets/:petId"
+  - method: POST
+    path: /pets
+    operation_id: ~
+    summary: Create pet
+    description: ~
+    tags:
+      - Pets
+    parameters: []
+    request:
+      content_type: application/json
+      schema:
+        properties:
+          name:
+            type: string
+          tag:
+            type: string
+        required:
+          - name
+          - tag
+        type: object
+      examples:
+        - name: Rex
+          tag: dog
+    responses:
+      - status: 201
+        description: ~
+        content_type: application/json
+        schema:
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            tag:
+              type: string
+          required:
+            - id
+            - name
+            - tag
+          type: object
+        examples:
+          - id: 43
+            name: Rex
+            tag: dog
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: Pets / Create pet
+        excerpt: "POST {{baseUrl}}/pets"
+  - method: POST
+    path: /login
+    operation_id: ~
+    summary: Login
+    description: ~
+    tags:
+      - Store
+    parameters: []
+    request:
+      content_type: application/x-www-form-urlencoded
+      schema:
+        properties:
+          password:
+            type: string
+          username:
+            type: string
+        type: object
+      examples:
+        - password: "<redacted>"
+          username: alice
+    responses:
+      - status: 200
+        description: ~
+        content_type: application/json
+        schema:
+          properties:
+            expires_in:
+              type: integer
+            token:
+              type: string
+          required:
+            - expires_in
+            - token
+          type: object
+        examples:
+          - expires_in: 3600
+            token: "<redacted>"
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: Store / Login
+        excerpt: "POST {{baseUrl}}/login"
+warnings: []

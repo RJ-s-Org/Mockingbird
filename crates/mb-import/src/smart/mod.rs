@@ -7,6 +7,7 @@ pub mod har;
 pub mod infer;
 pub mod model;
 pub mod paths;
+pub mod postman;
 pub mod redact;
 pub mod text;
 

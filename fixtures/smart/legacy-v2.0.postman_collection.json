@@ -1,0 +1,49 @@
+{
+  "info": {
+    "_postman_id": "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d",
+    "name": "Orders (legacy)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.0.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "List orders",
+      "request": {
+        "url": "https://api.example.com/v1/orders",
+        "method": "GET",
+        "header": []
+      },
+      "response": [
+        {
+          "name": "Orders",
+          "originalRequest": {
+            "url": "https://api.example.com/v1/orders",
+            "method": "GET"
+          },
+          "code": 200,
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": "[{\"id\": 1001, \"total\": 25.5}]"
+        }
+      ]
+    },
+    {
+      "name": "Get order",
+      "request": {
+        "url": "https://api.example.com/v1/orders/{{orderId}}",
+        "method": "GET",
+        "header": []
+      },
+      "response": [
+        {
+          "name": "Order",
+          "originalRequest": {
+            "url": "https://api.example.com/v1/orders/1001",
+            "method": "GET"
+          },
+          "code": 200,
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": "{\"id\": 1001, \"total\": 25.5}"
+        }
+      ]
+    }
+  ]
+}
