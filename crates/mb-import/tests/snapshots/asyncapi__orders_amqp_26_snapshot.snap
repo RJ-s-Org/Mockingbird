@@ -1,0 +1,102 @@
+---
+source: crates/mb-import/tests/asyncapi.rs
+expression: orders()
+---
+id: orders-events
+title: Orders Events
+version: 1.0.0
+source_digest: "[digest]"
+operations: []
+defs:
+  Order:
+    properties:
+      id:
+        type: string
+      status:
+        enum:
+          - placed
+          - paid
+          - shipped
+        type: string
+      total:
+        minimum: 0
+        type: number
+    required:
+      - id
+      - status
+      - total
+    type: object
+channels:
+  - id: cancelOrder
+    title: Cancel an order.
+    address: orders.cancel
+    binding:
+      amqp:
+        exchange: ""
+        exchange_type: direct
+        routing_key: ""
+        queue: order-cancellations
+    direction: subscribe
+    message_schema:
+      properties:
+        orderId:
+          type: string
+        reason:
+          type: string
+      required:
+        - orderId
+      type: object
+    message_names:
+      - CancelOrder
+    content_type: application/json
+    reply:
+      channel: orderCancelled
+    state_effect:
+      resource_type: cancellations
+      id_field: orderId
+      delete: false
+    semantic_hints:
+      - Cancellation requests sent by clients.
+  - id: orderCancelled
+    title: An order was cancelled.
+    address: orders.cancelled
+    binding:
+      amqp:
+        exchange: orders
+        exchange_type: topic
+        routing_key: orders.cancelled
+    direction: publish
+    message_schema:
+      properties:
+        cancelledAt:
+          format: date-time
+          type: string
+        orderId:
+          type: string
+      required:
+        - orderId
+        - cancelledAt
+      type: object
+    message_names:
+      - OrderCancelled
+    content_type: application/json
+    semantic_hints:
+      - Orders that were cancelled.
+  - id: orderCreated
+    title: An order was created.
+    address: orders.created
+    binding:
+      amqp:
+        exchange: orders
+        exchange_type: topic
+        routing_key: orders.created
+    direction: publish
+    message_schema:
+      $ref: "#/$defs/Order"
+    message_names:
+      - OrderCreated
+    content_type: application/json
+    semantic_hints:
+      - Orders that were just placed.
+      - orders
+      - A newly placed order.
