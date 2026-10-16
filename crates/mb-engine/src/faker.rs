@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -639,6 +640,36 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         Some("date") => return random_datetime(rng).format("%Y-%m-%d").to_string(),
         Some("email") => return format!("{}@example.com", word(rng)),
         Some("uri") => return format!("https://example.com/{}", word(rng)),
+        Some("int64") => return rng.random_range(-1_000_000_i64..1_000_000).to_string(),
+        Some("uint64") => return rng.random_range(0_u64..1_000_000).to_string(),
+        Some("byte") => {
+            let mut bytes = vec![0u8; rng.random_range(4..17usize)];
+            rng.fill(&mut bytes[..]);
+            return base64::engine::general_purpose::STANDARD.encode(bytes);
+        }
+        Some("time") => return random_datetime(rng).format("%H:%M:%SZ").to_string(),
+        Some("duration") => {
+            return format!(
+                "PT{}H{}M{}S",
+                rng.random_range(0..24u8),
+                rng.random_range(0..60u8),
+                rng.random_range(0..60u8)
+            );
+        }
+        Some("proto-duration") => {
+            let secs = rng.random_range(0..86_400u32);
+            return if rng.random_bool(0.5) {
+                format!("{secs}s")
+            } else {
+                format!("{secs}.{:03}s", rng.random_range(0..1000u16))
+            };
+        }
+        Some("hex") => {
+            let len = rng.random_range(1..17usize);
+            return (0..len)
+                .map(|_| format!("{:02x}", rng.random_range(0..=255u8)))
+                .collect();
+        }
         _ => {}
     }
     if let Some(lit) = s
