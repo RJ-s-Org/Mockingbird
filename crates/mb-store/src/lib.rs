@@ -1,5 +1,5 @@
-//! Control-plane persistence: mocks, contract versions, scenarios, LLM
-//! profiles and the request log, behind the backend-neutral [`ControlStore`].
+//! Control-plane persistence: workspaces, mocks, contract versions, scenarios,
+//! LLM profiles and the request log, behind the backend-neutral [`ControlStore`].
 
 mod error;
 mod model;
@@ -38,9 +38,31 @@ pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 #[async_trait]
 pub trait ControlStore: Send + Sync {
     async fn ping(&self) -> Result<(), StoreError>;
+    /// Name ascending.
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError>;
+    async fn get_workspace(&self, name: &str) -> Result<Option<Workspace>, StoreError>;
+    /// `Invalid` for a bad name, `Conflict` if it already exists.
+    async fn create_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError>;
+    /// `NotFound` if the workspace does not exist.
+    async fn update_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError>;
+    /// `false` if it does not exist. The default workspace is a `Conflict`,
+    /// as is a non-empty one (any mock or profile) without `force`; with
+    /// `force` its mocks (cascading) and profiles go in the same transaction.
+    async fn delete_workspace(&self, name: &str, force: bool) -> Result<bool, StoreError>;
+    /// Every workspace's mocks, `(workspace, name)` ascending.
+    async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError>;
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError>;
     async fn get_mock(&self, ws: &str, name: &str) -> Result<Option<Mock>, StoreError>;
-    /// `Conflict` if the name already exists in the workspace.
+    /// `Conflict` if the name already exists in the workspace, `NotFound` if
+    /// the workspace does not exist.
     async fn create_mock(&self, ws: &str, m: NewMock) -> Result<Mock, StoreError>;
     /// Updates the mock with `m.id`, bumping `updated_at`.
     async fn update_mock(&self, m: &Mock) -> Result<Mock, StoreError>;
@@ -76,7 +98,8 @@ pub trait ControlStore: Send + Sync {
     async fn delete_scenario(&self, mock_id: Uuid, name: &str) -> Result<bool, StoreError>;
     async fn list_profiles(&self, ws: &str) -> Result<Vec<LlmProfile>, StoreError>;
     async fn get_profile(&self, ws: &str, name: &str) -> Result<Option<LlmProfile>, StoreError>;
-    /// Upserts by `(workspace, name)`.
+    /// Upserts by `(workspace, name)`. `NotFound` if the workspace does not
+    /// exist.
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError>;
     async fn delete_profile(&self, ws: &str, name: &str) -> Result<bool, StoreError>;
     /// Returns the new row id. The mock's rows beyond the newest `retention`
@@ -129,6 +152,35 @@ pub fn validate_mock_name(name: &str) -> Result<(), StoreError> {
             "mock name {name:?} must match ^[a-z0-9][a-z0-9-]{{0,62}}$"
         )))
     }
+}
+
+/// Workspace names follow the mock-name rule `^[a-z0-9][a-z0-9-]{0,62}$`.
+pub fn validate_workspace_name(name: &str) -> Result<(), StoreError> {
+    validate_mock_name(name).map_err(|_| {
+        StoreError::Invalid(format!(
+            "workspace name {name:?} must match ^[a-z0-9][a-z0-9-]{{0,62}}$"
+        ))
+    })
+}
+
+/// A lowercase RFC 9110 token of 1–64 characters.
+pub fn validate_header_name(name: &str) -> Result<(), StoreError> {
+    let valid = (1..=64).contains(&name.len())
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Invalid(format!(
+            "header name {name:?} must be a lowercase HTTP token of 1-64 characters"
+        )))
+    }
+}
+
+/// Error for a write into a workspace that does not exist.
+pub(crate) fn missing_workspace(name: &str) -> StoreError {
+    StoreError::NotFound(format!("workspace {name:?}"))
 }
 
 /// `"/"` or `"/seg(/seg)*"` where each segment is `[A-Za-z0-9._-]+`.
@@ -210,6 +262,46 @@ mod tests {
         ] {
             assert!(
                 matches!(validate_mock_name(bad), Err(StoreError::Invalid(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_names() {
+        assert!(validate_workspace_name("team-a").is_ok());
+        for bad in ["Team A", "", "-x", &"a".repeat(64)] {
+            assert!(
+                matches!(validate_workspace_name(bad), Err(StoreError::Invalid(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_names() {
+        for ok in [
+            "x-api-key",
+            "x-key",
+            "authorization",
+            "a",
+            "x_1.~!",
+            &"h".repeat(64),
+        ] {
+            assert!(validate_header_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "Bad Header",
+            "X-Api-Key",
+            "x key",
+            "x:y",
+            "x\"/y",
+            "é",
+            &"h".repeat(65),
+        ] {
+            assert!(
+                matches!(validate_header_name(bad), Err(StoreError::Invalid(_))),
                 "{bad}"
             );
         }

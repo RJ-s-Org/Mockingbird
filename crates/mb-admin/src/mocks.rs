@@ -155,6 +155,7 @@ pub async fn create(
                 llm_profile: body.llm_profile,
                 header_overrides: body.header_overrides,
                 source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
             },
         )
         .await?;

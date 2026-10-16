@@ -352,6 +352,7 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
             },
         )
         .await

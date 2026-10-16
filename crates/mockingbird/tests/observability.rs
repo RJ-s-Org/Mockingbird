@@ -15,7 +15,7 @@ use mb_state::{
 use mb_store::{
     ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
     Mock, NewContractVersion, NewMock, NewRequestLogEntry, PgStore, RequestLogEntry,
-    RequestLogFilter, ResourceSource, Scenario, SqliteControlStore, StoreError,
+    RequestLogFilter, ResourceSource, Scenario, SqliteControlStore, StoreError, Workspace,
 };
 use mockingbird::ops::{self, OpsState};
 use mockingbird::recorder::StoreRecorder;
@@ -41,6 +41,32 @@ impl ControlStore for StubControl {
             return Err(StoreError::Db("connection refused".into()));
         }
         self.inner.ping().await
+    }
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+        self.inner.list_workspaces().await
+    }
+    async fn get_workspace(&self, name: &str) -> Result<Option<Workspace>, StoreError> {
+        self.inner.get_workspace(name).await
+    }
+    async fn create_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError> {
+        self.inner.create_workspace(name, display_name).await
+    }
+    async fn update_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError> {
+        self.inner.update_workspace(name, display_name).await
+    }
+    async fn delete_workspace(&self, name: &str, force: bool) -> Result<bool, StoreError> {
+        self.inner.delete_workspace(name, force).await
+    }
+    async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError> {
+        self.inner.list_all_mocks().await
     }
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError> {
         self.inner.list_mocks(ws).await
@@ -227,6 +253,7 @@ async fn orders_mock(store: &Arc<dyn ControlStore>) -> Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
             },
         )
         .await

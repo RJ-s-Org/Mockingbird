@@ -6,8 +6,51 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-/// The only workspace in P2; multi-workspace arrives with P3.
+/// The workspace that always exists and cannot be deleted.
 pub const DEFAULT_WORKSPACE: &str = "default";
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Workspace {
+    pub name: String,
+    pub display_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// How a mock's data plane authenticates callers.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DataPlaneAuthMode {
+    #[default]
+    None,
+    ApiKey,
+    PassthroughValidate,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DataPlaneAuthConfig {
+    #[serde(default)]
+    pub mode: DataPlaneAuthMode,
+    /// Lowercase header carrying the key in `api_key` mode.
+    #[serde(default = "DataPlaneAuthConfig::default_header")]
+    pub header: String,
+}
+
+impl DataPlaneAuthConfig {
+    pub const DEFAULT_HEADER: &str = "x-api-key";
+
+    fn default_header() -> String {
+        Self::DEFAULT_HEADER.to_string()
+    }
+}
+
+impl Default for DataPlaneAuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: DataPlaneAuthMode::None,
+            header: Self::default_header(),
+        }
+    }
+}
 
 /// Where a resource is managed. `File` resources are read-only through the API.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -27,6 +70,8 @@ pub struct Mock {
     pub llm_profile: Option<String>,
     pub header_overrides: bool,
     pub source: ResourceSource,
+    #[serde(default)]
+    pub data_plane_auth: DataPlaneAuthConfig,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -40,6 +85,8 @@ pub struct NewMock {
     pub llm_profile: Option<String>,
     pub header_overrides: bool,
     pub source: ResourceSource,
+    #[serde(default)]
+    pub data_plane_auth: DataPlaneAuthConfig,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -189,6 +236,7 @@ impl Default for RequestLogFilter {
 pub enum ControlChange {
     Mock { workspace: String, name: String },
     Profile { workspace: String, name: String },
+    Workspace { name: String },
 }
 
 impl ResourceSource {

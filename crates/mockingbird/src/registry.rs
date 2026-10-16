@@ -193,6 +193,8 @@ impl MockRegistry {
                             registry.reload_mock(&deps, &name).await;
                         }
                     }
+                    // Deleting a workspace also publishes each deleted mock.
+                    Ok(ControlChange::Workspace { .. }) => {}
                     Ok(ControlChange::Profile { .. })
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Err(error) = registry.reload_all(&deps).await {

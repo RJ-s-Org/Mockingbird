@@ -330,6 +330,7 @@ async fn apply_mock(
                         llm_profile: p.mock.llm_profile.clone(),
                         header_overrides: p.mock.header_overrides,
                         source: ResourceSource::File,
+                        data_plane_auth: Default::default(),
                     },
                 )
                 .await

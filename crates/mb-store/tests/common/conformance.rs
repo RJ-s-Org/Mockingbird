@@ -6,9 +6,10 @@ use std::sync::Arc;
 use chrono::Utc;
 use mb_mcm::Bundle;
 use mb_store::{
-    ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
-    NewContractVersion, NewMock, NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError,
+    ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig,
+    DataPlaneAuthMode, LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry,
+    RETENTION_PRUNE_INTERVAL, RequestLogFilter, ResourceSource, Scenario, ScenarioRules,
+    StoreError,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -27,6 +28,15 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     request_log_retention_prunes(&store).await;
     request_log_retention_prunes_interleaved_mocks(&store).await;
     changes_are_published(&store).await;
+    default_workspace_exists(&store).await;
+    workspace_crud_and_conflict(&store).await;
+    invalid_workspace_name_rejected(&store).await;
+    delete_default_workspace_conflicts(&store).await;
+    delete_nonempty_workspace_requires_force(&store).await;
+    mock_in_missing_workspace_not_found(&store).await;
+    same_mock_name_in_two_workspaces(&store).await;
+    data_plane_auth_round_trips(&store).await;
+    workspace_changes_are_published(&store).await;
 }
 
 fn new_mock(name: &str) -> NewMock {
@@ -37,6 +47,7 @@ fn new_mock(name: &str) -> NewMock {
         llm_profile: None,
         header_overrides: false,
         source: ResourceSource::Api,
+        data_plane_auth: Default::default(),
     }
 }
 
@@ -770,4 +781,369 @@ async fn changes_are_published(store: &Arc<dyn ControlStore>) {
         .await
         .expect("activate");
     assert_eq!(next_change(&mut rx, "activate change").await, expected);
+}
+
+fn profile(ws: &str, name: &str) -> LlmProfile {
+    LlmProfile {
+        workspace: ws.into(),
+        name: name.into(),
+        base_url: "http://localhost:11434/v1".into(),
+        model: "llama3".into(),
+        secret_ref: None,
+        json_schema: false,
+        temperature: 0.0,
+        timeout_ms: 1000,
+        max_tokens: 100,
+        fallback_profile: None,
+        source: ResourceSource::Api,
+    }
+}
+
+async fn default_workspace_exists(store: &Arc<dyn ControlStore>) {
+    let ws = store
+        .get_workspace(DEFAULT_WORKSPACE)
+        .await
+        .expect("get")
+        .expect("default workspace exists");
+    assert_eq!(ws.name, DEFAULT_WORKSPACE);
+    assert_eq!(ws.display_name, "Default");
+    let names: Vec<String> = store
+        .list_workspaces()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    assert!(names.contains(&DEFAULT_WORKSPACE.to_string()), "{names:?}");
+}
+
+async fn workspace_crud_and_conflict(store: &Arc<dyn ControlStore>) {
+    let created = store
+        .create_workspace("team-a", "Team A")
+        .await
+        .expect("create");
+    assert_eq!(created.name, "team-a");
+    assert_eq!(created.display_name, "Team A");
+    assert_eq!(
+        store.get_workspace("team-a").await.expect("get"),
+        Some(created.clone())
+    );
+    assert!(store.get_workspace("nope").await.expect("get").is_none());
+
+    let err = store
+        .create_workspace("team-a", "Again")
+        .await
+        .expect_err("duplicate");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+
+    let updated = store
+        .update_workspace("team-a", "Team Alpha")
+        .await
+        .expect("update");
+    assert_eq!(updated.display_name, "Team Alpha");
+    assert_eq!(updated.created_at, created.created_at);
+    assert_eq!(
+        store.get_workspace("team-a").await.expect("get"),
+        Some(updated)
+    );
+    let err = store
+        .update_workspace("ghost-ws", "Ghost")
+        .await
+        .expect_err("missing");
+    assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+
+    store
+        .create_workspace("aaa-first", "First")
+        .await
+        .expect("create");
+    let names: Vec<String> = store
+        .list_workspaces()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "name ascending");
+    assert!(names.contains(&"aaa-first".to_string()));
+    assert!(names.contains(&"team-a".to_string()));
+    assert!(
+        store
+            .delete_workspace("aaa-first", false)
+            .await
+            .expect("delete")
+    );
+    assert!(
+        !store
+            .delete_workspace("aaa-first", false)
+            .await
+            .expect("delete again")
+    );
+    assert!(
+        store
+            .get_workspace("aaa-first")
+            .await
+            .expect("get")
+            .is_none()
+    );
+}
+
+async fn invalid_workspace_name_rejected(store: &Arc<dyn ControlStore>) {
+    let err = store
+        .create_workspace("Team A", "Team A")
+        .await
+        .expect_err("invalid name");
+    assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+    assert!(store.get_workspace("Team A").await.expect("get").is_none());
+}
+
+async fn delete_default_workspace_conflicts(store: &Arc<dyn ControlStore>) {
+    for force in [false, true] {
+        let err = store
+            .delete_workspace(DEFAULT_WORKSPACE, force)
+            .await
+            .expect_err("default is undeletable");
+        assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    }
+    assert!(
+        store
+            .get_workspace(DEFAULT_WORKSPACE)
+            .await
+            .expect("get")
+            .is_some()
+    );
+}
+
+async fn delete_nonempty_workspace_requires_force(store: &Arc<dyn ControlStore>) {
+    store
+        .create_workspace("doomed", "Doomed")
+        .await
+        .expect("create");
+    let mut nm = new_mock("doomed-mock");
+    nm.route_prefix = Some("/doomed-mock".into());
+    let mock = store.create_mock("doomed", nm).await.expect("mock");
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Approved, "d"))
+        .await
+        .expect("version");
+    store
+        .put_profile(&profile("doomed", "doomed-profile"))
+        .await
+        .expect("profile");
+
+    let err = store
+        .delete_workspace("doomed", false)
+        .await
+        .expect_err("non-empty");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    assert!(
+        store
+            .get_mock("doomed", "doomed-mock")
+            .await
+            .expect("get")
+            .is_some()
+    );
+
+    assert!(store.delete_workspace("doomed", true).await.expect("force"));
+    assert!(store.get_workspace("doomed").await.expect("get").is_none());
+    assert!(
+        store
+            .get_mock("doomed", "doomed-mock")
+            .await
+            .expect("get")
+            .is_none()
+    );
+    assert!(
+        store
+            .list_profiles("doomed")
+            .await
+            .expect("profiles")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_contract_versions(mock.id)
+            .await
+            .expect("versions")
+            .is_empty()
+    );
+
+    // A profile alone also makes a workspace non-empty.
+    store
+        .create_workspace("doomed-2", "Doomed 2")
+        .await
+        .expect("create");
+    store
+        .put_profile(&profile("doomed-2", "only"))
+        .await
+        .expect("profile");
+    let err = store
+        .delete_workspace("doomed-2", false)
+        .await
+        .expect_err("non-empty");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    assert!(
+        store
+            .delete_workspace("doomed-2", true)
+            .await
+            .expect("force")
+    );
+}
+
+async fn mock_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
+    let err = store
+        .create_mock("no-such-ws", new_mock("orphan-mock"))
+        .await
+        .expect_err("missing workspace");
+    assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+    let err = store
+        .put_profile(&profile("no-such-ws", "orphan-profile"))
+        .await
+        .expect_err("missing workspace");
+    assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+    assert!(
+        store
+            .list_mocks("no-such-ws")
+            .await
+            .expect("list")
+            .is_empty()
+    );
+}
+
+async fn same_mock_name_in_two_workspaces(store: &Arc<dyn ControlStore>) {
+    store
+        .create_workspace("ws-one", "One")
+        .await
+        .expect("create");
+    store
+        .create_workspace("ws-two", "Two")
+        .await
+        .expect("create");
+    let mut a = new_mock("shared");
+    a.route_prefix = Some("/one/shared".into());
+    let mut b = new_mock("shared");
+    b.route_prefix = Some("/two/shared".into());
+    let in_two = store.create_mock("ws-two", b).await.expect("two");
+    let in_one = store.create_mock("ws-one", a).await.expect("one");
+    assert_eq!(in_one.workspace, "ws-one");
+    assert_eq!(in_two.workspace, "ws-two");
+
+    let all = store.list_all_mocks().await.expect("list all");
+    let keys: Vec<(String, String)> = all
+        .iter()
+        .map(|m| (m.workspace.clone(), m.name.clone()))
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "(workspace, name) ascending");
+    let shared: Vec<&Mock> = all.iter().filter(|m| m.name == "shared").collect();
+    assert_eq!(shared, vec![&in_one, &in_two]);
+    assert!(
+        all.iter().any(|m| m.workspace == DEFAULT_WORKSPACE),
+        "default workspace mocks are listed too"
+    );
+}
+
+async fn data_plane_auth_round_trips(store: &Arc<dyn ControlStore>) {
+    let fresh = create(store, "dp-default").await;
+    assert_eq!(fresh.data_plane_auth, DataPlaneAuthConfig::default());
+    assert_eq!(fresh.data_plane_auth.mode, DataPlaneAuthMode::None);
+    assert_eq!(fresh.data_plane_auth.header, "x-api-key");
+
+    let mut nm = new_mock("dp-keyed");
+    nm.data_plane_auth = DataPlaneAuthConfig {
+        mode: DataPlaneAuthMode::ApiKey,
+        header: "x-key".into(),
+    };
+    let created = store
+        .create_mock(DEFAULT_WORKSPACE, nm)
+        .await
+        .expect("create");
+    assert_eq!(created.data_plane_auth.mode, DataPlaneAuthMode::ApiKey);
+    let fetched = store
+        .get_mock(DEFAULT_WORKSPACE, "dp-keyed")
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(fetched, created);
+
+    let mut changed = fetched.clone();
+    changed.data_plane_auth = DataPlaneAuthConfig {
+        mode: DataPlaneAuthMode::PassthroughValidate,
+        header: "authorization".into(),
+    };
+    let updated = store.update_mock(&changed).await.expect("update");
+    assert_eq!(updated.data_plane_auth, changed.data_plane_auth);
+    assert_eq!(
+        store
+            .get_mock(DEFAULT_WORKSPACE, "dp-keyed")
+            .await
+            .expect("get")
+            .expect("exists")
+            .data_plane_auth,
+        changed.data_plane_auth
+    );
+
+    let mut bad = new_mock("dp-bad");
+    bad.data_plane_auth.header = "Bad Header".into();
+    let err = store
+        .create_mock(DEFAULT_WORKSPACE, bad)
+        .await
+        .expect_err("bad header");
+    assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+    let mut bad_update = updated.clone();
+    bad_update.data_plane_auth.header = "Bad Header".into();
+    let err = store
+        .update_mock(&bad_update)
+        .await
+        .expect_err("bad header");
+    assert!(matches!(err, StoreError::Invalid(_)), "got {err:?}");
+
+    // Serde defaults: an absent field is the default config.
+    let parsed: DataPlaneAuthConfig = serde_json::from_value(json!({})).expect("parse");
+    assert_eq!(parsed, DataPlaneAuthConfig::default());
+    let parsed: DataPlaneAuthConfig =
+        serde_json::from_value(json!({"mode": "passthrough_validate"})).expect("parse");
+    assert_eq!(parsed.mode, DataPlaneAuthMode::PassthroughValidate);
+    assert_eq!(parsed.header, "x-api-key");
+}
+
+async fn workspace_changes_are_published(store: &Arc<dyn ControlStore>) {
+    let mut rx = store.subscribe();
+    let ws_change = ControlChange::Workspace {
+        name: "published-ws".into(),
+    };
+    store
+        .create_workspace("published-ws", "Published")
+        .await
+        .expect("create");
+    assert_eq!(next_change(&mut rx, "create workspace").await, ws_change);
+    store
+        .update_workspace("published-ws", "Renamed")
+        .await
+        .expect("update");
+    assert_eq!(next_change(&mut rx, "update workspace").await, ws_change);
+
+    let mut nm = new_mock("pub-mock");
+    nm.route_prefix = Some("/published-ws/pub-mock".into());
+    store.create_mock("published-ws", nm).await.expect("mock");
+    let mock_change = ControlChange::Mock {
+        workspace: "published-ws".into(),
+        name: "pub-mock".into(),
+    };
+    assert_eq!(next_change(&mut rx, "create mock").await, mock_change);
+
+    assert!(
+        store
+            .delete_workspace("published-ws", true)
+            .await
+            .expect("delete")
+    );
+    let seen = [
+        next_change(&mut rx, "delete change 1").await,
+        next_change(&mut rx, "delete change 2").await,
+    ];
+    assert!(seen.contains(&ws_change), "{seen:?}");
+    assert!(seen.contains(&mock_change), "{seen:?}");
 }

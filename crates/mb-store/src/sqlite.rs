@@ -11,16 +11,19 @@ use uuid::Uuid;
 
 use crate::{
     ACQUIRE_TIMEOUT, CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange,
-    ControlStore, LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
-    RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError, now,
-    sha256_hex, validate_mock_name, validate_route_prefix,
+    ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
+    NewRequestLogEntry, PruneCounter, RequestLogEntry, RequestLogFilter, ResourceSource, Scenario,
+    ScenarioRules, StoreError, Workspace, missing_workspace, now, sha256_hex, validate_header_name,
+    validate_mock_name, validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
 /// the same database.
 const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 
-const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, created_at, updated_at";
+const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
+     data_plane_auth, created_at, updated_at";
+const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str =
     "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
@@ -101,6 +104,23 @@ impl SqliteControlStore {
     }
 }
 
+/// `NotFound` unless workspace `ws` exists.
+async fn require_workspace(conn: &mut sqlx::SqliteConnection, ws: &str) -> Result<(), StoreError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM workspaces WHERE name = ?")
+        .bind(ws)
+        .fetch_optional(conn)
+        .await?;
+    exists.map(|_| ()).ok_or_else(|| missing_workspace(ws))
+}
+
+fn workspace_from_row(row: &SqliteRow) -> Result<Workspace, StoreError> {
+    Ok(Workspace {
+        name: row.try_get("name")?,
+        display_name: row.try_get("display_name")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 fn to_i64<T: TryInto<i64>>(value: T, field: &str) -> Result<i64, StoreError> {
     value
         .try_into()
@@ -119,6 +139,7 @@ fn parse_uuid(s: &str) -> Result<Uuid, StoreError> {
 fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
     let id: String = row.try_get("id")?;
     let source: String = row.try_get("source")?;
+    let data_plane_auth: String = row.try_get("data_plane_auth")?;
     Ok(Mock {
         id: parse_uuid(&id)?,
         workspace: row.try_get("workspace")?,
@@ -128,6 +149,7 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
         llm_profile: row.try_get("llm_profile")?,
         header_overrides: row.try_get("header_overrides")?,
         source: ResourceSource::parse(&source)?,
+        data_plane_auth: serde_json::from_str(&data_plane_auth)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -212,6 +234,140 @@ impl ControlStore for SqliteControlStore {
         Ok(())
     }
 
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+        let sql = format!("SELECT {WORKSPACE_COLUMNS} FROM workspaces ORDER BY name");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(workspace_from_row)
+            .collect()
+    }
+
+    async fn get_workspace(&self, name: &str) -> Result<Option<Workspace>, StoreError> {
+        let sql = format!("SELECT {WORKSPACE_COLUMNS} FROM workspaces WHERE name = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(workspace_from_row)
+            .transpose()
+    }
+
+    async fn create_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError> {
+        validate_workspace_name(name)?;
+        let ws = Workspace {
+            name: name.to_string(),
+            display_name: display_name.to_string(),
+            created_at: now(),
+        };
+        let sql = format!("INSERT INTO workspaces ({WORKSPACE_COLUMNS}) VALUES (?, ?, ?)");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&ws.name)
+            .bind(&ws.display_name)
+            .bind(ws.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match StoreError::from(e) {
+                StoreError::Conflict(_) => {
+                    StoreError::Conflict(format!("workspace {name:?} already exists"))
+                }
+                other => other,
+            })?;
+        self.publish(ControlChange::Workspace {
+            name: ws.name.clone(),
+        });
+        Ok(ws)
+    }
+
+    async fn update_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError> {
+        let sql = format!(
+            "UPDATE workspaces SET display_name = ? WHERE name = ? RETURNING {WORKSPACE_COLUMNS}"
+        );
+        let ws = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(display_name)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(workspace_from_row)
+            .transpose()?
+            .ok_or_else(|| missing_workspace(name))?;
+        self.publish(ControlChange::Workspace {
+            name: ws.name.clone(),
+        });
+        Ok(ws)
+    }
+
+    async fn delete_workspace(&self, name: &str, force: bool) -> Result<bool, StoreError> {
+        if name == DEFAULT_WORKSPACE {
+            return Err(StoreError::Conflict(
+                "the default workspace cannot be deleted".into(),
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM workspaces WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+        let mocks: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM mocks WHERE workspace = ? ORDER BY name")
+                .bind(name)
+                .fetch_all(&mut *tx)
+                .await?;
+        let profiles: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM llm_profiles WHERE workspace = ?")
+                .bind(name)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !force && (!mocks.is_empty() || profiles > 0) {
+            return Err(StoreError::Conflict(format!(
+                "workspace {name:?} is not empty ({} mocks, {profiles} profiles); delete with force",
+                mocks.len()
+            )));
+        }
+        for sql in [
+            "DELETE FROM mocks WHERE workspace = ?",
+            "DELETE FROM llm_profiles WHERE workspace = ?",
+            "DELETE FROM workspaces WHERE name = ?",
+        ] {
+            sqlx::query(sql).bind(name).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        if !mocks.is_empty() {
+            self.prune.clear();
+        }
+        for mock in &mocks {
+            self.publish_mock(name, mock);
+        }
+        self.publish(ControlChange::Workspace {
+            name: name.to_string(),
+        });
+        Ok(true)
+    }
+
+    async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError> {
+        let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks ORDER BY workspace, name");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(mock_from_row)
+            .collect()
+    }
+
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError> {
         let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks WHERE workspace = ? ORDER BY name");
         sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -239,6 +395,8 @@ impl ControlStore for SqliteControlStore {
         validate_mock_name(&m.name)?;
         let route_prefix = m.route_prefix.unwrap_or_else(|| format!("/{}", m.name));
         validate_route_prefix(&route_prefix)?;
+        validate_header_name(&m.data_plane_auth.header)?;
+        let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let at = now();
         let mock = Mock {
             id: Uuid::new_v4(),
@@ -249,11 +407,14 @@ impl ControlStore for SqliteControlStore {
             llm_profile: m.llm_profile,
             header_overrides: m.header_overrides,
             source: m.source,
+            data_plane_auth: m.data_plane_auth,
             created_at: at,
             updated_at: at,
         };
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_workspace(&mut tx, ws).await?;
         let sql =
-            format!("INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            format!("INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(mock.id.to_string())
             .bind(&mock.workspace)
@@ -263,9 +424,10 @@ impl ControlStore for SqliteControlStore {
             .bind(&mock.llm_profile)
             .bind(mock.header_overrides)
             .bind(mock.source.as_str())
+            .bind(data_plane_auth)
             .bind(mock.created_at)
             .bind(mock.updated_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| match StoreError::from(e) {
                 StoreError::Conflict(_) => {
@@ -273,6 +435,7 @@ impl ControlStore for SqliteControlStore {
                 }
                 other => other,
             })?;
+        tx.commit().await?;
         self.publish_mock(&mock.workspace, &mock.name);
         Ok(mock)
     }
@@ -280,6 +443,8 @@ impl ControlStore for SqliteControlStore {
     async fn update_mock(&self, m: &Mock) -> Result<Mock, StoreError> {
         validate_mock_name(&m.name)?;
         validate_route_prefix(&m.route_prefix)?;
+        validate_header_name(&m.data_plane_auth.header)?;
+        let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks WHERE id = ?");
         let existing = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -299,7 +464,7 @@ impl ControlStore for SqliteControlStore {
         };
         sqlx::query(
             "UPDATE mocks SET name = ?, route_prefix = ?, persona = ?, llm_profile = ?, header_overrides = ?, \
-             source = ?, updated_at = ? WHERE id = ?",
+             source = ?, data_plane_auth = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&updated.name)
         .bind(&updated.route_prefix)
@@ -307,6 +472,7 @@ impl ControlStore for SqliteControlStore {
         .bind(&updated.llm_profile)
         .bind(updated.header_overrides)
         .bind(updated.source.as_str())
+        .bind(data_plane_auth)
         .bind(updated.updated_at)
         .bind(updated.id.to_string())
         .execute(&mut *tx)
@@ -556,6 +722,8 @@ impl ControlStore for SqliteControlStore {
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
              source = excluded.source"
         );
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_workspace(&mut tx, &p.workspace).await?;
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&p.workspace)
             .bind(&p.name)
@@ -568,8 +736,9 @@ impl ControlStore for SqliteControlStore {
             .bind(i64::from(p.max_tokens))
             .bind(&p.fallback_profile)
             .bind(p.source.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         self.publish(ControlChange::Profile {
             workspace: p.workspace.clone(),
             name: p.name.clone(),

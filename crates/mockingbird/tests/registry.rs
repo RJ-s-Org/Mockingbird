@@ -79,6 +79,7 @@ async fn create_mock(
                 llm_profile: profile.map(str::to_string),
                 header_overrides: true,
                 source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
             },
         )
         .await
