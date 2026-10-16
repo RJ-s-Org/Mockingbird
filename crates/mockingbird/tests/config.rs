@@ -864,7 +864,7 @@ async fn watch_reload_changes_default_profile() {
             .registry
             .mounted()
             .into_iter()
-            .map(|(name, _)| name)
+            .map(|(_, name, _)| name)
             .collect()
     };
     assert_eq!(mounted(&app), ["orders"]);

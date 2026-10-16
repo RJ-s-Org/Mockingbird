@@ -27,7 +27,8 @@ pub struct OpsState {
 /// - `/healthz`: liveness, always `200 {"status":"ok"}`.
 /// - `/readyz`: `503 unavailable` when the control store is unreachable;
 ///   `200 degraded` (with `reasons`) when the state store is unreachable, a
-///   mock failed to rebuild (`mock <name>: <error>`; it keeps serving its
+///   mock failed to rebuild (`mock <label>: <error>`, labelled by
+///   [`mock_label`](crate::registry::mock_label); it keeps serving its
 ///   previous version) or a mounted mock is serving statelessly; else
 ///   `200 ready`. Each store ping is bounded by [`PING_TIMEOUT`].
 /// - `/metrics`: Prometheus text exposition.

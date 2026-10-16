@@ -12,10 +12,11 @@ use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_store::ControlStore;
 
 use crate::client::ClientCommand;
+use crate::dp_keys::StoreDataPlaneKeys;
 use crate::file_config::{self, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile};
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
-use crate::registry::MockRegistry;
+use crate::registry::{MockRegistry, mock_label};
 use crate::runtime::{DefaultProfile, RuntimeDeps};
 use crate::watch::{self, WatchGuard};
 use crate::{reconcile, telemetry};
@@ -337,11 +338,13 @@ pub async fn build_app_with(
         recorder: Some(recorder.clone()),
         offline: args.offline,
         default_profile: DefaultProfile::new(cfg.llm.default_profile.clone()),
+        data_plane_keys: Some(StoreDataPlaneKeys::new(store.clone())),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await?;
     registry.spawn_watcher(deps.clone());
-    for (name, prefix) in registry.mounted() {
+    for (workspace, name, prefix) in registry.mounted() {
+        let name = mock_label(&workspace, &name);
         tracing::info!(
             "serving {name} at http://{}:{}{prefix}",
             cfg.server.host,

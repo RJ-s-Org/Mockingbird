@@ -17,9 +17,23 @@ use tower::ServiceExt;
 
 use crate::runtime::{RuntimeDeps, build_runtime};
 
+/// How a mock is named in logs and `/readyz`: `name` in the default
+/// workspace, `workspace/name` elsewhere.
+pub fn mock_label(workspace: &str, name: &str) -> String {
+    if workspace == DEFAULT_WORKSPACE {
+        name.to_string()
+    } else {
+        format!("{workspace}/{name}")
+    }
+}
+
+/// `(workspace, name)`: identifies a mock across workspaces.
+type MockKey = (String, String);
+
 /// One mock served by the dispatcher.
 #[derive(Clone)]
 struct Mounted {
+    workspace: String,
     name: String,
     prefix: String,
     router: Router,
@@ -27,15 +41,30 @@ struct Mounted {
     state_health: Arc<StateHealth>,
 }
 
-/// Mounted mocks, sorted by prefix length, longest first.
+impl Mounted {
+    fn is(&self, workspace: &str, name: &str) -> bool {
+        self.workspace == workspace && self.name == name
+    }
+
+    fn key(&self) -> (&str, &str) {
+        (&self.workspace, &self.name)
+    }
+
+    fn label(&self) -> String {
+        mock_label(&self.workspace, &self.name)
+    }
+}
+
+/// Mounted mocks from every workspace, sorted by prefix length, longest
+/// first.
 ///
 /// A mock whose rebuild fails keeps its previous version mounted and is
 /// listed in [`MockRegistry::failed_mocks`] until a rebuild succeeds; it is
 /// unmounted only when it is deleted or has no active contract.
 pub struct MockRegistry {
     mounted: ArcSwap<Vec<Mounted>>,
-    /// Mock name → why its last rebuild failed.
-    failed: std::sync::Mutex<BTreeMap<String, String>>,
+    /// `(workspace, name)` → why the mock's last rebuild failed.
+    failed: std::sync::Mutex<BTreeMap<MockKey, String>>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
     reload: Mutex<()>,
 }
@@ -49,7 +78,7 @@ impl MockRegistry {
         })
     }
 
-    /// Rebuilds every mock. A mock that fails to build is logged, recorded
+    /// Rebuilds every mock of every workspace. A mock that fails to build is logged, recorded
     /// as failed and keeps its previous version mounted, if it had one.
     pub async fn reload_all(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let _guard = self.reload.lock().await;
@@ -58,8 +87,8 @@ impl MockRegistry {
 
     /// [`Self::reload_all`] for a caller that already holds `self.reload`.
     async fn reload_all_locked(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
-        let mut mocks = deps.store.list_mocks(DEFAULT_WORKSPACE).await?;
-        mocks.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut mocks = deps.store.list_all_mocks().await?;
+        mocks.sort_by(|a, b| (&a.workspace, &a.name).cmp(&(&b.workspace, &b.name)));
         let current = self.mounted.load_full();
         let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
@@ -68,8 +97,8 @@ impl MockRegistry {
                 Ok(Some(mounted)) => mounted,
                 Ok(None) => continue,
                 Err(error) => {
-                    failed.insert(mock.name.clone(), error);
-                    match current.iter().find(|m| m.name == mock.name) {
+                    failed.insert((mock.workspace.clone(), mock.name.clone()), error);
+                    match current.iter().find(|m| m.is(&mock.workspace, &mock.name)) {
                         Some(previous) => previous.clone(),
                         None => continue,
                     }
@@ -77,9 +106,9 @@ impl MockRegistry {
             };
             if let Some(holder) = next.iter().find(|m| m.prefix == mounted.prefix) {
                 tracing::error!(
-                    mock = %mounted.name,
+                    mock = %mounted.label(),
                     prefix = %mounted.prefix,
-                    holder = %holder.name,
+                    holder = %holder.label(),
                     "route prefix already mounted by another mock; mock skipped"
                 );
                 continue;
@@ -100,25 +129,26 @@ impl MockRegistry {
     /// When the mock gives up a prefix it held (it is unmounted or moves to
     /// another prefix), a mock skipped earlier for colliding on that prefix
     /// may now be mountable, so every mock is rebuilt instead.
-    pub async fn reload_mock(&self, deps: &RuntimeDeps, name: &str) {
+    pub async fn reload_mock(&self, deps: &RuntimeDeps, workspace: &str, name: &str) {
         let _guard = self.reload.lock().await;
-        let built = match deps.store.get_mock(DEFAULT_WORKSPACE, name).await {
+        let label = mock_label(workspace, name);
+        let built = match deps.store.get_mock(workspace, name).await {
             Ok(Some(mock)) => build_mounted(deps, &mock).await,
             Ok(None) => Ok(None),
             Err(error) => {
-                tracing::error!(mock = %name, %error, "cannot load mock; leaving it as it was");
+                tracing::error!(mock = %label, %error, "cannot load mock; leaving it as it was");
                 return;
             }
         };
         let mounted = match built {
             Ok(mounted) => {
-                self.set_failed(name, None);
+                self.set_failed(workspace, name, None);
                 mounted
             }
             Err(error) => {
                 // Whatever is mounted (the previous version, or nothing)
                 // stays as it is.
-                self.set_failed(name, Some(error));
+                self.set_failed(workspace, name, Some(error));
                 return;
             }
         };
@@ -127,7 +157,7 @@ impl MockRegistry {
             .mounted
             .load()
             .iter()
-            .find(|m| m.name == name)
+            .find(|m| m.is(workspace, name))
             .map(|m| m.prefix.clone());
         let released = match (&held, &mounted) {
             (Some(old), Some(new)) => *old != new.prefix,
@@ -139,7 +169,7 @@ impl MockRegistry {
                 Ok(()) => return,
                 Err(error) => {
                     tracing::error!(
-                        mock = %name,
+                        mock = %label,
                         error = %format!("{error:#}"),
                         "cannot reload mocks after a prefix was released; reloading this mock only"
                     );
@@ -151,25 +181,26 @@ impl MockRegistry {
             .mounted
             .load()
             .iter()
-            .filter(|m| m.name != name)
+            .filter(|m| !m.is(workspace, name))
             .cloned()
             .collect();
         if let Some(mounted) = mounted {
             match next.iter().position(|m| m.prefix == mounted.prefix) {
-                // The holder sorts first by name, so it keeps the prefix.
-                Some(i) if next[i].name < mounted.name => {
+                // The holder sorts first by (workspace, name), so it keeps
+                // the prefix.
+                Some(i) if next[i].key() < mounted.key() => {
                     tracing::error!(
-                        mock = %mounted.name,
+                        mock = %mounted.label(),
                         prefix = %mounted.prefix,
-                        holder = %next[i].name,
+                        holder = %next[i].label(),
                         "route prefix already mounted by another mock; mock skipped"
                     );
                 }
                 Some(i) => {
                     tracing::error!(
-                        mock = %next[i].name,
+                        mock = %next[i].label(),
                         prefix = %mounted.prefix,
-                        holder = %mounted.name,
+                        holder = %mounted.label(),
                         "route prefix taken by a mock that sorts first; mock unmounted"
                     );
                     next[i] = mounted;
@@ -181,7 +212,8 @@ impl MockRegistry {
     }
 
     /// Applies control-plane changes as they are published: a mock change
-    /// reloads that mock; a profile change, or missed changes, reload all.
+    /// (in any workspace) reloads that mock; a workspace or profile change,
+    /// or missed changes, reload all.
     pub fn spawn_watcher(self: &Arc<Self>, deps: RuntimeDeps) -> tokio::task::JoinHandle<()> {
         let mut changes = deps.store.subscribe();
         let registry = Arc::clone(self);
@@ -189,13 +221,10 @@ impl MockRegistry {
             loop {
                 match changes.recv().await {
                     Ok(ControlChange::Mock { workspace, name }) => {
-                        if workspace == DEFAULT_WORKSPACE {
-                            registry.reload_mock(&deps, &name).await;
-                        }
+                        registry.reload_mock(&deps, &workspace, &name).await;
                     }
-                    // Deleting a workspace also publishes each deleted mock.
-                    Ok(ControlChange::Workspace { .. }) => {}
-                    Ok(ControlChange::Profile { .. })
+                    Ok(ControlChange::Workspace { .. })
+                    | Ok(ControlChange::Profile { .. })
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Err(error) = registry.reload_all(&deps).await {
                             tracing::error!(%error, "cannot reload mocks");
@@ -217,45 +246,52 @@ impl MockRegistry {
         })
     }
 
-    /// `(name, prefix)` of every mounted mock, longest prefix first.
-    pub fn mounted(&self) -> Vec<(String, String)> {
+    /// `(workspace, name, prefix)` of every mounted mock, longest prefix
+    /// first.
+    pub fn mounted(&self) -> Vec<(String, String, String)> {
         self.mounted
             .load()
             .iter()
-            .map(|m| (m.name.clone(), m.prefix.clone()))
+            .map(|m| (m.workspace.clone(), m.name.clone(), m.prefix.clone()))
             .collect()
     }
 
-    /// `(name, error)` of every mock whose last rebuild failed, sorted by
-    /// name. Such a mock serves its previous version, if it had one.
+    /// `(label, error)` of every mock whose last rebuild failed, sorted by
+    /// workspace and name; see [`mock_label`]. Such a mock serves its
+    /// previous version, if it had one.
     pub fn failed_mocks(&self) -> Vec<(String, String)> {
         self.failed
             .lock()
-            .map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .map(|f| {
+                f.iter()
+                    .map(|((ws, name), error)| (mock_label(ws, name), error.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    fn set_failed(&self, name: &str, error: Option<String>) {
+    fn set_failed(&self, workspace: &str, name: &str, error: Option<String>) {
         if let Ok(mut failed) = self.failed.lock() {
+            let key = (workspace.to_string(), name.to_string());
             match error {
-                Some(error) => failed.insert(name.to_string(), error),
-                None => failed.remove(name),
+                Some(error) => failed.insert(key, error),
+                None => failed.remove(&key),
             };
         }
     }
 
-    /// Names of mounted mocks currently serving statelessly because their
-    /// state store calls are failing, sorted.
+    /// Labels (see [`mock_label`]) of mounted mocks currently serving
+    /// statelessly because their state store calls are failing, sorted.
     pub fn degraded_mocks(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
+        let mut labels: Vec<String> = self
             .mounted
             .load()
             .iter()
             .filter(|m| m.state_health.is_degraded())
-            .map(|m| m.name.clone())
+            .map(Mounted::label)
             .collect();
-        names.sort();
-        names
+        labels.sort();
+        labels
     }
 
     fn publish(&self, mut next: Vec<Mounted>) {
@@ -263,7 +299,7 @@ impl MockRegistry {
             b.prefix
                 .len()
                 .cmp(&a.prefix.len())
-                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.key().cmp(&b.key()))
         });
         self.mounted.store(Arc::new(next));
     }
@@ -321,25 +357,27 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
 /// The mounted router for `mock`; `Ok(None)` when it has no active
 /// contract; `Err` (logged) when it cannot be built.
 async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted>, String> {
+    let label = mock_label(&mock.workspace, &mock.name);
     let runtime = match build_runtime(deps, mock).await {
         Ok(Some(rt)) => rt,
         Ok(None) => return Ok(None),
         Err(error) => {
             let error = format!("{error:#}");
-            tracing::error!(mock = %mock.name, %error, "cannot build mock; keeping any previous version mounted");
+            tracing::error!(mock = %label, %error, "cannot build mock; keeping any previous version mounted");
             return Err(error);
         }
     };
     let state_health = Arc::clone(&runtime.state_health);
     match http_rest::try_router(Arc::new(runtime)) {
         Ok(router) => Ok(Some(Mounted {
+            workspace: mock.workspace.clone(),
             name: mock.name.clone(),
             prefix: mock.route_prefix.clone(),
             router,
             state_health,
         })),
         Err(error) => {
-            tracing::error!(mock = %mock.name, %error, "cannot route mock; keeping any previous version mounted");
+            tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
             Err(format!("cannot route the contract: {error}"))
         }
     }

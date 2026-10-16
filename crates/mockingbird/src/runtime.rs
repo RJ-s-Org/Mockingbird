@@ -10,9 +10,14 @@ use arc_swap::ArcSwapOption;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec};
 use mb_ext::{Extensions, Tenancy};
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
-use mb_protocols::{MockRuntime, RequestRecorder, ScenarioRuntime};
+use mb_protocols::{
+    DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, RequestRecorder, ScenarioRuntime,
+};
 use mb_state::StateStore;
-use mb_store::{ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, Scenario};
+use mb_store::{
+    ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode as StoredAuthMode,
+    LlmProfile, Mock, Scenario,
+};
 
 /// Fallback hops followed from a mock's profile before the chain is rejected.
 pub const MAX_FALLBACK_DEPTH: usize = 3;
@@ -29,6 +34,9 @@ pub struct RuntimeDeps {
     /// Profile for mocks that name none. Shared with the config watcher,
     /// which swaps it when a reload changes `llm.default_profile`.
     pub default_profile: DefaultProfile,
+    /// Verifies data-plane API keys for mocks in `api_key` mode; without it
+    /// every key is rejected.
+    pub data_plane_keys: Option<Arc<dyn DataPlaneKeys>>,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so
@@ -76,7 +84,8 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     };
     let provider = match profile_name(deps, mock)? {
         Some(name) if !deps.offline => {
-            let chain = load_chain(deps, &name).await?;
+            let workspace = profile_workspace(deps, mock, &name).await?;
+            let chain = load_chain(deps, &workspace, &name).await?;
             let head = chain
                 .first()
                 .map(hop_settings)
@@ -104,6 +113,9 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
         Arc::new(Engine::new(provider, config)),
         deps.state.clone(),
     );
+    rt.workspace = mock.workspace.clone();
+    rt.data_plane_auth = data_plane_auth(&mock.data_plane_auth);
+    rt.data_plane_keys = deps.data_plane_keys.clone();
     rt.header_overrides = mock.header_overrides;
     rt.scenarios = scenarios;
     rt.ext = deps.ext.clone();
@@ -111,21 +123,56 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     Ok(Some(rt))
 }
 
-/// The provider for `profile_name`, wrapped in [`FallbackProvider`]s along
-/// its `fallback_profile` chain, each hop with its own profile's timeout,
-/// temperature and token limit. A cycle, a chain longer than
-/// [`MAX_FALLBACK_DEPTH`] hops, a missing profile or an unresolvable secret
-/// is an error.
+/// The runtime form of a mock's stored data-plane auth settings.
+fn data_plane_auth(config: &DataPlaneAuthConfig) -> DataPlaneAuth {
+    DataPlaneAuth {
+        mode: match config.mode {
+            StoredAuthMode::None => DataPlaneAuthMode::None,
+            StoredAuthMode::ApiKey => DataPlaneAuthMode::ApiKey,
+            StoredAuthMode::PassthroughValidate => DataPlaneAuthMode::PassthroughValidate,
+        },
+        header: config.header.clone(),
+    }
+}
+
+/// The workspace `mock`'s profile `name` is loaded from: the mock's own
+/// workspace, except that a default profile (the mock names none) missing
+/// there is taken from the `default` workspace.
+async fn profile_workspace(deps: &RuntimeDeps, mock: &Mock, name: &str) -> anyhow::Result<String> {
+    if mock.llm_profile.is_some() || mock.workspace == DEFAULT_WORKSPACE {
+        return Ok(mock.workspace.clone());
+    }
+    let own = deps
+        .store
+        .get_profile(&mock.workspace, name)
+        .await
+        .with_context(|| format!("loading LLM profile {name:?}"))?;
+    Ok(match own {
+        Some(_) => mock.workspace.clone(),
+        None => DEFAULT_WORKSPACE.to_string(),
+    })
+}
+
+/// The provider for `profile_name` in the `default` workspace, wrapped in
+/// [`FallbackProvider`]s along its `fallback_profile` chain, each hop with
+/// its own profile's timeout, temperature and token limit. A cycle, a chain
+/// longer than [`MAX_FALLBACK_DEPTH`] hops, a missing profile or an
+/// unresolvable secret is an error.
 pub async fn build_provider(
     deps: &RuntimeDeps,
     profile_name: &str,
 ) -> anyhow::Result<Arc<dyn Provider>> {
-    let chain = load_chain(deps, profile_name).await?;
+    let chain = load_chain(deps, DEFAULT_WORKSPACE, profile_name).await?;
     chain_provider(deps, &chain).await
 }
 
-/// `profile_name` and the profiles it falls back to, in order; never empty.
-async fn load_chain(deps: &RuntimeDeps, profile_name: &str) -> anyhow::Result<Vec<LlmProfile>> {
+/// `profile_name` and the profiles it falls back to, in order, all from
+/// `workspace`; never empty.
+async fn load_chain(
+    deps: &RuntimeDeps,
+    workspace: &str,
+    profile_name: &str,
+) -> anyhow::Result<Vec<LlmProfile>> {
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut next = Some(profile_name.to_string());
@@ -141,7 +188,7 @@ async fn load_chain(deps: &RuntimeDeps, profile_name: &str) -> anyhow::Result<Ve
                 "LLM profile fallback chain from {profile_name:?} exceeds {MAX_FALLBACK_DEPTH} hops"
             );
         }
-        let profile = load_profile(deps, &name).await?;
+        let profile = load_profile(deps, workspace, &name).await?;
         next = profile.fallback_profile.clone().filter(|f| !f.is_empty());
         chain.push(profile);
     }
@@ -206,12 +253,16 @@ fn profile_name(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<String
         })
 }
 
-async fn load_profile(deps: &RuntimeDeps, name: &str) -> anyhow::Result<LlmProfile> {
+async fn load_profile(
+    deps: &RuntimeDeps,
+    workspace: &str,
+    name: &str,
+) -> anyhow::Result<LlmProfile> {
     deps.store
-        .get_profile(DEFAULT_WORKSPACE, name)
+        .get_profile(workspace, name)
         .await
-        .with_context(|| format!("loading LLM profile {name:?}"))?
-        .ok_or_else(|| anyhow!("LLM profile {name:?} not found"))
+        .with_context(|| format!("loading LLM profile {name:?} of workspace {workspace:?}"))?
+        .ok_or_else(|| anyhow!("LLM profile {name:?} not found in workspace {workspace:?}"))
 }
 
 async fn openai_provider(

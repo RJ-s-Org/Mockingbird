@@ -60,6 +60,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         recorder: None,
         offline: true,
         default_profile: None.into(),
+        data_plane_keys: None,
     }
 }
 
@@ -147,7 +148,11 @@ async fn serves_active_contract_at_prefix() {
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(
         registry.mounted(),
-        vec![("orders".to_string(), "/orders".to_string())]
+        vec![(
+            "default".to_string(),
+            "orders".to_string(),
+            "/orders".to_string()
+        )]
     );
 
     let base = serve(registry.router()).await;
@@ -223,8 +228,8 @@ async fn longest_prefix_wins() {
     assert_eq!(
         registry.mounted(),
         vec![
-            ("a".to_string(), "/a".to_string()),
-            ("root".to_string(), "/".to_string()),
+            ("default".to_string(), "a".to_string(), "/a".to_string()),
+            ("default".to_string(), "root".to_string(), "/".to_string()),
         ]
     );
     let base = serve(registry.router()).await;
@@ -266,7 +271,9 @@ async fn swap_during_inflight_requests() {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     activate(&store, &mock, &fixture_v2_source()).await;
-    registry.reload_mock(&deps, "orders").await;
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "orders")
+        .await;
 
     for h in inflight {
         assert_eq!(h.await.unwrap(), 200);
@@ -389,7 +396,7 @@ async fn colliding_pair() -> (Arc<dyn ControlStore>, RuntimeDeps, Arc<MockRegist
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(
         registry.mounted(),
-        vec![("a".to_string(), "/x".to_string())]
+        vec![("default".to_string(), "a".to_string(), "/x".to_string())]
     );
     (store, deps, registry, a)
 }
@@ -402,11 +409,11 @@ async fn deleting_prefix_holder_mounts_skipped_mock() {
     assert_eq!(status_of(&base, "/x/ping").await, 404);
 
     assert!(store.delete_mock(DEFAULT_WORKSPACE, "a").await.unwrap());
-    registry.reload_mock(&deps, "a").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "a").await;
 
     assert_eq!(
         registry.mounted(),
-        vec![("b".to_string(), "/x".to_string())]
+        vec![("default".to_string(), "b".to_string(), "/x".to_string())]
     );
     assert_eq!(status_of(&base, "/x/ping").await, 200);
 }
@@ -419,13 +426,13 @@ async fn moving_prefix_holder_mounts_skipped_mock() {
     let mut moved = a.clone();
     moved.route_prefix = "/y".into();
     store.update_mock(&moved).await.unwrap();
-    registry.reload_mock(&deps, "a").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "a").await;
 
     assert_eq!(
         registry.mounted(),
         vec![
-            ("a".to_string(), "/y".to_string()),
-            ("b".to_string(), "/x".to_string()),
+            ("default".to_string(), "a".to_string(), "/y".to_string()),
+            ("default".to_string(), "b".to_string(), "/x".to_string()),
         ]
     );
     assert_eq!(status_of(&base, "/x/ping").await, 200);
@@ -454,7 +461,7 @@ async fn failed_rebuild_keeps_serving_previous_version() {
     store.put_profile(&q).await.unwrap();
     registry.reload_all(&deps).await.unwrap();
     assert_eq!(status_of(&base, "/c/orders").await, 200);
-    registry.reload_mock(&deps, "c").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "c").await;
     assert_eq!(status_of(&base, "/c/orders").await, 200);
     let failed = registry.failed_mocks();
     assert_eq!(failed.len(), 1, "{failed:?}");
@@ -470,7 +477,7 @@ async fn failed_rebuild_keeps_serving_previous_version() {
 
     // Deleting the mock unmounts it.
     assert!(store.delete_mock(DEFAULT_WORKSPACE, "c").await.unwrap());
-    registry.reload_mock(&deps, "c").await;
+    registry.reload_mock(&deps, DEFAULT_WORKSPACE, "c").await;
     assert_eq!(status_of(&base, "/c/orders").await, 404);
 }
 

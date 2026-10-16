@@ -2468,6 +2468,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "mb-admin",
+ "mb-auth",
  "mb-engine",
  "mb-ext",
  "mb-import",

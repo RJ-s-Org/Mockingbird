@@ -336,6 +336,7 @@ fn deps(
         recorder,
         offline: true,
         default_profile: None.into(),
+        data_plane_keys: None,
     }
 }
 
