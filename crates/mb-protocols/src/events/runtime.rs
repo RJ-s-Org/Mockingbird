@@ -1,7 +1,8 @@
 //! The per-mock channel runtime: broker resolution, the consumer tasks and
-//! the shared state producers, consumers and (later) triggers use.
+//! the shared state producers, consumers and triggers use.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
@@ -139,7 +140,6 @@ impl Flow {
 pub(crate) enum Origin {
     /// A trigger firing; carries the trigger JSON (with `"session"` for
     /// a state change).
-    #[allow(dead_code)] // fired by the trigger scheduler
     Trigger(Value),
     /// A manual publish, with its optional context.
     Manual(Option<Value>),
@@ -214,6 +214,8 @@ pub(crate) struct ChannelInner {
     activity: Mutex<BTreeMap<String, ChannelActivity>>,
     /// Consumers currently failing: channel id → error.
     consumer_errors: Mutex<BTreeMap<String, String>>,
+    /// Whether this replica holds the mock's scheduler lease.
+    leader: AtomicBool,
 }
 
 impl ChannelInner {
@@ -235,7 +237,17 @@ impl ChannelInner {
             inactive: resolution.inactive,
             activity: Mutex::new(activity),
             consumer_errors: Mutex::new(BTreeMap::new()),
+            leader: AtomicBool::new(false),
         }
+    }
+
+    /// Whether this replica holds the mock's scheduler lease.
+    pub(crate) fn is_leader(&self) -> bool {
+        self.leader.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_leader(&self, leader: bool) {
+        self.leader.store(leader, Ordering::SeqCst);
     }
 
     /// Why `channel` cannot be served, when it cannot.
@@ -383,8 +395,9 @@ pub struct ChannelRuntime {
 }
 
 impl ChannelRuntime {
-    /// Resolve the broker and start a consumer for every enabled, active
-    /// broker channel the mock consumes. Must run inside a Tokio runtime.
+    /// Resolve the broker, start a consumer for every enabled, active
+    /// broker channel the mock consumes and the triggers of every enabled,
+    /// active channel it publishes. Must run inside a Tokio runtime.
     pub fn start(rt: Arc<MockRuntime>, deps: EventDeps, setup: EventSetup) -> Arc<Self> {
         let inner = Arc::new(ChannelInner::new(rt, deps, setup));
         let mut tasks = JoinSet::new();
@@ -404,6 +417,7 @@ impl ChannelRuntime {
                 ));
             }
         }
+        super::triggers::spawn_triggers(&inner, &mut tasks);
         Arc::new(Self {
             inner,
             tasks: Mutex::new(tasks),
@@ -469,6 +483,12 @@ impl ChannelRuntime {
                 .map(|(id, e)| format!("channel {id}: {e}")),
         );
         out
+    }
+
+    /// Whether this replica holds the mock's scheduler lease, so its
+    /// schedule and cron triggers fire.
+    pub fn is_leader(&self) -> bool {
+        self.inner.is_leader()
     }
 
     /// The broker the mock resolved to.

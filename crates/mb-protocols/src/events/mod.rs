@@ -19,7 +19,7 @@ pub use memory::MemoryBroker;
 pub use runtime::{
     ChannelActivity, ChannelRuntime, ChannelSetup, EventDeps, EventSetup, PublishError, Published,
 };
-pub use triggers::{AlwaysLeader, LeaseProvider};
+pub use triggers::{AlwaysLeader, LEASE_RENEW, LEASE_TTL, LeaseProvider};
 
 /// Largest message payload produced or consumed (1 MiB).
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
