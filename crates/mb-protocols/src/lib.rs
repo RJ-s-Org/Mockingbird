@@ -21,6 +21,8 @@ pub mod graphql;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 mod record;
+#[cfg(feature = "websocket")]
+pub mod ws;
 
 pub use record::{RequestRecord, RequestRecorder};
 

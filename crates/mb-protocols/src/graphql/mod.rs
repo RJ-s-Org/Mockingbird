@@ -1,8 +1,10 @@
 //! GraphQL adapter: serves a bundle's queries and mutations from a dynamic
 //! schema built from the SDL the importer stored in the bundle.
 //!
-//! Every root field is one engine call (see [`resolve`]); nested fields
-//! project from the generated JSON. GraphQL parse and validation errors are
+//! Every query or mutation root field is one engine call (see
+//! [`resolve`]); nested fields project from the generated JSON.
+//! Subscriptions are served over WebSocket at the same path (see
+//! [`subscription`]). GraphQL parse and validation errors are
 //! answered `200 {errors}`; only transport-level failures (unknown path,
 //! wrong method, oversized or unparseable body) are problem documents.
 
@@ -12,8 +14,8 @@ use async_graphql::Request;
 use async_graphql::parser::types::{DocumentOperations, OperationType};
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
+use axum::extract::{FromRequestParts, Request as HttpRequest, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -22,6 +24,7 @@ use crate::MockRuntime;
 
 mod resolve;
 mod schema;
+mod subscription;
 
 pub(crate) use schema::build_schema;
 
@@ -46,7 +49,8 @@ struct GraphqlState {
 }
 
 /// A router serving `rt.bundle`'s GraphQL schema at
-/// `rt.protocols.graphql_path`, over `POST` and `GET`.
+/// `rt.protocols.graphql_path`, over `POST` and `GET`, and subscriptions
+/// over a WebSocket upgrade of a `GET`.
 pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, GraphqlError> {
     let schema = build_schema(&rt)?;
     let state = Arc::new(GraphqlState { rt, schema });
@@ -67,19 +71,23 @@ pub(crate) fn error_code(status: u16) -> &'static str {
     }
 }
 
-async fn handle(
-    State(st): State<Arc<GraphqlState>>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
+async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Response {
+    let (mut parts, body) = req.into_parts();
+    let method = parts.method.clone();
+    let uri = parts.uri.clone();
+    let headers = parts.headers.clone();
     if uri.path() != st.rt.protocols.graphql_path {
         return problem(
             404,
             "Not Found",
             format!("no GraphQL endpoint at {}", uri.path()),
         );
+    }
+    if method == Method::GET && is_websocket_upgrade(&headers) {
+        return match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(upgrade) => subscription::upgrade(st.schema.clone(), &st.rt, upgrade, headers),
+            Err(rejection) => rejection.into_response(),
+        };
     }
     let request = match method {
         Method::GET => {
@@ -159,6 +167,14 @@ async fn execute(
             .insert(SOURCE_HEADER, HeaderValue::from_static(source.as_str()));
     }
     resp
+}
+
+/// Whether the request asks for `Upgrade: websocket`.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
 /// The body, unless it exceeds [`MAX_BODY_BYTES`] (413) or cannot be read

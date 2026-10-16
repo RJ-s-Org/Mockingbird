@@ -59,6 +59,7 @@ insta = { version = "1", features = ["yaml", "redactions"] }
 tower = { version = "0.5", features = ["util"] }
 assert_cmd = "2"
 tempfile = "3"
+tokio-tungstenite = "0.29"
 
 # internal
 mb-mcm = { path = "crates/mb-mcm" }

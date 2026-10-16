@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_graphql::dynamic::{
     Enum, EnumItem, Field, FieldFuture, InputObject, InputValue, Interface, InterfaceField, Object,
-    Scalar, Schema, SchemaBuilder, TypeRef, Union,
+    Scalar, Schema, SchemaBuilder, Subscription, TypeRef, Union,
 };
 use async_graphql::parser::Positioned;
 use async_graphql::parser::types::{
@@ -16,6 +16,7 @@ use mb_mcm::{Binding, GraphqlOperationType, ProtocolPayload};
 
 use super::GraphqlError;
 use super::resolve::{self, Shape, Shapes};
+use super::subscription;
 use crate::MockRuntime;
 
 const BUILTIN_SCALARS: [&str; 5] = ["Int", "Float", "String", "Boolean", "ID"];
@@ -185,7 +186,7 @@ fn parse(sdl: &str) -> Result<Sdl, GraphqlError> {
     Ok(Sdl { types, roots })
 }
 
-fn type_ref(ty: &Type) -> TypeRef {
+pub(super) fn type_ref(ty: &Type) -> TypeRef {
     let inner = match &ty.base {
         BaseType::Named(n) => TypeRef::Named(n.to_string().into()),
         BaseType::List(item) => TypeRef::List(Box::new(type_ref(item))),
@@ -197,7 +198,7 @@ fn type_ref(ty: &Type) -> TypeRef {
     }
 }
 
-fn input_value(v: &InputValueDefinition) -> InputValue {
+pub(super) fn input_value(v: &InputValueDefinition) -> InputValue {
     let mut out = InputValue::new(v.name.node.to_string(), type_ref(&v.ty.node));
     if let Some(d) = &v.description {
         out = out.description(d.node.clone());
@@ -208,7 +209,8 @@ fn input_value(v: &InputValueDefinition) -> InputValue {
     out
 }
 
-/// A dynamic schema answering `rt.bundle`'s queries and mutations, with
+/// A dynamic schema answering `rt.bundle`'s queries, mutations and
+/// subscriptions, with
 /// the depth, complexity and introspection settings of `rt.protocols`.
 pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Schema, GraphqlError> {
     let Some(ProtocolPayload::Graphql { sdl }) = &rt.bundle.protocol_payload else {
@@ -224,9 +226,9 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Schema, GraphqlError
             .filter_map(|(name, def)| Some((name.clone(), def.kind.shape()?)))
             .collect(),
     );
-    // Query and mutation root fields → operation id; other types have none.
+    // Root fields → operation id; other types have none.
     let no_ops: HashMap<&str, &str> = HashMap::new();
-    let mut ops_by_root: [HashMap<&str, &str>; 2] = Default::default();
+    let mut ops_by_root: [HashMap<&str, &str>; 3] = Default::default();
     for op in &rt.bundle.operations {
         if let Binding::Graphql {
             operation_type,
@@ -236,16 +238,16 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Schema, GraphqlError
             let slot = match operation_type {
                 GraphqlOperationType::Query => 0,
                 GraphqlOperationType::Mutation => 1,
-                GraphqlOperationType::Subscription => continue,
+                GraphqlOperationType::Subscription => 2,
             };
             ops_by_root[slot].insert(field.as_str(), op.id.as_str());
         }
     }
 
-    let mut builder = Schema::build(query, mutation.as_deref(), None);
+    let mut builder = Schema::build(query, mutation.as_deref(), subscription.as_deref());
     for (name, def) in &sdl.types {
-        // Subscriptions are not served yet; their root type is left out.
         if subscription.as_deref() == Some(name.as_str()) {
+            builder = register_subscription(builder, rt, name, def, &ops_by_root[2], &shapes)?;
             continue;
         }
         let root_ops = if name == query {
@@ -267,6 +269,31 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Schema, GraphqlError
     builder
         .finish()
         .map_err(|e| GraphqlError::Schema(e.to_string()))
+}
+
+/// The subscription root type: one streaming field per object field.
+fn register_subscription(
+    builder: SchemaBuilder,
+    rt: &Arc<MockRuntime>,
+    name: &str,
+    def: &Def,
+    root_ops: &HashMap<&str, &str>,
+    shapes: &Arc<Shapes>,
+) -> Result<SchemaBuilder, GraphqlError> {
+    let Kind::Object { fields, .. } = &def.kind else {
+        return Err(GraphqlError::Schema(format!(
+            "subscription type {name} is not an object type"
+        )));
+    };
+    let mut s = Subscription::new(name);
+    if let Some(d) = &def.description {
+        s = s.description(d.clone());
+    }
+    for f in fields {
+        let op_id = root_ops.get(f.name.node.as_str()).copied();
+        s = s.field(subscription::field(rt, f, op_id, shapes));
+    }
+    Ok(builder.register(s))
 }
 
 fn register(

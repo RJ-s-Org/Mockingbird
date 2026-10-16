@@ -2103,6 +2103,7 @@ dependencies = [
  "serde_urlencoded",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "tracing",

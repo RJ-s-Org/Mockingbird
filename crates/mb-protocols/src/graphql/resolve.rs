@@ -95,18 +95,29 @@ impl HttpCall {
 }
 
 /// A root field failure: the HTTP status it stands for and the field error.
-struct Failure {
-    status: u16,
-    error: Error,
+pub(crate) struct Failure {
+    pub(crate) status: u16,
+    pub(crate) error: Error,
 }
 
 impl Failure {
-    fn new(status: u16, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: u16, message: impl Into<String>) -> Self {
         let error = Error::new(message).extend_with(|_, e| {
             e.set("code", error_code(status));
             e.set("status", i32::from(status));
         });
         Self { status, error }
+    }
+
+    /// The field error for a failed [`call::plan`] of mock `mock`.
+    pub(crate) fn plan(error: PlanError, mock: &str) -> Self {
+        match error {
+            PlanError::Rejected(r) => Self::rejected(r),
+            PlanError::BadOverride(detail) => Self::new(400, detail),
+            PlanError::UnknownScenario(name) => {
+                Self::new(400, format!("mock {mock} has no scenario {name:?}"))
+            }
+        }
     }
 
     fn rejected(r: Rejection) -> Self {
@@ -206,13 +217,7 @@ async fn generate(
             if let Some(s) = session {
                 report.session = s;
             }
-            Err(match error {
-                PlanError::Rejected(r) => Failure::rejected(r),
-                PlanError::BadOverride(detail) => Failure::new(400, detail),
-                PlanError::UnknownScenario(name) => {
-                    Failure::new(400, format!("mock {} has no scenario {name:?}", rt.name))
-                }
-            })
+            Err(Failure::plan(error, &rt.name))
         }
         Ok(plan) => {
             report.tenancy = Some(plan.tenancy.clone());
@@ -272,7 +277,7 @@ async fn generate(
     outcome.map_err(|f| f.error)
 }
 
-fn forced_message(status: u16) -> String {
+pub(crate) fn forced_message(status: u16) -> String {
     match StatusCode::from_u16(status)
         .ok()
         .and_then(|c| c.canonical_reason())
@@ -299,7 +304,7 @@ pub(crate) fn nested(
 /// `value` as a field value of type `ty`: enums from strings, objects as
 /// owned JSON for nested resolvers, interfaces and unions tagged with
 /// their `__typename`. `None` (null) for a null or mismatched value.
-fn project(value: Value, ty: &Type, shapes: &Shapes) -> Option<FieldValue<'static>> {
+pub(crate) fn project(value: Value, ty: &Type, shapes: &Shapes) -> Option<FieldValue<'static>> {
     if value.is_null() {
         return None;
     }
