@@ -5,6 +5,7 @@ import {
   useContracts,
   useMock,
   useUploadContract,
+  CONTRACT_EXTENSIONS,
   type ContractSummary,
 } from "../../api/queries";
 import { useMe } from "../../auth/me";
@@ -109,7 +110,7 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
   );
 }
 
-/** Uploads an OpenAPI/Swagger file, optionally activating it. */
+/** Uploads a contract file or archive, optionally activating it. */
 function UploadForm({ ws, mock }: { ws: string; mock: string }) {
   const upload = useUploadContract(ws, mock);
   const input = useRef<HTMLInputElement>(null);
@@ -142,13 +143,14 @@ function UploadForm({ ws, mock }: { ws: string; mock: string }) {
             id="contract-file"
             ref={input}
             type="file"
-            accept=".json,.yaml,.yml"
+            accept={CONTRACT_EXTENSIONS.join(",")}
             className="text-sm"
             onChange={(e) => setFile(e.target.files?.[0])}
             aria-describedby="contract-file-hint"
           />
           <p id="contract-file-hint" className="text-xs text-slate-600">
-            OpenAPI 3.x or Swagger 2.0, JSON or YAML.
+            OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL, .proto or descriptor set, WSDL, or a
+            zip/tar.gz archive of several files; at most 20 MiB.
           </p>
         </div>
         <div className="flex items-center gap-2">

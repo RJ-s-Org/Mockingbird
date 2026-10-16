@@ -1,0 +1,68 @@
+openapi: 3.1.0
+info:
+  title: Events API
+  version: 1.0.0
+paths:
+  /ticks:
+    get:
+      operationId: streamTicks
+      summary: Stream ticks as server-sent events
+      responses:
+        "200":
+          description: A stream of ticks
+          content:
+            text/event-stream:
+              x-mockingbird-sse-event: tick
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tick"
+        "503":
+          description: Stream unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      operationId: createTick
+      summary: Record a tick
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewTick"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tick"
+components:
+  schemas:
+    Tick:
+      type: object
+      required: [id, seq, price]
+      properties:
+        id:
+          type: string
+        seq:
+          type: integer
+          minimum: 0
+        price:
+          type: number
+    NewTick:
+      type: object
+      required: [price]
+      properties:
+        price:
+          type: number
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string

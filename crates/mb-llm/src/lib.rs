@@ -4,6 +4,7 @@ use std::ops::Add;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use serde_json::Value;
 
 pub mod fallback;
@@ -97,6 +98,11 @@ pub enum LlmError {
     Decode(String),
 }
 
+/// Text deltas of a streamed completion, in arrival order. A transport or
+/// decode error mid-stream arrives as one `Err` item, after which the stream
+/// ends.
+pub type TextStream = BoxStream<'static, Result<String, LlmError>>;
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn capabilities(&self) -> Capabilities;
@@ -107,5 +113,14 @@ pub trait Provider: Send + Sync {
     /// hop for a [`FallbackProvider`]. Callers bound the call by this.
     fn total_timeout(&self, request_timeout: Duration) -> Duration {
         request_timeout
+    }
+
+    /// Streams the completion of `req` as text deltas. The default calls
+    /// [`Provider::complete`] once and yields its content as one delta.
+    async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        let response = self.complete(req).await?;
+        Ok(Box::pin(futures::stream::once(std::future::ready(Ok(
+            response.content,
+        )))))
     }
 }

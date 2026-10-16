@@ -1,0 +1,223 @@
+---
+source: crates/mb-import/tests/wsdl.rs
+expression: b
+---
+id: accountservice
+title: AccountService
+version: "0"
+source_digest: "[digest]"
+operations:
+  - id: GetAccount
+    protocol: soap
+    binding:
+      soap:
+        service: AccountService
+        port: AccountPort
+        operation: GetAccount
+        soap_action: "urn:example:accounts#GetAccount"
+        version: soap11
+        address_path: /services/accounts
+    kind: query
+    summary: ~
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        properties:
+          id:
+            type: string
+        required:
+          - id
+        type: object
+        x-xml-namespace: "urn:example:accounts"
+        x-xml-order:
+          - id
+        x-xml-qualified: false
+        x-xml-root:
+          name: GetAccount
+          namespace: "urn:example:accounts"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: text/xml
+        schema:
+          properties:
+            account:
+              $ref: "#/$defs/Account"
+            id:
+              type: string
+          required:
+            - id
+            - account
+          type: object
+          x-xml-namespace: "urn:example:accounts"
+          x-xml-order:
+            - id
+            - account
+          x-xml-qualified: false
+          x-xml-root:
+            name: GetAccountResponse
+            namespace: "urn:example:accounts"
+    resource_type: account
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints: []
+  - id: CreateAccount
+    protocol: soap
+    binding:
+      soap:
+        service: AccountService
+        port: AccountPort
+        operation: CreateAccount
+        soap_action: "urn:example:accounts#CreateAccount"
+        version: soap11
+        address_path: /services/accounts
+    kind:
+      command: create
+    summary: ~
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        properties:
+          account:
+            $ref: "#/$defs/Account"
+        required:
+          - account
+        type: object
+        x-xml-namespace: "urn:example:accounts"
+        x-xml-order:
+          - account
+        x-xml-qualified: false
+        x-xml-root:
+          name: CreateAccount
+          namespace: "urn:example:accounts"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: text/xml
+        schema:
+          properties:
+            account:
+              $ref: "#/$defs/Account"
+            id:
+              type: string
+          required:
+            - id
+            - account
+          type: object
+          x-xml-namespace: "urn:example:accounts"
+          x-xml-order:
+            - id
+            - account
+          x-xml-qualified: false
+          x-xml-root:
+            name: CreateAccountResponse
+            namespace: "urn:example:accounts"
+    resource_type: account
+    identity:
+      path_param: ~
+      field: id
+    semantic_hints: []
+  - id: DeleteAccount
+    protocol: soap
+    binding:
+      soap:
+        service: AccountService
+        port: AccountPort
+        operation: DeleteAccount
+        soap_action: ~
+        version: soap11
+        address_path: /services/accounts
+    kind:
+      command: delete
+    summary: ~
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        properties:
+          id:
+            type: string
+        required:
+          - id
+        type: object
+        x-xml-namespace: "urn:example:accounts"
+        x-xml-order:
+          - id
+        x-xml-qualified: false
+        x-xml-root:
+          name: DeleteAccount
+          namespace: "urn:example:accounts"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: text/xml
+        schema:
+          properties:
+            deleted:
+              type: boolean
+            id:
+              type: string
+          required:
+            - id
+            - deleted
+          type: object
+          x-xml-namespace: "urn:example:accounts"
+          x-xml-order:
+            - id
+            - deleted
+          x-xml-qualified: false
+          x-xml-root:
+            name: DeleteAccountResponse
+            namespace: "urn:example:accounts"
+    resource_type: account
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints: []
+defs:
+  Account:
+    properties:
+      "@id":
+        type: string
+      createdAt:
+        format: date-time
+        type: string
+      email:
+        type: string
+      name:
+        type: string
+      status:
+        enum:
+          - active
+          - suspended
+          - closed
+        type: string
+      tags:
+        items:
+          type: string
+        type: array
+    required:
+      - name
+      - status
+      - createdAt
+    type: object
+    x-xml-namespace: "urn:example:accounts"
+    x-xml-order:
+      - name
+      - email
+      - tags
+      - status
+      - createdAt
+    x-xml-qualified: false
+protocol_payload: "[wsdl]"

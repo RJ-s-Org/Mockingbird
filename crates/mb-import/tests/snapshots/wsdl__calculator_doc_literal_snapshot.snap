@@ -1,0 +1,227 @@
+---
+source: crates/mb-import/tests/wsdl.rs
+expression: b
+---
+id: calculator
+title: Calculator
+version: "0"
+source_digest: "[digest]"
+operations:
+  - id: Add
+    protocol: soap
+    binding:
+      soap:
+        service: Calculator
+        port: CalculatorSoap
+        operation: Add
+        soap_action: "http://tempuri.org/Add"
+        version: soap11
+        address_path: /calculator.asmx
+    kind:
+      command: create
+    summary: ~
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/Add"
+        x-xml-root:
+          name: Add
+          namespace: "http://tempuri.org/"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: text/xml
+        schema:
+          $ref: "#/$defs/AddResponse"
+          x-xml-root:
+            name: AddResponse
+            namespace: "http://tempuri.org/"
+    resource_type: ~
+    identity: ~
+    semantic_hints: []
+  - id: Subtract
+    protocol: soap
+    binding:
+      soap:
+        service: Calculator
+        port: CalculatorSoap
+        operation: Subtract
+        soap_action: "http://tempuri.org/Subtract"
+        version: soap11
+        address_path: /calculator.asmx
+    kind: query
+    summary: ~
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/Subtract"
+        x-xml-root:
+          name: Subtract
+          namespace: "http://tempuri.org/"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: text/xml
+        schema:
+          $ref: "#/$defs/SubtractResponse"
+          x-xml-root:
+            name: SubtractResponse
+            namespace: "http://tempuri.org/"
+    resource_type: subtract
+    identity: ~
+    semantic_hints: []
+  - id: Divide
+    protocol: soap
+    binding:
+      soap:
+        service: Calculator
+        port: CalculatorSoap
+        operation: Divide
+        soap_action: "http://tempuri.org/Divide"
+        version: soap11
+        address_path: /calculator.asmx
+    kind: query
+    summary: ~
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/Divide"
+        x-xml-root:
+          name: Divide
+          namespace: "http://tempuri.org/"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: text/xml
+        schema:
+          $ref: "#/$defs/DivideResponse"
+          x-xml-root:
+            name: DivideResponse
+            namespace: "http://tempuri.org/"
+      - status:
+          code: 500
+        content_type: text/xml
+        schema:
+          $ref: "#/$defs/DivideByZero"
+          x-xml-root:
+            name: DivideByZero
+            namespace: "http://tempuri.org/"
+    resource_type: divide
+    identity: ~
+    semantic_hints: []
+defs:
+  Add:
+    properties:
+      intA:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      intB:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - intA
+      - intB
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - intA
+      - intB
+    x-xml-qualified: true
+  AddResponse:
+    properties:
+      AddResult:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - AddResult
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - AddResult
+    x-xml-qualified: true
+  Divide:
+    properties:
+      dividend:
+        type: number
+      divisor:
+        type: number
+    required:
+      - dividend
+      - divisor
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - dividend
+      - divisor
+    x-xml-qualified: true
+  DivideByZero:
+    properties:
+      dividend:
+        type: number
+      message:
+        type: string
+    required:
+      - message
+      - dividend
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - message
+      - dividend
+    x-xml-qualified: true
+  DivideResponse:
+    properties:
+      DivideResult:
+        type: number
+    required:
+      - DivideResult
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - DivideResult
+    x-xml-qualified: true
+  Subtract:
+    properties:
+      intA:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      intB:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - intA
+      - intB
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - intA
+      - intB
+    x-xml-qualified: true
+  SubtractResponse:
+    properties:
+      SubtractResult:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - SubtractResult
+    type: object
+    x-xml-namespace: "http://tempuri.org/"
+    x-xml-order:
+      - SubtractResult
+    x-xml-qualified: true
+protocol_payload: "[wsdl]"

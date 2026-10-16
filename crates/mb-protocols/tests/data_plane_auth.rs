@@ -506,3 +506,64 @@ async fn none_mode_unchanged() {
     let resp = send(&router, get("/widgets", &[])).await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// Data-plane auth runs in the shared call pipeline, so a SOAP mock in
+/// `api_key` mode reads the key from its HTTP headers: without one the call
+/// is a `401` client Fault with the challenge; with one it is served, and
+/// the key is neither forwarded nor recorded.
+#[cfg(feature = "soap")]
+#[tokio::test]
+async fn soap_api_key_mode() {
+    #[derive(Default)]
+    struct Records(Mutex<Vec<RequestRecord>>);
+    impl RequestRecorder for Records {
+        fn record(&self, r: RequestRecord) {
+            self.0.lock().unwrap().push(r);
+        }
+    }
+    let records = Arc::new(Records::default());
+    let mut rt = runtime("calc", bundle("wsdl/calculator.wsdl"), None, memory());
+    rt.workspace = "team-a".into();
+    rt.data_plane_auth = api_key_mode("x-api-key");
+    rt.data_plane_keys = Some(Arc::new(StubKeys(vec![("team-a", "good")])));
+    rt.recorder = Some(records.clone());
+    let app = mb_protocols::soap::try_router(Arc::new(rt)).unwrap();
+    let envelope = r#"<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><Add xmlns="http://tempuri.org/"><intA>2</intA><intB>3</intB></Add></soap:Body></soap:Envelope>"#;
+    let call = |key: Option<&'static str>| {
+        let mut req = Request::post("/calculator.asmx")
+            .header("content-type", "text/xml; charset=utf-8")
+            .header("SOAPAction", "\"http://tempuri.org/Add\"");
+        if let Some(key) = key {
+            req = req.header("x-api-key", key);
+        }
+        app.clone().oneshot(req.body(Body::from(envelope)).unwrap())
+    };
+
+    for key in [None, Some("bad")] {
+        let resp = call(key).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()["www-authenticate"],
+            r#"ApiKey realm="mockingbird", header="x-api-key""#
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("Fault") && text.contains("Client"), "{text}");
+    }
+    let resp = call(Some("good")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let records = records.0.lock().unwrap();
+    let statuses: Vec<u16> = records.iter().map(|r| r.status).collect();
+    assert_eq!(statuses, [401, 401, 200]);
+    for r in records.iter() {
+        assert_eq!(r.workspace, "team-a");
+        assert!(
+            r.request["headers"].get("x-api-key").is_none(),
+            "{:?}",
+            r.request
+        );
+    }
+}

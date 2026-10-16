@@ -160,12 +160,59 @@ export function useActiveOperations(ws: string, mock: string): string[] {
   return contract.data?.operations.map((o) => o.id) ?? [];
 }
 
-/** The upload Content-Type for a contract file name, by extension. */
-export function contentTypeFor(fileName: string): "application/json" | "application/yaml" | undefined {
-  const ext = fileName.toLowerCase().split(".").pop();
-  if (ext === "json") return "application/json";
-  if (ext === "yaml" || ext === "yml") return "application/yaml";
-  return undefined;
+/** Contract file extensions the console uploads (as the CLI does). */
+export const CONTRACT_EXTENSIONS = [
+  ".json",
+  ".yaml",
+  ".yml",
+  ".graphql",
+  ".graphqls",
+  ".gql",
+  ".proto",
+  ".pb",
+  ".desc",
+  ".wsdl",
+  ".xsd",
+  ".xml",
+  ".zip",
+  ".tgz",
+  ".tar.gz",
+];
+
+/**
+ * The upload Content-Type for a contract file name, by extension (the same
+ * mapping as `mockingbird import`); `undefined` for any other file.
+ */
+export function contentTypeFor(fileName: string): string | undefined {
+  const name = fileName.toLowerCase();
+  if (name.endsWith(".tar.gz")) return "application/gzip";
+  const ext = name.includes(".") ? name.split(".").pop() : undefined;
+  switch (ext) {
+    case "json":
+      return "application/json";
+    case "yaml":
+    case "yml":
+      return "application/yaml";
+    case "graphql":
+    case "graphqls":
+    case "gql":
+      return "application/graphql";
+    case "proto":
+      return "text/x-protobuf";
+    case "pb":
+    case "desc":
+      return "application/x-protobuf";
+    case "wsdl":
+    case "xsd":
+    case "xml":
+      return "application/xml";
+    case "zip":
+      return "application/zip";
+    case "tgz":
+      return "application/gzip";
+    default:
+      return undefined;
+  }
 }
 
 /** Everything that shows a mock's versions or active version. */
@@ -174,19 +221,22 @@ function invalidateMock(queryClient: ReturnType<typeof useQueryClient>, ws: stri
   return queryClient.invalidateQueries({ queryKey: keys.mocks(ws) });
 }
 
-/** `POST …/contracts[?activate=true]` with the file's text as the body. */
+/** `POST …/contracts[?activate=true]` with the file's bytes as the body. */
 export function useUploadContract(ws: string, mock: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ file, activate }: { file: File; activate: boolean }): Promise<UploadResult> => {
       const contentType = contentTypeFor(file.name);
-      if (!contentType) throw new Error("Choose a .json, .yaml or .yml file.");
-      const body = await file.text();
+      if (!contentType) throw new Error(`Choose a contract file (${CONTRACT_EXTENSIONS.join(", ")}).`);
+      // Sent as the file's raw bytes (archives and descriptor sets are
+      // binary). The schema types the body per media type as text or a
+      // number array; neither is how it travels, hence the cast.
+      const bytes = await file.arrayBuffer();
       return unwrap(
         await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/contracts", {
           params: { path: { ws, mock }, query: activate ? { activate: true } : undefined },
-          body,
-          bodySerializer: (b: string) => b,
+          body: bytes as unknown as string,
+          bodySerializer: (b: unknown) => b as BodyInit,
           headers: { "Content-Type": contentType },
         }),
       );

@@ -1,0 +1,527 @@
+---
+source: crates/mb-import/tests/graphql.rs
+assertion_line: 24
+expression: github()
+---
+id: graphql-api
+title: GraphQL API
+version: "0"
+source_digest: "[digest]"
+operations:
+  - id: Query.viewer
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: viewer
+    kind: query
+    summary: The currently authenticated user.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties: {}
+        type: object
+      body_required: false
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/User"
+    resource_type: user
+    identity:
+      path_param: ~
+      field: id
+    semantic_hints:
+      - "A user is an individual's account on GitHub."
+  - id: Query.repository
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: repository
+    kind: query
+    summary: Lookup a given repository by the owner and repository name.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          name:
+            type: string
+          owner:
+            type: string
+        required:
+          - owner
+          - name
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Repository"
+            - type: "null"
+    resource_type: repository
+    identity:
+      path_param: ~
+      field: id
+    semantic_hints:
+      - A repository contains the content for a project.
+  - id: Query.issue
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: issue
+    kind: query
+    summary: Lookup an issue by its Node ID.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          id:
+            type: string
+        required:
+          - id
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Issue"
+            - type: "null"
+    resource_type: issue
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints:
+      - "An Issue is a place to discuss ideas, enhancements, tasks, and bugs."
+  - id: Query.search
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: search
+    kind: query
+    summary: Perform a search across resources.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          first:
+            anyOf:
+              - maximum: 2147483647
+                minimum: -2147483648
+                type: integer
+              - type: "null"
+          query:
+            type: string
+        required:
+          - query
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          items:
+            $ref: "#/$defs/SearchResult"
+          type: array
+    resource_type: ~
+    identity: ~
+    semantic_hints:
+      - The results of a search.
+  - id: Mutation.createIssue
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: mutation
+        field: createIssue
+    kind:
+      command: create
+    summary: Creates a new issue.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          input:
+            $ref: "#/$defs/CreateIssueInput"
+        required:
+          - input
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Issue"
+            - type: "null"
+    resource_type: issue
+    identity:
+      path_param: ~
+      field: id
+    semantic_hints:
+      - "An Issue is a place to discuss ideas, enhancements, tasks, and bugs."
+  - id: Mutation.updateIssue
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: mutation
+        field: updateIssue
+    kind:
+      command: update
+    summary: Updates an Issue.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          id:
+            type: string
+          input:
+            $ref: "#/$defs/CreateIssueInput"
+        required:
+          - id
+          - input
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Issue"
+            - type: "null"
+    resource_type: issue
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints:
+      - "An Issue is a place to discuss ideas, enhancements, tasks, and bugs."
+  - id: Mutation.deleteIssue
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: mutation
+        field: deleteIssue
+    kind:
+      command: delete
+    summary: Deletes an Issue object.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          id:
+            type: string
+        required:
+          - id
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Issue"
+            - type: "null"
+    resource_type: issue
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints:
+      - "An Issue is a place to discuss ideas, enhancements, tasks, and bugs."
+  - id: Subscription.issueAdded
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: subscription
+        field: issueAdded
+    kind: stream_server
+    summary: Emitted when an issue is opened in a repository.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          repositoryId:
+            type: string
+        required:
+          - repositoryId
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          $ref: "#/$defs/Issue"
+    resource_type: issue
+    identity:
+      path_param: ~
+      field: id
+    semantic_hints:
+      - "An Issue is a place to discuss ideas, enhancements, tasks, and bugs."
+defs:
+  CreateIssueInput:
+    additionalProperties: false
+    description: Autogenerated input type of CreateIssue.
+    properties:
+      body:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: The body for the issue description.
+      labels:
+        anyOf:
+          - items:
+              type: string
+            type: array
+          - type: "null"
+        description: Labels to apply to the issue.
+      repositoryId:
+        description: The Node ID of the repository.
+        type: string
+      title:
+        description: The title for the issue.
+        type: string
+    required:
+      - repositoryId
+      - title
+    type: object
+  DateTime:
+    description: GraphQL scalar DateTime
+  Issue:
+    additionalProperties: false
+    description: "An Issue is a place to discuss ideas, enhancements, tasks, and bugs."
+    properties:
+      __typename:
+        const: Issue
+      author:
+        anyOf:
+          - $ref: "#/$defs/User"
+          - type: "null"
+      body:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: Identifies the body of the issue.
+      createdAt:
+        $ref: "#/$defs/DateTime"
+      id:
+        type: string
+      labels:
+        description: Identifies the labels of the issue.
+        items:
+          type: string
+        type: array
+      number:
+        description: Identifies the issue number.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      repository:
+        $ref: "#/$defs/Repository"
+      state:
+        $ref: "#/$defs/IssueState"
+        description: Identifies the state of the issue.
+      title:
+        description: Identifies the issue title.
+        type: string
+    required:
+      - __typename
+      - id
+      - number
+      - title
+      - state
+      - repository
+      - createdAt
+      - labels
+    type: object
+  IssueState:
+    description: The possible states of an issue.
+    enum:
+      - OPEN
+      - CLOSED
+    type: string
+  Mutation:
+    additionalProperties: false
+    description: The root query for implementing GraphQL mutations.
+    properties:
+      __typename:
+        const: Mutation
+      createIssue:
+        anyOf:
+          - $ref: "#/$defs/Issue"
+          - type: "null"
+        description: Creates a new issue.
+      deleteIssue:
+        anyOf:
+          - $ref: "#/$defs/Issue"
+          - type: "null"
+        description: Deletes an Issue object.
+      updateIssue:
+        anyOf:
+          - $ref: "#/$defs/Issue"
+          - type: "null"
+        description: Updates an Issue.
+    required:
+      - __typename
+    type: object
+  Node:
+    description: An object with an ID.
+    oneOf:
+      - $ref: "#/$defs/Issue"
+      - $ref: "#/$defs/Repository"
+      - $ref: "#/$defs/User"
+  Query:
+    additionalProperties: false
+    description: "The query root of GitHub's GraphQL interface."
+    properties:
+      __typename:
+        const: Query
+      issue:
+        anyOf:
+          - $ref: "#/$defs/Issue"
+          - type: "null"
+        description: Lookup an issue by its Node ID.
+      repository:
+        anyOf:
+          - $ref: "#/$defs/Repository"
+          - type: "null"
+        description: Lookup a given repository by the owner and repository name.
+      search:
+        description: Perform a search across resources.
+        items:
+          $ref: "#/$defs/SearchResult"
+        type: array
+      viewer:
+        $ref: "#/$defs/User"
+        description: The currently authenticated user.
+    required:
+      - __typename
+      - viewer
+      - search
+    type: object
+  Repository:
+    additionalProperties: false
+    description: A repository contains the content for a project.
+    properties:
+      __typename:
+        const: Repository
+      id:
+        type: string
+      isPrivate:
+        description: Identifies if the repository is private.
+        type: boolean
+      issues:
+        description: A list of issues that have been opened in the repository.
+        items:
+          $ref: "#/$defs/Issue"
+        type: array
+      name:
+        description: The name of the repository.
+        type: string
+      owner:
+        $ref: "#/$defs/User"
+        description: The User owner of the repository.
+      stargazerCount:
+        description: The number of stars.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - __typename
+      - id
+      - name
+      - owner
+      - isPrivate
+      - stargazerCount
+      - issues
+    type: object
+  SearchResult:
+    description: The results of a search.
+    oneOf:
+      - $ref: "#/$defs/Issue"
+      - $ref: "#/$defs/Repository"
+      - $ref: "#/$defs/User"
+  Subscription:
+    additionalProperties: false
+    description: The root subscription type.
+    properties:
+      __typename:
+        const: Subscription
+      issueAdded:
+        $ref: "#/$defs/Issue"
+        description: Emitted when an issue is opened in a repository.
+    required:
+      - __typename
+      - issueAdded
+    type: object
+  User:
+    additionalProperties: false
+    description: "A user is an individual's account on GitHub."
+    properties:
+      __typename:
+        const: User
+      createdAt:
+        $ref: "#/$defs/DateTime"
+      id:
+        type: string
+      login:
+        description: The username used to login.
+        type: string
+      name:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: "The user's public profile name."
+      repositories:
+        description: A list of repositories that the user owns.
+        items:
+          $ref: "#/$defs/Repository"
+        type: array
+    required:
+      - __typename
+      - id
+      - login
+      - createdAt
+      - repositories
+    type: object
+protocol_payload:
+  graphql:
+    sdl: "# A GitHub-like subset of the GitHub GraphQL API, used as an importer fixture.\n\n\"\"\"An object with an ID.\"\"\"\ninterface Node {\n  \"\"\"ID of the object.\"\"\"\n  id: ID!\n}\n\n\"\"\"An ISO-8601 encoded UTC date string.\"\"\"\nscalar DateTime\n\n\"\"\"The possible states of an issue.\"\"\"\nenum IssueState {\n  \"\"\"An issue that is still open.\"\"\"\n  OPEN\n  \"\"\"An issue that has been closed.\"\"\"\n  CLOSED\n}\n\n\"\"\"A user is an individual's account on GitHub.\"\"\"\ntype User implements Node {\n  id: ID!\n  \"\"\"The username used to login.\"\"\"\n  login: String!\n  \"\"\"The user's public profile name.\"\"\"\n  name: String\n  createdAt: DateTime!\n  \"\"\"A list of repositories that the user owns.\"\"\"\n  repositories(first: Int = 10): [Repository!]!\n}\n\n\"\"\"A repository contains the content for a project.\"\"\"\ntype Repository implements Node {\n  id: ID!\n  \"\"\"The name of the repository.\"\"\"\n  name: String!\n  \"\"\"The User owner of the repository.\"\"\"\n  owner: User!\n  \"\"\"Identifies if the repository is private.\"\"\"\n  isPrivate: Boolean!\n  \"\"\"The number of stars.\"\"\"\n  stargazerCount: Int!\n  \"\"\"A list of issues that have been opened in the repository.\"\"\"\n  issues(states: [IssueState!], first: Int): [Issue!]!\n}\n\n\"\"\"An Issue is a place to discuss ideas, enhancements, tasks, and bugs.\"\"\"\ntype Issue implements Node @key(fields: \"id\") {\n  id: ID!\n  \"\"\"Identifies the issue number.\"\"\"\n  number: Int!\n  \"\"\"Identifies the issue title.\"\"\"\n  title: String!\n  \"\"\"Identifies the body of the issue.\"\"\"\n  body: String\n  \"\"\"Identifies the state of the issue.\"\"\"\n  state: IssueState!\n  author: User\n  repository: Repository!\n  createdAt: DateTime!\n}\n\nextend type Issue {\n  \"\"\"Identifies the labels of the issue.\"\"\"\n  labels: [String!]!\n}\n\n\"\"\"The results of a search.\"\"\"\nunion SearchResult = Repository | Issue | User\n\n\"\"\"Autogenerated input type of CreateIssue.\"\"\"\ninput CreateIssueInput {\n  \"\"\"The Node ID of the repository.\"\"\"\n  repositoryId: ID!\n  \"\"\"The title for the issue.\"\"\"\n  title: String!\n  \"\"\"The body for the issue description.\"\"\"\n  body: String\n  \"\"\"Labels to apply to the issue.\"\"\"\n  labels: [String!] = []\n}\n\n\"\"\"The query root of GitHub's GraphQL interface.\"\"\"\ntype Query {\n  \"\"\"The currently authenticated user.\"\"\"\n  viewer: User!\n  \"\"\"Lookup a given repository by the owner and repository name.\"\"\"\n  repository(owner: String!, name: String!): Repository\n  \"\"\"Lookup an issue by its Node ID.\"\"\"\n  issue(id: ID!): Issue\n  \"\"\"Perform a search across resources.\"\"\"\n  search(query: String!, first: Int = 10): [SearchResult!]!\n}\n\n\"\"\"The root query for implementing GraphQL mutations.\"\"\"\ntype Mutation {\n  \"\"\"Creates a new issue.\"\"\"\n  createIssue(input: CreateIssueInput!): Issue\n  \"\"\"Updates an Issue.\"\"\"\n  updateIssue(id: ID!, input: CreateIssueInput!): Issue\n  \"\"\"Deletes an Issue object.\"\"\"\n  deleteIssue(id: ID!): Issue\n}\n\n\"\"\"The root subscription type.\"\"\"\ntype Subscription {\n  \"\"\"Emitted when an issue is opened in a repository.\"\"\"\n  issueAdded(repositoryId: ID!): Issue!\n}\n"

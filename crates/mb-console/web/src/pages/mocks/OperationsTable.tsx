@@ -6,9 +6,12 @@ import { ProblemAlert } from "../../components/ProblemAlert";
 type Operation = ContractDetail["operations"][number];
 
 const col = columnHelper<Operation>();
+// `target` covers every protocol (`GET /orders/{id}`, `query user`,
+// `/pkg.Service/Method`, `Service/Port Operation`); `method` and `path` are
+// empty outside HTTP.
 const columns = [
-  col.accessor("method", { header: "Method", cell: (info) => <code>{info.getValue()}</code> }),
-  col.accessor("path", { header: "Path", cell: (info) => <code className="break-all">{info.getValue()}</code> }),
+  col.accessor("protocol", { header: "Protocol" }),
+  col.accessor("target", { header: "Target", cell: (info) => <code className="break-all">{info.getValue()}</code> }),
   col.accessor("id", { header: "Operation ID" }),
   col.accessor("kind", { header: "Kind" }),
 ];

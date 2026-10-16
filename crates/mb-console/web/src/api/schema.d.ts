@@ -816,12 +816,22 @@ export interface components {
         /** @description One operation of a compiled contract. */
         OperationSummary: {
             id: string;
-            /** @description `query`, `create`, `update`, `delete` or `other`. */
+            /**
+             * @description `query`, `create`, `update`, `delete`, `other`, `stream-server`,
+             *     `stream-client` or `stream-bidi`.
+             */
             kind: string;
-            /** @description Upper-case HTTP method. */
+            /** @description Upper-case HTTP method (empty for non-HTTP operations). */
             method: string;
-            /** @description Path template with `{param}` placeholders. */
+            /** @description Path template with `{param}` placeholders (empty for non-HTTP operations). */
             path: string;
+            /** @description `http`, `graphql`, `grpc` or `soap`. */
+            protocol: string;
+            /**
+             * @description `GET /orders/{id}`, `query user`, `/pkg.Service/Method` or
+             *     `Service/Port Operation`.
+             */
+            target: string;
         };
         /** @description JSON merge patch of a mock: absent fields are kept, `null` clears. */
         PatchMock: {
@@ -911,6 +921,17 @@ export interface components {
              * @description 100–599.
              */
             status?: number | null;
+            /**
+             * Format: int64
+             * @description Pause between streamed items, in milliseconds.
+             */
+            stream_item_interval_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Items per streamed response (1–10000) unless
+             *     `X-Mockingbird-Stream-Items` overrides it.
+             */
+            stream_items?: number | null;
         };
         /** @description One recorded request, with redacted request and response bodies. */
         RequestLogView: {
@@ -959,6 +980,17 @@ export interface components {
              * @description Forced response status.
              */
             status?: number | null;
+            /**
+             * Format: int64
+             * @description Pause between streamed items, in milliseconds.
+             */
+            stream_item_interval_ms?: number | null;
+            /**
+             * Format: int32
+             * @description Items per streamed response unless `X-Mockingbird-Stream-Items`
+             *     overrides it.
+             */
+            stream_items?: number | null;
         };
         /** @description A live session of a mock. */
         SessionInfoView: {
@@ -1470,15 +1502,24 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description OpenAPI 3.x or Swagger 2.0 document, JSON or YAML, at most 10 MiB. Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml or application/vnd.oai.openapi(+json|+yaml). */
+        /** @description A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream. */
         requestBody: {
             content: {
+                "application/graphql": string;
+                "application/gzip": number[];
                 "application/json": string;
+                "application/octet-stream": number[];
                 "application/vnd.oai.openapi": string;
                 "application/vnd.oai.openapi+json": string;
                 "application/vnd.oai.openapi+yaml": string;
+                "application/wsdl+xml": string;
+                "application/x-protobuf": number[];
                 "application/x-yaml": string;
+                "application/xml": string;
                 "application/yaml": string;
+                "application/zip": number[];
+                "text/x-protobuf": string;
+                "text/xml": string;
                 "text/yaml": string;
             };
         };
@@ -1516,7 +1557,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a JSON, YAML or OpenAPI media type */
+            /** @description Not a contract media type */
             415: {
                 headers: {
                     [name: string]: unknown;
@@ -1633,13 +1674,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The uploaded source bytes */
+            /** @description The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "application/octet-stream": number[];
                 };
             };
             404: {
@@ -2867,15 +2908,24 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description OpenAPI 3.x or Swagger 2.0 document, JSON or YAML, at most 10 MiB. Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml or application/vnd.oai.openapi(+json|+yaml). */
+        /** @description A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream. */
         requestBody: {
             content: {
+                "application/graphql": string;
+                "application/gzip": number[];
                 "application/json": string;
+                "application/octet-stream": number[];
                 "application/vnd.oai.openapi": string;
                 "application/vnd.oai.openapi+json": string;
                 "application/vnd.oai.openapi+yaml": string;
+                "application/wsdl+xml": string;
+                "application/x-protobuf": number[];
                 "application/x-yaml": string;
+                "application/xml": string;
                 "application/yaml": string;
+                "application/zip": number[];
+                "text/x-protobuf": string;
+                "text/xml": string;
                 "text/yaml": string;
             };
         };
@@ -2913,7 +2963,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a JSON, YAML or OpenAPI media type */
+            /** @description Not a contract media type */
             415: {
                 headers: {
                     [name: string]: unknown;
@@ -3036,13 +3086,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The uploaded source bytes */
+            /** @description The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": string;
+                    "application/octet-stream": number[];
                 };
             };
             404: {

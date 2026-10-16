@@ -24,6 +24,7 @@ fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
         identity: Some(Identity {
             path_param: Some("id".into()),
             field: "id".into(),
+            input_field: None,
         }),
         semantic_hints: vec!["orders".into()],
         security: Vec::new(),
@@ -60,6 +61,7 @@ fn bundle_round_trips_through_json() {
             ),
         ],
         defs,
+        protocol_payload: None,
     };
     let value = serde_json::to_value(&bundle).unwrap();
     let back: Bundle = serde_json::from_value(value).unwrap();
@@ -147,6 +149,7 @@ fn with_defs_attaches_definitions() {
         source_digest: "d".into(),
         operations: vec![],
         defs,
+        protocol_payload: None,
     };
     let v = bundle.with_defs(&json!({"$ref":"#/$defs/Order"}));
     assert_eq!(v["$defs"]["Order"], order);
@@ -177,6 +180,7 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
         source_digest: "d".into(),
         operations: vec![],
         defs,
+        protocol_payload: None,
     };
 
     let v = bundle.with_reachable_defs(&json!({"$ref": "#/$defs/Order"}));
@@ -199,4 +203,166 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
     assert!(v["$defs"].as_object().unwrap().is_empty());
     let v = bundle.with_reachable_defs(&json!(true));
     assert_eq!(v["allOf"], json!([true]));
+}
+
+/// A P2-era orders bundle: no `protocol_payload`, no `input_field`.
+const P2_ORDERS: &str = r##"{"id":"orders-api","title":"Orders API","version":"1.0.0","source_digest":"abc","operations":[{"id":"getOrder","protocol":"http","binding":{"http":{"method":"get","path":"/orders/{orderId}"}},"kind":"query","summary":"Get an order","input":{"path":{"type":"object"},"query":null,"headers":null,"body":null,"body_required":false},"outputs":[{"status":{"code":200},"content_type":"application/json","schema":{"$ref":"#/$defs/Order"}}],"resource_type":"orders","identity":{"path_param":"orderId","field":"id"},"semantic_hints":["orders"]},{"id":"createOrder","protocol":"http","binding":{"http":{"method":"post","path":"/orders"}},"kind":{"command":"create"},"summary":null,"input":{"path":null,"query":null,"headers":null,"body":{"$ref":"#/$defs/Order"},"body_required":true},"outputs":[{"status":"default","content_type":null,"schema":null}],"resource_type":"orders","identity":null,"semantic_hints":[]}],"defs":{"Order":{"type":"object"}}}"##;
+
+#[test]
+fn p2_bundle_without_payload_deserializes() {
+    let bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    assert_eq!(bundle.protocol_payload, None);
+    let get = bundle.operation("getOrder").unwrap();
+    assert_eq!(get.identity.as_ref().unwrap().input_field, None);
+    assert_eq!(serde_json::to_string(&bundle).unwrap(), P2_ORDERS);
+}
+
+#[test]
+fn grpc_payload_round_trips_base64() {
+    let payload = ProtocolPayload::Grpc {
+        file_descriptor_set: vec![0, 1, 2, 255],
+    };
+    let v = serde_json::to_value(&payload).unwrap();
+    assert_eq!(v, json!({"grpc": {"file_descriptor_set": "AAEC/w=="}}));
+    let back: ProtocolPayload = serde_json::from_value(v).unwrap();
+    assert_eq!(back, payload);
+    assert!(
+        serde_json::from_value::<ProtocolPayload>(
+            json!({"grpc": {"file_descriptor_set": "not base64!"}})
+        )
+        .is_err()
+    );
+    for (p, tag) in [
+        (
+            ProtocolPayload::Graphql {
+                sdl: "type Query { a: Int }".into(),
+            },
+            "graphql",
+        ),
+        (
+            ProtocolPayload::Soap {
+                wsdl: "<definitions/>".into(),
+            },
+            "soap",
+        ),
+    ] {
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get(tag).is_some(), "{v}");
+        assert_eq!(serde_json::from_value::<ProtocolPayload>(v).unwrap(), p);
+    }
+}
+
+#[test]
+fn new_bindings_and_kinds_round_trip() {
+    let b = json!({"graphql": {"operation_type": "subscription", "field": "reviewAdded"}});
+    let binding: Binding = serde_json::from_value(b.clone()).unwrap();
+    assert_eq!(
+        binding,
+        Binding::Graphql {
+            operation_type: GraphqlOperationType::Subscription,
+            field: "reviewAdded".into(),
+        }
+    );
+    assert_eq!(serde_json::to_value(&binding).unwrap(), b);
+
+    let kind: OperationKind = serde_json::from_value(json!("stream_bidi")).unwrap();
+    assert_eq!(kind, OperationKind::StreamBidi);
+    assert_eq!(serde_json::to_value(&kind).unwrap(), json!("stream_bidi"));
+    assert!(kind.streams_request() && kind.streams_response());
+    assert!(OperationKind::StreamServer.streams_response());
+    assert!(!OperationKind::StreamServer.streams_request());
+    assert!(OperationKind::StreamClient.streams_request());
+    assert!(!OperationKind::StreamClient.streams_response());
+    assert!(!OperationKind::Query.streams_request() && !OperationKind::Query.streams_response());
+    assert_eq!(OperationKind::StreamClient.label(), "stream-client");
+    assert_eq!(OperationKind::Command(Effect::Delete).label(), "delete");
+
+    let soap = Binding::Soap {
+        service: "Calculator".into(),
+        port: "CalculatorSoap12".into(),
+        operation: "Add".into(),
+        soap_action: Some("http://tempuri.org/Add".into()),
+        version: SoapVersion::Soap12,
+        address_path: "/calculator.asmx".into(),
+    };
+    let v = serde_json::to_value(&soap).unwrap();
+    assert_eq!(v["soap"]["version"], "soap12");
+    assert_eq!(serde_json::from_value::<Binding>(v).unwrap(), soap);
+    assert_eq!(serde_json::to_value(SoapVersion::Soap11).unwrap(), "soap11");
+
+    let identity: Identity =
+        serde_json::from_value(json!({"path_param": null, "field": "id", "input_field": "id"}))
+            .unwrap();
+    assert_eq!(identity.input_field.as_deref(), Some("id"));
+}
+
+#[test]
+fn bundle_protocol_is_first_operations() {
+    let mut bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    assert_eq!(bundle.protocol(), Protocol::Http);
+    bundle.operations[0].protocol = Protocol::Grpc;
+    assert_eq!(bundle.protocol(), Protocol::Grpc);
+    bundle.operations.clear();
+    assert_eq!(bundle.protocol(), Protocol::Http);
+}
+
+#[test]
+fn grpc_path_formats() {
+    let b = Binding::Grpc {
+        package: "helloworld".into(),
+        service: "Greeter".into(),
+        method: "SayHello".into(),
+    };
+    assert_eq!(
+        b.grpc_path().as_deref(),
+        Some("/helloworld.Greeter/SayHello")
+    );
+    let b = Binding::Grpc {
+        package: String::new(),
+        service: "Greeter".into(),
+        method: "SayHello".into(),
+    };
+    assert_eq!(b.grpc_path().as_deref(), Some("/Greeter/SayHello"));
+    let http = Binding::Http {
+        method: HttpMethod::Get,
+        path: "/x".into(),
+    };
+    assert_eq!(http.grpc_path(), None);
+}
+
+#[test]
+fn operation_target_and_stream_item_schema() {
+    let mut o = op(
+        "a",
+        OperationKind::Query,
+        vec![OutputVariant {
+            status: StatusSelector::Code(200),
+            content_type: None,
+            schema: Some(json!({"type": "string"})),
+        }],
+    );
+    assert_eq!(o.target(), "GET /orders/{id}");
+    assert_eq!(o.stream_item_schema(), None);
+    o.kind = OperationKind::StreamServer;
+    assert_eq!(o.stream_item_schema(), Some(&json!({"type": "string"})));
+    o.binding = Binding::Graphql {
+        operation_type: GraphqlOperationType::Query,
+        field: "user".into(),
+    };
+    assert_eq!(o.target(), "query user");
+    o.binding = Binding::Grpc {
+        package: "pkg".into(),
+        service: "Svc".into(),
+        method: "M".into(),
+    };
+    assert_eq!(o.target(), "/pkg.Svc/M");
+    o.binding = Binding::Soap {
+        service: "Calc".into(),
+        port: "CalcSoap".into(),
+        operation: "Add".into(),
+        soap_action: None,
+        version: SoapVersion::Soap11,
+        address_path: "/calc".into(),
+    };
+    assert_eq!(o.target(), "Calc/CalcSoap Add");
 }

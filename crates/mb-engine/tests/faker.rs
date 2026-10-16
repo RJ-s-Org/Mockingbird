@@ -462,3 +462,47 @@ fn costs_computed_once_per_response() {
         "{elapsed:?}"
     );
 }
+
+#[test]
+fn faker_formats_match_patterns() {
+    use base64::Engine as _;
+    let faker = Faker::default();
+    let cases = [
+        ("int64", "^-?[0-9]+$"),
+        ("uint64", "^[0-9]+$"),
+        ("byte", "^[A-Za-z0-9+/]*={0,2}$"),
+        ("time", "^[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"),
+        (
+            "duration",
+            "^P(?:[0-9]+D)?T[0-9]+H[0-9]+M[0-9]+S$|^P[0-9]+D$",
+        ),
+        ("proto-duration", "^-?[0-9]+(\\.[0-9]+)?s$"),
+        ("hex", "^[0-9A-Fa-f]*$"),
+    ];
+    for (format, pattern) in cases {
+        let schema = json!({"type": "string", "format": format, "pattern": pattern});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        for seed in 0..100u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let v = faker.fake(&json!({"type": "string", "format": format}), &mut rng);
+            assert!(validator.validate(&v).is_ok(), "{format}: {v}");
+            let s = v.as_str().unwrap();
+            match format {
+                "int64" => {
+                    s.parse::<i64>().unwrap();
+                }
+                "uint64" => {
+                    s.parse::<u64>().unwrap();
+                }
+                "byte" => {
+                    base64::engine::general_purpose::STANDARD.decode(s).unwrap();
+                }
+                "time" => {
+                    chrono::NaiveTime::parse_from_str(s, "%H:%M:%SZ").unwrap();
+                }
+                "hex" => assert_eq!(s.len() % 2, 0, "{s}"),
+                _ => {}
+            }
+        }
+    }
+}

@@ -29,6 +29,13 @@ pub struct ScenarioView {
     pub set: Option<Value>,
     /// Operation ids the scenario applies to; empty means all.
     pub operations: Vec<String>,
+    /// Items per streamed response unless `X-Mockingbird-Stream-Items`
+    /// overrides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_items: Option<u32>,
+    /// Pause between streamed items, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_item_interval_ms: Option<u64>,
     pub source: Source,
 }
 
@@ -42,6 +49,8 @@ impl From<Scenario> for ScenarioView {
             latency_ms: s.rules.latency_ms,
             set: s.rules.set,
             operations: s.rules.operations,
+            stream_items: s.rules.stream_items,
+            stream_item_interval_ms: s.rules.stream_item_interval_ms,
         }
     }
 }
@@ -61,6 +70,13 @@ pub struct PutScenario {
     /// mock has an active contract, each must be one of its operations.
     #[serde(default)]
     pub operations: Vec<String>,
+    /// Items per streamed response (1–10000) unless
+    /// `X-Mockingbird-Stream-Items` overrides it.
+    #[serde(default)]
+    pub stream_items: Option<u32>,
+    /// Pause between streamed items, in milliseconds.
+    #[serde(default)]
+    pub stream_item_interval_ms: Option<u64>,
 }
 
 /// Path of one scenario.
@@ -140,6 +156,14 @@ pub async fn put(
     if body.status.is_some_and(|s| !(100..=599).contains(&s)) {
         return Err(Problem::unprocessable("status must be between 100 and 599"));
     }
+    if body
+        .stream_items
+        .is_some_and(|n| !(1..=10_000).contains(&n))
+    {
+        return Err(Problem::unprocessable(
+            "stream_items must be between 1 and 10000",
+        ));
+    }
     if body.set.as_ref().is_some_and(|s| !s.is_object()) {
         return Err(Problem::unprocessable("set must be a JSON object"));
     }
@@ -168,6 +192,8 @@ pub async fn put(
             latency_ms: body.latency_ms,
             set: body.set,
             operations: body.operations,
+            stream_items: body.stream_items,
+            stream_item_interval_ms: body.stream_item_interval_ms,
         },
         source: ResourceSource::Api,
     };

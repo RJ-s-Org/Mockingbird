@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package common.v1;
+
+// An amount of money in a currency.
+message Money {
+  // ISO 4217 currency code, e.g. "EUR".
+  string currency_code = 1;
+  // Whole units of the amount.
+  int64 units = 2;
+  // Nano units of the amount (10^-9).
+  int32 nanos = 3;
+}

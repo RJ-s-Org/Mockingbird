@@ -7,7 +7,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
-use mb_mcm::{Binding, Bundle, Effect, HttpMethod, OperationKind};
+use mb_import::SourceFormat;
+use mb_mcm::{Binding, Bundle, HttpMethod, Protocol};
 use mb_store::{ContractStatus, ContractVersion, Mock, NewContractVersion};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -20,12 +21,13 @@ use crate::problem::{
 };
 use crate::{AdminState, VersionStatus, ensure_api_managed};
 
-/// Largest accepted contract upload.
-pub const MAX_CONTRACT_BYTES: usize = 10 * 1024 * 1024;
+/// Largest accepted contract upload (an archive may be this large too).
+pub const MAX_CONTRACT_BYTES: usize = 20 * 1024 * 1024;
 
-/// Media types a contract upload may declare. None is CORS-safelisted, so
-/// a cross-site page cannot upload without a preflight.
-pub const CONTRACT_MEDIA_TYPES: [&str; 7] = [
+/// Media types a contract upload may declare. None is CORS-safelisted (in
+/// particular not `text/plain`), so a cross-site page cannot upload without
+/// a preflight.
+pub const CONTRACT_MEDIA_TYPES: [&str; 16] = [
     "application/json",
     "application/yaml",
     "application/x-yaml",
@@ -33,6 +35,15 @@ pub const CONTRACT_MEDIA_TYPES: [&str; 7] = [
     "application/vnd.oai.openapi",
     "application/vnd.oai.openapi+json",
     "application/vnd.oai.openapi+yaml",
+    "application/graphql",
+    "text/x-protobuf",
+    "application/x-protobuf",
+    "application/xml",
+    "text/xml",
+    "application/wsdl+xml",
+    "application/zip",
+    "application/gzip",
+    "application/octet-stream",
 ];
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -76,12 +87,18 @@ pub struct ContractVersionSummary {
 #[derive(Serialize, ToSchema, Debug, PartialEq)]
 pub struct OperationSummary {
     pub id: String,
-    /// Upper-case HTTP method.
+    /// Upper-case HTTP method (empty for non-HTTP operations).
     pub method: String,
-    /// Path template with `{param}` placeholders.
+    /// Path template with `{param}` placeholders (empty for non-HTTP operations).
     pub path: String,
-    /// `query`, `create`, `update`, `delete` or `other`.
+    /// `query`, `create`, `update`, `delete`, `other`, `stream-server`,
+    /// `stream-client` or `stream-bidi`.
     pub kind: String,
+    /// `http`, `graphql`, `grpc` or `soap`.
+    pub protocol: String,
+    /// `GET /orders/{id}`, `query user`, `/pkg.Service/Method` or
+    /// `Service/Port Operation`.
+    pub target: String,
 }
 
 /// A contract version's metadata and operations.
@@ -121,21 +138,24 @@ fn operations(bundle: &Bundle) -> Vec<OperationSummary> {
                 Binding::Http { method, path } => (method_name(*method), path.clone()),
                 _ => ("", String::new()),
             };
-            let kind = match &op.kind {
-                OperationKind::Query => "query",
-                OperationKind::Command(Effect::Create) => "create",
-                OperationKind::Command(Effect::Update) => "update",
-                OperationKind::Command(Effect::Delete) => "delete",
-                OperationKind::Command(Effect::Other) => "other",
-            };
             OperationSummary {
                 id: op.id.clone(),
                 method: method.into(),
                 path,
-                kind: kind.into(),
+                kind: op.kind.label().into(),
+                protocol: protocol_name(op.protocol),
+                target: op.target(),
             }
         })
         .collect()
+}
+
+/// The protocol's serde name (`http`, `graphql`, `grpc`, `soap`).
+fn protocol_name(p: Protocol) -> String {
+    serde_json::to_value(p)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn method_name(m: HttpMethod) -> &'static str {
@@ -172,7 +192,7 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
         UploadParams,
     ),
     request_body(
-        description = "OpenAPI 3.x or Swagger 2.0 document, JSON or YAML, at most 10 MiB. Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml or application/vnd.oai.openapi(+json|+yaml).",
+        description = "A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream.",
         content(
             (String = "application/json"),
             (String = "application/yaml"),
@@ -181,6 +201,15 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
             (String = "application/vnd.oai.openapi"),
             (String = "application/vnd.oai.openapi+json"),
             (String = "application/vnd.oai.openapi+yaml"),
+            (String = "application/graphql"),
+            (String = "text/x-protobuf"),
+            (Vec<u8> = "application/x-protobuf"),
+            (String = "application/xml"),
+            (String = "text/xml"),
+            (String = "application/wsdl+xml"),
+            (Vec<u8> = "application/zip"),
+            (Vec<u8> = "application/gzip"),
+            (Vec<u8> = "application/octet-stream"),
         )
     ),
     responses(
@@ -188,7 +217,7 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
         (status = 413, body = Problem, content_type = "application/problem+json"),
-        (status = 415, description = "Not a JSON, YAML or OpenAPI media type", body = Problem, content_type = "application/problem+json"),
+        (status = 415, description = "Not a contract media type", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The contract does not compile", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -349,7 +378,7 @@ pub async fn get_one(
         ("version" = i64, Path, description = "Contract version number"),
     ),
     responses(
-        (status = 200, description = "The uploaded source bytes", body = String, content_type = "application/octet-stream"),
+        (status = 200, description = "The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml.", body = Vec<u8>, content_type = "application/octet-stream"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -364,11 +393,32 @@ pub async fn source(
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
     let v = version(&st, &m, number).await?;
-    let content_type = match v.source.iter().find(|b| !b.is_ascii_whitespace()) {
-        Some(b'{') => "application/json",
-        _ => "application/yaml",
-    };
+    let content_type = source_content_type(&v.source);
     Ok(([(header::CONTENT_TYPE, content_type)], v.source).into_response())
+}
+
+/// The content type of stored contract source bytes, by sniffing.
+fn source_content_type(source: &[u8]) -> &'static str {
+    if source.starts_with(b"PK\x03\x04") {
+        return "application/zip";
+    }
+    if source.starts_with(&[0x1f, 0x8b]) {
+        return "application/gzip";
+    }
+    let Ok(text) = std::str::from_utf8(source) else {
+        return "application/octet-stream";
+    };
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    if text.starts_with('<') {
+        return "application/xml";
+    }
+    if text.starts_with('{') {
+        return "application/json";
+    }
+    match mb_import::sniff(source) {
+        Ok(SourceFormat::GraphqlSdl | SourceFormat::Proto) => "text/plain; charset=utf-8",
+        _ => "application/yaml",
+    }
 }
 
 #[utoipa::path(

@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { contentTypeFor } from "../api/queries";
+import { CONTRACT_EXTENSIONS, contentTypeFor } from "../api/queries";
 import { json, localMe, mockView, problem, renderAt, serve, shell } from "./harness";
 
 const MOCK = "/api/v1/workspaces/default/mocks/pets";
@@ -22,7 +22,15 @@ describe("contracts", () => {
     expect(contentTypeFor("orders.json")).toBe("application/json");
     expect(contentTypeFor("orders.YAML")).toBe("application/yaml");
     expect(contentTypeFor("orders.yml")).toBe("application/yaml");
+    expect(contentTypeFor("schema.graphql")).toBe("application/graphql");
+    expect(contentTypeFor("calc.proto")).toBe("text/x-protobuf");
+    expect(contentTypeFor("set.pb")).toBe("application/x-protobuf");
+    expect(contentTypeFor("calc.wsdl")).toBe("application/xml");
+    expect(contentTypeFor("protos.zip")).toBe("application/zip");
+    expect(contentTypeFor("protos.TAR.GZ")).toBe("application/gzip");
+    expect(contentTypeFor("protos.tgz")).toBe("application/gzip");
     expect(contentTypeFor("orders.txt")).toBeUndefined();
+    expect(contentTypeFor("README")).toBeUndefined();
   });
 
   it("upload sends yaml content type and activate flag", async () => {
@@ -37,7 +45,7 @@ describe("contracts", () => {
 
     const source = "openapi: 3.0.3\ninfo: {title: Orders, version: '1'}\npaths: {}\n";
     const input = await screen.findByLabelText("Contract file");
-    expect(input.getAttribute("accept")).toBe(".json,.yaml,.yml");
+    expect(input.getAttribute("accept")).toBe(CONTRACT_EXTENSIONS.join(","));
     await user.upload(input, new File([source], "orders.yaml", { type: "" }));
     await user.click(screen.getByLabelText("Activate after upload"));
     await user.click(screen.getByRole("button", { name: "Upload" }));
@@ -48,6 +56,28 @@ describe("contracts", () => {
     expect(post?.search).toBe("?activate=true");
     expect(post?.contentType).toBe("application/yaml");
     expect(post?.body).toBe(source);
+  });
+
+  it("upload sends an archive as raw bytes with its media type", async () => {
+    const user = userEvent.setup();
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${MOCK}`]: mockView("pets", { active_version: 1 }),
+      [`GET ${MOCK}/contracts`]: [summary(1, "active")],
+      [`POST ${MOCK}/contracts`]: () => json({ version: 2, status: "approved", operations: 3 }, 201),
+    });
+    renderAt("/w/default/mocks/pets/contracts");
+
+    // A zip's local file header magic, then ASCII so the recorded text is exact.
+    const bytes = new TextEncoder().encode("PK\u0003\u0004protos/calc.proto");
+    const input = await screen.findByLabelText("Contract file");
+    await user.upload(input, new File([bytes], "protos.zip", { type: "" }));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
+
+    await screen.findByText("Uploaded version 2 (approved, 3 operations).");
+    const post = calls.find((c) => c.method === "POST");
+    expect(post?.contentType).toBe("application/zip");
+    expect(post?.body).toBe("PK\u0003\u0004protos/calc.proto");
   });
 
   it("upload without activation and a 422 shows the importer detail", async () => {
@@ -91,7 +121,16 @@ describe("contracts", () => {
         ...summary(1, "active"),
         title: "Orders",
         api_version: "1.0.0",
-        operations: [{ id: "listOrders", method: "GET", path: "/orders", kind: "query" }],
+        operations: [
+          {
+            id: "listOrders",
+            method: "GET",
+            path: "/orders",
+            kind: "query",
+            protocol: "http",
+            target: "GET /orders",
+          },
+        ],
       },
     });
     renderAt("/w/default/mocks/pets/contracts");
@@ -118,6 +157,7 @@ describe("contracts", () => {
     await user.click(within(row(1)).getByRole("button", { name: "View operations of version 1" }));
     const drawer = await screen.findByRole("dialog", { name: "Operations of version 1" });
     await within(drawer).findByText("listOrders");
-    expect(within(drawer).getByText("/orders")).toBeTruthy();
+    expect(within(drawer).getByText("GET /orders")).toBeTruthy();
+    expect(within(drawer).getByText("http")).toBeTruthy();
   });
 });

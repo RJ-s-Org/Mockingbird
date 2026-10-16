@@ -1,0 +1,384 @@
+---
+source: crates/mb-import/tests/graphql.rs
+assertion_line: 30
+expression: b
+---
+id: the-star-wars-api
+title: The Star Wars API
+version: "0"
+source_digest: "[digest]"
+operations:
+  - id: Query.hero
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: hero
+    kind: query
+    summary: "The hero of the given episode, or of the whole saga."
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          episode:
+            anyOf:
+              - $ref: "#/$defs/Episode"
+              - type: "null"
+        type: object
+      body_required: false
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Character"
+            - type: "null"
+    resource_type: hero
+    identity: ~
+    semantic_hints:
+      - A character in the Star Wars Trilogy.
+  - id: Query.human
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: human
+    kind: query
+    summary: A human by id.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          id:
+            description: id of the human
+            type: string
+        required:
+          - id
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Human"
+            - type: "null"
+    resource_type: human
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints:
+      - A humanoid creature in the Star Wars universe.
+  - id: Query.droid
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: query
+        field: droid
+    kind: query
+    summary: A droid by id.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          id:
+            description: id of the droid
+            type: string
+        required:
+          - id
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Droid"
+            - type: "null"
+    resource_type: droid
+    identity:
+      path_param: ~
+      field: id
+      input_field: id
+    semantic_hints:
+      - A mechanical creature in the Star Wars universe.
+  - id: Mutation.createReview
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: mutation
+        field: createReview
+    kind:
+      command: create
+    summary: Create a review for an episode.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          episode:
+            anyOf:
+              - $ref: "#/$defs/Episode"
+              - type: "null"
+          review:
+            $ref: "#/$defs/ReviewInput"
+        required:
+          - review
+        type: object
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Review"
+            - type: "null"
+    resource_type: review
+    identity: ~
+    semantic_hints:
+      - Represents a review for a movie.
+  - id: Subscription.reviewAdded
+    protocol: graphql
+    binding:
+      graphql:
+        operation_type: subscription
+        field: reviewAdded
+    kind: stream_server
+    summary: A review was added for an episode.
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        additionalProperties: false
+        properties:
+          episode:
+            anyOf:
+              - $ref: "#/$defs/Episode"
+              - type: "null"
+        type: object
+      body_required: false
+    outputs:
+      - status:
+          code: 200
+        content_type: application/json
+        schema:
+          anyOf:
+            - $ref: "#/$defs/Review"
+            - type: "null"
+    resource_type: review
+    identity: ~
+    semantic_hints:
+      - Represents a review for a movie.
+defs:
+  Character:
+    description: A character in the Star Wars Trilogy.
+    oneOf:
+      - $ref: "#/$defs/Droid"
+      - $ref: "#/$defs/Human"
+  Droid:
+    additionalProperties: false
+    description: A mechanical creature in the Star Wars universe.
+    properties:
+      __typename:
+        const: Droid
+      appearsIn:
+        description: Which movies they appear in.
+        items:
+          anyOf:
+            - $ref: "#/$defs/Episode"
+            - type: "null"
+        type: array
+      friends:
+        anyOf:
+          - items:
+              anyOf:
+                - $ref: "#/$defs/Character"
+                - type: "null"
+            type: array
+          - type: "null"
+        description: "The friends of the droid, or an empty list if they have none."
+      id:
+        description: The id of the droid.
+        type: string
+      name:
+        description: The name of the droid.
+        type: string
+      primaryFunction:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: The primary function of the droid.
+    required:
+      - __typename
+      - id
+      - name
+      - appearsIn
+    type: object
+  Episode:
+    description: The episodes in the Star Wars trilogy.
+    enum:
+      - NEWHOPE
+      - EMPIRE
+      - JEDI
+    type: string
+  Human:
+    additionalProperties: false
+    description: A humanoid creature in the Star Wars universe.
+    properties:
+      __typename:
+        const: Human
+      appearsIn:
+        description: Which movies they appear in.
+        items:
+          anyOf:
+            - $ref: "#/$defs/Episode"
+            - type: "null"
+        type: array
+      friends:
+        anyOf:
+          - items:
+              anyOf:
+                - $ref: "#/$defs/Character"
+                - type: "null"
+            type: array
+          - type: "null"
+        description: "The friends of the human, or an empty list if they have none."
+      height:
+        anyOf:
+          - type: number
+          - type: "null"
+        description: Height in the preferred unit.
+      homePlanet:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: "The home planet of the human, or null if unknown."
+      id:
+        description: The id of the human.
+        type: string
+      name:
+        description: The name of the human.
+        type: string
+    required:
+      - __typename
+      - id
+      - name
+      - appearsIn
+    type: object
+  LengthUnit:
+    description: Units of height.
+    enum:
+      - METER
+      - FOOT
+    type: string
+  Mutation:
+    additionalProperties: false
+    properties:
+      __typename:
+        const: Mutation
+      createReview:
+        anyOf:
+          - $ref: "#/$defs/Review"
+          - type: "null"
+        description: Create a review for an episode.
+    required:
+      - __typename
+    type: object
+  Query:
+    additionalProperties: false
+    properties:
+      __typename:
+        const: Query
+      droid:
+        anyOf:
+          - $ref: "#/$defs/Droid"
+          - type: "null"
+        description: A droid by id.
+      hero:
+        anyOf:
+          - $ref: "#/$defs/Character"
+          - type: "null"
+        description: "The hero of the given episode, or of the whole saga."
+      human:
+        anyOf:
+          - $ref: "#/$defs/Human"
+          - type: "null"
+        description: A human by id.
+    required:
+      - __typename
+    type: object
+  Review:
+    additionalProperties: false
+    description: Represents a review for a movie.
+    properties:
+      __typename:
+        const: Review
+      commentary:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: Comment about the movie.
+      episode:
+        anyOf:
+          - $ref: "#/$defs/Episode"
+          - type: "null"
+        description: The movie.
+      stars:
+        description: "The number of stars this review gave, 1-5."
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - __typename
+      - stars
+    type: object
+  ReviewInput:
+    additionalProperties: false
+    description: The input object sent when someone is creating a new review.
+    properties:
+      commentary:
+        anyOf:
+          - type: string
+          - type: "null"
+        description: "Comment about the movie, optional."
+      stars:
+        description: 0-5 stars.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    required:
+      - stars
+    type: object
+  Subscription:
+    additionalProperties: false
+    properties:
+      __typename:
+        const: Subscription
+      reviewAdded:
+        anyOf:
+          - $ref: "#/$defs/Review"
+          - type: "null"
+        description: A review was added for an episode.
+    required:
+      - __typename
+    type: object
+protocol_payload:
+  graphql:
+    sdl: "\"A character in the Star Wars Trilogy.\"\ninterface Character {\n  \"The id of the character.\"\n  id: ID!\n  \"The name of the character.\"\n  name: String!\n  \"The friends of the character, or an empty list if they have none.\"\n  friends: [Character]\n  \"Which movies they appear in.\"\n  appearsIn: [Episode]!\n}\n\n\"A mechanical creature in the Star Wars universe.\"\ntype Droid implements Character {\n  \"The id of the droid.\"\n  id: ID!\n  \"The name of the droid.\"\n  name: String!\n  \"The friends of the droid, or an empty list if they have none.\"\n  friends: [Character]\n  \"Which movies they appear in.\"\n  appearsIn: [Episode]!\n  \"The primary function of the droid.\"\n  primaryFunction: String\n}\n\n\"The episodes in the Star Wars trilogy.\"\nenum Episode {\n  \"Star Wars Episode IV: A New Hope, released in 1977.\"\n  NEWHOPE\n  \"Star Wars Episode V: The Empire Strikes Back, released in 1980.\"\n  EMPIRE\n  \"Star Wars Episode VI: Return of the Jedi, released in 1983.\"\n  JEDI\n}\n\n\"A humanoid creature in the Star Wars universe.\"\ntype Human implements Character {\n  \"The id of the human.\"\n  id: ID!\n  \"The name of the human.\"\n  name: String!\n  \"The friends of the human, or an empty list if they have none.\"\n  friends: [Character]\n  \"Which movies they appear in.\"\n  appearsIn: [Episode]!\n  \"The home planet of the human, or null if unknown.\"\n  homePlanet: String\n  \"Height in the preferred unit.\"\n  height(unit: LengthUnit = METER): Float\n}\n\n\"Units of height.\"\nenum LengthUnit {\n  METER\n  FOOT\n}\n\ntype Mutation {\n  \"Create a review for an episode.\"\n  createReview(episode: Episode, review: ReviewInput!): Review\n}\n\ntype Query {\n  \"The hero of the given episode, or of the whole saga.\"\n  hero(episode: Episode): Character\n  \"A human by id.\"\n  human(\"id of the human\" id: ID!): Human\n  \"A droid by id.\"\n  droid(\"id of the droid\" id: ID!): Droid\n}\n\n\"Represents a review for a movie.\"\ntype Review {\n  \"The movie.\"\n  episode: Episode\n  \"The number of stars this review gave, 1-5.\"\n  stars: Int!\n  \"Comment about the movie.\"\n  commentary: String\n}\n\n\"The input object sent when someone is creating a new review.\"\ninput ReviewInput {\n  \"0-5 stars.\" stars: Int!\n  \"Comment about the movie, optional.\" commentary: String\n}\n\ntype Subscription {\n  \"A review was added for an episode.\"\n  reviewAdded(episode: Episode): Review\n}\n"

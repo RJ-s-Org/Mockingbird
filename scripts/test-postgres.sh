@@ -90,6 +90,16 @@ as_server_user "$PG_CTL" -D "$PGDATA" -l "$DATA_ROOT/server.log" -w \
 
 "$PSQL" -q -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE mb_test"
 
+# A full workspace test build needs several GB under target/. When the disk
+# fills mid-link, ld dies with SIGBUS instead of reporting ENOSPC, so say so up
+# front.
+TARGET_DIR=${CARGO_TARGET_DIR:-$(cd "$(dirname "$0")/.." && pwd)/target}
+mkdir -p "$TARGET_DIR"
+FREE_KB=$(df -Pk "$TARGET_DIR" | awk 'NR==2 {print $4}')
+if [[ -n "$FREE_KB" && "$FREE_KB" -lt 4194304 ]]; then
+    echo "test-postgres: warning: only $((FREE_KB / 1024)) MiB free under $TARGET_DIR; linking may fail (ld: Bus error). Run 'cargo clean' first." >&2
+fi
+
 export MB_TEST_POSTGRES_URL="postgres://postgres@127.0.0.1:$PORT/mb_test"
 echo "test-postgres: MB_TEST_POSTGRES_URL=$MB_TEST_POSTGRES_URL"
 

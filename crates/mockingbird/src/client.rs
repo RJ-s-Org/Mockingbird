@@ -58,7 +58,8 @@ pub enum MocksCommand {
 
 #[derive(Args, Debug)]
 pub struct ImportArgs {
-    /// OpenAPI 3.x or Swagger 2.0 file, JSON or YAML.
+    /// Contract file (OpenAPI, Swagger, GraphQL, .proto, descriptor set,
+    /// WSDL, zip or tar.gz), or a directory, uploaded as a tar.gz.
     pub contract: PathBuf,
     /// The mock to import into.
     #[arg(long = "as", value_name = "MOCK")]
@@ -182,7 +183,8 @@ pub async fn run(
 }
 
 async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, ClientError> {
-    let source = read(&args.contract)?;
+    let source = mb_import::read_source(&args.contract)
+        .with_context(|| format!("cannot read {}", args.contract.display()))?;
     match api.send(Method::GET, &["mocks", &args.mock], None).await {
         Ok(_) => {}
         Err(ClientError::Api { status, .. }) if status == StatusCode::NOT_FOUND => {
@@ -211,14 +213,34 @@ async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, Cl
     .await
 }
 
-/// The upload media type for a contract: by extension (`.json`, `.yaml`,
-/// `.yml`), else JSON when the document starts with `{`, else YAML.
+/// The upload media type for a contract, by extension: `.graphql`,
+/// `.graphqls`, `.gql` (GraphQL), `.proto`, `.pb`/`.desc` (descriptor set),
+/// `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz` and directories (packed
+/// as tar.gz); else `.json`/`.yaml`/`.yml`, else JSON when the document
+/// starts with `{`, else YAML.
 fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
+    if path.is_dir() {
+        return "application/gzip";
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if name.ends_with(".tar.gz") {
+        return "application/gzip";
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
     match ext.as_deref() {
+        Some("graphql" | "graphqls" | "gql") => "application/graphql",
+        Some("proto") => "text/x-protobuf",
+        Some("pb" | "desc") => "application/x-protobuf",
+        Some("wsdl" | "xsd" | "xml") => "application/xml",
+        Some("zip") => "application/zip",
+        Some("tgz") => "application/gzip",
         Some("json") => "application/json",
         Some("yaml" | "yml") => "application/yaml",
         _ if source.trim_ascii_start().starts_with(b"{") => "application/json",
@@ -339,6 +361,30 @@ mod tests {
         assert_eq!(
             contract_media_type(Path::new("contract"), b"openapi: 3.0.0"),
             "application/yaml"
+        );
+        for (name, expected) in [
+            ("s.graphql", "application/graphql"),
+            ("s.GraphQLS", "application/graphql"),
+            ("s.gql", "application/graphql"),
+            ("a.proto", "text/x-protobuf"),
+            ("a.pb", "application/x-protobuf"),
+            ("a.desc", "application/x-protobuf"),
+            ("a.wsdl", "application/xml"),
+            ("a.xsd", "application/xml"),
+            ("a.xml", "application/xml"),
+            ("a.zip", "application/zip"),
+            ("a.tgz", "application/gzip"),
+            ("a.TAR.GZ", "application/gzip"),
+        ] {
+            assert_eq!(
+                contract_media_type(Path::new(name), b""),
+                expected,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            contract_media_type(Path::new(env!("CARGO_MANIFEST_DIR")), b""),
+            "application/gzip"
         );
     }
 }

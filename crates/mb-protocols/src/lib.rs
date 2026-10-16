@@ -1,10 +1,11 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
-//! Each adapter sits behind a cargo feature (`http-rest`, ...).
+//! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
+//! `grpc`, `soap`, `websocket`); all of them share the [`call`] pipeline.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mb_engine::{Engine, ScenarioSpec};
@@ -12,15 +13,84 @@ use mb_ext::Extensions;
 use mb_mcm::Bundle;
 use mb_state::StateStore;
 
+// Until an adapter is compiled in, nothing calls the shared pipeline.
+#[cfg_attr(
+    not(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    )),
+    allow(dead_code)
+)]
+mod call;
+#[cfg_attr(
+    not(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    )),
+    allow(dead_code)
+)]
 mod dp_auth;
+#[cfg(feature = "graphql")]
+pub mod graphql;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 mod record;
+#[cfg(feature = "soap")]
+pub mod soap;
+#[cfg(feature = "websocket")]
+pub mod ws;
 
+use dp_auth::CredentialNames;
 pub use dp_auth::{
     API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
 };
 pub use record::{RequestRecord, RequestRecorder};
+
+/// Request header capping how many items a streamed response carries
+/// (an integer in `1..=10000`; the engine clamps it to its own maximum).
+pub const STREAM_ITEMS_HEADER: &str = "x-mockingbird-stream-items";
+
+/// A request extension carrying the mount prefix the dispatcher stripped
+/// before forwarding the request to a mock's router (e.g. `/calc`).
+#[derive(Clone, Debug)]
+pub struct MountPrefix(pub String);
+
+/// Protocol knobs shared by every mock (the `protocols:` config section).
+#[derive(Clone, Debug)]
+pub struct ProtocolSettings {
+    /// Path the GraphQL endpoint is served on, below the mount prefix.
+    pub graphql_path: String,
+    /// Whether GraphQL introspection queries are answered.
+    pub graphql_introspection: bool,
+    pub graphql_max_depth: usize,
+    pub graphql_max_complexity: usize,
+    /// Interval between SSE keepalive comments.
+    pub sse_keepalive: Duration,
+    /// Interval between WebSocket pings.
+    pub ws_keepalive: Duration,
+    /// Largest gRPC message decoded or encoded.
+    pub grpc_max_message_bytes: usize,
+}
+
+impl Default for ProtocolSettings {
+    fn default() -> Self {
+        Self {
+            graphql_path: "/graphql".into(),
+            graphql_introspection: true,
+            graphql_max_depth: 15,
+            graphql_max_complexity: 1000,
+            sse_keepalive: Duration::from_secs(15),
+            ws_keepalive: Duration::from_secs(30),
+            grpc_max_message_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
 
 /// A saved scenario as the data plane applies it (spec §7.1).
 #[derive(Clone, Debug, Default)]
@@ -34,6 +104,11 @@ pub struct ScenarioRuntime {
     pub latency: Option<Duration>,
     /// Operation ids the scenario applies to; empty means every operation.
     pub operations: Vec<String>,
+    /// Items per streamed response unless `X-Mockingbird-Stream-Items`
+    /// overrides it.
+    pub stream_items: Option<usize>,
+    /// Pause between streamed items, overriding the engine's default.
+    pub stream_item_interval: Option<Duration>,
 }
 
 impl ScenarioRuntime {
@@ -140,12 +215,47 @@ pub struct MockRuntime {
     /// Verifies keys in [`DataPlaneAuthMode::ApiKey`] mode; without it every
     /// key is rejected.
     pub data_plane_keys: Option<Arc<dyn DataPlaneKeys>>,
+    /// Protocol knobs (GraphQL limits, keepalives, gRPC message size).
+    pub protocols: ProtocolSettings,
+    /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
+    /// process begins to shut down. Never fires by default.
+    pub shutdown: Shutdown,
+    /// The credential header and query names derived from
+    /// `data_plane_auth` and `bundle` on first use (see
+    /// [`MockRuntime::credential_names`]).
+    credential_names: OnceLock<CredentialNames>,
+}
+
+/// A process stop signal that open-ended streams end on, so a graceful
+/// shutdown is not held open by a connected client.
+#[derive(Clone, Debug, Default)]
+pub struct Shutdown(Option<tokio::sync::watch::Receiver<bool>>);
+
+impl Shutdown {
+    /// A signal that fires once `true` is sent on the channel of `stop`.
+    pub fn new(stop: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self(Some(stop))
+    }
+
+    /// Resolves once shutdown has begun; never for the default signal or
+    /// when the sender is dropped without sending.
+    pub fn stopped(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let stop = self.0.clone();
+        async move {
+            if let Some(mut stop) = stop
+                && stop.wait_for(|stop| *stop).await.is_ok()
+            {
+                return;
+            }
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl MockRuntime {
     /// A runtime in workspace `default` with header overrides enabled, no
-    /// scenarios, the self-hosted extensions, no recorder and no data-plane
-    /// auth.
+    /// scenarios, the self-hosted extensions, no recorder, no data-plane
+    /// auth and default protocol settings.
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
@@ -165,6 +275,18 @@ impl MockRuntime {
             state_health: Arc::new(StateHealth::default()),
             data_plane_auth: DataPlaneAuth::default(),
             data_plane_keys: None,
+            protocols: ProtocolSettings::default(),
+            shutdown: Shutdown::default(),
+            credential_names: OnceLock::new(),
         }
+    }
+
+    /// The request headers and query parameters that carry this mock's
+    /// data-plane credentials: never forwarded to the engine or recorded.
+    /// Derived from `data_plane_auth` and `bundle` on first use, so both
+    /// must be final before the runtime serves its first call.
+    pub(crate) fn credential_names(&self) -> &CredentialNames {
+        self.credential_names
+            .get_or_init(|| CredentialNames::new(&self.data_plane_auth, &self.bundle))
     }
 }

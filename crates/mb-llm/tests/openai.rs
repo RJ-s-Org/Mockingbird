@@ -147,3 +147,41 @@ async fn scripted_returns_in_order() {
     assert_eq!((a.content.as_str(), b.content.as_str()), ("one", "two"));
     assert_eq!(p.requests().len(), 2);
 }
+
+#[tokio::test]
+async fn openai_stream_yields_deltas() {
+    use futures::StreamExt;
+
+    let server = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"a\\\"\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\":1}\\n\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let stream = client(&server, false)
+        .stream(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let deltas: Vec<String> = stream.map(|d| d.unwrap()).collect().await;
+    assert_eq!(deltas, vec!["{\"a\"".to_string(), ":1}\n".to_string()]);
+    assert_eq!(wire_body(&server).await["stream"], true);
+}
+
+#[tokio::test]
+async fn openai_stream_http_error_before_first_delta() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&server)
+        .await;
+    let r = client(&server, false)
+        .stream(req(ResponseFormat::Text, Duration::from_secs(2)))
+        .await;
+    assert!(matches!(r, Err(LlmError::Http { status: 500, .. })));
+}

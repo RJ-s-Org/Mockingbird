@@ -8,10 +8,10 @@
 use std::fmt::Write as _;
 
 use mb_llm::{ChatMessage, Role};
-use mb_mcm::{Binding, Bundle, Operation};
+use mb_mcm::{Binding, Bundle, Operation, OperationKind};
 use serde_json::Value;
 
-use crate::{GenerationContext, OperationCall};
+use crate::{GenerationContext, OperationCall, StreamContext};
 
 /// Maximum number of related resources included in a prompt.
 pub const MAX_RELATED: usize = 20;
@@ -19,8 +19,17 @@ pub const MAX_RELATED: usize = 20;
 /// Maximum bytes of serialized request body included in a prompt.
 pub const MAX_BODY_BYTES: usize = 8 * 1024;
 
+/// Maximum number of received stream items (the most recent) included in a
+/// stream prompt.
+pub const MAX_REQUEST_STREAM: usize = 20;
+
 const ROLE_STATEMENT: &str = "You generate realistic synthetic API response data. \
 Output only a single JSON value conforming to the schema. Never output real personal data.";
+
+const STREAM_ROLE_STATEMENT: &str = "You generate realistic synthetic API stream data. \
+Output newline-delimited JSON: exactly one JSON value per line, each conforming to the stream item \
+schema. Do not wrap the items in an array and do not output prose or Markdown code fences. \
+Never output real personal data.";
 
 pub fn build_messages(
     bundle: &Bundle,
@@ -43,6 +52,67 @@ pub fn build_messages(
     ]
 }
 
+/// Messages for a streamed generation of `items` stream items. The system
+/// message depends only on the operation and persona; the user message is
+/// the unary one plus the received request stream and the item count.
+pub fn build_stream_messages(
+    bundle: &Bundle,
+    op: &Operation,
+    item_schema: &Value,
+    items: usize,
+    call: &OperationCall,
+    ctx: &StreamContext,
+    persona: Option<&str>,
+) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            role: Role::System,
+            content: stream_system_message(bundle, op, item_schema, persona),
+        },
+        ChatMessage {
+            role: Role::User,
+            content: stream_user_message(call, ctx, items),
+        },
+    ]
+}
+
+/// The system message of a stream prompt, also used for item repairs.
+pub(crate) fn stream_system_message(
+    bundle: &Bundle,
+    op: &Operation,
+    item_schema: &Value,
+    persona: Option<&str>,
+) -> String {
+    let mut s = String::new();
+    s.push_str(STREAM_ROLE_STATEMENT);
+    s.push_str("\n\n");
+    binding_lines(&mut s, bundle, op, persona);
+    let schema = bundle.with_reachable_defs(item_schema);
+    let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
+    let _ = write!(s, "Stream item JSON Schema:\n{pretty}");
+    s
+}
+
+fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) -> String {
+    let unary = GenerationContext {
+        related: &ctx.related,
+        target: ctx.target.as_ref(),
+        forced_status: None,
+        scenario: ctx.scenario.as_ref(),
+    };
+    let mut s = user_message(call, &unary);
+    if !ctx.request_stream.is_empty() {
+        s.push_str("<request_stream>\n");
+        let skip = ctx.request_stream.len().saturating_sub(MAX_REQUEST_STREAM);
+        for item in &ctx.request_stream[skip..] {
+            let _ = writeln!(s, "{}", truncated(data(item), MAX_BODY_BYTES));
+        }
+        s.push_str("</request_stream>\n");
+    }
+    let _ = write!(s, "Generate {items} items.");
+    s
+}
+
 fn system_message(
     bundle: &Bundle,
     op: &Operation,
@@ -53,14 +123,42 @@ fn system_message(
     let mut s = String::new();
     s.push_str(ROLE_STATEMENT);
     s.push_str("\n\n");
+    binding_lines(&mut s, bundle, op, persona);
+    let _ = writeln!(s, "Response status: {status}");
+    let schema = bundle.with_reachable_defs(schema);
+    let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
+    let _ = write!(s, "Response JSON Schema:\n{pretty}");
+    s
+}
+
+/// Persona, API, operation, binding, summary and hint lines.
+fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Option<&str>) {
     if let Some(persona) = persona {
         let _ = writeln!(s, "Persona: {persona}\n");
     }
     let _ = writeln!(s, "API: {}", bundle.title);
     let _ = writeln!(s, "Operation: {}", op.id);
-    if let Binding::Http { method, path } = &op.binding {
-        let method = format!("{method:?}").to_uppercase();
-        let _ = writeln!(s, "HTTP: {method} {path}");
+    match &op.binding {
+        Binding::Http { method, path } => {
+            let method = format!("{method:?}").to_uppercase();
+            let _ = writeln!(s, "HTTP: {method} {path}");
+        }
+        Binding::Graphql { .. } => {
+            let _ = writeln!(s, "GraphQL: {}", op.target());
+        }
+        Binding::Soap { .. } => {
+            let _ = writeln!(s, "SOAP: {}", op.target());
+        }
+        Binding::Grpc { .. } => {
+            let call_kind = match op.kind {
+                OperationKind::StreamServer => "server streaming",
+                OperationKind::StreamClient => "client streaming",
+                OperationKind::StreamBidi => "bidi streaming",
+                _ => "unary",
+            };
+            let _ = writeln!(s, "gRPC: {} ({call_kind})", op.target());
+        }
+        _ => {}
     }
     if let Some(summary) = &op.summary {
         let _ = writeln!(s, "Summary: {summary}");
@@ -71,11 +169,6 @@ fn system_message(
             let _ = writeln!(s, "- {hint}");
         }
     }
-    let _ = writeln!(s, "Response status: {status}");
-    let schema = bundle.with_reachable_defs(schema);
-    let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
-    let _ = write!(s, "Response JSON Schema:\n{pretty}");
-    s
 }
 
 fn user_message(call: &OperationCall, ctx: &GenerationContext<'_>) -> String {
@@ -141,7 +234,7 @@ fn truncated(mut text: String, max: usize) -> String {
 
 /// Owner text with `&`, `<` and `>` entity-escaped, so it cannot open or
 /// close a tag block.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -149,6 +242,6 @@ fn escape(text: &str) -> String {
 
 /// Compact JSON with `<` escaped, so data cannot close or open a tag block.
 /// `<` only occurs inside JSON strings, where `\u003c` is an equivalent escape.
-fn data(value: &Value) -> String {
+pub(crate) fn data(value: &Value) -> String {
     value.to_string().replace('<', "\\u003c")
 }

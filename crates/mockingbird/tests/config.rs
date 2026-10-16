@@ -10,7 +10,9 @@ use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
     LlmProfile, NewContractVersion, NewMock, ResourceSource, Scenario, ScenarioRules,
 };
-use mockingbird::config::{App, ServeArgs, apply_flags, bind_admin, build_app, resolve_config};
+use mockingbird::config::{
+    App, ServeArgs, apply_flags, bind_admin, bind_grpc, build_app, resolve_config,
+};
 use mockingbird::file_config::{self, AuthConfig, AuthMode, FileConfig, OidcConfig, ServerConfig};
 use mockingbird::reconcile::reconcile;
 use serde_json::{Value, json};
@@ -110,6 +112,8 @@ fn loads_full_example_config() {
     assert_eq!(cfg.server.host.to_string(), "127.0.0.1");
     assert_eq!(cfg.server.port, 8080);
     assert_eq!(cfg.server.admin_port, 9090);
+    assert_eq!(cfg.server.grpc_port, 50051);
+    assert!(cfg.server.grpc_port_explicit);
     assert!(!cfg.server.insecure_no_auth);
     assert_eq!(
         cfg.server.api_secret_refs,
@@ -199,6 +203,23 @@ fn loads_full_example_config() {
         cfg.audit.webhook_secret.as_deref(),
         Some("env:MB_AUDIT_WEBHOOK_SECRET")
     );
+
+    assert_eq!(s.stream_items, None);
+
+    let p = &cfg.protocols;
+    assert_eq!(p.graphql.path, "/graphql");
+    assert!(p.graphql.introspection);
+    assert_eq!(p.graphql.max_depth, 15);
+    assert_eq!(p.graphql.max_complexity, 1000);
+    assert_eq!(p.stream.default_items, 5);
+    assert_eq!(p.stream.max_items, 50);
+    assert_eq!(p.stream.item_interval, Duration::ZERO);
+    assert_eq!(p.sse.keepalive, Duration::from_secs(15));
+    assert_eq!(p.grpc.max_message_bytes, 4 * 1024 * 1024);
+
+    let ticks = &cfg.mocks["events"].scenarios["trickle"];
+    assert_eq!(ticks.stream_items, Some(3));
+    assert_eq!(ticks.stream_item_interval, Some(Duration::from_millis(500)));
 }
 
 #[test]
@@ -1538,4 +1559,226 @@ fn compose_config_is_a_valid_oidc_config() {
         ..cfg.server.clone()
     };
     server.check_bind(&cfg.auth).unwrap();
+}
+
+/// Copies `src` recursively into `dst`.
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn file_config_contract_directory() {
+    let ws = Workspace::new();
+    copy_dir(
+        &repo().join("fixtures/proto/multi"),
+        &ws.dir.path().join("protos"),
+    );
+    let cfg = ws.load("mocks:\n  orders:\n    contract: protos\n");
+    let store = store().await;
+
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.new_versions, [("orders".to_string(), 1)]);
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.new_versions.is_empty(), "{again:?}");
+
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let versions = store.list_contract_versions(mock.id).await.unwrap();
+    assert_eq!(versions.len(), 1);
+    let active = store.active_contract(mock.id).await.unwrap().unwrap();
+    assert_eq!(
+        active.source,
+        mb_import::pack_dir(&ws.dir.path().join("protos")).unwrap()
+    );
+    assert!(
+        active
+            .bundle
+            .operations
+            .iter()
+            .any(|o| o.id == "OrderService.GetOrder")
+    );
+}
+
+// ---- gRPC port and the protocols section ----
+
+#[test]
+fn grpc_port_precedence() {
+    let ws = Workspace::new();
+    let cfg = ws.load("mocks: {}\n");
+    assert_eq!(cfg.server.grpc_port, 50051);
+    assert!(!cfg.server.grpc_port_explicit);
+
+    let mut cfg = ws.load("server:\n  grpc_port: 6000\n");
+    assert_eq!(cfg.server.grpc_port, 6000);
+    assert!(cfg.server.grpc_port_explicit);
+
+    let mut env_only = FileConfig::default();
+    file_config::apply_env_from(&mut env_only, |k| {
+        (k == "MB_GRPC_PORT").then(|| "6001".to_string())
+    })
+    .unwrap();
+    assert_eq!(env_only.server.grpc_port, 6001);
+    assert!(env_only.server.grpc_port_explicit);
+
+    file_config::apply_env_from(&mut cfg, |k| {
+        (k == "MB_GRPC_PORT").then(|| "6001".to_string())
+    })
+    .unwrap();
+    assert_eq!(cfg.server.grpc_port, 6001, "env overrides the file");
+    apply_flags(&mut cfg, &ServeArgs::default());
+    assert_eq!(cfg.server.grpc_port, 6001, "no flag keeps the env value");
+    apply_flags(
+        &mut cfg,
+        &ServeArgs {
+            grpc_port: Some(6002),
+            ..ServeArgs::default()
+        },
+    );
+    assert_eq!(cfg.server.grpc_port, 6002, "the flag overrides the env");
+
+    let mut flag_only = FileConfig::default();
+    apply_flags(
+        &mut flag_only,
+        &ServeArgs {
+            grpc_port: Some(6002),
+            ..ServeArgs::default()
+        },
+    );
+    assert!(flag_only.server.grpc_port_explicit);
+
+    let mut bad = FileConfig::default();
+    let err = file_config::apply_env_from(&mut bad, |k| (k == "MB_GRPC_PORT").then(|| "x".into()))
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("MB_GRPC_PORT"), "{err:#}");
+}
+
+/// Only an explicitly chosen gRPC port must be free.
+#[tokio::test]
+async fn busy_default_grpc_port_is_skipped() {
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = held.local_addr().unwrap();
+    assert!(bind_grpc(addr, false).await.unwrap().is_none());
+    let err = bind_grpc(addr, true).await.unwrap_err();
+    assert!(format!("{err:#}").contains(&addr.to_string()), "{err:#}");
+    drop(held);
+    assert!(bind_grpc(addr, false).await.unwrap().is_some());
+}
+
+#[test]
+fn protocols_section_defaults_and_overrides() {
+    let ws = Workspace::new();
+    let cfg = ws.load("mocks: {}\n");
+    let (settings, stream) = cfg.protocols.settings();
+    assert_eq!(settings.graphql_path, "/graphql");
+    assert!(settings.graphql_introspection);
+    assert_eq!(settings.graphql_max_depth, 15);
+    assert_eq!(settings.graphql_max_complexity, 1000);
+    assert_eq!(settings.sse_keepalive, Duration::from_secs(15));
+    assert_eq!(settings.ws_keepalive, Duration::from_secs(30));
+    assert_eq!(settings.grpc_max_message_bytes, 4_194_304);
+    assert_eq!(stream.default_items, 5);
+    assert_eq!(stream.max_items, 50);
+    assert_eq!(stream.item_interval, Duration::ZERO);
+
+    let cfg = ws.load(
+        r#"
+protocols:
+  graphql: {path: /gql, introspection: false, max_depth: 7, max_complexity: 300}
+  stream: {default_items: 3, max_items: 9, item_interval: 40ms}
+  sse: {keepalive: 2s}
+  grpc: {max_message_bytes: 1024}
+"#,
+    );
+    let (settings, stream) = cfg.protocols.settings();
+    assert_eq!(settings.graphql_path, "/gql");
+    assert!(!settings.graphql_introspection);
+    assert_eq!(settings.graphql_max_depth, 7);
+    assert_eq!(settings.graphql_max_complexity, 300);
+    assert_eq!(settings.sse_keepalive, Duration::from_secs(2));
+    assert_eq!(settings.grpc_max_message_bytes, 1024);
+    assert_eq!(stream.default_items, 3);
+    assert_eq!(stream.max_items, 9);
+    assert_eq!(stream.item_interval, Duration::from_millis(40));
+
+    // A partial section keeps the other defaults.
+    let cfg = ws.load("protocols:\n  sse:\n    keepalive: 1s\n");
+    assert_eq!(cfg.protocols.graphql.path, "/graphql");
+    assert_eq!(cfg.protocols.sse.keepalive, Duration::from_secs(1));
+
+    ws.write("protocols:\n  graphql:\n    depth: 3\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("depth"), "{err:#}");
+    ws.write("protocols:\n  soap: {}\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("soap"), "{err:#}");
+}
+
+/// Reads an SSE body until the first keepalive comment, returning the text.
+async fn sse_until_keepalive(mut resp: reqwest::Response) -> String {
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !text.contains("keepalive") {
+            let chunk = resp.chunk().await.unwrap().unwrap();
+            text.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no keepalive in {text:?}"));
+    text
+}
+
+#[tokio::test]
+async fn scenario_stream_settings_reach_runtime() {
+    let ws = Workspace::new();
+    std::fs::copy(
+        repo().join("fixtures/openapi/events-3.1.yaml"),
+        ws.dir.path().join("events.yaml"),
+    )
+    .unwrap();
+    ws.write(
+        r#"
+protocols:
+  sse: {keepalive: 300ms}
+mocks:
+  events:
+    contract: events.yaml
+    scenarios:
+      pair:
+        stream_items: 2
+"#,
+    );
+    let app = start(config_args(&ws, false)).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/events/ticks", app.data))
+        .header("X-Mockingbird-Scenario", "pair")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = sse_until_keepalive(resp).await;
+    assert_eq!(text.matches("event: tick").count(), 2, "{text}");
+
+    // Without the scenario, the configured default count applies.
+    let resp = reqwest::get(format!("{}/events/ticks", app.data))
+        .await
+        .unwrap();
+    let text = sse_until_keepalive(resp).await;
+    assert_eq!(text.matches("event: tick").count(), 5, "{text}");
 }

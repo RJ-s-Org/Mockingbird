@@ -3,7 +3,8 @@
 use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::openapi3::{
-    METHODS, OperationIds, check_refs, deref, escape, invalid, is_json_media, slug,
+    EVENT_STREAM, METHODS, OperationIds, check_refs, deref, escape, invalid, is_event_stream,
+    is_json_media, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -154,6 +155,7 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
         None => media_types(doc.get("produces")),
     };
     let json_ct = produces.iter().find(|m| is_json_media(m)).cloned();
+    let event_stream = produces.iter().any(|m| is_event_stream(m));
     for (status, resp) in responses {
         let selector = match status.as_str() {
             "default" => StatusSelector::Default,
@@ -163,7 +165,14 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
             },
         };
         let resp = deref(doc, resp, &format!("{at}/responses/{status}"))?;
+        let is_2xx = matches!(selector, StatusSelector::Code(c) if (200..300).contains(&c));
+        // A 2xx response of an operation producing an event stream streams
+        // its items; the stream extensions sit on the response object.
         let (content_type, schema) = match resp.get("schema") {
+            s if is_2xx && event_stream => (
+                Some(EVENT_STREAM.to_owned()),
+                Some(stream_item_schema(resp, s, norm)),
+            ),
             None => (None, None),
             Some(s) if produces.is_empty() => (Some("application/json".to_owned()), Some(norm(s))),
             Some(s) => match &json_ct {
@@ -245,6 +254,9 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                 semantic_hints: Vec::new(),
                 security: compile_security(doc, op, "/securityDefinitions", &at)?,
             };
+            if let Some(kind) = stream_kind(&op_out) {
+                op_out.kind = kind;
+            }
             op_out.identity = infer_identity(
                 &op_out.kind,
                 path,
@@ -289,5 +301,6 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
         source_digest,
         operations,
         defs,
+        protocol_payload: None,
     })
 }

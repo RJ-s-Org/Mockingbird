@@ -74,6 +74,9 @@ pub struct ServeArgs {
     /// Admin API and ops port [default: 9090].
     #[arg(long)]
     pub admin_port: Option<u16>,
+    /// gRPC port [default: 50051].
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
     /// Control-plane storage: sqlite::memory:, sqlite://<path> or postgres://….
     #[arg(long)]
     pub storage_url: Option<String>,
@@ -131,6 +134,8 @@ pub struct App {
     pub data: Router,
     /// The Admin API, the ops endpoints and any extension admin routes.
     pub admin: Router,
+    /// Every gRPC mock, plus health and reflection (serve it as h2c).
+    pub grpc: Router,
     pub registry: Arc<MockRegistry>,
     /// The effective configuration (file < env < flags).
     pub config: FileConfig,
@@ -223,6 +228,10 @@ pub fn apply_flags(cfg: &mut FileConfig, args: &ServeArgs) {
         cfg.server.admin_port = port;
         cfg.server.admin_port_explicit = true;
     }
+    if let Some(port) = args.grpc_port {
+        cfg.server.grpc_port = port;
+        cfg.server.grpc_port_explicit = true;
+    }
     if args.insecure_no_auth {
         cfg.server.insecure_no_auth = true;
     }
@@ -302,6 +311,25 @@ pub async fn bind_admin(
     }
 }
 
+/// Binds the gRPC listener, with the same policy as [`bind_admin`]: a busy
+/// port that was not set explicitly is skipped with a warning (`None`).
+pub async fn bind_grpc(
+    addr: std::net::SocketAddr,
+    explicit: bool,
+) -> anyhow::Result<Option<tokio::net::TcpListener>> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok(Some(listener)),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !explicit => {
+            tracing::warn!(
+                "gRPC port {addr} is in use; continuing without gRPC mocks \
+                 (set --grpc-port, MB_GRPC_PORT or server.grpc_port to choose another)"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(anyhow!("cannot bind {addr}: {e}")),
+    }
+}
+
 /// [`build_app_with`] with the self-hosted [`Extensions`].
 pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<App> {
     build_app_with(args, llm, Extensions::default()).await
@@ -354,6 +382,7 @@ pub async fn build_app_with(
         cfg.observability.request_log_retention,
         cfg.observability.redact_fields.clone(),
     );
+    let (protocols, stream) = cfg.protocols.settings();
     let deps = RuntimeDeps {
         store: store.clone(),
         state: state.clone(),
@@ -362,6 +391,8 @@ pub async fn build_app_with(
         offline: args.offline,
         default_profile: DefaultProfile::new(cfg.llm.default_profile.clone()),
         data_plane_keys: Some(StoreDataPlaneKeys::new(store.clone())),
+        protocols,
+        stream,
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await?;
@@ -372,6 +403,14 @@ pub async fn build_app_with(
             "serving {name} at http://{}:{}{prefix}",
             cfg.server.host,
             cfg.server.port
+        );
+    }
+    let grpc = registry.grpc();
+    for (service, name) in grpc.services() {
+        tracing::info!(
+            "serving {name} gRPC {service} at {}:{}",
+            cfg.server.host,
+            cfg.server.grpc_port
         );
     }
 
@@ -457,6 +496,7 @@ pub async fn build_app_with(
     Ok(App {
         data,
         admin,
+        grpc: grpc.router(),
         registry,
         config: cfg,
         watch,

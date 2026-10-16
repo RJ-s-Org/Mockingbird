@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use mb_engine::StreamConfig;
 use mb_ext::Extensions;
+use mb_protocols::ProtocolSettings;
 use mb_protocols::{RequestRecord, RequestRecorder};
 use mb_state::{
     MemoryStore, SessionInfo, SessionKey, SqlStateStore, StateChanged, StateError, StateStore,
@@ -337,6 +339,8 @@ fn deps(
         offline: true,
         default_profile: None.into(),
         data_plane_keys: None,
+        protocols: ProtocolSettings::default(),
+        stream: StreamConfig::default(),
     }
 }
 

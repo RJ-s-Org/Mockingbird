@@ -45,6 +45,8 @@ fn deps(store: Arc<dyn ControlStore>, recorder: Option<Arc<dyn RequestRecorder>>
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     RuntimeDeps {
         data_plane_keys: Some(StoreDataPlaneKeys::new(store.clone())),
+        protocols: mb_protocols::ProtocolSettings::default(),
+        stream: mb_engine::StreamConfig::default(),
         store,
         state,
         ext: Extensions::default(),

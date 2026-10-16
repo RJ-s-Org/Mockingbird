@@ -1,0 +1,186 @@
+---
+source: crates/mb-import/tests/proto.rs
+expression: b
+---
+id: routeguide
+title: routeguide
+version: "0"
+source_digest: "[digest]"
+operations:
+  - id: RouteGuide.GetFeature
+    protocol: grpc
+    binding:
+      grpc:
+        package: routeguide
+        service: RouteGuide
+        method: GetFeature
+    kind: query
+    summary: "A simple RPC.\n\nObtains the feature at a given position.\n\nA feature with an empty name is returned if there's no feature at the given\nposition."
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/routeguide.Point"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/grpc
+        schema:
+          $ref: "#/$defs/routeguide.Feature"
+    resource_type: feature
+    identity: ~
+    semantic_hints:
+      - "A feature names something at a given point.\n\nIf a feature could not be named, the name is empty."
+  - id: RouteGuide.ListFeatures
+    protocol: grpc
+    binding:
+      grpc:
+        package: routeguide
+        service: RouteGuide
+        method: ListFeatures
+    kind: stream_server
+    summary: "A server-to-client streaming RPC.\n\nObtains the Features available within the given Rectangle.  Results are\nstreamed rather than returned at once (e.g. in a response message with a\nrepeated field), as the rectangle may cover a large area and contain a\nhuge number of features."
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/routeguide.Rectangle"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/grpc
+        schema:
+          $ref: "#/$defs/routeguide.Feature"
+    resource_type: feature
+    identity: ~
+    semantic_hints:
+      - "A feature names something at a given point.\n\nIf a feature could not be named, the name is empty."
+  - id: RouteGuide.RecordRoute
+    protocol: grpc
+    binding:
+      grpc:
+        package: routeguide
+        service: RouteGuide
+        method: RecordRoute
+    kind: stream_client
+    summary: "A client-to-server streaming RPC.\n\nAccepts a stream of Points on a route being traversed, returning a\nRouteSummary when traversal is completed."
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/routeguide.Point"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/grpc
+        schema:
+          $ref: "#/$defs/routeguide.RouteSummary"
+    resource_type: recordroute
+    identity: ~
+    semantic_hints:
+      - "A RouteSummary is received in response to a RecordRoute rpc.\n\nIt contains the number of individual points received, the number of\ndetected features, and the total distance covered as the cumulative sum of\nthe distance between each point."
+  - id: RouteGuide.RouteChat
+    protocol: grpc
+    binding:
+      grpc:
+        package: routeguide
+        service: RouteGuide
+        method: RouteChat
+    kind: stream_bidi
+    summary: "A Bidirectional streaming RPC.\n\nAccepts a stream of RouteNotes sent while a route is being traversed,\nwhile receiving other RouteNotes (e.g. from other users)."
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/routeguide.RouteNote"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/grpc
+        schema:
+          $ref: "#/$defs/routeguide.RouteNote"
+    resource_type: routechat
+    identity: ~
+    semantic_hints:
+      - A RouteNote is a message sent while at a given point.
+defs:
+  routeguide.Feature:
+    additionalProperties: false
+    description: "A feature names something at a given point.\n\nIf a feature could not be named, the name is empty."
+    properties:
+      location:
+        $ref: "#/$defs/routeguide.Point"
+        description: The point where the feature is detected.
+      name:
+        description: The name of the feature.
+        type: string
+    type: object
+  routeguide.Point:
+    additionalProperties: false
+    description: "Points are represented as latitude-longitude pairs in the E7 representation\n(degrees multiplied by 10**7 and rounded to the nearest integer).\nLatitudes should be in the range +/- 90 degrees and longitude should be in\nthe range +/- 180 degrees (inclusive)."
+    properties:
+      latitude:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      longitude:
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    type: object
+  routeguide.Rectangle:
+    additionalProperties: false
+    description: "A latitude-longitude rectangle, represented as two diagonally opposite\npoints \"lo\" and \"hi\"."
+    properties:
+      hi:
+        $ref: "#/$defs/routeguide.Point"
+        description: The other corner of the rectangle.
+      lo:
+        $ref: "#/$defs/routeguide.Point"
+        description: One corner of the rectangle.
+    type: object
+  routeguide.RouteNote:
+    additionalProperties: false
+    description: A RouteNote is a message sent while at a given point.
+    properties:
+      location:
+        $ref: "#/$defs/routeguide.Point"
+        description: The location from which the message is sent.
+      message:
+        description: The message to be sent.
+        type: string
+    type: object
+  routeguide.RouteSummary:
+    additionalProperties: false
+    description: "A RouteSummary is received in response to a RecordRoute rpc.\n\nIt contains the number of individual points received, the number of\ndetected features, and the total distance covered as the cumulative sum of\nthe distance between each point."
+    properties:
+      distance:
+        description: The distance covered in metres.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      elapsedTime:
+        description: The duration of the traversal in seconds.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      featureCount:
+        description: The number of known features passed while traversing the route.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+      pointCount:
+        description: The number of points received.
+        maximum: 2147483647
+        minimum: -2147483648
+        type: integer
+    type: object
+protocol_payload: "[descriptor set]"

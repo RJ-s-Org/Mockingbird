@@ -101,8 +101,13 @@ async function open() {
   return table;
 }
 
-function bodyRows(table: HTMLElement) {
-  return within(table).getAllByRole("row").slice(1);
+/**
+ * The table's body rows. A plain DOM query rather than `getAllByRole("row")`:
+ * role queries compute the accessibility tree of every row, which took
+ * seconds over the 500-row cap test and made it time out under load.
+ */
+function bodyRows(table: HTMLElement): HTMLTableRowElement[] {
+  return Array.from((table as HTMLTableElement).tBodies[0]?.rows ?? []);
 }
 
 beforeEach(() => {
@@ -130,8 +135,14 @@ describe("live requests", () => {
     const rows = bodyRows(table);
     expect(rows.length).toBe(500);
     expect(within(rows[0] as HTMLElement).getByText("/pets/orders/n499")).toBeTruthy();
-    expect(within(table).queryByText("/pets/orders/first")).toBeNull();
-  });
+    expect(within(rows[499] as HTMLElement).getByText("/pets/orders/n0")).toBeTruthy();
+    // The oldest row was dropped (a text scan, not a role query).
+    expect(rows.some((r) => r.textContent?.includes("/pets/orders/first"))).toBe(false);
+    // Rendering 500 rows in jsdom takes about 1 s on an idle machine (2 s
+    // before `bodyRows` stopped using role queries), and timed out at the
+    // default 5 s while cargo builds loaded every core; the assertions are
+    // unchanged, only the budget for the unavoidable rendering is wider.
+  }, 15_000);
 
   it("pause stops rendering new rows", async () => {
     const user = userEvent.setup();
