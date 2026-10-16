@@ -87,3 +87,12 @@ mb-admin = { path = "crates/mb-admin" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+# Full debuginfo made the ~50 workspace test binaries about 9.5 GB, enough to
+# fill the disk mid-link (ld then dies with SIGBUS). Line tables keep file:line
+# in backtraces for workspace code; dependencies carry no debuginfo.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
