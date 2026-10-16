@@ -26,6 +26,9 @@ allow = [
 # dedication; allowed for that crate only rather than globally.
 exceptions = [
     { allow = ["CC0-1.0"], crate = "notify" },
+    # xxhash-rust is a mandatory dependency of redis (the Redis state backend
+    # and bus); BSL-1.0 is a permissive, OSI-approved license.
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
 ]
 
 [bans]
