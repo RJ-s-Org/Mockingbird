@@ -1339,13 +1339,14 @@ async fn openapi_lists_all_paths() {
         }
     }
     // The P2 paths; the workspace-scoped ones are covered in workspaces.rs
-    // and the global audit log in audit.rs.
+    // the global audit log in audit.rs and /api/v1/me in auth_flow.rs.
     let documented: usize = doc["paths"]
         .as_object()
         .unwrap()
         .iter()
         .filter(|(path, _)| {
-            !path.starts_with("/api/v1/workspaces") && path.as_str() != "/api/v1/audit"
+            !path.starts_with("/api/v1/workspaces")
+                && !matches!(path.as_str(), "/api/v1/audit" | "/api/v1/me")
         })
         .map(|(_, item)| item.as_object().unwrap().len())
         .sum();

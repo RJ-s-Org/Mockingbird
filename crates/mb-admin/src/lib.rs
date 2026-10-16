@@ -2,8 +2,9 @@
 //! contract versions, scenarios, LLM profiles, sessions and the request log
 //! under `/api/v1/workspaces/{ws}` (the P2 paths under `/api/v1` act on
 //! `default`), plus each workspace's API keys and audit log and the global
-//! audit log at `/api/v1/audit`, and the live request tail over SSE, described by the OpenAPI document at
-//! `/api/openapi.json`. Every successful mutation writes one audit event.
+//! audit log at `/api/v1/audit`, the live request tail over SSE and the
+//! caller's identity at `/api/v1/me`, described by the OpenAPI document at
+//! `/api/openapi.json`, plus the OIDC browser login under `/auth`. Every successful mutation writes one audit event.
 //! Every `/api/v1` request is authenticated and checked against the caller's
 //! workspace role. Every error is an RFC 9457 `application/problem+json`
 //! document.
@@ -21,6 +22,7 @@ use utoipa::ToSchema;
 pub mod access;
 mod apikeys;
 mod audit;
+mod auth_routes;
 mod contracts;
 mod live;
 mod mocks;
@@ -36,6 +38,9 @@ mod workspaces;
 pub use access::{CurrentPrincipal, WsAccess};
 pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
 pub use audit::{AuditEventView, Auditor, spawn_retention};
+pub use auth_routes::{
+    LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
+};
 pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
 pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
@@ -66,12 +71,14 @@ pub struct AdminState {
     /// Subscribes to served data-plane calls for the live request tail;
     /// `None` answers the tail with 503.
     pub live: Option<LiveSubscribe>,
+    /// Browser login (`/auth/*`); `None` in `auth.mode: none`.
+    pub web_auth: Option<WebAuth>,
 }
 
 impl AdminState {
     /// A state with [`LocalAuth`] (`auth.mode: none`), the
-    /// [`DEFAULT_API_SECRET_REFS`], an [`Auditor`] without a webhook and no
-    /// live request feed.
+    /// [`DEFAULT_API_SECRET_REFS`], an [`Auditor`] without a webhook, no
+    /// live request feed and no browser login.
     pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
         Self {
             audit: Auditor::new(store.clone(), None),
@@ -85,6 +92,7 @@ impl AdminState {
             ),
             auth: Arc::new(LocalAuth),
             live: None,
+            web_auth: None,
         }
     }
 }
@@ -114,13 +122,14 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     p[pi..].iter().all(|&c| c == b'*')
 }
 
-/// Mounts `/api/v1/*` and `/api/openapi.json`.
+/// Mounts `/api/v1/*`, `/api/openapi.json` and the browser login routes
+/// `/auth/login`, `/auth/callback` and `/auth/logout`.
 ///
 /// The workspace resources are served under `/api/v1/workspaces/{ws}` and,
 /// for `default`, under `/api/v1` (the P2 paths). Every `/api/v1` route
 /// requires a principal (401 otherwise); `/api/openapi.json` is public, and
-/// any other `/api/*` path is a 404 problem. Paths outside `/api` are left
-/// to the caller's fallback.
+/// any other `/api/*` path is a 404 problem. The `/auth/*` routes are
+/// public. Other paths are left to the caller's fallback.
 ///
 /// Every mutating request needs a non-CORS-safelisted `Content-Type`
 /// (`application/json`, or a JSON/YAML/OpenAPI type for contract uploads;
@@ -190,6 +199,7 @@ pub fn router(st: AdminState) -> Router {
         .nest("/workspaces/{ws}", workspace_only)
         .merge(resources)
         .route("/audit", get(audit::list_global))
+        .route("/me", get(auth_routes::me))
         .route_layer(axum::middleware::from_fn_with_state(
             st.clone(),
             access::authenticate,
@@ -198,6 +208,7 @@ pub fn router(st: AdminState) -> Router {
     Router::new()
         .nest(API_BASE, api)
         .route(OPENAPI_PATH, get(openapi::serve))
+        .merge(auth_routes::routes())
         .route("/api/{*rest}", any(problem::not_found))
         .method_not_allowed_fallback(problem::method_not_allowed)
         .layer(axum::middleware::from_fn(problem::log_server_errors))

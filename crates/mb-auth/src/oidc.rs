@@ -13,7 +13,7 @@ use openidconnect::core::{
 };
 use openidconnect::{
     AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, IdTokenFields, IssuerUrl, Nonce,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl, Nonce,
     OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError,
     Scope, StandardErrorResponse, StandardTokenResponse, TokenResponse, UserInfoClaims,
 };
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::AuthError;
-use crate::http::send;
+use crate::http::OidcHttp;
 use crate::jwt::JwtVerifier;
 use crate::mapping::RoleMapping;
 use crate::principal::Principal;
@@ -124,7 +124,7 @@ impl OidcClient {
             .map_err(|e| AuthError::Invalid(format!("invalid OIDC issuer: {e}")))?;
         let redirect = RedirectUrl::new(settings.redirect_url.clone())
             .map_err(|e| AuthError::Invalid(format!("invalid OIDC redirect URL: {e}")))?;
-        let call = |req: HttpRequest| send(&http, req);
+        let call = OidcHttp(&http);
         let metadata = CoreProviderMetadata::discover_async(issuer, &call)
             .await
             .map_err(|e| upstream("OIDC discovery failed", error_chain(&e)))?;
@@ -224,7 +224,7 @@ impl OidcClient {
             .filter(|p| p.created.elapsed() < PENDING_TTL)
             .ok_or_else(|| AuthError::Unauthenticated("unknown login state".to_string()))?;
 
-        let call = |req: HttpRequest| send(&self.http, req);
+        let call = OidcHttp(&self.http);
         let token = self
             .client
             .exchange_code(AuthorizationCode::new(code.to_string()))

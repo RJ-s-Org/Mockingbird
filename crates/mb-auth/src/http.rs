@@ -2,9 +2,11 @@
 //! JWKS fetches: our reqwest 0.13 client behind openidconnect's async
 //! client interface.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
-use openidconnect::{HttpRequest, HttpResponse};
+use openidconnect::{AsyncHttpClient, HttpRequest, HttpResponse};
 
 /// Timeout for every request to the identity provider.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -49,4 +51,18 @@ pub async fn send(client: &reqwest::Client, req: HttpRequest) -> Result<HttpResp
     *out.status_mut() = status;
     *out.headers_mut() = headers;
     Ok(out)
+}
+
+/// [`send`] as an openidconnect client. A named type (rather than a
+/// closure) keeps the futures that use it provably `Send`, so they can run
+/// in axum handlers.
+pub(crate) struct OidcHttp<'a>(pub(crate) &'a reqwest::Client);
+
+impl<'c> AsyncHttpClient<'c> for OidcHttp<'_> {
+    type Error = HttpError;
+    type Future = Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + 'c>>;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        Box::pin(send(self.0, request))
+    }
 }
