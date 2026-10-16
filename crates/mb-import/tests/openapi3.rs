@@ -90,7 +90,7 @@ paths:
 
 #[test]
 fn rejects_unknown_format() {
-    let r = compile(br#"{"asyncapi":"3.0.0"}"#);
+    let r = compile(br#"{"asyncapi":"4.0.0"}"#);
     assert!(matches!(r, Err(ImportError::Unsupported(_))));
 }
 

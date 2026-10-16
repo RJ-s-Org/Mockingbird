@@ -13,11 +13,12 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     ACQUIRE_TIMEOUT, AdminSession, ApiKey, AuditEvent, AuditFilter, CHANGE_CHANNEL_CAPACITY,
-    ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
-    Mock, NewAuditEvent, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
-    RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError,
-    Workspace, missing_workspace, now, sha256_hex, validate_header_name, validate_mock_name,
-    validate_route_prefix, validate_workspace_name,
+    ChannelSettings, ContractStatus, ContractVersion, ControlChange, ControlStore,
+    DEFAULT_WORKSPACE, LlmProfile, Mock, MockEventSettings, NewAuditEvent, NewContractVersion,
+    NewMock, NewRequestLogEntry, PruneCounter, RequestKind, RequestLogEntry, RequestLogFilter,
+    ResourceSource, Scenario, ScenarioRules, StoreError, Workspace, lease_times, missing_workspace,
+    now, sha256_hex, validate_header_name, validate_mock_name, validate_route_prefix,
+    validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -37,7 +38,9 @@ const SESSION_COLUMNS: &str = "id_hash, principal, created_at, expires_at, last_
 const AUDIT_COLUMNS: &str = "id, workspace, actor_subject, actor_kind, action, target, before_value, after_value, \
      request_id, at";
 const LOG_COLUMNS: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
-     prompt_tokens, completion_tokens, request, response, at";
+     prompt_tokens, completion_tokens, request, response, at, kind";
+const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
+const EVENT_SETTINGS_COLUMNS: &str = "mock_id, broker, source, updated_at";
 
 pub struct SqliteControlStore {
     pool: SqlitePool,
@@ -263,6 +266,7 @@ fn log_from_row(row: &SqliteRow) -> Result<RequestLogEntry, StoreError> {
     let mock_id: String = row.try_get("mock_id")?;
     let request: String = row.try_get("request")?;
     let response: Option<String> = row.try_get("response")?;
+    let kind: String = row.try_get("kind")?;
     Ok(RequestLogEntry {
         id: row.try_get("id")?,
         mock_id: parse_uuid(&mock_id)?,
@@ -278,6 +282,36 @@ fn log_from_row(row: &SqliteRow) -> Result<RequestLogEntry, StoreError> {
         request: serde_json::from_str(&request)?,
         response: response.map(|r| serde_json::from_str(&r)).transpose()?,
         at: row.try_get("at")?,
+        kind: parse_kind(&kind)?,
+    })
+}
+
+fn parse_kind(s: &str) -> Result<RequestKind, StoreError> {
+    RequestKind::parse(s).ok_or_else(|| StoreError::Db(format!("unknown request kind {s:?}")))
+}
+
+fn channel_settings_from_row(row: &SqliteRow) -> Result<ChannelSettings, StoreError> {
+    let mock_id: String = row.try_get("mock_id")?;
+    let triggers: Option<String> = row.try_get("triggers")?;
+    let source: String = row.try_get("source")?;
+    Ok(ChannelSettings {
+        mock_id: parse_uuid(&mock_id)?,
+        channel_id: row.try_get("channel_id")?,
+        enabled: row.try_get("enabled")?,
+        triggers: triggers.map(|t| serde_json::from_str(&t)).transpose()?,
+        source: ResourceSource::parse(&source)?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn event_settings_from_row(row: &SqliteRow) -> Result<MockEventSettings, StoreError> {
+    let mock_id: String = row.try_get("mock_id")?;
+    let source: String = row.try_get("source")?;
+    Ok(MockEventSettings {
+        mock_id: parse_uuid(&mock_id)?,
+        broker: row.try_get("broker")?,
+        source: ResourceSource::parse(&source)?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
@@ -826,8 +860,8 @@ impl ControlStore for SqliteControlStore {
         let response = e.response.as_ref().map(serde_json::to_string).transpose()?;
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO request_log (mock_id, operation_id, session, method, path, status, source, latency_ms, \
-             prompt_tokens, completion_tokens, request, response, at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+             prompt_tokens, completion_tokens, request, response, at, kind) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(e.mock_id.to_string())
         .bind(&e.operation_id)
@@ -842,6 +876,7 @@ impl ControlStore for SqliteControlStore {
         .bind(serde_json::to_string(&e.request)?)
         .bind(response)
         .bind(e.at)
+        .bind(e.kind.as_str())
         .fetch_one(&self.pool)
         .await?;
         if self.prune.tick(e.mock_id) {
@@ -875,6 +910,9 @@ impl ControlStore for SqliteControlStore {
         if let Some(source) = &f.source {
             qb.push(" AND source = ").push_bind(source.clone());
         }
+        if let Some(kind) = f.kind {
+            qb.push(" AND kind = ").push_bind(kind.as_str());
+        }
         if let Some(before) = f.before_id {
             qb.push(" AND id < ").push_bind(before);
         }
@@ -886,6 +924,119 @@ impl ControlStore for SqliteControlStore {
             .iter()
             .map(log_from_row)
             .collect()
+    }
+
+    async fn list_channel_settings(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Vec<ChannelSettings>, StoreError> {
+        let sql = format!(
+            "SELECT {CHANNEL_COLUMNS} FROM channel_settings WHERE mock_id = ? ORDER BY channel_id"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(channel_settings_from_row)
+            .collect()
+    }
+
+    async fn put_channel_settings(&self, s: &ChannelSettings) -> Result<(), StoreError> {
+        let (ws, name) = self.require_mock_key(s.mock_id).await?;
+        let triggers = s.triggers.as_ref().map(serde_json::to_string).transpose()?;
+        let sql = format!(
+            "INSERT INTO channel_settings ({CHANNEL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (mock_id, channel_id) DO UPDATE SET enabled = excluded.enabled, \
+             triggers = excluded.triggers, source = excluded.source, updated_at = excluded.updated_at"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(s.mock_id.to_string())
+            .bind(&s.channel_id)
+            .bind(s.enabled)
+            .bind(triggers)
+            .bind(s.source.as_str())
+            .bind(s.updated_at)
+            .execute(&self.pool)
+            .await?;
+        self.publish_mock(&ws, &name);
+        Ok(())
+    }
+
+    async fn delete_channel_settings(
+        &self,
+        mock_id: Uuid,
+        channel_id: &str,
+    ) -> Result<bool, StoreError> {
+        let deleted =
+            sqlx::query("DELETE FROM channel_settings WHERE mock_id = ? AND channel_id = ?")
+                .bind(mock_id.to_string())
+                .bind(channel_id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0;
+        if deleted && let Some((ws, mock_name)) = self.mock_key(mock_id).await? {
+            self.publish_mock(&ws, &mock_name);
+        }
+        Ok(deleted)
+    }
+
+    async fn get_event_settings(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Option<MockEventSettings>, StoreError> {
+        let sql =
+            format!("SELECT {EVENT_SETTINGS_COLUMNS} FROM mock_event_settings WHERE mock_id = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(event_settings_from_row)
+            .transpose()
+    }
+
+    async fn put_event_settings(&self, s: &MockEventSettings) -> Result<(), StoreError> {
+        let (ws, name) = self.require_mock_key(s.mock_id).await?;
+        let sql = format!(
+            "INSERT INTO mock_event_settings ({EVENT_SETTINGS_COLUMNS}) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (mock_id) DO UPDATE SET broker = excluded.broker, \
+             source = excluded.source, updated_at = excluded.updated_at"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(s.mock_id.to_string())
+            .bind(&s.broker)
+            .bind(s.source.as_str())
+            .bind(s.updated_at)
+            .execute(&self.pool)
+            .await?;
+        self.publish_mock(&ws, &name);
+        Ok(())
+    }
+
+    async fn acquire_scheduler_lease(
+        &self,
+        mock_id: Uuid,
+        holder: &str,
+        ttl: Duration,
+    ) -> Result<bool, StoreError> {
+        let (expires, at) = lease_times(ttl)?;
+        // Timestamps are RFC 3339 text in UTC, so the text comparison is
+        // chronological.
+        let row = sqlx::query(
+            "INSERT INTO scheduler_leases (mock_id, holder, expires_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (mock_id) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at \
+             WHERE scheduler_leases.holder = excluded.holder OR scheduler_leases.expires_at < ?4 \
+             RETURNING holder",
+        )
+        .bind(mock_id.to_string())
+        .bind(holder)
+        .bind(expires)
+        .bind(at)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
     }
 
     async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError> {

@@ -82,6 +82,8 @@ pub struct LiveRequestView {
     pub request: Value,
     #[schema(value_type = Option<Object>)]
     pub response: Option<Value>,
+    /// Request kind: `http`, `graphql`, `grpc`, `soap` or `event`.
+    pub kind: String,
     /// When the record was forwarded to this subscriber.
     pub at: DateTime<Utc>,
 }
@@ -102,6 +104,7 @@ impl From<RequestRecord> for LiveRequestView {
             completion_tokens: r.completion_tokens,
             request: r.request,
             response: r.response,
+            kind: r.kind.as_str().to_string(),
             at: Utc::now(),
         }
     }

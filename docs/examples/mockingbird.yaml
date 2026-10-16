@@ -84,6 +84,35 @@ protocols:
   grpc:
     max_message_bytes: 4194304   # largest message decoded or encoded
 
+# Message brokers the AsyncAPI mocks' channels publish to and consume from.
+# Read at startup. kind: kafka | amqp | mqtt | memory (in-process, for tests).
+# kafka needs bootstrap_servers; amqp and mqtt need url. Passwords never go
+# in a url: put them in sasl.password as a secret reference.
+brokers:
+  local:
+    kind: memory
+  # kafka:
+  #   kind: kafka
+  #   bootstrap_servers: kafka-1:9092,kafka-2:9092   # comma-separated host:port list
+  #   tls: true
+  #   ca_file: /etc/ssl/kafka-ca.pem                 # trusted in addition to the system roots
+  #   sasl:
+  #     mechanism: SCRAM-SHA-512                     # PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512
+  #     username: mockingbird
+  #     password: env:KAFKA_PASSWORD                 # a secret reference, never the password
+  #   client_id_prefix: mockingbird                  # client ids; consumer group <prefix>-<mock>
+  # rabbit:
+  #   kind: amqp
+  #   url: amqp://mockingbird@127.0.0.1:5672/%2f
+  #   tls: false
+  #   sasl: {mechanism: PLAIN, username: mockingbird, password: env:RABBIT_PASSWORD}
+  # mosquitto:
+  #   kind: mqtt
+  #   url: mqtt://127.0.0.1:1883                     # plain MQTT only: mqtts://, ssl://, tls and ca_file
+  #                                                  # are rejected (put a TLS-terminating proxy in front)
+  # test:
+  #   kind: memory                                   # in-process; nothing leaves Mockingbird
+
 mocks:
   orders:
     workspace: default                                 # created if missing; mock names are unique per workspace
@@ -111,3 +140,18 @@ mocks:
       trickle:
         stream_items: 3              # items per streamed response
         stream_item_interval: 500ms  # pause between streamed items
+  order-events:
+    contract: ../../fixtures/asyncapi/orders-amqp-2.6.yaml   # AsyncAPI: event channels
+    broker: local                    # a brokers: entry; default: picked automatically
+    channels:                        # by channel id; channels not listed keep the contract's settings
+      orderCreated:
+        enabled: true                # false stops producing (or consuming) on the channel
+        triggers:                    # omitted = the contract's triggers (manual when it has none)
+          - every: 30s               # on a schedule (at least 100ms)
+          - cron: "0 9 * * 1-5"      # 5-field (or 6-field, with seconds) cron expression, UTC
+          - on_state_change:         # when the mock's state changes
+              resource_type: orders
+              kind: upserted         # upserted | deleted | any (default)
+          - manual                   # on demand: mockingbird channels publish / the Admin API
+      orderCancelled:
+        enabled: false

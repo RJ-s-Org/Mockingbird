@@ -1,7 +1,7 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
 //! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
-//! `grpc`, `soap`, `websocket`); all of them share the [`call`] pipeline.
+//! `grpc`, `soap`, `websocket`, `events`); all of them share the [`call`] pipeline.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,8 @@ mod call;
     allow(dead_code)
 )]
 mod dp_auth;
+#[cfg(feature = "events")]
+pub mod events;
 #[cfg(feature = "graphql")]
 pub mod graphql;
 #[cfg(feature = "grpc")]
@@ -50,7 +52,7 @@ use dp_auth::CredentialNames;
 pub use dp_auth::{
     API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
 };
-pub use record::{RequestRecord, RequestRecorder};
+pub use record::{RequestKind, RequestRecord, RequestRecorder};
 
 /// Request header capping how many items a streamed response carries
 /// (an integer in `1..=10000`; the engine clamps it to its own maximum).

@@ -217,9 +217,58 @@ fn loads_full_example_config() {
     assert_eq!(p.sse.keepalive, Duration::from_secs(15));
     assert_eq!(p.grpc.max_message_bytes, 4 * 1024 * 1024);
 
+    assert_eq!(cfg.brokers.len(), 1);
+    assert_eq!(cfg.brokers["local"].kind, "memory");
+    let brokers = file_config::broker_configs(&cfg).unwrap();
+    assert_eq!(brokers[0].name, "local");
+
     let ticks = &cfg.mocks["events"].scenarios["trickle"];
     assert_eq!(ticks.stream_items, Some(3));
     assert_eq!(ticks.stream_item_interval, Some(Duration::from_millis(500)));
+
+    let ev = &cfg.mocks["order-events"];
+    assert_eq!(ev.broker.as_deref(), Some("local"));
+    let created = &ev.channels["orderCreated"];
+    assert!(created.enabled);
+    let triggers: Vec<mb_mcm::Trigger> = created
+        .triggers
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|t| t.to_trigger())
+        .collect();
+    assert_eq!(
+        triggers,
+        [
+            mb_mcm::Trigger::Schedule {
+                every: Duration::from_secs(30)
+            },
+            mb_mcm::Trigger::Cron {
+                expr: "0 9 * * 1-5".into()
+            },
+            mb_mcm::Trigger::OnStateChange {
+                resource_type: "orders".into(),
+                kind: mb_mcm::StateChangeKind::Upserted
+            },
+            mb_mcm::Trigger::Manual,
+        ]
+    );
+    assert!(!ev.channels["orderCancelled"].enabled);
+}
+
+#[tokio::test]
+async fn example_config_reconciles() {
+    let cfg = file_config::load(&repo().join("docs/examples/mockingbird.yaml")).unwrap();
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "order-events")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.list_channel_settings(mock.id).await.unwrap().len(), 2);
 }
 
 #[test]
@@ -1046,6 +1095,70 @@ async fn invalid_reload_keeps_previous_state() {
     }
 }
 
+/// Brokers are read at startup: a reload whose `brokers:` differ is
+/// rejected as a whole (nothing else in it is applied), and the watch keeps
+/// running.
+#[tokio::test]
+async fn reload_changing_brokers_is_rejected() {
+    let with_brokers = |brokers: &str, scenario: &str| {
+        format!(
+            "brokers:\n{brokers}{}",
+            BASIC.replace("out-of-stock", scenario)
+        )
+    };
+    let local = "  local:\n    kind: memory\n";
+    let ws = Workspace::new();
+    ws.write(&with_brokers(local, "out-of-stock"));
+    let app = start(config_args(&ws, true)).await;
+    assert_eq!(app._app.brokers.names(), ["local"]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Adding a broker (with another change) is not applied.
+    ws.write(&with_brokers(
+        &format!("{local}  extra:\n    kind: memory\n"),
+        "sold-out",
+    ));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(scenario_names(&app.admin).await, ["out-of-stock"]);
+    assert_eq!(app._app.brokers.names(), ["local"]);
+
+    // Changing a broker's settings is rejected too.
+    ws.write(&with_brokers(
+        "  local:\n    kind: memory\n    client_id_prefix: other\n",
+        "sold-out",
+    ));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(scenario_names(&app.admin).await, ["out-of-stock"]);
+
+    // The same brokers again: the watch is still running and applies it.
+    ws.write(&with_brokers(local, "sold-out"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while scenario_names(&app.admin).await != ["sold-out"] {
+        assert!(Instant::now() < deadline, "not reloaded after the fix");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[test]
+fn broker_change_check_names_the_restart() {
+    let ws = Workspace::new();
+    let before = ws.load("brokers:\n  local:\n    kind: memory\n");
+    let initial = file_config::broker_configs(&before).unwrap();
+    assert!(mockingbird::config::ensure_brokers_unchanged(&initial, &before).is_ok());
+    for changed in [
+        "brokers:\n  local:\n    kind: memory\n  extra:\n    kind: memory\n",
+        "brokers: {}\n",
+        "brokers:\n  local:\n    kind: memory\n    client_id_prefix: x\n",
+    ] {
+        let cfg = ws.load(changed);
+        let e = mockingbird::config::ensure_brokers_unchanged(&initial, &cfg).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("brokers changed: restart required"),
+            "{changed}: {e:#}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn zero_config_matches_p1_behaviour() {
     let args = ServeArgs {
@@ -1853,4 +1966,374 @@ mocks:
         .unwrap();
     let text = sse_until_keepalive(resp).await;
     assert_eq!(text.matches("event: tick").count(), 5, "{text}");
+}
+
+/// `broker_configs` error for a config with one broker `b` declared as `body`.
+fn broker_error(ws: &Workspace, body: &str) -> String {
+    let cfg = ws.load(&format!("brokers:\n  b:\n{body}"));
+    match file_config::broker_configs(&cfg) {
+        Ok(configs) => panic!("expected an error, got {configs:?}"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+#[test]
+fn brokers_section_parses_and_validates() {
+    let ws = Workspace::new();
+
+    let cfg = ws.load("brokers:\n  local:\n    kind: memory\n");
+    let configs = file_config::broker_configs(&cfg).unwrap();
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "local");
+    assert_eq!(configs[0].kind, mb_protocols::events::BrokerKind::Memory);
+    assert_eq!(configs[0].client_id_prefix, "mockingbird");
+    assert!(!configs[0].tls);
+
+    let e = broker_error(&ws, "    kind: nats\n");
+    assert!(
+        e.contains("brokers.b.kind: unknown broker kind \"nats\""),
+        "{e}"
+    );
+
+    let e = broker_error(&ws, "    kind: kafka\n");
+    assert!(e.contains("brokers.b.bootstrap_servers"), "{e}");
+    let e = broker_error(&ws, "    kind: amqp\n");
+    assert!(e.contains("brokers.b") && e.contains("url"), "{e}");
+    let e = broker_error(&ws, "    kind: mqtt\n");
+    assert!(e.contains("brokers.b") && e.contains("url"), "{e}");
+
+    let e = broker_error(
+        &ws,
+        "    kind: amqp\n    url: amqp://guest:guest@127.0.0.1:5672/%2f\n",
+    );
+    assert!(
+        e.contains("brokers.b.url: put the password in sasl.password as a secret reference"),
+        "{e}"
+    );
+
+    let e = broker_error(
+        &ws,
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: hunter2\n",
+    );
+    assert!(e.contains("brokers.b.sasl.password"), "{e}");
+    assert!(e.contains("secret reference"), "{e}");
+
+    // A user without a password, and a secret-reference password, pass.
+    #[cfg(feature = "mqtt")]
+    {
+        let cfg = ws.load(
+            "brokers:\n  m:\n    kind: mqtt\n    url: mqtt://user@127.0.0.1:1883\n    client_id_prefix: mb\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: env:MQTT_PASSWORD\n",
+        );
+        let configs = file_config::broker_configs(&cfg).unwrap();
+        assert_eq!(configs[0].url, "mqtt://user@127.0.0.1:1883");
+        assert!(!configs[0].tls);
+        assert_eq!(configs[0].client_id_prefix, "mb");
+        assert_eq!(
+            configs[0].sasl.as_ref().unwrap().password_ref,
+            "env:MQTT_PASSWORD"
+        );
+    }
+
+    // Unknown keys are rejected.
+    ws.write("brokers:\n  b:\n    kind: memory\n    bogus: 1\n");
+    assert!(file_config::load(&ws.config_path()).is_err());
+}
+
+/// rumqttc is built without its TLS stack (its rustls-webpki has open
+/// advisories), so every way of asking for MQTT over TLS is refused.
+#[test]
+fn mqtt_over_tls_is_rejected() {
+    const EXPECTED: &str = "brokers.b: MQTT over TLS is not supported in this build (rumqttc TLS stack has open advisories); use a TLS-terminating proxy or plain MQTT";
+    let ws = Workspace::new();
+    for body in [
+        "    kind: mqtt\n    url: mqtts://127.0.0.1:8883\n",
+        "    kind: mqtt\n    url: ssl://127.0.0.1:8883\n",
+        "    kind: mqtt\n    url: MQTTS://127.0.0.1:8883\n",
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    tls: true\n",
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    ca_file: /etc/ssl/ca.pem\n",
+    ] {
+        let e = broker_error(&ws, body);
+        assert!(e.contains(EXPECTED), "{body}: {e}");
+    }
+    // Plain MQTT, and TLS for the other kinds, stay accepted.
+    let cfg = ws.load("brokers:\n  m:\n    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n");
+    #[cfg(feature = "mqtt")]
+    assert!(file_config::broker_configs(&cfg).is_ok());
+    let _ = cfg;
+    let cfg = ws.load(
+        "brokers:\n  r:\n    kind: amqp\n    url: amqps://127.0.0.1:5671/%2f\n    tls: true\n",
+    );
+    #[cfg(feature = "amqp")]
+    assert!(file_config::broker_configs(&cfg).is_ok());
+    let _ = cfg;
+}
+
+#[tokio::test]
+async fn invalid_brokers_fail_build_app() {
+    let ws = Workspace::new();
+    ws.write("brokers:\n  b:\n    kind: nats\n");
+    let e = match build_app(&config_args(&ws, false), None).await {
+        Ok(_) => panic!("expected an error"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(e.starts_with("applying the configuration"), "{e}");
+    assert!(e.contains("unknown broker kind \"nats\""), "{e}");
+}
+
+#[cfg(not(feature = "kafka"))]
+#[test]
+fn slim_build_rejects_kafka_broker() {
+    let ws = Workspace::new();
+    let e = broker_error(
+        &ws,
+        "    kind: kafka\n    bootstrap_servers: 127.0.0.1:9092\n",
+    );
+    assert!(
+        e.contains(
+            "brokers.b: this build has no kafka support (use the full image or build with --features kafka)"
+        ),
+        "{e}"
+    );
+}
+
+// ---- channels and broker as code ----
+
+fn asyncapi_fixture() -> PathBuf {
+    repo().join("fixtures/asyncapi/orders-amqp-2.6.yaml")
+}
+
+/// A config with a `mem` broker and an `orders` AsyncAPI mock whose body
+/// (`broker:`/`channels:` lines, indented four spaces) is `extra`.
+fn channels_config(extra: &str) -> String {
+    format!(
+        "brokers:\n  mem:\n    kind: memory\nmocks:\n  orders:\n    contract: {}\n{extra}",
+        asyncapi_fixture().display()
+    )
+}
+
+const CHANNEL_BLOCK: &str = "    broker: mem\n    channels:\n      orderCreated:\n        triggers:\n          - every: 10s\n          - manual\n";
+
+#[test]
+fn file_trigger_forms_parse() {
+    let ws = Workspace::new();
+    let cfg = ws.load(&channels_config(
+        "    channels:\n      orderCreated:\n        enabled: false\n        triggers:\n          - every: 250ms\n          - cron: \"*/5 * * * *\"\n          - on_state_change: {resource_type: orders, kind: deleted}\n          - on_state_change: {resource_type: carts}\n          - manual\n      orderCancelled: {}\n",
+    ));
+    let m = &cfg.mocks["orders"];
+    assert_eq!(m.broker, None);
+    let c = &m.channels["orderCreated"];
+    assert!(!c.enabled);
+    let triggers: Vec<mb_mcm::Trigger> = c
+        .triggers
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|t| t.to_trigger())
+        .collect();
+    assert_eq!(
+        triggers,
+        [
+            mb_mcm::Trigger::Schedule {
+                every: Duration::from_millis(250)
+            },
+            mb_mcm::Trigger::Cron {
+                expr: "*/5 * * * *".into()
+            },
+            mb_mcm::Trigger::OnStateChange {
+                resource_type: "orders".into(),
+                kind: mb_mcm::StateChangeKind::Deleted
+            },
+            mb_mcm::Trigger::OnStateChange {
+                resource_type: "carts".into(),
+                kind: mb_mcm::StateChangeKind::Any
+            },
+            mb_mcm::Trigger::Manual,
+        ]
+    );
+    let other = &m.channels["orderCancelled"];
+    assert!(other.enabled);
+    assert_eq!(other.triggers, None);
+
+    ws.write(&channels_config(
+        "    channels:\n      orderCreated:\n        bogus: 1\n",
+    ));
+    assert!(file_config::load(&ws.config_path()).is_err());
+}
+
+#[tokio::test]
+async fn file_channel_settings_reconciled() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(&channels_config(CHANNEL_BLOCK));
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = store.list_channel_settings(mock.id).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].channel_id, "orderCreated");
+    assert!(rows[0].enabled);
+    assert_eq!(rows[0].source, ResourceSource::File);
+    assert_eq!(
+        rows[0].triggers,
+        Some(vec![
+            mb_mcm::Trigger::Schedule {
+                every: Duration::from_secs(10)
+            },
+            mb_mcm::Trigger::Manual
+        ])
+    );
+    let events = store.get_event_settings(mock.id).await.unwrap().unwrap();
+    assert_eq!(events.broker.as_deref(), Some("mem"));
+    assert_eq!(events.source, ResourceSource::File);
+
+    // Reconciling the same file again changes nothing.
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(report.is_empty(), "{report:?}");
+
+    // Removing the block deletes the row and clears the broker.
+    let cfg = ws.load(&channels_config(""));
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["orders"]);
+    assert!(
+        store
+            .list_channel_settings(mock.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let events = store.get_event_settings(mock.id).await.unwrap().unwrap();
+    assert_eq!(events.broker, None);
+}
+
+async fn channel_reconcile_error(extra: &str) -> (String, Arc<dyn ControlStore>) {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(&channels_config(extra));
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    (format!("{err:#}"), store)
+}
+
+#[tokio::test]
+async fn file_channel_invalid_cron_rejected() {
+    let (err, store) = channel_reconcile_error(
+        "    channels:\n      orderCreated:\n        triggers:\n          - cron: \"not a cron\"\n",
+    )
+    .await;
+    assert!(
+        err.contains("mocks.orders.channels.orderCreated.triggers: invalid cron expression"),
+        "{err}"
+    );
+    // Nothing was applied.
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn file_channel_unknown_id_rejected() {
+    let (err, store) =
+        channel_reconcile_error("    channels:\n      nope:\n        enabled: false\n").await;
+    assert!(
+        err.contains("mocks.orders.channels.nope: no such channel in the contract"),
+        "{err}"
+    );
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn file_unknown_broker_rejected() {
+    let (err, store) = channel_reconcile_error("    broker: rabbit\n").await;
+    assert!(
+        err.contains("mocks.orders.broker: unknown broker \"rabbit\""),
+        "{err}"
+    );
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn file_triggers_on_subscribe_channel_rejected() {
+    let (err, store) = channel_reconcile_error(
+        "    channels:\n      cancelOrder:\n        triggers:\n          - manual\n",
+    )
+    .await;
+    assert!(
+        err.contains("mocks.orders.channels.cancelOrder.triggers: triggers apply only"),
+        "{err}"
+    );
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn api_put_on_file_channel_409() {
+    let ws = Workspace::new();
+    ws.write(&channels_config(CHANNEL_BLOCK));
+    let app = start(config_args(&ws, false)).await;
+    let http = reqwest::Client::new();
+    let api = format!("{}/api/v1/mocks/orders", app.admin);
+
+    let r = http
+        .put(format!("{api}/channels/orderCreated"))
+        .json(&json!({"enabled": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.headers()["content-type"], "application/problem+json");
+
+    let view: Value = http
+        .get(format!("{api}/channels/orderCreated"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view["settings_source"], "file", "{view}");
+    assert_eq!(
+        view["triggers"],
+        json!([{"schedule": {"every_ms": 10000}}, "manual"]),
+        "{view}"
+    );
+    let events: Value = http
+        .get(format!("{api}/event-settings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(events, json!({"broker": "mem", "source": "file"}));
 }

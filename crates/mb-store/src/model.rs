@@ -1,7 +1,7 @@
 //! Control-plane entities persisted by a [`crate::ControlStore`].
 
 use chrono::{DateTime, Utc};
-use mb_mcm::Bundle;
+use mb_mcm::{Bundle, Trigger};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -162,6 +162,42 @@ pub struct LlmProfile {
     pub source: ResourceSource,
 }
 
+/// What kind of call a request-log entry records.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    #[default]
+    Http,
+    Graphql,
+    Grpc,
+    Soap,
+    /// A produced or consumed event-channel message.
+    Event,
+}
+
+impl RequestKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RequestKind::Http => "http",
+            RequestKind::Graphql => "graphql",
+            RequestKind::Grpc => "grpc",
+            RequestKind::Soap => "soap",
+            RequestKind::Event => "event",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "http" => Some(RequestKind::Http),
+            "graphql" => Some(RequestKind::Graphql),
+            "grpc" => Some(RequestKind::Grpc),
+            "soap" => Some(RequestKind::Soap),
+            "event" => Some(RequestKind::Event),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RequestLogEntry {
     pub id: i64,
@@ -178,6 +214,8 @@ pub struct RequestLogEntry {
     pub request: Value,
     pub response: Option<Value>,
     pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub kind: RequestKind,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -195,6 +233,8 @@ pub struct NewRequestLogEntry {
     pub request: Value,
     pub response: Option<Value>,
     pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub kind: RequestKind,
 }
 
 /// Request-log query. Results are ordered by id, newest first.
@@ -208,6 +248,9 @@ pub struct RequestLogFilter {
     pub limit: u32,
     /// Only entries with `id < before_id` (keyset pagination).
     pub before_id: Option<i64>,
+    /// Only entries of this kind.
+    #[serde(default)]
+    pub kind: Option<RequestKind>,
 }
 
 impl RequestLogFilter {
@@ -232,8 +275,31 @@ impl Default for RequestLogFilter {
             source: None,
             limit: Self::DEFAULT_LIMIT,
             before_id: None,
+            kind: None,
         }
     }
+}
+
+/// Per-channel overrides of a mock's event channel.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ChannelSettings {
+    pub mock_id: Uuid,
+    pub channel_id: String,
+    pub enabled: bool,
+    /// `None` = the contract's triggers.
+    pub triggers: Option<Vec<Trigger>>,
+    pub source: ResourceSource,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A mock's event settings: the broker its channels use.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MockEventSettings {
+    pub mock_id: Uuid,
+    /// Broker name; `None` picks automatically.
+    pub broker: Option<String>,
+    pub source: ResourceSource,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A stored API key. Only the hex sha256 of its secret is kept.

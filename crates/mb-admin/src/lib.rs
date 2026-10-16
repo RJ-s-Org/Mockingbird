@@ -23,6 +23,7 @@ pub mod access;
 mod apikeys;
 mod audit;
 mod auth_routes;
+pub mod channels;
 mod contracts;
 mod live;
 mod login_limit;
@@ -194,7 +195,8 @@ pub fn router(st: AdminState) -> Router {
                 .delete(sessions::reset),
         )
         .route("/mocks/{mock}/requests", get(requests::list))
-        .route("/mocks/{mock}/requests/stream", get(live::stream));
+        .route("/mocks/{mock}/requests/stream", get(live::stream))
+        .merge(channels::routes());
     // Workspace-only resources: no P2 alias for `default`.
     let workspace_only: Router<AdminState> = resources
         .clone()
@@ -217,6 +219,7 @@ pub fn router(st: AdminState) -> Router {
         .merge(resources)
         .route("/audit", get(audit::list_global))
         .route("/me", get(auth_routes::me))
+        .route("/brokers", get(channels::brokers))
         .route_layer(axum::middleware::from_fn_with_state(
             st.clone(),
             access::authenticate,

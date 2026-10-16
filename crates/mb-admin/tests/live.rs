@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use mb_admin::{AdminState, LiveSubscribe, router};
 use mb_auth::{AuthError, Authenticate, Principal, PrincipalKind, Role};
-use mb_protocols::RequestRecord;
+use mb_protocols::{RequestKind, RequestRecord};
 use mb_state::{MemoryStore, StateStore};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -179,6 +179,7 @@ fn record(workspace: &str, mock: &str, op: &str, session: &str, source: &str) ->
         request: json!({ "query": {}, "headers": {}, "body": null }),
         request_body_bytes: None,
         response: Some(json!(["a"])),
+        kind: RequestKind::Http,
     }
 }
 

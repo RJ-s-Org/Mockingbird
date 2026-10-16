@@ -74,6 +74,7 @@ async fn client(admin_url: &str, token: Option<&str>, cmd: ClientCommand) -> Res
             eprintln!("{body}");
             Err(Failure::Silent)
         }
+        Err(ClientError::Usage(msg)) => Err(Failure::Usage(msg)),
         Err(ClientError::Other(e)) => Err(Failure::Other(e)),
     }
 }
@@ -94,10 +95,11 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
     let bundle =
         mb_import::compile(&bytes).with_context(|| format!("cannot compile {}", path.display()))?;
     println!(
-        "{} {} ({} operations)",
+        "{} {} ({} operations, {} channels)",
         bundle.title,
         bundle.version,
-        bundle.operations.len()
+        bundle.operations.len(),
+        bundle.channels.len()
     );
     for op in &bundle.operations {
         let streams = op.kind.streams_request() || op.kind.streams_response();
@@ -106,6 +108,19 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
         } else {
             println!("{:<32} {}", op.id, op.target());
         }
+    }
+    for c in &bundle.channels {
+        let direction = match c.direction {
+            mb_mcm::Direction::Publish => "publish",
+            mb_mcm::Direction::Subscribe => "subscribe",
+        };
+        println!(
+            "{:<32} {} {} {}",
+            c.id,
+            direction,
+            c.binding.protocol(),
+            c.binding.address()
+        );
     }
     Ok(())
 }

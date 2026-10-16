@@ -1,5 +1,6 @@
 //! `mockingbird.yaml`: server, storage, authentication, audit, LLM
-//! profiles, observability, protocol settings and mocks declared as code.
+//! profiles, observability, protocol settings, message brokers and mocks
+//! (with their channels and broker) declared as code.
 //!
 //! Precedence: the file < `MB_*` environment variables ([`apply_env`]) <
 //! command-line flags ([`crate::config::apply_flags`]).
@@ -9,9 +10,11 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use mb_engine::StreamConfig;
+use mb_mcm::{StateChangeKind, Trigger};
 use mb_protocols::ProtocolSettings;
+use mb_protocols::events::{BrokerConfig, BrokerKind, MQTT_TLS_UNSUPPORTED, SaslConfig};
 use mb_store::{DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -37,6 +40,8 @@ pub struct FileConfig {
     pub observability: ObservabilityConfig,
     /// Protocol knobs shared by every mock. Read at startup.
     pub protocols: ProtocolsConfig,
+    /// Message brokers the mocks' channels use, by name. Read at startup.
+    pub brokers: BTreeMap<String, FileBroker>,
     pub mocks: BTreeMap<String, FileMock>,
     pub auth: AuthConfig,
     pub audit: AuditConfig,
@@ -488,6 +493,135 @@ impl Default for GrpcConfig {
     }
 }
 
+/// One `brokers:` entry: a connection to a message broker.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileBroker {
+    /// `kafka`, `amqp`, `mqtt` or `memory`.
+    pub kind: String,
+    /// AMQP and MQTT: the broker URL, without a password.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Kafka: comma-separated `host:port` list.
+    #[serde(default)]
+    pub bootstrap_servers: Option<String>,
+    #[serde(default)]
+    pub tls: bool,
+    /// CA bundle (PEM) trusted for TLS, in addition to the system roots.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+    #[serde(default)]
+    pub sasl: Option<FileSasl>,
+    /// Prefix of the client ids and consumer groups Mockingbird uses: a
+    /// mock's Kafka consumer group (and AMQP shared-queue name) is
+    /// `<client_id_prefix>-<mock>` (`<client_id_prefix>-<workspace>.<mock>`
+    /// outside `default`).
+    #[serde(default = "default_client_id_prefix")]
+    pub client_id_prefix: String,
+}
+
+fn default_client_id_prefix() -> String {
+    "mockingbird".into()
+}
+
+/// SASL credentials of a broker.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileSasl {
+    pub mechanism: String,
+    pub username: String,
+    /// A secret reference (`env:NAME` or `file:/path`), never a password.
+    pub password: String,
+}
+
+/// The broker connections of the `brokers:` section, validated: a known
+/// `kind` compiled into this build, the address that kind needs, no
+/// password in a `url`, a secret reference as the SASL password, and no
+/// TLS for MQTT (`mqtts://`/`ssl://` URLs, `tls` or `ca_file`; see
+/// [`MQTT_TLS_UNSUPPORTED`]).
+pub fn broker_configs(cfg: &FileConfig) -> anyhow::Result<Vec<BrokerConfig>> {
+    cfg.brokers
+        .iter()
+        .map(|(name, broker)| broker_config(name, broker))
+        .collect()
+}
+
+fn broker_config(name: &str, broker: &FileBroker) -> anyhow::Result<BrokerConfig> {
+    let kind = match broker.kind.as_str() {
+        "kafka" => BrokerKind::Kafka,
+        "amqp" => BrokerKind::Amqp,
+        "mqtt" => BrokerKind::Mqtt,
+        "memory" => BrokerKind::Memory,
+        other => bail!("brokers.{name}.kind: unknown broker kind \"{other}\""),
+    };
+    let url = match kind {
+        BrokerKind::Kafka => broker
+            .bootstrap_servers
+            .clone()
+            .ok_or_else(|| anyhow!("brokers.{name}.bootstrap_servers: required for kafka"))?,
+        BrokerKind::Amqp | BrokerKind::Mqtt => broker
+            .url
+            .clone()
+            .ok_or_else(|| anyhow!("brokers.{name}.url: required for {}", kind.as_str()))?,
+        BrokerKind::Memory => broker.url.clone().unwrap_or_default(),
+    };
+    if broker.url.as_deref().is_some_and(has_password) {
+        bail!("brokers.{name}.url: put the password in sasl.password as a secret reference");
+    }
+    let sasl = match &broker.sasl {
+        Some(sasl) => {
+            if !crate::reconcile::valid_secret_ref(&sasl.password) {
+                bail!(
+                    "brokers.{name}.sasl.password: must be a secret reference (env:NAME or file:/path), not a password"
+                );
+            }
+            Some(SaslConfig {
+                mechanism: sasl.mechanism.clone(),
+                username: sasl.username.clone(),
+                password_ref: sasl.password.clone(),
+            })
+        }
+        None => None,
+    };
+    if kind == BrokerKind::Mqtt
+        && (broker.tls
+            || broker.ca_file.is_some()
+            || url
+                .get(..url.find("://").unwrap_or(0))
+                .is_some_and(|scheme| {
+                    ["mqtts", "ssl"]
+                        .iter()
+                        .any(|tls| scheme.eq_ignore_ascii_case(tls))
+                }))
+    {
+        bail!("brokers.{name}: {MQTT_TLS_UNSUPPORTED}");
+    }
+    if !kind.compiled() {
+        let kind = kind.as_str();
+        bail!(
+            "brokers.{name}: this build has no {kind} support (use the full image or build with --features {kind})"
+        );
+    }
+    Ok(BrokerConfig {
+        name: name.to_string(),
+        kind,
+        url,
+        tls: broker.tls,
+        ca_file: broker.ca_file.clone(),
+        sasl,
+        client_id_prefix: broker.client_id_prefix.clone(),
+    })
+}
+
+/// Whether `url`'s userinfo (`user:password@`) holds a password.
+fn has_password(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
+}
+
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileMock {
@@ -507,6 +641,13 @@ pub struct FileMock {
     pub header_overrides: bool,
     #[serde(default)]
     pub scenarios: BTreeMap<String, FileScenario>,
+    /// The `brokers:` entry the mock's channels use; absent picks one
+    /// automatically.
+    #[serde(default)]
+    pub broker: Option<String>,
+    /// Per-channel settings, by channel id.
+    #[serde(default)]
+    pub channels: BTreeMap<String, FileChannel>,
     #[serde(default, deserialize_with = "strict_data_plane_auth")]
     pub data_plane_auth: DataPlaneAuthConfig,
 }
@@ -543,6 +684,8 @@ impl FileMock {
             llm_profile: None,
             header_overrides: true,
             scenarios: BTreeMap::new(),
+            broker: None,
+            channels: BTreeMap::new(),
             data_plane_auth: DataPlaneAuthConfig::default(),
         }
     }
@@ -557,6 +700,53 @@ impl FileMock {
 
 fn default_true() -> bool {
     true
+}
+
+/// A `channels:` entry of a mock: overrides of one event channel.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileChannel {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Absent uses the contract's triggers.
+    #[serde(default)]
+    pub triggers: Option<Vec<FileTrigger>>,
+}
+
+/// A channel trigger as written in the config file.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTrigger {
+    /// `- every: 10s`
+    Every(#[serde(with = "humantime_serde")] Duration),
+    /// `- cron: "*/5 * * * *"`
+    Cron(String),
+    /// `- on_state_change: {resource_type: orders, kind: deleted}`
+    OnStateChange {
+        resource_type: String,
+        #[serde(default)]
+        kind: StateChangeKind,
+    },
+    /// `- manual`
+    Manual,
+}
+
+impl FileTrigger {
+    /// The MCM trigger.
+    pub fn to_trigger(&self) -> Trigger {
+        match self {
+            FileTrigger::Every(every) => Trigger::Schedule { every: *every },
+            FileTrigger::Cron(expr) => Trigger::Cron { expr: expr.clone() },
+            FileTrigger::OnStateChange {
+                resource_type,
+                kind,
+            } => Trigger::OnStateChange {
+                resource_type: resource_type.clone(),
+                kind: *kind,
+            },
+            FileTrigger::Manual => Trigger::Manual,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Default, PartialEq)]

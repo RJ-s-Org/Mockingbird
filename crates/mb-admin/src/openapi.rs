@@ -71,6 +71,7 @@ use crate::{
         contracts::ContractVersionSummary,
         contracts::ContractVersionDetail,
         contracts::OperationSummary,
+        contracts::ChannelSummary,
         scenarios::ScenarioView,
         scenarios::PutScenario,
         profiles::LlmProfileView,
@@ -121,7 +122,7 @@ const ALIASED: [&str; 2] = ["/mocks", "/llm-profiles"];
 /// after its tag (`me`): generated clients key operations by id, and
 /// several modules share handler names.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    let mut doc = ApiDoc::openapi();
+    let mut doc = ApiDoc::openapi().merge_from(crate::channels::ChannelsDoc::openapi());
     doc.paths
         .paths
         .values_mut()

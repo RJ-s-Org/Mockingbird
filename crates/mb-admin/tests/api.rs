@@ -13,7 +13,7 @@ use mb_state::{
 };
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
-    NewRequestLogEntry, ResourceSource, Scenario, ScenarioRules,
+    NewRequestLogEntry, RequestKind, ResourceSource, Scenario, ScenarioRules,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -428,7 +428,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 1, "status": "active", "operations": 3 })
+        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0 })
     );
 
     // Later uploads stay approved unless asked to activate; YAML is accepted.
@@ -436,7 +436,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 2, "status": "approved", "operations": 1 })
+        json!({ "version": 2, "status": "approved", "operations": 1, "channels": 0 })
     );
     assert_eq!(h.active_version("orders").await, 1);
 
@@ -444,7 +444,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 3, "status": "active", "operations": 3 })
+        json!({ "version": 3, "status": "active", "operations": 3, "channels": 0 })
     );
     assert_eq!(h.active_version("orders").await, 3);
 
@@ -1219,6 +1219,7 @@ async fn request_log_query() {
                     request: json!({ "query": {} }),
                     response: Some(json!({ "ok": true })),
                     at: Utc::now(),
+                    kind: RequestKind::Http,
                 },
                 1000,
             )
@@ -1276,6 +1277,67 @@ async fn request_log_query() {
     h.get("/api/v1/mocks/nope/requests")
         .await
         .assert_problem(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn request_log_kind_query() {
+    let h = harness().await;
+    let mock = h.create_mock("orders").await;
+    let mock_id = mock["id"].as_str().unwrap().parse().unwrap();
+    for (op, method, kind) in [
+        ("listOrders", "GET", RequestKind::Http),
+        ("orderPlaced", "PUBLISH", RequestKind::Event),
+    ] {
+        h.store
+            .append_request_log(
+                NewRequestLogEntry {
+                    mock_id,
+                    operation_id: Some(op.into()),
+                    session: "default".into(),
+                    method: method.into(),
+                    path: "orders.placed".into(),
+                    status: 200,
+                    source: Some("llm".into()),
+                    latency_ms: 1,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    request: json!({}),
+                    response: None,
+                    at: Utc::now(),
+                    kind,
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+    }
+
+    let r = h.get("/api/v1/mocks/orders/requests").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let kinds: Vec<Value> = r
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].clone())
+        .collect();
+    assert_eq!(kinds, [json!("event"), json!("http")]);
+
+    let r = h.get("/api/v1/mocks/orders/requests?kind=event").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let events = r.json();
+    assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+    assert_eq!(events[0]["operation_id"], "orderPlaced");
+    assert_eq!(events[0]["kind"], "event");
+
+    let r = h.get("/api/v1/mocks/orders/requests?kind=http").await;
+    assert_eq!(r.json()[0]["operation_id"], "listOrders");
+
+    let body = h
+        .get("/api/v1/mocks/orders/requests?kind=bogus")
+        .await
+        .assert_problem(StatusCode::BAD_REQUEST);
+    assert_eq!(body["detail"], "unknown request kind \"bogus\"", "{body}");
 }
 
 #[tokio::test]
@@ -1421,6 +1483,11 @@ async fn openapi_lists_all_paths() {
             &["get", "put", "delete"],
         ),
         ("/api/v1/mocks/{mock}/requests", &["get"]),
+        ("/api/v1/mocks/{mock}/channels", &["get"]),
+        ("/api/v1/mocks/{mock}/channels/{channel}", &["get", "put"]),
+        ("/api/v1/mocks/{mock}/channels/{channel}/publish", &["post"]),
+        ("/api/v1/mocks/{mock}/event-settings", &["get", "put"]),
+        ("/api/v1/brokers", &["get"]),
         ("/api/v1/mocks/{mock}/requests/stream", &["get"]),
     ];
     for (path, methods) in expected {
@@ -1445,7 +1512,15 @@ async fn openapi_lists_all_paths() {
     let listed: usize = expected.iter().map(|(_, m)| m.len()).sum();
     assert_eq!(documented, listed, "unexpected extra operations");
     let schemas = doc["components"]["schemas"].as_object().unwrap();
-    for name in ["Problem", "MockView", "LlmProfileView", "ScenarioView"] {
+    for name in [
+        "Problem",
+        "MockView",
+        "LlmProfileView",
+        "ScenarioView",
+        "ChannelView",
+        "ChannelDetail",
+        "BrokerView",
+    ] {
         assert!(schemas.contains_key(name), "schema {name} missing");
     }
 }
@@ -1594,7 +1669,7 @@ async fn upload_graphql_proto_wsdl_and_archive() {
         assert_eq!(r.status, StatusCode::CREATED, "{mock}: {}", r.text);
         assert_eq!(
             r.json(),
-            json!({ "version": 1, "status": "active", "operations": expected }),
+            json!({ "version": 1, "status": "active", "operations": expected, "channels": 0 }),
             "{mock}"
         );
         let r = h
@@ -1665,6 +1740,70 @@ async fn grpc_contract_detail_lists_protocol_target_kind() {
     assert_eq!(list["kind"], "stream-server", "{list}");
     assert_eq!(list["method"], "", "{list}");
     assert_eq!(list["path"], "", "{list}");
+}
+
+#[tokio::test]
+async fn upload_asyncapi_reports_channels() {
+    let h = harness().await;
+    h.create_mock("lights").await;
+    let r = h
+        .upload_bytes(
+            "lights",
+            fixture("asyncapi/streetlights-kafka-3.0.yaml"),
+            "application/vnd.aai.asyncapi+yaml",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    assert_eq!(
+        r.json(),
+        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4 })
+    );
+
+    let r = h.get("/api/v1/mocks/lights/contracts").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()[0]["channels"], 4);
+
+    let r = h.get("/api/v1/mocks/lights/contracts/1").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let detail = r.json();
+    assert_eq!(detail["operations"], json!([]));
+    let ids: Vec<&str> = detail["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["dimLight", "receiveLightMeasurement", "turnOff", "turnOn"]
+    );
+    assert_eq!(
+        detail["channels"][3],
+        json!({
+            "id": "turnOn",
+            "direction": "publish",
+            "protocol": "kafka",
+            "address": "smartylighting.streetlights.1.0.action.{streetlightId}.turn.on",
+            "messages": ["turnOnOff"],
+        })
+    );
+    assert_eq!(detail["channels"][1]["direction"], "subscribe");
+
+    for media in [
+        "application/vnd.aai.asyncapi",
+        "application/vnd.aai.asyncapi+json",
+    ] {
+        h.create_mock(&format!("m-{}", media.len())).await;
+        let r = h
+            .upload_bytes(
+                &format!("m-{}", media.len()),
+                fixture("asyncapi/sensors-mqtt-3.0.yaml"),
+                media,
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{media}: {}", r.text);
+        assert_eq!(r.json()["channels"], 3, "{media}");
+    }
 }
 
 /// A WSDL whose documentation embeds an XHTML script: served inline as

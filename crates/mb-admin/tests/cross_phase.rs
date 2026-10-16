@@ -156,7 +156,7 @@ async fn proto_archive_upload_is_rbac_checked_and_audited() {
     assert_eq!(s, StatusCode::CREATED, "{body}");
     assert_eq!(
         body,
-        json!({"version": 1, "status": "active", "operations": expected})
+        json!({"version": 1, "status": "active", "operations": expected, "channels": 0})
     );
 
     // The version lists gRPC operations with their protocol and target.

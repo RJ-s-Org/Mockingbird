@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use mb_engine::StreamConfig;
 use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_protocols::ProtocolSettings;
+use mb_protocols::events::EventDeps;
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
@@ -65,6 +66,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         data_plane_keys: None,
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
+        events: EventDeps::default(),
     }
 }
 
@@ -761,4 +763,114 @@ async fn grpc_mock_removed_on_delete() {
         assert!(Instant::now() < deadline, "service still published");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+fn orders_asyncapi_source() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/asyncapi/orders-amqp-2.6.yaml");
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// [`deps`] with one memory broker, `mem`.
+fn event_deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
+    use mb_protocols::events::{BrokerConfig, BrokerKind, Brokers};
+    let mut deps = deps(store);
+    deps.events.brokers = Brokers::new(
+        vec![BrokerConfig {
+            name: "mem".into(),
+            kind: BrokerKind::Memory,
+            url: String::new(),
+            tls: false,
+            ca_file: None,
+            sasl: None,
+            client_id_prefix: "mockingbird".into(),
+        }],
+        Arc::new(mb_ext::EnvFileSecrets),
+    );
+    deps
+}
+
+#[tokio::test]
+async fn asyncapi_mock_mounts_with_channel_runtime() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &orders_asyncapi_source()).await;
+    let deps = event_deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(
+        registry.failed_mocks().is_empty(),
+        "{:?}",
+        registry.failed_mocks()
+    );
+    let channels = registry
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
+        .expect("a channel runtime");
+    assert_eq!(channels.broker_name().as_deref(), Some("mem"));
+    assert!(
+        registry
+            .channel_runtime(DEFAULT_WORKSPACE, "nobody")
+            .is_none()
+    );
+    assert!(
+        registry.event_issues().is_empty(),
+        "{:?}",
+        registry.event_issues()
+    );
+
+    let base = serve(registry.router()).await;
+    let r = reqwest::get(format!("{base}/orders/anything"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.headers()["content-type"], "application/problem+json");
+}
+
+#[tokio::test]
+async fn settings_change_restarts_runtime() {
+    use mb_protocols::events::PublishError;
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &orders_asyncapi_source()).await;
+    let deps = event_deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let before = registry
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
+        .unwrap();
+    assert_eq!(
+        before
+            .publish_manual("orderCreated", 1, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store
+        .put_channel_settings(&mb_store::ChannelSettings {
+            mock_id: mock.id,
+            channel_id: "orderCreated".into(),
+            enabled: false,
+            triggers: None,
+            source: ResourceSource::Api,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "orders")
+        .await;
+
+    let after = registry
+        .channel_runtime(DEFAULT_WORKSPACE, "orders")
+        .unwrap();
+    assert!(!Arc::ptr_eq(&before, &after));
+    assert_eq!(
+        after
+            .publish_manual("orderCreated", 1, None)
+            .await
+            .map_err(|f| f.error),
+        Err(PublishError::Disabled("orderCreated".into()))
+    );
 }

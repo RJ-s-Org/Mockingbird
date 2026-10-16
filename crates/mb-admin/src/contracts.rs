@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_import::SourceFormat;
-use mb_mcm::{Binding, Bundle, HttpMethod, Protocol};
+use mb_mcm::{Binding, Bundle, Direction, HttpMethod, Protocol};
 use mb_store::{ContractStatus, ContractVersion, Mock, NewContractVersion};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -27,7 +27,7 @@ pub const MAX_CONTRACT_BYTES: usize = 20 * 1024 * 1024;
 /// Media types a contract upload may declare. None is CORS-safelisted (in
 /// particular not `text/plain`), so a cross-site page cannot upload without
 /// a preflight.
-pub const CONTRACT_MEDIA_TYPES: [&str; 16] = [
+pub const CONTRACT_MEDIA_TYPES: [&str; 19] = [
     "application/json",
     "application/yaml",
     "application/x-yaml",
@@ -35,6 +35,9 @@ pub const CONTRACT_MEDIA_TYPES: [&str; 16] = [
     "application/vnd.oai.openapi",
     "application/vnd.oai.openapi+json",
     "application/vnd.oai.openapi+yaml",
+    "application/vnd.aai.asyncapi",
+    "application/vnd.aai.asyncapi+json",
+    "application/vnd.aai.asyncapi+yaml",
     "application/graphql",
     "text/x-protobuf",
     "application/x-protobuf",
@@ -68,6 +71,8 @@ pub struct UploadResult {
     pub status: VersionStatus,
     /// Number of operations in the compiled contract.
     pub operations: usize,
+    /// Number of event channels in the compiled contract.
+    pub channels: usize,
 }
 
 /// A contract version without its source or compiled bundle.
@@ -81,6 +86,8 @@ pub struct ContractVersionSummary {
     pub created_at: DateTime<Utc>,
     /// Number of operations in the compiled contract.
     pub operations: usize,
+    /// Number of event channels in the compiled contract.
+    pub channels: usize,
 }
 
 /// One operation of a compiled contract.
@@ -101,7 +108,22 @@ pub struct OperationSummary {
     pub target: String,
 }
 
-/// A contract version's metadata and operations.
+/// One event channel of a compiled contract.
+#[derive(Serialize, ToSchema, Debug, PartialEq)]
+pub struct ChannelSummary {
+    pub id: String,
+    /// `publish` (the mock produces) or `subscribe` (the mock consumes).
+    pub direction: String,
+    /// `kafka`, `amqp`, `mqtt` or `websocket`.
+    pub protocol: String,
+    /// Topic, routing key, queue or WebSocket path, with `{param}`
+    /// placeholders.
+    pub address: String,
+    /// The channel's message names.
+    pub messages: Vec<String>,
+}
+
+/// A contract version's metadata, operations and channels.
 #[derive(Serialize, ToSchema, Debug)]
 pub struct ContractVersionDetail {
     pub version: i64,
@@ -114,6 +136,8 @@ pub struct ContractVersionDetail {
     /// The contract's `info.version`.
     pub api_version: String,
     pub operations: Vec<OperationSummary>,
+    /// The event channels, in bundle order.
+    pub channels: Vec<ChannelSummary>,
 }
 
 impl From<&ContractVersion> for ContractVersionSummary {
@@ -125,8 +149,27 @@ impl From<&ContractVersion> for ContractVersionSummary {
             created_by: v.created_by.clone(),
             created_at: v.created_at,
             operations: v.bundle.operations.len(),
+            channels: v.bundle.channels.len(),
         }
     }
+}
+
+fn channels(bundle: &Bundle) -> Vec<ChannelSummary> {
+    bundle
+        .channels
+        .iter()
+        .map(|c| ChannelSummary {
+            id: c.id.clone(),
+            direction: match c.direction {
+                Direction::Publish => "publish",
+                Direction::Subscribe => "subscribe",
+            }
+            .into(),
+            protocol: c.binding.protocol().into(),
+            address: c.binding.address().into(),
+            messages: c.message_names.clone(),
+        })
+        .collect()
 }
 
 fn operations(bundle: &Bundle) -> Vec<OperationSummary> {
@@ -192,7 +235,7 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
         UploadParams,
     ),
     request_body(
-        description = "A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream.",
+        description = "A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, AsyncAPI 2.x or 3.0 (JSON or YAML), or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/vnd.aai.asyncapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream.",
         content(
             (String = "application/json"),
             (String = "application/yaml"),
@@ -201,6 +244,9 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
             (String = "application/vnd.oai.openapi"),
             (String = "application/vnd.oai.openapi+json"),
             (String = "application/vnd.oai.openapi+yaml"),
+            (String = "application/vnd.aai.asyncapi"),
+            (String = "application/vnd.aai.asyncapi+json"),
+            (String = "application/vnd.aai.asyncapi+yaml"),
             (String = "application/graphql"),
             (String = "text/x-protobuf"),
             (Vec<u8> = "application/x-protobuf"),
@@ -268,6 +314,7 @@ pub async fn upload(
     let bundle =
         compiled.map_err(|e| Problem::unprocessable(format!("contract does not compile: {e}")))?;
     let operations = bundle.operations.len();
+    let channels = bundle.channels.len();
     let activate =
         params.activate.unwrap_or(false) || st.store.active_contract(m.id).await?.is_none();
     if activate {
@@ -297,6 +344,7 @@ pub async fn upload(
         version: stored.version,
         status: VersionStatus::from(&stored.status),
         operations,
+        channels,
     };
     access
         .audit(
@@ -388,6 +436,7 @@ pub async fn get_one(
         version: v.version,
         status: VersionStatus::from(&v.status),
         operations: operations(&v.bundle),
+        channels: channels(&v.bundle),
         title: v.bundle.title,
         api_version: v.bundle.version,
         source_digest: v.source_digest,
@@ -487,6 +536,8 @@ fn source_extension(source: &[u8]) -> &'static str {
         Ok(SourceFormat::Proto) => "proto",
         Ok(SourceFormat::FileDescriptorSet) => "pb",
         Ok(SourceFormat::Wsdl11) => "wsdl",
+        Ok(SourceFormat::AsyncApi2 | SourceFormat::AsyncApi3) if json => "json",
+        Ok(SourceFormat::AsyncApi2 | SourceFormat::AsyncApi3) => "yaml",
         Ok(SourceFormat::Archive) | Err(_) => match text {
             None => "bin",
             Some(t) if t.starts_with('<') => "xml",

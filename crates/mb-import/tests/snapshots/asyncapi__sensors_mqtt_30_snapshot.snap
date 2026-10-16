@@ -1,0 +1,113 @@
+---
+source: crates/mb-import/tests/asyncapi.rs
+expression: sensors()
+---
+id: sensors
+title: Sensors
+version: 1.0.0
+source_digest: "[digest]"
+operations: []
+defs:
+  temperatureReading:
+    properties:
+      at:
+        format: date-time
+        type: string
+      celsius:
+        type: number
+      sensorId:
+        type: string
+    required:
+      - sensorId
+      - celsius
+      - at
+    type: object
+channels:
+  - id: publishTemperature
+    title: Report the current temperature of a sensor.
+    address: "sensors/{sensorId}/temperature"
+    binding:
+      mqtt:
+        topic: "sensors/{sensorId}/temperature"
+        qos: 1
+        retain: false
+    direction: publish
+    message_schema:
+      $ref: "#/$defs/temperatureReading"
+    message_names:
+      - temperatureReading
+    content_type: application/json
+    parameters:
+      sensorId:
+        type: string
+    triggers:
+      - schedule:
+          every_ms: 5000
+    semantic_hints:
+      - Temperature readings of one sensor.
+      - A temperature reading.
+  - id: receiveCommand
+    title: Execute a command and acknowledge it.
+    address: "sensors/{sensorId}/commands"
+    binding:
+      mqtt:
+        topic: "sensors/{sensorId}/commands"
+        qos: 0
+        retain: false
+    direction: subscribe
+    message_schema:
+      properties:
+        command:
+          enum:
+            - reset
+            - calibrate
+          type: string
+      required:
+        - command
+      type: object
+    message_names:
+      - command
+    content_type: application/json
+    headers_schema:
+      properties:
+        replyTo:
+          description: Topic the acknowledgement is published to.
+          type: string
+      type: object
+    parameters:
+      sensorId:
+        type: string
+    reply:
+      channel: receiveCommand.reply
+      address_header: replyTo
+    semantic_hints:
+      - Commands sent to one sensor.
+      - A command for a sensor.
+  - id: receiveCommand.reply
+    title: "sensors/{sensorId}/acks"
+    address: "sensors/{sensorId}/acks"
+    binding:
+      mqtt:
+        topic: "sensors/{sensorId}/acks"
+        qos: 0
+        retain: false
+    direction: publish
+    message_schema:
+      properties:
+        command:
+          type: string
+        ok:
+          type: boolean
+      required:
+        - command
+        - ok
+      type: object
+    message_names:
+      - ack
+    content_type: application/json
+    parameters:
+      sensorId:
+        type: string
+    semantic_hints:
+      - Acknowledgements of executed commands.
+      - The outcome of a command.

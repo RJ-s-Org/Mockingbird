@@ -3,7 +3,7 @@
 use axum::extract::State;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
-use mb_store::{RequestLogEntry, RequestLogFilter};
+use mb_store::{RequestKind, RequestLogEntry, RequestLogFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
@@ -26,6 +26,8 @@ pub struct RequestsQuery {
     pub limit: Option<u32>,
     /// Only entries with a smaller id (keyset pagination).
     pub before: Option<i64>,
+    /// Request kind: `http`, `graphql`, `grpc`, `soap` or `event`.
+    pub kind: Option<String>,
 }
 
 /// One recorded request, with redacted request and response bodies.
@@ -46,6 +48,8 @@ pub struct RequestLogView {
     #[schema(value_type = Option<Object>)]
     pub response: Option<Value>,
     pub at: DateTime<Utc>,
+    /// `http`, `graphql`, `grpc`, `soap` or `event`.
+    pub kind: String,
 }
 
 impl From<RequestLogEntry> for RequestLogView {
@@ -64,6 +68,7 @@ impl From<RequestLogEntry> for RequestLogView {
             request: e.request,
             response: e.response,
             at: e.at,
+            kind: e.kind.as_str().to_string(),
         }
     }
 }
@@ -91,12 +96,21 @@ pub async fn list(
 ) -> ApiResult<Json<Vec<RequestLogView>>> {
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
+    let kind = q
+        .kind
+        .as_deref()
+        .map(|k| {
+            RequestKind::parse(k)
+                .ok_or_else(|| Problem::bad_request(format!("unknown request kind {k:?}")))
+        })
+        .transpose()?;
     let filter = RequestLogFilter {
         operation_id: q.operation,
         session: q.session,
         source: q.source,
         limit: q.limit.unwrap_or(RequestLogFilter::DEFAULT_LIMIT),
         before_id: q.before,
+        kind,
     };
     let entries = st.store.list_request_log(m.id, &filter).await?;
     Ok(Json(entries.into_iter().map(Into::into).collect()))

@@ -1,0 +1,53 @@
+asyncapi: 2.6.0
+info:
+  title: Users
+  version: 1.0.0
+servers:
+  kafka:
+    url: localhost:9092
+    protocol: kafka
+channels:
+  users:
+    description: User lifecycle events.
+    bindings:
+      kafka:
+        topic: users
+        partitions: 3
+    subscribe:
+      operationId: userCreated
+      summary: A user was created.
+      message:
+        name: UserCreated
+        schemaFormat: application/vnd.apache.avro;version=1.9.0
+        payload:
+          type: record
+          name: User
+          namespace: com.example
+          doc: A registered user.
+          fields:
+            - name: id
+              type:
+                type: string
+                logicalType: uuid
+            - name: name
+              type: string
+            - name: age
+              type: ['null', int]
+              default: null
+            - name: created
+              type:
+                type: long
+                logicalType: timestamp-millis
+            - name: status
+              type:
+                type: enum
+                name: Status
+                symbols: [ACTIVE, DISABLED]
+            - name: tags
+              type:
+                type: array
+                items: string
+            - name: attrs
+              type:
+                type: map
+                values: string

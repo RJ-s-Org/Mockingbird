@@ -118,6 +118,33 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError>;
+    /// Sorted by `channel_id`.
+    async fn list_channel_settings(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Vec<ChannelSettings>, StoreError>;
+    /// Upserts by `(mock_id, channel_id)`; publishes the owning mock.
+    async fn put_channel_settings(&self, s: &ChannelSettings) -> Result<(), StoreError>;
+    /// Publishes the owning mock when a row was deleted.
+    async fn delete_channel_settings(
+        &self,
+        mock_id: Uuid,
+        channel_id: &str,
+    ) -> Result<bool, StoreError>;
+    async fn get_event_settings(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Option<MockEventSettings>, StoreError>;
+    /// Upserts by `mock_id`; publishes the owning mock.
+    async fn put_event_settings(&self, s: &MockEventSettings) -> Result<(), StoreError>;
+    /// Takes or renews the mock's scheduler lease for `ttl`. `true` when
+    /// `holder` now holds it: it was free, expired, or already `holder`'s.
+    async fn acquire_scheduler_lease(
+        &self,
+        mock_id: Uuid,
+        holder: &str,
+        ttl: Duration,
+    ) -> Result<bool, StoreError>;
     /// `NotFound` if the key's workspace does not exist, `Conflict` if the
     /// `key_id` is taken. A workspace's keys go with it when it is deleted.
     async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError>;
@@ -259,6 +286,17 @@ impl PruneCounter {
 /// Current time at microsecond precision, which every backend round-trips.
 pub(crate) fn now() -> DateTime<Utc> {
     Utc::now().trunc_subsecs(6)
+}
+
+/// `(now + ttl, now)` at microsecond precision, for a lease acquisition.
+pub(crate) fn lease_times(ttl: Duration) -> Result<(DateTime<Utc>, DateTime<Utc>), StoreError> {
+    let at = now();
+    let expires = chrono::Duration::from_std(ttl)
+        .ok()
+        .and_then(|d| at.checked_add_signed(d))
+        .ok_or_else(|| StoreError::Invalid("lease ttl is out of range".into()))?
+        .trunc_subsecs(6);
+    Ok((expires, at))
 }
 
 /// Hex sha256.

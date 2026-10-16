@@ -247,7 +247,7 @@ async fn import_directory_uploads_archive() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert_eq!(
         out.json(),
-        json!({ "version": 1, "status": "active", "operations": 3 })
+        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0 })
     );
     let source = reqwest::get(format!("{admin}/api/v1/mocks/orders/contracts/1/source"))
         .await
@@ -305,4 +305,256 @@ fn validate_handles_proto_and_wsdl() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains("GetOrder"), "{stdout}");
+}
+
+#[test]
+fn validate_prints_channels() {
+    let out = Command::cargo_bin("mockingbird")
+        .unwrap()
+        .arg("validate")
+        .arg(repo_path("fixtures/asyncapi/streetlights-kafka-3.0.yaml"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.starts_with("Streetlights Kafka API 1.0.0 (0 operations, 4 channels)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "{:<32} publish kafka smartylighting.streetlights.1.0.action.{{streetlightId}}.turn.on\n",
+            "turnOn"
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("receiveLightMeasurement"), "{stdout}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_asyncapi_uses_asyncapi_media_type() {
+    let admin = admin_url().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("lights.asyncapi.yaml");
+    std::fs::copy(
+        repo_path("fixtures/asyncapi/streetlights-kafka-3.0.yaml"),
+        &file,
+    )
+    .unwrap();
+    let out = run(
+        &admin,
+        &["import", file.to_str().unwrap(), "--as", "lights"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        out.json(),
+        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4 })
+    );
+}
+
+#[test]
+fn parse_trigger_specs() {
+    use mockingbird::client::parse_trigger_spec;
+    assert_eq!(
+        parse_trigger_spec("every:5s").unwrap(),
+        json!({"schedule": {"every_ms": 5000}})
+    );
+    assert_eq!(
+        parse_trigger_spec("every:1m 30s").unwrap(),
+        json!({"schedule": {"every_ms": 90000}})
+    );
+    assert_eq!(
+        parse_trigger_spec("cron:*/5 * * * *").unwrap(),
+        json!({"cron": {"expr": "*/5 * * * *"}})
+    );
+    assert_eq!(
+        parse_trigger_spec("state:orders").unwrap(),
+        json!({"on_state_change": {"resource_type": "orders", "kind": "any"}})
+    );
+    assert_eq!(
+        parse_trigger_spec("state:orders:deleted").unwrap(),
+        json!({"on_state_change": {"resource_type": "orders", "kind": "deleted"}})
+    );
+    assert_eq!(
+        parse_trigger_spec("state:orders:upserted").unwrap(),
+        json!({"on_state_change": {"resource_type": "orders", "kind": "upserted"}})
+    );
+    assert_eq!(parse_trigger_spec("manual").unwrap(), json!("manual"));
+    for bad in [
+        "hourly",
+        "every:soon",
+        "state:",
+        "state:orders:sometimes",
+        "cron:",
+        "manual:x",
+    ] {
+        assert_eq!(
+            parse_trigger_spec(bad).unwrap_err(),
+            format!(
+                "unknown trigger spec \"{bad}\" (every:<duration>|cron:<expr>|state:<type>[:kind]|manual)"
+            ),
+            "{bad}"
+        );
+    }
+}
+
+/// An offline server whose config declares a `mem` memory broker and no
+/// mocks; returns its admin base URL.
+async fn admin_url_with_memory_broker() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mockingbird.yaml");
+    std::fs::write(&path, "brokers:\n  mem:\n    kind: memory\n").unwrap();
+    let args = ServeArgs {
+        config: Some(path),
+        offline: true,
+        ..ServeArgs::default()
+    };
+    let app = build_app(&args, None).await.unwrap();
+    let router = app.admin.clone();
+    Box::leak(Box::new((app, dir)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    format!("http://{addr}")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channels_cli_round_trip() {
+    let admin = admin_url_with_memory_broker().await;
+    let contract = repo_path("fixtures/asyncapi/orders-amqp-2.6.yaml");
+    let out = run(
+        &admin,
+        &["import", contract.to_str().unwrap(), "--as", "orders"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let out = run(&admin, &["channels", "list", "orders"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let ids: Vec<String> = out
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(ids.contains(&"orderCreated".to_string()), "{ids:?}");
+
+    let out = run(
+        &admin,
+        &[
+            "channels",
+            "set",
+            "orders",
+            "orderCreated",
+            "--trigger",
+            "every:5s",
+            "--trigger",
+            "manual",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let out = run(&admin, &["channels", "get", "orders", "orderCreated"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let view = out.json();
+    assert_eq!(
+        view["triggers"],
+        json!([{"schedule": {"every_ms": 5000}}, "manual"]),
+        "{view}"
+    );
+    assert_eq!(view["settings_source"], "api");
+    assert_eq!(view["enabled"], true);
+
+    // The channel runtime picks the settings up asynchronously.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let messages = loop {
+        let out = run(
+            &admin,
+            &[
+                "channels",
+                "publish",
+                "orders",
+                "orderCreated",
+                "--count",
+                "2",
+            ],
+        )
+        .await;
+        if out.code == 0 {
+            break out.json();
+        }
+        assert!(std::time::Instant::now() < deadline, "{}", out.stderr);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        messages["messages"].as_array().unwrap().len(),
+        2,
+        "{messages}"
+    );
+
+    let out = run(&admin, &["channels", "broker", "orders", "mem"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json(), json!({"broker": "mem", "source": "api"}));
+    let out = run(&admin, &["channels", "broker", "orders"]).await;
+    assert_eq!(out.json()["broker"], "mem");
+    let out = run(&admin, &["channels", "broker", "orders", "-"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["broker"], Value::Null);
+
+    let out = run(
+        &admin,
+        &[
+            "channels",
+            "set",
+            "orders",
+            "orderCreated",
+            "--disable",
+            "--contract-triggers",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let view = out.json();
+    assert_eq!(view["enabled"], false);
+    assert_eq!(view["triggers"], json!(["manual"]), "{view}");
+
+    let out = run(&admin, &["brokers", "list"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()[0]["name"], "mem", "{}", out.stdout);
+
+    // Usage errors exit 2.
+    let out = run(
+        &admin,
+        &[
+            "channels",
+            "set",
+            "orders",
+            "orderCreated",
+            "--trigger",
+            "hourly",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("unknown trigger spec"),
+        "{}",
+        out.stderr
+    );
+    let out = run(
+        &admin,
+        &[
+            "channels",
+            "publish",
+            "orders",
+            "orderCreated",
+            "--context",
+            "{nope",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
 }

@@ -62,6 +62,7 @@ fn bundle_round_trips_through_json() {
         ],
         defs,
         protocol_payload: None,
+        channels: Vec::new(),
     };
     let value = serde_json::to_value(&bundle).unwrap();
     let back: Bundle = serde_json::from_value(value).unwrap();
@@ -150,6 +151,7 @@ fn with_defs_attaches_definitions() {
         operations: vec![],
         defs,
         protocol_payload: None,
+        channels: Vec::new(),
     };
     let v = bundle.with_defs(&json!({"$ref":"#/$defs/Order"}));
     assert_eq!(v["$defs"]["Order"], order);
@@ -181,6 +183,7 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
         operations: vec![],
         defs,
         protocol_payload: None,
+        channels: Vec::new(),
     };
 
     let v = bundle.with_reachable_defs(&json!({"$ref": "#/$defs/Order"}));
@@ -368,6 +371,254 @@ fn operation_target_and_stream_item_schema() {
 }
 
 #[test]
+fn p4_bundle_without_channels_round_trips() {
+    let bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    assert!(bundle.channels.is_empty());
+    let text = serde_json::to_string(&bundle).unwrap();
+    assert_eq!(text, P2_ORDERS);
+    assert!(!text.contains("\"channels\""));
+}
+
+fn kafka_channel() -> Channel {
+    let mut parameters = serde_json::Map::new();
+    parameters.insert("region".into(), json!({"type": "string"}));
+    Channel {
+        id: "orderCreated".into(),
+        title: "Order created".into(),
+        address: "orders.{region}.created".into(),
+        binding: ChannelBinding::Kafka {
+            topic: "orders.{region}.created".into(),
+            partitions_hint: Some(3),
+        },
+        direction: Direction::Publish,
+        message_schema: json!({"$ref": "#/$defs/Order"}),
+        message_names: vec!["OrderCreated".into()],
+        content_type: "application/json".into(),
+        key_schema: Some(json!({"type": "string"})),
+        headers_schema: Some(json!({"type": "object"})),
+        parameters,
+        triggers: vec![
+            Trigger::Schedule {
+                every: std::time::Duration::from_secs(10),
+            },
+            Trigger::Cron {
+                expr: "*/5 * * * *".into(),
+            },
+            Trigger::OnStateChange {
+                resource_type: "orders".into(),
+                kind: StateChangeKind::Upserted,
+            },
+            Trigger::Manual,
+        ],
+        reply: Some(Reply {
+            channel: "orderReplies".into(),
+            address_header: Some("reply-to".into()),
+        }),
+        state_effect: Some(StateEffect {
+            resource_type: "orders".into(),
+            id_field: "id".into(),
+            delete: false,
+        }),
+        semantic_hints: vec!["orders".into()],
+    }
+}
+
+#[test]
+fn channel_round_trips() {
+    let channel = kafka_channel();
+    let expected = json!({
+        "id": "orderCreated",
+        "title": "Order created",
+        "address": "orders.{region}.created",
+        "binding": {"kafka": {"topic": "orders.{region}.created", "partitions_hint": 3}},
+        "direction": "publish",
+        "message_schema": {"$ref": "#/$defs/Order"},
+        "message_names": ["OrderCreated"],
+        "content_type": "application/json",
+        "key_schema": {"type": "string"},
+        "headers_schema": {"type": "object"},
+        "parameters": {"region": {"type": "string"}},
+        "triggers": [
+            {"schedule": {"every_ms": 10000}},
+            {"cron": {"expr": "*/5 * * * *"}},
+            {"on_state_change": {"resource_type": "orders", "kind": "upserted"}},
+            "manual"
+        ],
+        "reply": {"channel": "orderReplies", "address_header": "reply-to"},
+        "state_effect": {"resource_type": "orders", "id_field": "id", "delete": false},
+        "semantic_hints": ["orders"]
+    });
+    let v = serde_json::to_value(&channel).unwrap();
+    assert_eq!(v, expected);
+    let back: Channel = serde_json::from_value(v).unwrap();
+    assert_eq!(back, channel);
+
+    // Inside a bundle, and found by id.
+    let mut bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    bundle.channels.push(channel.clone());
+    let text = serde_json::to_string(&bundle).unwrap();
+    let back: Bundle = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, bundle);
+    assert_eq!(bundle.channel("orderCreated"), Some(&channel));
+    assert!(bundle.channel("nope").is_none());
+
+    // Optional fields are omitted when empty.
+    let minimal = Channel {
+        key_schema: None,
+        headers_schema: None,
+        parameters: serde_json::Map::new(),
+        triggers: vec![],
+        reply: None,
+        state_effect: None,
+        semantic_hints: vec![],
+        ..channel
+    };
+    let v = serde_json::to_value(&minimal).unwrap();
+    let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    for absent in [
+        "key_schema",
+        "headers_schema",
+        "parameters",
+        "triggers",
+        "reply",
+        "state_effect",
+        "semantic_hints",
+    ] {
+        assert!(!keys.contains(&absent), "{absent} in {v}");
+    }
+    assert_eq!(serde_json::from_value::<Channel>(v).unwrap(), minimal);
+}
+
+#[test]
+fn websocket_binding_serializes_as_websocket() {
+    let b = ChannelBinding::WebSocket {
+        path: "/chat".into(),
+    };
+    let v = serde_json::to_value(&b).unwrap();
+    assert_eq!(v, json!({"websocket": {"path": "/chat"}}));
+    assert_eq!(serde_json::from_value::<ChannelBinding>(v).unwrap(), b);
+}
+
+#[test]
+fn state_change_kind_defaults_to_any() {
+    assert_eq!(StateChangeKind::default(), StateChangeKind::Any);
+    let t: Trigger =
+        serde_json::from_value(json!({"on_state_change": {"resource_type": "orders"}})).unwrap();
+    assert_eq!(
+        t,
+        Trigger::OnStateChange {
+            resource_type: "orders".into(),
+            kind: StateChangeKind::Any,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(StateChangeKind::Deleted).unwrap(),
+        json!("deleted")
+    );
+}
+
+#[test]
+fn effective_triggers_defaults() {
+    let mut c = kafka_channel();
+    c.triggers.clear();
+    assert_eq!(c.effective_triggers(), vec![Trigger::Manual]);
+    c.triggers = vec![Trigger::Cron {
+        expr: "* * * * *".into(),
+    }];
+    assert_eq!(c.effective_triggers(), c.triggers);
+    c.direction = Direction::Subscribe;
+    assert_eq!(c.effective_triggers(), vec![]);
+    c.triggers.clear();
+    assert_eq!(c.effective_triggers(), vec![]);
+    assert_eq!(MIN_SCHEDULE_INTERVAL, std::time::Duration::from_millis(100));
+}
+
+#[test]
+fn normalized_cron_adds_seconds() {
+    assert_eq!(Trigger::normalized_cron("*/5 * * * *"), "0 */5 * * * *");
+    assert_eq!(Trigger::normalized_cron("  */5 * * * *  "), "0 */5 * * * *");
+    assert_eq!(Trigger::normalized_cron("30 */5 * * * *"), "30 */5 * * * *");
+    assert_eq!(
+        Trigger::normalized_cron(" 30 */5 * * * * "),
+        "30 */5 * * * *"
+    );
+}
+
+#[test]
+fn schedule_every_ms_is_whole_milliseconds() {
+    let t = Trigger::Schedule {
+        every: std::time::Duration::from_micros(1_500_900),
+    };
+    assert_eq!(
+        serde_json::to_value(&t).unwrap(),
+        json!({"schedule": {"every_ms": 1500}})
+    );
+    let back: Trigger = serde_json::from_value(json!({"schedule": {"every_ms": 250}})).unwrap();
+    assert_eq!(
+        back,
+        Trigger::Schedule {
+            every: std::time::Duration::from_millis(250)
+        }
+    );
+}
+
+#[test]
+fn binding_protocol_and_address() {
+    let cases = [
+        (
+            ChannelBinding::Kafka {
+                topic: "orders".into(),
+                partitions_hint: None,
+            },
+            "kafka",
+            "orders",
+        ),
+        (
+            ChannelBinding::Amqp {
+                exchange: "events".into(),
+                exchange_type: "topic".into(),
+                routing_key: "orders.created".into(),
+                queue: Some("q".into()),
+            },
+            "amqp",
+            "orders.created",
+        ),
+        (
+            ChannelBinding::Amqp {
+                exchange: String::new(),
+                exchange_type: "direct".into(),
+                routing_key: String::new(),
+                queue: Some("work".into()),
+            },
+            "amqp",
+            "work",
+        ),
+        (
+            ChannelBinding::Mqtt {
+                topic: "sensors/{id}/temp".into(),
+                qos: 1,
+                retain: false,
+            },
+            "mqtt",
+            "sensors/{id}/temp",
+        ),
+        (
+            ChannelBinding::WebSocket {
+                path: "/chat".into(),
+            },
+            "websocket",
+            "/chat",
+        ),
+    ];
+    for (b, protocol, address) in cases {
+        assert_eq!(b.protocol(), protocol);
+        assert_eq!(b.address(), address);
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(serde_json::from_value::<ChannelBinding>(v).unwrap(), b);
+    }
+}
+
+#[test]
 fn grpc_services_lists_full_service_names() {
     let grpc = |package: &str, service: &str, method: &str| {
         let mut o = op(method, OperationKind::Query, vec![]);
@@ -392,6 +643,7 @@ fn grpc_services_lists_full_service_names() {
         ],
         defs: serde_json::Map::new(),
         protocol_payload: None,
+        channels: vec![],
     };
     let services: Vec<String> = bundle.grpc_services().into_iter().collect();
     assert_eq!(services, ["Bare", "routeguide.RouteGuide"]);

@@ -10,6 +10,7 @@ use arc_swap::ArcSwapOption;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec, StreamConfig};
 use mb_ext::{Extensions, Tenancy};
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
+use mb_protocols::events::EventDeps;
 use mb_protocols::{
     DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, ProtocolSettings,
     RequestRecorder, ScenarioRuntime, Shutdown,
@@ -53,6 +54,8 @@ pub struct RuntimeDeps {
     pub protocols: ProtocolSettings,
     /// Stream limits and pacing handed to every engine.
     pub stream: StreamConfig,
+    /// Brokers and the scheduler lease every channel runtime uses.
+    pub events: EventDeps,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so

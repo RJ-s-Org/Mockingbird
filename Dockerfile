@@ -18,6 +18,15 @@ RUN mkdir /manifests \
  && find . \( -name Cargo.toml -o -name Cargo.lock \) -exec cp --parents {} /manifests/ \;
 
 FROM rust:1.97-bookworm AS builder
+# Cargo features of the binary. The default builds the full image (Kafka,
+# AMQP and MQTT brokers; librdkafka is compiled with cmake). For the slim
+# image (WebSocket channels and the memory broker only, no system libraries):
+#   docker build --build-arg FEATURES=--no-default-features -t mockingbird:slim .
+ARG FEATURES="--features full"
+# libcurl headers: librdkafka 2.12 includes <curl/curl.h> even without curl.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY --from=manifests /manifests ./
 # Build the dependencies against stub sources (an empty lib per crate, a
@@ -32,14 +41,14 @@ RUN for manifest in crates/*/Cargo.toml; do \
           | while read -r name; do touch "$dir/tests/$name.rs"; done; \
     done \
  && echo 'fn main() {}' > crates/mockingbird/src/main.rs \
- && cargo build --release --locked -p mockingbird \
+ && cargo build --release --locked -p mockingbird $FEATURES \
  && rm -rf crates
 COPY crates crates
 COPY --from=console /src/crates/mb-console/dist crates/mb-console/dist
 # COPY keeps the context's timestamps, which can be older than the stub
 # build; touch the sources so Cargo rebuilds the workspace crates.
 RUN find crates -name '*.rs' -exec touch {} + \
- && cargo build --release --locked -p mockingbird
+ && cargo build --release --locked -p mockingbird $FEATURES
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /src/target/release/mockingbird /usr/local/bin/mockingbird

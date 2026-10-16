@@ -5,6 +5,29 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+/// What kind of call a [`RequestRecord`] records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestKind {
+    Http,
+    Graphql,
+    Grpc,
+    Soap,
+    /// A produced or consumed event-channel message.
+    Event,
+}
+
+impl RequestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestKind::Http => "http",
+            RequestKind::Graphql => "graphql",
+            RequestKind::Grpc => "grpc",
+            RequestKind::Soap => "soap",
+            RequestKind::Event => "event",
+        }
+    }
+}
+
 /// One served data-plane call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestRecord {
@@ -30,6 +53,7 @@ pub struct RequestRecord {
     pub request_body_bytes: Option<usize>,
     /// The response body, when it is JSON.
     pub response: Option<Value>,
+    pub kind: RequestKind,
 }
 
 /// Sink for [`RequestRecord`]s. Called on the request path, so it must not

@@ -13,11 +13,12 @@ use axum::Router;
 use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
-use mb_mcm::Protocol;
+use mb_mcm::{Channel, ChannelBinding, Direction, Protocol};
+use mb_protocols::events::{ChannelRuntime, ChannelSetup, EventSetup};
 use mb_protocols::grpc::{GrpcError, GrpcMock, GrpcServer};
 use mb_protocols::http_rest::{self, problem};
 use mb_protocols::{MountPrefix, StateHealth, graphql, soap};
-use mb_store::{ControlChange, DEFAULT_WORKSPACE, Mock};
+use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, Mock};
 use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
@@ -44,6 +45,11 @@ struct Mounted {
     served: Served,
     /// The runtime's state store circuit breaker.
     state_health: Arc<StateHealth>,
+    /// The channels of a mock whose contract has some. Dropping the last
+    /// handle (when the mock is replaced or unmounted) stops its tasks.
+    events: Option<Arc<ChannelRuntime>>,
+    /// The contract's channels, for the startup log.
+    channels: Vec<Channel>,
 }
 
 /// How a mounted mock is reached.
@@ -336,6 +342,60 @@ impl MockRegistry {
         }
     }
 
+    /// The channel runtime of mounted mock `name` in `workspace`; `None`
+    /// when it is not mounted or its contract has no channels.
+    pub fn channel_runtime(&self, workspace: &str, name: &str) -> Option<Arc<ChannelRuntime>> {
+        self.mounted
+            .load()
+            .iter()
+            .find(|m| m.is(workspace, name))
+            .and_then(|m| m.events.clone())
+    }
+
+    /// `(label, reason)` for every reason a mounted mock's channels are not
+    /// all working (see [`ChannelRuntime::health`]), sorted; see
+    /// [`mock_label`].
+    pub fn event_issues(&self) -> Vec<(String, String)> {
+        let mut issues: Vec<(String, String)> = self
+            .mounted
+            .load()
+            .iter()
+            .filter_map(|m| m.events.as_ref().map(|events| (m.label(), events.health())))
+            .flat_map(|(label, reasons)| reasons.into_iter().map(move |r| (label.clone(), r)))
+            .collect();
+        issues.sort();
+        issues
+    }
+
+    /// `(mock label, protocol, channel id, direction, address)` of every channel
+    /// of the mounted mocks with a channel runtime, by mock. WebSocket
+    /// addresses are paths below the mock's route prefix.
+    pub fn served_channels(&self) -> Vec<ServedChannel> {
+        let mut out = Vec::new();
+        for m in self.mounted.load().iter().filter(|m| m.events.is_some()) {
+            for channel in &m.channels {
+                let address = match (&channel.binding, m.prefix()) {
+                    (ChannelBinding::WebSocket { path }, Some(prefix)) => {
+                        format!("{}{path}", prefix.trim_end_matches('/'))
+                    }
+                    (binding, _) => binding.address().to_string(),
+                };
+                out.push(ServedChannel {
+                    mock: m.label(),
+                    protocol: channel.binding.protocol(),
+                    id: channel.id.clone(),
+                    direction: match channel.direction {
+                        Direction::Publish => "publish",
+                        Direction::Subscribe => "subscribe",
+                    },
+                    address,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.mock.cmp(&b.mock));
+        out
+    }
+
     /// Labels (see [`mock_label`]) of mounted mocks currently serving
     /// statelessly because their state store calls are failing, sorted.
     pub fn degraded_mocks(&self) -> Vec<String> {
@@ -454,6 +514,19 @@ impl MockRegistry {
     }
 }
 
+/// One channel of a mounted mock, as the startup log lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServedChannel {
+    pub mock: String,
+    /// `kafka`, `amqp`, `mqtt` or `websocket`.
+    pub protocol: &'static str,
+    pub id: String,
+    /// `publish` (the mock produces) or `subscribe` (it consumes).
+    pub direction: &'static str,
+    /// The broker address, or for WebSocket the path on the data plane.
+    pub address: String,
+}
+
 /// The path below `prefix`, with a leading `/`, when `path` lies under
 /// `prefix` at a segment boundary.
 fn strip_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -493,10 +566,31 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
     };
     let state_health = Arc::clone(&runtime.state_health);
     let protocol = runtime.bundle().protocol();
+    let channels = runtime.bundle().channels.clone();
     let runtime = Arc::new(runtime);
+    let events = if channels.is_empty() {
+        None
+    } else {
+        let setup = event_setup(deps.store.as_ref(), mock, &channels)
+            .await
+            .map_err(|error| {
+                let error = format!("{error:#}");
+                tracing::error!(mock = %label, %error, "cannot load the event settings; keeping any previous version mounted");
+                error
+            })?;
+        Some(ChannelRuntime::start(
+            Arc::clone(&runtime),
+            deps.events.clone(),
+            setup,
+        ))
+    };
+    let ws = events.as_ref().and_then(|events| events.ws_router());
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
-        router,
+        router: match &ws {
+            Some(ws) => ws.clone().fallback_service(router),
+            None => router,
+        },
     };
     let served = match protocol {
         Protocol::Http => http_rest::try_router(runtime)
@@ -519,12 +613,56 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
             name: mock.name.clone(),
             served,
             state_health,
+            events,
+            channels,
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
             Err(format!("cannot route the contract: {error}"))
         }
     }
+}
+
+/// The stored event settings of `mock`: its broker and, by channel id,
+/// each stored channel's `enabled` and triggers (the contract's when the
+/// stored row keeps them).
+async fn event_setup(
+    store: &dyn ControlStore,
+    mock: &Mock,
+    channels: &[Channel],
+) -> anyhow::Result<EventSetup> {
+    use anyhow::Context as _;
+    let broker = store
+        .get_event_settings(mock.id)
+        .await
+        .with_context(|| format!("loading the event settings of mock {:?}", mock.name))?
+        .and_then(|s| s.broker);
+    let stored = store
+        .list_channel_settings(mock.id)
+        .await
+        .with_context(|| format!("loading the channel settings of mock {:?}", mock.name))?;
+    let channels = stored
+        .into_iter()
+        .map(|s| {
+            let triggers = s.triggers.unwrap_or_else(|| {
+                channels
+                    .iter()
+                    .find(|c| c.id == s.channel_id)
+                    .map(Channel::effective_triggers)
+                    .unwrap_or_default()
+            });
+            let setup = ChannelSetup {
+                enabled: s.enabled,
+                triggers,
+            };
+            (s.channel_id, setup)
+        })
+        .collect();
+    Ok(EventSetup {
+        broker,
+        channels,
+        lease_key: mock.id.to_string(),
+    })
 }
 
 #[cfg(test)]
