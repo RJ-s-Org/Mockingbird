@@ -116,13 +116,15 @@ impl Element {
     pub(crate) fn resolve(&self, value: &str) -> Option<QName> {
         let value = value.trim();
         let (prefix, local) = value.split_once(':').unwrap_or(("", value));
-        let ns = lookup_in(&self.scope, prefix).map(str::to_owned).or_else(|| {
-            if prefix.is_empty() {
-                Some(String::new())
-            } else {
-                None
-            }
-        })?;
+        let ns = lookup_in(&self.scope, prefix)
+            .map(str::to_owned)
+            .or_else(|| {
+                if prefix.is_empty() {
+                    Some(String::new())
+                } else {
+                    None
+                }
+            })?;
         Some(QName {
             ns,
             local: local.to_owned(),
