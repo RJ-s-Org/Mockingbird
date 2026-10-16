@@ -1,7 +1,12 @@
 //! Mockingbird Contract Model: protocol-neutral description of an API contract.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+/// The shortest interval a [`Trigger::Schedule`] may fire at.
+pub const MIN_SCHEDULE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +25,9 @@ pub struct Bundle {
     /// descriptor set or WSDL); absent for HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_payload: Option<ProtocolPayload>,
+    /// Event-driven channels (AsyncAPI); absent for request/response contracts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<Channel>,
 }
 
 /// Protocol-native material carried next to the operations.
@@ -266,6 +274,10 @@ impl Bundle {
         self.operations.iter().find(|o| o.id == id)
     }
 
+    pub fn channel(&self, id: &str) -> Option<&Channel> {
+        self.channels.iter().find(|c| c.id == id)
+    }
+
     /// Clone `schema` with this bundle's definitions attached as `$defs`, so
     /// it can be validated or faked standalone.
     pub fn with_defs(&self, schema: &Value) -> Value {
@@ -289,6 +301,194 @@ impl Bundle {
             }
         }
         attach_defs(schema, reachable)
+    }
+}
+
+/// A channel's direction from the mock's point of view.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Mockingbird produces messages on the channel.
+    Publish,
+    /// Mockingbird consumes messages from the channel.
+    Subscribe,
+}
+
+/// Where a channel's messages travel. Topics, routing keys and paths keep
+/// the contract's `{param}` placeholders.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelBinding {
+    Kafka {
+        topic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partitions_hint: Option<u32>,
+    },
+    Amqp {
+        /// `""` is the default exchange.
+        exchange: String,
+        /// `direct`, `topic`, `fanout` or `headers`.
+        exchange_type: String,
+        routing_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue: Option<String>,
+    },
+    Mqtt {
+        topic: String,
+        /// 0..=2.
+        qos: u8,
+        retain: bool,
+    },
+    #[serde(rename = "websocket")]
+    WebSocket { path: String },
+}
+
+impl ChannelBinding {
+    /// `kafka`, `amqp`, `mqtt` or `websocket`.
+    pub fn protocol(&self) -> &'static str {
+        match self {
+            ChannelBinding::Kafka { .. } => "kafka",
+            ChannelBinding::Amqp { .. } => "amqp",
+            ChannelBinding::Mqtt { .. } => "mqtt",
+            ChannelBinding::WebSocket { .. } => "websocket",
+        }
+    }
+
+    /// The Kafka topic, the AMQP routing key (the queue when the routing
+    /// key is empty), the MQTT topic or the WebSocket path.
+    pub fn address(&self) -> &str {
+        match self {
+            ChannelBinding::Kafka { topic, .. } | ChannelBinding::Mqtt { topic, .. } => topic,
+            ChannelBinding::Amqp {
+                routing_key, queue, ..
+            } if routing_key.is_empty() => queue.as_deref().unwrap_or(routing_key),
+            ChannelBinding::Amqp { routing_key, .. } => routing_key,
+            ChannelBinding::WebSocket { path } => path,
+        }
+    }
+}
+
+/// Which resource changes fire a [`Trigger::OnStateChange`].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StateChangeKind {
+    Upserted,
+    Deleted,
+    #[default]
+    Any,
+}
+
+/// When a publish channel produces a message.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    /// Every `every` (serialized as whole milliseconds, `every_ms`).
+    Schedule {
+        #[serde(rename = "every_ms", with = "duration_ms")]
+        every: Duration,
+    },
+    /// A 5- or 6-field cron expression (see [`Trigger::normalized_cron`]).
+    Cron { expr: String },
+    /// When a resource of `resource_type` changes in the mock's state.
+    OnStateChange {
+        resource_type: String,
+        #[serde(default)]
+        kind: StateChangeKind,
+    },
+    /// Only on demand.
+    Manual,
+}
+
+impl Trigger {
+    /// A 5-field expression gains a leading seconds field (`0 ` + expr);
+    /// anything else is returned trimmed.
+    pub fn normalized_cron(expr: &str) -> String {
+        let trimmed = expr.trim();
+        if trimmed.split_whitespace().count() == 5 {
+            format!("0 {trimmed}")
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+mod duration_ms {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        u64::deserialize(d).map(Duration::from_millis)
+    }
+}
+
+/// Where a subscribe channel answers each consumed message.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct Reply {
+    /// The id of a [`Direction::Publish`] channel.
+    pub channel: String,
+    /// A message header naming the reply address, overriding the channel's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_header: Option<String>,
+}
+
+/// How a consumed message changes the mock's state.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct StateEffect {
+    pub resource_type: String,
+    /// The message field carrying the resource id.
+    pub id_field: String,
+    #[serde(default)]
+    pub delete: bool,
+}
+
+/// An event-driven channel.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct Channel {
+    pub id: String,
+    pub title: String,
+    /// As in the contract, with `{param}` placeholders kept.
+    pub address: String,
+    pub binding: ChannelBinding,
+    pub direction: Direction,
+    /// JSON Schema 2020-12; a `oneOf` over the messages when several.
+    pub message_schema: Value,
+    pub message_names: Vec<String>,
+    /// Usually `application/json`.
+    pub content_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers_schema: Option<Value>,
+    /// Address parameter name → schema.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub parameters: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<Trigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<Reply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_effect: Option<StateEffect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_hints: Vec<String>,
+}
+
+impl Channel {
+    /// Publish channels: their triggers, or `[Manual]` when none are
+    /// declared. Subscribe channels never fire triggers.
+    pub fn effective_triggers(&self) -> Vec<Trigger> {
+        match self.direction {
+            Direction::Publish if self.triggers.is_empty() => vec![Trigger::Manual],
+            Direction::Publish => self.triggers.clone(),
+            Direction::Subscribe => Vec::new(),
+        }
     }
 }
 

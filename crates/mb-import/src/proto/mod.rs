@@ -346,6 +346,7 @@ fn bundle(compiled: &Compiled, source_digest: String) -> Bundle {
         protocol_payload: Some(ProtocolPayload::Grpc {
             file_descriptor_set: compiled.file_descriptor_set.clone(),
         }),
+        channels: Vec::new(),
     }
 }
 

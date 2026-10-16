@@ -590,6 +590,7 @@ fn compile_text(sdl: &str, bytes: &[u8], title: Option<String>) -> Result<Bundle
         protocol_payload: Some(ProtocolPayload::Graphql {
             sdl: sdl.to_owned(),
         }),
+        channels: Vec::new(),
     })
 }
 

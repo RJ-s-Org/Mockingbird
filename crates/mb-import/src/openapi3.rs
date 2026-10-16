@@ -459,5 +459,6 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
         operations,
         defs,
         protocol_payload: None,
+        channels: Vec::new(),
     })
 }
