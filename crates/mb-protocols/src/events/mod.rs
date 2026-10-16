@@ -6,6 +6,8 @@ mod address;
 mod broker;
 mod consume;
 mod memory;
+#[cfg(feature = "mqtt")]
+mod mqtt;
 mod produce;
 mod runtime;
 mod triggers;
@@ -17,6 +19,8 @@ pub use broker::{
     SaslConfig,
 };
 pub use memory::MemoryBroker;
+#[cfg(feature = "mqtt")]
+pub use mqtt::MqttClient;
 pub use runtime::{
     ChannelActivity, ChannelRuntime, ChannelSetup, EventDeps, EventSetup, PublishError, Published,
 };
