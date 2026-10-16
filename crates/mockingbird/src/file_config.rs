@@ -1,5 +1,5 @@
 //! `mockingbird.yaml`: server, storage, LLM profiles, observability,
-//! protocol settings and mocks declared as code.
+//! protocol settings, message brokers and mocks declared as code.
 //!
 //! Precedence: the file < `MB_*` environment variables ([`apply_env`]) <
 //! command-line flags ([`crate::config::apply_flags`]).
@@ -9,9 +9,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use mb_engine::StreamConfig;
 use mb_protocols::ProtocolSettings;
+use mb_protocols::events::{BrokerConfig, BrokerKind, SaslConfig};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -36,6 +37,8 @@ pub struct FileConfig {
     pub observability: ObservabilityConfig,
     /// Protocol knobs shared by every mock. Read at startup.
     pub protocols: ProtocolsConfig,
+    /// Message brokers the mocks' channels use, by name. Read at startup.
+    pub brokers: BTreeMap<String, FileBroker>,
     pub mocks: BTreeMap<String, FileMock>,
 }
 
@@ -316,6 +319,117 @@ impl Default for GrpcConfig {
             max_message_bytes: 4 * 1024 * 1024,
         }
     }
+}
+
+/// One `brokers:` entry: a connection to a message broker.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileBroker {
+    /// `kafka`, `amqp`, `mqtt` or `memory`.
+    pub kind: String,
+    /// AMQP and MQTT: the broker URL, without a password.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Kafka: comma-separated `host:port` list.
+    #[serde(default)]
+    pub bootstrap_servers: Option<String>,
+    #[serde(default)]
+    pub tls: bool,
+    /// CA bundle (PEM) trusted for TLS, in addition to the system roots.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+    #[serde(default)]
+    pub sasl: Option<FileSasl>,
+    /// Prefix of the client ids and consumer groups Mockingbird uses.
+    #[serde(default = "default_client_id_prefix")]
+    pub client_id_prefix: String,
+}
+
+fn default_client_id_prefix() -> String {
+    "mockingbird".into()
+}
+
+/// SASL credentials of a broker.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileSasl {
+    pub mechanism: String,
+    pub username: String,
+    /// A secret reference (`env:NAME` or `file:/path`), never a password.
+    pub password: String,
+}
+
+/// The broker connections of the `brokers:` section, validated: a known
+/// `kind` compiled into this build, the address that kind needs, no
+/// password in a `url` and a secret reference as the SASL password.
+pub fn broker_configs(cfg: &FileConfig) -> anyhow::Result<Vec<BrokerConfig>> {
+    cfg.brokers
+        .iter()
+        .map(|(name, broker)| broker_config(name, broker))
+        .collect()
+}
+
+fn broker_config(name: &str, broker: &FileBroker) -> anyhow::Result<BrokerConfig> {
+    let kind = match broker.kind.as_str() {
+        "kafka" => BrokerKind::Kafka,
+        "amqp" => BrokerKind::Amqp,
+        "mqtt" => BrokerKind::Mqtt,
+        "memory" => BrokerKind::Memory,
+        other => bail!("brokers.{name}.kind: unknown broker kind \"{other}\""),
+    };
+    let url = match kind {
+        BrokerKind::Kafka => broker
+            .bootstrap_servers
+            .clone()
+            .ok_or_else(|| anyhow!("brokers.{name}.bootstrap_servers: required for kafka"))?,
+        BrokerKind::Amqp | BrokerKind::Mqtt => broker
+            .url
+            .clone()
+            .ok_or_else(|| anyhow!("brokers.{name}.url: required for {}", kind.as_str()))?,
+        BrokerKind::Memory => broker.url.clone().unwrap_or_default(),
+    };
+    if broker.url.as_deref().is_some_and(has_password) {
+        bail!("brokers.{name}.url: put the password in sasl.password as a secret reference");
+    }
+    let sasl = match &broker.sasl {
+        Some(sasl) => {
+            if !crate::reconcile::valid_secret_ref(&sasl.password) {
+                bail!(
+                    "brokers.{name}.sasl.password: must be a secret reference (env:NAME or file:/path), not a password"
+                );
+            }
+            Some(SaslConfig {
+                mechanism: sasl.mechanism.clone(),
+                username: sasl.username.clone(),
+                password_ref: sasl.password.clone(),
+            })
+        }
+        None => None,
+    };
+    if !kind.compiled() {
+        let kind = kind.as_str();
+        bail!(
+            "brokers.{name}: this build has no {kind} support (use the full image or build with --features {kind})"
+        );
+    }
+    Ok(BrokerConfig {
+        name: name.to_string(),
+        kind,
+        url,
+        tls: broker.tls,
+        ca_file: broker.ca_file.clone(),
+        sasl,
+        client_id_prefix: broker.client_id_prefix.clone(),
+    })
+}
+
+/// Whether `url`'s userinfo (`user:password@`) holds a password.
+fn has_password(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]

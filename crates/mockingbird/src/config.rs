@@ -8,10 +8,13 @@ use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use axum::Router;
 use clap::{Parser, Subcommand};
+use mb_admin::channels::SharedChannelControl;
 use mb_ext::{ExtError, Extensions, SecretStore};
+use mb_protocols::events::{Brokers, EventDeps};
 use mb_store::ControlStore;
 
 use crate::client::ClientCommand;
+use crate::events::{RegistryChannels, StoreLease};
 use crate::file_config::{self, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile};
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
@@ -131,18 +134,23 @@ pub struct App {
     pub watch: Option<WatchGuard>,
     /// The request log writer.
     pub recorder: Arc<StoreRecorder>,
+    /// The configured message brokers (the `brokers:` section).
+    pub brokers: Arc<Brokers>,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
 pub const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl App {
-    /// Graceful shutdown: stops watching the config file and writes the
-    /// queued request-log entries (waiting at most
-    /// [`SHUTDOWN_DRAIN_TIMEOUT`]).
+    /// Graceful shutdown: stops watching the config file, flushes the
+    /// brokers' queued messages and writes the queued request-log entries
+    /// (each waiting at most [`SHUTDOWN_DRAIN_TIMEOUT`], concurrently).
     pub async fn shutdown(self) {
         drop(self.watch);
-        self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT).await;
+        tokio::join!(
+            self.brokers.shutdown(SHUTDOWN_DRAIN_TIMEOUT),
+            self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT)
+        );
     }
 }
 
@@ -348,6 +356,7 @@ pub async fn build_app_with(
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| "opening the state store")?;
 
+    let broker_configs = file_config::broker_configs(&cfg).context("applying the configuration")?;
     let report = reconcile::reconcile(store.as_ref(), state.as_ref(), &cfg)
         .await
         .context("applying the configuration")?;
@@ -368,7 +377,15 @@ pub async fn build_app_with(
         default_profile: DefaultProfile::new(cfg.llm.default_profile.clone()),
         protocols,
         stream,
+        events: EventDeps {
+            brokers: Brokers::new(broker_configs, ext.secrets.clone()),
+            lease: Arc::new(StoreLease {
+                store: store.clone(),
+            }),
+            holder: uuid::Uuid::new_v4().to_string(),
+        },
     };
+    let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await?;
     registry.spawn_watcher(deps.clone());
@@ -377,6 +394,19 @@ pub async fn build_app_with(
             "serving {name} at http://{}:{}{prefix}",
             cfg.server.host,
             cfg.server.port
+        );
+    }
+    for c in registry.served_channels() {
+        let address = match c.protocol {
+            "websocket" => format!("ws://{}:{}{}", cfg.server.host, cfg.server.port, c.address),
+            _ => c.address,
+        };
+        tracing::info!(
+            "serving {} {} channel {} ({}) at {address}",
+            c.mock,
+            c.protocol,
+            c.id,
+            c.direction
         );
     }
     let grpc = registry.grpc();
@@ -406,7 +436,13 @@ pub async fn build_app_with(
         state: state.clone(),
         registry: registry.clone(),
         prometheus,
-    }));
+    }))
+    .layer(axum::Extension::<SharedChannelControl>(Arc::new(
+        RegistryChannels {
+            registry: registry.clone(),
+            brokers: brokers.clone(),
+        },
+    )));
     if let Some(routes) = ext.admin_hooks.routes() {
         admin = admin.merge(routes);
     }
@@ -444,6 +480,7 @@ pub async fn build_app_with(
         config: cfg,
         watch,
         recorder,
+        brokers,
     })
 }
 

@@ -489,7 +489,7 @@ fn valid_identifier(name: &str) -> bool {
 }
 
 /// `env:NAME` or `file:/path` with a non-empty name or path.
-fn valid_secret_ref(reference: &str) -> bool {
+pub(crate) fn valid_secret_ref(reference: &str) -> bool {
     reference
         .strip_prefix("env:")
         .or_else(|| reference.strip_prefix("file:"))

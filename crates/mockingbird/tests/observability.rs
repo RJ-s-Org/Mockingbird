@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use mb_engine::StreamConfig;
 use mb_ext::Extensions;
 use mb_protocols::ProtocolSettings;
+use mb_protocols::events::EventDeps;
 use mb_protocols::{RequestKind, RequestRecord, RequestRecorder};
 use mb_state::{
     MemoryStore, SessionInfo, SessionKey, SqlStateStore, StateChanged, StateError, StateStore,
@@ -306,6 +307,7 @@ fn deps(
         default_profile: None.into(),
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
+        events: EventDeps::default(),
     }
 }
 

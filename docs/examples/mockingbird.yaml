@@ -60,6 +60,24 @@ protocols:
   grpc:
     max_message_bytes: 4194304   # largest message decoded or encoded
 
+# Message brokers the AsyncAPI mocks' channels publish to and consume from.
+# Read at startup. kind: kafka | amqp | mqtt | memory (in-process, for tests).
+# kafka needs bootstrap_servers; amqp and mqtt need url. Passwords never go
+# in a url: put them in sasl.password as a secret reference.
+brokers:
+  local:
+    kind: memory
+  # rabbit:
+  #   kind: amqp
+  #   url: amqp://127.0.0.1:5672/%2f
+  #   tls: false
+  #   ca_file: /etc/ssl/rabbit-ca.pem
+  #   sasl: {mechanism: PLAIN, username: mockingbird, password: env:RABBIT_PASSWORD}
+  #   client_id_prefix: mockingbird
+  # kafka:
+  #   kind: kafka
+  #   bootstrap_servers: 127.0.0.1:9092
+
 mocks:
   orders:
     contract: ../../fixtures/openapi/orders-3.0.yaml   # relative to this file

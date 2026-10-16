@@ -28,7 +28,9 @@ pub struct OpsState {
 /// - `/readyz`: `503 unavailable` when the control store is unreachable;
 ///   `200 degraded` (with `reasons`) when the state store is unreachable, a
 ///   mock failed to rebuild (`mock <name>: <error>`; it keeps serving its
-///   previous version) or a mounted mock is serving statelessly; else
+///   previous version), a mock's channels are not all working (`mock
+///   <name>: <reason>`, e.g. an unreachable broker) or a mounted mock is
+///   serving statelessly; else
 ///   `200 ready`. Each store ping is bounded by [`PING_TIMEOUT`].
 /// - `/metrics`: Prometheus text exposition.
 pub fn router(st: OpsState) -> Router {
@@ -76,6 +78,9 @@ async fn readyz(State(st): State<OpsState>) -> Response {
     }
     for (mock, error) in st.registry.failed_mocks() {
         reasons.push(format!("mock {mock}: {error}"));
+    }
+    for (mock, reason) in st.registry.event_issues() {
+        reasons.push(format!("mock {mock}: {reason}"));
     }
     for mock in st.registry.degraded_mocks() {
         reasons.push(format!(

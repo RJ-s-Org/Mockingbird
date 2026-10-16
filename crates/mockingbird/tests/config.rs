@@ -182,6 +182,11 @@ fn loads_full_example_config() {
     assert_eq!(p.sse.keepalive, Duration::from_secs(15));
     assert_eq!(p.grpc.max_message_bytes, 4 * 1024 * 1024);
 
+    assert_eq!(cfg.brokers.len(), 1);
+    assert_eq!(cfg.brokers["local"].kind, "memory");
+    let brokers = file_config::broker_configs(&cfg).unwrap();
+    assert_eq!(brokers[0].name, "local");
+
     let ticks = &cfg.mocks["events"].scenarios["trickle"];
     assert_eq!(ticks.stream_items, Some(3));
     assert_eq!(ticks.stream_item_interval, Some(Duration::from_millis(500)));
@@ -1308,4 +1313,103 @@ mocks:
         .unwrap();
     let text = sse_until_keepalive(resp).await;
     assert_eq!(text.matches("event: tick").count(), 5, "{text}");
+}
+
+/// `broker_configs` error for a config with one broker `b` declared as `body`.
+fn broker_error(ws: &Workspace, body: &str) -> String {
+    let cfg = ws.load(&format!("brokers:\n  b:\n{body}"));
+    match file_config::broker_configs(&cfg) {
+        Ok(configs) => panic!("expected an error, got {configs:?}"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+#[test]
+fn brokers_section_parses_and_validates() {
+    let ws = Workspace::new();
+
+    let cfg = ws.load("brokers:\n  local:\n    kind: memory\n");
+    let configs = file_config::broker_configs(&cfg).unwrap();
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "local");
+    assert_eq!(configs[0].kind, mb_protocols::events::BrokerKind::Memory);
+    assert_eq!(configs[0].client_id_prefix, "mockingbird");
+    assert!(!configs[0].tls);
+
+    let e = broker_error(&ws, "    kind: nats\n");
+    assert!(
+        e.contains("brokers.b.kind: unknown broker kind \"nats\""),
+        "{e}"
+    );
+
+    let e = broker_error(&ws, "    kind: kafka\n");
+    assert!(e.contains("brokers.b.bootstrap_servers"), "{e}");
+    let e = broker_error(&ws, "    kind: amqp\n");
+    assert!(e.contains("brokers.b") && e.contains("url"), "{e}");
+    let e = broker_error(&ws, "    kind: mqtt\n");
+    assert!(e.contains("brokers.b") && e.contains("url"), "{e}");
+
+    let e = broker_error(
+        &ws,
+        "    kind: amqp\n    url: amqp://guest:guest@127.0.0.1:5672/%2f\n",
+    );
+    assert!(
+        e.contains("brokers.b.url: put the password in sasl.password as a secret reference"),
+        "{e}"
+    );
+
+    let e = broker_error(
+        &ws,
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: hunter2\n",
+    );
+    assert!(e.contains("brokers.b.sasl.password"), "{e}");
+    assert!(e.contains("secret reference"), "{e}");
+
+    // A user without a password, and a secret-reference password, pass.
+    #[cfg(feature = "mqtt")]
+    {
+        let cfg = ws.load(
+            "brokers:\n  m:\n    kind: mqtt\n    url: mqtt://user@127.0.0.1:1883\n    tls: true\n    client_id_prefix: mb\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: env:MQTT_PASSWORD\n",
+        );
+        let configs = file_config::broker_configs(&cfg).unwrap();
+        assert_eq!(configs[0].url, "mqtt://user@127.0.0.1:1883");
+        assert!(configs[0].tls);
+        assert_eq!(configs[0].client_id_prefix, "mb");
+        assert_eq!(
+            configs[0].sasl.as_ref().unwrap().password_ref,
+            "env:MQTT_PASSWORD"
+        );
+    }
+
+    // Unknown keys are rejected.
+    ws.write("brokers:\n  b:\n    kind: memory\n    bogus: 1\n");
+    assert!(file_config::load(&ws.config_path()).is_err());
+}
+
+#[tokio::test]
+async fn invalid_brokers_fail_build_app() {
+    let ws = Workspace::new();
+    ws.write("brokers:\n  b:\n    kind: nats\n");
+    let e = match build_app(&config_args(&ws, false), None).await {
+        Ok(_) => panic!("expected an error"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(e.starts_with("applying the configuration"), "{e}");
+    assert!(e.contains("unknown broker kind \"nats\""), "{e}");
+}
+
+#[cfg(not(feature = "kafka"))]
+#[test]
+fn slim_build_rejects_kafka_broker() {
+    let ws = Workspace::new();
+    let e = broker_error(
+        &ws,
+        "    kind: kafka\n    bootstrap_servers: 127.0.0.1:9092\n",
+    );
+    assert!(
+        e.contains(
+            "brokers.b: this build has no kafka support (use the full image or build with --features kafka)"
+        ),
+        "{e}"
+    );
 }
