@@ -1,17 +1,22 @@
-//! Mockingbird Admin REST API: mocks, contract versions, scenarios, LLM
-//! profiles, sessions and the request log under `/api/v1`, described by the
-//! OpenAPI document at `/api/openapi.json`. Every error is an RFC 9457
-//! `application/problem+json` document.
+//! Mockingbird Admin REST API: workspaces, and in each workspace mocks,
+//! contract versions, scenarios, LLM profiles, sessions and the request log
+//! under `/api/v1/workspaces/{ws}` (the P2 paths under `/api/v1` act on
+//! `default`), described by the OpenAPI document at `/api/openapi.json`.
+//! Every `/api/v1` request is authenticated and checked against the caller's
+//! workspace role. Every error is an RFC 9457 `application/problem+json`
+//! document.
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
+use mb_auth::{Authenticate, LocalAuth};
 use mb_state::StateStore;
-use mb_store::{ContractStatus, ControlStore, DEFAULT_WORKSPACE, Mock, ResourceSource};
+use mb_store::{ContractStatus, ControlStore, Mock, ResourceSource};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+pub mod access;
 mod contracts;
 mod mocks;
 mod openapi;
@@ -20,10 +25,13 @@ mod profiles;
 mod requests;
 mod scenarios;
 mod sessions;
+mod workspaces;
 
-pub use openapi::ApiDoc;
+pub use access::{CurrentPrincipal, WsAccess};
+pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
+pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
 
 /// Admin API base path.
 pub const API_BASE: &str = "/api/v1";
@@ -41,6 +49,26 @@ pub struct AdminState {
     /// Globs (`*` matches any run of characters) a profile's `secret_ref`
     /// must match when written through the API (`server.api_secret_refs`).
     pub api_secret_refs: Arc<Vec<String>>,
+    /// Resolves the caller of every `/api/v1` request.
+    pub auth: Arc<dyn Authenticate>,
+}
+
+impl AdminState {
+    /// A state with [`LocalAuth`] (`auth.mode: none`) and the
+    /// [`DEFAULT_API_SECRET_REFS`].
+    pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
+        Self {
+            store,
+            state,
+            api_secret_refs: Arc::new(
+                DEFAULT_API_SECRET_REFS
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect(),
+            ),
+            auth: Arc::new(LocalAuth),
+        }
+    }
 }
 
 /// Whether `text` matches `pattern`, where `*` matches any run of
@@ -70,12 +98,18 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// Mounts `/api/v1/*` and `/api/openapi.json`.
 ///
+/// The workspace resources are served under `/api/v1/workspaces/{ws}` and,
+/// for `default`, under `/api/v1` (the P2 paths). Every `/api/v1` route
+/// requires a principal (401 otherwise); `/api/openapi.json` is public, and
+/// any other `/api/*` path is a 404 problem. Paths outside `/api` are left
+/// to the caller's fallback.
+///
 /// Every mutating request needs a non-CORS-safelisted `Content-Type`
 /// (`application/json`, or a JSON/YAML/OpenAPI type for contract uploads;
 /// otherwise 415), so a cross-site page cannot reach the API with a simple
 /// request.
 pub fn router(st: AdminState) -> Router {
-    let api = Router::new()
+    let resources: Router<AdminState> = Router::new()
         .route("/mocks", get(mocks::list).post(mocks::create))
         .route(
             "/mocks/{mock}",
@@ -117,10 +151,28 @@ pub fn router(st: AdminState) -> Router {
         )
         .route("/mocks/{mock}/requests", get(requests::list));
 
+    let api = Router::new()
+        .route(
+            "/workspaces",
+            get(workspaces::list).post(workspaces::create),
+        )
+        .route(
+            "/workspaces/{ws}",
+            get(workspaces::get_one)
+                .patch(workspaces::patch)
+                .delete(workspaces::delete),
+        )
+        .nest("/workspaces/{ws}", resources.clone())
+        .merge(resources)
+        .route_layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            access::authenticate,
+        ));
+
     Router::new()
         .nest(API_BASE, api)
         .route(OPENAPI_PATH, get(openapi::serve))
-        .fallback(problem::not_found)
+        .route("/api/{*rest}", any(problem::not_found))
         .method_not_allowed_fallback(problem::method_not_allowed)
         .layer(axum::middleware::from_fn(problem::log_server_errors))
         .with_state(st)
@@ -165,10 +217,10 @@ impl From<&ContractStatus> for VersionStatus {
 }
 
 impl AdminState {
-    /// The mock named `name`, or a 404 problem.
-    async fn mock(&self, name: &str) -> ApiResult<Mock> {
+    /// The mock named `name` in workspace `ws`, or a 404 problem.
+    async fn mock(&self, ws: &str, name: &str) -> ApiResult<Mock> {
         self.store
-            .get_mock(DEFAULT_WORKSPACE, name)
+            .get_mock(ws, name)
             .await?
             .ok_or_else(|| Problem::not_found(format!("mock {name:?} does not exist")))
     }

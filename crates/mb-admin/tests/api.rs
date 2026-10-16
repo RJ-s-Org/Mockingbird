@@ -71,9 +71,8 @@ async fn harness_with(api_secret_refs: Vec<String>) -> Harness {
 async fn harness_full(api_secret_refs: Vec<String>, state: Arc<dyn StateStore>) -> Harness {
     let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let app = router(AdminState {
-        store: store.clone(),
-        state,
         api_secret_refs: Arc::new(api_secret_refs),
+        ..AdminState::new(store.clone(), state)
     });
     Harness { app, store }
 }
@@ -1338,11 +1337,13 @@ async fn openapi_lists_all_paths() {
             assert!(item[*m].is_object(), "{m} {path} missing");
         }
     }
+    // The P2 paths; the workspace-scoped ones are covered in workspaces.rs.
     let documented: usize = doc["paths"]
         .as_object()
         .unwrap()
-        .values()
-        .map(|item| item.as_object().unwrap().len())
+        .iter()
+        .filter(|(path, _)| !path.starts_with("/api/v1/workspaces"))
+        .map(|(_, item)| item.as_object().unwrap().len())
         .sum();
     let listed: usize = expected.iter().map(|(_, m)| m.len()).sum();
     assert_eq!(documented, listed, "unexpected extra operations");

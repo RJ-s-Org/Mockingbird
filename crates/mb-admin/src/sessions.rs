@@ -1,15 +1,17 @@
-//! `/api/v1/mocks/{mock}/sessions…`: list, export, seed and reset session
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/sessions…`: list, export, seed and reset session
 //! state.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
+use mb_auth::Permission;
 use mb_state::{SessionInfo, SessionKey, StoredResource};
-use mb_store::DEFAULT_WORKSPACE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+use crate::access::WsAccess;
+use crate::mocks::MockPath;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, valid_identifier};
 
@@ -62,17 +64,25 @@ impl From<StoredResourceView> for StoredResource {
     }
 }
 
-/// The key of `session` in an existing mock: 404 for an unknown mock, 400
-/// for a malformed session id.
-async fn key(st: &AdminState, mock: String, session: String) -> ApiResult<SessionKey> {
-    st.mock(&mock).await?;
+/// Path of one session.
+#[derive(Deserialize, Debug)]
+pub struct SessionPath {
+    pub mock: String,
+    pub session: String,
+}
+
+/// The key of `session` in an existing mock of `ws`: 404 for an unknown
+/// mock, 400 for a malformed session id.
+async fn key(st: &AdminState, ws: &str, path: SessionPath) -> ApiResult<SessionKey> {
+    let SessionPath { mock, session } = path;
+    st.mock(ws, &mock).await?;
     if !valid_identifier(&session) {
         return Err(Problem::bad_request(
             "session ids are 1-128 characters of [A-Za-z0-9._-]",
         ));
     }
     Ok(SessionKey {
-        workspace: DEFAULT_WORKSPACE.into(),
+        workspace: ws.into(),
         mock,
         session,
     })
@@ -80,9 +90,12 @@ async fn key(st: &AdminState, mock: String, session: String) -> ApiResult<Sessio
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/sessions",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/sessions",
     tag = "sessions",
-    params(("mock" = String, Path, description = "Mock name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+    ),
     responses(
         (status = 200, description = "Most recently touched first", body = Vec<SessionInfoView>),
         (status = 404, body = Problem, content_type = "application/problem+json"),
@@ -91,18 +104,21 @@ async fn key(st: &AdminState, mock: String, session: String) -> ApiResult<Sessio
 )]
 pub async fn list(
     State(st): State<AdminState>,
-    Path(mock): Path<String>,
+    access: WsAccess,
+    Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<Json<Vec<SessionInfoView>>> {
-    st.mock(&mock).await?;
-    let sessions = st.state.sessions(DEFAULT_WORKSPACE, &mock).await?;
+    access.require(Permission::Read)?;
+    st.mock(&access.ws, &mock).await?;
+    let sessions = st.state.sessions(&access.ws, &mock).await?;
     Ok(Json(sessions.into_iter().map(Into::into).collect()))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/sessions/{session}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/sessions/{session}",
     tag = "sessions",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("session" = String, Path, description = "Session id"),
     ),
@@ -115,18 +131,21 @@ pub async fn list(
 )]
 pub async fn export(
     State(st): State<AdminState>,
-    Path((mock, session)): Path<(String, String)>,
+    access: WsAccess,
+    Path(path): Path<SessionPath>,
 ) -> ApiResult<Json<Vec<StoredResourceView>>> {
-    let key = key(&st, mock, session).await?;
+    access.require(Permission::Read)?;
+    let key = key(&st, &access.ws, path).await?;
     let resources = st.state.export(&key).await?;
     Ok(Json(resources.into_iter().map(Into::into).collect()))
 }
 
 #[utoipa::path(
     put,
-    path = "/api/v1/mocks/{mock}/sessions/{session}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/sessions/{session}",
     tag = "sessions",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("session" = String, Path, description = "Session id"),
     ),
@@ -140,10 +159,12 @@ pub async fn export(
 )]
 pub async fn seed(
     State(st): State<AdminState>,
-    Path((mock, session)): Path<(String, String)>,
+    access: WsAccess,
+    Path(path): Path<SessionPath>,
     Json(body): Json<Vec<StoredResourceView>>,
 ) -> ApiResult<StatusCode> {
-    let key = key(&st, mock, session).await?;
+    access.require(Permission::Edit)?;
+    let key = key(&st, &access.ws, path).await?;
     st.state
         .seed(&key, body.into_iter().map(Into::into).collect())
         .await?;
@@ -152,9 +173,10 @@ pub async fn seed(
 
 #[utoipa::path(
     delete,
-    path = "/api/v1/mocks/{mock}/sessions/{session}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/sessions/{session}",
     tag = "sessions",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("session" = String, Path, description = "Session id"),
     ),
@@ -167,9 +189,11 @@ pub async fn seed(
 )]
 pub async fn reset(
     State(st): State<AdminState>,
-    Path((mock, session)): Path<(String, String)>,
+    access: WsAccess,
+    Path(path): Path<SessionPath>,
 ) -> ApiResult<StatusCode> {
-    let key = key(&st, mock, session).await?;
+    access.require(Permission::Edit)?;
+    let key = key(&st, &access.ws, path).await?;
     st.state.reset(&key).await?;
     Ok(StatusCode::NO_CONTENT)
 }

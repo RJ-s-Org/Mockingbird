@@ -1,4 +1,4 @@
-//! `/api/v1/llm-profiles…`. Profiles hold a `secret_ref` (`env:NAME` or
+//! `/api/v1/workspaces/{ws}/llm-profiles…`. Profiles hold a `secret_ref` (`env:NAME` or
 //! `file:/path`), never a raw key, and the API never resolves it. A ref
 //! written through the API must match one of the `server.api_secret_refs`
 //! globs; profiles from the config file are not restricted.
@@ -8,13 +8,21 @@ use std::collections::{HashMap, HashSet};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use mb_store::{DEFAULT_WORKSPACE, LlmProfile, ResourceSource};
+use mb_auth::Permission;
+use mb_store::{LlmProfile, ResourceSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+use crate::access::WsAccess;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, glob_match, valid_identifier};
+
+/// Path of one profile.
+#[derive(Deserialize, Debug)]
+pub struct ProfilePath {
+    pub name: String,
+}
 
 /// Body keys that would carry a raw secret.
 const RAW_KEY_FIELDS: [&str; 2] = ["api_key", "apiKey"];
@@ -146,17 +154,17 @@ pub struct ProfileDeleteResult {
     pub warnings: Vec<String>,
 }
 
-/// Names of the mocks whose profile is `name` or falls back to it.
-async fn mocks_using(st: &AdminState, name: &str) -> ApiResult<Vec<String>> {
+/// Names of the mocks of `ws` whose profile is `name` or falls back to it.
+async fn mocks_using(st: &AdminState, ws: &str, name: &str) -> ApiResult<Vec<String>> {
     let fallbacks: HashMap<String, Option<String>> = st
         .store
-        .list_profiles(DEFAULT_WORKSPACE)
+        .list_profiles(ws)
         .await?
         .into_iter()
         .map(|p| (p.name, p.fallback_profile))
         .collect();
     let mut users = Vec::new();
-    for mock in st.store.list_mocks(DEFAULT_WORKSPACE).await? {
+    for mock in st.store.list_mocks(ws).await? {
         let mut next = mock.llm_profile.clone();
         let mut seen = HashSet::new();
         while let Some(profile) = next {
@@ -173,29 +181,37 @@ async fn mocks_using(st: &AdminState, name: &str) -> ApiResult<Vec<String>> {
     Ok(users)
 }
 
-async fn find(st: &AdminState, name: &str) -> ApiResult<LlmProfile> {
+async fn find(st: &AdminState, ws: &str, name: &str) -> ApiResult<LlmProfile> {
     st.store
-        .get_profile(DEFAULT_WORKSPACE, name)
+        .get_profile(ws, name)
         .await?
         .ok_or_else(|| Problem::not_found(format!("LLM profile {name:?} does not exist")))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/llm-profiles",
+    path = "/api/v1/workspaces/{ws}/llm-profiles",
     tag = "llm-profiles",
+    params(("ws" = String, Path, description = "Workspace name")),
     responses((status = 200, body = Vec<LlmProfileView>))
 )]
-pub async fn list(State(st): State<AdminState>) -> ApiResult<Json<Vec<LlmProfileView>>> {
-    let profiles = st.store.list_profiles(DEFAULT_WORKSPACE).await?;
+pub async fn list(
+    State(st): State<AdminState>,
+    access: WsAccess,
+) -> ApiResult<Json<Vec<LlmProfileView>>> {
+    access.require(Permission::Read)?;
+    let profiles = st.store.list_profiles(&access.ws).await?;
     Ok(Json(profiles.into_iter().map(Into::into).collect()))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/llm-profiles/{name}",
+    path = "/api/v1/workspaces/{ws}/llm-profiles/{name}",
     tag = "llm-profiles",
-    params(("name" = String, Path, description = "Profile name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("name" = String, Path, description = "Profile name"),
+    ),
     responses(
         (status = 200, body = LlmProfileView),
         (status = 404, body = Problem, content_type = "application/problem+json"),
@@ -203,16 +219,21 @@ pub async fn list(State(st): State<AdminState>) -> ApiResult<Json<Vec<LlmProfile
 )]
 pub async fn get_one(
     State(st): State<AdminState>,
-    Path(name): Path<String>,
+    access: WsAccess,
+    Path(ProfilePath { name }): Path<ProfilePath>,
 ) -> ApiResult<Json<LlmProfileView>> {
-    Ok(Json(find(&st, &name).await?.into()))
+    access.require(Permission::Read)?;
+    Ok(Json(find(&st, &access.ws, &name).await?.into()))
 }
 
 #[utoipa::path(
     put,
-    path = "/api/v1/llm-profiles/{name}",
+    path = "/api/v1/workspaces/{ws}/llm-profiles/{name}",
     tag = "llm-profiles",
-    params(("name" = String, Path, description = "Profile name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("name" = String, Path, description = "Profile name"),
+    ),
     request_body = PutProfile,
     responses(
         (status = 200, body = ProfileWriteResult),
@@ -222,15 +243,17 @@ pub async fn get_one(
 )]
 pub async fn put(
     State(st): State<AdminState>,
-    Path(name): Path<String>,
+    access: WsAccess,
+    Path(ProfilePath { name }): Path<ProfilePath>,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<ProfileWriteResult>> {
+    access.require(Permission::ManageProfiles)?;
     if !valid_identifier(&name) {
         return Err(Problem::unprocessable(
             "profile names are 1-128 characters of [A-Za-z0-9._-]",
         ));
     }
-    if let Some(existing) = st.store.get_profile(DEFAULT_WORKSPACE, &name).await? {
+    if let Some(existing) = st.store.get_profile(&access.ws, &name).await? {
         ensure_api_managed(&existing.source, format_args!("LLM profile {name:?}"))?;
     }
     if let Some(obj) = body.as_object()
@@ -253,7 +276,7 @@ pub async fn put(
         )));
     }
     let profile = LlmProfile {
-        workspace: DEFAULT_WORKSPACE.into(),
+        workspace: access.ws.clone(),
         name,
         base_url: body.base_url,
         model: body.model,
@@ -266,7 +289,7 @@ pub async fn put(
         source: ResourceSource::Api,
     };
     st.store.put_profile(&profile).await?;
-    let warnings = mocks_using(&st, &profile.name)
+    let warnings = mocks_using(&st, &access.ws, &profile.name)
         .await?
         .into_iter()
         .map(|mock| {
@@ -284,9 +307,12 @@ pub async fn put(
 
 #[utoipa::path(
     delete,
-    path = "/api/v1/llm-profiles/{name}",
+    path = "/api/v1/workspaces/{ws}/llm-profiles/{name}",
     tag = "llm-profiles",
-    params(("name" = String, Path, description = "Profile name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("name" = String, Path, description = "Profile name"),
+    ),
     responses(
         (status = 204, description = "Deleted; no mock used the profile"),
         (status = 200, description = "Deleted, but mocks still use the profile", body = ProfileDeleteResult),
@@ -294,11 +320,16 @@ pub async fn put(
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
     )
 )]
-pub async fn delete(State(st): State<AdminState>, Path(name): Path<String>) -> ApiResult<Response> {
-    let existing = find(&st, &name).await?;
+pub async fn delete(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(ProfilePath { name }): Path<ProfilePath>,
+) -> ApiResult<Response> {
+    access.require(Permission::ManageProfiles)?;
+    let existing = find(&st, &access.ws, &name).await?;
     ensure_api_managed(&existing.source, format_args!("LLM profile {name:?}"))?;
-    if st.store.delete_profile(DEFAULT_WORKSPACE, &name).await? {
-        let users = mocks_using(&st, &name).await?;
+    if st.store.delete_profile(&access.ws, &name).await? {
+        let users = mocks_using(&st, &access.ws, &name).await?;
         if users.is_empty() {
             return Ok(StatusCode::NO_CONTENT.into_response());
         }

@@ -1,4 +1,4 @@
-//! `/api/v1/mocks/{mock}/contracts…`: upload, list, inspect and activate
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/contracts…`: upload, list, inspect and activate
 //! contract versions.
 
 use axum::body::Body;
@@ -6,11 +6,14 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
+use mb_auth::Permission;
 use mb_mcm::{Binding, Bundle, Effect, HttpMethod, OperationKind};
 use mb_store::{ContractStatus, ContractVersion, Mock, NewContractVersion};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use crate::access::WsAccess;
+use crate::mocks::MockPath;
 use crate::problem::{
     ApiResult, Json, Path, Problem, Query, RequireJson, media_type, unsupported_media_type,
 };
@@ -37,6 +40,13 @@ pub struct UploadParams {
     /// Activate the new version. The first version of a mock (or any upload
     /// while no version is active) is activated regardless.
     pub activate: Option<bool>,
+}
+
+/// Path of one contract version.
+#[derive(Deserialize, Debug)]
+pub struct VersionPath {
+    pub mock: String,
+    pub version: i64,
 }
 
 /// The outcome of a contract upload.
@@ -153,9 +163,13 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
 
 #[utoipa::path(
     post,
-    path = "/api/v1/mocks/{mock}/contracts",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts",
     tag = "contracts",
-    params(("mock" = String, Path, description = "Mock name"), UploadParams),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        UploadParams,
+    ),
     request_body(
         description = "OpenAPI 3.x or Swagger 2.0 document, JSON or YAML, at most 10 MiB. Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml or application/vnd.oai.openapi(+json|+yaml).",
         content(
@@ -179,11 +193,13 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
 )]
 pub async fn upload(
     State(st): State<AdminState>,
-    Path(mock): Path<String>,
+    access: WsAccess,
+    Path(MockPath { mock }): Path<MockPath>,
     Query(params): Query<UploadParams>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
+    access.require(Permission::Edit)?;
     let media = media_type(headers.get(header::CONTENT_TYPE));
     if !media
         .as_deref()
@@ -194,7 +210,7 @@ pub async fn upload(
             &CONTRACT_MEDIA_TYPES.join(", "),
         ));
     }
-    let m = st.mock(&mock).await?;
+    let m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     let source = axum::body::to_bytes(body, MAX_CONTRACT_BYTES)
         .await
@@ -256,9 +272,12 @@ pub async fn upload(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/contracts",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts",
     tag = "contracts",
-    params(("mock" = String, Path, description = "Mock name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+    ),
     responses(
         (status = 200, description = "Newest first", body = Vec<ContractVersionSummary>),
         (status = 404, body = Problem, content_type = "application/problem+json"),
@@ -266,18 +285,21 @@ pub async fn upload(
 )]
 pub async fn list(
     State(st): State<AdminState>,
-    Path(mock): Path<String>,
+    access: WsAccess,
+    Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<Json<Vec<ContractVersionSummary>>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let versions = st.store.list_contract_versions(m.id).await?;
     Ok(Json(versions.iter().map(Into::into).collect()))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/contracts/{version}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}",
     tag = "contracts",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("version" = i64, Path, description = "Contract version number"),
     ),
@@ -288,9 +310,14 @@ pub async fn list(
 )]
 pub async fn get_one(
     State(st): State<AdminState>,
-    Path((mock, number)): Path<(String, i64)>,
+    access: WsAccess,
+    Path(VersionPath {
+        mock,
+        version: number,
+    }): Path<VersionPath>,
 ) -> ApiResult<Json<ContractVersionDetail>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let v = version(&st, &m, number).await?;
     Ok(Json(ContractVersionDetail {
         version: v.version,
@@ -306,9 +333,10 @@ pub async fn get_one(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/contracts/{version}/source",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/source",
     tag = "contracts",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("version" = i64, Path, description = "Contract version number"),
     ),
@@ -319,9 +347,14 @@ pub async fn get_one(
 )]
 pub async fn source(
     State(st): State<AdminState>,
-    Path((mock, number)): Path<(String, i64)>,
+    access: WsAccess,
+    Path(VersionPath {
+        mock,
+        version: number,
+    }): Path<VersionPath>,
 ) -> ApiResult<Response> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let v = version(&st, &m, number).await?;
     let content_type = match v.source.iter().find(|b| !b.is_ascii_whitespace()) {
         Some(b'{') => "application/json",
@@ -332,9 +365,10 @@ pub async fn source(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/mocks/{mock}/contracts/{version}/activate",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/activate",
     tag = "contracts",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("version" = i64, Path, description = "Contract version number"),
     ),
@@ -347,10 +381,15 @@ pub async fn source(
 )]
 pub async fn activate(
     State(st): State<AdminState>,
-    Path((mock, number)): Path<(String, i64)>,
+    access: WsAccess,
+    Path(VersionPath {
+        mock,
+        version: number,
+    }): Path<VersionPath>,
     _json: RequireJson,
 ) -> ApiResult<Json<ContractVersionSummary>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let v = version(&st, &m, number).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     if v.status == ContractStatus::Draft {

@@ -1,19 +1,29 @@
-//! The OpenAPI document served at `/api/openapi.json`.
+//! The OpenAPI document served at `/api/openapi.json`: the canonical
+//! `/api/v1/workspaces/{ws}/…` paths, plus the P2 alias paths for
+//! `default`, marked deprecated.
 
 use std::sync::LazyLock;
 
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use utoipa::OpenApi;
+use utoipa::openapi::path::{Operation, ParameterIn, PathItem};
+use utoipa::openapi::{Deprecated, RefOr};
 
 use crate::{
-    Source, VersionStatus, contracts, mocks, problem, profiles, requests, scenarios, sessions,
+    API_BASE, Source, VersionStatus, contracts, mocks, problem, profiles, requests, scenarios,
+    sessions, workspaces,
 };
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Mockingbird Admin API", description = "Manage mocks, contract versions, scenarios, LLM profiles, sessions and the request log. Errors are RFC 9457 `application/problem+json`."),
+    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, scenarios, LLM profiles, sessions and the request log. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
     paths(
+        workspaces::list,
+        workspaces::create,
+        workspaces::get_one,
+        workspaces::patch,
+        workspaces::delete,
         mocks::list,
         mocks::create,
         mocks::get_one,
@@ -39,6 +49,12 @@ use crate::{
     ),
     components(schemas(
         problem::Problem,
+        workspaces::WorkspaceView,
+        workspaces::CreateWorkspace,
+        workspaces::PatchWorkspace,
+        workspaces::RoleSchema,
+        mocks::DataPlaneAuthSchema,
+        mocks::DataPlaneAuthModeSchema,
         Source,
         VersionStatus,
         mocks::MockView,
@@ -59,6 +75,7 @@ use crate::{
         requests::RequestLogView,
     )),
     tags(
+        (name = "workspaces"),
         (name = "mocks"),
         (name = "contracts"),
         (name = "scenarios"),
@@ -69,9 +86,78 @@ use crate::{
 )]
 pub struct ApiDoc;
 
+/// Where the canonical workspace resource paths live.
+const WORKSPACE_PREFIX: &str = "/api/v1/workspaces/{ws}";
+
+/// Resources whose P2 paths stay as aliases for `default`.
+const ALIASED: [&str; 2] = ["/mocks", "/llm-profiles"];
+
+/// The admin API's OpenAPI document: [`ApiDoc`] plus, for every canonical
+/// `mocks`/`llm-profiles` path, its deprecated `/api/v1/…` alias without
+/// the `ws` parameter and with operation ids suffixed `_default`.
+pub fn openapi_document() -> utoipa::openapi::OpenApi {
+    let mut doc = ApiDoc::openapi();
+    let aliases: Vec<(String, PathItem)> = doc
+        .paths
+        .paths
+        .iter()
+        .filter_map(|(path, item)| {
+            let rest = path.strip_prefix(WORKSPACE_PREFIX)?;
+            ALIASED
+                .iter()
+                .any(|r| rest.starts_with(r))
+                .then(|| (format!("{API_BASE}{rest}"), alias(item.clone())))
+        })
+        .collect();
+    doc.paths.paths.extend(aliases);
+    doc
+}
+
+/// `item` as a deprecated alias for workspace `default`.
+fn alias(mut item: PathItem) -> PathItem {
+    item.parameters = item.parameters.take().map(without_ws);
+    for op in [
+        &mut item.get,
+        &mut item.put,
+        &mut item.post,
+        &mut item.delete,
+        &mut item.options,
+        &mut item.head,
+        &mut item.patch,
+        &mut item.trace,
+        &mut item.query,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        alias_operation(op);
+    }
+    item.additional_operations
+        .values_mut()
+        .for_each(alias_operation);
+    item
+}
+
+fn alias_operation(op: &mut Operation) {
+    op.parameters = op.parameters.take().map(without_ws);
+    op.deprecated = Some(Deprecated::True);
+    op.operation_id = op.operation_id.take().map(|id| format!("{id}_default"));
+}
+
+fn without_ws(
+    params: Vec<RefOr<utoipa::openapi::path::Parameter>>,
+) -> Vec<RefOr<utoipa::openapi::path::Parameter>> {
+    params
+        .into_iter()
+        .filter(
+            |p| !matches!(p, RefOr::T(p) if p.name == "ws" && p.parameter_in == ParameterIn::Path),
+        )
+        .collect()
+}
+
 /// The document, serialised once.
 static DOCUMENT: LazyLock<String> =
-    LazyLock::new(|| ApiDoc::openapi().to_json().unwrap_or_else(|_| "{}".into()));
+    LazyLock::new(|| openapi_document().to_json().unwrap_or_else(|_| "{}".into()));
 
 pub async fn serve() -> Response {
     (

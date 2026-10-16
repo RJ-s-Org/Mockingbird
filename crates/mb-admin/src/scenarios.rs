@@ -1,12 +1,15 @@
-//! `/api/v1/mocks/{mock}/scenarios…`.
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/scenarios…`.
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use mb_auth::Permission;
 use mb_store::{ResourceSource, Scenario, ScenarioRules};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+use crate::access::WsAccess;
+use crate::mocks::MockPath;
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, valid_identifier};
 
@@ -59,6 +62,13 @@ pub struct PutScenario {
     pub operations: Vec<String>,
 }
 
+/// Path of one scenario.
+#[derive(Deserialize, Debug)]
+pub struct ScenarioPath {
+    pub mock: String,
+    pub name: String,
+}
+
 async fn find(st: &AdminState, mock_id: uuid::Uuid, name: &str) -> ApiResult<Option<Scenario>> {
     Ok(st
         .store
@@ -70,9 +80,12 @@ async fn find(st: &AdminState, mock_id: uuid::Uuid, name: &str) -> ApiResult<Opt
 
 #[utoipa::path(
     get,
-    path = "/api/v1/mocks/{mock}/scenarios",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/scenarios",
     tag = "scenarios",
-    params(("mock" = String, Path, description = "Mock name")),
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+    ),
     responses(
         (status = 200, body = Vec<ScenarioView>),
         (status = 404, body = Problem, content_type = "application/problem+json"),
@@ -80,18 +93,21 @@ async fn find(st: &AdminState, mock_id: uuid::Uuid, name: &str) -> ApiResult<Opt
 )]
 pub async fn list(
     State(st): State<AdminState>,
-    Path(mock): Path<String>,
+    access: WsAccess,
+    Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<Json<Vec<ScenarioView>>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let scenarios = st.store.list_scenarios(m.id).await?;
     Ok(Json(scenarios.into_iter().map(Into::into).collect()))
 }
 
 #[utoipa::path(
     put,
-    path = "/api/v1/mocks/{mock}/scenarios/{name}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/scenarios/{name}",
     tag = "scenarios",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("name" = String, Path, description = "Scenario name"),
     ),
@@ -105,10 +121,12 @@ pub async fn list(
 )]
 pub async fn put(
     State(st): State<AdminState>,
-    Path((mock, name)): Path<(String, String)>,
+    access: WsAccess,
+    Path(ScenarioPath { mock, name }): Path<ScenarioPath>,
     Json(body): Json<PutScenario>,
 ) -> ApiResult<Json<ScenarioView>> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
     if !valid_identifier(&name) {
         return Err(Problem::unprocessable(
             "scenario names are 1-128 characters of [A-Za-z0-9._-]",
@@ -157,9 +175,10 @@ pub async fn put(
 
 #[utoipa::path(
     delete,
-    path = "/api/v1/mocks/{mock}/scenarios/{name}",
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/scenarios/{name}",
     tag = "scenarios",
     params(
+        ("ws" = String, Path, description = "Workspace name"),
         ("mock" = String, Path, description = "Mock name"),
         ("name" = String, Path, description = "Scenario name"),
     ),
@@ -171,9 +190,11 @@ pub async fn put(
 )]
 pub async fn delete(
     State(st): State<AdminState>,
-    Path((mock, name)): Path<(String, String)>,
+    access: WsAccess,
+    Path(ScenarioPath { mock, name }): Path<ScenarioPath>,
 ) -> ApiResult<StatusCode> {
-    let m = st.mock(&mock).await?;
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
     let missing = || Problem::not_found(format!("mock {mock:?} has no scenario {name:?}"));
     let existing = find(&st, m.id, &name).await?.ok_or_else(missing)?;
     ensure_api_managed(&existing.source, format_args!("scenario {name:?}"))?;
