@@ -394,3 +394,92 @@ async fn state_effect_and_trigger_on_one_topic_stay_bounded() {
         .collect();
     assert_eq!(hops, vec!["1", "2", "3"]);
 }
+
+/// The chat mock (WebSocket only) with `chatMessage` on `triggers`.
+fn start_chat(triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -> Harness {
+    let bundle = mb_import::compile(include_bytes!(
+        "../../../fixtures/asyncapi/chat-ws-2.6.yaml"
+    ))
+    .unwrap();
+    let records = Arc::new(Capture::default());
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut rt = MockRuntime::new(
+        "chat",
+        Arc::new(bundle),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::clone(&state),
+    );
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn RequestRecorder>);
+    let brokers = memory_brokers();
+    let broker = brokers.memory("mem").unwrap();
+    let deps = EventDeps {
+        brokers,
+        lease,
+        holder: "replica-2".into(),
+    };
+    let setup = EventSetup {
+        broker: None,
+        channels: HashMap::from([(
+            "chatMessage".to_string(),
+            ChannelSetup {
+                enabled: true,
+                triggers,
+            },
+        )]),
+        lease_key: "default/chat".into(),
+    };
+    let channels = ChannelRuntime::start(Arc::new(rt), deps, setup);
+    Harness {
+        channels,
+        records,
+        broker,
+        state,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn websocket_schedule_fires_on_every_replica() {
+    // WebSocket fan-out is per replica: a replica without the lease still
+    // pushes to its own clients, and no lease is taken for it.
+    let lease = ScriptedLease::new(vec![Ok(false)]);
+    let h = start_chat(vec![schedule(1000)], lease.clone());
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let publishes = h
+        .records
+        .records()
+        .into_iter()
+        .filter(|r| r.method == "PUBLISH" && r.status == 200)
+        .count();
+    assert_eq!(publishes, 3);
+    assert_eq!(lease.calls(), 0);
+}
+
+/// Grants the lease once, then never answers.
+struct HangingLease {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LeaseProvider for HangingLease {
+    async fn try_acquire(&self, _key: &str, _holder: &str, _ttl: Duration) -> Result<bool, String> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(true)
+        } else {
+            std::future::pending().await
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn hung_lease_renewal_gives_up_leadership_at_ttl() {
+    let lease = Arc::new(HangingLease {
+        calls: AtomicUsize::new(0),
+    });
+    let h = start(true, vec![schedule(60_000)], lease.clone());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(h.channels.is_leader());
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    assert!(h.channels.is_leader());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!h.channels.is_leader(), "still leader 31 s after the grant");
+}

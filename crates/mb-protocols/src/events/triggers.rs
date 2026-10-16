@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use mb_mcm::{Channel, Direction, StateChangeKind, Trigger};
+use mb_mcm::{Channel, ChannelBinding, Direction, StateChangeKind, Trigger};
 use mb_state::{ChangeKind, StateChanged, StoredResource};
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -52,7 +52,7 @@ struct ChannelTriggers {
 
 /// Start the trigger tasks of every enabled, active publish channel, the
 /// state-change listener when some trigger needs it, and the leader loop
-/// when some trigger is a schedule or cron.
+/// when some broker channel's trigger is a schedule or cron.
 pub(crate) fn spawn_triggers(inner: &Arc<ChannelInner>, tasks: &mut JoinSet<()>) {
     let active: Vec<ChannelTriggers> = inner
         .rt
@@ -76,11 +76,11 @@ pub(crate) fn spawn_triggers(inner: &Arc<ChannelInner>, tasks: &mut JoinSet<()>)
         for trigger in &ct.triggers {
             match trigger {
                 Trigger::Schedule { every } => {
-                    timed = true;
+                    timed |= leader_gated(&ct.channel);
                     tasks.spawn(run_schedule(Arc::clone(inner), ct.channel.clone(), *every));
                 }
                 Trigger::Cron { expr } => {
-                    timed = true;
+                    timed |= leader_gated(&ct.channel);
                     tasks.spawn(run_cron(
                         Arc::clone(inner),
                         ct.channel.clone(),
@@ -106,10 +106,20 @@ pub(crate) fn spawn_triggers(inner: &Arc<ChannelInner>, tasks: &mut JoinSet<()>)
     }
 }
 
-/// Produce on `channel` every `every` while this replica leads.
+/// Whether `channel`'s schedule and cron triggers fire on the lease holder
+/// only. A broker channel's message reaches every consumer from one
+/// replica; a WebSocket channel's reaches only the clients of the replica
+/// that sends it, so every replica fires it.
+fn leader_gated(channel: &Channel) -> bool {
+    !matches!(channel.binding, ChannelBinding::WebSocket { .. })
+}
+
+/// Produce on `channel` every `every` while this replica leads (on every
+/// replica for a WebSocket channel).
 async fn run_schedule(inner: Arc<ChannelInner>, channel: Channel, every: Duration) {
     let stopped = inner.rt.shutdown.stopped();
     tokio::pin!(stopped);
+    let gated = leader_gated(&channel);
     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let origin = json!({
@@ -121,7 +131,7 @@ async fn run_schedule(inner: Arc<ChannelInner>, channel: Channel, every: Duratio
             () = &mut stopped => return,
             _ = ticks.tick() => {}
         }
-        if inner.is_leader() {
+        if !gated || inner.is_leader() {
             fire(
                 &inner,
                 &channel,
@@ -138,7 +148,7 @@ async fn run_schedule(inner: Arc<ChannelInner>, channel: Channel, every: Duratio
 }
 
 /// Produce on `channel` at each time `expr` (UTC) names while this
-/// replica leads.
+/// replica leads (on every replica for a WebSocket channel).
 async fn run_cron(inner: Arc<ChannelInner>, channel: Channel, expr: String) {
     let schedule = match cron::Schedule::from_str(&Trigger::normalized_cron(&expr)) {
         Ok(schedule) => schedule,
@@ -150,6 +160,7 @@ async fn run_cron(inner: Arc<ChannelInner>, channel: Channel, expr: String) {
     };
     let stopped = inner.rt.shutdown.stopped();
     tokio::pin!(stopped);
+    let gated = leader_gated(&channel);
     let origin = json!({"kind": "cron", "expr": expr});
     // The last time fired, so a timer waking a little early against the
     // wall clock never fires the same time twice.
@@ -166,7 +177,7 @@ async fn run_cron(inner: Arc<ChannelInner>, channel: Channel, expr: String) {
             () = &mut stopped => return,
             () = tokio::time::sleep(wait) => {}
         }
-        if inner.is_leader() {
+        if !gated || inner.is_leader() {
             fire(
                 &inner,
                 &channel,
@@ -322,7 +333,9 @@ async fn related(inner: &ChannelInner, change: &StateChanged) -> Option<Vec<Stor
 }
 
 /// Take and renew the mock's scheduler lease. A failed attempt keeps the
-/// current leadership until `LEASE_TTL` after the last grant.
+/// current leadership until `LEASE_TTL` after the last grant. Each attempt
+/// is bounded by `LEASE_RENEW` and by the time left on the current grant,
+/// so a hung lease store never keeps this replica leading past it.
 async fn run_leader(inner: Arc<ChannelInner>) {
     let stopped = inner.rt.shutdown.stopped();
     tokio::pin!(stopped);
@@ -334,14 +347,31 @@ async fn run_leader(inner: Arc<ChannelInner>) {
             () = &mut stopped => return,
             _ = ticks.tick() => {}
         }
+        let started = Instant::now();
+        let limit = match last_grant {
+            Some(at) if inner.is_leader() => {
+                LEASE_RENEW.min((at + LEASE_TTL).saturating_duration_since(started))
+            }
+            _ => LEASE_RENEW,
+        };
+        let acquire = tokio::time::timeout(
+            limit,
+            inner
+                .deps
+                .lease
+                .try_acquire(&inner.setup.lease_key, &inner.deps.holder, LEASE_TTL),
+        );
         let attempt = tokio::select! {
             () = &mut stopped => return,
-            attempt = inner.deps.lease.try_acquire(&inner.setup.lease_key, &inner.deps.holder, LEASE_TTL) => attempt,
+            attempt = acquire => attempt.unwrap_or_else(|_| {
+                Err(format!("timed out after {} ms", limit.as_millis()))
+            }),
         };
         match attempt {
             Ok(leader) => {
+                // The grant runs from when it was asked for.
                 if leader {
-                    last_grant = Some(Instant::now());
+                    last_grant = Some(started);
                 }
                 inner.set_leader(leader);
             }
