@@ -31,6 +31,8 @@ use crate::principal::Principal;
 const PENDING_TTL: Duration = Duration::from_secs(600);
 /// The most logins in flight at once; the oldest is evicted beyond this.
 const MAX_PENDING: usize = 10_000;
+/// The longest `return_to` accepted, in bytes.
+pub const MAX_RETURN_TO: usize = 2048;
 /// Minimum time between JWKS refetches for ID-token verification.
 const ID_TOKEN_JWKS_REFETCH: Duration = Duration::from_secs(30);
 
@@ -359,6 +361,22 @@ impl OidcClient {
         })
     }
 
+    /// Whether `state` identifies a login that was started and has neither
+    /// completed nor expired.
+    pub fn is_pending(&self, state: &str) -> bool {
+        self.lock_pending()
+            .get(state)
+            .is_some_and(|p| p.created.elapsed() < PENDING_TTL)
+    }
+
+    /// Ends the login identified by `state` without completing it (the
+    /// provider answered with an error); returns whether it was pending.
+    pub fn abandon_login(&self, state: &str) -> bool {
+        self.lock_pending()
+            .remove(state)
+            .is_some_and(|p| p.created.elapsed() < PENDING_TTL)
+    }
+
     /// The bearer-JWT verifier for this provider (JWKS URI from discovery).
     pub fn bearer(&self) -> Arc<JwtVerifier> {
         Arc::clone(&self.bearer)
@@ -397,9 +415,11 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 /// Accepts a same-origin path for the post-login redirect: it must start
 /// with `/`, must not start with `//` or `/\` (protocol-relative URLs) and
 /// must contain no control characters (browsers strip tabs and newlines,
-/// which would turn `/\t/evil` into `//evil`).
+/// which would turn `/\t/evil` into `//evil`), and must be at most
+/// [`MAX_RETURN_TO`] bytes (it is held in memory until the login ends).
 pub fn validate_return_to(s: &str) -> Result<String, AuthError> {
-    let ok = s.starts_with('/')
+    let ok = s.len() <= MAX_RETURN_TO
+        && s.starts_with('/')
         && !s.starts_with("//")
         && !s.starts_with("/\\")
         && !s.chars().any(char::is_control);

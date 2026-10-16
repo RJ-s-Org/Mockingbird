@@ -187,6 +187,7 @@ async fn return_to_validation() {
         "javascript:alert(1)",
         "",
         "/\t/evil.example",
+        &format!("/{}", "a".repeat(2048)),
     ] {
         assert!(
             matches!(validate_return_to(bad), Err(AuthError::Invalid(_))),
@@ -198,6 +199,17 @@ async fn return_to_validation() {
     let c = client(&p).await;
     assert!(matches!(
         c.begin_login("//evil.example"),
+        Err(AuthError::Invalid(_))
+    ));
+}
+
+#[test]
+fn return_to_length_bound() {
+    let max = format!("/{}", "a".repeat(2047));
+    assert_eq!(validate_return_to(&max).unwrap(), max);
+    let long = format!("/{}", "a".repeat(2048));
+    assert!(matches!(
+        validate_return_to(&long),
         Err(AuthError::Invalid(_))
     ));
 }

@@ -180,21 +180,30 @@ async fn callback(
     let rid = request_id(&headers);
     let completed = match complete(web, &headers, &q).await {
         Ok(c) => c,
-        Err(reason) => {
-            tracing::info!(%reason, "console login failed");
-            st.audit
-                .record(mb_store::NewAuditEvent {
-                    workspace: None,
-                    actor_subject: "anonymous".to_string(),
-                    actor_kind: "user".to_string(),
-                    action: "auth.login_failed".to_string(),
-                    target: "user:unknown".to_string(),
-                    before: None,
-                    after: Some(json!({ "reason": reason.code() })),
-                    request_id: Some(rid),
-                    at: chrono::Utc::now(),
-                })
-                .await;
+        Err((reason, attributable)) => {
+            // Only a failure of a login this browser started is audited, so
+            // anonymous requests cannot grow the audit log or fill the
+            // webhook queue.
+            if attributable {
+                tracing::info!(%reason, "console login failed");
+                st.audit
+                    .record(mb_store::NewAuditEvent {
+                        workspace: None,
+                        actor_subject: "anonymous".to_string(),
+                        actor_kind: "user".to_string(),
+                        action: "auth.login_failed".to_string(),
+                        target: "user:unknown".to_string(),
+                        before: None,
+                        after: Some(json!({ "reason": reason.code() })),
+                        request_id: Some(rid),
+                        at: chrono::Utc::now(),
+                    })
+                    .await;
+            } else {
+                tracing::debug!(%reason, "console login callback without a login in progress");
+                metrics::counter!("mb_auth_callback_rejected_total", "reason" => reason.code())
+                    .increment(1);
+            }
             let p = Problem::titled(StatusCode::BAD_REQUEST, LOGIN_FAILED, reason.detail());
             return Ok(with_cookies(p.into_response(), &[web.login_cookie("", 0)]));
         }
@@ -265,24 +274,36 @@ impl std::fmt::Display for Failure {
     }
 }
 
+/// Completes the callback's login. On failure, also whether the failure
+/// belongs to a login this browser started: its `state` matches the
+/// `mb_login` cookie and names a pending login.
 async fn complete(
     web: &WebAuth,
     headers: &HeaderMap,
     q: &CallbackQuery,
-) -> Result<mb_auth::CompletedLogin, Failure> {
+) -> Result<mb_auth::CompletedLogin, (Failure, bool)> {
+    let own_state = q
+        .state
+        .as_deref()
+        .filter(|s| cookie(headers, LOGIN_STATE_COOKIE) == Some(*s));
     if let Some(e) = &q.error {
-        return Err(Failure::Provider(e.chars().take(64).collect()));
+        let attributable = own_state.is_some_and(|s| web.oidc.abandon_login(s));
+        return Err((
+            Failure::Provider(e.chars().take(64).collect()),
+            attributable,
+        ));
     }
     let (Some(code), Some(state)) = (&q.code, &q.state) else {
-        return Err(Failure::MissingParams);
+        return Err((Failure::MissingParams, false));
     };
-    if cookie(headers, LOGIN_STATE_COOKIE) != Some(state.as_str()) {
-        return Err(Failure::StateMismatch);
+    if own_state.is_none() {
+        return Err((Failure::StateMismatch, false));
     }
+    let attributable = web.oidc.is_pending(state);
     web.oidc
         .complete_login(state, code)
         .await
-        .map_err(Failure::Rejected)
+        .map_err(|e| (Failure::Rejected(e), attributable))
 }
 
 async fn logout(
@@ -330,10 +351,13 @@ pub async fn console_gate(State(st): State<AdminState>, mut req: Request, next: 
     };
     let navigation = req.method() == Method::GET && accepts_html(req.headers());
     if navigation && problem.status == StatusCode::UNAUTHORIZED.as_u16() {
+        // A path too long to be a `return_to` returns to the start page.
         let target = req
             .uri()
             .path_and_query()
-            .map_or("/", |pq| pq.as_str())
+            .map(|pq| pq.as_str())
+            .filter(|t| t.len() <= mb_auth::MAX_RETURN_TO)
+            .unwrap_or("/")
             .to_string();
         let location = format!("/auth/login?return_to={}", percent_encode(&target));
         if let Ok(v) = HeaderValue::from_str(&location) {

@@ -373,7 +373,7 @@ async fn return_to_open_redirect_rejected() {
 }
 
 #[tokio::test]
-async fn callback_state_mismatch_rejected_and_audited() {
+async fn callback_state_mismatch_rejected_not_audited() {
     let h = harness().await;
     let started = h.start_login("/").await;
     let nonce = MockOidcProvider::query_param(&started.url, "nonce").unwrap();
@@ -383,18 +383,60 @@ async fn callback_state_mismatch_rejected_and_audited() {
     let p = r.problem(StatusCode::BAD_REQUEST);
     assert_eq!(p["title"], "Login failed");
     assert!(r.set_cookie(SESSION_COOKIE).is_none());
+    // Not attributable to this browser's login: no audit event.
+    assert!(h.audit("auth.login_failed").await.is_empty());
+    assert!(h.audit("auth.login").await.is_empty());
 
+    // An error from the provider without a login in progress fails the
+    // same way, unaudited.
+    let r = get_with(&h.app, "/auth/callback?error=access_denied", &[]).await;
+    assert_eq!(r.problem(StatusCode::BAD_REQUEST)["title"], "Login failed");
+    assert!(h.audit("auth.login_failed").await.is_empty());
+}
+
+#[tokio::test]
+async fn provider_error_for_pending_login_audited_once() {
+    let h = harness().await;
+    let started = h.start_login("/").await;
+    let state = MockOidcProvider::query_param(&started.url, "state").unwrap();
+    let cookies = format!("mb_login={}", cookie_value(&started.state_cookie));
+    let uri = format!("/auth/callback?error=access_denied&state={state}");
+    for _ in 0..3 {
+        let r = get_with(&h.app, &uri, &[("cookie", &cookies)]).await;
+        assert_eq!(r.problem(StatusCode::BAD_REQUEST)["title"], "Login failed");
+    }
     let events = h.audit("auth.login_failed").await;
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].actor_subject, "anonymous");
     assert_eq!(events[0].target, "user:unknown");
     assert_eq!(events[0].workspace, None);
-    assert!(h.audit("auth.login").await.is_empty());
+    assert_eq!(events[0].after, Some(json!({ "reason": "provider_error" })));
+}
 
-    // An error from the provider fails the same way.
-    let r = get_with(&h.app, "/auth/callback?error=access_denied", &[]).await;
-    assert_eq!(r.problem(StatusCode::BAD_REQUEST)["title"], "Login failed");
-    assert_eq!(h.audit("auth.login_failed").await.len(), 2);
+#[tokio::test]
+async fn anonymous_callback_flood_not_audited() {
+    let h = harness().await;
+    for uri in [
+        "/auth/callback?error=x",
+        "/auth/callback",
+        "/auth/callback?code=a&state=b",
+        "/auth/callback?error=x&state=b",
+    ] {
+        for cookie in ["", "mb_login=b"] {
+            let r = get_with(&h.app, uri, &[("cookie", cookie)]).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+    assert!(h.audit("auth.login_failed").await.is_empty());
+}
+
+#[tokio::test]
+async fn overlong_return_to_rejected() {
+    let h = harness().await;
+    let long = format!("%2F{}", "a".repeat(4096));
+    let r = get_with(&h.app, &format!("/auth/login?return_to={long}"), &[]).await;
+    r.problem(StatusCode::BAD_REQUEST);
+    assert!(r.set_cookie(LOGIN_STATE_COOKIE).is_none());
 }
 
 #[tokio::test]
@@ -405,7 +447,7 @@ async fn callback_without_state_cookie_rejected() {
     let r = h.callback(&started, "alice", &[], &nonce, "other=1").await;
     assert_eq!(r.problem(StatusCode::BAD_REQUEST)["title"], "Login failed");
     assert!(r.set_cookie(SESSION_COOKIE).is_none());
-    assert_eq!(h.audit("auth.login_failed").await.len(), 1);
+    assert!(h.audit("auth.login_failed").await.is_empty());
 }
 
 #[tokio::test]
@@ -584,6 +626,11 @@ async fn console_gate_redirects_html_and_401s_api_clients() {
     )
     .await;
     assert_eq!(r.location(), "/auth/login?return_to=%2Fw%2Fx");
+
+    // A path too long to be a return_to sends the browser back to `/`.
+    let long = format!("/w/{}", "a".repeat(3000));
+    let r = get_with(&app, &long, &[("accept", html)]).await;
+    assert_eq!(r.location(), "/auth/login?return_to=%2F");
 
     let session = h.login("alice", &[], None).await;
     let r = get_with(

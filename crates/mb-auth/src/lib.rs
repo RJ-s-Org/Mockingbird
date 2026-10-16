@@ -25,7 +25,9 @@ pub use error::AuthError;
 pub use http::{HttpError, http_client, send};
 pub use jwt::{ALLOWED_ALGS, JwtVerifier};
 pub use mapping::RoleMapping;
-pub use oidc::{CompletedLogin, LoginRedirect, OidcClient, OidcSettings, validate_return_to};
+pub use oidc::{
+    CompletedLogin, LoginRedirect, MAX_RETURN_TO, OidcClient, OidcSettings, validate_return_to,
+};
 pub use principal::{Principal, PrincipalKind};
 pub use role::{Permission, Role};
 pub use session::{SESSION_COOKIE, SessionManager};
