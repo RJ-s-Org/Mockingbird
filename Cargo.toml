@@ -13,7 +13,7 @@ version = "0.1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }
 axum = "0.8"
 matchit = "0.9"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-saphyr = "2.0"
@@ -41,6 +41,8 @@ opentelemetry-otlp = { version = "0.33", default-features = false, features = ["
 tracing-opentelemetry = { version = "0.34", default-features = false }
 arc-swap = "1"
 base64 = "0.23.1"
+futures = "0.3.34"
+eventsource-stream = "0.2.3"
 json-patch = { version = "4", default-features = false }
 humantime-serde = "1"
 notify = "8"

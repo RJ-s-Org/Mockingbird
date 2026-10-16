@@ -14,6 +14,8 @@ testing = []
 
 [dependencies]
 async-trait.workspace = true
+eventsource-stream.workspace = true
+futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,8 +25,12 @@ tracing.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[test]]
 name = "fallback"
+required-features = ["testing"]
+
+[[test]]
+name = "scripted"
 required-features = ["testing"]

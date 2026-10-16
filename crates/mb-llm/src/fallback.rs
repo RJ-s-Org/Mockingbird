@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 
-use crate::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider};
+use crate::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider, TextStream};
 
 /// The request settings of one hop of a fallback chain (its profile's
 /// timeout, temperature and token limit), applied to the request before it
@@ -100,6 +101,30 @@ impl Provider for FallbackProvider {
                     .await
             }
         }
+    }
+
+    /// Opens the primary's stream. When opening it fails, or its first item
+    /// is an error, returns the secondary's stream instead. Once the primary
+    /// has yielded a delta it is never switched, so its later errors reach
+    /// the caller.
+    async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        let primary_req = for_hop(self.primary_settings, req.clone());
+        let error = match self.primary.stream(primary_req).await {
+            Ok(mut stream) => match stream.next().await {
+                Some(Ok(first)) => {
+                    return Ok(Box::pin(
+                        futures::stream::once(std::future::ready(Ok(first))).chain(stream),
+                    ));
+                }
+                Some(Err(error)) => error,
+                None => return Ok(Box::pin(futures::stream::empty())),
+            },
+            Err(error) => error,
+        };
+        tracing::warn!(%error, "primary LLM provider stream failed; trying fallback provider");
+        self.secondary
+            .stream(for_hop(self.secondary_settings, req))
+            .await
     }
 
     /// The primary's and the secondary's total timeouts, added.
