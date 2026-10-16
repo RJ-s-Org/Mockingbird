@@ -312,6 +312,8 @@ impl<'a> Writer<'a> {
         for (key, value) in members {
             if let Some(name) = key.strip_prefix('@')
                 && !value.is_null()
+                && is_ncname(name)
+                && name != "xmlns"
             {
                 let _ = write!(self.out, " {name}=\"{}\"", text(value));
             }
@@ -333,7 +335,7 @@ impl<'a> Writer<'a> {
 /// The element members of `members`: those listed in `x-xml-order` first,
 /// in that order, then the others sorted.
 fn element_order<'m>(members: &'m Map<String, Value>, object: Option<&Value>) -> Vec<&'m str> {
-    let is_element = |k: &str| !k.starts_with('@') && k != "#text";
+    let is_element = |k: &str| !k.starts_with('@') && k != "#text" && is_ncname(k);
     let listed: Vec<&str> = object
         .and_then(|o| o.get("x-xml-order"))
         .and_then(Value::as_array)
@@ -352,6 +354,16 @@ fn element_order<'m>(members: &'m Map<String, Value>, object: Option<&Value>) ->
     rest.sort_unstable();
     order.extend(rest);
     order
+}
+
+/// Whether `name` is an XML NCName (a name without a colon), so it can be
+/// written as an element or attribute name. Members with other keys (from
+/// an LLM item or a scenario patch) are skipped rather than written raw.
+fn is_ncname(name: &str) -> bool {
+    let mut chars = name.chars();
+    let start = |c: char| c == '_' || c.is_alphabetic();
+    chars.next().is_some_and(start)
+        && chars.all(|c| start(c) || c.is_alphanumeric() || matches!(c, '-' | '.' | '\u{B7}'))
 }
 
 /// A scalar's escaped text; objects and arrays as escaped JSON.
@@ -451,6 +463,39 @@ mod tests {
             back,
             json!({"account": {"tags": ["only"], "age": "old", "active": false, "score": 2}})
         );
+    }
+
+    #[test]
+    fn keys_that_are_not_xml_names_are_skipped() {
+        let schema = account_schema();
+        let value = json!({
+            "id": "a-1",
+            "a b": 1,
+            "1x": 2,
+            "x><y": 3,
+            "p:q": 4,
+            "": 5,
+            "ok-name.é_2": 6,
+            "account": {
+                "@a b": "1",
+                "@x=\"1\" y": "2",
+                "@xmlns": "urn:evil",
+                "@xmlns:e": "urn:evil",
+                "@": "3",
+                "@good": "4",
+            },
+        });
+        let xml = json_to_xml(&value, &schema).unwrap();
+        assert_eq!(
+            xml,
+            concat!(
+                r#"<ns0:GetAccountResponse xmlns:ns0="urn:a"><id>a-1</id>"#,
+                r#"<account good="4"></account><ok-name.é_2>6</ok-name.é_2>"#,
+                r#"</ns0:GetAccountResponse>"#,
+            )
+        );
+        // Still well-formed.
+        envelope_body_to_json(&envelope(Version::V11, &xml), &schema).unwrap();
     }
 
     #[test]
