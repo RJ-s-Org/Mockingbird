@@ -9,9 +9,12 @@
 //! wrong method, oversized or unparseable body) are problem documents.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use async_graphql::Request;
-use async_graphql::parser::types::{DocumentOperations, OperationType};
+use async_graphql::parser::types::{
+    DocumentOperations, ExecutableDocument, OperationType, Selection, SelectionSet,
+};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, Query, Request as HttpRequest, State, WebSocketUpgrade};
@@ -46,6 +49,8 @@ pub enum GraphqlError {
 struct GraphqlState {
     rt: Arc<MockRuntime>,
     schema: async_graphql::dynamic::Schema,
+    /// Open subscription WebSocket connections to this mock.
+    connections: Arc<AtomicUsize>,
 }
 
 /// A router serving `rt.bundle`'s GraphQL schema at
@@ -53,7 +58,11 @@ struct GraphqlState {
 /// over a WebSocket upgrade of a `GET`.
 pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, GraphqlError> {
     let schema = build_schema(&rt)?;
-    let state = Arc::new(GraphqlState { rt, schema });
+    let state = Arc::new(GraphqlState {
+        rt,
+        schema,
+        connections: Arc::new(AtomicUsize::new(0)),
+    });
     Ok(Router::new().fallback(handle).with_state(state))
 }
 
@@ -71,17 +80,23 @@ pub(crate) fn error_code(status: u16) -> &'static str {
     }
 }
 
+/// Answers one request. Every response sent before execution (an unknown
+/// path, a refused upgrade, an invalid or oversized request, a wrong
+/// method, too many root fields, a refused admission or key) is reported
+/// as a call with its status.
 async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Response {
     let (mut parts, body) = req.into_parts();
     let method = parts.method.clone();
     let uri = parts.uri.clone();
     let headers = parts.headers.clone();
-    if uri.path() != st.rt.protocols.graphql_path {
-        return problem(
+    let rt = &st.rt;
+    if uri.path() != rt.protocols.graphql_path {
+        let resp = problem(
             404,
             "Not Found",
             format!("no GraphQL endpoint at {}", uri.path()),
         );
+        return refused(rt, &method, &headers, resp, None).await;
     }
     let query = Query::<Vec<(String, String)>>::try_from_uri(&uri)
         .map(|q| q.0)
@@ -89,16 +104,24 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
     if method == Method::GET && is_websocket_upgrade(&headers) {
         return match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(upgrade) => {
-                subscription::upgrade(st.schema.clone(), &st.rt, upgrade, headers, query).await
+                let connections = Arc::clone(&st.connections);
+                subscription::upgrade(st.schema.clone(), rt, connections, upgrade, headers, query)
+                    .await
             }
-            Err(rejection) => rejection.into_response(),
+            Err(rejection) => {
+                let resp = rejection.into_response();
+                refused(rt, &method, &headers, resp, None).await
+            }
         };
     }
     let request = match method {
         Method::GET => {
             let request = match async_graphql::http::parse_query_string(uri.query().unwrap_or("")) {
                 Ok(r) => r,
-                Err(e) => return problem(400, "Invalid GraphQL request", e.to_string()),
+                Err(e) => {
+                    let resp = problem(400, "Invalid GraphQL request", e.to_string());
+                    return refused(rt, &method, &headers, resp, None).await;
+                }
             };
             if is_mutation(&request) {
                 let mut resp = problem(
@@ -108,22 +131,21 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
                 );
                 resp.headers_mut()
                     .insert(header::ALLOW, HeaderValue::from_static("POST"));
-                return resp;
+                return refused(rt, &method, &headers, resp, None).await;
             }
             request
         }
-        Method::POST => match read_body(&headers, body, st.rt.limits.max_request_bytes).await {
-            Ok(bytes) => match parse_post(&headers, &bytes) {
+        Method::POST => {
+            let parsed = match read_body(&headers, body, rt.limits.max_request_bytes).await {
+                Ok(bytes) => parse_post(&headers, &bytes)
+                    .map_err(|detail| problem(400, "Invalid GraphQL request", detail)),
+                Err(resp) => Err(resp),
+            };
+            match parsed {
                 Ok(r) => r,
-                Err(detail) => return problem(400, "Invalid GraphQL request", detail),
-            },
-            Err(resp) => {
-                if resp.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                    report_too_large(&st.rt, &method, &headers).await;
-                }
-                return resp;
+                Err(resp) => return refused(rt, &method, &headers, resp, None).await,
             }
-        },
+        }
         _ => {
             let mut resp = problem(
                 405,
@@ -132,16 +154,30 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             );
             resp.headers_mut()
                 .insert(header::ALLOW, HeaderValue::from_static("GET, POST"));
-            return resp;
+            return refused(rt, &method, &headers, resp, None).await;
         }
     };
+    // Each root field is one engine call: cap them before anything runs.
+    let max = rt.protocols.graphql_max_root_fields;
+    if let Some(count) = root_field_count(&request).filter(|n| *n > max) {
+        let body = json!({"errors": [{
+            "message": format!("too many root fields: {count} (maximum {max})"),
+            "extensions": {"code": "TOO_MANY_ROOT_FIELDS"},
+        }]});
+        let mut resp = (StatusCode::BAD_REQUEST, body.to_string()).into_response();
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        return refused(rt, &method, &headers, resp, Some(body)).await;
+    }
     // Data-plane auth: in `api_key` mode the whole request is admitted
     // (tenant, then quota) and then its key checked once, before anything
     // runs (a 429/401 problem, as for REST, reported like any call); root
     // fields are then not admitted again. Each root field still runs the
     // per-operation checks of the shared pipeline.
-    let admitted = if st.rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey {
-        match admit_request(&st.rt, &request, &method, &headers, &query).await {
+    let admitted = if rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey {
+        match admit_request(rt, &request, &method, &headers, &query).await {
             Ok(tenancy) => Some(tenancy),
             Err(resp) => return resp,
         }
@@ -291,15 +327,22 @@ async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Byte
     Ok(Bytes::from(buf))
 }
 
-/// Reports a request refused for its size as a `413` call (before
-/// admission, so it is attributed like an unrouted call).
-async fn report_too_large(rt: &MockRuntime, method: &Method, headers: &HeaderMap) {
+/// Reports `resp`, a response sent before admission ran (so attributed
+/// like an unrouted call), as a call with its status and the given
+/// recorded `response`; returns it.
+pub(crate) async fn refused(
+    rt: &MockRuntime,
+    method: &Method,
+    headers: &HeaderMap,
+    resp: Response,
+    response: Option<Value>,
+) -> Response {
     let report = call::Report {
         operation_id: None,
         session: call::DEFAULT_SESSION.into(),
         method: method.as_str().to_string(),
         path: rt.protocols.graphql_path.clone(),
-        status: 413,
+        status: resp.status().as_u16(),
         source: None,
         usage: Default::default(),
         latency: Default::default(),
@@ -311,9 +354,10 @@ async fn report_too_large(rt: &MockRuntime, method: &Method, headers: &HeaderMap
             Value::Null
         },
         request_body_bytes: None,
-        response: None,
+        response: response.filter(|_| rt.recorder.is_some()),
     };
     call::report(rt, headers, report).await;
+    resp
 }
 
 /// A `POST` body: raw query text for `application/graphql`, else the JSON
@@ -344,6 +388,55 @@ fn is_mutation(request: &Request) -> bool {
         (DocumentOperations::Multiple(_), None) => None,
     };
     selected.is_some_and(|op| op.node.ty == OperationType::Mutation)
+}
+
+/// How many root fields the operation `request` selects, with fragment
+/// spreads and inline fragments on the root type expanded. `None` when the
+/// query does not parse or selects no operation (the executor reports
+/// that).
+fn root_field_count(request: &Request) -> Option<usize> {
+    let doc = async_graphql::parser::parse_query(&request.query).ok()?;
+    let selected = match (&doc.operations, request.operation_name.as_deref()) {
+        (DocumentOperations::Single(op), _) => op,
+        (DocumentOperations::Multiple(ops), Some(name)) => ops.get(name)?,
+        (DocumentOperations::Multiple(ops), None) if ops.len() == 1 => ops.values().next()?,
+        (DocumentOperations::Multiple(_), None) => return None,
+    };
+    let mut visiting = Vec::new();
+    Some(count_fields(
+        &doc,
+        &selected.node.selection_set.node,
+        &mut visiting,
+    ))
+}
+
+/// The fields of `set`, expanding fragments; a fragment already being
+/// expanded (a cycle, which validation rejects) counts nothing.
+fn count_fields<'d>(
+    doc: &'d ExecutableDocument,
+    set: &'d SelectionSet,
+    visiting: &mut Vec<&'d str>,
+) -> usize {
+    set.items
+        .iter()
+        .map(|item| match &item.node {
+            Selection::Field(_) => 1,
+            Selection::InlineFragment(f) => count_fields(doc, &f.node.selection_set.node, visiting),
+            Selection::FragmentSpread(spread) => {
+                let name = spread.node.fragment_name.node.as_str();
+                if visiting.contains(&name) {
+                    return 0;
+                }
+                let Some(fragment) = doc.fragments.get(&spread.node.fragment_name.node) else {
+                    return 0;
+                };
+                visiting.push(name);
+                let n = count_fields(doc, &fragment.node.selection_set.node, visiting);
+                visiting.pop();
+                n
+            }
+        })
+        .sum()
 }
 
 /// An RFC 9457 `application/problem+json` response.

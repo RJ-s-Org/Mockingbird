@@ -211,6 +211,42 @@ pub(crate) fn rate_limit(rt: &MockRuntime) -> Result<(), Rejection> {
     })
 }
 
+/// Admission of one more inbound message of a streaming call already
+/// admitted with `tenancy` (gRPC client and bidi streams): `quota.admit`,
+/// then the mock's rate limit, as for a new call.
+#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+pub(crate) async fn admit_item(
+    rt: &MockRuntime,
+    tenancy: &Tenancy,
+    operation_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), Rejection> {
+    let call_info = CallInfo::new(&rt.name, operation_id, headers);
+    rt.ext.quota.admit(tenancy, &call_info).await?;
+    rate_limit(rt)
+}
+
+/// One usage event for a single engine call of a streaming call (a gRPC
+/// bidi reply); the call's own [`report`] is then sent with
+/// [`report_unmetered`], so nothing is counted twice.
+#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+pub(crate) fn meter(
+    rt: &MockRuntime,
+    tenancy: Tenancy,
+    operation_id: &str,
+    source: Source,
+    latency: Duration,
+    usage: Usage,
+) {
+    let mut event = UsageEvent::new(tenancy, rt.name.clone(), operation_id);
+    event.status = 200;
+    event.source = source.as_str().to_string();
+    event.latency = latency;
+    event.prompt_tokens = usage.prompt_tokens;
+    event.completion_tokens = usage.completion_tokens;
+    rt.ext.usage.record(&event);
+}
+
 /// The answer to a rate-limited call of `op` when the contract declares a
 /// `429` response: the engine's fallback for that variant (never an LLM
 /// call). `None` when the operation declares no `429`.
@@ -603,8 +639,23 @@ pub(crate) struct Report {
 /// Report a served call to the usage sink and the request recorder. Calls
 /// that never reached admission are still attributed to a tenant.
 pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
+    report_with(rt, headers, r, true).await;
+}
+
+/// [`report`] to the request recorder only: the call's usage was already
+/// recorded item by item (see [`meter`]).
+#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+pub(crate) async fn report_unmetered(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
+    report_with(rt, headers, r, false).await;
+}
+
+async fn report_with(rt: &MockRuntime, headers: &HeaderMap, mut r: Report, metered: bool) {
+    if !metered {
+        record(rt, r);
+        return;
+    }
     let operation_id = r.operation_id.clone().unwrap_or_default();
-    let tenancy = match (r.tenancy, r.admission_ran) {
+    let tenancy = match (r.tenancy.take(), r.admission_ran) {
         (Some(t), _) => Some(t),
         (None, true) => None,
         (None, false) => {
@@ -621,6 +672,11 @@ pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
         event.completion_tokens = r.usage.completion_tokens;
         rt.ext.usage.record(&event);
     }
+    record(rt, r);
+}
+
+/// Hands one call to the request recorder, when one is set.
+fn record(rt: &MockRuntime, r: Report) {
     if let Some(recorder) = &rt.recorder {
         recorder.record(RequestRecord {
             workspace: rt.workspace.clone(),

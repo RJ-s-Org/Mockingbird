@@ -471,3 +471,115 @@ async fn rpc_literal_state_round_trip() {
     assert_eq!(got["account"]["tags"], json!(["vip", "beta"]));
     assert_valid(&schema(&bundle, "GetAccount", 200), &got);
 }
+
+/// The `?wsdl` document of `rt` behind mount prefix `/calc`, fetched with
+/// `headers`.
+async fn wsdl_with(rt: MockRuntime, headers: &[(&str, &str)]) -> String {
+    let base = serve(rt, "/calc").await;
+    let mut req = reqwest::Client::new()
+        .get(format!("{base}/calculator.asmx?wsdl"))
+        .header("host", "127.0.0.1:1234");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    resp.text().await.unwrap()
+}
+
+fn calculator_runtime() -> MockRuntime {
+    runtime(fixture("calculator.wsdl"), &scripted(vec![]))
+}
+
+fn assert_location(text: &str, base: &str) {
+    let location = format!(r#"location="{base}/calc/calculator.asmx""#);
+    assert_eq!(text.matches(&location).count(), 2, "{location}\n{text}");
+}
+
+#[tokio::test]
+async fn wsdl_uses_forwarded_headers_when_trusted() {
+    let mut rt = calculator_runtime();
+    rt.protocols.trust_forwarded_headers = true;
+    let text = wsdl_with(
+        rt,
+        &[
+            ("x-forwarded-proto", "https, http"),
+            ("x-forwarded-host", "api.example.org, proxy.internal"),
+        ],
+    )
+    .await;
+    assert_location(&text, "https://api.example.org");
+}
+
+#[tokio::test]
+async fn wsdl_ignores_forwarded_headers_by_default() {
+    let text = wsdl_with(
+        calculator_runtime(),
+        &[
+            ("x-forwarded-proto", "https"),
+            ("x-forwarded-host", "api.example.org"),
+            ("forwarded", "proto=https;host=api.example.org"),
+        ],
+    )
+    .await;
+    assert_location(&text, "http://127.0.0.1:1234");
+}
+
+#[tokio::test]
+async fn wsdl_forwarded_rfc7239() {
+    let mut rt = calculator_runtime();
+    rt.protocols.trust_forwarded_headers = true;
+    let text = wsdl_with(
+        rt,
+        &[(
+            "forwarded",
+            r#"for=192.0.2.60;proto=https;host="mocks.example.org:8443", for=10.0.0.1;proto=http;host=inner"#,
+        )],
+    )
+    .await;
+    assert_location(&text, "https://mocks.example.org:8443");
+}
+
+#[tokio::test]
+async fn wsdl_https_when_tls_terminated() {
+    let mut rt = calculator_runtime();
+    rt.protocols.tls_terminated = true;
+    let text = wsdl_with(rt, &[("x-forwarded-proto", "http")]).await;
+    assert_location(&text, "https://127.0.0.1:1234");
+
+    // TLS termination wins over a forwarded scheme, even when trusted.
+    let mut rt = calculator_runtime();
+    rt.protocols.tls_terminated = true;
+    rt.protocols.trust_forwarded_headers = true;
+    let text = wsdl_with(
+        rt,
+        &[
+            ("x-forwarded-proto", "http"),
+            ("x-forwarded-host", "a.example"),
+        ],
+    )
+    .await;
+    assert_location(&text, "https://a.example");
+}
+
+#[tokio::test]
+async fn wsdl_rejects_bad_forwarded_host() {
+    for bad in ["evil.example/path", "evil example", "a\tb"] {
+        let mut rt = calculator_runtime();
+        rt.protocols.trust_forwarded_headers = true;
+        let text = wsdl_with(
+            rt,
+            &[
+                ("x-forwarded-host", bad),
+                ("x-forwarded-proto", "javascript"),
+            ],
+        )
+        .await;
+        assert_location(&text, "http://127.0.0.1:1234");
+        assert!(!text.contains("evil"), "{text}");
+    }
+    let mut rt = calculator_runtime();
+    rt.protocols.trust_forwarded_headers = true;
+    let text = wsdl_with(rt, &[("forwarded", "host=\"x/y\";proto=https")]).await;
+    assert_location(&text, "https://127.0.0.1:1234");
+}

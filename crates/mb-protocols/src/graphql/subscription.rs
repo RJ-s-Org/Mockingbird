@@ -7,8 +7,10 @@
 //! disconnects, or the process shuts down, and is reported once, when its
 //! stream is dropped.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_graphql::Data;
 use async_graphql::dynamic::{
@@ -17,7 +19,7 @@ use async_graphql::dynamic::{
 use async_graphql::http::{WebSocket, WebSocketProtocols, WsMessage};
 use async_graphql::parser::types::{FieldDefinition, Type};
 use axum::extract::WebSocketUpgrade;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, PollNext};
@@ -74,13 +76,30 @@ const CLOSE_UNAUTHORIZED: u16 = 4401;
 /// name, `api_key` or `apiKey`); without a valid key the connection is
 /// refused with a `connection_error` (`graphql-ws`) or close code 4401
 /// (`graphql-transport-ws`). Refusals are reported as `401` calls.
+///
+/// Once `graphql_max_connections_per_mock` connections are open
+/// (`connections` counts them), the upgrade is refused with a `503`
+/// problem and `Retry-After: 1`, reported as a call.
 pub(crate) async fn upgrade(
     schema: Schema,
     rt: &Arc<MockRuntime>,
+    connections: Arc<AtomicUsize>,
     upgrade: WebSocketUpgrade,
     headers: HeaderMap,
     query: Vec<(String, String)>,
 ) -> Response {
+    let Some(slot) =
+        ConnectionSlot::acquire(connections, rt.protocols.graphql_max_connections_per_mock)
+    else {
+        let mut resp = super::problem(
+            503,
+            "Service Unavailable",
+            "too many GraphQL WebSocket connections",
+        );
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        return super::refused(rt, &Method::GET, &headers, resp, None).await;
+    };
     let mut key_verified = false;
     if rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey
         && crate::dp_auth::presented_key(rt, &headers, &query).is_some()
@@ -99,9 +118,31 @@ pub(crate) async fn upgrade(
     }
     let cfg = ChannelConfig::for_mock(rt, SUBPROTOCOLS.to_vec());
     let rt = Arc::clone(rt);
-    serve_channel(upgrade, cfg, move |io| {
-        run(schema, io, rt, headers, query, key_verified)
+    serve_channel(upgrade, cfg, move |io| async move {
+        // Held for as long as the connection is open.
+        let _slot = slot;
+        run(schema, io, rt, headers, query, key_verified).await;
     })
+}
+
+/// One open connection of a mock, counted until dropped.
+struct ConnectionSlot(Arc<AtomicUsize>);
+
+impl ConnectionSlot {
+    /// A slot, unless `max` connections are already open.
+    fn acquire(open: Arc<AtomicUsize>, max: usize) -> Option<Self> {
+        open.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < max).then_some(n + 1)
+        })
+        .ok()?;
+        Some(Self(open))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Reports a connection refused by data-plane auth as a `401` call.
@@ -147,8 +188,17 @@ async fn run(
         .unwrap_or(WebSocketProtocols::GraphQLWS);
     let refused = Arc::new(AtomicBool::new(false));
     let refused_init = Arc::clone(&refused);
-    let messages = WebSocket::new(schema, io.incoming, protocol).on_connection_init(
-        move |payload| async move {
+    let active = Arc::new(Mutex::new(HashSet::new()));
+    let incoming = capped(
+        io.incoming,
+        Arc::clone(&rt),
+        headers.clone(),
+        protocol,
+        Arc::clone(&active),
+        io.outgoing.clone(),
+    );
+    let messages =
+        WebSocket::new(schema, incoming, protocol).on_connection_init(move |payload| async move {
             let (auth_headers, headers) = overlay(&rt, headers, &payload);
             let api_key = rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey;
             if api_key
@@ -167,12 +217,19 @@ async fn run(
                 key_verified: api_key,
             }));
             Ok(data)
-        },
-    );
+        });
     futures::pin_mut!(messages);
     while let Some(message) = messages.next().await {
         let (out, last) = match message {
-            WsMessage::Text(text) => (Outbound::Text(text), false),
+            WsMessage::Text(text) => {
+                // A finished operation frees its slot.
+                if let Some((ty, id)) = operation_message(&text)
+                    && matches!(ty.as_str(), "complete" | "error")
+                {
+                    lock(&active).remove(&id);
+                }
+                (Outbound::Text(text), false)
+            }
             // `graphql-transport-ws` answers a refused `connection_init`
             // with a close frame: make it say why.
             WsMessage::Close(_, _) if refused.load(Ordering::Relaxed) => (
@@ -188,6 +245,112 @@ async fn run(
             break;
         }
     }
+}
+
+/// The open operations of one connection, by id.
+type Active = Arc<Mutex<HashSet<String>>>;
+
+fn lock(active: &Active) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    active.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `type` and `id` of a protocol message, when it has both.
+fn operation_message(text: &str) -> Option<(String, String)> {
+    let msg: Value = serde_json::from_str(text).ok()?;
+    let ty = msg.get("type")?.as_str()?.to_string();
+    let id = msg.get("id")?.as_str()?.to_string();
+    Some((ty, id))
+}
+
+/// The client's messages, with operations past the connection's
+/// `graphql_max_subscriptions_per_connection` open ones refused: such a
+/// `subscribe` (`start`) is answered with an `error` message for its id,
+/// reported as a `429` call and not handed to the executor; the
+/// connection stays open. `complete` (`stop`) frees a slot, as does the
+/// server completing or failing an operation.
+fn capped(
+    incoming: BoxStream<'static, String>,
+    rt: Arc<MockRuntime>,
+    headers: HeaderMap,
+    protocol: WebSocketProtocols,
+    active: Active,
+    outgoing: tokio::sync::mpsc::Sender<Outbound>,
+) -> BoxStream<'static, String> {
+    let max = rt.protocols.graphql_max_subscriptions_per_connection;
+    incoming
+        .filter_map(move |text| {
+            let (rt, headers, active, outgoing) = (
+                Arc::clone(&rt),
+                headers.clone(),
+                Arc::clone(&active),
+                outgoing.clone(),
+            );
+            async move {
+                let Some((ty, id)) = operation_message(&text) else {
+                    return Some(text);
+                };
+                match ty.as_str() {
+                    "subscribe" | "start" => {
+                        let admitted = {
+                            let mut open = lock(&active);
+                            let admitted = open.contains(&id) || open.len() < max;
+                            if admitted {
+                                open.insert(id.clone());
+                            }
+                            admitted
+                        };
+                        if admitted {
+                            return Some(text);
+                        }
+                        let message =
+                            format!("too many subscriptions on this connection (maximum {max})");
+                        let error = json!({"message": message});
+                        let payload = match protocol {
+                            WebSocketProtocols::GraphQLWS => json!([error]),
+                            _ => error,
+                        };
+                        let frame = json!({"type": "error", "id": id, "payload": payload});
+                        let _ = outgoing.send(Outbound::Text(frame.to_string())).await;
+                        report_too_many(&rt, &headers, &message).await;
+                        None
+                    }
+                    "complete" | "stop" => {
+                        lock(&active).remove(&id);
+                        Some(text)
+                    }
+                    _ => Some(text),
+                }
+            }
+        })
+        .boxed()
+}
+
+/// Reports a subscription refused by the per-connection cap as a `429`
+/// call.
+async fn report_too_many(rt: &MockRuntime, headers: &HeaderMap, message: &str) {
+    let report = Report {
+        operation_id: None,
+        session: DEFAULT_SESSION.into(),
+        method: "GET".into(),
+        path: rt.protocols.graphql_path.clone(),
+        status: 429,
+        source: None,
+        usage: Default::default(),
+        latency: Default::default(),
+        tenancy: None,
+        admission_ran: false,
+        request: if rt.recorder.is_some() {
+            json!({"headers": recorded_headers(rt, headers)})
+        } else {
+            Value::Null
+        },
+        request_body_bytes: None,
+        response: rt
+            .recorder
+            .is_some()
+            .then(|| json!({"message": message, "extensions": {"code": "RATE_LIMITED"}})),
+    };
+    call::report(rt, headers, report).await;
 }
 
 /// `headers` with each string member of `payload` set as a header (names

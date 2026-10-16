@@ -58,7 +58,12 @@ type MessageStream = BoxStream<'static, Result<DynamicMessage, Status>>;
 ///   of a one-item engine stream is the response;
 /// - bidi: each client message gets the first item of its own one-item
 ///   engine stream (with up to 20 earlier messages), in order; `OK` once
-///   the client half-closes.
+///   the client half-closes. Each reply is metered as its own usage event.
+///
+/// In client and bidi streams every client message after the first (which
+/// the call's own admission covers) runs `quota.admit` and the mock's rate
+/// limit again; a refusal ends the call with `RESOURCE_EXHAUSTED`, after
+/// the replies already sent.
 ///
 /// Generated JSON that does not fit the response message is replaced by
 /// the engine's fallback; if that does not fit either, the call fails with
@@ -254,6 +259,7 @@ impl CallState {
             usage: Usage::default(),
             response: None,
             items: 0,
+            metered: false,
             done: false,
         }
     }
@@ -292,6 +298,16 @@ impl CallState {
             return Err(Failure::forced(status));
         }
         Ok(OwnedPlan::new(&plan))
+    }
+
+    /// Admits one more client message of a call admitted with `plan`.
+    async fn admit_item(&self, plan: &OwnedPlan, headers: &HeaderMap) -> Result<(), Failure> {
+        call::admit_item(self.rt(), &plan.tenancy, &self.method.op_id, headers)
+            .await
+            .map_err(|r| Failure {
+                http: r.status,
+                status: Status::resource_exhausted(r.detail),
+            })
     }
 
     fn operation_call(&self, headers: &HeaderMap, body: Option<Value>) -> OperationCall {
@@ -462,10 +478,16 @@ impl CallState {
         let mut rep = self.reporter(metadata.into_headers());
         let outcome = async {
             let plan = self.start(&mut rep).await?;
-            let messages = inbound.map(|m| m.map(|m| message_json(&m)));
-            let request_stream = last_items(messages, REQUEST_STREAM_ITEMS)
-                .await
-                .map_err(Failure::request)?;
+            let headers = rep.headers.clone();
+            let (this, plan_ref, headers_ref) = (&*self, &plan, &headers);
+            let messages = inbound.enumerate().then(|(i, m)| async move {
+                let m = m.map_err(Failure::request)?;
+                if i > 0 {
+                    this.admit_item(plan_ref, headers_ref).await?;
+                }
+                Ok::<_, Failure>(message_json(&m))
+            });
+            let request_stream = last_items(messages, REQUEST_STREAM_ITEMS).await?;
             let last = request_stream.back().cloned();
             if let Some(body) = &last {
                 rep.set_body(body);
@@ -504,6 +526,8 @@ impl CallState {
                 return Err(failure.status);
             }
         };
+        // Each reply is metered on its own.
+        rep.metered = true;
         let state = Bidi {
             call: Arc::clone(&self),
             delay: plan.delay,
@@ -511,6 +535,7 @@ impl CallState {
             inbound,
             earlier: VecDeque::new(),
             rep,
+            received: 0,
             ended: false,
         };
         let stream = stream::unfold(state, |mut st| async move {
@@ -576,6 +601,8 @@ struct Bidi {
     rep: Reporter,
     /// Slept before the first reply.
     delay: Option<Duration>,
+    /// Client messages read so far.
+    received: usize,
     ended: bool,
 }
 
@@ -588,6 +615,11 @@ impl Bidi {
             let Some(message) = self.inbound.message().await.map_err(Failure::request)? else {
                 return Ok(None);
             };
+            let started = Instant::now();
+            self.received += 1;
+            if self.received > 1 {
+                self.call.admit_item(&self.plan, &self.rep.headers).await?;
+            }
             let body = message_json(&message);
             self.rep.set_body(&body);
             let call = self
@@ -600,11 +632,20 @@ impl Bidi {
             }
             self.earlier.push_back(body);
             sleep(self.delay.take()).await;
-            Ok(Some(reply))
+            Ok(Some((reply, started.elapsed())))
         }
         .await;
         match reply {
-            Ok(Some((message, _, source))) => {
+            Ok(Some(((message, _, source), latency))) => {
+                // Stream items carry no token counts of their own.
+                call::meter(
+                    self.call.rt(),
+                    self.plan.tenancy.clone(),
+                    &self.call.method.op_id,
+                    source,
+                    latency,
+                    Usage::default(),
+                );
                 self.rep.items += 1;
                 self.rep.add_source(source);
                 self.call.add_source(source);
@@ -722,6 +763,9 @@ struct Reporter {
     response: Option<Value>,
     /// Messages sent (streams).
     items: usize,
+    /// Usage was already recorded per message (bidi replies): the report
+    /// goes to the request recorder only.
+    metered: bool,
     done: bool,
 }
 
@@ -782,7 +826,7 @@ impl Reporter {
     async fn finish(mut self) {
         let report = self.take();
         let span = self.span.clone();
-        call::report(&self.rt, &self.headers, report)
+        send_report(&self.rt, &self.headers, report, self.metered)
             .instrument(span)
             .await;
     }
@@ -797,14 +841,27 @@ impl Drop for Reporter {
         let rt = Arc::clone(&self.rt);
         let headers = std::mem::take(&mut self.headers);
         let span = self.span.clone();
+        let metered = self.metered;
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                handle.spawn(
-                    async move { call::report(&rt, &headers, report).instrument(span).await },
-                );
+                handle.spawn(async move {
+                    send_report(&rt, &headers, report, metered)
+                        .instrument(span)
+                        .await
+                });
             }
             Err(_) => tracing::warn!(mock = %rt.name, "gRPC call not reported: no runtime"),
         }
+    }
+}
+
+/// Reports a call; to the request recorder only when its usage was
+/// `metered` item by item.
+async fn send_report(rt: &MockRuntime, headers: &HeaderMap, report: Report, metered: bool) {
+    if metered {
+        call::report_unmetered(rt, headers, report).await;
+    } else {
+        call::report(rt, headers, report).await;
     }
 }
 
