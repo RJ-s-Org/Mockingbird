@@ -5,12 +5,15 @@ pub mod chunk;
 pub mod fetch;
 pub mod har;
 pub mod infer;
+pub mod llm;
+pub mod merge;
 pub mod model;
 pub mod paths;
 pub mod postman;
 pub mod redact;
 pub mod text;
 
+pub use llm::ExtractLlm;
 pub use model::ImportKind;
 use serde_json::Value;
 
