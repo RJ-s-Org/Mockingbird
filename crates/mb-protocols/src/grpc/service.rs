@@ -407,7 +407,7 @@ impl CallState {
         self.invoked.store(true, Ordering::SeqCst);
         let (metadata, _, message) = req.into_parts();
         let mut rep = self.reporter(metadata.into_headers());
-        let body = message_json(&message);
+        let body = tracing::info_span!("mb.decode").in_scope(|| message_json(&message));
         rep.set_body(&body);
         let outcome = async {
             let plan = self.start(&mut rep).await?;
@@ -416,8 +416,8 @@ impl CallState {
                 .await
                 .map_err(engine_failure)?;
             rep.usage = generated.usage;
-            let (message, json, source) =
-                self.response(&plan, &call, generated.body, generated.source)?;
+            let (message, json, source) = tracing::info_span!("mb.encode")
+                .in_scope(|| self.response(&plan, &call, generated.body, generated.source))?;
             sleep(plan.delay).await;
             Ok((message, json, source))
         }
@@ -447,7 +447,7 @@ impl CallState {
         self.invoked.store(true, Ordering::SeqCst);
         let (metadata, _, message) = req.into_parts();
         let mut rep = self.reporter(metadata.into_headers());
-        let body = message_json(&message);
+        let body = tracing::info_span!("mb.decode").in_scope(|| message_json(&message));
         rep.set_body(&body);
         let opened = async {
             let plan = self.start(&mut rep).await?;

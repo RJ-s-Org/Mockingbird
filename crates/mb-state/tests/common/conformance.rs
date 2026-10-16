@@ -31,6 +31,41 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     reads_do_not_create_sessions(&store, ws).await;
     sessions_lists_with_counts(&store, ws).await;
     export_then_seed_round_trips(&store, ws).await;
+    session_count_default_matches_sessions(&store, ws).await;
+}
+
+/// `session_count` counts exactly the live sessions `sessions` lists, per
+/// mock, and drops a reset session.
+pub async fn session_count_default_matches_sessions(st: &Arc<dyn StateStore>, ws: &str) {
+    let count = |mock: &'static str| {
+        let st = Arc::clone(st);
+        let ws = ws.to_string();
+        async move {
+            let n = st.session_count(&ws, mock).await.expect("session_count");
+            let listed = st.sessions(&ws, mock).await.expect("sessions").len();
+            assert_eq!(n, listed, "session_count of {mock} must match sessions");
+            n
+        }
+    };
+    assert_eq!(count("gauge").await, 0);
+    for session in ["a", "b", "c"] {
+        st.upsert(&key(ws, "gauge", session), res("order", "1", json!({})))
+            .await
+            .expect("upsert");
+    }
+    st.upsert(&key(ws, "gauge-other", "a"), res("order", "1", json!({})))
+        .await
+        .expect("upsert");
+    // Reads never create a session.
+    st.get(&key(ws, "gauge", "d"), "order", "1")
+        .await
+        .expect("get");
+    assert_eq!(count("gauge").await, 3);
+    assert_eq!(count("gauge-other").await, 1);
+    st.reset(&key(ws, "gauge", "b")).await.expect("reset");
+    assert_eq!(count("gauge").await, 2);
+    st.reset_mock(ws, "gauge").await.expect("reset_mock");
+    assert_eq!(count("gauge").await, 0);
 }
 
 fn key(ws: &str, mock: &str, session: &str) -> SessionKey {
@@ -402,6 +437,7 @@ pub async fn ttl_expiry_in(store: Arc<dyn StateStore>, workspace: &str) {
             .expect("sessions")
             .is_empty()
     );
+    assert_eq!(store.session_count(ws, "ttl").await.expect("count"), 0);
     // A write after expiry starts a fresh session: old resources stay gone.
     store
         .upsert(&k, res("order", "2", json!({})))
@@ -411,4 +447,5 @@ pub async fn ttl_expiry_in(store: Arc<dyn StateStore>, workspace: &str) {
     let s = store.sessions(ws, "ttl").await.expect("sessions");
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].resources, 1);
+    assert_eq!(store.session_count(ws, "ttl").await.expect("count"), 1);
 }

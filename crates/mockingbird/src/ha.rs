@@ -309,6 +309,9 @@ impl StateStore for BusStateStore {
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         self.inner.sessions(workspace, mock).await
     }
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        self.inner.session_count(workspace, mock).await
+    }
     async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
         self.inner.export(s).await
     }

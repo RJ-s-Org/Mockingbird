@@ -27,7 +27,7 @@ use crate::file_config::{
 use crate::ha::Ha;
 use crate::host_guard::HostPolicy;
 use crate::import_llm::RuntimeLlm;
-use crate::maintenance::{LeaderJobs, LeaderWork, Maintenance};
+use crate::maintenance::{LeaderJobs, LeaderWork, Maintenance, StateGauge};
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
 use crate::registry::{MockRegistry, mock_label};
@@ -172,6 +172,10 @@ pub struct App {
     /// The leader-only work (reconcile on gaining leadership, `--watch`,
     /// [`Maintenance`]); `None` on a `data` node. Dropping it stops it.
     pub leader_work: Option<LeaderWork>,
+    /// Refreshes the `mb_state_sessions` gauge on a node that serves the
+    /// data plane (leader or not); `None` on a `control` node. Dropping it
+    /// stops it.
+    pub state_gauge: Option<StateGauge>,
     /// How many times this node reconciled the configuration into the
     /// control store (tests).
     #[doc(hidden)]
@@ -745,6 +749,11 @@ async fn build_app_on(
         }
     };
 
+    let state_gauge = match role {
+        Role::Control => None,
+        Role::All | Role::Data => Some(StateGauge::spawn(state.clone(), registry.clone())),
+    };
+
     let (tls, tls_reloader) = match tls {
         Some((files, rustls)) => {
             let reloader = crate::tls::spawn_reloader(files, rustls.clone());
@@ -761,6 +770,7 @@ async fn build_app_on(
         role,
         leadership,
         leader_work,
+        state_gauge,
         reconciles,
         recorder,
         brokers,

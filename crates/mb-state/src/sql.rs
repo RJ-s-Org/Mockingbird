@@ -428,6 +428,21 @@ impl StateStore for SqlStateStore {
         self.inner.touch_existing(s).await.map(|_| ())
     }
 
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        let cutoff = self.inner.cutoff(now_ms());
+        let n: i64 = on_pool!(&self.inner.pool, |p| sqlx::query_scalar(
+            "SELECT COUNT(*) FROM state_sessions \
+             WHERE workspace = $1 AND mock = $2 AND last_touched > $3"
+        )
+        .bind(workspace)
+        .bind(mock)
+        .bind(cutoff)
+        .fetch_one(p)
+        .await?);
+        usize::try_from(n)
+            .map_err(|_| StateError::Backend(format!("session count {n} is out of range")))
+    }
+
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         let cutoff = self.inner.cutoff(now_ms());
         let sql = "SELECT s.session AS session, s.last_touched AS last_touched, \

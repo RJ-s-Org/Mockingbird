@@ -1,16 +1,94 @@
 //! Background maintenance jobs: the admin session sweeper and audit
-//! retention, and the leader-only work ([`LeaderWork`]).
+//! retention, the leader-only work ([`LeaderWork`]) and, on every node that
+//! serves the data plane, the state-size gauge ([`StateGauge`]).
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mb_auth::SessionManager;
+use mb_state::StateStore;
 use mb_store::ControlStore;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::registry::{MockRegistry, mock_label};
 use crate::watch::WatchGuard;
+
+/// Gauge of each mounted mock's live state sessions, labelled by `mock`
+/// (see [`mock_label`]).
+pub const STATE_SESSIONS_METRIC: &str = "mb_state_sessions";
+
+/// How often [`StateGauge`] refreshes [`STATE_SESSIONS_METRIC`].
+pub const STATE_GAUGE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Refreshes [`STATE_SESSIONS_METRIC`] for every mounted mock every
+/// [`STATE_GAUGE_INTERVAL`] (first right away); a mock no longer mounted
+/// drops to 0. Runs on every node that serves the data plane, leader or
+/// not. Dropping it stops the task.
+pub struct StateGauge {
+    task: JoinHandle<()>,
+}
+
+impl StateGauge {
+    /// Must be called inside a Tokio runtime.
+    pub fn spawn(state: Arc<dyn StateStore>, registry: Arc<MockRegistry>) -> Self {
+        Self {
+            task: tokio::spawn(async move {
+                let mut tick = tokio::time::interval(STATE_GAUGE_INTERVAL);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut labelled = BTreeSet::new();
+                loop {
+                    tick.tick().await;
+                    let counts = session_counts(state.as_ref(), &registry.mounted_mocks()).await;
+                    labelled = set_state_gauges(counts, labelled);
+                }
+            }),
+        }
+    }
+}
+
+impl Drop for StateGauge {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// `(label, live sessions)` of each of `mocks` (`(workspace, name)`); a
+/// mock whose count fails is logged and left out (its gauge keeps its last
+/// value).
+pub async fn session_counts(
+    state: &dyn StateStore,
+    mocks: &[(String, String)],
+) -> Vec<(String, usize)> {
+    let mut out = Vec::with_capacity(mocks.len());
+    for (workspace, name) in mocks {
+        let label = mock_label(workspace, name);
+        match state.session_count(workspace, name).await {
+            Ok(n) => out.push((label, n)),
+            Err(error) => {
+                tracing::warn!(mock = %label, %error, "cannot count state sessions");
+            }
+        }
+    }
+    out
+}
+
+/// Sets the gauge of every counted mock and zeroes the ones `previous`
+/// labelled that are no longer counted. Returns the labels now set.
+fn set_state_gauges(counts: Vec<(String, usize)>, previous: BTreeSet<String>) -> BTreeSet<String> {
+    let mut now = BTreeSet::new();
+    for (label, n) in counts {
+        metrics::gauge!(STATE_SESSIONS_METRIC, "mock" => label.clone()).set(n as f64);
+        now.insert(label);
+    }
+    for gone in previous.difference(&now) {
+        metrics::gauge!(STATE_SESSIONS_METRIC, "mock" => gone.clone()).set(0.0);
+    }
+    now
+}
 
 /// The running maintenance jobs; dropping it stops them.
 pub struct Maintenance {
@@ -137,5 +215,53 @@ async fn follow(mut leader: watch::Receiver<bool>, mut reconciled: bool, jobs: L
             // Leadership is final: keep what runs until this task stops.
             std::future::pending::<()>().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mb_state::{MemoryStore, SessionKey, StoredResource};
+
+    #[tokio::test]
+    async fn session_counts_label_each_mock() {
+        let state = MemoryStore::new(Duration::from_secs(60));
+        for (workspace, mock, session) in [
+            ("default", "orders", "a"),
+            ("default", "orders", "b"),
+            ("team", "pets", "a"),
+        ] {
+            let key = SessionKey {
+                workspace: workspace.into(),
+                mock: mock.into(),
+                session: session.into(),
+            };
+            let resource = StoredResource {
+                resource_type: "thing".into(),
+                id: "1".into(),
+                data: serde_json::json!({}),
+            };
+            state.upsert(&key, resource).await.expect("upsert");
+        }
+        let mocks = [
+            ("default".to_string(), "orders".to_string()),
+            ("team".to_string(), "pets".to_string()),
+            ("default".to_string(), "empty".to_string()),
+        ];
+        assert_eq!(
+            session_counts(&state, &mocks).await,
+            [
+                ("orders".to_string(), 2),
+                ("team/pets".to_string(), 1),
+                ("empty".to_string(), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn vanished_mocks_are_dropped_from_the_labels() {
+        let first = set_state_gauges(vec![("a".into(), 1), ("b".into(), 2)], BTreeSet::new());
+        let second = set_state_gauges(vec![("b".into(), 3)], first);
+        assert_eq!(second.into_iter().collect::<Vec<_>>(), ["b"]);
     }
 }

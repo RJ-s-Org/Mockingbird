@@ -383,6 +383,32 @@ impl StateStore for RedisStateStore {
         Ok(())
     }
 
+    /// Like [`StateStore::sessions`], without reading each session's
+    /// resource count and timestamp: only whether its meta key still exists.
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        let index = sessions_key(workspace, mock);
+        let cutoff = Utc::now().timestamp_millis().saturating_sub(self.ttl_ms);
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        pipe.cmd("ZREMRANGEBYSCORE")
+            .arg(&index)
+            .arg("-inf")
+            .arg(cutoff)
+            .ignore();
+        pipe.cmd("ZRANGE").arg(&index).arg(0).arg(-1);
+        let (listed,): (Vec<String>,) = pipe.query_async(&mut self.con()).await?;
+        if listed.is_empty() {
+            return Ok(0);
+        }
+        let mut pipe = redis::pipe();
+        for session in &listed {
+            let [_, _, meta] = session_keys(workspace, mock, session);
+            pipe.cmd("EXISTS").arg(meta);
+        }
+        let exists: Vec<bool> = pipe.query_async(&mut self.con()).await?;
+        Ok(exists.into_iter().filter(|e| *e).count())
+    }
+
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         let index = sessions_key(workspace, mock);
         let cutoff = Utc::now().timestamp_millis().saturating_sub(self.ttl_ms);

@@ -3,12 +3,82 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
+use mb_state::{
+    MemoryStore, SessionInfo, SessionKey, StateChanged, StateError, StateStore, StoredResource,
+};
 use serde_json::json;
+use tokio::sync::broadcast;
 
 #[tokio::test]
 async fn memory_conformance() {
     common::conformance::run_all(Arc::new(MemoryStore::new(Duration::from_secs(60)))).await;
+}
+
+#[tokio::test]
+async fn state_session_count_default_matches_sessions() {
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(60)));
+    common::conformance::session_count_default_matches_sessions(&store, "default").await;
+    // The trait's default (a store that only lists sessions).
+    let store: Arc<dyn StateStore> = Arc::new(ListOnly(MemoryStore::new(Duration::from_secs(60))));
+    common::conformance::session_count_default_matches_sessions(&store, "default").await;
+}
+
+/// Forwards everything but `session_count`, which keeps the default.
+struct ListOnly(MemoryStore);
+
+#[async_trait::async_trait]
+impl StateStore for ListOnly {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, StateError> {
+        self.0.get(s, resource_type, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.0.list(s, resource_type, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+        self.0.upsert(s, r).await
+    }
+    async fn delete(
+        &self,
+        s: &SessionKey,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<bool, StateError> {
+        self.0.delete(s, resource_type, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.0.reset(s).await
+    }
+    async fn reset_mock(&self, workspace: &str, mock: &str) -> Result<(), StateError> {
+        self.0.reset_mock(workspace, mock).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.0.touch(s).await
+    }
+    async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
+        self.0.sessions(workspace, mock).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+        self.0.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, resources: Vec<StoredResource>) -> Result<(), StateError> {
+        self.0.seed(s, resources).await
+    }
+    async fn ping(&self) -> Result<(), StateError> {
+        self.0.ping().await
+    }
+    fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
+        self.0.subscribe()
+    }
 }
 
 #[tokio::test]

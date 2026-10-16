@@ -456,6 +456,8 @@ async fn answer(
         Err(error) => return error.fault(version),
     };
     report.request_body_bytes = Some(bytes.len());
+    // Parse, dispatch and validate in the `mb.decode` span.
+    let decode = tracing::info_span!("mb.decode").entered();
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Answer::fault(version, 400, "the request body is not UTF-8");
     };
@@ -486,6 +488,7 @@ async fn answer(
             format!("invalid request: {}", errors.join("; ")),
         );
     }
+    drop(decode);
 
     report.admission_ran = true;
     // SOAP credentials travel in HTTP headers only.
@@ -535,6 +538,7 @@ async fn answer(
             Ok(generated) => {
                 report.usage = generated.usage;
                 let body = generated.body.unwrap_or(Value::Null);
+                let encode = tracing::info_span!("mb.encode").entered();
                 let schema = op
                     .output_for_status(generated.status)
                     .and_then(|o| o.schema.as_ref())
@@ -543,12 +547,14 @@ async fn answer(
                     Some(schema) => json_to_xml(&body, &schema),
                     None => Err(format!("operation {} declares no output schema", op.id)),
                 };
+                let xml = xml.map(|xml| envelope::envelope(version, &xml));
+                drop(encode);
                 match xml {
                     Ok(xml) => Answer {
                         http: generated.status,
                         status: generated.status,
                         version,
-                        xml: envelope::envelope(version, &xml),
+                        xml,
                         source: Some(generated.source),
                         record: body,
                         retry_after: None,

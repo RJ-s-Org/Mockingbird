@@ -236,6 +236,19 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        let now = Instant::now();
+        Ok(self
+            .inner
+            .sessions
+            .iter()
+            .filter(|e| {
+                let k = e.key();
+                k.workspace == workspace && k.mock == mock && !self.inner.expired(e.value(), now)
+            })
+            .count())
+    }
+
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         let now = Instant::now();
         let mut live: Vec<(Instant, SessionInfo)> = self

@@ -179,12 +179,6 @@ pub(crate) async fn root(
 ) -> async_graphql::Result<Option<FieldValue<'static>>> {
     let http = ctx.data::<Arc<HttpCall>>()?;
     let key = ctx.ctx.item.node.response_key().node.to_string();
-    let args: Map<String, Value> = ctx
-        .args
-        .as_index_map()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.clone().into_json().unwrap_or(Value::Null)))
-        .collect();
     let span = tracing::info_span!(
         "mock.request",
         mock = %rt.name,
@@ -193,9 +187,21 @@ pub(crate) async fn root(
         status = Empty,
         source = Empty,
     );
-    let result = generate(rt, op_id, http, key, args).instrument(span).await;
+    let args: Map<String, Value> = span.in_scope(|| {
+        tracing::info_span!("mb.decode").in_scope(|| {
+            ctx.args
+                .as_index_map()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone().into_json().unwrap_or(Value::Null)))
+                .collect()
+        })
+    });
+    let result = generate(rt, op_id, http, key, args)
+        .instrument(span.clone())
+        .await;
     match result {
-        Ok(body) => Ok(project(body, ty, shapes)),
+        Ok(body) => Ok(span
+            .in_scope(|| tracing::info_span!("mb.encode").in_scope(|| project(body, ty, shapes)))),
         // A nullable field answers null and reports the error at its path;
         // the dynamic executor would otherwise drop the field from `data`
         // and the error's path.

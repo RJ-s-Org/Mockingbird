@@ -264,7 +264,8 @@ async fn serve(
     let rt = &st.rt;
     let path = uri.path();
 
-    // 1. Route.
+    // 1. Route, then 2. decode and validate, in the `mb.decode` span.
+    let decode = tracing::info_span!("mb.decode").entered();
     let found = to_http_method(method).and_then(|m| st.routes.find(m, path));
     let Some((op_id, raw_params)) = found else {
         return unrouted(&st.routes, method, path, log);
@@ -331,6 +332,7 @@ async fn serve(
     if !errors.is_empty() {
         return invalid_input(rt, op, &errors, log);
     }
+    drop(decode);
 
     // 3. Admission, data-plane auth, overrides and scenario.
     log.admitted_or_rejected = true;
@@ -428,7 +430,7 @@ async fn serve(
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
-    let mut resp = log.generated(generated);
+    let mut resp = tracing::info_span!("mb.encode").in_scope(|| log.generated(generated));
     if plan.chaos.inject_error {
         mark_chaos(&mut resp);
     }

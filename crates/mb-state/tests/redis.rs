@@ -65,6 +65,13 @@ async fn redis_conformance() {
 }
 
 #[tokio::test]
+async fn state_session_count_default_matches_sessions() {
+    let Some(url) = redis_url() else { return };
+    let store = mb_state::connect(&url, LONG_TTL).await.expect("connect");
+    common::conformance::session_count_default_matches_sessions(&store, &workspace()).await;
+}
+
+#[tokio::test]
 async fn redis_ttl_expiry() {
     let Some(url) = redis_url() else { return };
     let store = RedisStateStore::connect(&url, Duration::from_secs(1))

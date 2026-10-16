@@ -120,6 +120,12 @@ pub trait StateStore: Send + Sync {
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError>;
     /// Live sessions of a mock, most recently touched first.
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError>;
+    /// How many live sessions a mock has (the `mb_state_sessions` gauge):
+    /// always the length of [`StateStore::sessions`]. Backends may count
+    /// without listing.
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        Ok(self.sessions(workspace, mock).await?.len())
+    }
     /// All resources of a session, oldest first (so [`StateStore::seed`]
     /// restores the same recency order).
     async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError>;

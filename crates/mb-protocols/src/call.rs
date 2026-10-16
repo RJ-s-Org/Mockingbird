@@ -19,6 +19,7 @@ use mb_mcm::{Binding, Effect, Operation, OperationKind, Protocol};
 use mb_state::{ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
+use tracing::Instrument;
 
 use crate::chaos::{self, CHAOS_HEADER, ChaosDecision};
 pub(crate) use crate::dp_auth::Unauthorized;
@@ -195,20 +196,24 @@ pub(crate) async fn admit(
     operation_id: &str,
     headers: &HeaderMap,
 ) -> Result<Tenancy, (Rejection, Option<Tenancy>)> {
-    let call_info = CallInfo::new(&rt.name, operation_id, headers);
-    let tenancy = rt
-        .ext
-        .tenants
-        .resolve(&call_info)
-        .await
-        .map_err(|r| (r, None))?;
-    if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
-        return Err((r, Some(tenancy)));
+    async {
+        let call_info = CallInfo::new(&rt.name, operation_id, headers);
+        let tenancy = rt
+            .ext
+            .tenants
+            .resolve(&call_info)
+            .await
+            .map_err(|r| (r, None))?;
+        if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+            return Err((r, Some(tenancy)));
+        }
+        match rate_limit(rt) {
+            Ok(()) => Ok(tenancy),
+            Err(r) => Err((r, Some(tenancy))),
+        }
     }
-    match rate_limit(rt) {
-        Ok(()) => Ok(tenancy),
-        Err(r) => Err((r, Some(tenancy))),
-    }
+    .instrument(tracing::info_span!("mb.admission"))
+    .await
 }
 
 /// The mock's rate limit (spec §7, step 2, after the quota): `Err` with
@@ -361,46 +366,16 @@ impl PlanFailure {
 /// applies only where `op` declares it. Chaos comes from the applying
 /// scenario, else the mock, unless `X-Mockingbird-Chaos: off`; it injects
 /// no error when a status is already forced. Records the session on the
-/// current span.
+/// current span. Admission and auth run in an `mb.admission` span.
 pub(crate) async fn plan<'a>(
     rt: &'a MockRuntime,
     op: &'a Operation,
     headers: &HeaderMap,
     presented: Presented<'_>,
 ) -> Result<CallPlan<'a>, PlanFailure> {
-    let call_info = CallInfo::new(&rt.name, &op.id, headers);
-    let tenancy = match presented.admitted {
-        Some(t) => t.clone(),
-        None => {
-            let tenancy = match rt.ext.tenants.resolve(&call_info).await {
-                Ok(t) => t,
-                Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
-            };
-            if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
-                return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
-            }
-            if let Err(r) = rate_limit(rt) {
-                return Err(PlanFailure::new(PlanError::RateLimited(r), Some(tenancy)));
-            }
-            tenancy
-        }
-    };
-    let auth = authenticate(
-        rt,
-        &op.id,
-        &op.security,
-        headers,
-        presented.query,
-        presented.key_verified,
-    )
-    .await;
-    if let Err(unauthorized) = auth {
-        return Err(PlanFailure::new(
-            PlanError::Unauthorized(unauthorized),
-            Some(tenancy),
-        ));
-    }
-
+    let tenancy = admit_and_authenticate(rt, op, headers, presented)
+        .instrument(tracing::info_span!("mb.admission"))
+        .await?;
     let overrides = match Overrides::parse(headers, rt.header_overrides) {
         Ok(o) => o,
         Err(detail) => {
@@ -458,6 +433,48 @@ pub(crate) async fn plan<'a>(
         tenancy,
         chaos,
     })
+}
+
+/// The admission and data-plane auth of [`plan`].
+async fn admit_and_authenticate(
+    rt: &MockRuntime,
+    op: &Operation,
+    headers: &HeaderMap,
+    presented: Presented<'_>,
+) -> Result<Tenancy, PlanFailure> {
+    let call_info = CallInfo::new(&rt.name, &op.id, headers);
+    let tenancy = match presented.admitted {
+        Some(t) => t.clone(),
+        None => {
+            let tenancy = match rt.ext.tenants.resolve(&call_info).await {
+                Ok(t) => t,
+                Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
+            };
+            if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+                return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
+            }
+            if let Err(r) = rate_limit(rt) {
+                return Err(PlanFailure::new(PlanError::RateLimited(r), Some(tenancy)));
+            }
+            tenancy
+        }
+    };
+    let auth = authenticate(
+        rt,
+        &op.id,
+        &op.security,
+        headers,
+        presented.query,
+        presented.key_verified,
+    )
+    .await;
+    if let Err(unauthorized) = auth {
+        return Err(PlanFailure::new(
+            PlanError::Unauthorized(unauthorized),
+            Some(tenancy),
+        ));
+    }
+    Ok(tenancy)
 }
 
 /// The call's faults, from the applying scenario's chaos, else the mock's;
@@ -566,7 +583,9 @@ pub(crate) async fn generate_once(
     let mut state = StateAccess::new(rt);
     let resource_type = op.resource_type.as_deref();
     let target_id = target_id(op, call);
-    let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call).await;
+    let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call)
+        .instrument(state_span())
+        .await;
 
     let ctx = GenerationContext {
         related: &related,
@@ -576,22 +595,31 @@ pub(crate) async fn generate_once(
     };
     let generated = rt.engine.generate(&rt.bundle, op, call, ctx).await?;
 
-    if (200..300).contains(&generated.status)
-        && let Some(t) = resource_type
-    {
-        write_state(
-            &mut state,
-            session,
-            op,
-            t,
-            target_id,
-            &generated,
-            call.body.as_ref(),
-        )
-        .await;
+    async {
+        if (200..300).contains(&generated.status)
+            && let Some(t) = resource_type
+        {
+            write_state(
+                &mut state,
+                session,
+                op,
+                t,
+                target_id,
+                &generated,
+                call.body.as_ref(),
+            )
+            .await;
+        }
+        state.touch(session).await;
     }
-    state.touch(session).await;
+    .instrument(state_span())
+    .await;
     Ok(generated)
+}
+
+/// The span of a call's state reads, or of its writes.
+fn state_span() -> tracing::Span {
+    tracing::info_span!("mb.state")
 }
 
 /// Reads the target and related resources like [`generate_once`], keeps
@@ -607,9 +635,14 @@ pub(crate) async fn open_stream(
     let op = plan.op;
     let mut state = StateAccess::new(rt);
     let target_id = target_id(op, &call);
-    let (target, related) =
-        read_context(&mut state, &plan.session, op, target_id.as_deref(), &call).await;
-    state.touch(&plan.session).await;
+    let (target, related) = async {
+        let context =
+            read_context(&mut state, &plan.session, op, target_id.as_deref(), &call).await;
+        state.touch(&plan.session).await;
+        context
+    }
+    .instrument(state_span())
+    .await;
     let ctx = StreamContext {
         related,
         target,

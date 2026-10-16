@@ -325,6 +325,15 @@ impl MockRegistry {
             .collect()
     }
 
+    /// `(workspace, name)` of every mounted mock, gRPC mocks included.
+    pub fn mounted_mocks(&self) -> Vec<(String, String)> {
+        self.mounted
+            .load()
+            .iter()
+            .map(|m| (m.workspace.clone(), m.name.clone()))
+            .collect()
+    }
+
     /// `(label, error)` of every mock whose last rebuild failed, or that is
     /// kept off the gRPC server by a service collision, sorted by workspace
     /// and name; see [`mock_label`]. A mock whose rebuild failed serves its

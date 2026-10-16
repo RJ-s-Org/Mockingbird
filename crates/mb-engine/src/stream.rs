@@ -14,6 +14,7 @@ use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, TextStrea
 use mb_mcm::{Bundle, Operation};
 use serde_json::Value;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use crate::guards::{Checked, GenerationPermit};
 use crate::ndjson::LineSplitter;
@@ -21,7 +22,7 @@ use crate::prompt::{self, build_stream_messages};
 use crate::validate::SchemaValidator;
 use crate::{
     Engine, EngineError, OperationCall, Source, StreamContext, StreamItem, apply_set, format_name,
-    success_status,
+    llm_span, record_usage, success_status,
 };
 
 impl Engine {
@@ -57,15 +58,17 @@ impl Engine {
         let (upstream, repair_system) = match &self.provider {
             None => (Upstream::Closed, None),
             Some(_) => {
-                let messages = build_stream_messages(
-                    &bundle,
-                    op,
-                    &schema,
-                    items,
-                    &call,
-                    &ctx,
-                    self.config.persona.as_deref(),
-                );
+                let messages = tracing::info_span!("mb.prompt").in_scope(|| {
+                    build_stream_messages(
+                        &bundle,
+                        op,
+                        &schema,
+                        items,
+                        &call,
+                        &ctx,
+                        self.config.persona.as_deref(),
+                    )
+                });
                 let system = messages.first().cloned();
                 let request = self.chat_request(messages, ResponseFormat::Text);
                 (Upstream::Pending(request), system)
@@ -130,12 +133,16 @@ struct StreamMeter {
     engine: Arc<Engine>,
     prompt_bytes: usize,
     completion_bytes: usize,
+    /// The provider call's `mb.llm` span: open until the stream closes,
+    /// when the estimate is recorded on it.
+    span: tracing::Span,
 }
 
 impl Drop for StreamMeter {
     fn drop(&mut self) {
-        self.engine
-            .spend(estimate_usage(self.prompt_bytes, self.completion_bytes));
+        let usage = estimate_usage(self.prompt_bytes, self.completion_bytes);
+        record_usage(&self.span, usage);
+        self.engine.spend(usage);
     }
 }
 
@@ -256,7 +263,10 @@ impl StreamState {
                         }
                     }
                     let prompt_bytes = request.messages.iter().map(|m| m.content.len()).sum();
-                    match tokio::time::timeout_at(deadline, provider.stream(request)).await {
+                    // One span for the whole provider stream, never one per item.
+                    let span = llm_span();
+                    let open = provider.stream(request).instrument(span.clone());
+                    match tokio::time::timeout_at(deadline, open).await {
                         Ok(Ok(stream)) => {
                             self.prompt_bytes = prompt_bytes;
                             self.upstream = Upstream::Open {
@@ -266,6 +276,7 @@ impl StreamState {
                                     engine: Arc::clone(&self.engine),
                                     prompt_bytes,
                                     completion_bytes: 0,
+                                    span,
                                 },
                             };
                         }
@@ -340,10 +351,22 @@ impl StreamState {
         line: &str,
         errors: &[String],
     ) -> Result<Value, String> {
-        let engine = &self.engine;
-        if engine.budget_exhausted() {
+        if self.engine.budget_exhausted() {
             return Err("token budget exhausted".into());
         }
+        self.repair_call(provider, line, errors)
+            .instrument(tracing::info_span!("mb.repair"))
+            .await
+    }
+
+    /// The repair call of [`StreamState::repair`], in its `mb.repair` span.
+    async fn repair_call(
+        &mut self,
+        provider: &dyn Provider,
+        line: &str,
+        errors: &[String],
+    ) -> Result<Value, String> {
+        let engine = &self.engine;
         let item = match serde_json::from_str::<Value>(line) {
             Ok(value) => prompt::data(&value),
             Err(_) => prompt::escape(line),
@@ -362,8 +385,11 @@ impl StreamState {
         };
         let request = engine.chat_request(messages, format);
         let limit = provider.total_timeout(engine.config.timeout);
-        let text = match tokio::time::timeout(limit, provider.complete(request)).await {
+        let span = llm_span();
+        let call = provider.complete(request).instrument(span.clone());
+        let text = match tokio::time::timeout(limit, call).await {
             Ok(Ok(response)) => {
+                record_usage(&span, response.usage);
                 engine.spend(response.usage);
                 self.repair_usage = self.repair_usage + response.usage;
                 response.content
