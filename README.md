@@ -251,6 +251,8 @@ The Admin API lives under `http://127.0.0.1:9090/api/v1`; its OpenAPI document i
 | LLM profiles | `GET /llm-profiles`, `GET/PUT/DELETE /llm-profiles/{name}` |
 | Sessions | `GET /mocks/{mock}/sessions`, `GET/PUT/DELETE …/sessions/{session}` (export, seed, reset) |
 | Request log | `GET /mocks/{mock}/requests` |
+| Imports | `GET/POST /mocks/{mock}/imports`, `GET/DELETE …/imports/{job}` (see [Smart import](#smart-import)) |
+| Drafts | `GET/PUT …/contracts/{version}/draft`, `POST …/{version}/approve`, `POST …/{version}/preview` |
 
 The request log keeps the newest `observability.request_log_retention` calls per mock. Keys matching `observability.redact_fields` are redacted anywhere in recorded JSON bodies, form bodies and query strings: a key matches when, lowercased and stripped of `_`, `-` and `.`, it contains a field normalized the same way (so `token` also redacts `access_token` and `refresh_token`, and `apiKey` redacts `x-api-key`; it errs towards hiding, e.g. `tokenizer_version`); multipart bodies are not recorded, a request body over 64 KiB is replaced by `{"truncated": true, "bytes": N}`, and a response body over 64 KiB by `{"truncated": true, "bytes": N, "preview": "…"}` (the first 1 KiB of the redacted JSON). Redaction and truncation run on the background writer, never on the request path. Queued entries are written before a graceful shutdown completes (for up to 5 s).
 
@@ -302,6 +304,129 @@ mockingbird import --as calc calculator.zip
 ```
 
 An archive is at most 20 MiB, holds at most 500 files and unpacks to at most 64 MiB. It is unpacked in memory only: absolute paths, `..`, links and devices are rejected, and when every file shares one top-level directory, that directory is stripped. Nested archives are not supported. The CLI picks the upload's media type from the file extension (`.graphql`, `.proto`, `.pb`/`.desc`, `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz`, `.json`, `.yaml`).
+
+## Smart import
+
+Not every API comes with a contract. Smart import turns what you do have into a **draft** contract version that you review before it serves anything:
+
+| Input | `kind` | How it is read | What it produces |
+| --- | --- | --- | --- |
+| Markdown, HTML, PDF (at most 500 pages) or plain text documentation | `markdown`, `html`, `pdf`, `text` | Split into chunks of about 6000 tokens (400 overlapping) along headings; an LLM extracts the operations of each chunk; the results are merged and deduplicated. Needs an LLM profile. | Operations with summaries, parameters, request and response schemas, and examples quoted from the text. |
+| A HAR 1.2 recording (browser dev tools, proxies) | `har` | Deterministic: the JSON traffic of the most common origin; static assets and other origins are dropped; ids in paths become parameters (`/pets/42` → `/pets/{petId}`). | Operations with schemas inferred from the recorded bodies and up to two examples each. |
+| A Postman v2.0 or v2.1 collection | `postman` | Deterministic: every request, folders as tags, saved responses as examples, `:var` and `{{var}}` path segments as parameters. | As for HAR. |
+| An http(s) URL to any of the above | (`url`) | Fetched once (see [URL fetching](#url-fetching)), then read according to its content type. | As above. |
+
+HAR and Postman imports do not need an LLM. When one is available it only writes missing summaries. Passwords, tokens, API keys, cookies, `Authorization` headers and similar values in recordings are replaced by `<redacted>` before anything is stored. Every input is at most 20 MiB.
+
+Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploaded contract, so a draft is always a valid contract. OpenAPI, GraphQL, protobuf and WSDL files are contracts already: upload them to `…/contracts` as before.
+
+### Review flow
+
+1. **Import.** `POST …/imports` queues a job; a pool of in-process workers runs it (`queued` → `running` → `done`, `failed` or `canceled`), reporting the phase (`fetching`, `extracting`, `analyzing`, `summarizing`, `assembling`) and chunk progress. A `done` job names the new contract version in `result_version`, with status `draft`. A draft never serves traffic.
+2. **Edit.** `GET …/contracts/{version}/draft` returns the document, each operation with its confidence and provenance, the warnings and a diff against the active version. `PUT …/draft` replaces the document; it must compile, otherwise a `422` lists each problem with a JSON pointer. Edited operations are marked `edited`. `POST …/preview` generates a sample response for one operation without touching any session state (it spends LLM tokens).
+3. **Approve.** `POST …/approve` turns the draft into an ordinary `approved` version; it can no longer be edited.
+4. **Activate.** `POST …/activate`, as for any version, swaps the mock to it.
+
+Every step is audited: `import.create` and `import.cancel` (target `import:<mock>/<job>`), `import.complete` (target `contract:<mock>@<version>`, actor kind `system`), `contract.draft_update`, `contract.approve` and `contract.activate`.
+
+### Confidence and provenance
+
+Each operation carries a **confidence** between 0 and 1. Operations seen in HAR or Postman traffic get 1.0, or 0.8 when a path parameter was inferred from a slug-like segment. Document operations get the LLM's own estimate (0.5 when it gives none), less 0.2 when no response shape was found, and halved when a literal path segment does not occur in the chunk it came from. The console shows it as High, Medium or Low.
+
+**Provenance** says where an operation came from: up to three entries, each with a location (the chunk and heading, or the HAR entry / Postman item) and an excerpt of at most 300 characters. For documents the excerpt is quoted from the source text, so you can check each operation against the documentation.
+
+### Warnings
+
+A draft lists what the importer was unsure about. Warnings never fail a job; check them before you approve.
+
+| Code | Meaning |
+| --- | --- |
+| `chunk_skipped` | The LLM call for a chunk failed or answered something unusable; that part of the document contributed nothing. |
+| `invalid_operation` | The LLM proposed operations without a valid method or path; they were dropped. |
+| `invalid_schema` | A schema the LLM proposed does not compile; it was dropped and a schema inferred from the examples was used. |
+| `ungrounded_operation` | A path segment of an operation does not occur in the text it supposedly came from; its confidence was halved. Check that it exists. |
+| `token_budget_exhausted` | The job's token budget ran out: the draft is **partial** and covers only the chunks processed so far. |
+| `conflicting_schemas` | Several sources describe the same operation differently; the richer schema was kept. |
+| `no_responses` | No response was described; a bare `200` was added. |
+| `missing_path_parameter` | A `{param}` in the path was not described; it was added as a string. |
+| `entries_skipped` | HAR entries (static assets, non-JSON traffic, unreadable entries) or Postman items without a usable method or URL were skipped. |
+| `other_origins` | The HAR file recorded several origins; only the most common one was imported. |
+| `summaries_skipped` | Summaries for HAR or Postman operations could not be generated. |
+
+### Token budget
+
+The LLM calls of one job may spend at most `import.max_tokens` tokens (default 200 000), counted from the provider's reported usage. Before each chunk the importer estimates its cost (the chunk, the prompt and the profile's `max_tokens`); when the budget cannot cover it, the job stops early and assembles a partial draft with a `token_budget_exhausted` warning instead of failing. Extraction calls use the mock's LLM profile (or `import.llm_profile`) with a timeout of at least 120 s, at least 8192 output tokens and a temperature of at most 0.2. Document text is passed to the model only as delimited data, never as instructions; the model has no tools, and every answer is validated before use. With `--offline` there is no LLM, so only HAR and Postman imports work.
+
+### Configuration
+
+```yaml
+import:
+  workers: 2                 # import worker tasks, 1..=16
+  max_tokens: 200000         # LLM token budget per job, at least 1000
+  llm_profile: importer      # optional; default: the mock's own profile
+  url_allowlist:             # private hosts URL imports may reach (default: none)
+    - docs.internal          # an exact host name
+    - "*.corp.example"       # any subdomain of corp.example
+    - 10.20.0.0/16           # a CIDR range
+    - 192.168.1.15           # a single address
+```
+
+`import.llm_profile` is looked up in the mock's workspace first, then in `default`. The `import:` section is read at startup.
+
+### URL fetching
+
+URL imports are fetched by the server, so they are guarded against server-side request forgery:
+
+- Only `http` and `https` URLs with a host and without credentials.
+- The host is resolved once and every address is checked before connecting; the connection is pinned to the checked addresses, so the name cannot be re-resolved elsewhere. Blocked: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, `240.0.0.0/4`, and for IPv6 `::`, `::1`, `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8` and `2001:db8::/32` (IPv4-mapped and NAT64 addresses are judged by their IPv4 address).
+- `import.url_allowlist` exempts a host name, a host suffix (`*.corp.example`) or an address range. A blocked fetch fails with a message naming the address and this setting.
+- At most 5 redirects, and each hop is validated and resolved again, exactly like the first request.
+- No proxy is used (proxy environment variables are ignored), the whole fetch takes at most 20 s and the body is at most 10 MiB.
+- The content type picks the reader: `text/html`, `text/markdown`, `text/plain`, `application/pdf`, or JSON that is a HAR file or a Postman collection.
+
+### Admin API
+
+| Endpoint | Role | Result |
+| --- | --- | --- |
+| `POST /mocks/{mock}/imports` | Edit | `202` with the job and a `Location` header. `409 managed_by_file` for a mock from the config file; `422` for an unknown kind, a contract, or a document import without an LLM. |
+| `GET /mocks/{mock}/imports`, `GET …/imports/{job}` | Read | The newest 50 jobs; one job. Finished jobs are kept for 7 days. |
+| `DELETE …/imports/{job}` | Edit | Cancels a queued or running job; `409` once it has finished. |
+| `GET …/contracts/{version}/draft`, `PUT …/draft` | Read, Edit | The draft for review; replace its document (`409` unless the version is a draft). |
+| `POST …/contracts/{version}/approve` | Edit | The approved version. |
+| `POST …/contracts/{version}/preview` | Edit | A generated response for one operation. |
+
+The JSON body takes `url`, or `kind` with `text` (`markdown`, `html`, `text`, `har`, `postman`), or `content_base64` with an optional `kind` and `filename`. A file can also be uploaded as `multipart/form-data` with a `file` part and an optional `kind` part; the request must carry an `X-Mockingbird-Upload` header (any value), which a cross-site form cannot send. The request body is at most 28 MiB.
+
+```sh
+ADMIN=http://127.0.0.1:9090/api/v1/workspaces/default/mocks/pets
+# Upload a file.
+curl -X POST "$ADMIN/imports" -H 'X-Mockingbird-Upload: 1' -F file=@petstore.har
+# Or send JSON.
+curl -X POST "$ADMIN/imports" -H 'content-type: application/json' \
+  -d '{"url": "https://example.com/docs"}'
+curl -X POST "$ADMIN/imports" -H 'content-type: application/json' \
+  -d "$(jq -Rs '{kind: "markdown", text: .}' petstore.md)"
+# Follow the job, then review the draft it names.
+curl "$ADMIN/imports/<job id>"
+curl "$ADMIN/contracts/<version>/draft"
+```
+
+### CLI
+
+`mockingbird import` recognises documentation, HAR files and Postman collections (by content, and by file name for Markdown, HTML and text), and http(s) URLs. It creates the mock if needed, waits for the job (`--timeout`, default 10 minutes) and prints the draft's operations and warnings:
+
+```sh
+mockingbird import petstore.har --as pets
+mockingbird import https://example.com/docs --as pets
+# Approve and activate in one go, but only if the draft has no warnings.
+mockingbird import petstore.har --as pets --approve --activate
+```
+
+With `--approve`, a draft with warnings is left unapproved: the command prints the summary, says how many warnings there are and exits 1, so you can review it in the console. `--activate` needs `--approve` for these imports.
+
+### Console
+
+A mock's **Import** tab starts an import from a file, a URL or pasted text, and follows the job's progress. The **draft review** page (opened from a draft on the Contracts tab, or when an import finishes) lists the operations with their confidence and provenance, edits an operation, previews a response, shows the diff against the active version and the warnings, and approves and activates the draft.
 
 ## Console and auth
 
@@ -495,6 +620,15 @@ With a config file, mount it and its contracts and pass `-c`; use Postgres (`MB_
 | `MB_LLM_JSON_SCHEMA` | `false` | `true` to request JSON Schema mode instead of JSON mode. |
 | `RUST_LOG` | `info` | Log filter. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Enables OTLP trace export. |
+
+### Config keys: `import`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `import.workers` | `2` | Import worker tasks, 1 to 16. |
+| `import.max_tokens` | `200000` | LLM token budget of one import job, at least 1000. |
+| `import.llm_profile` | none | LLM profile for extraction instead of the mock's own (mock's workspace first, then `default`). |
+| `import.url_allowlist` | `[]` | Host names, `*.suffix` host suffixes, addresses and CIDR ranges that URL imports may reach although they are private. |
 
 ## License
 
