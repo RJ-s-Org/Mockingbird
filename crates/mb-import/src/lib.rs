@@ -1,6 +1,6 @@
 //! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0, GraphQL SDL and
-//! introspection, protobuf sources and descriptor sets) into the
-//! Mockingbird Contract Model.
+//! introspection, protobuf sources and descriptor sets, WSDL 1.1 with XSD)
+//! into the Mockingbird Contract Model.
 
 mod graphql;
 mod heuristics;
@@ -8,6 +8,7 @@ mod openapi3;
 mod proto;
 mod schema;
 mod swagger2;
+mod wsdl;
 
 use mb_mcm::Bundle;
 use serde_json::Value;
@@ -103,6 +104,9 @@ pub fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
         }
         return detect_format(&doc);
     }
+    if wsdl::looks_like_xml(bytes) {
+        return wsdl::sniff(bytes);
+    }
     let yaml = serde_saphyr::from_slice::<Value>(bytes);
     if let Ok(doc) = &yaml
         && let Ok(format) = detect_format(doc)
@@ -141,15 +145,15 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
         }
         SourceFormat::Proto => proto::compile_text(bytes),
         SourceFormat::FileDescriptorSet => proto::compile_descriptor_set(bytes),
-        format @ (SourceFormat::Wsdl11 | SourceFormat::Archive) => {
-            Err(ImportError::Unsupported(format!("{format:?}")))
-        }
+        SourceFormat::Wsdl11 => wsdl::compile_text(bytes),
+        format @ SourceFormat::Archive => Err(ImportError::Unsupported(format!("{format:?}"))),
     }
 }
 
 /// Compile a multi-file contract: any `.proto` files are compiled together
-/// (imports resolve between them); otherwise exactly one file is compiled
-/// on its own.
+/// (imports resolve between them); else a single `.wsdl` is compiled with
+/// the other files available to its `schemaLocation`s; otherwise exactly
+/// one file is compiled on its own.
 pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
     let protos: Vec<&SourceFile> = files
         .iter()
@@ -157,6 +161,26 @@ pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
         .collect();
     if !protos.is_empty() {
         return proto::compile_sources(&protos, proto::files_digest(&protos));
+    }
+    let wsdls: Vec<&SourceFile> = files.iter().filter(|f| f.path.ends_with(".wsdl")).collect();
+    match wsdls.as_slice() {
+        [] => {}
+        [wsdl] => {
+            let digest = match files {
+                [one] => proto::hex_digest(&one.bytes),
+                _ => proto::files_digest(&files.iter().collect::<Vec<_>>()),
+            };
+            return wsdl::compile_upload(wsdl, files, digest);
+        }
+        many => {
+            return Err(ImportError::Invalid {
+                pointer: "/".into(),
+                message: format!(
+                    "the upload contains {} .wsdl files; expected one",
+                    many.len()
+                ),
+            });
+        }
     }
     match files {
         [one] => compile(&one.bytes),

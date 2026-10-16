@@ -136,7 +136,7 @@ fn run(resolver: impl FileResolver + 'static, names: &[String]) -> Result<Compil
     })
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()

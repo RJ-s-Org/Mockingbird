@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:t="urn:example:orders:types"
+    targetNamespace="urn:example:orders:types"
+    elementFormDefault="qualified">
+  <xs:complexType name="Money">
+    <xs:simpleContent>
+      <xs:extension base="xs:decimal">
+        <xs:attribute name="currency" type="xs:string" use="required"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="Order">
+    <xs:sequence>
+      <xs:element name="id" type="xs:string"/>
+      <xs:element name="total" type="t:Money"/>
+      <xs:element name="placedAt" type="xs:dateTime"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:element name="GetOrder">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="id" type="xs:string"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="GetOrderResponse" type="t:Order"/>
+</xs:schema>
