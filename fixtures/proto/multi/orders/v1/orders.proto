@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package orders.v1;
+
+import "common/v1/money.proto";
+import "google/protobuf/timestamp.proto";
+
+// Manages customer orders.
+service OrderService {
+  // Fetches one order by id.
+  rpc GetOrder(GetOrderRequest) returns (Order);
+  // Places a new order.
+  rpc CreateOrder(CreateOrderRequest) returns (Order);
+  // Streams the orders of a customer.
+  rpc ListOrders(ListOrdersRequest) returns (stream Order);
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING = 1;
+  ORDER_STATUS_SHIPPED = 2;
+  ORDER_STATUS_CANCELLED = 3;
+}
+
+// A customer order.
+message Order {
+  string id = 1;
+  string customer_id = 2;
+  OrderStatus status = 3;
+  common.v1.Money total = 4;
+  google.protobuf.Timestamp created_at = 5;
+  repeated LineItem items = 6;
+}
+
+message LineItem {
+  string sku = 1;
+  int32 quantity = 2;
+  common.v1.Money price = 3;
+}
+
+message GetOrderRequest {
+  string order_id = 1;
+}
+
+message CreateOrderRequest {
+  string customer_id = 1;
+  repeated LineItem items = 2;
+}
+
+message ListOrdersRequest {
+  string customer_id = 1;
+  int32 page_size = 2;
+}

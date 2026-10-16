@@ -12,6 +12,10 @@ workspace = true
 [dependencies]
 mb-mcm.workspace = true
 async-graphql-parser.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+prost-reflect.workspace = true
+protox.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
@@ -20,3 +24,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+jsonschema.workspace = true

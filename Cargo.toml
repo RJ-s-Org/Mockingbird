@@ -45,6 +45,10 @@ futures = "0.3.34"
 eventsource-stream = "0.2.3"
 async-graphql = { version = "7.2.1", default-features = false, features = ["dynamic-schema"] }
 async-graphql-parser = "7.2.1"
+prost = "0.14.4"
+prost-types = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+protox = "0.10.0"
 json-patch = { version = "4", default-features = false }
 humantime-serde = "1"
 notify = "8"

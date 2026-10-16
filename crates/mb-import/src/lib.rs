@@ -1,9 +1,11 @@
 //! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0, GraphQL SDL and
-//! introspection) into the Mockingbird Contract Model.
+//! introspection, protobuf sources and descriptor sets) into the
+//! Mockingbird Contract Model.
 
 mod graphql;
 mod heuristics;
 mod openapi3;
+mod proto;
 mod schema;
 mod swagger2;
 
@@ -20,6 +22,14 @@ pub enum SourceFormat {
     FileDescriptorSet,
     Wsdl11,
     Archive,
+}
+
+/// One uploaded file of a multi-file contract.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceFile {
+    /// `/`-separated path relative to the upload root.
+    pub path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -76,6 +86,9 @@ const SDL_MARKERS: [&str; 4] = [
     "type Subscription",
 ];
 
+/// The `syntax` statement of a `.proto` source.
+const PROTO_SYNTAX: &str = "syntax = \"proto";
+
 /// Whether a JSON document is a GraphQL introspection result
 /// (`/__schema` or `/data/__schema`).
 fn is_introspection(doc: &Value) -> bool {
@@ -96,10 +109,20 @@ pub fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
     {
         return Ok(format);
     }
-    if let Ok(text) = std::str::from_utf8(bytes)
-        && SDL_MARKERS.iter().any(|m| text.contains(m))
-    {
-        return Ok(SourceFormat::GraphqlSdl);
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if text.contains(PROTO_SYNTAX) {
+            return Ok(SourceFormat::Proto);
+        }
+        if SDL_MARKERS.iter().any(|m| text.contains(m)) {
+            return Ok(SourceFormat::GraphqlSdl);
+        }
+        // A `.proto` without a syntax statement.
+        if text.contains("service ") && text.contains("message ") {
+            return Ok(SourceFormat::Proto);
+        }
+    }
+    if proto::is_descriptor_set(bytes) {
+        return Ok(SourceFormat::FileDescriptorSet);
     }
     match yaml {
         Ok(doc) => detect_format(&doc),
@@ -116,9 +139,29 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
         SourceFormat::GraphqlIntrospection => {
             graphql::compile_introspection(&parse_document(bytes)?, bytes)
         }
-        format @ (SourceFormat::Proto
-        | SourceFormat::FileDescriptorSet
-        | SourceFormat::Wsdl11
-        | SourceFormat::Archive) => Err(ImportError::Unsupported(format!("{format:?}"))),
+        SourceFormat::Proto => proto::compile_text(bytes),
+        SourceFormat::FileDescriptorSet => proto::compile_descriptor_set(bytes),
+        format @ (SourceFormat::Wsdl11 | SourceFormat::Archive) => {
+            Err(ImportError::Unsupported(format!("{format:?}")))
+        }
+    }
+}
+
+/// Compile a multi-file contract: any `.proto` files are compiled together
+/// (imports resolve between them); otherwise exactly one file is compiled
+/// on its own.
+pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
+    let protos: Vec<&SourceFile> = files
+        .iter()
+        .filter(|f| f.path.ends_with(".proto"))
+        .collect();
+    if !protos.is_empty() {
+        return proto::compile_sources(&protos, proto::files_digest(&protos));
+    }
+    match files {
+        [one] => compile(&one.bytes),
+        _ => Err(ImportError::Unsupported(
+            "archive contains no recognised contract".into(),
+        )),
     }
 }
