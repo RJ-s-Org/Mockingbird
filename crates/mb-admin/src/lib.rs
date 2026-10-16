@@ -1,18 +1,31 @@
-//! Mockingbird Admin REST API: mocks, contract versions, scenarios, LLM
-//! profiles, sessions and the request log under `/api/v1`, described by the
-//! OpenAPI document at `/api/openapi.json`. Every error is an RFC 9457
-//! `application/problem+json` document.
+//! Mockingbird Admin REST API: workspaces, and in each workspace mocks,
+//! contract versions, scenarios, LLM profiles, sessions and the request log
+//! under `/api/v1/workspaces/{ws}` (the P2 paths under `/api/v1` act on
+//! `default`), plus each workspace's API keys and audit log and the global
+//! audit log at `/api/v1/audit`, the live request tail over SSE and the
+//! caller's identity at `/api/v1/me`, described by the OpenAPI document at
+//! `/api/openapi.json`, plus the OIDC browser login under `/auth`. Every successful mutation writes one audit event.
+//! Every `/api/v1` request is authenticated and checked against the caller's
+//! workspace role. Every error is an RFC 9457 `application/problem+json`
+//! document.
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
+use mb_auth::{Authenticate, LocalAuth};
 use mb_state::StateStore;
-use mb_store::{ContractStatus, ControlStore, DEFAULT_WORKSPACE, Mock, ResourceSource};
+use mb_store::{ContractStatus, ControlStore, Mock, ResourceSource};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+pub mod access;
+mod apikeys;
+mod audit;
+mod auth_routes;
 mod contracts;
+mod live;
+mod login_limit;
 mod mocks;
 mod openapi;
 pub mod problem;
@@ -20,10 +33,22 @@ mod profiles;
 mod requests;
 mod scenarios;
 mod sessions;
+mod webhook;
+mod workspaces;
 
-pub use openapi::ApiDoc;
+pub use access::{CurrentPrincipal, WsAccess, authenticate};
+pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
+pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
+pub use auth_routes::{
+    LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
+};
+pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
+pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUPPRESSED_METRIC};
+pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
+pub use webhook::{WebhookSink, signature};
+pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
 
 /// Admin API base path.
 pub const API_BASE: &str = "/api/v1";
@@ -34,6 +59,9 @@ pub const OPENAPI_PATH: &str = "/api/openapi.json";
 /// created or updated through the API may use.
 pub const DEFAULT_API_SECRET_REFS: [&str; 2] = ["env:MB_LLM_*", "env:*_API_KEY"];
 
+/// Default [`AdminState::live_recheck`].
+pub const DEFAULT_LIVE_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct AdminState {
     pub store: Arc<dyn ControlStore>,
@@ -41,6 +69,45 @@ pub struct AdminState {
     /// Globs (`*` matches any run of characters) a profile's `secret_ref`
     /// must match when written through the API (`server.api_secret_refs`).
     pub api_secret_refs: Arc<Vec<String>>,
+    /// Resolves the caller of every `/api/v1` request.
+    pub auth: Arc<dyn Authenticate>,
+    /// Records every successful mutation.
+    pub audit: Auditor,
+    /// Subscribes to served data-plane calls for the live request tail;
+    /// `None` answers the tail with 503.
+    pub live: Option<LiveSubscribe>,
+    /// How often an open live tail re-authenticates its caller and re-checks
+    /// its Read permission, ending the stream when either fails
+    /// ([`DEFAULT_LIVE_RECHECK`]).
+    pub live_recheck: std::time::Duration,
+    /// Browser login (`/auth/*`); `None` in `auth.mode: none`.
+    pub web_auth: Option<WebAuth>,
+    /// Rate limit for `auth.login_failed` audit events.
+    pub login_failures: Arc<LoginFailureLimiter>,
+}
+
+impl AdminState {
+    /// A state with [`LocalAuth`] (`auth.mode: none`), the
+    /// [`DEFAULT_API_SECRET_REFS`], an [`Auditor`] without a webhook, no
+    /// live request feed and no browser login.
+    pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
+        Self {
+            audit: Auditor::new(store.clone(), None),
+            store,
+            state,
+            api_secret_refs: Arc::new(
+                DEFAULT_API_SECRET_REFS
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect(),
+            ),
+            auth: Arc::new(LocalAuth),
+            live: None,
+            live_recheck: DEFAULT_LIVE_RECHECK,
+            web_auth: None,
+            login_failures: Arc::new(LoginFailureLimiter::new()),
+        }
+    }
 }
 
 /// Whether `text` matches `pattern`, where `*` matches any run of
@@ -68,14 +135,25 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     p[pi..].iter().all(|&c| c == b'*')
 }
 
-/// Mounts `/api/v1/*` and `/api/openapi.json`.
+/// Mounts `/api/v1/*`, `/api/openapi.json` and the browser login routes
+/// `/auth/login`, `/auth/callback` and `/auth/logout`.
+///
+/// The workspace resources are served under `/api/v1/workspaces/{ws}` and,
+/// for `default`, under `/api/v1` (the P2 paths). Every `/api/v1` route
+/// requires a principal (401 otherwise); `/api/openapi.json` is public, and
+/// any other `/api/*` path is a 404 problem. The `/auth/*` routes are
+/// public. Other paths are left to the caller's fallback.
 ///
 /// Every mutating request needs a non-CORS-safelisted `Content-Type`
-/// (`application/json`, or a JSON/YAML/OpenAPI type for contract uploads;
-/// otherwise 415), so a cross-site page cannot reach the API with a simple
-/// request.
+/// (`application/json`, or one of the contract media types for contract
+/// uploads, see `contracts::CONTRACT_MEDIA_TYPES`: JSON, YAML, OpenAPI,
+/// GraphQL, protobuf, XML/WSDL, zip, gzip or octet-stream; otherwise 415),
+/// so a cross-site page cannot reach the API with a simple request.
+///
+/// Every `/api` response carries `X-Content-Type-Options: nosniff` and the
+/// sandboxing [`API_CSP`]; contract sources download as attachments.
 pub fn router(st: AdminState) -> Router {
-    let api = Router::new()
+    let resources: Router<AdminState> = Router::new()
         .route("/mocks", get(mocks::list).post(mocks::create))
         .route(
             "/mocks/{mock}",
@@ -115,15 +193,72 @@ pub fn router(st: AdminState) -> Router {
                 .put(sessions::seed)
                 .delete(sessions::reset),
         )
-        .route("/mocks/{mock}/requests", get(requests::list));
+        .route("/mocks/{mock}/requests", get(requests::list))
+        .route("/mocks/{mock}/requests/stream", get(live::stream));
+    // Workspace-only resources: no P2 alias for `default`.
+    let workspace_only: Router<AdminState> = resources
+        .clone()
+        .route("/api-keys", get(apikeys::list).post(apikeys::create))
+        .route("/api-keys/{key_id}", axum::routing::delete(apikeys::revoke))
+        .route("/audit", get(audit::list));
+
+    let api = Router::new()
+        .route(
+            "/workspaces",
+            get(workspaces::list).post(workspaces::create),
+        )
+        .route(
+            "/workspaces/{ws}",
+            get(workspaces::get_one)
+                .patch(workspaces::patch)
+                .delete(workspaces::delete),
+        )
+        .nest("/workspaces/{ws}", workspace_only)
+        .merge(resources)
+        .route("/audit", get(audit::list_global))
+        .route("/me", get(auth_routes::me))
+        .route_layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            access::authenticate,
+        ));
 
     Router::new()
         .nest(API_BASE, api)
         .route(OPENAPI_PATH, get(openapi::serve))
-        .fallback(problem::not_found)
+        .merge(auth_routes::routes())
+        .route("/api/{*rest}", any(problem::not_found))
         .method_not_allowed_fallback(problem::method_not_allowed)
         .layer(axum::middleware::from_fn(problem::log_server_errors))
+        .layer(axum::middleware::from_fn(api_security_headers))
         .with_state(st)
+}
+
+/// The `Content-Security-Policy` of every `/api` response.
+pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'; sandbox";
+
+/// Marks every `/api` response as never to be rendered: `nosniff` and a
+/// CSP that sandboxes it, so a stored document (a contract source, an
+/// echoed name) cannot run script in the console's origin even if a
+/// browser is navigated to it.
+async fn api_security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    let api = path == "/api" || path.starts_with("/api/");
+    let mut resp = next.run(req).await;
+    if api {
+        let headers = resp.headers_mut();
+        headers.insert(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        );
+        headers.insert(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(API_CSP),
+        );
+    }
+    resp
 }
 
 /// Where a resource is managed. `file` resources are read-only here.
@@ -165,10 +300,10 @@ impl From<&ContractStatus> for VersionStatus {
 }
 
 impl AdminState {
-    /// The mock named `name`, or a 404 problem.
-    async fn mock(&self, name: &str) -> ApiResult<Mock> {
+    /// The mock named `name` in workspace `ws`, or a 404 problem.
+    async fn mock(&self, ws: &str, name: &str) -> ApiResult<Mock> {
         self.store
-            .get_mock(DEFAULT_WORKSPACE, name)
+            .get_mock(ws, name)
             .await?
             .ok_or_else(|| Problem::not_found(format!("mock {name:?} does not exist")))
     }

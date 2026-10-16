@@ -3,7 +3,7 @@
 # Run with: mockingbird serve -c docs/examples/mockingbird.yaml [--watch]
 
 server:
-  host: 127.0.0.1          # MB_HOST / --host; non-loopback needs insecure_no_auth
+  host: 127.0.0.1          # MB_HOST / --host; non-loopback needs insecure_no_auth in auth.mode none
   port: 8080               # data plane; MB_PORT / --port
   admin_port: 9090         # Admin API and /healthz, /readyz, /metrics; MB_ADMIN_PORT / --admin-port
   grpc_port: 50051         # gRPC (h2c), shared by every gRPC mock; MB_GRPC_PORT / --grpc-port
@@ -18,10 +18,34 @@ storage:
   state_url: memory        # session state; omitted = same as url; "memory" = in-process
   session_ttl: 24h
 
+auth:
+  mode: none               # none (every admin request is a local sysadmin) | oidc
+  # The URL browsers use to reach the admin port: the OIDC redirect is
+  # <external_url>/auth/callback, https makes cookies Secure, and in oidc mode
+  # the admin port answers only to this host (except /healthz, /readyz, /metrics).
+  external_url: http://127.0.0.1:9090
+  session_ttl: 12h         # absolute lifetime of a console login
+  sysadmin_subjects: []    # OIDC `sub` values that are always sysadmin
+  public_metrics: true     # false: /metrics needs credentials like the API
+  oidc:                    # required in oidc mode
+    issuer: http://localhost:8080/auth/v1
+    client_id: mockingbird
+    client_secret: env:MB_OIDC_CLIENT_SECRET   # a secret reference; omit for a public client
+    scopes: [openid, profile, email, groups]
+    roles_claim: groups    # claim holding <group_prefix>:<workspace>:<role> and <group_prefix>:sysadmin
+    group_prefix: mb
+    audience: mockingbird  # required `aud` of bearer JWTs; default: client_id
+
+audit:
+  retention_days: 365      # older audit events are pruned daily
+  webhook_url: https://audit.example.com/mockingbird   # optional; every event is POSTed here
+  webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET          # secret reference; signs X-Mockingbird-Signature
+
 llm:
   default_profile: deepseek   # used by mocks that name no profile; MB_LLM_* override profile "default"
   profiles:
     deepseek:
+      workspace: default              # workspace the profile belongs to (created if missing)
       base_url: https://api.deepseek.com
       model: deepseek-chat
       api_key: env:DEEPSEEK_API_KEY   # a secret reference (env:NAME or file:/path), never the key itself
@@ -62,11 +86,15 @@ protocols:
 
 mocks:
   orders:
+    workspace: default                                 # created if missing; mock names are unique per workspace
     contract: ../../fixtures/openapi/orders-3.0.yaml   # relative to this file
     route_prefix: /orders-api                          # default: /<name>
     persona: A small online shop selling hiking gear.
     llm_profile: deepseek                              # default: llm.default_profile
     header_overrides: true                             # honour X-Mockingbird-* request headers
+    data_plane_auth:
+      mode: none                                       # none | api_key | passthrough_validate
+      header: x-api-key                                # where api_key mode reads the key (or ?api_key=)
     scenarios:
       out-of-stock:
         instructions: Every product is out of stock.

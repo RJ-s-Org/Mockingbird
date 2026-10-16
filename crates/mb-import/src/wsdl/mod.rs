@@ -631,6 +631,7 @@ impl<'a> Wsdl<'a> {
             resource_type: resource_from_name(name),
             identity,
             semantic_hints: Vec::new(),
+            security: Vec::new(),
         })
     }
 

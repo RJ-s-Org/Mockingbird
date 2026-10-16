@@ -52,6 +52,7 @@ impl Failure {
     pub(crate) fn plan(error: PlanError, mock: &str) -> Self {
         match error {
             PlanError::Rejected(r) => Self::new(r.status, r.detail),
+            PlanError::Unauthorized(u) => Self::new(401, u.detail),
             PlanError::BadOverride(detail) => Self::new(400, detail),
             PlanError::UnknownScenario(name) => {
                 Self::new(400, format!("mock {mock} has no scenario {name:?}"))

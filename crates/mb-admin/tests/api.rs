@@ -27,6 +27,7 @@ struct Harness {
 struct Resp {
     status: StatusCode,
     content_type: String,
+    headers: axum::http::HeaderMap,
     text: String,
 }
 
@@ -71,9 +72,8 @@ async fn harness_with(api_secret_refs: Vec<String>) -> Harness {
 async fn harness_full(api_secret_refs: Vec<String>, state: Arc<dyn StateStore>) -> Harness {
     let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let app = router(AdminState {
-        store: store.clone(),
-        state,
         api_secret_refs: Arc::new(api_secret_refs),
+        ..AdminState::new(store.clone(), state)
     });
     Harness { app, store }
 }
@@ -102,12 +102,14 @@ impl Harness {
             .get("content-type")
             .map(|v| v.to_str().unwrap().to_owned())
             .unwrap_or_default();
+        let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         Resp {
             status,
             content_type,
+            headers,
             text: String::from_utf8_lossy(&bytes).into_owned(),
         }
     }
@@ -1290,6 +1292,7 @@ async fn file_managed_mock_is_read_only() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::File,
+                data_plane_auth: Default::default(),
             },
         )
         .await
@@ -1418,6 +1421,7 @@ async fn openapi_lists_all_paths() {
             &["get", "put", "delete"],
         ),
         ("/api/v1/mocks/{mock}/requests", &["get"]),
+        ("/api/v1/mocks/{mock}/requests/stream", &["get"]),
     ];
     for (path, methods) in expected {
         let item = &doc["paths"][*path];
@@ -1426,11 +1430,17 @@ async fn openapi_lists_all_paths() {
             assert!(item[*m].is_object(), "{m} {path} missing");
         }
     }
+    // The P2 paths; the workspace-scoped ones are covered in workspaces.rs
+    // the global audit log in audit.rs and /api/v1/me in auth_flow.rs.
     let documented: usize = doc["paths"]
         .as_object()
         .unwrap()
-        .values()
-        .map(|item| item.as_object().unwrap().len())
+        .iter()
+        .filter(|(path, _)| {
+            !path.starts_with("/api/v1/workspaces")
+                && !matches!(path.as_str(), "/api/v1/audit" | "/api/v1/me")
+        })
+        .map(|(_, item)| item.as_object().unwrap().len())
         .sum();
     let listed: usize = expected.iter().map(|(_, m)| m.len()).sum();
     assert_eq!(documented, listed, "unexpected extra operations");
@@ -1572,6 +1582,11 @@ async fn upload_graphql_proto_wsdl_and_archive() {
         ("multi-zip", multi_zip, "application/zip", "application/zip"),
     ];
     for (mock, bytes, content_type, source_type) in cases {
+        if mock == "multi-zip" {
+            // Its services are those of `multi`: one active holder only.
+            let r = h.delete("/api/v1/mocks/multi").await;
+            assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+        }
         h.create_mock(mock).await;
         let expected = mb_import::compile(&bytes).unwrap().operations.len();
         assert!(expected > 0, "{mock}");
@@ -1586,7 +1601,11 @@ async fn upload_graphql_proto_wsdl_and_archive() {
             .get(&format!("/api/v1/mocks/{mock}/contracts/1/source"))
             .await;
         assert_eq!(r.status, StatusCode::OK, "{mock}");
-        assert_eq!(r.content_type, source_type, "{mock}");
+        assert_eq!(r.content_type, "application/octet-stream", "{mock}");
+        assert_eq!(
+            r.headers["x-mockingbird-source-type"], source_type,
+            "{mock}"
+        );
     }
 
     // A descriptor set uploads as application/x-protobuf; text/plain stays
@@ -1646,4 +1665,149 @@ async fn grpc_contract_detail_lists_protocol_target_kind() {
     assert_eq!(list["kind"], "stream-server", "{list}");
     assert_eq!(list["method"], "", "{list}");
     assert_eq!(list["path"], "", "{list}");
+}
+
+/// A WSDL whose documentation embeds an XHTML script: served inline as
+/// XML it would run same-origin with the console's session cookie.
+#[tokio::test]
+async fn contract_source_is_an_inert_attachment() {
+    let h = harness().await;
+    h.create_mock("calc").await;
+    let wsdl = String::from_utf8(fixture("wsdl/calculator.wsdl")).unwrap();
+    let evil = wsdl.replacen(
+        "<wsdl:types>",
+        "<wsdl:documentation><html:script xmlns:html=\"http://www.w3.org/1999/xhtml\">alert(document.cookie)</html:script></wsdl:documentation><wsdl:types>",
+        1,
+    );
+    assert_ne!(evil, wsdl, "the fixture has a <wsdl:types> element");
+    let r = h
+        .upload_bytes("calc", evil.clone().into_bytes(), "application/wsdl+xml")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    let r = h.get("/api/v1/mocks/calc/contracts/1/source").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.text, evil);
+    assert_eq!(r.content_type, "application/octet-stream");
+    assert_eq!(
+        r.headers["content-disposition"],
+        r#"attachment; filename="calc-v1.wsdl""#
+    );
+    assert_eq!(r.headers["x-mockingbird-source-type"], "application/xml");
+    assert_eq!(r.headers["x-content-type-options"], "nosniff");
+    assert_eq!(
+        r.headers["content-security-policy"],
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
+    );
+}
+
+/// Every `/api` response, success or problem, public or not, carries
+/// `nosniff` and a sandboxing CSP: API responses are never rendered.
+#[tokio::test]
+async fn api_responses_are_never_rendered() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    for uri in [
+        "/api/v1/mocks",
+        "/api/v1/mocks/nope",
+        "/api/openapi.json",
+        "/api/nothing-here",
+    ] {
+        let r = h.get(uri).await;
+        assert_eq!(r.headers["x-content-type-options"], "nosniff", "{uri}");
+        assert_eq!(
+            r.headers["content-security-policy"],
+            "default-src 'none'; frame-ancestors 'none'; sandbox",
+            "{uri}"
+        );
+    }
+}
+
+/// gRPC mocks share one listener, so a service may be served by one
+/// active contract only, across every workspace.
+#[tokio::test]
+async fn grpc_services_are_unique_across_workspaces() {
+    let h = harness().await;
+    let r = h
+        .json(
+            Method::POST,
+            "/api/v1/workspaces",
+            json!({ "name": "team-b" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    h.create_mock("routes").await;
+    let route_guide = fixture("proto/route_guide.proto");
+    let r = h
+        .upload_bytes("routes", route_guide.clone(), "text/x-protobuf")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    let r = h
+        .json(
+            Method::POST,
+            "/api/v1/workspaces/team-b/mocks",
+            json!({ "name": "hijack" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let upload = |bytes: Vec<u8>, query: &'static str| {
+        let uri = format!("/api/v1/workspaces/team-b/mocks/hijack/contracts{query}");
+        let h = &h;
+        async move {
+            h.send(
+                Method::POST,
+                &uri,
+                Body::from(bytes),
+                Some("text/x-protobuf"),
+            )
+            .await
+        }
+    };
+
+    // The first upload activates itself: refused, nothing stored.
+    let body = upload(route_guide.clone(), "")
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("routeguide.RouteGuide") && detail.contains("default/routes"),
+        "{detail}"
+    );
+    let r = h
+        .get("/api/v1/workspaces/team-b/mocks/hijack/contracts")
+        .await;
+    assert_eq!(r.json(), json!([]));
+
+    // Another service is fine; the clashing one may be stored but neither
+    // activated on upload nor later.
+    let r = upload(fixture("proto/helloworld.proto"), "").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    upload(route_guide.clone(), "?activate=true")
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    let r = upload(route_guide.clone(), "?activate=false").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    assert_eq!(r.json()["status"], "approved");
+    let version = r.json()["version"].as_i64().unwrap();
+    h.post_empty_json(&format!(
+        "/api/v1/workspaces/team-b/mocks/hijack/contracts/{version}/activate"
+    ))
+    .await
+    .assert_problem(StatusCode::CONFLICT);
+
+    // A mock may re-upload and re-activate its own services.
+    let r = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks/routes/contracts?activate=true",
+            Body::from(route_guide),
+            Some("text/x-protobuf"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let r = h
+        .post_empty_json("/api/v1/mocks/routes/contracts/1/activate")
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
 }

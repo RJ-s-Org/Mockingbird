@@ -7,6 +7,7 @@ use crate::openapi3::{
     is_json_media, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
+use crate::security::compile_security;
 use mb_mcm::{Binding, Bundle, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -251,6 +252,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                 resource_type: infer_resource_type(path),
                 identity: None,
                 semantic_hints: Vec::new(),
+                security: compile_security(doc, op, "/securityDefinitions", &at)?,
             };
             if let Some(kind) = stream_kind(&op_out) {
                 op_out.kind = kind;

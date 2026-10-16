@@ -1,0 +1,105 @@
+# Mockingbird with OIDC login through Rauthy, backed by Postgres.
+#
+#   docker compose -f deploy/compose/docker-compose.yml up --build
+#
+# Console: http://localhost:9090 (log in as demo@localhost.test /
+# Demo-Passw0rd-123!), data plane: http://localhost:8080, Rauthy admin UI:
+# http://localhost:8081/auth/v1/admin (admin@localhost.test).
+#
+# DEVELOPMENT ONLY: every secret below is a published, well-known dev value.
+# Never expose this stack beyond your machine or reuse these values.
+
+name: mockingbird
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Rauthy with its embedded Hiqlite database. Mockingbird and the bootstrap
+  # job share this container's network namespace, so `localhost:8081` is the
+  # same issuer for the browser (through the published port) and for the
+  # Mockingbird server; the Mockingbird ports are published here too.
+  rauthy:
+    image: ghcr.io/sebadob/rauthy:0.37.1
+    environment:
+      # Plain HTTP on 8081: the issuer is http://localhost:8081/auth/v1/ (Rauthy
+      # always ends it with a slash; mockingbird.yaml must match it exactly).
+      LISTEN_SCHEME: http
+      LISTEN_PORT_HTTP: "8081"
+      PUB_URL: localhost:8081
+      # Required since there is no config.toml: Rauthy panics at startup with
+      # "`webauthn.rp_id` is missing" / "`webauthn.rp_origin` is missing".
+      # The origin must include the port.
+      RP_ID: localhost
+      RP_ORIGIN: http://localhost:8081
+      COOKIE_MODE: danger-insecure
+      # Rauthy's metrics listener defaults to 9090, Mockingbird's admin port.
+      METRICS_ENABLE: "false"
+      HQL_NODE_ID: "1"
+      HQL_NODES: "1 localhost:8100 localhost:8200"
+      HQL_SECRET_RAFT: dev-only-raft-secret-0123456789
+      HQL_SECRET_API: dev-only-api-secret-0123456789
+      ENC_KEYS: devkey1/wTFCH9cmlM1tYcnFJZ3HzTkVK3mKtuSSmqbvTAzVjik=
+      ENC_KEY_ACTIVE: devkey1
+      BOOTSTRAP_ADMIN_EMAIL: admin@localhost.test
+      BOOTSTRAP_ADMIN_PASSWORD_PLAIN: Admin-Passw0rd-123!
+      # base64 of {"name":"bootstrap","exp":null,"access":[{"group":"Clients"|"Groups"|"Users"|"Roles",
+      #   "access_rights":["read","create","update","delete"]}, ...,
+      #   {"group":"Secrets","access_rights":["read","update"]}]}
+      # (Secrets: PUT /clients/{id}/secret needs Secrets/update.)
+      BOOTSTRAP_API_KEY: eyJuYW1lIjoiYm9vdHN0cmFwIiwiZXhwIjpudWxsLCJhY2Nlc3MiOlt7Imdyb3VwIjoiQ2xpZW50cyIsImFjY2Vzc19yaWdodHMiOlsicmVhZCIsImNyZWF0ZSIsInVwZGF0ZSIsImRlbGV0ZSJdfSx7Imdyb3VwIjoiR3JvdXBzIiwiYWNjZXNzX3JpZ2h0cyI6WyJyZWFkIiwiY3JlYXRlIiwidXBkYXRlIiwiZGVsZXRlIl19LHsiZ3JvdXAiOiJVc2VycyIsImFjY2Vzc19yaWdodHMiOlsicmVhZCIsImNyZWF0ZSIsInVwZGF0ZSIsImRlbGV0ZSJdfSx7Imdyb3VwIjoiUm9sZXMiLCJhY2Nlc3NfcmlnaHRzIjpbInJlYWQiLCJjcmVhdGUiLCJ1cGRhdGUiLCJkZWxldGUiXX0seyJncm91cCI6IlNlY3JldHMiLCJhY2Nlc3NfcmlnaHRzIjpbInJlYWQiLCJ1cGRhdGUiXX1dfQ==
+      BOOTSTRAP_API_KEY_SECRET: pWZqB5bDOLJCI9hXxN4HNJsx417WaPv9oEFZQJqgrkz90VkC526TQSN6UgeIPxVQ
+    volumes:
+      - rauthy:/app/data
+    ports:
+      - "8081:8081" # Rauthy
+      - "8080:8080" # Mockingbird data plane
+      - "9090:9090" # Mockingbird console and Admin API
+
+  # One-shot job: groups, the `mockingbird` client (its secret goes to the
+  # `bootstrap` volume) and the demo user. Safe to run again. Rauthy's image is
+  # distroless (no shell or curl), so it has no healthcheck; this job waits for
+  # Rauthy's discovery document instead.
+  rauthy-bootstrap:
+    image: curlimages/curl:8.11.1
+    network_mode: "service:rauthy"
+    depends_on:
+      rauthy:
+        condition: service_started
+    # root, so it can write to the freshly created (root-owned) volume.
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/rauthy-bootstrap.sh"]
+    environment:
+      RAUTHY_URL: http://localhost:8081
+      BOOTSTRAP_API_KEY_SECRET: pWZqB5bDOLJCI9hXxN4HNJsx417WaPv9oEFZQJqgrkz90VkC526TQSN6UgeIPxVQ
+    volumes:
+      - ./rauthy-bootstrap.sh:/rauthy-bootstrap.sh:ro
+      - bootstrap:/bootstrap
+
+  mockingbird:
+    build: ../..
+    network_mode: "service:rauthy"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rauthy-bootstrap:
+        condition: service_completed_successfully
+    # --offline: the built-in faker only, so no LLM key is needed.
+    command: ["serve", "-c", "/etc/mockingbird/mockingbird.yaml", "--host", "0.0.0.0", "--offline"]
+    volumes:
+      - ./mockingbird.yaml:/etc/mockingbird/mockingbird.yaml:ro
+      - bootstrap:/bootstrap:ro
+
+volumes:
+  postgres:
+  rauthy:
+  bootstrap:

@@ -27,6 +27,7 @@ fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
             input_field: None,
         }),
         semantic_hints: vec!["orders".into()],
+        security: Vec::new(),
     }
 }
 
@@ -364,4 +365,34 @@ fn operation_target_and_stream_item_schema() {
         address_path: "/calc".into(),
     };
     assert_eq!(o.target(), "Calc/CalcSoap Add");
+}
+
+#[test]
+fn grpc_services_lists_full_service_names() {
+    let grpc = |package: &str, service: &str, method: &str| {
+        let mut o = op(method, OperationKind::Query, vec![]);
+        o.protocol = Protocol::Grpc;
+        o.binding = Binding::Grpc {
+            package: package.into(),
+            service: service.into(),
+            method: method.into(),
+        };
+        o
+    };
+    let bundle = Bundle {
+        id: "b".into(),
+        title: "b".into(),
+        version: "1".into(),
+        source_digest: String::new(),
+        operations: vec![
+            grpc("routeguide", "RouteGuide", "GetFeature"),
+            grpc("routeguide", "RouteGuide", "ListFeatures"),
+            grpc("", "Bare", "Ping"),
+            op("http", OperationKind::Query, vec![]),
+        ],
+        defs: serde_json::Map::new(),
+        protocol_payload: None,
+    };
+    let services: Vec<String> = bundle.grpc_services().into_iter().collect();
+    assert_eq!(services, ["Bare", "routeguide.RouteGuide"]);
 }

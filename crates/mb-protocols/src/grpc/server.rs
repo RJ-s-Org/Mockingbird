@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::Router;
 use axum::body::Body;
@@ -18,13 +18,16 @@ use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
 
 use super::{GrpcError, GrpcMock};
+use crate::DataPlaneAuthMode;
+use crate::dp_auth::{authenticate_contract, presented_key};
 
 const HEALTH_SERVICE: &str = "grpc.health.v1.Health";
 const REFLECTION_V1: &str = "grpc.reflection.v1.ServerReflection";
 const REFLECTION_V1ALPHA: &str = "grpc.reflection.v1alpha.ServerReflection";
 
 /// One h2c endpoint serving every published gRPC mock, plus
-/// `grpc.health.v1.Health` and server reflection (v1 and v1alpha).
+/// `grpc.health.v1.Health` and server reflection (v1 and v1alpha), which
+/// lists only the mocks the caller's data-plane credentials reach.
 pub struct GrpcServer {
     published: RwLock<Arc<Published>>,
     /// Serializes [`GrpcServer::publish`], so health updates do not race.
@@ -37,26 +40,100 @@ pub struct GrpcServer {
 struct Published {
     /// Service full name → the mock serving it.
     by_service: BTreeMap<String, Arc<GrpcMock>>,
-    /// Both reflection versions; `None` if they could not be built.
-    reflection: Option<Router>,
+    /// The published mocks, in publish order.
+    mocks: Vec<Arc<GrpcMock>>,
+    /// Reflection (both versions) by the indexes in `mocks` a caller may
+    /// see; the entry for every mock is built at publish, so a publish
+    /// whose descriptors cannot be reflected fails.
+    reflection: Mutex<HashMap<Vec<usize>, Router>>,
+}
+
+impl Published {
+    fn new(by_service: BTreeMap<String, Arc<GrpcMock>>, mocks: Vec<Arc<GrpcMock>>) -> Self {
+        Self {
+            by_service,
+            mocks,
+            reflection: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Reflection over the mocks the caller may see (data-plane auth,
+    /// spec §11.2): every mock without data-plane auth; `api_key` mocks
+    /// whose key header carries a valid key of their workspace;
+    /// `passthrough_validate` mocks when the credentials of one of their
+    /// operations are present. When any published mock is in `api_key`
+    /// mode, the caller must present a valid key for at least one of them
+    /// (`UNAUTHENTICATED` otherwise).
+    async fn reflection_for(&self, headers: &HeaderMap) -> Result<Router, Status> {
+        let mut visible = Vec::new();
+        let mut key_required = false;
+        let mut key_accepted = false;
+        // (workspace, key) → verified, so one key is checked once.
+        let mut verified: HashMap<(String, String), bool> = HashMap::new();
+        for (i, mock) in self.mocks.iter().enumerate() {
+            let rt = mock.runtime();
+            let allowed = match rt.data_plane_auth.mode {
+                DataPlaneAuthMode::None => true,
+                DataPlaneAuthMode::ApiKey => {
+                    key_required = true;
+                    let ok = match (presented_key(rt, headers, &[]), &rt.data_plane_keys) {
+                        (Some(key), Some(keys)) => {
+                            let slot = (rt.workspace.clone(), key.to_string());
+                            match verified.get(&slot) {
+                                Some(ok) => *ok,
+                                None => {
+                                    let ok = keys.verify(&rt.workspace, key).await;
+                                    verified.insert(slot, ok);
+                                    ok
+                                }
+                            }
+                        }
+                        _ => false,
+                    };
+                    key_accepted |= ok;
+                    ok
+                }
+                DataPlaneAuthMode::PassthroughValidate => {
+                    authenticate_contract(rt, headers, &[]).await.is_ok()
+                }
+            };
+            if allowed {
+                visible.push(i);
+            }
+        }
+        if key_required && !key_accepted {
+            return Err(Status::unauthenticated(
+                "reflection requires a valid data-plane API key",
+            ));
+        }
+        self.reflection_of(visible)
+    }
+
+    /// Reflection over the mocks at `visible`, built once per set.
+    fn reflection_of(&self, visible: Vec<usize>) -> Result<Router, Status> {
+        let mut cache = self.reflection.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(router) = cache.get(&visible) {
+            return Ok(router.clone());
+        }
+        let mocks: Vec<Arc<GrpcMock>> = visible
+            .iter()
+            .filter_map(|&i| self.mocks.get(i).cloned())
+            .collect();
+        let router = reflection(&mocks).map_err(|e| {
+            tracing::error!(error = %e, "cannot build gRPC reflection");
+            Status::internal("reflection is unavailable")
+        })?;
+        cache.insert(visible, router.clone());
+        Ok(router)
+    }
 }
 
 impl GrpcServer {
     /// A server publishing no mocks; health reports `""` as `SERVING`.
     pub fn new() -> Arc<Self> {
         let (health, health_server) = tonic_health::server::health_reporter();
-        let reflection = match reflection(&[]) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                tracing::error!(error = %e, "cannot build gRPC reflection");
-                None
-            }
-        };
         Arc::new(Self {
-            published: RwLock::new(Arc::new(Published {
-                by_service: BTreeMap::new(),
-                reflection,
-            })),
+            published: RwLock::new(Arc::new(Published::new(BTreeMap::new(), Vec::new()))),
             publishing: tokio::sync::Mutex::new(()),
             health,
             health_service: Router::new().fallback_service(health_server),
@@ -81,11 +158,13 @@ impl GrpcServer {
                 by_service.insert(service, Arc::clone(mock));
             }
         }
-        let reflection = reflection(&mocks)?;
-        let new = Arc::new(Published {
-            by_service,
-            reflection: Some(reflection),
-        });
+        let all = reflection(&mocks)?;
+        let new = Published::new(by_service, mocks);
+        new.reflection
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((0..new.mocks.len()).collect(), all);
+        let new = Arc::new(new);
         let old = std::mem::replace(&mut *self.write(), Arc::clone(&new));
 
         self.health
@@ -214,10 +293,13 @@ async fn dispatch(State(server): State<Arc<GrpcServer>>, req: Request) -> Respon
         .map_or("", |(service, _)| service);
     match service {
         HEALTH_SERVICE => call(server.health_service.clone(), req).await,
-        REFLECTION_V1 | REFLECTION_V1ALPHA => match server.current().reflection.clone() {
-            Some(reflection) => call(reflection, req).await,
-            None => unimplemented(&path),
-        },
+        REFLECTION_V1 | REFLECTION_V1ALPHA => {
+            let published = server.current();
+            match published.reflection_for(req.headers()).await {
+                Ok(reflection) => call(reflection, req).await,
+                Err(status) => status.into_http(),
+            }
+        }
         _ => {
             let mock = server.current().by_service.get(service).cloned();
             match mock {

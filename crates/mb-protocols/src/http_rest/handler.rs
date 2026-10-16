@@ -21,7 +21,8 @@ use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
 use crate::MockRuntime;
 use crate::call::{
-    self, DEFAULT_SESSION, PlanError, PlanFailure, Report, forwarded_headers, recorded_headers,
+    self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
+    public_query, recorded_headers,
 };
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
@@ -235,14 +236,17 @@ async fn serve(
             .map(|(k, v)| (k, vec![v.as_str().unwrap_or_default().to_string()])),
         op.input.path.as_ref(),
     );
-    let query = match serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
-    {
-        Ok(pairs) => coerce_params(group(pairs), op.input.query.as_ref()),
-        Err(e) => {
-            errors.push(format!("query: {e}"));
-            Map::new()
-        }
-    };
+    // Credential parameters (`api_key`, declared query API keys) are
+    // checked by data-plane auth but never reach the engine.
+    let raw_query =
+        match serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or("")) {
+            Ok(pairs) => pairs,
+            Err(e) => {
+                errors.push(format!("query: {e}"));
+                Vec::new()
+            }
+        };
+    let query = coerce_params(group(public_query(rt, &raw_query)), op.input.query.as_ref());
     let body = match decode_body(op, raw_body) {
         Ok(body) => body,
         Err(e) => {
@@ -269,9 +273,14 @@ async fn serve(
         return invalid_input(rt, op, &errors, log);
     }
 
-    // 3. Admission, overrides and scenario.
+    // 3. Admission, data-plane auth, overrides and scenario.
     log.admitted_or_rejected = true;
-    let plan = match call::plan(rt, op, headers).await {
+    let presented = Presented {
+        query: &raw_query,
+        key_verified: false,
+        admitted: None,
+    };
+    let plan = match call::plan(rt, op, headers, presented).await {
         Ok(plan) => plan,
         Err(PlanFailure {
             error,
@@ -284,6 +293,13 @@ async fn serve(
             }
             return match error {
                 PlanError::Rejected(r) => log.rejected(r),
+                PlanError::Unauthorized(u) => {
+                    let mut resp = log.problem(401, "Unauthorized", u.detail);
+                    if let Ok(v) = HeaderValue::from_str(&u.challenge) {
+                        resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+                    }
+                    resp
+                }
                 PlanError::BadOverride(detail) => log.problem(400, "Invalid override", detail),
                 PlanError::UnknownScenario(name) => log.problem(
                     400,
@@ -300,7 +316,7 @@ async fn serve(
         operation_id: op.id.clone(),
         path_params,
         query,
-        headers: forwarded_headers(headers),
+        headers: forwarded_headers(rt, headers),
         body,
     };
 
@@ -388,8 +404,8 @@ async fn report(
     let request = if rt.recorder.is_some() {
         let media = media_type(headers).or(log.declared_body_type);
         json!({
-            "query": recorded_query(uri),
-            "headers": recorded_headers(headers),
+            "query": recorded_query(rt, uri),
+            "headers": recorded_headers(rt, headers),
             "body": request_body_record(raw_body, media.as_deref(), log.request_body),
         })
     } else {
@@ -613,11 +629,12 @@ fn invalid_input(
     }
 }
 
-/// The raw query as recorded: repeated keys become arrays of strings.
-fn recorded_query(uri: &Uri) -> Value {
+/// The raw query as recorded (without credential parameters): repeated keys
+/// become arrays of strings.
+fn recorded_query(rt: &MockRuntime, uri: &Uri) -> Value {
     let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
         .unwrap_or_default();
-    Value::Object(string_params(pairs))
+    Value::Object(string_params(public_query(rt, &pairs)))
 }
 
 /// `pairs` as an object of strings; repeated keys become arrays of strings.

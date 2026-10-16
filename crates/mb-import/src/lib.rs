@@ -8,6 +8,7 @@ mod heuristics;
 mod openapi3;
 mod proto;
 mod schema;
+mod security;
 mod swagger2;
 mod wsdl;
 

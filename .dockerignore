@@ -5,3 +5,7 @@ target
 docs
 fixtures
 **/*.rs.bk
+**/node_modules
+crates/mb-console/dist
+crates/mb-console/web/test-results
+crates/mb-console/web/playwright-report

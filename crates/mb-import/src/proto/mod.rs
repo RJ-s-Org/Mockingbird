@@ -273,6 +273,7 @@ fn operation(id: String, service: &ServiceDescriptor, method: &MethodDescriptor)
         semantic_hints: comment(&output.parent_file(), output.path())
             .into_iter()
             .collect(),
+        security: Vec::new(),
     }
 }
 

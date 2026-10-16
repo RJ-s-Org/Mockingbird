@@ -70,7 +70,7 @@ pub(crate) fn sse_response(
         request: if rt.recorder.is_some() {
             json!({
                 "query": call.query,
-                "headers": recorded_headers(&headers),
+                "headers": recorded_headers(&rt, &headers),
                 "body": call.body,
             })
         } else {

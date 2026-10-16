@@ -421,6 +421,17 @@ async fn admin_rejects_foreign_host_on_loopback() {
     }
     assert_eq!(admin_status(&app.admin, None).await.0, 200);
 
+    // The ops endpoints are exempt: probes may send any Host.
+    for path in ["/healthz", "/readyz", "/metrics"] {
+        use tower::ServiceExt;
+        let req = axum::http::Request::get(path)
+            .header("host", "evil.example")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.admin.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200, "{path}");
+    }
+
     // A non-loopback bind (with --insecure-no-auth) does not check.
     let mut a = args(vec![fixture()]);
     a.offline = true;

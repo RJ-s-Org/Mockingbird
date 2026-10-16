@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 
 use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use mb_store::{
-    ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
-    ResourceSource, Scenario, ScenarioRules,
+    ContractStatus, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
+    LlmProfile, NewContractVersion, NewMock, ResourceSource, Scenario, ScenarioRules,
 };
-use mockingbird::config::{App, ServeArgs, apply_flags, bind_admin, bind_grpc, build_app};
-use mockingbird::file_config::{self, FileConfig};
+use mockingbird::config::{
+    App, ServeArgs, apply_flags, bind_admin, bind_grpc, build_app, resolve_config,
+};
+use mockingbird::file_config::{self, AuthConfig, AuthMode, FileConfig, OidcConfig, ServerConfig};
 use mockingbird::reconcile::reconcile;
 use serde_json::{Value, json};
 
@@ -169,6 +171,39 @@ fn loads_full_example_config() {
         Some(Duration::from_secs(2)),
         "scenario defaults"
     );
+    assert_eq!(m.workspace, "default");
+    assert_eq!(m.data_plane_auth, DataPlaneAuthConfig::default());
+    assert_eq!(p.workspace, "default");
+    assert_eq!(local.workspace, "default", "profile workspace default");
+
+    let auth = &cfg.auth;
+    assert_eq!(auth.mode, AuthMode::None);
+    assert_eq!(auth.external_url, "http://127.0.0.1:9090");
+    assert_eq!(auth.session_ttl, Duration::from_secs(12 * 3600));
+    assert!(auth.sysadmin_subjects.is_empty());
+    assert!(auth.public_metrics);
+    let oidc = auth.oidc.as_ref().unwrap();
+    assert_eq!(oidc.issuer, "http://localhost:8080/auth/v1");
+    assert_eq!(oidc.client_id, "mockingbird");
+    assert_eq!(
+        oidc.client_secret.as_deref(),
+        Some("env:MB_OIDC_CLIENT_SECRET")
+    );
+    assert_eq!(oidc.scopes, ["openid", "profile", "email", "groups"]);
+    assert_eq!(oidc.roles_claim, "groups");
+    assert_eq!(oidc.group_prefix, "mb");
+    assert_eq!(oidc.audience.as_deref(), Some("mockingbird"));
+
+    assert_eq!(cfg.audit.retention_days, 365);
+    assert_eq!(
+        cfg.audit.webhook_url.as_deref(),
+        Some("https://audit.example.com/mockingbird")
+    );
+    assert_eq!(
+        cfg.audit.webhook_secret.as_deref(),
+        Some("env:MB_AUDIT_WEBHOOK_SECRET")
+    );
+
     assert_eq!(s.stream_items, None);
 
     let p = &cfg.protocols;
@@ -185,6 +220,153 @@ fn loads_full_example_config() {
     let ticks = &cfg.mocks["events"].scenarios["trickle"];
     assert_eq!(ticks.stream_items, Some(3));
     assert_eq!(ticks.stream_item_interval, Some(Duration::from_millis(500)));
+}
+
+#[test]
+fn auth_defaults() {
+    let ws = Workspace::new();
+    let cfg = ws.load("mocks:\n  orders:\n    contract: orders.yaml\n");
+    assert_eq!(cfg.auth.mode, AuthMode::None);
+    assert_eq!(cfg.auth.external_url, "http://127.0.0.1:9090");
+    assert_eq!(cfg.auth.session_ttl, Duration::from_secs(12 * 3600));
+    assert!(cfg.auth.sysadmin_subjects.is_empty());
+    assert!(cfg.auth.public_metrics);
+    assert_eq!(cfg.auth.oidc, None);
+    assert_eq!(cfg.audit.retention_days, 365);
+    assert_eq!(cfg.audit.webhook_url, None);
+    assert_eq!(cfg.audit.webhook_secret, None);
+    assert_eq!(cfg.mocks["orders"].workspace, "default");
+    assert_eq!(
+        cfg.mocks["orders"].data_plane_auth,
+        DataPlaneAuthConfig::default()
+    );
+
+    // OIDC defaults.
+    let cfg = ws.load("auth:\n  mode: oidc\n  oidc:\n    issuer: http://idp\n    client_id: mb\n");
+    assert_eq!(cfg.auth.mode, AuthMode::Oidc);
+    let oidc = cfg.auth.oidc.unwrap();
+    assert_eq!(oidc.client_secret, None);
+    assert_eq!(oidc.scopes, ["openid", "profile", "email", "groups"]);
+    assert_eq!(oidc.roles_claim, "groups");
+    assert_eq!(oidc.group_prefix, "mb");
+    assert_eq!(oidc.audience, None);
+
+    // Unknown keys are rejected in the new sections too.
+    for yaml in [
+        "auth:\n  mdoe: oidc\n",
+        "auth:\n  oidc: {issuer: x, client_id: y, scope: [openid]}\n",
+        "audit:\n  retention: 3\n",
+        "mocks:\n  orders: {contract: orders.yaml, data_plane_auth: {mod: api_key}}\n",
+        "auth:\n  mode: saml\n",
+    ] {
+        ws.write(yaml);
+        assert!(file_config::load(&ws.config_path()).is_err(), "{yaml}");
+    }
+}
+
+#[test]
+fn session_ttl_and_retention_days_are_bounded() {
+    let ws = Workspace::new();
+    for yaml in [
+        "auth:\n  session_ttl: 31d\n",
+        "audit:\n  retention_days: 0\n",
+        "audit:\n  retention_days: 3651\n",
+        "audit:\n  retention_days: 4294967295\n",
+    ] {
+        ws.write(yaml);
+        let err = file_config::load(&ws.config_path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("auth.session_ttl") || msg.contains("audit.retention_days"),
+            "{yaml}: {msg}"
+        );
+    }
+    let cfg = ws.load("auth:\n  session_ttl: 30d\naudit:\n  retention_days: 3650\n");
+    assert_eq!(cfg.auth.session_ttl, Duration::from_secs(30 * 24 * 60 * 60));
+    assert_eq!(cfg.audit.retention_days, 3650);
+    let cfg = ws.load("audit:\n  retention_days: 1\n");
+    assert_eq!(cfg.audit.retention_days, 1);
+}
+
+fn oidc_args(ws: &Workspace) -> ServeArgs {
+    ServeArgs {
+        config: Some(ws.config_path()),
+        offline: true,
+        ..ServeArgs::default()
+    }
+}
+
+#[test]
+fn oidc_mode_requires_oidc_section_and_external_url() {
+    let ws = Workspace::new();
+    ws.write("auth:\n  mode: oidc\n");
+    let err = resolve_config(&oidc_args(&ws), None).unwrap_err();
+    assert!(format!("{err:#}").contains("auth.oidc"), "{err:#}");
+
+    for url in ["", "127.0.0.1:9090", "ftp://host", "http://", "not a url"] {
+        ws.write(&format!(
+            "auth:\n  mode: oidc\n  external_url: \"{url}\"\n  oidc: {{issuer: http://idp, client_id: mb}}\n"
+        ));
+        let err = resolve_config(&oidc_args(&ws), None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("external_url"),
+            "{url}: {err:#}"
+        );
+        let cfg = file_config::load(&ws.config_path()).unwrap();
+        assert!(cfg.server.check_bind(&cfg.auth).is_err(), "{url}");
+    }
+
+    ws.write(
+        "auth:\n  mode: oidc\n  external_url: https://mb.example.com\n  oidc: {issuer: http://idp, client_id: mb}\n",
+    );
+    let cfg = resolve_config(&oidc_args(&ws), None).unwrap();
+    assert!(cfg.server.check_bind(&cfg.auth).is_ok());
+
+    // `none` mode ignores the OIDC settings.
+    ws.write("auth:\n  mode: none\n  external_url: nonsense\n");
+    resolve_config(&oidc_args(&ws), None).unwrap();
+}
+
+#[test]
+fn none_mode_public_bind_requires_flag() {
+    let auth = AuthConfig::default();
+    let mut server = ServerConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        ..ServerConfig::default()
+    };
+    let err = server.check_bind(&auth).unwrap_err();
+    assert!(err.contains("--insecure-no-auth"), "{err}");
+    server.insecure_no_auth = true;
+    assert!(server.check_bind(&auth).is_ok());
+    assert!(ServerConfig::default().check_bind(&auth).is_ok());
+}
+
+#[test]
+fn oidc_mode_public_bind_allowed() {
+    let auth = AuthConfig {
+        mode: AuthMode::Oidc,
+        external_url: "https://mb.example.com".into(),
+        oidc: Some(OidcConfig {
+            issuer: "https://idp.example.com".into(),
+            client_id: "mb".into(),
+            client_secret: None,
+            scopes: vec!["openid".into()],
+            roles_claim: "groups".into(),
+            group_prefix: "mb".into(),
+            audience: None,
+        }),
+        ..AuthConfig::default()
+    };
+    let server = ServerConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        ..ServerConfig::default()
+    };
+    assert!(server.check_bind(&auth).is_ok());
+    let missing = AuthConfig {
+        oidc: None,
+        ..auth.clone()
+    };
+    assert!(server.check_bind(&missing).is_err());
 }
 
 #[test]
@@ -370,6 +552,7 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
             },
         )
         .await
@@ -522,6 +705,78 @@ async fn reconcile_rejects_prefix_clash_with_api_mock() {
             .unwrap()
             .is_none()
     );
+}
+
+/// gRPC services are unique across workspaces: two file mocks, or a file
+/// mock and an API mock's active contract, may not serve the same one.
+#[tokio::test]
+async fn reconcile_rejects_grpc_service_clashes() {
+    let ws = Workspace::new();
+    let proto = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/proto/route_guide.proto"),
+    )
+    .unwrap();
+    std::fs::write(ws.dir.path().join("routes.proto"), &proto).unwrap();
+    let store = store().await;
+
+    let cfg = ws.load(
+        "mocks:\n  a:\n    contract: routes.proto\n  b:\n    workspace: team-b\n    contract: routes.proto\n",
+    );
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("routeguide.RouteGuide"), "{text}");
+    assert!(store.list_all_mocks().await.unwrap().is_empty());
+
+    // An API mock's active contract holds the service.
+    let api = store
+        .create_mock(
+            DEFAULT_WORKSPACE,
+            NewMock {
+                name: "api-routes".into(),
+                route_prefix: None,
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let v = store
+        .add_contract_version(
+            api.id,
+            NewContractVersion {
+                bundle: mb_import::compile(&proto).unwrap(),
+                source: proto.clone(),
+                status: ContractStatus::Approved,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .activate_contract_version(api.id, v.version)
+        .await
+        .unwrap();
+    let cfg = ws.load("mocks:\n  a:\n    workspace: team-b\n    contract: routes.proto\n");
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("routeguide.RouteGuide") && text.contains("api-routes"),
+        "{text}"
+    );
+    assert_eq!(store.list_all_mocks().await.unwrap().len(), 1);
+
+    // Different services are fine.
+    let cfg = ws.load("mocks:\n  a:\n    workspace: team-b\n    contract: orders.yaml\n");
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -881,7 +1136,7 @@ async fn watch_reload_changes_default_profile() {
             .registry
             .mounted()
             .into_iter()
-            .map(|(name, _)| name)
+            .map(|(_, name, _)| name)
             .collect()
     };
     assert_eq!(mounted(&app), ["orders"]);
@@ -1086,6 +1341,296 @@ async fn removing_file_profile_used_by_api_mock_warns() {
             .unwrap()
             .is_none()
     );
+}
+
+// ---- workspaces as code ----
+
+const TEAM_A: &str = "team-a";
+
+#[tokio::test]
+async fn reconcile_creates_file_workspaces() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(
+        r#"
+llm:
+  profiles:
+    main: {workspace: team-a, base_url: "http://127.0.0.1:1", model: m}
+    shared: {base_url: "http://127.0.0.1:2", model: m}
+mocks:
+  orders: {workspace: team-a, contract: orders.yaml, llm_profile: main}
+  billing: {workspace: team-b, contract: billing.yaml}
+"#,
+    );
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mut created = report.created.clone();
+    created.sort();
+    assert_eq!(created, ["team-a/orders", "team-b/billing"]);
+
+    let workspaces = store.list_workspaces().await.unwrap();
+    let names: Vec<&str> = workspaces.iter().map(|w| w.name.as_str()).collect();
+    assert_eq!(names, ["default", "team-a", "team-b"]);
+    assert_eq!(workspaces[1].display_name, "team-a");
+    let orders = store.get_mock(TEAM_A, "orders").await.unwrap().unwrap();
+    assert_eq!(orders.source, ResourceSource::File);
+    assert_eq!(orders.llm_profile.as_deref(), Some("main"));
+    assert!(store.get_profile(TEAM_A, "main").await.unwrap().is_some());
+    assert!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "main")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "shared")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Removing everything deletes the file resources but keeps the workspaces.
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &ws.load(""))
+        .await
+        .unwrap();
+    assert_eq!(report.deleted, ["team-a/orders", "team-b/billing"]);
+    assert_eq!(store.list_workspaces().await.unwrap().len(), 3);
+    assert!(store.list_profiles(TEAM_A).await.unwrap().is_empty());
+
+    // An invalid workspace name is rejected before anything is applied.
+    let cfg = ws.load("mocks:\n  orders: {workspace: Team_A, contract: orders.yaml}\n");
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("Team_A"), "{err:#}");
+    assert_eq!(store.list_workspaces().await.unwrap().len(), 3);
+
+    // A mock's profile must exist in the mock's own workspace.
+    let cfg = ws.load(
+        r#"
+llm:
+  profiles:
+    main: {base_url: "http://127.0.0.1:1", model: m}
+mocks:
+  orders: {workspace: team-c, contract: orders.yaml, llm_profile: main}
+"#,
+    );
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("main"), "{err:#}");
+    assert!(store.get_workspace("team-c").await.unwrap().is_none());
+}
+
+/// Mocks are keyed by (workspace, name): a file mock does not clash with a
+/// same-named mock in another workspace, and moving a file mock to another
+/// workspace replaces it there.
+#[tokio::test]
+async fn reconcile_same_name_two_workspaces() {
+    let ws = Workspace::new();
+    let store = store().await;
+    store.create_workspace(TEAM_A, "Team A").await.unwrap();
+    // An API mock `orders` in team-a and an API profile `main` there.
+    store
+        .create_mock(
+            TEAM_A,
+            NewMock {
+                name: "orders".into(),
+                route_prefix: Some("/a/orders".into()),
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                data_plane_auth: DataPlaneAuthConfig::default(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .put_profile(&LlmProfile {
+            workspace: TEAM_A.into(),
+            ..api_profile("main")
+        })
+        .await
+        .unwrap();
+
+    // File `orders` and file profile `main` in `default` are fine.
+    reconcile(store.as_ref(), no_state().as_ref(), &ws.load(BASIC))
+        .await
+        .unwrap();
+    let file = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(file.source, ResourceSource::File);
+    let api = store.get_mock(TEAM_A, "orders").await.unwrap().unwrap();
+    assert_eq!(api.source, ResourceSource::Api);
+    assert_eq!(
+        store
+            .get_profile(TEAM_A, "main")
+            .await
+            .unwrap()
+            .unwrap()
+            .source,
+        ResourceSource::Api
+    );
+
+    // But declaring `orders` in team-a clashes with the API mock there.
+    let cfg =
+        ws.load("mocks:\n  orders: {workspace: team-a, contract: orders.yaml, route_prefix: /x}\n");
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("API"), "{err:#}");
+
+    // Moving the file mock to team-b deletes it from default only.
+    let cfg = ws.load("mocks:\n  orders: {workspace: team-b, contract: orders.yaml}\n");
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.created, ["team-b/orders"]);
+    assert_eq!(report.deleted, ["orders"]);
+    assert!(
+        store
+            .get_mock(DEFAULT_WORKSPACE, "orders")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.get_mock("team-b", "orders").await.unwrap().is_some());
+    assert!(store.get_mock(TEAM_A, "orders").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn reconcile_prefix_collision_across_workspaces_errors() {
+    let ws = Workspace::new();
+    let store = store().await;
+    store.create_workspace(TEAM_A, "Team A").await.unwrap();
+    store
+        .create_mock(
+            TEAM_A,
+            NewMock {
+                name: "manual".into(),
+                route_prefix: Some("/shared".into()),
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                data_plane_auth: DataPlaneAuthConfig::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // With an API mock in another workspace.
+    let cfg = ws.load(
+        "llm:\n  profiles:\n    extra: {base_url: http://x, model: m}\nmocks:\n  orders: {workspace: team-b, contract: orders.yaml, route_prefix: /shared}\n",
+    );
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("/shared"), "{err:#}");
+    assert!(store.get_workspace("team-b").await.unwrap().is_none());
+    assert!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "extra")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Between two file mocks in different workspaces.
+    let cfg = ws.load(
+        "mocks:\n  orders: {workspace: team-b, contract: orders.yaml, route_prefix: /p}\n  billing: {contract: billing.yaml, route_prefix: /p}\n",
+    );
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("/p"), "{err:#}");
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn reconcile_applies_data_plane_auth() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(
+        "mocks:\n  orders:\n    contract: orders.yaml\n    data_plane_auth: {mode: api_key, header: x-key}\n",
+    );
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mock.data_plane_auth.mode, DataPlaneAuthMode::ApiKey);
+    assert_eq!(mock.data_plane_auth.header, "x-key");
+
+    // Changing it updates the mock.
+    let cfg = ws.load(
+        "mocks:\n  orders:\n    contract: orders.yaml\n    data_plane_auth: {mode: passthrough_validate}\n",
+    );
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["orders"]);
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mock.data_plane_auth.mode,
+        DataPlaneAuthMode::PassthroughValidate
+    );
+    assert_eq!(mock.data_plane_auth.header, "x-api-key");
+
+    // An invalid header name is rejected.
+    let cfg = ws.load(
+        "mocks:\n  orders:\n    contract: orders.yaml\n    data_plane_auth: {mode: api_key, header: \"bad header\"}\n",
+    );
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("header"), "{err:#}");
+}
+
+/// The Compose stack's config (deploy/compose) parses and is a valid `oidc`
+/// config for an all-interfaces bind.
+#[test]
+fn compose_config_is_a_valid_oidc_config() {
+    let cfg = file_config::load(&repo().join("deploy/compose/mockingbird.yaml")).unwrap();
+    assert_eq!(cfg.auth.mode, AuthMode::Oidc);
+    assert_eq!(cfg.auth.external_url, "http://localhost:9090");
+    assert_eq!(
+        cfg.storage.url,
+        "postgres://postgres:postgres@postgres:5432/postgres"
+    );
+    assert_eq!(cfg.llm.default_profile, None);
+    let oidc = cfg.auth.oidc.as_ref().unwrap();
+    assert_eq!(oidc.issuer, "http://localhost:8081/auth/v1/");
+    assert_eq!(oidc.client_id, "mockingbird");
+    assert_eq!(
+        oidc.client_secret.as_deref(),
+        Some("file:/bootstrap/client_secret")
+    );
+    let server = ServerConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        ..cfg.server.clone()
+    };
+    server.check_bind(&cfg.auth).unwrap();
 }
 
 /// Copies `src` recursively into `dst`.

@@ -9,22 +9,33 @@ use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use chrono::{DateTime, Utc};
+
 use crate::{
-    ACQUIRE_TIMEOUT, CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange,
-    ControlStore, LlmProfile, Mock, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
-    RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError, now,
-    sha256_hex, validate_mock_name, validate_route_prefix,
+    ACQUIRE_TIMEOUT, AdminSession, ApiKey, AuditEvent, AuditFilter, CHANGE_CHANNEL_CAPACITY,
+    ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
+    Mock, NewAuditEvent, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
+    RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError,
+    Workspace, missing_workspace, now, sha256_hex, validate_header_name, validate_mock_name,
+    validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
 /// the same database.
 const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 
-const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, created_at, updated_at";
+const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
+     data_plane_auth, created_at, updated_at";
+const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str =
     "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
      max_tokens, fallback_profile, source";
+const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
+     created_at, expires_at, last_used_at, revoked_at";
+const SESSION_COLUMNS: &str = "id_hash, principal, created_at, expires_at, last_seen";
+const AUDIT_COLUMNS: &str = "id, workspace, actor_subject, actor_kind, action, target, before_value, after_value, \
+     request_id, at";
 const LOG_COLUMNS: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
      prompt_tokens, completion_tokens, request, response, at";
 
@@ -101,6 +112,23 @@ impl SqliteControlStore {
     }
 }
 
+/// `NotFound` unless workspace `ws` exists.
+async fn require_workspace(conn: &mut sqlx::SqliteConnection, ws: &str) -> Result<(), StoreError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM workspaces WHERE name = ?")
+        .bind(ws)
+        .fetch_optional(conn)
+        .await?;
+    exists.map(|_| ()).ok_or_else(|| missing_workspace(ws))
+}
+
+fn workspace_from_row(row: &SqliteRow) -> Result<Workspace, StoreError> {
+    Ok(Workspace {
+        name: row.try_get("name")?,
+        display_name: row.try_get("display_name")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 fn to_i64<T: TryInto<i64>>(value: T, field: &str) -> Result<i64, StoreError> {
     value
         .try_into()
@@ -119,6 +147,7 @@ fn parse_uuid(s: &str) -> Result<Uuid, StoreError> {
 fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
     let id: String = row.try_get("id")?;
     let source: String = row.try_get("source")?;
+    let data_plane_auth: String = row.try_get("data_plane_auth")?;
     Ok(Mock {
         id: parse_uuid(&id)?,
         workspace: row.try_get("workspace")?,
@@ -128,6 +157,7 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
         llm_profile: row.try_get("llm_profile")?,
         header_overrides: row.try_get("header_overrides")?,
         source: ResourceSource::parse(&source)?,
+        data_plane_auth: serde_json::from_str(&data_plane_auth)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -183,6 +213,52 @@ fn profile_from_row(row: &SqliteRow) -> Result<LlmProfile, StoreError> {
     })
 }
 
+fn api_key_from_row(row: &SqliteRow) -> Result<ApiKey, StoreError> {
+    let scopes: String = row.try_get("scopes")?;
+    Ok(ApiKey {
+        key_id: row.try_get("key_id")?,
+        workspace: row.try_get("workspace")?,
+        name: row.try_get("name")?,
+        role: row.try_get("role")?,
+        scopes: serde_json::from_str(&scopes)?,
+        sysadmin: row.try_get("sysadmin")?,
+        secret_hash: row.try_get("secret_hash")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
+fn session_from_row(row: &SqliteRow) -> Result<AdminSession, StoreError> {
+    let principal: String = row.try_get("principal")?;
+    Ok(AdminSession {
+        id_hash: row.try_get("id_hash")?,
+        principal: serde_json::from_str(&principal)?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_seen: row.try_get("last_seen")?,
+    })
+}
+
+fn audit_from_row(row: &SqliteRow) -> Result<AuditEvent, StoreError> {
+    let before: Option<String> = row.try_get("before_value")?;
+    let after: Option<String> = row.try_get("after_value")?;
+    Ok(AuditEvent {
+        id: row.try_get("id")?,
+        workspace: row.try_get("workspace")?,
+        actor_subject: row.try_get("actor_subject")?,
+        actor_kind: row.try_get("actor_kind")?,
+        action: row.try_get("action")?,
+        target: row.try_get("target")?,
+        before: before.map(|v| serde_json::from_str(&v)).transpose()?,
+        after: after.map(|v| serde_json::from_str(&v)).transpose()?,
+        request_id: row.try_get("request_id")?,
+        at: row.try_get("at")?,
+    })
+}
+
 fn log_from_row(row: &SqliteRow) -> Result<RequestLogEntry, StoreError> {
     let mock_id: String = row.try_get("mock_id")?;
     let request: String = row.try_get("request")?;
@@ -212,6 +288,141 @@ impl ControlStore for SqliteControlStore {
         Ok(())
     }
 
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+        let sql = format!("SELECT {WORKSPACE_COLUMNS} FROM workspaces ORDER BY name");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(workspace_from_row)
+            .collect()
+    }
+
+    async fn get_workspace(&self, name: &str) -> Result<Option<Workspace>, StoreError> {
+        let sql = format!("SELECT {WORKSPACE_COLUMNS} FROM workspaces WHERE name = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(workspace_from_row)
+            .transpose()
+    }
+
+    async fn create_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError> {
+        validate_workspace_name(name)?;
+        let ws = Workspace {
+            name: name.to_string(),
+            display_name: display_name.to_string(),
+            created_at: now(),
+        };
+        let sql = format!("INSERT INTO workspaces ({WORKSPACE_COLUMNS}) VALUES (?, ?, ?)");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&ws.name)
+            .bind(&ws.display_name)
+            .bind(ws.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match StoreError::from(e) {
+                StoreError::Conflict(_) => {
+                    StoreError::Conflict(format!("workspace {name:?} already exists"))
+                }
+                other => other,
+            })?;
+        self.publish(ControlChange::Workspace {
+            name: ws.name.clone(),
+        });
+        Ok(ws)
+    }
+
+    async fn update_workspace(
+        &self,
+        name: &str,
+        display_name: &str,
+    ) -> Result<Workspace, StoreError> {
+        let sql = format!(
+            "UPDATE workspaces SET display_name = ? WHERE name = ? RETURNING {WORKSPACE_COLUMNS}"
+        );
+        let ws = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(display_name)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(workspace_from_row)
+            .transpose()?
+            .ok_or_else(|| missing_workspace(name))?;
+        self.publish(ControlChange::Workspace {
+            name: ws.name.clone(),
+        });
+        Ok(ws)
+    }
+
+    async fn delete_workspace(&self, name: &str, force: bool) -> Result<bool, StoreError> {
+        if name == DEFAULT_WORKSPACE {
+            return Err(StoreError::Conflict(
+                "the default workspace cannot be deleted".into(),
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM workspaces WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+        let mocks: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM mocks WHERE workspace = ? ORDER BY name")
+                .bind(name)
+                .fetch_all(&mut *tx)
+                .await?;
+        let profiles: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM llm_profiles WHERE workspace = ?")
+                .bind(name)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !force && (!mocks.is_empty() || profiles > 0) {
+            return Err(StoreError::Conflict(format!(
+                "workspace {name:?} is not empty ({} mocks, {profiles} profiles); delete with force",
+                mocks.len()
+            )));
+        }
+        for sql in [
+            "DELETE FROM mocks WHERE workspace = ?",
+            "DELETE FROM llm_profiles WHERE workspace = ?",
+            "DELETE FROM api_keys WHERE workspace = ?",
+            "DELETE FROM workspaces WHERE name = ?",
+        ] {
+            sqlx::query(sql).bind(name).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        if !mocks.is_empty() {
+            self.prune.clear();
+        }
+        for mock in &mocks {
+            self.publish_mock(name, mock);
+        }
+        self.publish(ControlChange::Workspace {
+            name: name.to_string(),
+        });
+        Ok(true)
+    }
+
+    async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError> {
+        let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks ORDER BY workspace, name");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(mock_from_row)
+            .collect()
+    }
+
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError> {
         let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks WHERE workspace = ? ORDER BY name");
         sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -239,6 +450,8 @@ impl ControlStore for SqliteControlStore {
         validate_mock_name(&m.name)?;
         let route_prefix = m.route_prefix.unwrap_or_else(|| format!("/{}", m.name));
         validate_route_prefix(&route_prefix)?;
+        validate_header_name(&m.data_plane_auth.header)?;
+        let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let at = now();
         let mock = Mock {
             id: Uuid::new_v4(),
@@ -249,11 +462,14 @@ impl ControlStore for SqliteControlStore {
             llm_profile: m.llm_profile,
             header_overrides: m.header_overrides,
             source: m.source,
+            data_plane_auth: m.data_plane_auth,
             created_at: at,
             updated_at: at,
         };
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_workspace(&mut tx, ws).await?;
         let sql =
-            format!("INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            format!("INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(mock.id.to_string())
             .bind(&mock.workspace)
@@ -263,9 +479,10 @@ impl ControlStore for SqliteControlStore {
             .bind(&mock.llm_profile)
             .bind(mock.header_overrides)
             .bind(mock.source.as_str())
+            .bind(data_plane_auth)
             .bind(mock.created_at)
             .bind(mock.updated_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| match StoreError::from(e) {
                 StoreError::Conflict(_) => {
@@ -273,6 +490,7 @@ impl ControlStore for SqliteControlStore {
                 }
                 other => other,
             })?;
+        tx.commit().await?;
         self.publish_mock(&mock.workspace, &mock.name);
         Ok(mock)
     }
@@ -280,6 +498,8 @@ impl ControlStore for SqliteControlStore {
     async fn update_mock(&self, m: &Mock) -> Result<Mock, StoreError> {
         validate_mock_name(&m.name)?;
         validate_route_prefix(&m.route_prefix)?;
+        validate_header_name(&m.data_plane_auth.header)?;
+        let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks WHERE id = ?");
         let existing = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -299,7 +519,7 @@ impl ControlStore for SqliteControlStore {
         };
         sqlx::query(
             "UPDATE mocks SET name = ?, route_prefix = ?, persona = ?, llm_profile = ?, header_overrides = ?, \
-             source = ?, updated_at = ? WHERE id = ?",
+             source = ?, data_plane_auth = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&updated.name)
         .bind(&updated.route_prefix)
@@ -307,6 +527,7 @@ impl ControlStore for SqliteControlStore {
         .bind(&updated.llm_profile)
         .bind(updated.header_overrides)
         .bind(updated.source.as_str())
+        .bind(data_plane_auth)
         .bind(updated.updated_at)
         .bind(updated.id.to_string())
         .execute(&mut *tx)
@@ -556,6 +777,8 @@ impl ControlStore for SqliteControlStore {
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
              source = excluded.source"
         );
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_workspace(&mut tx, &p.workspace).await?;
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&p.workspace)
             .bind(&p.name)
@@ -568,8 +791,9 @@ impl ControlStore for SqliteControlStore {
             .bind(i64::from(p.max_tokens))
             .bind(&p.fallback_profile)
             .bind(p.source.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         self.publish(ControlChange::Profile {
             workspace: p.workspace.clone(),
             name: p.name.clone(),
@@ -662,6 +886,214 @@ impl ControlStore for SqliteControlStore {
             .iter()
             .map(log_from_row)
             .collect()
+    }
+
+    async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        require_workspace(&mut tx, &k.workspace).await?;
+        let sql = format!(
+            "INSERT INTO api_keys ({API_KEY_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&k.key_id)
+            .bind(&k.workspace)
+            .bind(&k.name)
+            .bind(&k.role)
+            .bind(serde_json::to_string(&k.scopes)?)
+            .bind(k.sysadmin)
+            .bind(&k.secret_hash)
+            .bind(&k.created_by)
+            .bind(k.created_at)
+            .bind(k.expires_at)
+            .bind(k.last_used_at)
+            .bind(k.revoked_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match StoreError::from(e) {
+                StoreError::Conflict(_) => {
+                    StoreError::Conflict(format!("api key {:?} already exists", k.key_id))
+                }
+                other => other,
+            })?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_api_key(&self, key_id: &str) -> Result<Option<ApiKey>, StoreError> {
+        let sql = format!("SELECT {API_KEY_COLUMNS} FROM api_keys WHERE key_id = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(key_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(api_key_from_row)
+            .transpose()
+    }
+
+    async fn list_api_keys(&self, ws: &str) -> Result<Vec<ApiKey>, StoreError> {
+        let sql = format!(
+            "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE workspace = ? \
+             ORDER BY created_at DESC, key_id"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(ws)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(api_key_from_row)
+            .collect()
+    }
+
+    async fn revoke_api_key(&self, ws: &str, key_id: &str) -> Result<bool, StoreError> {
+        let revoked = sqlx::query(
+            "UPDATE api_keys SET revoked_at = ? \
+             WHERE workspace = ? AND key_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now())
+        .bind(ws)
+        .bind(key_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0;
+        Ok(revoked)
+    }
+
+    async fn touch_api_key(&self, key_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE key_id = ?")
+            .bind(at)
+            .bind(key_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_admin_session(&self, s: &AdminSession) -> Result<(), StoreError> {
+        let sql = format!("INSERT INTO admin_sessions ({SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?)");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&s.id_hash)
+            .bind(serde_json::to_string(&s.principal)?)
+            .bind(s.created_at)
+            .bind(s.expires_at)
+            .bind(s.last_seen)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| match StoreError::from(e) {
+                StoreError::Conflict(_) => {
+                    StoreError::Conflict("admin session already exists".into())
+                }
+                other => other,
+            })?;
+        Ok(())
+    }
+
+    async fn get_admin_session(&self, id_hash: &str) -> Result<Option<AdminSession>, StoreError> {
+        let sql = format!("SELECT {SESSION_COLUMNS} FROM admin_sessions WHERE id_hash = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id_hash)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(session_from_row)
+            .transpose()
+    }
+
+    async fn touch_admin_session(
+        &self,
+        id_hash: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE admin_sessions SET last_seen = ? WHERE id_hash = ?")
+            .bind(at)
+            .bind(id_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError> {
+        Ok(sqlx::query("DELETE FROM admin_sessions WHERE id_hash = ?")
+            .bind(id_hash)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
+    async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(
+            sqlx::query("DELETE FROM admin_sessions WHERE expires_at <= ?")
+                .bind(now)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
+    async fn append_audit(&self, e: NewAuditEvent) -> Result<AuditEvent, StoreError> {
+        let before = e.before.as_ref().map(serde_json::to_string).transpose()?;
+        let after = e.after.as_ref().map(serde_json::to_string).transpose()?;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO audit_events (workspace, actor_subject, actor_kind, action, target, \
+             before_value, after_value, request_id, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(&e.workspace)
+        .bind(&e.actor_subject)
+        .bind(&e.actor_kind)
+        .bind(&e.action)
+        .bind(&e.target)
+        .bind(before)
+        .bind(after)
+        .bind(&e.request_id)
+        .bind(e.at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(AuditEvent {
+            id,
+            workspace: e.workspace,
+            actor_subject: e.actor_subject,
+            actor_kind: e.actor_kind,
+            action: e.action,
+            target: e.target,
+            before: e.before,
+            after: e.after,
+            request_id: e.request_id,
+            at: e.at,
+        })
+    }
+
+    async fn list_audit(&self, f: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError> {
+        let mut qb = QueryBuilder::<Sqlite>::new(format!(
+            "SELECT {AUDIT_COLUMNS} FROM audit_events WHERE 1 = 1"
+        ));
+        if let Some(ws) = &f.workspace {
+            qb.push(" AND workspace = ").push_bind(ws.clone());
+        }
+        if let Some(action) = &f.action {
+            qb.push(" AND action = ").push_bind(action.clone());
+        }
+        if let Some(actor) = &f.actor {
+            qb.push(" AND actor_subject = ").push_bind(actor.clone());
+        }
+        if let Some(before) = f.before_id {
+            qb.push(" AND id < ").push_bind(before);
+        }
+        qb.push(" ORDER BY id DESC LIMIT ")
+            .push_bind(i64::from(f.effective_limit()));
+        qb.build()
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(audit_from_row)
+            .collect()
+    }
+
+    async fn prune_audit(&self, older_than: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(sqlx::query("DELETE FROM audit_events WHERE at < ?")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {

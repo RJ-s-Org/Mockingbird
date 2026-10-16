@@ -1,19 +1,28 @@
 //! Applies a [`FileConfig`] to the control store: file-declared profiles,
 //! mocks, contracts and scenarios are created, updated or deleted to match
-//! the file. API-owned resources are never touched.
+//! the file, and the workspaces they name are created. API-owned resources
+//! and workspaces are never deleted.
+//!
+//! Mocks and profiles are identified by `(workspace, name)`; reports label
+//! them with [`mock_label`] (`name` in `default`, else `workspace/name`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};
 use mb_mcm::Bundle;
 use mb_state::StateStore;
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
-    ResourceSource, Scenario, ScenarioRules, validate_mock_name, validate_route_prefix,
+    ResourceSource, Scenario, ScenarioRules, validate_header_name, validate_mock_name,
+    validate_route_prefix, validate_workspace_name,
 };
 use sha2::{Digest, Sha256};
 
 use crate::file_config::{FileConfig, FileMock, FileProfile};
+use crate::registry::mock_label;
+
+/// `(workspace, name)` of a mock or profile.
+type Key = (String, String);
 
 /// What a [`reconcile`] changed.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -39,6 +48,7 @@ impl ReconcileReport {
 
 /// A file mock with its contract read and compiled.
 struct Prepared<'a> {
+    workspace: &'a str,
     name: &'a str,
     mock: &'a FileMock,
     prefix: String,
@@ -50,39 +60,66 @@ struct Prepared<'a> {
 /// Makes the store match `cfg`. Deleting a file mock also resets its
 /// session state in `state`.
 ///
-/// The whole config is validated first (names, prefixes, profile
-/// references, secret references, contracts and scenario operations, and
-/// clashes with API-owned resources, route prefixes included); any error
+/// The whole config is validated first (workspace names, names, route
+/// prefixes and gRPC services across every workspace, data-plane auth
+/// headers, profile references, secret references, contracts and scenario
+/// operations, and clashes with API-owned resources, route prefixes and
+/// active gRPC services included); any error
 /// returns `Err` with nothing applied.
 pub async fn reconcile(
     store: &dyn ControlStore,
     state: &dyn StateStore,
     cfg: &FileConfig,
 ) -> anyhow::Result<ReconcileReport> {
-    let ws = DEFAULT_WORKSPACE;
-    let existing_mocks: HashMap<String, Mock> = store
-        .list_mocks(ws)
+    let existing_workspaces: BTreeSet<String> = store
+        .list_workspaces()
+        .await
+        .context("listing workspaces")?
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    let existing_mocks: HashMap<Key, Mock> = store
+        .list_all_mocks()
         .await
         .context("listing mocks")?
         .into_iter()
-        .map(|m| (m.name.clone(), m))
+        .map(|m| ((m.workspace.clone(), m.name.clone()), m))
         .collect();
-    let existing_profiles: HashMap<String, LlmProfile> = store
-        .list_profiles(ws)
-        .await
-        .context("listing LLM profiles")?
-        .into_iter()
-        .map(|p| (p.name.clone(), p))
-        .collect();
+    let mut existing_profiles: HashMap<Key, LlmProfile> = HashMap::new();
+    for ws in &existing_workspaces {
+        for p in store
+            .list_profiles(ws)
+            .await
+            .with_context(|| format!("listing the LLM profiles of workspace {ws:?}"))?
+        {
+            existing_profiles.insert((p.workspace.clone(), p.name.clone()), p);
+        }
+    }
 
     let prepared = validate(store, cfg, &existing_mocks, &existing_profiles).await?;
 
     let mut report = ReconcileReport::default();
 
-    // Profiles first, so mocks never reference a missing one.
+    // Workspaces first, so every mock and profile has its workspace.
+    let wanted: BTreeSet<&str> = cfg
+        .mocks
+        .values()
+        .map(|m| m.workspace.as_str())
+        .chain(cfg.llm.profiles.values().map(|p| p.workspace.as_str()))
+        .collect();
+    for ws in wanted {
+        if !existing_workspaces.contains(ws) {
+            store
+                .create_workspace(ws, ws)
+                .await
+                .with_context(|| format!("creating workspace {ws:?}"))?;
+        }
+    }
+
+    // Profiles next, so mocks never reference a missing one.
     for (name, fp) in &cfg.llm.profiles {
         let profile = to_profile(name, fp)?;
-        if existing_profiles.get(name) != Some(&profile) {
+        if existing_profiles.get(&(fp.workspace.clone(), name.clone())) != Some(&profile) {
             store
                 .put_profile(&profile)
                 .await
@@ -91,67 +128,77 @@ pub async fn reconcile(
     }
 
     for p in &prepared {
-        apply_mock(store, p, existing_mocks.get(p.name), &mut report).await?;
+        let key = (p.workspace.to_string(), p.name.to_string());
+        apply_mock(store, p, existing_mocks.get(&key), &mut report).await?;
     }
 
-    for (name, mock) in &existing_mocks {
-        if mock.source == ResourceSource::File && !cfg.mocks.contains_key(name) {
+    let declared_mocks: HashSet<Key> = cfg
+        .mocks
+        .iter()
+        .map(|(name, m)| (m.workspace.clone(), name.clone()))
+        .collect();
+    for (key, mock) in &existing_mocks {
+        if mock.source == ResourceSource::File && !declared_mocks.contains(key) {
+            let (ws, name) = key;
+            let label = mock_label(ws, name);
             // Its sessions go first, so a new mock of the same name starts
             // empty and a failed reset leaves the mock for the next reload.
             state
                 .reset_mock(ws, name)
                 .await
                 .map_err(|e| anyhow!("{e}"))
-                .with_context(|| format!("resetting the state of mock {name:?}"))?;
+                .with_context(|| format!("resetting the state of mock {label:?}"))?;
             store
                 .delete_mock(ws, name)
                 .await
-                .with_context(|| format!("deleting mock {name:?}"))?;
-            report.deleted.push(name.clone());
+                .with_context(|| format!("deleting mock {label:?}"))?;
+            report.deleted.push(label);
         }
     }
     report.deleted.sort();
 
-    let removed: Vec<&String> = existing_profiles
+    let declared_profiles: HashSet<Key> = cfg
+        .llm
+        .profiles
         .iter()
-        .filter(|(name, p)| {
-            p.source == ResourceSource::File && !cfg.llm.profiles.contains_key(*name)
-        })
-        .map(|(name, _)| name)
+        .map(|(name, p)| (p.workspace.clone(), name.clone()))
         .collect();
-    if !removed.is_empty() {
+    let mut removed: Vec<&Key> = existing_profiles
+        .iter()
+        .filter(|(key, p)| p.source == ResourceSource::File && !declared_profiles.contains(*key))
+        .map(|(key, _)| key)
+        .collect();
+    removed.sort();
+    for (ws, name) in removed {
+        store
+            .delete_profile(ws, name)
+            .await
+            .with_context(|| format!("deleting LLM profile {:?}", mock_label(ws, name)))?;
         // Mocks the API owns are not in the file, so nothing above stopped
         // them from using a profile the file no longer declares.
-        let api_mocks: Vec<&Mock> = existing_mocks
+        let mut users: Vec<&str> = existing_mocks
             .values()
-            .filter(|m| m.source == ResourceSource::Api)
+            .filter(|m| m.source == ResourceSource::Api && m.workspace == *ws)
+            .filter(|m| uses_profile(m, name, &existing_profiles))
+            .map(|m| m.name.as_str())
             .collect();
-        for name in removed {
-            store
-                .delete_profile(ws, name)
-                .await
-                .with_context(|| format!("deleting LLM profile {name:?}"))?;
-            let mut users: Vec<&str> = api_mocks
-                .iter()
-                .filter(|m| uses_profile(m, name, &existing_profiles))
-                .map(|m| m.name.as_str())
-                .collect();
-            users.sort_unstable();
-            if !users.is_empty() {
-                let warning = format!(
-                    "LLM profile {name:?} was removed from the config file but API mocks still use it: {}",
-                    users.join(", ")
-                );
-                tracing::warn!("{warning}");
-                report.warnings.push(warning);
-            }
+        users.sort_unstable();
+        if !users.is_empty() {
+            let warning = format!(
+                "LLM profile {:?} was removed from the config file but API mocks still use it: {}",
+                mock_label(ws, name),
+                users.join(", ")
+            );
+            tracing::warn!("{warning}");
+            report.warnings.push(warning);
         }
     }
     Ok(report)
 }
 
-/// Whether `mock`'s profile is `profile` or falls back to it.
-fn uses_profile(mock: &Mock, profile: &str, profiles: &HashMap<String, LlmProfile>) -> bool {
+/// Whether `mock`'s profile is `profile` or falls back to it (profiles of
+/// the mock's workspace).
+fn uses_profile(mock: &Mock, profile: &str, profiles: &HashMap<Key, LlmProfile>) -> bool {
     let mut seen = HashSet::new();
     let mut next = mock.llm_profile.as_deref();
     while let Some(name) = next {
@@ -162,7 +209,7 @@ fn uses_profile(mock: &Mock, profile: &str, profiles: &HashMap<String, LlmProfil
             return false;
         }
         next = profiles
-            .get(name)
+            .get(&(mock.workspace.clone(), name.to_string()))
             .and_then(|p| p.fallback_profile.as_deref());
     }
     false
@@ -171,65 +218,87 @@ fn uses_profile(mock: &Mock, profile: &str, profiles: &HashMap<String, LlmProfil
 async fn validate<'a>(
     store: &dyn ControlStore,
     cfg: &'a FileConfig,
-    existing_mocks: &HashMap<String, Mock>,
-    existing_profiles: &HashMap<String, LlmProfile>,
+    existing_mocks: &HashMap<Key, Mock>,
+    existing_profiles: &HashMap<Key, LlmProfile>,
 ) -> anyhow::Result<Vec<Prepared<'a>>> {
-    // Profiles a file mock may use: the file's own and API-owned ones.
-    let known_profile = |name: &str| {
-        cfg.llm.profiles.contains_key(name)
+    for ws in cfg
+        .mocks
+        .values()
+        .map(|m| &m.workspace)
+        .chain(cfg.llm.profiles.values().map(|p| &p.workspace))
+    {
+        validate_workspace_name(ws).map_err(|e| anyhow!("{e}"))?;
+    }
+
+    // Profiles a file mock or profile in `ws` may use: the file's own in
+    // `ws` and API-owned ones there.
+    let known_profile = |ws: &str, name: &str| {
+        cfg.llm
+            .profiles
+            .get(name)
+            .is_some_and(|p| p.workspace == ws)
             || existing_profiles
-                .get(name)
+                .get(&(ws.to_string(), name.to_string()))
                 .is_some_and(|p| p.source == ResourceSource::Api)
     };
 
     for (name, p) in &cfg.llm.profiles {
+        let label = mock_label(&p.workspace, name);
         if !valid_identifier(name) {
             bail!("LLM profile name {name:?} must be 1-128 characters of [A-Za-z0-9._-]");
         }
         if existing_profiles
-            .get(name)
+            .get(&(p.workspace.clone(), name.clone()))
             .is_some_and(|e| e.source == ResourceSource::Api)
         {
-            bail!("LLM profile {name:?} is managed through the API; rename it in the config file");
+            bail!("LLM profile {label:?} is managed through the API; rename it in the config file");
         }
         if let Some(reference) = &p.api_key
             && !valid_secret_ref(reference)
         {
             bail!(
-                "LLM profile {name:?}: api_key must be a secret reference (env:NAME or file:/path), not a key"
+                "LLM profile {label:?}: api_key must be a secret reference (env:NAME or file:/path), not a key"
             );
         }
         if let Some(fallback) = &p.fallback
-            && !known_profile(fallback)
+            && !known_profile(&p.workspace, fallback)
         {
-            bail!("LLM profile {name:?}: fallback profile {fallback:?} does not exist");
+            bail!(
+                "LLM profile {label:?}: fallback profile {fallback:?} does not exist in workspace {:?}",
+                p.workspace
+            );
         }
         to_profile(name, p)?;
     }
     if let Some(name) = &cfg.llm.default_profile
-        && !known_profile(name)
+        && !known_profile(DEFAULT_WORKSPACE, name)
     {
         bail!("default LLM profile {name:?} does not exist");
     }
 
-    let mut prefixes: BTreeMap<String, &str> = BTreeMap::new();
+    // Route prefixes are unique across every workspace.
+    let mut prefixes: BTreeMap<String, String> = BTreeMap::new();
     let mut prepared = Vec::with_capacity(cfg.mocks.len());
     for (name, mock) in &cfg.mocks {
         validate_mock_name(name).map_err(|e| anyhow!("{e}"))?;
-        let existing = existing_mocks.get(name);
+        let ws = mock.workspace.as_str();
+        let label = mock_label(ws, name);
+        let existing = existing_mocks.get(&(ws.to_string(), name.clone()));
         if existing.is_some_and(|m| m.source == ResourceSource::Api) {
-            bail!("mock {name:?} is managed through the API; rename it in the config file");
+            bail!("mock {label:?} is managed through the API; rename it in the config file");
         }
         let prefix = mock.effective_prefix(name);
-        validate_route_prefix(&prefix).map_err(|e| anyhow!("mock {name:?}: {e}"))?;
-        if let Some(other) = prefixes.insert(prefix.clone(), name) {
-            bail!("mocks {other:?} and {name:?} share the route prefix {prefix:?}");
+        validate_route_prefix(&prefix).map_err(|e| anyhow!("mock {label:?}: {e}"))?;
+        if let Some(other) = prefixes.insert(prefix.clone(), label.clone()) {
+            bail!("mocks {other:?} and {label:?} share the route prefix {prefix:?}");
         }
         if let Some(profile) = &mock.llm_profile
-            && !known_profile(profile)
+            && !known_profile(ws, profile)
         {
-            bail!("mock {name:?}: LLM profile {profile:?} does not exist");
+            bail!("mock {label:?}: LLM profile {profile:?} does not exist in workspace {ws:?}");
         }
+        validate_header_name(&mock.data_plane_auth.header)
+            .map_err(|e| anyhow!("mock {label:?}: data_plane_auth header: {e}"))?;
 
         // File reads and compilation block: keep them off the runtime.
         let path = mock.contract.clone();
@@ -244,14 +313,14 @@ async fn validate<'a>(
         })
         .await
         .context("reading the contract did not finish")?
-        .with_context(|| format!("mock {name:?}"))?;
+        .with_context(|| format!("mock {label:?}"))?;
         let operations: HashSet<&str> = bundle.operations.iter().map(|o| o.id.as_str()).collect();
 
         let api_scenarios: HashSet<String> = match existing {
             Some(m) => store
                 .list_scenarios(m.id)
                 .await
-                .with_context(|| format!("listing the scenarios of mock {name:?}"))?
+                .with_context(|| format!("listing the scenarios of mock {label:?}"))?
                 .into_iter()
                 .filter(|s| s.source == ResourceSource::Api)
                 .map(|s| s.name)
@@ -261,39 +330,47 @@ async fn validate<'a>(
         for (sname, s) in &mock.scenarios {
             if !valid_identifier(sname) {
                 bail!(
-                    "mock {name:?}: scenario name {sname:?} must be 1-128 characters of [A-Za-z0-9._-]"
+                    "mock {label:?}: scenario name {sname:?} must be 1-128 characters of [A-Za-z0-9._-]"
                 );
             }
             if api_scenarios.contains(sname) {
-                bail!("mock {name:?}: scenario {sname:?} is managed through the API");
+                bail!("mock {label:?}: scenario {sname:?} is managed through the API");
             }
             if let Some(status) = s.status
                 && !(100..=599).contains(&status)
             {
-                bail!("mock {name:?}, scenario {sname:?}: status {status} is not 100-599");
+                bail!("mock {label:?}, scenario {sname:?}: status {status} is not 100-599");
             }
             if let Some(set) = &s.set
                 && !set.is_object()
             {
-                bail!("mock {name:?}, scenario {sname:?}: set must be a mapping");
+                bail!("mock {label:?}, scenario {sname:?}: set must be a mapping");
             }
             if let Some(op) = s
                 .operations
                 .iter()
                 .find(|op| !operations.contains(op.as_str()))
             {
-                bail!("mock {name:?}, scenario {sname:?}: operation {op:?} is not in the contract");
+                bail!(
+                    "mock {label:?}, scenario {sname:?}: operation {op:?} is not in the contract"
+                );
             }
             if let Some(items) = s.stream_items
                 && !(1..=10_000).contains(&items)
             {
-                bail!("mock {name:?}, scenario {sname:?}: stream_items {items} is not 1-10000");
+                bail!("mock {label:?}, scenario {sname:?}: stream_items {items} is not 1-10000");
             }
-            duration_ms(name, sname, "latency", s.latency)?;
-            duration_ms(name, sname, "stream_item_interval", s.stream_item_interval)?;
+            duration_ms(&label, sname, "latency", s.latency)?;
+            duration_ms(
+                &label,
+                sname,
+                "stream_item_interval",
+                s.stream_item_interval,
+            )?;
         }
 
         prepared.push(Prepared {
+            workspace: ws,
             name,
             mock,
             prefix,
@@ -302,16 +379,51 @@ async fn validate<'a>(
             bundle,
         });
     }
-    // A file mock may not take the prefix of a mock the API owns.
+    // gRPC services are unique across every workspace (one shared
+    // listener): among the file mocks, and against the active contracts of
+    // the mocks the API owns.
+    let mut grpc: BTreeMap<String, String> = BTreeMap::new();
+    for p in &prepared {
+        let label = mock_label(p.workspace, p.name);
+        for service in p.bundle.grpc_services() {
+            if let Some(other) = grpc.insert(service.clone(), label.clone()) {
+                bail!("mocks {other:?} and {label:?} both serve the gRPC service {service:?}");
+            }
+        }
+    }
+    if !grpc.is_empty() {
+        for api_mock in existing_mocks
+            .values()
+            .filter(|m| m.source == ResourceSource::Api)
+        {
+            let api_label = mock_label(&api_mock.workspace, &api_mock.name);
+            let Some(active) = store
+                .active_contract(api_mock.id)
+                .await
+                .with_context(|| format!("loading the active contract of mock {api_label:?}"))?
+            else {
+                continue;
+            };
+            for service in active.bundle.grpc_services() {
+                if let Some(label) = grpc.get(&service) {
+                    bail!(
+                        "mock {label:?}: gRPC service {service:?} is already served by mock {api_label:?}, which is managed through the API"
+                    );
+                }
+            }
+        }
+    }
+    // A file mock may not take the prefix of a mock the API owns, in any
+    // workspace.
     for api_mock in existing_mocks
         .values()
         .filter(|m| m.source == ResourceSource::Api)
     {
-        if let Some(name) = prefixes.get(&api_mock.route_prefix) {
+        if let Some(label) = prefixes.get(&api_mock.route_prefix) {
             bail!(
-                "mock {name:?}: route prefix {:?} is already used by mock {:?}, which is managed through the API",
+                "mock {label:?}: route prefix {:?} is already used by mock {:?}, which is managed through the API",
                 api_mock.route_prefix,
-                api_mock.name
+                mock_label(&api_mock.workspace, &api_mock.name)
             );
         }
     }
@@ -324,20 +436,22 @@ async fn apply_mock(
     existing: Option<&Mock>,
     report: &mut ReconcileReport,
 ) -> anyhow::Result<()> {
-    let name = p.name;
+    let label = mock_label(p.workspace, p.name);
+    let name = label.as_str();
     let mut changed = false;
     let mock = match existing {
         None => {
             let mock = store
                 .create_mock(
-                    DEFAULT_WORKSPACE,
+                    p.workspace,
                     NewMock {
-                        name: name.to_string(),
+                        name: p.name.to_string(),
                         route_prefix: Some(p.prefix.clone()),
                         persona: p.mock.persona.clone(),
                         llm_profile: p.mock.llm_profile.clone(),
                         header_overrides: p.mock.header_overrides,
                         source: ResourceSource::File,
+                        data_plane_auth: p.mock.data_plane_auth.clone(),
                     },
                 )
                 .await
@@ -351,6 +465,7 @@ async fn apply_mock(
                 persona: p.mock.persona.clone(),
                 llm_profile: p.mock.llm_profile.clone(),
                 header_overrides: p.mock.header_overrides,
+                data_plane_auth: p.mock.data_plane_auth.clone(),
                 ..current.clone()
             };
             if wanted != *current {
@@ -451,7 +566,7 @@ async fn apply_mock(
 
 fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
     Ok(LlmProfile {
-        workspace: DEFAULT_WORKSPACE.to_string(),
+        workspace: p.workspace.clone(),
         name: name.to_string(),
         base_url: p.base_url.clone(),
         model: p.model.clone(),

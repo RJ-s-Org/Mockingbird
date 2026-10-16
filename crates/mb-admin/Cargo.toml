@@ -11,22 +11,34 @@ description = "Mockingbird Admin REST API with its OpenAPI document"
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum = { workspace = true, features = ["macros"] }
 chrono.workspace = true
+hmac.workspace = true
+mb-auth.workspace = true
 mb-import.workspace = true
 mb-mcm.workspace = true
+mb-protocols.workspace = true
 mb-state.workspace = true
 mb-store.workspace = true
+metrics.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 utoipa.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
+http-body-util.workspace = true
+mb-auth = { workspace = true, features = ["testing"] }
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower.workspace = true
 tracing-subscriber.workspace = true
+wiremock.workspace = true
 zip.workspace = true

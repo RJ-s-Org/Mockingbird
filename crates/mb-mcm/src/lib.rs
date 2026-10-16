@@ -213,6 +213,47 @@ pub struct Operation {
     pub identity: Option<Identity>,
     /// Description text and tags.
     pub semantic_hints: Vec<String>,
+    /// Security requirements, any one of which satisfies the operation (OR
+    /// across requirements). Empty means the operation is unsecured; a
+    /// requirement with no schemes makes authentication optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub security: Vec<SecurityRequirement>,
+}
+
+/// Where an API key is carried.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyLocation {
+    Header,
+    Query,
+    Cookie,
+}
+
+/// A credential form an operation accepts.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityScheme {
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `Authorization: Basic <base64(user:password)>`.
+    Basic,
+    /// A named header, query parameter or cookie.
+    ApiKey {
+        location: ApiKeyLocation,
+        name: String,
+    },
+    /// An OAuth 2 access token (presented as a bearer token).
+    #[serde(rename = "oauth2")]
+    OAuth2 { scopes: Vec<String> },
+    /// An OpenID Connect token (presented as a bearer token).
+    OpenIdConnect { scopes: Vec<String> },
+}
+
+/// Schemes that must all be satisfied together (AND).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SecurityRequirement {
+    pub schemes: Vec<SecurityScheme>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -264,6 +305,23 @@ impl Bundle {
 
     pub fn operation(&self, id: &str) -> Option<&Operation> {
         self.operations.iter().find(|o| o.id == id)
+    }
+
+    /// Full names (`pkg.Service`, or `Service` without a package) of the
+    /// gRPC services this bundle's operations bind to, sorted.
+    pub fn grpc_services(&self) -> std::collections::BTreeSet<String> {
+        self.operations
+            .iter()
+            .filter_map(|op| match &op.binding {
+                Binding::Grpc {
+                    package, service, ..
+                } if package.is_empty() => Some(service.clone()),
+                Binding::Grpc {
+                    package, service, ..
+                } => Some(format!("{package}.{service}")),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Clone `schema` with this bundle's definitions attached as `$defs`, so

@@ -11,7 +11,7 @@ use async_graphql::parser::types::{BaseType, Type};
 use async_graphql::{Error, ErrorExtensions, Name};
 use axum::http::{HeaderMap, StatusCode};
 use mb_engine::{EngineError, OperationCall, Source};
-use mb_ext::Rejection;
+use mb_ext::{Rejection, Tenancy};
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -20,7 +20,8 @@ use tracing::field::Empty;
 use super::error_code;
 use crate::MockRuntime;
 use crate::call::{
-    self, DEFAULT_SESSION, PlanError, PlanFailure, Report, forwarded_headers, recorded_headers,
+    self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
+    recorded_headers,
 };
 
 /// How a named type's values are turned into field values.
@@ -47,6 +48,10 @@ pub(crate) struct HttpCall {
     method: String,
     /// The request's variables, for the request record.
     variables: Value,
+    /// The tenancy the whole request was admitted with, in `api_key` mode
+    /// (admission runs before the key check); root fields are then not
+    /// admitted again.
+    admitted: Option<Tenancy>,
     collected: Mutex<Collected>,
 }
 
@@ -62,11 +67,17 @@ pub(crate) struct Collected {
 }
 
 impl HttpCall {
-    pub(crate) fn new(headers: HeaderMap, method: String, variables: Value) -> Self {
+    pub(crate) fn new(
+        headers: HeaderMap,
+        method: String,
+        variables: Value,
+        admitted: Option<Tenancy>,
+    ) -> Self {
         Self {
             headers,
             method,
             variables,
+            admitted,
             collected: Mutex::new(Collected::default()),
         }
     }
@@ -113,6 +124,7 @@ impl Failure {
     pub(crate) fn plan(error: PlanError, mock: &str) -> Self {
         match error {
             PlanError::Rejected(r) => Self::rejected(r),
+            PlanError::Unauthorized(u) => Self::new(401, u.detail),
             PlanError::BadOverride(detail) => Self::new(400, detail),
             PlanError::UnknownScenario(name) => {
                 Self::new(400, format!("mock {mock} has no scenario {name:?}"))
@@ -197,7 +209,7 @@ async fn generate(
             json!({
                 "variables": http.variables,
                 "args": args,
-                "headers": recorded_headers(&http.headers),
+                "headers": recorded_headers(rt, &http.headers),
             })
         } else {
             Value::Null
@@ -207,7 +219,14 @@ async fn generate(
     };
     let mut delay = None;
 
-    let outcome = match call::plan(rt, op, &http.headers).await {
+    // The data-plane key was checked once for the whole HTTP request (after
+    // admitting it, in `api_key` mode).
+    let presented = Presented {
+        query: &[],
+        key_verified: true,
+        admitted: http.admitted.as_ref(),
+    };
+    let outcome = match call::plan(rt, op, &http.headers, presented).await {
         Err(PlanFailure {
             error,
             tenancy,
@@ -228,7 +247,7 @@ async fn generate(
                 None => {
                     let call = OperationCall {
                         operation_id: op.id.clone(),
-                        headers: forwarded_headers(&http.headers),
+                        headers: forwarded_headers(rt, &http.headers),
                         body: Some(Value::Object(args)),
                         ..Default::default()
                     };

@@ -557,6 +557,7 @@ fn operation(
             .and_then(|t| t.description.clone())
             .into_iter()
             .collect(),
+        security: Vec::new(),
     }
 }
 

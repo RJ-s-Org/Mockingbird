@@ -5,7 +5,7 @@
 //! and SOAP mocks are dispatched by route prefix on the data plane; gRPC
 //! mocks hold no prefix and are published to the shared [`GrpcServer`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -23,9 +23,23 @@ use tower::ServiceExt;
 
 use crate::runtime::{RuntimeDeps, build_runtime};
 
+/// How a mock is named in logs and `/readyz`: `name` in the default
+/// workspace, `workspace/name` elsewhere.
+pub fn mock_label(workspace: &str, name: &str) -> String {
+    if workspace == DEFAULT_WORKSPACE {
+        name.to_string()
+    } else {
+        format!("{workspace}/{name}")
+    }
+}
+
+/// `(workspace, name)`: identifies a mock across workspaces.
+type MockKey = (String, String);
+
 /// One mounted mock.
 #[derive(Clone)]
 struct Mounted {
+    workspace: String,
     name: String,
     served: Served,
     /// The runtime's state store circuit breaker.
@@ -42,6 +56,18 @@ enum Served {
 }
 
 impl Mounted {
+    fn is(&self, workspace: &str, name: &str) -> bool {
+        self.workspace == workspace && self.name == name
+    }
+
+    fn key(&self) -> (&str, &str) {
+        (&self.workspace, &self.name)
+    }
+
+    fn label(&self) -> String {
+        mock_label(&self.workspace, &self.name)
+    }
+
     /// The data-plane route prefix; `None` for a gRPC mock.
     fn prefix(&self) -> Option<&str> {
         match &self.served {
@@ -51,21 +77,28 @@ impl Mounted {
     }
 }
 
-/// Mounted mocks, sorted by prefix length, longest first.
+/// Mounted mocks from every workspace, sorted by prefix length, longest
+/// first. Route prefixes and gRPC services are unique across workspaces.
 ///
 /// A mock whose rebuild fails keeps its previous version mounted and is
 /// listed in [`MockRegistry::failed_mocks`] until a rebuild succeeds; it is
 /// unmounted only when it is deleted or has no active contract.
 ///
 /// After every change the gRPC mocks are published to [`MockRegistry::grpc`].
-/// A gRPC mock serving a service that a mock sorting first by name already
-/// serves is skipped (and listed as failed) until that service is free.
+/// A gRPC service has one holder across every workspace: a mock already
+/// published keeps its services, and a mock that would serve a service
+/// another mock holds is skipped (and listed as failed in `/readyz`) until
+/// that service is free. Among mocks not yet published, the one sorting
+/// first by (workspace, name) wins.
 pub struct MockRegistry {
     mounted: ArcSwap<Vec<Mounted>>,
-    /// Mock name → why its last rebuild failed.
-    failed: std::sync::Mutex<BTreeMap<String, String>>,
-    /// Mock name → the service collision that kept it off the gRPC server.
-    grpc_skipped: std::sync::Mutex<BTreeMap<String, String>>,
+    /// `(workspace, name)` → why the mock's last rebuild failed.
+    failed: std::sync::Mutex<BTreeMap<MockKey, String>>,
+    /// `(workspace, name)` → the service collision that kept it off the
+    /// gRPC server.
+    grpc_skipped: std::sync::Mutex<BTreeMap<MockKey, String>>,
+    /// The gRPC mocks of the last publish: they keep their services.
+    grpc_published: std::sync::Mutex<BTreeSet<MockKey>>,
     /// The h2c server every gRPC mock is published to.
     grpc: Arc<GrpcServer>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
@@ -78,6 +111,7 @@ impl MockRegistry {
             mounted: ArcSwap::from_pointee(Vec::new()),
             failed: std::sync::Mutex::new(BTreeMap::new()),
             grpc_skipped: std::sync::Mutex::new(BTreeMap::new()),
+            grpc_published: std::sync::Mutex::new(BTreeSet::new()),
             grpc: GrpcServer::new(),
             reload: Mutex::new(()),
         })
@@ -88,7 +122,7 @@ impl MockRegistry {
         Arc::clone(&self.grpc)
     }
 
-    /// Rebuilds every mock. A mock that fails to build is logged, recorded
+    /// Rebuilds every mock of every workspace. A mock that fails to build is logged, recorded
     /// as failed and keeps its previous version mounted, if it had one.
     pub async fn reload_all(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let _guard = self.reload.lock().await;
@@ -97,8 +131,8 @@ impl MockRegistry {
 
     /// [`Self::reload_all`] for a caller that already holds `self.reload`.
     async fn reload_all_locked(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
-        let mut mocks = deps.store.list_mocks(DEFAULT_WORKSPACE).await?;
-        mocks.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut mocks = deps.store.list_all_mocks().await?;
+        mocks.sort_by(|a, b| (&a.workspace, &a.name).cmp(&(&b.workspace, &b.name)));
         let current = self.mounted.load_full();
         let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
@@ -107,8 +141,8 @@ impl MockRegistry {
                 Ok(Some(mounted)) => mounted,
                 Ok(None) => continue,
                 Err(error) => {
-                    failed.insert(mock.name.clone(), error);
-                    match current.iter().find(|m| m.name == mock.name) {
+                    failed.insert((mock.workspace.clone(), mock.name.clone()), error);
+                    match current.iter().find(|m| m.is(&mock.workspace, &mock.name)) {
                         Some(previous) => previous.clone(),
                         None => continue,
                     }
@@ -118,9 +152,9 @@ impl MockRegistry {
                 && let Some(holder) = next.iter().find(|m| m.prefix() == Some(prefix))
             {
                 tracing::error!(
-                    mock = %mounted.name,
+                    mock = %mounted.label(),
                     prefix = %prefix,
-                    holder = %holder.name,
+                    holder = %holder.label(),
                     "route prefix already mounted by another mock; mock skipped"
                 );
                 continue;
@@ -141,25 +175,26 @@ impl MockRegistry {
     /// When the mock gives up a prefix it held (it is unmounted or moves to
     /// another prefix), a mock skipped earlier for colliding on that prefix
     /// may now be mountable, so every mock is rebuilt instead.
-    pub async fn reload_mock(&self, deps: &RuntimeDeps, name: &str) {
+    pub async fn reload_mock(&self, deps: &RuntimeDeps, workspace: &str, name: &str) {
         let _guard = self.reload.lock().await;
-        let built = match deps.store.get_mock(DEFAULT_WORKSPACE, name).await {
+        let label = mock_label(workspace, name);
+        let built = match deps.store.get_mock(workspace, name).await {
             Ok(Some(mock)) => build_mounted(deps, &mock).await,
             Ok(None) => Ok(None),
             Err(error) => {
-                tracing::error!(mock = %name, %error, "cannot load mock; leaving it as it was");
+                tracing::error!(mock = %label, %error, "cannot load mock; leaving it as it was");
                 return;
             }
         };
         let mounted = match built {
             Ok(mounted) => {
-                self.set_failed(name, None);
+                self.set_failed(workspace, name, None);
                 mounted
             }
             Err(error) => {
                 // Whatever is mounted (the previous version, or nothing)
                 // stays as it is.
-                self.set_failed(name, Some(error));
+                self.set_failed(workspace, name, Some(error));
                 return;
             }
         };
@@ -168,7 +203,7 @@ impl MockRegistry {
             .mounted
             .load()
             .iter()
-            .find(|m| m.name == name)
+            .find(|m| m.is(workspace, name))
             .and_then(|m| m.prefix().map(str::to_owned));
         let released = match (&held, &mounted) {
             (Some(old), Some(new)) => new.prefix() != Some(old.as_str()),
@@ -180,7 +215,7 @@ impl MockRegistry {
                 Ok(()) => return,
                 Err(error) => {
                     tracing::error!(
-                        mock = %name,
+                        mock = %label,
                         error = %format!("{error:#}"),
                         "cannot reload mocks after a prefix was released; reloading this mock only"
                     );
@@ -192,7 +227,7 @@ impl MockRegistry {
             .mounted
             .load()
             .iter()
-            .filter(|m| m.name != name)
+            .filter(|m| !m.is(workspace, name))
             .cloned()
             .collect();
         if let Some(mounted) = mounted {
@@ -201,20 +236,21 @@ impl MockRegistry {
                 .as_deref()
                 .and_then(|p| next.iter().position(|m| m.prefix() == Some(p)));
             match (holder, prefix) {
-                // The holder sorts first by name, so it keeps the prefix.
-                (Some(i), Some(prefix)) if next[i].name < mounted.name => {
+                // The holder sorts first by (workspace, name), so it keeps
+                // the prefix.
+                (Some(i), Some(prefix)) if next[i].key() < mounted.key() => {
                     tracing::error!(
-                        mock = %mounted.name,
+                        mock = %mounted.label(),
                         prefix = %prefix,
-                        holder = %next[i].name,
+                        holder = %next[i].label(),
                         "route prefix already mounted by another mock; mock skipped"
                     );
                 }
                 (Some(i), Some(prefix)) => {
                     tracing::error!(
-                        mock = %next[i].name,
+                        mock = %next[i].label(),
                         prefix = %prefix,
-                        holder = %mounted.name,
+                        holder = %mounted.label(),
                         "route prefix taken by a mock that sorts first; mock unmounted"
                     );
                     next[i] = mounted;
@@ -226,7 +262,8 @@ impl MockRegistry {
     }
 
     /// Applies control-plane changes as they are published: a mock change
-    /// reloads that mock; a profile change, or missed changes, reload all.
+    /// (in any workspace) reloads that mock; a workspace or profile change,
+    /// or missed changes, reload all.
     pub fn spawn_watcher(self: &Arc<Self>, deps: RuntimeDeps) -> tokio::task::JoinHandle<()> {
         let mut changes = deps.store.subscribe();
         let registry = Arc::clone(self);
@@ -234,11 +271,10 @@ impl MockRegistry {
             loop {
                 match changes.recv().await {
                     Ok(ControlChange::Mock { workspace, name }) => {
-                        if workspace == DEFAULT_WORKSPACE {
-                            registry.reload_mock(&deps, &name).await;
-                        }
+                        registry.reload_mock(&deps, &workspace, &name).await;
                     }
-                    Ok(ControlChange::Profile { .. })
+                    Ok(ControlChange::Workspace { .. })
+                    | Ok(ControlChange::Profile { .. })
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Err(error) = registry.reload_all(&deps).await {
                             tracing::error!(%error, "cannot reload mocks");
@@ -260,50 +296,58 @@ impl MockRegistry {
         })
     }
 
-    /// `(name, prefix)` of every mock mounted on the data plane, longest
-    /// prefix first. gRPC mocks are listed by [`GrpcServer::services`].
-    pub fn mounted(&self) -> Vec<(String, String)> {
+    /// `(workspace, name, prefix)` of every mock mounted on the data plane,
+    /// longest prefix first. gRPC mocks are listed by
+    /// [`GrpcServer::services`].
+    pub fn mounted(&self) -> Vec<(String, String, String)> {
         self.mounted
             .load()
             .iter()
-            .filter_map(|m| m.prefix().map(|p| (m.name.clone(), p.to_owned())))
+            .filter_map(|m| {
+                m.prefix()
+                    .map(|p| (m.workspace.clone(), m.name.clone(), p.to_owned()))
+            })
             .collect()
     }
 
-    /// `(name, error)` of every mock whose last rebuild failed, or that is
-    /// kept off the gRPC server by a service collision, sorted by name. A
-    /// mock whose rebuild failed serves its previous version, if it had one.
+    /// `(label, error)` of every mock whose last rebuild failed, or that is
+    /// kept off the gRPC server by a service collision, sorted by workspace
+    /// and name; see [`mock_label`]. A mock whose rebuild failed serves its
+    /// previous version, if it had one.
     pub fn failed_mocks(&self) -> Vec<(String, String)> {
         let mut all = self.failed.lock().map(|f| f.clone()).unwrap_or_default();
         if let Ok(skipped) = self.grpc_skipped.lock() {
-            for (name, error) in skipped.iter() {
-                all.entry(name.clone()).or_insert_with(|| error.clone());
+            for (key, error) in skipped.iter() {
+                all.entry(key.clone()).or_insert_with(|| error.clone());
             }
         }
-        all.into_iter().collect()
+        all.into_iter()
+            .map(|((ws, name), error)| (mock_label(&ws, &name), error))
+            .collect()
     }
 
-    fn set_failed(&self, name: &str, error: Option<String>) {
+    fn set_failed(&self, workspace: &str, name: &str, error: Option<String>) {
         if let Ok(mut failed) = self.failed.lock() {
+            let key = (workspace.to_string(), name.to_string());
             match error {
-                Some(error) => failed.insert(name.to_string(), error),
-                None => failed.remove(name),
+                Some(error) => failed.insert(key, error),
+                None => failed.remove(&key),
             };
         }
     }
 
-    /// Names of mounted mocks currently serving statelessly because their
-    /// state store calls are failing, sorted.
+    /// Labels (see [`mock_label`]) of mounted mocks currently serving
+    /// statelessly because their state store calls are failing, sorted.
     pub fn degraded_mocks(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
+        let mut labels: Vec<String> = self
             .mounted
             .load()
             .iter()
             .filter(|m| m.state_health.is_degraded())
-            .map(|m| m.name.clone())
+            .map(Mounted::label)
             .collect();
-        names.sort();
-        names
+        labels.sort();
+        labels
     }
 
     /// Installs `next` as the mounted set and publishes its gRPC mocks.
@@ -313,12 +357,14 @@ impl MockRegistry {
         next.sort_by(|a, b| {
             prefix_len(b)
                 .cmp(&prefix_len(a))
-                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.key().cmp(&b.key()))
         });
-        let grpc: Vec<(String, Arc<GrpcMock>)> = next
+        let grpc: Vec<(MockKey, Arc<GrpcMock>)> = next
             .iter()
             .filter_map(|m| match &m.served {
-                Served::Grpc(mock) => Some((m.name.clone(), Arc::clone(mock))),
+                Served::Grpc(mock) => {
+                    Some(((m.workspace.clone(), m.name.clone()), Arc::clone(mock)))
+                }
                 Served::Http { .. } => None,
             })
             .collect();
@@ -326,31 +372,51 @@ impl MockRegistry {
         self.publish_grpc(grpc).await;
     }
 
-    /// Publishes the gRPC mocks, in name order: a mock serving a service an
-    /// earlier one already serves is skipped and recorded.
-    async fn publish_grpc(&self, mut mocks: Vec<(String, Arc<GrpcMock>)>) {
-        mocks.sort_by(|a, b| a.0.cmp(&b.0));
+    /// Publishes the gRPC mocks of every workspace: the mocks of the last
+    /// publish first, then the others, each group in (workspace, name)
+    /// order. A mock serving a service an earlier one already serves (in
+    /// any workspace; the gRPC listener is shared) is skipped and recorded,
+    /// so a service stays with the mock that held it.
+    async fn publish_grpc(&self, mut mocks: Vec<(MockKey, Arc<GrpcMock>)>) {
+        let previous = self
+            .grpc_published
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default();
+        mocks.sort_by(|a, b| {
+            (!previous.contains(&a.0), &a.0).cmp(&(!previous.contains(&b.0), &b.0))
+        });
         let mut holders: BTreeMap<String, String> = BTreeMap::new();
         let mut skipped = BTreeMap::new();
         let mut published = Vec::new();
-        for (name, mock) in mocks {
+        for (key, mock) in mocks {
+            let label = mock_label(&key.0, &key.1);
             let services = mock.services();
             let collision = services
                 .iter()
                 .find_map(|s| holders.get(s).map(|holder| (s.clone(), holder.clone())));
             if let Some((service, holder)) = collision {
                 let error = GrpcError::ServiceCollision { service, holder }.to_string();
-                tracing::error!(mock = %name, %error, "gRPC service already served by another mock; mock skipped");
-                skipped.insert(name, error);
+                tracing::error!(mock = %label, %error, "gRPC service already served by another mock; mock skipped");
+                skipped.insert(key, error);
                 continue;
             }
             for service in services {
-                holders.insert(service, name.clone());
+                holders.insert(service, label.clone());
             }
-            published.push(mock);
+            published.push((key, mock));
         }
-        if let Err(error) = self.grpc.publish(published).await {
-            tracing::error!(%error, "cannot publish the gRPC mocks; keeping the previous set");
+        let keys: BTreeSet<MockKey> = published.iter().map(|(k, _)| k.clone()).collect();
+        let mocks = published.into_iter().map(|(_, m)| m).collect();
+        match self.grpc.publish(mocks).await {
+            Ok(()) => {
+                if let Ok(mut slot) = self.grpc_published.lock() {
+                    *slot = keys;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot publish the gRPC mocks; keeping the previous set");
+            }
         }
         if let Ok(mut slot) = self.grpc_skipped.lock() {
             *slot = skipped;
@@ -415,17 +481,18 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
 /// The mounted router for `mock`; `Ok(None)` when it has no active
 /// contract; `Err` (logged) when it cannot be built.
 async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted>, String> {
+    let label = mock_label(&mock.workspace, &mock.name);
     let runtime = match build_runtime(deps, mock).await {
         Ok(Some(rt)) => rt,
         Ok(None) => return Ok(None),
         Err(error) => {
             let error = format!("{error:#}");
-            tracing::error!(mock = %mock.name, %error, "cannot build mock; keeping any previous version mounted");
+            tracing::error!(mock = %label, %error, "cannot build mock; keeping any previous version mounted");
             return Err(error);
         }
     };
     let state_health = Arc::clone(&runtime.state_health);
-    let protocol = runtime.bundle.protocol();
+    let protocol = runtime.bundle().protocol();
     let runtime = Arc::new(runtime);
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
@@ -448,12 +515,13 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
     };
     match served {
         Ok(served) => Ok(Some(Mounted {
+            workspace: mock.workspace.clone(),
             name: mock.name.clone(),
             served,
             state_health,
         })),
         Err(error) => {
-            tracing::error!(mock = %mock.name, %error, "cannot route mock; keeping any previous version mounted");
+            tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
             Err(format!("cannot route the contract: {error}"))
         }
     }

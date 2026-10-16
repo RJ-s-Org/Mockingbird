@@ -35,7 +35,9 @@ use tracing::{Instrument, Span};
 use super::GrpcError;
 use super::codec::DynamicCodec;
 use super::status::Failure;
-use crate::call::{self, CallPlan, DEFAULT_SESSION, Report, forwarded_headers, recorded_headers};
+use crate::call::{
+    self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
+};
 use crate::{MockRuntime, ScenarioRuntime};
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
@@ -132,6 +134,11 @@ impl GrpcMock {
         })
     }
 
+    /// The runtime this mock serves.
+    pub(crate) fn runtime(&self) -> &Arc<MockRuntime> {
+        &self.rt
+    }
+
     /// The mock's name.
     pub fn name(&self) -> &str {
         &self.rt.name
@@ -225,7 +232,7 @@ impl CallState {
             span: self.span.clone(),
             started: Instant::now(),
             request: if self.rt().recorder.is_some() {
-                json!({"headers": recorded_headers(&headers)})
+                json!({"headers": recorded_headers(self.rt(), &headers)})
             } else {
                 Value::Null
             },
@@ -260,7 +267,8 @@ impl CallState {
         let op = self
             .op()
             .ok_or_else(|| Failure::internal(format!("unknown operation {}", self.method.op_id)))?;
-        let plan = match call::plan(self.rt(), op, &rep.headers).await {
+        // gRPC credentials travel in the request metadata (HTTP/2 headers).
+        let plan = match call::plan(self.rt(), op, &rep.headers, Presented::default()).await {
             Ok(plan) => plan,
             Err(failure) => {
                 rep.tenancy = failure.tenancy;
@@ -282,7 +290,7 @@ impl CallState {
     fn operation_call(&self, headers: &HeaderMap, body: Option<Value>) -> OperationCall {
         OperationCall {
             operation_id: self.method.op_id.clone(),
-            headers: forwarded_headers(headers),
+            headers: forwarded_headers(self.rt(), headers),
             body,
             ..OperationCall::default()
         }

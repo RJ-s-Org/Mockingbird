@@ -49,7 +49,7 @@ async-graphql-parser = "7.2.1"
 tonic = "0.14.6"
 tonic-reflection = "0.14.6"
 tonic-health = "0.14.6"
-tokio-stream = "0.1.19"
+tokio-stream = { version = "0.1.19", features = ["sync"] }
 prost = "0.14.4"
 prost-types = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
@@ -63,10 +63,17 @@ humantime-serde = "1"
 notify = "8"
 notify-debouncer-full = "0.6"
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
+subtle = "2"
+hmac = "0.12"
+rust-embed = { version = "8.13", features = ["debug-embed", "mime-guess"] }
+openidconnect = { version = "4.0", default-features = false }
+jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
+rsa = { version = "0.9", features = ["pem"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev
 wiremock = "0.6"
+http-body-util = "0.1"
 proptest = "1"
 insta = { version = "1", features = ["yaml", "redactions"] }
 tower = { version = "0.5", features = ["util"] }
@@ -84,9 +91,17 @@ mb-protocols = { path = "crates/mb-protocols" }
 mb-ext = { path = "crates/mb-ext" }
 mb-store = { path = "crates/mb-store" }
 mb-admin = { path = "crates/mb-admin" }
+mb-auth = { path = "crates/mb-auth" }
+mb-console = { path = "crates/mb-console" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+# RSA key generation in the `testing` OIDC provider is very slow unoptimized.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
 
 # Full debuginfo made the ~50 workspace test binaries about 9.5 GB, enough to
 # fill the disk mid-link (ld then dies with SIGBUS). Line tables keep file:line

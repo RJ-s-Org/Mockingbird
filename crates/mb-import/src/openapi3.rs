@@ -3,6 +3,7 @@
 use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::schema::{collect_refs, defs_name, normalize_schema};
+use crate::security::compile_security;
 use mb_mcm::{
     Binding, Bundle, HttpMethod, InputSchemas, Operation, OperationKind, OutputVariant, Protocol,
     StatusSelector,
@@ -410,6 +411,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                 resource_type: infer_resource_type(path),
                 identity: None,
                 semantic_hints: Vec::new(),
+                security: compile_security(doc, op, "/components/securitySchemes", &at)?,
             };
             if let Some(kind) = stream_kind(&op_out) {
                 op_out.kind = kind;

@@ -23,6 +23,8 @@ clap.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 mb-admin.workspace = true
+mb-auth.workspace = true
+mb-console.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
 serde.workspace = true
@@ -53,6 +55,7 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 assert_cmd.workspace = true
+mb-auth = { workspace = true, features = ["testing"] }
 prost-reflect.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
