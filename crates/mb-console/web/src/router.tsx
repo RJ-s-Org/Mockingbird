@@ -10,7 +10,9 @@ import {
 import { lastWorkspace, workspacesQuery } from "./api/queries";
 import { Layout } from "./components/Layout";
 import { ProblemAlert } from "./components/ProblemAlert";
-import { Home, Pending } from "./pages/Home";
+import { ApiKeys } from "./pages/ApiKeys";
+import { Audit } from "./pages/Audit";
+import { Home } from "./pages/Home";
 import { Contracts } from "./pages/mocks/Contracts";
 import { LiveRequests } from "./pages/mocks/LiveRequests";
 import { MockLayout } from "./pages/mocks/MockLayout";
@@ -19,6 +21,8 @@ import { Overview } from "./pages/mocks/Overview";
 import { Scenarios } from "./pages/mocks/Scenarios";
 import { Sessions } from "./pages/mocks/Sessions";
 import { NotFound } from "./pages/NotFound";
+import { Profiles } from "./pages/Profiles";
+import { Status } from "./pages/Status";
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -138,19 +142,28 @@ const mockRequestsRoute = createRoute({
 const profilesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "/llm-profiles",
-  component: () => <Pending title="LLM profiles" />,
+  component: function ProfilesPage() {
+    const { ws } = profilesRoute.useParams();
+    return <Profiles ws={ws} />;
+  },
 });
 
 const apiKeysRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "/api-keys",
-  component: () => <Pending title="API keys" />,
+  component: function ApiKeysPage() {
+    const { ws } = apiKeysRoute.useParams();
+    return <ApiKeys ws={ws} />;
+  },
 });
 
 const auditRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "/audit",
-  component: () => <Pending title="Audit" />,
+  component: function AuditPage() {
+    const { ws } = auditRoute.useParams();
+    return <Audit ws={ws} />;
+  },
 });
 
 /** `/status`: outside any workspace; the frame keeps the last used one. */
@@ -165,7 +178,7 @@ const statusRoute = createRoute({
 const statusIndexRoute = createRoute({
   getParentRoute: () => statusRoute,
   path: "/",
-  component: () => <Pending title="Status" />,
+  component: Status,
 });
 
 const routeTree = rootRoute.addChildren([

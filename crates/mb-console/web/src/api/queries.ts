@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, unwrap } from "./client";
 import type { components } from "./schema";
 
@@ -66,6 +66,8 @@ export const keys = {
   contracts: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "contracts"] as const,
   contract: (ws: string, mock: string, version: number) => ["ws", ws, "mocks", mock, "contracts", version] as const,
   profiles: (ws: string) => ["ws", ws, "llm-profiles"] as const,
+  apiKeys: (ws: string) => ["ws", ws, "api-keys"] as const,
+  audit: (ws: string, filters: AuditFilters) => ["ws", ws, "audit", filters] as const,
   scenarios: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "scenarios"] as const,
   sessions: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "sessions"] as const,
   session: (ws: string, mock: string, session: string) => ["ws", ws, "mocks", mock, "sessions", session] as const,
@@ -207,7 +209,7 @@ export function useActivate(ws: string, mock: string) {
   });
 }
 
-/** The LLM profiles of `ws` (read-only here). */
+/** The LLM profiles of `ws`. */
 export function useProfiles(ws: string) {
   return useQuery({
     queryKey: keys.profiles(ws),
@@ -322,5 +324,220 @@ export function useSeedSession(ws: string, mock: string) {
       );
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.sessions(ws, mock) }),
+  });
+}
+
+export type PutProfile = components["schemas"]["PutProfile"];
+export type ProfileWriteResult = components["schemas"]["ProfileWriteResult"];
+export type ProfileDeleteResult = components["schemas"]["ProfileDeleteResult"];
+
+/** `PUT …/llm-profiles/{name}` with the full profile; refreshes the list. */
+export function usePutProfile(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ name, body }: { name: string; body: PutProfile }): Promise<ProfileWriteResult> =>
+      unwrap(
+        await api.PUT("/api/v1/workspaces/{ws}/llm-profiles/{name}", { params: { path: { ws, name } }, body }),
+      ),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.profiles(ws) }),
+  });
+}
+
+/** `DELETE …/llm-profiles/{name}`: the mocks that still use it as warnings; refreshes the list. */
+export function useDeleteProfile(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (name: string): Promise<ProfileDeleteResult> => {
+      const r = await api.DELETE("/api/v1/workspaces/{ws}/llm-profiles/{name}", { params: { path: { ws, name } } });
+      // 204: no mock used the profile.
+      return unwrap(r) ?? { deleted: name, warnings: [] };
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.profiles(ws) }),
+  });
+}
+
+export type ApiKey = components["schemas"]["ApiKeyView"];
+export type CreateApiKey = components["schemas"]["CreateApiKey"];
+export type CreatedApiKey = components["schemas"]["CreatedApiKey"];
+export type Role = components["schemas"]["Role"];
+export type KeyScope = components["schemas"]["KeyScope"];
+
+/** The API keys of `ws`, newest first, revoked ones included (ManageApiKeys). */
+export function useApiKeys(ws: string, enabled = true) {
+  return useQuery({
+    queryKey: keys.apiKeys(ws),
+    queryFn: async (): Promise<ApiKey[]> =>
+      unwrap(await api.GET("/api/v1/workspaces/{ws}/api-keys", { params: { path: { ws } } })),
+    enabled,
+  });
+}
+
+/** `POST …/api-keys`: the result carries the token, which is never shown again. */
+export function useCreateApiKey(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: CreateApiKey): Promise<CreatedApiKey> =>
+      unwrap(await api.POST("/api/v1/workspaces/{ws}/api-keys", { params: { path: { ws } }, body })),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.apiKeys(ws) }),
+  });
+}
+
+/** `DELETE …/api-keys/{key_id}`; refreshes the list. */
+export function useRevokeApiKey(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (keyId: string): Promise<void> => {
+      unwrap(
+        await api.DELETE("/api/v1/workspaces/{ws}/api-keys/{key_id}", { params: { path: { ws, key_id: keyId } } }),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.apiKeys(ws) }),
+  });
+}
+
+/** `active`, `revoked` or `expired` (at `now`). */
+export function keyStatus(key: ApiKey, now = Date.now()): "active" | "revoked" | "expired" {
+  if (key.revoked_at) return "revoked";
+  if (key.expires_at && Date.parse(key.expires_at) <= now) return "expired";
+  return "active";
+}
+
+export type AuditEvent = components["schemas"]["AuditEventView"];
+
+/** Audit list filters; empty strings are left out of the query. */
+export interface AuditFilters {
+  action?: string;
+  actor?: string;
+}
+
+/** Events per audit page; a shorter page is the last one. */
+export const AUDIT_PAGE = 50;
+
+function auditQuery(filters: AuditFilters) {
+  const q: { action?: string; actor?: string } = {};
+  if (filters.action) q.action = filters.action;
+  if (filters.actor) q.actor = filters.actor;
+  return q;
+}
+
+/** The URL of an audit log (`ws`, or every workspace when `null`) as JSONL, with `filters`. */
+export function auditExportUrl(ws: string | null, filters: AuditFilters): string {
+  const base = ws === null ? "/api/v1/audit" : `/api/v1/workspaces/${encodeURIComponent(ws)}/audit`;
+  const params = new URLSearchParams({ ...auditQuery(filters), format: "jsonl" });
+  return `${base}?${params.toString()}`;
+}
+
+const auditPaging = {
+  initialPageParam: undefined as number | undefined,
+  getNextPageParam: (last: AuditEvent[]) => (last.length < AUDIT_PAGE ? undefined : last[last.length - 1]?.id),
+};
+
+/** The audit log of `ws`, newest first; `fetchNextPage` loads older events (`before=<last id>`). */
+export function useAudit(ws: string, filters: AuditFilters, enabled = true) {
+  return useInfiniteQuery({
+    queryKey: keys.audit(ws, filters),
+    queryFn: async ({ pageParam }): Promise<AuditEvent[]> =>
+      unwrap(
+        await api.GET("/api/v1/workspaces/{ws}/audit", {
+          params: { path: { ws }, query: { ...auditQuery(filters), limit: AUDIT_PAGE, before: pageParam } },
+        }),
+      ),
+    ...auditPaging,
+    enabled,
+  });
+}
+
+/** The audit log of every workspace (sysadmin), paged like [`useAudit`]. */
+export function useGlobalAudit(filters: AuditFilters, enabled = true) {
+  return useInfiniteQuery({
+    queryKey: ["audit", filters] as const,
+    queryFn: async ({ pageParam }): Promise<AuditEvent[]> =>
+      unwrap(
+        await api.GET("/api/v1/audit", {
+          params: { query: { ...auditQuery(filters), limit: AUDIT_PAGE, before: pageParam } },
+        }),
+      ),
+    ...auditPaging,
+    enabled,
+  });
+}
+
+/** `GET` on an ops path of the admin port (not part of the Admin API client). */
+function fetchOps(path: string): Promise<Response> {
+  return globalThis.fetch(new Request(new URL(path, window.location.origin)));
+}
+
+/** The `/readyz` answer. */
+export interface Readiness {
+  status: string;
+  reasons: string[];
+}
+
+/** `/readyz`: `ready`, `degraded` or `unavailable` (a 503), with reasons. */
+export function useReadiness() {
+  return useQuery({
+    queryKey: ["ops", "readyz"] as const,
+    queryFn: async (): Promise<Readiness> => {
+      const response = await fetchOps("/readyz");
+      let body: Partial<Readiness> = {};
+      try {
+        body = (await response.json()) as Partial<Readiness>;
+      } catch {
+        // Not JSON: fall back to the status code.
+      }
+      return {
+        status: typeof body.status === "string" ? body.status : `HTTP ${response.status}`,
+        reasons: Array.isArray(body.reasons) ? body.reasons.map(String) : [],
+      };
+    },
+    refetchInterval: 15_000,
+  });
+}
+
+/** What the Status page shows from `/metrics`. */
+export interface MetricsSummary {
+  /** Sum of every `mb_requests_total` series. */
+  requestsTotal: number;
+  /** `mb_requests_total` summed per `source` label, in first-seen order. */
+  bySource: Record<string, number>;
+  /** Sum of every `mb_request_log_dropped_total` series. */
+  logDropped: number;
+}
+
+const SAMPLE = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)/;
+const LABEL = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g;
+
+/** Sums the series the Status page shows from Prometheus text exposition. */
+export function parseMetricsSummary(text: string): MetricsSummary {
+  const summary: MetricsSummary = { requestsTotal: 0, bySource: {}, logDropped: 0 };
+  for (const line of text.split("\n")) {
+    if (line.startsWith("#")) continue;
+    const m = SAMPLE.exec(line.trim());
+    if (!m) continue;
+    const [, name, labels = "", raw] = m;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) continue;
+    if (name === "mb_requests_total") {
+      summary.requestsTotal += value;
+      const source = [...labels.matchAll(LABEL)].find((l) => l[1] === "source")?.[2] ?? "unknown";
+      summary.bySource[source] = (summary.bySource[source] ?? 0) + value;
+    } else if (name === "mb_request_log_dropped_total") {
+      summary.logDropped += value;
+    }
+  }
+  return summary;
+}
+
+/** `/metrics` summarised, or `"private"` when it needs credentials (401/403). */
+export function useMetricsSummary() {
+  return useQuery({
+    queryKey: ["ops", "metrics"] as const,
+    queryFn: async (): Promise<MetricsSummary | "private"> => {
+      const response = await fetchOps("/metrics");
+      if (response.status === 401 || response.status === 403) return "private";
+      if (!response.ok) throw new Error(`/metrics answered ${response.status}`);
+      return parseMetricsSummary(await response.text());
+    },
+    refetchInterval: 15_000,
   });
 }
