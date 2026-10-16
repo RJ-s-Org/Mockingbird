@@ -2459,6 +2459,8 @@ export interface operations {
                 session?: string;
                 /** @description Only this response source, e.g. `llm`, `repaired`, `fallback`. */
                 source?: string;
+                /** @description Only this request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
+                kind?: string;
             };
             header?: never;
             path: {
@@ -2476,6 +2478,15 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": components["schemas"]["LiveRequestView"];
+                };
+            };
+            /** @description Unknown request kind */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             403: {
@@ -4224,6 +4235,8 @@ export interface operations {
                 session?: string;
                 /** @description Only this response source, e.g. `llm`, `repaired`, `fallback`. */
                 source?: string;
+                /** @description Only this request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
+                kind?: string;
             };
             header?: never;
             path: {
@@ -4243,6 +4256,15 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": components["schemas"]["LiveRequestView"];
+                };
+            };
+            /** @description Unknown request kind */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             403: {

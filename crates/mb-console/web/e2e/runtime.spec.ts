@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const ORDERS = fileURLToPath(new URL("../../../../fixtures/openapi/orders-3.0.yaml", import.meta.url));
+const CHAT = fileURLToPath(new URL("../../../../fixtures/asyncapi/chat-ws-2.6.yaml", import.meta.url));
 const MOCK_API = "/api/v1/workspaces/default/mocks";
 const DATA_PLANE = "http://127.0.0.1:18080";
 
@@ -88,6 +89,48 @@ test("live requests, sessions and scenarios of a running mock", async ({ page, r
   await expect(slow.getByRole("cell", { name: "100 ms" })).toBeVisible();
 
   // 7. Accessibility of the final page.
+  await expectAccessible(page);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("channels tab publishes on a websocket channel", async ({ page, request }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error") consoleErrors.push(m.text());
+  });
+
+  // 1. Mock `chat` serving the WebSocket chat fixture (a reused server may still have it).
+  await request.delete(`${MOCK_API}/chat`);
+  expect((await request.post(MOCK_API, { data: { name: "chat" } })).status()).toBe(201);
+  const upload = await request.post(`${MOCK_API}/chat/contracts?activate=true`, {
+    headers: { "Content-Type": "application/yaml" },
+    data: readFileSync(CHAT, "utf8"),
+  });
+  expect(upload.status()).toBe(201);
+
+  // 2. The Channels tab, once its event feed is connected.
+  await page.goto("/w/default/mocks/chat/overview");
+  const stream = page.waitForResponse((r) => r.url().includes("/mocks/chat/requests/stream?kind=event"));
+  await mockTab(page, "Channels").click();
+  expect((await stream).status()).toBe(200);
+  const channels = page.getByRole("table", { name: "Channels" });
+  const chat = channels.getByRole("row").filter({ hasText: "chatMessage" });
+  await expect(chat.getByRole("cell", { name: "websocket", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Broker").locator("option")).toHaveCount(2);
+  const feed = page.getByRole("table", { name: "Event feed" });
+  await expect(feed.getByText("Waiting for events…")).toBeVisible();
+  await expectAccessible(page);
+
+  // 3. Publish one message now: the dialog shows it and the feed records it.
+  await chat.getByRole("button", { name: "Publish now on chatMessage" }).click();
+  const dialog = page.getByRole("dialog", { name: "Publish on chatMessage" });
+  await dialog.getByRole("button", { name: "Publish" }).click();
+  await expect(dialog.getByLabel("Published payload")).toHaveCount(1);
+  await expect(dialog.getByLabel("Published payload")).toContainText('"user"');
+  await expectAccessible(page);
+  await dialog.getByRole("button", { name: "Close" }).click();
+  const published = feed.getByRole("row").filter({ hasText: "chatMessage" });
+  await expect(published.getByRole("cell", { name: "PUBLISH", exact: true })).toBeVisible({ timeout: 5_000 });
   await expectAccessible(page);
   expect(consoleErrors).toEqual([]);
 });

@@ -12,13 +12,15 @@ export interface LiveFilters {
   operation?: string;
   session?: string;
   source?: string;
+  /** Request kind, e.g. `event` for event-channel messages. */
+  kind?: string;
 }
 
 /** The stream URL of a mock's live tail with `filters` as its query. */
 export function streamUrl(ws: string, mock: string, filters: LiveFilters): string {
   const e = encodeURIComponent;
   const query = new URLSearchParams();
-  for (const key of ["operation", "session", "source"] as const) {
+  for (const key of ["operation", "session", "source", "kind"] as const) {
     const value = filters[key];
     if (value) query.set(key, value);
   }

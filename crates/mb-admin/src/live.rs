@@ -23,6 +23,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_protocols::RequestRecord;
+use mb_store::RequestKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -51,6 +52,34 @@ pub struct StreamQuery {
     pub session: Option<String>,
     /// Only this response source, e.g. `llm`, `repaired`, `fallback`.
     pub source: Option<String>,
+    /// Only this request kind: `http`, `graphql`, `grpc`, `soap` or `event`.
+    pub kind: Option<String>,
+}
+
+/// [`StreamQuery`] with its `kind` parsed (the request log's kinds, which
+/// share their wire names with the data plane's).
+#[derive(Debug)]
+struct StreamFilter {
+    query: StreamQuery,
+    kind: Option<RequestKind>,
+}
+
+impl StreamFilter {
+    fn new(query: StreamQuery) -> Result<Self, Problem> {
+        let kind = query
+            .kind
+            .as_deref()
+            .map(|k| {
+                RequestKind::parse(k)
+                    .ok_or_else(|| Problem::bad_request(format!("unknown request kind {k:?}")))
+            })
+            .transpose()?;
+        Ok(Self { query, kind })
+    }
+
+    fn matches(&self, r: &RequestRecord) -> bool {
+        self.kind.is_none_or(|k| r.kind.as_str() == k.as_str()) && self.query.matches(r)
+    }
 }
 
 impl StreamQuery {
@@ -122,6 +151,7 @@ impl From<RequestRecord> for LiveRequestView {
     ),
     responses(
         (status = 200, description = "An SSE stream of served calls", body = LiveRequestView, content_type = "text/event-stream"),
+        (status = 400, description = "Unknown request kind", body = Problem, content_type = "application/problem+json"),
         (status = 403, body = Problem, content_type = "application/problem+json"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "No live feed", body = Problem, content_type = "application/problem+json"),
@@ -136,6 +166,7 @@ pub async fn stream(
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
+    let filter = StreamFilter::new(q)?;
     let subscribe = st.live.as_ref().ok_or_else(|| {
         Problem::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -144,7 +175,7 @@ pub async fn stream(
     })?;
     let feed = subscribe();
     let (out, events) = mpsc::channel(16);
-    tokio::spawn(forward(st, headers, access.ws, m.name, q, feed, out));
+    tokio::spawn(forward(st, headers, access.ws, m.name, filter, feed, out));
     Ok(Sse::new(ReceiverStream::new(events)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE)))
 }
 
@@ -155,7 +186,7 @@ async fn forward(
     headers: HeaderMap,
     ws: String,
     mock: String,
-    q: StreamQuery,
+    q: StreamFilter,
     mut feed: broadcast::Receiver<RequestRecord>,
     out: mpsc::Sender<Result<Event, Infallible>>,
 ) {

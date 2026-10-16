@@ -1,5 +1,5 @@
 # The binary behind the local Playwright suite: no auth, in-memory storage,
-# one read-only file mock.
+# one read-only file mock and an in-memory message broker.
 server:
   port: 18080
   admin_port: 19090
@@ -9,6 +9,10 @@ storage:
 
 auth:
   mode: none
+
+brokers:
+  mem:
+    kind: memory
 
 mocks:
   files:

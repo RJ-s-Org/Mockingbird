@@ -13,6 +13,7 @@ import { ProblemAlert } from "./components/ProblemAlert";
 import { ApiKeys } from "./pages/ApiKeys";
 import { Audit } from "./pages/Audit";
 import { Home } from "./pages/Home";
+import { Channels } from "./pages/mocks/Channels";
 import { Contracts } from "./pages/mocks/Contracts";
 import { LiveRequests } from "./pages/mocks/LiveRequests";
 import { MockLayout } from "./pages/mocks/MockLayout";
@@ -139,6 +140,15 @@ const mockRequestsRoute = createRoute({
   },
 });
 
+const mockChannelsRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/channels",
+  component: function ChannelsPage() {
+    const { ws, mock } = mockChannelsRoute.useParams();
+    return <Channels ws={ws} mock={mock} />;
+  },
+});
+
 const profilesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "/llm-profiles",
@@ -193,6 +203,7 @@ const routeTree = rootRoute.addChildren([
       mockScenariosRoute,
       mockSessionsRoute,
       mockRequestsRoute,
+      mockChannelsRoute,
     ]),
     profilesRoute,
     apiKeysRoute,
