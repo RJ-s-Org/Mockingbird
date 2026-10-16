@@ -1,0 +1,51 @@
+---
+source: crates/mb-import/tests/proto.rs
+expression: b
+---
+id: helloworld
+title: helloworld
+version: "0"
+source_digest: "[digest]"
+operations:
+  - id: Greeter.SayHello
+    protocol: grpc
+    binding:
+      grpc:
+        package: helloworld
+        service: Greeter
+        method: SayHello
+    kind: query
+    summary: Sends a greeting
+    input:
+      path: ~
+      query: ~
+      headers: ~
+      body:
+        $ref: "#/$defs/helloworld.HelloRequest"
+      body_required: true
+    outputs:
+      - status:
+          code: 200
+        content_type: application/grpc
+        schema:
+          $ref: "#/$defs/helloworld.HelloReply"
+    resource_type: sayhello
+    identity: ~
+    semantic_hints:
+      - The response message containing the greetings
+defs:
+  helloworld.HelloReply:
+    additionalProperties: false
+    description: The response message containing the greetings
+    properties:
+      message:
+        type: string
+    type: object
+  helloworld.HelloRequest:
+    additionalProperties: false
+    description: "The request message containing the user's name."
+    properties:
+      name:
+        type: string
+    type: object
+protocol_payload: "[descriptor set]"

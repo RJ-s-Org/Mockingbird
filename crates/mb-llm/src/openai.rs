@@ -1,6 +1,10 @@
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use serde_json::{Value, json};
 
-use crate::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider, ResponseFormat, Usage};
+use crate::{
+    Capabilities, ChatRequest, ChatResponse, LlmError, Provider, ResponseFormat, TextStream, Usage,
+};
 
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
@@ -62,15 +66,43 @@ impl OpenAiCompatible {
         body
     }
 
-    async fn send(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let mut builder = self.client.post(self.url()).json(&self.body(req));
+    /// Posts `body` and waits for the response head.
+    async fn post(&self, body: &Value) -> Result<reqwest::Response, LlmError> {
+        let mut builder = self.client.post(self.url()).json(body);
         if let Some(key) = &self.config.api_key {
             builder = builder.bearer_auth(key);
         }
-        let resp = builder
+        builder
             .send()
             .await
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+            .map_err(|e| LlmError::Transport(e.to_string()))
+    }
+
+    /// Opens a streaming completion: the response head has arrived with a
+    /// success status. A non-2xx status is an [`LlmError::Http`] carrying the
+    /// response body.
+    async fn open_stream(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
+        let mut body = self.body(req);
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("stream".to_string(), Value::Bool(true));
+        }
+        let resp = self.post(&body).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| LlmError::Transport(e.to_string()))?;
+            return Err(LlmError::Http {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        Ok(resp)
+    }
+
+    async fn send(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let resp = self.post(&self.body(req)).await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -118,5 +150,43 @@ impl Provider for OpenAiCompatible {
             Ok(r) => r,
             Err(_) => Err(LlmError::Timeout),
         }
+    }
+
+    /// `req.timeout` bounds only the arrival of the response head (and of an
+    /// error body); the deltas then arrive as fast as the server sends them.
+    async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        let resp = match tokio::time::timeout(req.timeout, self.open_stream(&req)).await {
+            Ok(r) => r?,
+            Err(_) => return Err(LlmError::Timeout),
+        };
+        let events = resp.bytes_stream().eventsource();
+        let deltas = futures::stream::unfold(Some(events), |state| async move {
+            let mut events = state?;
+            loop {
+                let event = match events.next().await {
+                    None => return None,
+                    Some(Err(e)) => return Some((Err(LlmError::Transport(e.to_string())), None)),
+                    Some(Ok(event)) => event,
+                };
+                let data = event.data.trim();
+                if data == "[DONE]" {
+                    return None;
+                }
+                let v: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(e) => return Some((Err(LlmError::Decode(e.to_string())), None)),
+                };
+                match v
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                {
+                    Some(text) if !text.is_empty() => {
+                        return Some((Ok(text.to_string()), Some(events)));
+                    }
+                    _ => continue,
+                }
+            }
+        });
+        Ok(Box::pin(deltas))
     }
 }

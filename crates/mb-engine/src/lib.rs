@@ -13,13 +13,15 @@ use serde_json::{Map, Value};
 
 pub mod extract;
 pub mod faker;
+pub mod ndjson;
 pub mod prompt;
 pub mod scenario;
+pub mod stream;
 pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker};
-pub use prompt::build_messages;
+pub use prompt::{build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
 pub use validate::SchemaValidator;
 
@@ -64,6 +66,23 @@ pub enum Source {
 }
 
 impl Source {
+    /// The less trustworthy of two sources: `Fallback` > `Repaired` > `Llm`.
+    pub fn worst(self, other: Source) -> Source {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Source::Llm => 0,
+            Source::Repaired => 1,
+            Source::Fallback => 2,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Llm => "llm",
@@ -97,6 +116,49 @@ pub struct EngineConfig {
     pub max_tokens: u32,
     pub persona: Option<String>,
     pub faker_depth: usize,
+    pub stream: StreamConfig,
+}
+
+/// Limits and pacing for [`Engine::generate_stream`].
+#[derive(Clone, Debug)]
+pub struct StreamConfig {
+    /// Items generated when the caller asks for no particular count.
+    pub default_items: usize,
+    /// Upper bound on items per stream.
+    pub max_items: usize,
+    /// Pause before every item except the first.
+    pub item_interval: Duration,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            default_items: 5,
+            max_items: 50,
+            item_interval: Duration::ZERO,
+        }
+    }
+}
+
+/// Owned state a stream's items must stay consistent with.
+#[derive(Clone, Debug, Default)]
+pub struct StreamContext {
+    pub related: Vec<StoredResource>,
+    pub target: Option<StoredResource>,
+    /// The active scenario: its instructions go in the prompt and its `set`
+    /// patches object items.
+    pub scenario: Option<ScenarioSpec>,
+    /// Items the client has sent so far (client and bidi streams).
+    pub request_stream: Vec<Value>,
+    /// Overrides [`StreamConfig::item_interval`].
+    pub item_interval: Option<Duration>,
+}
+
+/// One generated stream item.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamItem {
+    pub value: Value,
+    pub source: Source,
 }
 
 /// Faker attempts (cycling through top-level `oneOf`/`anyOf` branches and
@@ -111,6 +173,7 @@ impl Default for EngineConfig {
             max_tokens: 2048,
             persona: None,
             faker_depth: 6,
+            stream: StreamConfig::default(),
         }
     }
 }
@@ -134,6 +197,28 @@ impl Engine {
         }
     }
 
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
+    /// Whether `value` is a valid stream item of `op`; `false` when `op`
+    /// has no stream item schema.
+    pub fn conform_item(&self, bundle: &Bundle, op: &Operation, value: &Value) -> bool {
+        let Some(schema) = op.stream_item_schema() else {
+            return false;
+        };
+        let Some(status) = op.success_output().map(|o| success_status(o.status)) else {
+            return false;
+        };
+        match self.validator(bundle, op, status, schema) {
+            Ok(validator) => validator.validate(value).is_ok(),
+            Err(e) => {
+                tracing::warn!(operation = %op.id, error = %e, "stream item schema cannot be validated");
+                false
+            }
+        }
+    }
+
     pub async fn generate(
         &self,
         bundle: &Bundle,
@@ -149,11 +234,7 @@ impl Engine {
             ),
             None => {
                 let variant = op.success_output().ok_or(EngineError::NoOutput)?;
-                let status = match variant.status {
-                    StatusSelector::Code(c) => c,
-                    StatusSelector::Default => 200,
-                };
-                (variant, status)
+                (variant, success_status(variant.status))
             }
         };
 
@@ -250,39 +331,44 @@ impl Engine {
         schema: &Value,
         validator: Option<&SchemaValidator>,
     ) -> GeneratedResponse {
+        GeneratedResponse {
+            status,
+            content_type: variant.content_type.clone(),
+            body: Some(self.fake_value(bundle, schema, validator)),
+            source: Source::Fallback,
+            usage: Usage::default(),
+        }
+    }
+
+    /// A faker value for `schema`, validated by `validator` when given:
+    /// other `oneOf`/`anyOf` branches and fresh draws are tried before an
+    /// invalid value is accepted.
+    pub(crate) fn fake_value(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        validator: Option<&SchemaValidator>,
+    ) -> Value {
         let schema = bundle.with_reachable_defs(schema);
         let faker = Faker::new(self.config.faker_depth);
         // One cost table for every attempt: computing it walks the schema.
         let costs = Costs::compute(&schema);
         let mut rng = rand::rng();
         let mut first: Option<Value> = None;
-        let mut body = None;
         for attempt in 0..FALLBACK_ATTEMPTS {
             let candidate = faker.fake_with_costs(&schema, Some(attempt), &costs, &mut rng);
             match validator {
                 Some(v) if v.validate(&candidate).is_err() => {
                     first.get_or_insert(candidate);
                 }
-                _ => {
-                    body = Some(candidate);
-                    break;
-                }
+                _ => return candidate,
             }
         }
-        if body.is_none() {
-            tracing::warn!(status, "faker output does not validate against the schema");
-            body = first;
-        }
-        GeneratedResponse {
-            status,
-            content_type: variant.content_type.clone(),
-            body,
-            source: Source::Fallback,
-            usage: Usage::default(),
-        }
+        tracing::warn!("faker output does not validate against the schema");
+        first.unwrap_or(Value::Null)
     }
 
-    fn validator(
+    pub(crate) fn validator(
         &self,
         bundle: &Bundle,
         op: &Operation,
@@ -363,15 +449,23 @@ impl Engine {
     }
 }
 
+/// The status a success variant is served with.
+fn success_status(status: StatusSelector) -> u16 {
+    match status {
+        StatusSelector::Code(c) => c,
+        StatusSelector::Default => 200,
+    }
+}
+
 /// Extract and validate LLM output.
-fn check(validator: &SchemaValidator, text: &str) -> Result<Value, Vec<String>> {
+pub(crate) fn check(validator: &SchemaValidator, text: &str) -> Result<Value, Vec<String>> {
     let value = extract_json(text).ok_or_else(|| vec!["output is not valid JSON".to_string()])?;
     validator.validate(&value)?;
     Ok(value)
 }
 
 /// A `response_format` name matching `^[a-zA-Z0-9_-]{1,64}$`.
-fn format_name(id: &str) -> String {
+pub(crate) fn format_name(id: &str) -> String {
     let name: String = id
         .chars()
         .map(|c| {
@@ -475,6 +569,10 @@ fn reflect(
             overlay(validator, body, call.body.as_ref())
         }
         OperationKind::Command(_) => body,
+        // Streams have no stored target to reflect.
+        OperationKind::StreamServer | OperationKind::StreamClient | OperationKind::StreamBidi => {
+            body
+        }
     };
     response.body = Some(force_identity(validator, op, call, body));
     response
@@ -528,8 +626,9 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
     best
 }
 
-/// Set `body[identity.field]` to the path id, as a string or (when the
-/// schema wants one) a number.
+/// Set `body[identity.field]` to the path id (else the request body's
+/// `identity.input_field`), as a string or (when the schema wants one) a
+/// number.
 fn force_identity(
     validator: &SchemaValidator,
     op: &Operation,
@@ -539,11 +638,15 @@ fn force_identity(
     let Some(identity) = &op.identity else {
         return body;
     };
-    let Some(id) = identity
+    let from_path = identity
         .path_param
         .as_ref()
-        .and_then(|p| call.path_params.get(p))
-    else {
+        .and_then(|p| call.path_params.get(p));
+    let from_body = || {
+        let field = identity.input_field.as_ref()?;
+        call.body.as_ref()?.get(field)
+    };
+    let Some(id) = from_path.or_else(from_body) else {
         return body;
     };
     if !body.is_object() || body.get(&identity.field) == Some(id) {

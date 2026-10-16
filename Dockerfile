@@ -31,8 +31,8 @@ RUN find crates -name '*.rs' -exec touch {} + \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /src/target/release/mockingbird /usr/local/bin/mockingbird
-# Data plane and Admin API / ops. Both bind 127.0.0.1 unless told otherwise:
-#   docker run -p 8080:8080 -p 9090:9090 IMAGE serve --host 0.0.0.0 --insecure-no-auth ...
-EXPOSE 8080 9090
+# Data plane, Admin API / ops and gRPC. All bind 127.0.0.1 unless told otherwise:
+#   docker run -p 8080:8080 -p 9090:9090 -p 50051:50051 IMAGE serve --host 0.0.0.0 --insecure-no-auth ...
+EXPOSE 8080 9090 50051
 ENTRYPOINT ["mockingbird"]
 CMD ["--help"]

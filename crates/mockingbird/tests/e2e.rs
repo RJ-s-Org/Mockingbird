@@ -469,3 +469,65 @@ async fn busy_default_admin_port_still_serves_data_plane() {
         .failure()
         .stderr(predicates::str::contains(format!("127.0.0.1:{busy}")));
 }
+
+/// SIGTERM stops the server even while an open-ended SSE stream is
+/// connected, and the process exits cleanly (graceful shutdown runs).
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_ends_open_sse_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let contract = dir.path().join("events.yaml");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/openapi/events-3.1.yaml"),
+        &contract,
+    )
+    .unwrap();
+    let (port, admin_port, grpc_port) = (free_port(), free_port(), free_port());
+    let mut child = Child(
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+            .env_remove("MB_LLM_API_KEY")
+            .args(["serve", "--offline", "--port"])
+            .arg(port.to_string())
+            .arg("--admin-port")
+            .arg(admin_port.to_string())
+            .arg("--grpc-port")
+            .arg(grpc_port.to_string())
+            .arg(&contract)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let url = format!("http://127.0.0.1:{port}/ticks");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut resp = loop {
+        if let Ok(resp) = reqwest::get(&url).await {
+            break resp;
+        }
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    // Drain the generated items; the stream then stays open.
+    let reader = tokio::spawn(async move { while let Ok(Some(_)) = resp.chunk().await {} });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &child.0.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let exit = loop {
+        if let Some(exit) = child.0.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still running 5s after SIGTERM with an SSE client connected"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(exit.success(), "{exit:?}");
+    reader.abort();
+}

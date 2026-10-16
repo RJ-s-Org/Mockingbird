@@ -139,3 +139,61 @@ async fn fallback_rewrites_request_per_hop_and_sums_timeouts() {
     assert_eq!(sent[0].max_tokens, 20);
     assert!((sent[0].temperature - 0.9).abs() < f32::EPSILON);
 }
+
+async fn collect(stream: mb_llm::TextStream) -> Vec<Result<String, LlmError>> {
+    use futures::StreamExt;
+    stream.collect().await
+}
+
+#[tokio::test]
+async fn fallback_stream_uses_secondary_when_primary_fails_first() {
+    use mb_llm::HopSettings;
+
+    // Primary: stream() itself fails.
+    let primary =
+        Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Err(LlmError::Timeout)]));
+    let secondary = Arc::new(
+        ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![Ok("x".into()), Ok("y".into())])]),
+    );
+    let p = HopSettings {
+        timeout: Duration::from_millis(300),
+        temperature: 0.1,
+        max_tokens: 10,
+    };
+    let fallback =
+        FallbackProvider::new(primary.clone(), secondary.clone()).with_primary_settings(p);
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
+    assert_eq!(items, vec!["x", "y"]);
+    assert_eq!(primary.stream_requests()[0].max_tokens, 10);
+    assert_eq!(secondary.stream_requests()[0].max_tokens, 64);
+
+    // Primary: the first item is an error.
+    let primary = Arc::new(
+        ScriptedProvider::new(vec![])
+            .with_streams(vec![Ok(vec![Err(LlmError::Decode("bad".into()))])]),
+    );
+    let secondary =
+        Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![Ok("z".into())])]));
+    let fallback = FallbackProvider::new(primary.clone(), secondary.clone());
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].as_ref().unwrap(), "z");
+    assert_eq!(secondary.stream_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn fallback_stream_does_not_switch_after_first_delta() {
+    let primary = Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![
+        Ok("a".into()),
+        Err(LlmError::Transport("cut".into())),
+    ])]));
+    let secondary =
+        Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![Ok("z".into())])]));
+    let fallback = FallbackProvider::new(primary.clone(), secondary.clone());
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].as_ref().unwrap(), "a");
+    assert!(matches!(items[1], Err(LlmError::Transport(_))));
+    assert!(secondary.stream_requests().is_empty());
+}

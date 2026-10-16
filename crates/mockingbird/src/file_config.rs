@@ -1,5 +1,5 @@
-//! `mockingbird.yaml`: server, storage, LLM profiles, observability and
-//! mocks declared as code.
+//! `mockingbird.yaml`: server, storage, LLM profiles, observability,
+//! protocol settings and mocks declared as code.
 //!
 //! Precedence: the file < `MB_*` environment variables ([`apply_env`]) <
 //! command-line flags ([`crate::config::apply_flags`]).
@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
+use mb_engine::StreamConfig;
+use mb_protocols::ProtocolSettings;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -32,6 +34,8 @@ pub struct FileConfig {
     pub storage: StorageConfig,
     pub llm: LlmConfig,
     pub observability: ObservabilityConfig,
+    /// Protocol knobs shared by every mock. Read at startup.
+    pub protocols: ProtocolsConfig,
     pub mocks: BTreeMap<String, FileMock>,
 }
 
@@ -43,6 +47,8 @@ pub struct ServerConfig {
     pub port: u16,
     /// Admin API and ops endpoints.
     pub admin_port: u16,
+    /// gRPC (h2c), shared by every gRPC mock.
+    pub grpc_port: u16,
     pub insecure_no_auth: bool,
     /// Globs (`*` = any run of characters) an LLM profile's secret
     /// reference must match when it is created or updated through the
@@ -54,6 +60,11 @@ pub struct ServerConfig {
     /// port is skipped with a warning instead of failing startup.
     #[serde(skip)]
     pub admin_port_explicit: bool,
+    /// Whether `grpc_port` was set explicitly (config file key,
+    /// `MB_GRPC_PORT` or `--grpc-port`). When it was not, a busy default
+    /// port is skipped with a warning instead of failing startup.
+    #[serde(skip)]
+    pub grpc_port_explicit: bool,
 }
 
 impl Default for ServerConfig {
@@ -62,18 +73,20 @@ impl Default for ServerConfig {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 8080,
             admin_port: 9090,
+            grpc_port: 50051,
             insecure_no_auth: false,
             api_secret_refs: mb_admin::DEFAULT_API_SECRET_REFS
                 .iter()
                 .map(|r| r.to_string())
                 .collect(),
             admin_port_explicit: false,
+            grpc_port_explicit: false,
         }
     }
 }
 
 impl ServerConfig {
-    /// Checks the bind address against the auth rules (both ports share it).
+    /// Checks the bind address against the auth rules (every port shares it).
     pub fn check_bind(&self) -> Result<(), String> {
         if !self.host.is_loopback() && !self.insecure_no_auth {
             return Err(format!(
@@ -199,6 +212,112 @@ impl Default for ObservabilityConfig {
     }
 }
 
+/// The `protocols:` section: knobs shared by every mock's adapter.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProtocolsConfig {
+    pub graphql: GraphqlConfig,
+    pub stream: StreamFileConfig,
+    pub sse: SseConfig,
+    pub grpc: GrpcConfig,
+}
+
+impl ProtocolsConfig {
+    /// The adapters' settings and the engine's stream limits.
+    pub fn settings(&self) -> (ProtocolSettings, StreamConfig) {
+        let settings = ProtocolSettings {
+            graphql_path: self.graphql.path.clone(),
+            graphql_introspection: self.graphql.introspection,
+            graphql_max_depth: self.graphql.max_depth,
+            graphql_max_complexity: self.graphql.max_complexity,
+            sse_keepalive: self.sse.keepalive,
+            grpc_max_message_bytes: self.grpc.max_message_bytes,
+            ..ProtocolSettings::default()
+        };
+        let stream = StreamConfig {
+            default_items: self.stream.default_items,
+            max_items: self.stream.max_items,
+            item_interval: self.stream.item_interval,
+        };
+        (settings, stream)
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct GraphqlConfig {
+    /// Endpoint path below each GraphQL mock's route prefix.
+    pub path: String,
+    /// Whether introspection queries are answered.
+    pub introspection: bool,
+    pub max_depth: usize,
+    pub max_complexity: usize,
+}
+
+impl Default for GraphqlConfig {
+    fn default() -> Self {
+        Self {
+            path: "/graphql".into(),
+            introspection: true,
+            max_depth: 15,
+            max_complexity: 1000,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct StreamFileConfig {
+    /// Items per streamed response when the request asks for no count.
+    pub default_items: usize,
+    /// Upper bound on items per streamed response.
+    pub max_items: usize,
+    /// Pause before every streamed item except the first.
+    #[serde(with = "humantime_serde")]
+    pub item_interval: Duration,
+}
+
+impl Default for StreamFileConfig {
+    fn default() -> Self {
+        Self {
+            default_items: 5,
+            max_items: 50,
+            item_interval: Duration::ZERO,
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct SseConfig {
+    /// Interval between keepalive comments.
+    #[serde(with = "humantime_serde")]
+    pub keepalive: Duration,
+}
+
+impl Default for SseConfig {
+    fn default() -> Self {
+        Self {
+            keepalive: Duration::from_secs(15),
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct GrpcConfig {
+    /// Largest gRPC message decoded or encoded.
+    pub max_message_bytes: usize,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            max_message_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileMock {
@@ -253,6 +372,12 @@ pub struct FileScenario {
     pub set: Option<Value>,
     /// Operation ids the scenario applies to; empty means all.
     pub operations: Vec<String>,
+    /// Items per streamed response unless `X-Mockingbird-Stream-Items`
+    /// overrides it.
+    pub stream_items: Option<u32>,
+    /// Pause between streamed items.
+    #[serde(with = "humantime_serde")]
+    pub stream_item_interval: Option<Duration>,
 }
 
 /// Reads and parses `path`, resolving contract paths against its directory.
@@ -267,7 +392,9 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
             .map_err(|e| anyhow!("{e}"))
             .with_context(|| format!("cannot parse config file {}", path.display()))?
     };
-    cfg.server.admin_port_explicit = admin_port_in(&text);
+    let explicit = explicit_ports(&text);
+    cfg.server.admin_port_explicit = explicit.admin_port;
+    cfg.server.grpc_port_explicit = explicit.grpc_port;
     let dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -287,8 +414,16 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
     Ok(cfg)
 }
 
-/// Whether a config document sets `server.admin_port`.
-fn admin_port_in(text: &str) -> bool {
+/// Which optional ports a config document sets.
+#[derive(Default)]
+struct ExplicitPorts {
+    admin_port: bool,
+    grpc_port: bool,
+}
+
+/// Whether a config document sets `server.admin_port` and
+/// `server.grpc_port`.
+fn explicit_ports(text: &str) -> ExplicitPorts {
     #[derive(Deserialize, Default)]
     struct Probe {
         #[serde(default)]
@@ -298,11 +433,17 @@ fn admin_port_in(text: &str) -> bool {
     struct ProbeServer {
         #[serde(default)]
         admin_port: Option<serde::de::IgnoredAny>,
+        #[serde(default)]
+        grpc_port: Option<serde::de::IgnoredAny>,
     }
     serde_saphyr::from_str::<Probe>(text)
         .ok()
         .and_then(|p| p.server)
-        .is_some_and(|s| s.admin_port.is_some())
+        .map(|s| ExplicitPorts {
+            admin_port: s.admin_port.is_some(),
+            grpc_port: s.grpc_port.is_some(),
+        })
+        .unwrap_or_default()
 }
 
 /// Applies the `MB_*` environment variables (see [`apply_env_from`]).
@@ -310,8 +451,9 @@ pub fn apply_env(cfg: &mut FileConfig) -> anyhow::Result<()> {
     apply_env_from(cfg, |k| std::env::var(k).ok())
 }
 
-/// Applies `MB_HOST`, `MB_PORT`, `MB_ADMIN_PORT` and `MB_STORAGE_URL`, and
-/// the `MB_LLM_*` variables to the [`ENV_PROFILE`] profile (created with
+/// Applies `MB_HOST`, `MB_PORT`, `MB_ADMIN_PORT`, `MB_GRPC_PORT` and
+/// `MB_STORAGE_URL`, and the `MB_LLM_*` variables to the [`ENV_PROFILE`]
+/// profile (created with
 /// the documented defaults if absent, and made the default profile when
 /// none is set). `MB_LLM_API_KEY` is stored as the reference
 /// [`ENV_API_KEY_REF`], never as its value. Empty values count as unset.
@@ -329,6 +471,10 @@ pub fn apply_env_from(
     if let Some(v) = get("MB_ADMIN_PORT") {
         cfg.server.admin_port = v.parse().with_context(|| format!("MB_ADMIN_PORT={v:?}"))?;
         cfg.server.admin_port_explicit = true;
+    }
+    if let Some(v) = get("MB_GRPC_PORT") {
+        cfg.server.grpc_port = v.parse().with_context(|| format!("MB_GRPC_PORT={v:?}"))?;
+        cfg.server.grpc_port_explicit = true;
     }
     if let Some(v) = get("MB_STORAGE_URL") {
         cfg.storage.url = v;

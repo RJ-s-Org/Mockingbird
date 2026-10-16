@@ -17,7 +17,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 arc-swap.workspace = true
 async-trait.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["http2"] }
 chrono.workspace = true
 clap.workspace = true
 humantime.workspace = true
@@ -53,7 +53,9 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 assert_cmd.workspace = true
+prost-reflect.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tonic.workspace = true
 wiremock.workspace = true
 predicates = "3"

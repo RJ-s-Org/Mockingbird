@@ -10,29 +10,49 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["http-rest"]
-http-rest = [
-    "dep:axum",
-    "dep:matchit",
-    "dep:humantime",
-    "dep:serde_urlencoded",
-    "dep:thiserror",
-    "dep:tower-http",
+default = ["http-rest", "sse", "graphql", "grpc", "soap", "websocket"]
+http-rest = ["dep:matchit", "dep:serde_urlencoded", "dep:tower-http"]
+sse = ["http-rest"]
+websocket = ["axum/ws"]
+graphql = ["websocket", "dep:async-graphql"]
+grpc = [
+    "axum/http2",
+    "dep:http-body",
+    "dep:tonic",
+    "dep:tonic-reflection",
+    "dep:tonic-health",
+    "dep:prost",
+    "dep:prost-types",
+    "dep:prost-reflect",
+    "dep:tokio-stream",
 ]
+soap = ["dep:quick-xml"]
 
 [dependencies]
-axum = { workspace = true, optional = true }
-humantime = { workspace = true, optional = true }
+async-graphql = { workspace = true, optional = true }
+axum.workspace = true
+futures.workspace = true
+http-body = { workspace = true, optional = true }
+humantime.workspace = true
 matchit = { workspace = true, optional = true }
 metrics.workspace = true
 mb-engine.workspace = true
 mb-ext.workspace = true
+mb-llm.workspace = true
 mb-mcm.workspace = true
 mb-state.workspace = true
+prost = { workspace = true, optional = true }
+prost-reflect = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
 serde_json.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
+thiserror.workspace = true
 tokio.workspace = true
+tokio-stream = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+tonic-health = { workspace = true, optional = true }
+tonic-reflection = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 tracing.workspace = true
 
@@ -40,5 +60,7 @@ tracing.workspace = true
 async-trait.workspace = true
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
+reqwest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
 tower.workspace = true

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wsdl:definitions name="Orders"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:t="urn:example:orders:types"
+    xmlns:tns="urn:example:orders"
+    targetNamespace="urn:example:orders">
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:example:orders">
+      <xs:import namespace="urn:example:orders:types" schemaLocation="types.xsd"/>
+      <xs:import namespace="http://schemas.xmlsoap.org/soap/encoding/"/>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="GetOrderIn"><wsdl:part name="body" element="t:GetOrder"/></wsdl:message>
+  <wsdl:message name="GetOrderOut"><wsdl:part name="body" element="t:GetOrderResponse"/></wsdl:message>
+  <wsdl:portType name="OrdersPort">
+    <wsdl:operation name="GetOrder">
+      <wsdl:input message="tns:GetOrderIn"/>
+      <wsdl:output message="tns:GetOrderOut"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="OrdersSoap12" type="tns:OrdersPort">
+    <soap12:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="GetOrder">
+      <soap12:operation soapAction="urn:example:orders/GetOrder"/>
+      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+      <wsdl:output><soap12:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="OrderService">
+    <wsdl:port name="OrdersSoap12" binding="tns:OrdersSoap12">
+      <soap12:address location="http://example.com/orders"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>

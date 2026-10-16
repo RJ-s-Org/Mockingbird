@@ -593,3 +593,62 @@ async fn response_format_name_is_sanitized() {
         other => panic!("{other:?}"),
     }
 }
+
+const ITEM_CONTRACT: &str = r#"
+openapi: 3.1.0
+info: {title: Items, version: "1"}
+paths:
+  /item:
+    get:
+      operationId: getItem
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties: {id: {type: string}, name: {type: string}}
+"#;
+
+#[tokio::test]
+async fn force_identity_uses_input_field() {
+    let mut bundle = inline(ITEM_CONTRACT);
+    bundle.operations[0].identity = Some(mb_mcm::Identity {
+        path_param: None,
+        field: "id".into(),
+        input_field: Some("id".into()),
+    });
+    let op = bundle.operation("getItem").unwrap();
+    let mut c = call("getItem");
+    c.path_params.clear();
+    c.body = Some(json!({"id": "42"}));
+    for _ in 0..5 {
+        let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+        assert_eq!(out.body.unwrap()["id"], "42");
+    }
+}
+
+#[tokio::test]
+async fn prompt_names_grpc_binding() {
+    let mut bundle = inline(ITEM_CONTRACT);
+    bundle.operations[0].protocol = mb_mcm::Protocol::Grpc;
+    bundle.operations[0].binding = mb_mcm::Binding::Grpc {
+        package: "helloworld".into(),
+        service: "Greeter".into(),
+        method: "SayHello".into(),
+    };
+    bundle.operations[0].kind = mb_mcm::OperationKind::StreamServer;
+    let op = bundle.operation("getItem").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"id": "x"}).to_string())]);
+    let mut c = call("getItem");
+    c.path_params.clear();
+    engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(
+        system.contains("gRPC: /helloworld.Greeter/SayHello (server streaming)\n"),
+        "{system}"
+    );
+    assert!(!system.contains("HTTP:"), "{system}");
+}

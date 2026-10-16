@@ -674,3 +674,23 @@ async fn optional_request_body_may_be_omitted() {
     let req = Request::post("/orders").body(Body::empty()).unwrap();
     assert_eq!(send(&h, req).await.status(), StatusCode::BAD_REQUEST);
 }
+
+/// Without the `sse` feature an event-stream operation is a 501 problem.
+#[cfg(not(feature = "sse"))]
+#[tokio::test]
+async fn event_stream_without_sse_feature_is_not_implemented() {
+    let path = format!(
+        "{}/../../fixtures/openapi/events-3.1.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bundle = Arc::new(compile(&std::fs::read(path).unwrap()).unwrap());
+    let rt = Arc::new(MockRuntime::new(
+        "events",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ));
+    let resp = http_rest::router(rt).oneshot(get("/ticks")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body_json(resp).await["title"], "Streaming not enabled");
+}

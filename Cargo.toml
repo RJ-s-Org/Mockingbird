@@ -13,7 +13,7 @@ version = "0.1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }
 axum = "0.8"
 matchit = "0.9"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-saphyr = "2.0"
@@ -33,6 +33,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
 http = "1"
+http-body = "1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
@@ -40,6 +41,23 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 tracing-opentelemetry = { version = "0.34", default-features = false }
 arc-swap = "1"
+base64 = "0.23.1"
+futures = "0.3.34"
+eventsource-stream = "0.2.3"
+async-graphql = { version = "7.2.1", default-features = false, features = ["dynamic-schema"] }
+async-graphql-parser = "7.2.1"
+tonic = "0.14.6"
+tonic-reflection = "0.14.6"
+tonic-health = "0.14.6"
+tokio-stream = "0.1.19"
+prost = "0.14.4"
+prost-types = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+protox = "0.10.0"
+quick-xml = "0.42.0"
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
+tar = "0.4.46"
+flate2 = "1.1.10"
 json-patch = { version = "4", default-features = false }
 humantime-serde = "1"
 notify = "8"
@@ -54,6 +72,7 @@ insta = { version = "1", features = ["yaml", "redactions"] }
 tower = { version = "0.5", features = ["util"] }
 assert_cmd = "2"
 tempfile = "3"
+tokio-tungstenite = "0.29"
 
 # internal
 mb-mcm = { path = "crates/mb-mcm" }
@@ -68,3 +87,12 @@ mb-admin = { path = "crates/mb-admin" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+# Full debuginfo made the ~50 workspace test binaries about 9.5 GB, enough to
+# fill the disk mid-link (ld then dies with SIGBUS). Line tables keep file:line
+# in backtraces for workspace code; dependencies carry no debuginfo.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

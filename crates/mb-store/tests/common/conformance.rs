@@ -48,6 +48,7 @@ fn bundle(title: &str) -> Bundle {
         source_digest: "abc".into(),
         operations: vec![],
         defs: serde_json::Map::new(),
+        protocol_payload: None,
     }
 }
 
@@ -423,6 +424,8 @@ async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
             latency_ms: Some(1500),
             set: Some(json!({"retry": true})),
             operations: vec!["listOrders".into()],
+            stream_items: Some(3),
+            stream_item_interval_ms: Some(250),
         },
         source: ResourceSource::File,
     };

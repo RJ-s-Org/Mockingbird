@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mb_engine::StreamConfig;
 use mb_ext::{ExtError, Extensions, SecretStore};
+use mb_protocols::ProtocolSettings;
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
@@ -60,6 +62,8 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         recorder: None,
         offline: true,
         default_profile: None.into(),
+        protocols: ProtocolSettings::default(),
+        stream: StreamConfig::default(),
     }
 }
 
@@ -522,4 +526,190 @@ async fn fallback_profile_used_when_primary_times_out() {
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["customerId"], "from-secondary");
     secondary.verify().await;
+}
+
+// ---- protocol families ----
+
+fn fixture_text(rel: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures")
+        .join(rel);
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// `(service, mock)` of every service the shared gRPC server publishes.
+fn grpc_services(registry: &MockRegistry) -> Vec<(String, String)> {
+    registry.grpc().services()
+}
+
+fn services(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(s, m)| (s.to_string(), m.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn graphql_mock_served_at_prefix() {
+    let store = store().await;
+    let mock = create_mock(&store, "gh", "/gh", None).await;
+    activate(&store, &mock, &fixture_text("graphql/github.graphql")).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        registry.mounted(),
+        vec![("gh".to_string(), "/gh".to_string())]
+    );
+    let base = serve(registry.router()).await;
+
+    let r = reqwest::Client::new()
+        .post(format!("{base}/gh/graphql"))
+        .json(&json!({"query": "{ viewer { login } }"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert!(body["data"]["viewer"]["login"].is_string(), "{body}");
+    assert_eq!(status_of(&base, "/gh/other").await, 404);
+}
+
+#[tokio::test]
+async fn soap_wsdl_uses_mount_prefix() {
+    let store = store().await;
+    let mock = create_mock(&store, "calc", "/calc", None).await;
+    activate(&store, &mock, &fixture_text("wsdl/calculator.wsdl")).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+
+    let r = reqwest::Client::new()
+        .get(format!("{base}/calc/calculator.asmx?wsdl"))
+        .header("host", "127.0.0.1:1234")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let text = r.text().await.unwrap();
+    assert_eq!(
+        text.matches(r#"location="http://127.0.0.1:1234/calc/calculator.asmx""#)
+            .count(),
+        2,
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn grpc_mock_published_to_grpc_server() {
+    let store = store().await;
+    let mock = create_mock(&store, "routes", "/routes", None).await;
+    activate(&store, &mock, &fixture_text("proto/route_guide.proto")).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[("routeguide.RouteGuide", "routes")])
+    );
+    // A gRPC mock holds no route prefix on the data plane.
+    assert!(registry.mounted().is_empty());
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/routes").await, 404);
+    assert!(registry.failed_mocks().is_empty());
+}
+
+/// A service already served by a mock that sorts first by name skips the
+/// later mock, which is reported as failed; the skipped mock takes over
+/// when the holder goes away.
+#[tokio::test]
+async fn grpc_service_collision_skips_later_mock() {
+    let store = store().await;
+    let b = create_mock(&store, "b-routes", "/b", None).await;
+    activate(&store, &b, &fixture_text("proto/route_guide.proto")).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[("routeguide.RouteGuide", "b-routes")])
+    );
+
+    // `a-routes` sorts first, so it takes the service over.
+    let a = create_mock(&store, "a-routes", "/a", None).await;
+    activate(&store, &a, &fixture_text("proto/route_guide.proto")).await;
+    registry.reload_mock(&deps, "a-routes").await;
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[("routeguide.RouteGuide", "a-routes")])
+    );
+    let failed = registry.failed_mocks();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0, "b-routes");
+    assert_eq!(
+        failed[0].1,
+        "service routeguide.RouteGuide is already served by mock a-routes"
+    );
+
+    // A full reload keeps the same winner.
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[("routeguide.RouteGuide", "a-routes")])
+    );
+    assert_eq!(registry.failed_mocks().len(), 1);
+
+    // A mock serving other services is unaffected.
+    let hello = create_mock(&store, "hello", "/hello", None).await;
+    activate(&store, &hello, &fixture_text("proto/helloworld.proto")).await;
+    registry.reload_mock(&deps, "hello").await;
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[
+            ("helloworld.Greeter", "hello"),
+            ("routeguide.RouteGuide", "a-routes"),
+        ])
+    );
+
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "a-routes")
+            .await
+            .unwrap()
+    );
+    registry.reload_mock(&deps, "a-routes").await;
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[
+            ("helloworld.Greeter", "hello"),
+            ("routeguide.RouteGuide", "b-routes"),
+        ])
+    );
+    assert!(registry.failed_mocks().is_empty());
+}
+
+#[tokio::test]
+async fn grpc_mock_removed_on_delete() {
+    let store = store().await;
+    let mock = create_mock(&store, "routes", "/routes", None).await;
+    activate(&store, &mock, &fixture_text("proto/route_guide.proto")).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let _watcher = registry.spawn_watcher(deps);
+    assert_eq!(grpc_services(&registry).len(), 1);
+
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "routes")
+            .await
+            .unwrap()
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !grpc_services(&registry).is_empty() {
+        assert!(Instant::now() < deadline, "service still published");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

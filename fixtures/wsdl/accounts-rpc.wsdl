@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions name="AccountService"
+    xmlns="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:example:accounts"
+    targetNamespace="urn:example:accounts">
+  <types>
+    <xsd:schema targetNamespace="urn:example:accounts">
+      <xsd:simpleType name="AccountStatus">
+        <xsd:restriction base="xsd:string">
+          <xsd:enumeration value="active"/>
+          <xsd:enumeration value="suspended"/>
+          <xsd:enumeration value="closed"/>
+        </xsd:restriction>
+      </xsd:simpleType>
+      <xsd:complexType name="Account">
+        <xsd:sequence>
+          <xsd:element name="name" type="xsd:string"/>
+          <xsd:element name="email" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="tags" type="xsd:string" minOccurs="0" maxOccurs="unbounded"/>
+          <xsd:element name="status" type="tns:AccountStatus"/>
+          <xsd:element name="createdAt" type="xsd:dateTime"/>
+        </xsd:sequence>
+        <xsd:attribute name="id" type="xsd:string"/>
+      </xsd:complexType>
+    </xsd:schema>
+  </types>
+
+  <message name="GetAccountRequest">
+    <part name="id" type="xsd:string"/>
+  </message>
+  <message name="GetAccountResponse">
+    <part name="id" type="xsd:string"/>
+    <part name="account" type="tns:Account"/>
+  </message>
+  <message name="CreateAccountRequest">
+    <part name="account" type="tns:Account"/>
+  </message>
+  <message name="CreateAccountResponse">
+    <part name="id" type="xsd:string"/>
+    <part name="account" type="tns:Account"/>
+  </message>
+  <message name="DeleteAccountRequest">
+    <part name="id" type="xsd:string"/>
+  </message>
+  <message name="DeleteAccountResponse">
+    <part name="id" type="xsd:string"/>
+    <part name="deleted" type="xsd:boolean"/>
+  </message>
+
+  <portType name="AccountPortType">
+    <operation name="GetAccount">
+      <input message="tns:GetAccountRequest"/>
+      <output message="tns:GetAccountResponse"/>
+    </operation>
+    <operation name="CreateAccount">
+      <input message="tns:CreateAccountRequest"/>
+      <output message="tns:CreateAccountResponse"/>
+    </operation>
+    <operation name="DeleteAccount">
+      <input message="tns:DeleteAccountRequest"/>
+      <output message="tns:DeleteAccountResponse"/>
+    </operation>
+  </portType>
+
+  <binding name="AccountBinding" type="tns:AccountPortType">
+    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <operation name="GetAccount">
+      <soap:operation soapAction="urn:example:accounts#GetAccount"/>
+      <input><soap:body use="literal" namespace="urn:example:accounts"/></input>
+      <output><soap:body use="literal" namespace="urn:example:accounts"/></output>
+    </operation>
+    <operation name="CreateAccount">
+      <soap:operation soapAction="urn:example:accounts#CreateAccount"/>
+      <input><soap:body use="literal" namespace="urn:example:accounts"/></input>
+      <output><soap:body use="literal" namespace="urn:example:accounts"/></output>
+    </operation>
+    <operation name="DeleteAccount">
+      <soap:operation soapAction=""/>
+      <input><soap:body use="literal" namespace="urn:example:accounts"/></input>
+      <output><soap:body use="literal" namespace="urn:example:accounts"/></output>
+    </operation>
+  </binding>
+
+  <service name="AccountService">
+    <port name="AccountPort" binding="tns:AccountBinding">
+      <soap:address location="http://localhost:8080/services/accounts"/>
+    </port>
+  </service>
+</definitions>
