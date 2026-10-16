@@ -26,13 +26,35 @@ const RAW_PREVIEW_BYTES: usize = 1024;
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const MAX_SESSION_LEN: usize = 128;
 
+/// The consumer group (Kafka `group.id`) of mock `mock` in `workspace`:
+/// `<client_id_prefix>-<mock>`, or `mockingbird-<mock>` when the broker has
+/// no prefix. Outside the `default` workspace it is
+/// `<prefix>-<workspace>.<mock>`, so same-named mocks of two workspaces do
+/// not split one topic's messages between them (workspace names have no
+/// `.`).
+pub fn consumer_group(client_id_prefix: &str, workspace: &str, mock: &str) -> String {
+    let prefix = match client_id_prefix.trim() {
+        "" => "mockingbird",
+        p => p,
+    };
+    if workspace == "default" {
+        format!("{prefix}-{mock}")
+    } else {
+        format!("{prefix}-{workspace}.{mock}")
+    }
+}
+
 /// Consume `channel` from `broker` until the process shuts down,
 /// resubscribing with backoff after errors.
 pub(crate) async fn run_consumer(inner: Arc<ChannelInner>, channel: Channel, broker: String) {
     let stopped = inner.rt.shutdown.stopped();
     tokio::pin!(stopped);
-    let group = format!("mockingbird-{}", inner.rt.name);
     let brokers = Arc::clone(&inner.deps.brokers);
+    let prefix = brokers
+        .config(&broker)
+        .map(|c| c.client_id_prefix.as_str())
+        .unwrap_or_default();
+    let group = consumer_group(prefix, &inner.rt.workspace, &inner.rt.name);
     let mut backoff = BACKOFF_START;
     loop {
         let subscribed = match brokers.client(&broker).await {

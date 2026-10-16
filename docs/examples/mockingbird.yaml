@@ -100,7 +100,7 @@ brokers:
   #     mechanism: SCRAM-SHA-512                     # PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512
   #     username: mockingbird
   #     password: env:KAFKA_PASSWORD                 # a secret reference, never the password
-  #   client_id_prefix: mockingbird                  # client ids; Kafka consumer group <prefix>-<mock>
+  #   client_id_prefix: mockingbird                  # client ids; consumer group <prefix>-<mock>
   # rabbit:
   #   kind: amqp
   #   url: amqp://mockingbird@127.0.0.1:5672/%2f

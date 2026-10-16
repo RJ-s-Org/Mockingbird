@@ -50,6 +50,10 @@ fn orders() -> Bundle {
 }
 
 fn memory_brokers() -> Arc<Brokers> {
+    memory_brokers_with_prefix("mockingbird")
+}
+
+fn memory_brokers_with_prefix(client_id_prefix: &str) -> Arc<Brokers> {
     Brokers::new(
         vec![BrokerConfig {
             name: "mem".into(),
@@ -58,7 +62,7 @@ fn memory_brokers() -> Arc<Brokers> {
             tls: false,
             ca_file: None,
             sasl: None,
-            client_id_prefix: "mockingbird".into(),
+            client_id_prefix: client_id_prefix.into(),
         }],
         Arc::new(EnvFileSecrets),
     )
@@ -300,6 +304,32 @@ async fn consumed_message_validated_recorded_and_replied() {
     let stored = h.state.get(&key, "cancellations", "o1").await.unwrap();
     assert_eq!(stored.unwrap().data["reason"], "x");
     assert_eq!(h.channels.activity()["cancelOrder"].received, 1);
+}
+
+/// The consumer group is `<client_id_prefix>-<mock>` (`mockingbird-<mock>`
+/// without a prefix); outside `default` the workspace is part of it.
+#[tokio::test]
+async fn consumer_group_uses_the_client_id_prefix() {
+    let expect = |prefix: &str, workspace: &str, group: &str| {
+        assert_eq!(
+            mb_protocols::events::consumer_group(prefix, workspace, "orders"),
+            group
+        );
+    };
+    expect("acme", "default", "acme-orders");
+    expect("mockingbird", "default", "mockingbird-orders");
+    expect("", "default", "mockingbird-orders");
+    expect("acme", "team-a", "acme-team-a.orders");
+
+    let h = runtime_with_brokers(
+        orders(),
+        EventSetup::default(),
+        memory_brokers_with_prefix("acme"),
+    );
+    settle().await;
+    let groups = h.broker.subscribed_groups();
+    assert!(!groups.is_empty());
+    assert!(groups.iter().all(|g| g == "acme-orders"), "{groups:?}");
 }
 
 /// Consumed messages are recorded without credential-like headers, as on

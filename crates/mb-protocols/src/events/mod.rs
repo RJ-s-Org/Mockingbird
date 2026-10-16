@@ -24,6 +24,7 @@ pub use broker::{
     BrokerClient, BrokerConfig, BrokerError, BrokerInfo, BrokerKind, Brokers, MQTT_TLS_UNSUPPORTED,
     MessageStream, SaslConfig,
 };
+pub use consume::consumer_group;
 #[cfg(feature = "kafka")]
 pub use kafka::KafkaClient;
 pub use memory::MemoryBroker;

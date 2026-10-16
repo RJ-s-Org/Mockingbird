@@ -30,6 +30,8 @@ struct State {
     subscribers: Vec<Subscriber>,
     /// Publishes left to fail.
     failures: usize,
+    /// The consumer group of every subscription, in order.
+    groups: Vec<String>,
 }
 
 /// A broker that delivers each published message to the subscribers
@@ -89,6 +91,11 @@ impl MemoryBroker {
         deliver(&mut self.state(), binding.address(), &msg);
     }
 
+    /// The consumer group named by each subscription so far, in order.
+    pub fn subscribed_groups(&self) -> Vec<String> {
+        self.state().groups.clone()
+    }
+
     /// Make the next `n` publishes fail with [`BrokerError::Publish`].
     pub fn fail_publishes(&self, n: usize) {
         self.state().failures = n;
@@ -139,11 +146,13 @@ impl BrokerClient for MemoryBroker {
     async fn subscribe(
         &self,
         binding: &ChannelBinding,
-        _group: &str,
+        group: &str,
     ) -> Result<MessageStream, BrokerError> {
         let template = binding.address().to_string();
         let (tx, rx) = subscription("memory", &template);
-        self.state().subscribers.push(Subscriber { template, tx });
+        let mut state = self.state();
+        state.groups.push(group.to_string());
+        state.subscribers.push(Subscriber { template, tx });
         Ok(rx)
     }
 }

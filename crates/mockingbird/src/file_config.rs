@@ -512,7 +512,10 @@ pub struct FileBroker {
     pub ca_file: Option<PathBuf>,
     #[serde(default)]
     pub sasl: Option<FileSasl>,
-    /// Prefix of the client ids and consumer groups Mockingbird uses.
+    /// Prefix of the client ids and consumer groups Mockingbird uses: a
+    /// mock's Kafka consumer group (and AMQP shared-queue name) is
+    /// `<client_id_prefix>-<mock>` (`<client_id_prefix>-<workspace>.<mock>`
+    /// outside `default`).
     #[serde(default = "default_client_id_prefix")]
     pub client_id_prefix: String,
 }
