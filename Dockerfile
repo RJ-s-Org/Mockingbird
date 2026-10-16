@@ -23,8 +23,9 @@ FROM rust:1.97-bookworm AS builder
 # image (WebSocket channels and the memory broker only, no system libraries):
 #   docker build --build-arg FEATURES=--no-default-features -t mockingbird:slim .
 ARG FEATURES="--features full"
+# libcurl headers: librdkafka 2.12 includes <curl/curl.h> even without curl.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake \
+ && apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY --from=manifests /manifests ./

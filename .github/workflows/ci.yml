@@ -55,6 +55,8 @@ jobs:
           toolchain: "1.97"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
@@ -79,6 +81,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: protocols-${{ matrix.features }}
+      # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
+      - if: matrix.features == 'kafka'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - name: cargo check -p mb-protocols (${{ matrix.features }})
         env:
           FEATURES: ${{ matrix.features }}
