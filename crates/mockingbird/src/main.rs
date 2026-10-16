@@ -74,6 +74,13 @@ async fn client(admin_url: &str, token: Option<&str>, cmd: ClientCommand) -> Res
             eprintln!("{body}");
             Err(Failure::Silent)
         }
+        Err(ClientError::Usage(msg)) => Err(Failure::Usage(msg)),
+        Err(ClientError::Incomplete { output, message }) => {
+            let text = serde_json::to_string_pretty(&output).map_err(anyhow::Error::from)?;
+            println!("{text}");
+            eprintln!("{message}");
+            Err(Failure::Silent)
+        }
         Err(ClientError::Other(e)) => Err(Failure::Other(e)),
     }
 }

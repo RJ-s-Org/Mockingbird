@@ -298,3 +298,144 @@ fn validate_handles_proto_and_wsdl() {
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains("GetOrder"), "{stdout}");
 }
+
+fn smart_fixture(name: &str) -> PathBuf {
+    repo_path(&format!("fixtures/smart/{name}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_har_waits_for_draft() {
+    let admin = admin_url().await;
+    let har = smart_fixture("petstore.har");
+    let out = run(&admin, &["import", har.to_str().unwrap(), "--as", "pets"]).await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let summary = out.json();
+    assert_eq!(summary["version"], 1, "{summary}");
+    assert_eq!(summary["status"], "draft", "{summary}");
+    assert_eq!(summary["approved"], false, "{summary}");
+    assert!(summary["job"].as_str().is_some_and(|j| !j.is_empty()));
+    let ops: Vec<&str> = summary["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_str().unwrap())
+        .collect();
+    assert!(ops.contains(&"GET /api/pets/{petId}"), "{ops:?}");
+    assert!(summary["warnings"].is_array());
+
+    let mock: Value = reqwest::get(format!("{admin}/api/v1/mocks/pets"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mock["source"], "api");
+    assert_eq!(mock["active_version"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_postman_approve_activate() {
+    let admin = admin_url().await;
+    let collection = smart_fixture("legacy-v2.0.postman_collection.json");
+    let out = run(
+        &admin,
+        &[
+            "import",
+            collection.to_str().unwrap(),
+            "--as",
+            "legacy",
+            "--approve",
+            "--activate",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let summary = out.json();
+    assert_eq!(summary["status"], "active", "{summary}");
+    assert_eq!(summary["approved"], true, "{summary}");
+    assert_eq!(summary["warnings"], json!([]), "{summary}");
+
+    let mock: Value = reqwest::get(format!("{admin}/api/v1/mocks/legacy"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mock["active_version"], summary["version"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_with_warnings_not_approved() {
+    let admin = admin_url().await;
+    let har = smart_fixture("petstore.har");
+    let out = run(
+        &admin,
+        &["import", har.to_str().unwrap(), "--as", "pets", "--approve"],
+    )
+    .await;
+    assert_eq!(out.code, 1, "stderr: {}", out.stderr);
+    let summary = out.json();
+    assert_eq!(summary["approved"], false, "{summary}");
+    assert_eq!(summary["status"], "draft", "{summary}");
+    let warnings = summary["warnings"].as_array().unwrap().len();
+    assert!(warnings > 0, "{summary}");
+    assert!(
+        out.stderr.contains("not approved"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains(&format!("{warnings} warning")),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_markdown_offline_fails() {
+    let admin = admin_url().await;
+    let doc = smart_fixture("petstore.md");
+    let out = run(&admin, &["import", doc.to_str().unwrap(), "--as", "pets"]).await;
+    assert_eq!(out.code, 1, "stdout: {}", out.stdout);
+    assert!(out.stderr.contains("LLM profile"), "stderr: {}", out.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_activate_without_approve_rejected() {
+    let admin = admin_url().await;
+    let har = smart_fixture("petstore.har");
+    let out = run(
+        &admin,
+        &[
+            "import",
+            har.to_str().unwrap(),
+            "--as",
+            "pets",
+            "--activate",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("--activate needs --approve for document, HAR and Postman imports"),
+        "stderr: {}",
+        out.stderr
+    );
+    // Rejected before anything was created.
+    let out = run(&admin, &["mocks", "list"]).await;
+    assert_eq!(out.json(), json!([]));
+
+    let out = run(
+        &admin,
+        &[
+            "import",
+            "https://docs.example.com/api",
+            "--as",
+            "pets",
+            "--activate",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+}

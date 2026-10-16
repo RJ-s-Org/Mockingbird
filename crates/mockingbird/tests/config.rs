@@ -1782,3 +1782,56 @@ mocks:
     let text = sse_until_keepalive(resp).await;
     assert_eq!(text.matches("event: tick").count(), 5, "{text}");
 }
+
+#[test]
+fn import_section_defaults() {
+    let ws = Workspace::new();
+    let cfg = ws.load("mocks: {}\n");
+    assert_eq!(cfg.import.workers, 2);
+    assert_eq!(cfg.import.max_tokens, 200_000);
+    assert_eq!(cfg.import.llm_profile, None);
+    assert!(cfg.import.url_allowlist.is_empty());
+    let settings = cfg.import.settings().unwrap();
+    assert_eq!(settings.workers, 2);
+    assert_eq!(settings.max_tokens, 200_000);
+
+    let cfg = ws.load(
+        "import:\n  workers: 4\n  max_tokens: 50000\n  llm_profile: big\n  url_allowlist: [docs.internal, 10.0.0.0/8]\n",
+    );
+    assert_eq!(cfg.import.workers, 4);
+    assert_eq!(cfg.import.llm_profile.as_deref(), Some("big"));
+    let settings = cfg.import.settings().unwrap();
+    assert_eq!(settings.workers, 4);
+    assert_eq!(settings.max_tokens, 50_000);
+    assert!(settings.fetch.host_allowed("docs.internal"));
+}
+
+#[test]
+fn import_section_validation() {
+    let ws = Workspace::new();
+    for (yaml, field) in [
+        ("import:\n  workers: 0\n", "import.workers"),
+        ("import:\n  workers: 17\n", "import.workers"),
+        ("import:\n  max_tokens: 999\n", "import.max_tokens"),
+        (
+            "import:\n  url_allowlist: [\"10.0.0.0/33\"]\n",
+            "import.url_allowlist",
+        ),
+    ] {
+        ws.write(yaml);
+        let err = file_config::load(&ws.config_path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(field), "{yaml}: {msg}");
+    }
+    let cfg = ws.load("import:\n  workers: 16\n  max_tokens: 1000\n");
+    assert_eq!(cfg.import.workers, 16);
+    assert_eq!(cfg.import.max_tokens, 1000);
+}
+
+#[test]
+fn import_unknown_field_rejected() {
+    let ws = Workspace::new();
+    ws.write("import:\n  worker: 3\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("worker"), "{err:#}");
+}
