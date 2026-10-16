@@ -197,8 +197,12 @@ pub struct Fetched {
 pub enum FetchError {
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
+    /// The host or a redirect resolves to a private or reserved address.
+    /// The message names neither, so URL imports cannot probe internal
+    /// names; the fetch logs both.
     #[error(
-        "{host} resolves to {ip}, a private or reserved address; add it to import.url_allowlist to allow it"
+        "destination not allowed: the URL or a redirect leads to an address imports may not fetch \
+         (an administrator can allow it with import.url_allowlist)"
     )]
     Blocked { host: String, ip: IpAddr },
     #[error("cannot resolve {0}")]
@@ -398,6 +402,7 @@ fn check_addr(
     if host_allowed || !is_blocked_ip(ip) || policy.ip_allowed(ip) {
         Ok(())
     } else {
+        tracing::warn!(%host, %ip, "import fetch blocked: private or reserved address");
         Err(FetchError::Blocked {
             host: host.to_string(),
             ip,
@@ -406,6 +411,8 @@ fn check_addr(
 }
 
 fn transport(err: reqwest::Error) -> FetchError {
+    // The URL may carry secrets (a signed query) and is the caller's own.
+    let err = err.without_url();
     let mut message = err.to_string();
     let mut source = std::error::Error::source(&err);
     while let Some(cause) = source {

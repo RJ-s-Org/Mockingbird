@@ -43,3 +43,21 @@ pub fn redact(value: &mut Value) {
         _ => {}
     }
 }
+
+/// What a query value of a redacted URL is replaced with.
+pub const REDACTED_QUERY_VALUE: &str = "REDACTED";
+
+/// `url` as it may be stored, shown or audited: every query value replaced
+/// with [`REDACTED_QUERY_VALUE`] (the keys kept) and the fragment dropped,
+/// so a signed URL's secrets stay out of job records and drafts.
+pub fn redacted_url(url: &url::Url) -> String {
+    let mut out = url.clone();
+    out.set_fragment(None);
+    if url.query().is_some() {
+        let keys: Vec<String> = url.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        out.query_pairs_mut()
+            .clear()
+            .extend_pairs(keys.iter().map(|k| (k.as_str(), REDACTED_QUERY_VALUE)));
+    }
+    out.to_string()
+}

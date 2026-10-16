@@ -291,14 +291,12 @@ async fn extract_document(
     observer: &dyn ImportObserver,
 ) -> Result<Extracted, SmartError> {
     report(observer, Phase::Extracting, 0, 1).await?;
-    let doc = if kind == ImportKind::Pdf {
-        tokio::task::spawn_blocking(move || text::extract_text(kind, &bytes))
-            .await
-            .map_err(|_| SmartError::Unreadable("the PDF could not be parsed".to_string()))??
-    } else {
-        text::extract_text(kind, &bytes)?
-    };
-    let chunks = chunk(&doc, CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS);
+    let (doc, chunks) = blocking(move || {
+        let doc = text::extract_text(kind, &bytes)?;
+        let chunks = chunk(&doc, CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS);
+        Ok((doc, chunks))
+    })
+    .await?;
     let total = chunks.len();
     let name = source_name.unwrap_or(UNNAMED_SOURCE);
     let mut operations = Vec::new();
@@ -368,8 +366,13 @@ pub async fn run_import_with(
             report(observer, Phase::Fetching, 0, 1).await?;
             let fetched = fetch_with(&url, &opts.fetch, resolver).await?;
             let kind = fetched_kind(&fetched)?;
-            let final_url = fetched.url.to_string();
-            (kind, fetched.bytes, Some(url), Some(final_url))
+            // The real URL is only fetched; what is stored and prompted
+            // with has its query values redacted.
+            let name = fetch::validate_url(&url)
+                .map(|u| redact::redacted_url(&u))
+                .unwrap_or_default();
+            let final_url = redact::redacted_url(&fetched.url);
+            (kind, fetched.bytes, Some(name), Some(final_url))
         }
     };
     if bytes.len() > MAX_IMPORT_BYTES {
@@ -392,10 +395,11 @@ pub async fn run_import_with(
         )
         .await?
     } else {
-        let mut recorded = match kind {
-            ImportKind::Har => har::import_har(&bytes)?,
-            _ => postman::import_postman(&bytes)?,
-        };
+        let mut recorded = blocking(move || match kind {
+            ImportKind::Har => har::import_har(&bytes),
+            _ => postman::import_postman(&bytes),
+        })
+        .await?;
         if let Some(llm) = llm {
             let warnings =
                 summarize_operations(llm, &mut recorded.operations, &mut budget, observer).await?;
@@ -427,7 +431,62 @@ pub async fn run_import_with(
     }
 
     report(observer, Phase::Assembling, 0, 1).await?;
-    let mut extracted = extracted;
+    let Assembled {
+        extracted,
+        document,
+        ids,
+        warnings: assembly_warnings,
+        source,
+        bundle,
+    } = blocking(move || assemble(extracted)).await?;
+    let operations = ids
+        .into_iter()
+        .zip(&extracted.operations)
+        .map(|(id, op)| {
+            (
+                id,
+                OperationMeta {
+                    confidence: op.confidence,
+                    provenance: op.provenance.clone(),
+                    edited: false,
+                },
+            )
+        })
+        .collect();
+    let mut warnings = extracted.warnings;
+    warnings.extend(assembly_warnings);
+    let meta = DraftMeta {
+        source_kind: kind,
+        source_name,
+        source_url,
+        chunk_count: u32::try_from(extracted.chunk_count).unwrap_or(u32::MAX),
+        chunks_processed: u32::try_from(extracted.chunks_processed).unwrap_or(u32::MAX),
+        warnings,
+        operations,
+        usage: budget.used,
+        edited: false,
+    };
+    Ok(DraftResult {
+        document,
+        source,
+        bundle,
+        meta,
+    })
+}
+
+/// A compiled draft before its metadata is attached.
+struct Assembled {
+    extracted: Extracted,
+    document: Value,
+    ids: Vec<String>,
+    warnings: Vec<DraftWarning>,
+    source: Vec<u8>,
+    bundle: Bundle,
+}
+
+/// Assembles and compiles the extracted operations, skipping the ones the
+/// compiler's problems point at (§11.3); a problem elsewhere fails.
+fn assemble(mut extracted: Extracted) -> Result<Assembled, SmartError> {
     let (mut document, mut ids, mut assembly_warnings) =
         assemble_openapi(&extracted.title, &extracted.servers, &extracted.operations);
     let compiled = match compile_draft(&document) {
@@ -463,37 +522,30 @@ pub async fn run_import_with(
         }
     };
     let (source, bundle) = compiled;
-    let operations = ids
-        .into_iter()
-        .zip(&extracted.operations)
-        .map(|(id, op)| {
-            (
-                id,
-                OperationMeta {
-                    confidence: op.confidence,
-                    provenance: op.provenance.clone(),
-                    edited: false,
-                },
-            )
-        })
-        .collect();
-    let mut warnings = extracted.warnings;
-    warnings.extend(assembly_warnings);
-    let meta = DraftMeta {
-        source_kind: kind,
-        source_name,
-        source_url,
-        chunk_count: u32::try_from(extracted.chunk_count).unwrap_or(u32::MAX),
-        chunks_processed: u32::try_from(extracted.chunks_processed).unwrap_or(u32::MAX),
-        warnings,
-        operations,
-        usage: budget.used,
-        edited: false,
-    };
-    Ok(DraftResult {
+    Ok(Assembled {
+        extracted,
         document,
+        ids,
+        warnings: assembly_warnings,
         source,
         bundle,
-        meta,
     })
+}
+
+/// Runs CPU-bound work (parsing, extraction, assembly, compilation) on the
+/// blocking pool, so a large input does not stall the async runtime. A
+/// panic in `f` resumes on the caller.
+async fn blocking<T, F>(f: F) -> Result<T, SmartError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, SmartError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(e) => match e.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            // Only a runtime shutdown cancels a blocking task.
+            Err(_) => Err(SmartError::Canceled),
+        },
+    }
 }

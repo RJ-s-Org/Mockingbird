@@ -343,3 +343,44 @@ fn fetch_error_converts_to_smart_error() {
     let err: SmartError = FetchError::Http(500).into();
     assert!(matches!(err, SmartError::Fetch(ref m) if m == "the server answered HTTP 500"));
 }
+
+#[tokio::test]
+async fn blocked_destination_does_not_echo_the_address() {
+    let resolver = MapResolver::new(
+        "intranet.test",
+        vec![SocketAddr::new(ip("10.20.30.40"), 80)],
+    );
+    let err = fetch_with("http://intranet.test/", &FetchPolicy::default(), &resolver)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FetchError::Blocked { .. }), "{err:?}");
+    let shown = SmartError::from(err).to_string();
+    assert!(shown.contains("destination not allowed"), "{shown}");
+    assert!(!shown.contains("10.20.30.40"), "{shown}");
+    assert!(!shown.contains("intranet.test"), "{shown}");
+}
+
+#[tokio::test]
+async fn transport_errors_do_not_echo_the_url() {
+    // Nothing listens on port 9 of the (allowlisted) loopback address.
+    let err = fetch(
+        "http://127.0.0.1:9/doc.md?sig=s3cret",
+        &allow(&["127.0.0.1/32"]),
+    )
+    .await
+    .unwrap_err();
+    let shown = SmartError::from(err).to_string();
+    assert!(!shown.contains("s3cret"), "{shown}");
+}
+
+#[test]
+fn redacted_url_keeps_keys_only() {
+    use mb_import::smart::redact::redacted_url;
+    let url = validate_url("https://h.test/a/b?sig=abc&X-Amz-Date=1&flag#frag").unwrap();
+    assert_eq!(
+        redacted_url(&url),
+        "https://h.test/a/b?sig=REDACTED&X-Amz-Date=REDACTED&flag=REDACTED"
+    );
+    let plain = validate_url("https://h.test/a").unwrap();
+    assert_eq!(redacted_url(&plain), "https://h.test/a");
+}

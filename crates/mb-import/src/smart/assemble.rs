@@ -23,6 +23,50 @@ const DEFAULT_CONTENT_TYPE: &str = "application/json";
 const COMPONENTS_PREFIX: &str = "#/components/schemas/";
 /// Longest accepted own operation id.
 const MAX_ID_CHARS: usize = 64;
+/// Deepest example kept in a draft; a deeper one is left out.
+pub const MAX_EXAMPLE_DEPTH: usize = 32;
+/// Deepest given schema kept in a draft; a deeper one is replaced by the
+/// schema inferred from the examples (inference stops at its own depth).
+pub const MAX_SCHEMA_DEPTH: usize = 64;
+/// Deepest draft document accepted, well under `serde_json`'s recursion
+/// limit (128) so the stored source and bundle always parse back.
+pub const MAX_DRAFT_DEPTH: usize = 100;
+
+/// How deeply `v` nests: 1 for a scalar, one more per array or object.
+pub fn json_depth(v: &Value) -> usize {
+    match v {
+        Value::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
+/// The first example shallow enough to keep.
+fn first_example(examples: &[Value]) -> Option<&Value> {
+    examples.iter().find(|e| json_depth(e) <= MAX_EXAMPLE_DEPTH)
+}
+
+/// The given schema, unless it nests too deeply to keep.
+fn kept_schema(schema: Option<&Value>) -> Option<&Value> {
+    schema.filter(|s| json_depth(s) <= MAX_SCHEMA_DEPTH)
+}
+
+/// Whether `op` has an example or schema [`assemble_openapi`] leaves out.
+fn has_too_deep(op: &DraftOperation) -> bool {
+    let examples = |xs: &[Value]| xs.iter().any(|e| json_depth(e) > MAX_EXAMPLE_DEPTH);
+    let schema = |s: Option<&Value>| s.is_some_and(|s| json_depth(s) > MAX_SCHEMA_DEPTH);
+    op.parameters
+        .iter()
+        .any(|p| examples(&p.examples) || schema(p.schema.as_ref()))
+        || op
+            .request
+            .as_ref()
+            .is_some_and(|b| examples(&b.examples) || schema(b.schema.as_ref()))
+        || op
+            .responses
+            .iter()
+            .any(|r| examples(&r.examples) || schema(r.schema.as_ref()))
+}
 
 /// One problem found in a draft document.
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -100,7 +144,7 @@ fn location_str(location: &ParamLocation) -> &'static str {
 }
 
 fn param_schema(param: &DraftParam) -> Value {
-    if let Some(schema) = &param.schema {
+    if let Some(schema) = kept_schema(param.schema.as_ref()) {
         return schema.clone();
     }
     let samples: Vec<&str> = param.examples.iter().filter_map(Value::as_str).collect();
@@ -123,7 +167,7 @@ fn param_object(param: &DraftParam) -> Value {
         obj.insert("description".into(), json!(d));
     }
     obj.insert("schema".into(), param_schema(param));
-    if let Some(example) = param.examples.first() {
+    if let Some(example) = first_example(&param.examples) {
         obj.insert("example".into(), example.clone());
     }
     Value::Object(obj)
@@ -177,7 +221,7 @@ fn parameters(op: &DraftOperation, warnings: &mut Vec<DraftWarning>) -> Vec<Valu
 /// missing) and the first example.
 fn media(schema: Option<&Value>, examples: &[Value]) -> Value {
     let mut obj = Map::new();
-    let schema = match schema {
+    let schema = match kept_schema(schema) {
         Some(s) => Some(s.clone()),
         None if !examples.is_empty() => Some(infer_schema(examples)),
         None => None,
@@ -185,7 +229,7 @@ fn media(schema: Option<&Value>, examples: &[Value]) -> Value {
     if let Some(schema) = schema {
         obj.insert("schema".into(), schema);
     }
-    if let Some(example) = examples.first() {
+    if let Some(example) = first_example(examples) {
         obj.insert("example".into(), example.clone());
     }
     Value::Object(obj)
@@ -246,6 +290,19 @@ fn response_object(response: &DraftResponse) -> Value {
 }
 
 fn operation_object(op: &DraftOperation, id: &str, warnings: &mut Vec<DraftWarning>) -> Value {
+    if has_too_deep(op) {
+        let target = op.target();
+        warnings.push(
+            DraftWarning::new(
+                "too_deep",
+                format!(
+                    "{target}: an example nested deeper than {MAX_EXAMPLE_DEPTH} levels or a schema \
+                     deeper than {MAX_SCHEMA_DEPTH} levels was left out"
+                ),
+            )
+            .for_operation(target),
+        );
+    }
     let mut obj = Map::new();
     obj.insert("operationId".into(), json!(id));
     if let Some(s) = &op.summary {
@@ -418,6 +475,12 @@ pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> 
         return Err(vec![DraftIssue::new(
             "/openapi",
             "the draft must be an OpenAPI 3.x document (a JSON object)",
+        )]);
+    }
+    if json_depth(doc) > MAX_DRAFT_DEPTH {
+        return Err(vec![DraftIssue::new(
+            "/",
+            format!("the draft is nested deeper than {MAX_DRAFT_DEPTH} levels"),
         )]);
     }
     let mut issues = Vec::new();

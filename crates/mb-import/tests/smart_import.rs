@@ -669,3 +669,245 @@ fn diff_bundles_added_removed_changed() {
     assert_eq!(diff.changed, vec!["GET /pets/{petId}"]);
     assert_eq!(diff_bundles(&draft, &draft), Default::default());
 }
+
+/// A HAR file with one JSON exchange per `(method, url, response body)`.
+fn har(entries: &[(&str, String, String)]) -> Vec<u8> {
+    let entries: Vec<Value> = entries
+        .iter()
+        .map(|(method, url, body)| {
+            json!({
+                "startedDateTime": "2026-10-01T10:00:00.000Z",
+                "time": 1,
+                "request": {"method": method, "url": url, "httpVersion": "HTTP/1.1",
+                            "headers": [], "queryString": [], "cookies": [],
+                            "headersSize": -1, "bodySize": 0},
+                "response": {"status": 200, "statusText": "OK", "httpVersion": "HTTP/1.1",
+                             "headers": [{"name": "Content-Type", "value": "application/json"}],
+                             "cookies": [],
+                             "content": {"size": body.len(), "mimeType": "application/json",
+                                         "text": body},
+                             "redirectURL": "", "headersSize": -1, "bodySize": body.len()},
+                "cache": {}, "timings": {"send": 0, "wait": 1, "receive": 0}
+            })
+        })
+        .collect();
+    serde_json::to_vec(&json!({"log": {"version": "1.2", "creator": {"name": "t", "version": "1"},
+                                       "entries": entries}}))
+    .unwrap()
+}
+
+/// `{"a": {"a": … 1 …}}`, `levels` objects deep.
+fn nested(levels: usize) -> Value {
+    let mut v = json!(1);
+    for _ in 0..levels {
+        v = json!({ "a": v });
+    }
+    v
+}
+
+/// Runs `fut` on a current-thread runtime next to a task ticking every
+/// millisecond; returns the longest the ticker went unpolled and the output.
+fn longest_stall<F: std::future::Future>(fut: F) -> (Duration, F::Output) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let worst = Arc::new(std::sync::Mutex::new(Duration::ZERO));
+        let ticker = tokio::spawn({
+            let worst = worst.clone();
+            async move {
+                let mut last = std::time::Instant::now();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    let gap = last.elapsed();
+                    let mut w = worst.lock().unwrap();
+                    *w = (*w).max(gap);
+                    last = std::time::Instant::now();
+                }
+            }
+        });
+        // Let the ticker start before the work does.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let out = fut.await;
+        // Let the ticker see the gap a blocking stretch left behind.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        ticker.abort();
+        let w = *worst.lock().unwrap();
+        (w, out)
+    })
+}
+
+/// The longest stall the async runtime may see while an import runs.
+const MAX_STALL: Duration = Duration::from_millis(100);
+
+#[test]
+fn large_html_extraction_does_not_block_the_runtime() {
+    let mut html = String::from("<!doctype html><html><head><title>Big</title></head><body>");
+    while html.len() < 8 * 1024 * 1024 {
+        html.push_str("<h2>GET /things/{id}</h2><p>Returns the thing with the given id, as JSON.</p><table><tr><td>id</td><td>integer</td></tr></table>\n");
+    }
+    html.push_str("</body></html>");
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Html,
+        name: Some("big.html".into()),
+        bytes: html.into_bytes(),
+    };
+    // A budget too small for any chunk: only extraction and chunking run.
+    let provider = Arc::new(ScriptedProvider::new(vec![]));
+    let opts = ImportOptions {
+        max_tokens: 1,
+        ..ImportOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let (stall, result) = longest_stall(async {
+        run_import(input, Some(&llm(provider, 1000)), &opts, &NoopObserver).await
+    });
+    assert!(matches!(result, Err(SmartError::NoOperations(_))), "{result:?}");
+    assert!(
+        stall < MAX_STALL,
+        "the runtime stalled for {stall:?} of {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn large_har_assembly_does_not_block_the_runtime() {
+    let entries: Vec<(&str, String, String)> = (0..1500)
+        .map(|i| {
+            (
+                "GET",
+                format!("https://api.example.com/r{i}/items?page=1"),
+                json!({"id": i, "name": format!("item {i}"), "tags": ["a", "b"],
+                       "owner": {"id": i, "email": "a@example.com"}})
+                .to_string(),
+            )
+        })
+        .collect();
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Har,
+        name: None,
+        bytes: har(&entries),
+    };
+    let started = std::time::Instant::now();
+    let (stall, result) = longest_stall(async {
+        run_import(input, None, &ImportOptions::default(), &NoopObserver).await
+    });
+    assert!(result.is_ok(), "{:?}", result.err());
+    assert!(
+        stall < MAX_STALL,
+        "the runtime stalled for {stall:?} of {:?}",
+        started.elapsed()
+    );
+}
+
+/// Every stored form of a draft parses back: the source, the bundle and the
+/// metadata.
+fn assert_round_trips(source: &[u8], bundle: &mb_mcm::Bundle, meta: &DraftMeta) {
+    let doc: Value = serde_json::from_slice(source).expect("the source parses back");
+    assert!(doc.is_object());
+    let bundle_json = serde_json::to_vec(bundle).unwrap();
+    let back: mb_mcm::Bundle =
+        serde_json::from_slice(&bundle_json).expect("the bundle parses back");
+    assert_eq!(&back, bundle);
+    let meta_json = serde_json::to_vec(meta).unwrap();
+    serde_json::from_slice::<DraftMeta>(&meta_json).expect("the meta parses back");
+}
+
+#[tokio::test]
+async fn deeply_nested_har_example_round_trips() {
+    let body = nested(120).to_string();
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Har,
+        name: None,
+        bytes: har(&[
+            ("GET", "https://api.example.com/deep".into(), body),
+            ("GET", "https://api.example.com/flat".into(), json!({"id": 1}).to_string()),
+        ]),
+    };
+    let draft = run_import(input, None, &ImportOptions::default(), &NoopObserver)
+        .await
+        .unwrap();
+    assert_round_trips(&draft.source, &draft.bundle, &draft.meta);
+    assert_eq!(draft.bundle.operations.len(), 2);
+    assert!(codes(&draft.meta).contains(&"too_deep"), "{:?}", codes(&draft.meta));
+}
+
+#[test]
+fn deeply_nested_llm_schema_and_examples_round_trip() {
+    let mut o = op("POST", "/deep");
+    o.request = Some(mb_import::smart::model::DraftBody {
+        content_type: "application/json".into(),
+        schema: None,
+        examples: vec![nested(120)],
+    });
+    o.responses[0].schema = Some(nested(120));
+    o.responses[0].examples = vec![nested(120)];
+    o.parameters.push(DraftParam {
+        name: "q".into(),
+        location: ParamLocation::Query,
+        required: false,
+        description: None,
+        schema: Some(nested(120)),
+        examples: vec![nested(120)],
+    });
+    let (doc, _ids, warnings) = assemble_openapi("Deep", &[], &[o]);
+    let (source, bundle) = compile_draft(&doc).unwrap();
+    assert_round_trips(&source, &bundle, &meta_for(&[]));
+    assert!(
+        warnings.iter().any(|w| w.code == "too_deep"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn compile_draft_rejects_documents_too_deep_to_store() {
+    let doc = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Deep", "version": "1"},
+        "paths": {"/deep": {"get": {"responses": {"200": {
+            "description": "OK",
+            "content": {"application/json": {"example": nested(115)}}
+        }}}}}
+    });
+    let issues = compile_draft(&doc).unwrap_err();
+    assert!(
+        issues.iter().any(|i| i.message.contains("nested")),
+        "{issues:?}"
+    );
+}
+
+#[tokio::test]
+async fn url_import_redacts_query_values() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/docs/api"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(fixture("smart/petstore.md"), "text/markdown; charset=utf-8"),
+        )
+        .mount(&server)
+        .await;
+    let url = format!(
+        "{}/docs/api?X-Amz-Signature=s3cret&expires=99#token=t0ken",
+        server.uri()
+    );
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(pets_answer())]));
+    let draft = run_import(
+        ImportInput::Url(url),
+        Some(&llm(provider.clone(), 1000)),
+        &loopback_options(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap();
+    let expected = format!(
+        "{}/docs/api?X-Amz-Signature=REDACTED&expires=REDACTED",
+        server.uri()
+    );
+    assert_eq!(draft.meta.source_url.as_deref(), Some(expected.as_str()));
+    assert_eq!(draft.meta.source_name.as_deref(), Some(expected.as_str()));
+    let prompts = format!("{:?}", provider.requests());
+    assert!(!prompts.contains("s3cret"), "the prompt carries the secret");
+    assert!(!prompts.contains("t0ken"), "the prompt carries the fragment");
+}
