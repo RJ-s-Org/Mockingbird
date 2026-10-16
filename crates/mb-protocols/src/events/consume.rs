@@ -128,9 +128,12 @@ impl ChannelInner {
     ) -> Option<Value> {
         let started = Instant::now();
         let bytes = msg.payload.len();
+        // Recorded like HTTP headers: credential-like names (and the mock's
+        // data-plane key header) are left out.
         let headers: Map<String, Value> = msg
             .headers
             .iter()
+            .filter(|(k, _)| crate::call::is_recordable_header(&self.rt, k))
             .map(|(k, v)| (k.clone(), Value::String(v.clone())))
             .collect();
         let key = msg

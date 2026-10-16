@@ -302,6 +302,53 @@ async fn consumed_message_validated_recorded_and_replied() {
     assert_eq!(h.channels.activity()["cancelOrder"].received, 1);
 }
 
+/// Consumed messages are recorded without credential-like headers, as on
+/// the HTTP path; the reply still carries the correlation headers.
+#[tokio::test]
+async fn consumed_message_headers_are_redacted_in_the_record() {
+    let bundle = orders();
+    let binding = cancel_binding(&bundle);
+    let h = runtime_with(bundle, EventSetup::default());
+    settle().await;
+
+    h.broker.inject(
+        &binding,
+        incoming(
+            br#"{"orderId":"o9","reason":"x"}"#,
+            &[
+                ("correlation_id", "c9"),
+                ("Authorization", "Bearer secret-token"),
+                ("x-api-key", "mb_key"),
+                ("apiKey", "k2"),
+                ("cookie", "sid=1"),
+                ("x-session-token", "t"),
+                ("db_password", "p"),
+                ("x-trace", "keep-me"),
+            ],
+        ),
+    );
+    h.broker.wait_published(1, Duration::from_secs(5)).await;
+    let records = h.records.wait(2, Duration::from_secs(5)).await;
+    let received = records.iter().find(|r| r.method == "RECEIVE").unwrap();
+    let headers = received.request["headers"].as_object().unwrap();
+    assert_eq!(headers["correlation_id"], "c9");
+    assert_eq!(headers["x-trace"], "keep-me");
+    for secret in [
+        "Authorization",
+        "x-api-key",
+        "apiKey",
+        "cookie",
+        "x-session-token",
+        "db_password",
+    ] {
+        assert!(!headers.contains_key(secret), "{secret} in {headers:?}");
+    }
+    let text = received.request.to_string();
+    for value in ["secret-token", "mb_key", "k2", "sid=1"] {
+        assert!(!text.contains(value), "{value} in {text}");
+    }
+}
+
 #[tokio::test]
 async fn poison_message_recorded_not_crash() {
     let bundle = orders();

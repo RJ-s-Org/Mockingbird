@@ -655,6 +655,19 @@ fn safe_headers(rt: &MockRuntime, headers: &HeaderMap, keep_overrides: bool) -> 
         .collect()
 }
 
+/// Whether a header named `name` (any case) may be kept in a request
+/// record: not credential-like (see [`is_sensitive`]) and not one of the
+/// mock's credential headers. Used for headers outside a `HeaderMap`
+/// (consumed broker messages).
+#[cfg_attr(not(feature = "events"), allow(dead_code))]
+pub(crate) fn is_recordable_header(rt: &MockRuntime, name: &str) -> bool {
+    !is_sensitive(name)
+        && !rt
+            .credential_names()
+            .headers
+            .contains(&name.to_ascii_lowercase())
+}
+
 /// Headers forwarded to the prompt.
 pub(crate) fn forwarded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<String, Value> {
     safe_headers(rt, headers, false)
