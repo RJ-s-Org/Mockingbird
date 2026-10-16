@@ -14,12 +14,13 @@ fn fixture() -> PathBuf {
 
 fn args(contracts: Vec<PathBuf>) -> ServeArgs {
     ServeArgs {
-        host: "127.0.0.1".parse().unwrap(),
-        port: 0,
+        host: Some("127.0.0.1".parse().unwrap()),
+        port: Some(0),
         insecure_no_auth: false,
         offline: false,
-        llm_timeout: "3s".parse().unwrap(),
+        llm_timeout: Some("3s".parse().unwrap()),
         contracts,
+        ..ServeArgs::default()
     }
 }
 
@@ -65,7 +66,10 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
         .mount(&mock)
         .await;
 
-    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri()))).unwrap();
+    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri())))
+        .await
+        .unwrap()
+        .data;
     let base = serve(app).await;
     let http = reqwest::Client::new();
 
@@ -106,7 +110,10 @@ async fn e2e_llm_down_falls_back() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&mock)
         .await;
-    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri()))).unwrap();
+    let app = build_app(&args(vec![fixture()]), Some(llm(mock.uri())))
+        .await
+        .unwrap()
+        .data;
     let base = serve(app).await;
 
     let r = reqwest::get(format!("{base}/orders/x")).await.unwrap();
@@ -130,7 +137,7 @@ async fn multiple_contracts_are_prefixed() {
     std::fs::copy(fixture(), &b).unwrap();
     let mut args = args(vec![a, b]);
     args.offline = true;
-    let base = serve(build_app(&args, None).unwrap()).await;
+    let base = serve(build_app(&args, None).await.unwrap().data).await;
 
     for p in ["/a/orders", "/b/orders"] {
         let r = reqwest::get(format!("{base}{p}")).await.unwrap();
@@ -150,7 +157,7 @@ async fn health_endpoint_is_reserved_and_outside_mock_prefixes() {
     for contracts in [vec![fixture()], vec![a, b]] {
         let mut args = args(contracts);
         args.offline = true;
-        let base = serve(build_app(&args, None).unwrap()).await;
+        let base = serve(build_app(&args, None).await.unwrap().data).await;
         let r = reqwest::get(format!("{base}/__mockingbird/healthz"))
             .await
             .unwrap();
@@ -195,4 +202,270 @@ fn validate_prints_operations() {
         .success()
         .stdout(predicates::str::contains("createOrder"))
         .stdout(predicates::str::contains("getOrder"));
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Kills the server process when dropped.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn serve_binds_data_and_admin_ports() {
+    let (port, admin_port) = (free_port(), free_port());
+    let _child = Child(
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+            .env_remove("MB_LLM_API_KEY")
+            .args(["serve", "--offline", "--port"])
+            .arg(port.to_string())
+            .arg("--admin-port")
+            .arg(admin_port.to_string())
+            .arg(fixture())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let data = format!("http://127.0.0.1:{port}/orders");
+    while reqwest::get(&data).await.is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(reqwest::get(&data).await.unwrap().status(), 200);
+    for p in ["/healthz", "/api/v1/mocks"] {
+        let r = reqwest::get(format!("http://127.0.0.1:{admin_port}{p}"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{p}");
+    }
+}
+
+/// Waits until `GET url` answers JSON satisfying `ok`, or fails after 5s.
+async fn wait_for_json(url: &str, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let body: Value = reqwest::get(url).await.unwrap().json().await.unwrap();
+        if ok(&body) {
+            return body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "GET {url}: still {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Breaking a profile a serving mock uses keeps the mock serving its
+/// previous version; the API warns about it and `/readyz` names the mock.
+#[tokio::test]
+async fn broken_profile_keeps_mock_serving() {
+    let app = build_app(
+        &args(vec![fixture()]),
+        Some(llm("http://127.0.0.1:9".into())),
+    )
+    .await
+    .unwrap();
+    let data = serve(app.data.clone()).await;
+    let admin = serve(app.admin.clone()).await;
+    let http = reqwest::Client::new();
+
+    let profile = json!({"base_url": "http://127.0.0.1:9", "model": "m", "timeout_ms": 500});
+    let r = http
+        .put(format!("{admin}/api/v1/llm-profiles/q"))
+        .json(&profile)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let r = http
+        .post(format!("{admin}/api/v1/mocks"))
+        .json(&json!({"name": "c", "llm_profile": "q"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let r = http
+        .post(format!("{admin}/api/v1/mocks/c/contracts"))
+        .header("content-type", "application/yaml")
+        .body(std::fs::read(fixture()).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while reqwest::get(format!("{data}/c/orders"))
+        .await
+        .unwrap()
+        .status()
+        != 200
+    {
+        assert!(std::time::Instant::now() < deadline, "c never mounted");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut broken = profile.clone();
+    broken["secret_ref"] = json!("env:MB_LLM_E2E_NOT_SET_41C7");
+    let r = http
+        .put(format!("{admin}/api/v1/llm-profiles/q"))
+        .json(&broken)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    let warnings = body["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("\"c\"")),
+        "{body}"
+    );
+
+    let ready = wait_for_json(&format!("{admin}/readyz"), |b| b["status"] == "degraded").await;
+    assert!(
+        ready["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().starts_with("mock c: ")),
+        "{ready}"
+    );
+    assert_eq!(
+        reqwest::get(format!("{data}/c/orders"))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+
+    // Deleting the profile still succeeds, with a warning.
+    let r = http
+        .delete(format!("{admin}/api/v1/llm-profiles/q"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert!(
+        body["warnings"][0].as_str().unwrap().contains("\"c\""),
+        "{body}"
+    );
+    assert_eq!(
+        reqwest::get(format!("{data}/c/orders"))
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}
+
+async fn admin_status(app: &axum::Router, host: Option<&str>) -> (u16, String) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::get("/api/v1/mocks");
+    if let Some(host) = host {
+        req = req.header("host", host);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    (resp.status().as_u16(), ct)
+}
+
+/// On a loopback bind the admin port answers only to loopback host names,
+/// which blocks DNS rebinding.
+#[tokio::test]
+async fn admin_rejects_foreign_host_on_loopback() {
+    let mut a = args(vec![fixture()]);
+    a.offline = true;
+    let app = build_app(&a, None).await.unwrap();
+    for host in [
+        "evil.example",
+        "evil.example:9090",
+        "127.0.0.1.evil.example",
+        "localhost.evil.example:9090",
+        "10.0.0.1:9090",
+    ] {
+        let (status, ct) = admin_status(&app.admin, Some(host)).await;
+        assert_eq!(status, 421, "{host}");
+        assert_eq!(ct, "application/problem+json", "{host}");
+    }
+    for host in [
+        "localhost",
+        "LocalHost:9090",
+        "127.0.0.1",
+        "127.0.0.1:9090",
+        "[::1]",
+        "[::1]:9090",
+    ] {
+        assert_eq!(admin_status(&app.admin, Some(host)).await.0, 200, "{host}");
+    }
+    assert_eq!(admin_status(&app.admin, None).await.0, 200);
+
+    // A non-loopback bind (with --insecure-no-auth) does not check.
+    let mut a = args(vec![fixture()]);
+    a.offline = true;
+    a.host = Some("0.0.0.0".parse().unwrap());
+    a.insecure_no_auth = true;
+    let app = build_app(&a, None).await.unwrap();
+    assert_eq!(admin_status(&app.admin, Some("evil.example")).await.0, 200);
+}
+
+/// Zero-config serving survives a busy default admin port; an explicitly
+/// chosen busy admin port is still fatal.
+#[tokio::test]
+async fn busy_default_admin_port_still_serves_data_plane() {
+    // Hold 9090 (or find it already held by someone else).
+    let _held = std::net::TcpListener::bind("127.0.0.1:9090").ok();
+    let port = free_port();
+    let _child = Child(
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+            .env_remove("MB_LLM_API_KEY")
+            .env_remove("MB_ADMIN_PORT")
+            .args(["serve", "--offline", "--port"])
+            .arg(port.to_string())
+            .arg(fixture())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let data = format!("http://127.0.0.1:{port}/orders");
+    while reqwest::get(&data).await.is_err() {
+        assert!(std::time::Instant::now() < deadline, "server did not start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(reqwest::get(&data).await.unwrap().status(), 200);
+
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = held.local_addr().unwrap().port();
+    bin()
+        .args(["serve", "--offline", "--port"])
+        .arg(free_port().to_string())
+        .arg("--admin-port")
+        .arg(busy.to_string())
+        .arg(fixture())
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!("127.0.0.1:{busy}")));
 }

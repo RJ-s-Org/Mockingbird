@@ -9,26 +9,35 @@ use axum::response::Response;
 use mb_engine::{
     EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator,
 };
+use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_mcm::{Binding, Effect, HttpMethod, Operation, OperationKind, StatusSelector};
-use mb_state::{SessionKey, StoredResource};
-use serde_json::{Map, Number, Value};
+use mb_state::{SessionKey, StateError, StoredResource};
+use serde_json::{Map, Number, Value, json};
+use tokio::time::Instant;
+use tracing::Instrument;
+use tracing::field::Empty;
 
-use super::problem::problem;
+use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
-use crate::MockRuntime;
+use crate::{MockRuntime, RequestRecord, ScenarioRuntime};
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
 const LATENCY_HEADER: &str = "x-mockingbird-latency";
+const SCENARIO_HEADER: &str = "x-mockingbird-scenario";
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const DEFAULT_SESSION: &str = "default";
 const WORKSPACE: &str = "default";
 const MAX_LATENCY: Duration = Duration::from_secs(30);
+const MAX_SESSION_LEN: usize = 128;
 const LIST_CONTEXT_LIMIT: usize = 20;
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
+/// Usage-event source for responses that were not generated (problems).
+const NO_SOURCE: &str = "none";
 
-/// Headers never forwarded to the engine (they may carry credentials).
+/// Headers never forwarded to the engine or recorded (they may carry
+/// credentials).
 const SENSITIVE_HEADERS: [&str; 6] = [
     "authorization",
     "proxy-authorization",
@@ -81,7 +90,87 @@ impl RestState {
     }
 }
 
+/// What serving one call produced, beyond the response itself; feeds the
+/// usage event and the request record.
+struct CallLog {
+    operation_id: Option<String>,
+    session: String,
+    /// Tenancy resolved during admission.
+    tenancy: Option<Tenancy>,
+    /// Whether admission ran (a rejected call has no tenancy to bill).
+    admitted_or_rejected: bool,
+    source: Option<&'static str>,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    /// The response body, kept only when `record` is set.
+    response: Option<Value>,
+    /// The request body as decoded as JSON by `serve`, kept only when
+    /// `record` is set, so the record need not parse it again.
+    request_body: Option<Value>,
+    /// Whether a recorder will receive this call's record.
+    record: bool,
+    /// Injected latency, slept after the call is recorded.
+    delay: Option<Duration>,
+    /// The body media type the matched operation declares (`x-content-type`).
+    declared_body_type: Option<String>,
+}
+
+impl CallLog {
+    fn new(record: bool) -> Self {
+        Self {
+            operation_id: None,
+            session: DEFAULT_SESSION.into(),
+            tenancy: None,
+            admitted_or_rejected: false,
+            source: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            response: None,
+            request_body: None,
+            record,
+            delay: None,
+            declared_body_type: None,
+        }
+    }
+
+    /// A problem response, remembered for the request record.
+    fn problem(&mut self, status: u16, title: &str, detail: impl Into<String>) -> Response {
+        let (code, body) = problem_body(status, title, detail.into());
+        let resp = render(code, &body);
+        if self.record {
+            self.response = Some(body);
+        }
+        resp
+    }
+
+    /// A generated response, remembered for the request record.
+    fn generated(&mut self, generated: GeneratedResponse) -> Response {
+        self.source = Some(generated.source.as_str());
+        self.prompt_tokens = generated.usage.prompt_tokens;
+        self.completion_tokens = generated.usage.completion_tokens;
+        let resp = respond(&generated);
+        if self.record {
+            self.response = generated.body;
+        }
+        resp
+    }
+
+    fn rejected(&mut self, r: Rejection) -> Response {
+        let mut resp = self.problem(r.status, &r.title, r.detail);
+        if let Some(after) = r.retry_after {
+            let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+        }
+        resp
+    }
+}
+
 /// The single fallback handler serving every operation.
+///
+/// Each call runs in a `mock.request` span. Once the response is built it
+/// is reported to the usage sink and the request recorder, and only then is
+/// any injected latency slept.
 pub(crate) async fn handle(
     State(st): State<Arc<RestState>>,
     method: Method,
@@ -90,21 +179,68 @@ pub(crate) async fn handle(
     raw_body: Bytes,
 ) -> Response {
     let rt = &st.rt;
+    let span = tracing::info_span!(
+        "mock.request",
+        mock = %rt.name,
+        operation = Empty,
+        session = Empty,
+        status = Empty,
+        source = Empty,
+    );
+    let started = Instant::now();
+    let mut log = CallLog::new(rt.recorder.is_some());
+    let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
+        .instrument(span.clone())
+        .await;
+    let status = resp.status().as_u16();
+    span.record("status", status);
+    if let Some(source) = log.source {
+        span.record("source", source);
+    }
+    let delay = log.delay;
+    let latency = started.elapsed() + delay.unwrap_or_default();
+    report(rt, &method, &uri, &headers, &raw_body, log, status, latency)
+        .instrument(span.clone())
+        .await;
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).instrument(span).await;
+    }
+    resp
+}
+
+async fn serve(
+    st: &RestState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+    log: &mut CallLog,
+) -> Response {
+    let rt = &st.rt;
     let path = uri.path();
 
     // 1. Route.
-    let found = to_http_method(&method).and_then(|m| st.routes.find(m, path));
+    let found = to_http_method(method).and_then(|m| st.routes.find(m, path));
     let Some((op_id, raw_params)) = found else {
-        return unrouted(&st.routes, &method, path);
+        return unrouted(&st.routes, method, path, log);
     };
+    tracing::Span::current().record("operation", op_id.as_str());
+    log.operation_id = Some(op_id.clone());
     let Some(op) = rt.bundle.operation(&op_id) else {
-        return problem(
+        return log.problem(
             500,
             "Internal Server Error",
             format!("unknown operation {op_id}"),
         );
     };
     let validators = st.inputs.get(&op_id);
+    log.declared_body_type = op
+        .input
+        .body
+        .as_ref()
+        .and_then(|s| s.get("x-content-type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     // 2. Decode and validate.
     let mut errors = Vec::new();
@@ -122,7 +258,7 @@ pub(crate) async fn handle(
             Map::new()
         }
     };
-    let body = match decode_body(op, &raw_body) {
+    let body = match decode_body(op, raw_body) {
         Ok(body) => body,
         Err(e) => {
             errors.push(e);
@@ -145,73 +281,204 @@ pub(crate) async fn handle(
         check(&mut errors, "body", v.body.as_ref(), body.as_ref());
     }
     if !errors.is_empty() {
-        return invalid_input(rt, op, &errors);
+        return invalid_input(rt, op, &errors, log);
     }
 
-    // 3. Overrides.
-    let overrides = match Overrides::parse(&headers, rt.header_overrides) {
-        Ok(o) => o,
-        Err(detail) => return problem(400, "Invalid override", detail),
+    // 3. Admission.
+    let call_info = CallInfo {
+        mock: &rt.name,
+        operation_id: &op.id,
+        headers,
     };
+    log.admitted_or_rejected = true;
+    let tenancy = match rt.ext.tenants.resolve(&call_info).await {
+        Ok(t) => t,
+        Err(r) => return log.rejected(r),
+    };
+    let admitted = rt.ext.quota.admit(&tenancy, &call_info).await;
+    log.tenancy = Some(tenancy);
+    if let Err(r) = admitted {
+        return log.rejected(r);
+    }
 
-    // 4. State read.
+    // 4. Overrides and scenario.
+    let overrides = match Overrides::parse(headers, rt.header_overrides) {
+        Ok(o) => o,
+        Err(detail) => return log.problem(400, "Invalid override", detail),
+    };
+    tracing::Span::current().record("session", overrides.session.as_str());
+    log.session = overrides.session.clone();
+    let scenario = match overrides.scenario.as_deref() {
+        None => None,
+        Some(name) => match rt.scenarios.get(name) {
+            None => {
+                return log.problem(
+                    400,
+                    "Unknown scenario",
+                    format!("mock {} has no scenario {name:?}", rt.name),
+                );
+            }
+            Some(s) => s.applies_to(&op.id).then_some(s),
+        },
+    };
+    // A scenario's status applies only where the contract declares it; the
+    // header override is used as given (an undeclared one is a 400).
+    let scenario_status = scenario
+        .and_then(|s| s.status)
+        .filter(|code| op.output_for_status(*code).is_some());
+    let forced_status = overrides.status.or(scenario_status);
+    let delay = overrides
+        .latency
+        .or_else(|| scenario.and_then(|s| s.latency))
+        .map(|d| d.min(MAX_LATENCY));
+
+    // 5. State read.
     let session = SessionKey {
         workspace: WORKSPACE.into(),
         mock: rt.name.clone(),
         session: overrides.session,
     };
+    let mut state = StateAccess::new(rt);
     let resource_type = op.resource_type.as_deref();
     let target_id = target_id(op, &path_params);
     let target = match (resource_type, &target_id) {
-        (Some(t), Some(id)) => rt.state.get(&session, t, id).await,
+        (Some(t), Some(id)) => state.get(&session, t, id).await,
         _ => None,
     };
-    let related = related(rt, &session, op, target_id.is_some(), &query, body.as_ref()).await;
+    let related = related(
+        &mut state,
+        &session,
+        op,
+        target_id.is_some(),
+        &query,
+        body.as_ref(),
+    )
+    .await;
 
-    // 5. Generate.
+    // 6. Generate.
     let call = OperationCall {
         operation_id: op.id.clone(),
         path_params,
         query,
-        headers: forwarded_headers(&headers),
+        headers: forwarded_headers(headers),
         body,
     };
     let ctx = GenerationContext {
         related: &related,
         target: target.as_ref(),
-        forced_status: overrides.status,
+        forced_status,
+        scenario: scenario.map(|s: &ScenarioRuntime| &s.spec),
     };
     let generated = match rt.engine.generate(&rt.bundle, op, &call, ctx).await {
         Ok(g) => g,
         Err(EngineError::UndeclaredStatus(code)) => {
-            return problem(
+            return log.problem(
                 400,
                 "Undeclared status override",
                 format!("operation {} declares no response for status {code}", op.id),
             );
         }
-        Err(e) => return problem(500, "Generation failed", e.to_string()),
+        Err(e) => return log.problem(500, "Generation failed", e.to_string()),
     };
 
-    // 6. State write.
+    // 7. State write.
     if (200..300).contains(&generated.status)
         && let Some(t) = resource_type
     {
-        write_state(rt, &session, op, t, target_id, &generated, call.body).await;
+        write_state(
+            &mut state,
+            &session,
+            op,
+            t,
+            target_id,
+            &generated,
+            call.body.as_ref(),
+        )
+        .await;
+    }
+    state.touch(&session).await;
+    // Kept for the record only when `serve` decoded it as JSON.
+    if log.record
+        && !matches!(
+            log.declared_body_type.as_deref(),
+            Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)
+        )
+    {
+        log.request_body = call.body;
     }
 
-    // 7. Respond.
-    if let Some(latency) = overrides.latency {
-        tokio::time::sleep(latency).await;
+    // 8. Respond (the handler sleeps `delay` after recording).
+    log.delay = delay;
+    log.generated(generated)
+}
+
+/// Report a served call to the usage sink and the request recorder.
+#[allow(clippy::too_many_arguments)]
+async fn report(
+    rt: &MockRuntime,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+    log: CallLog,
+    status: u16,
+    latency: Duration,
+) {
+    let operation_id = log.operation_id.clone().unwrap_or_default();
+    // Calls that never reached admission are still attributed to a tenant.
+    let tenancy = match (&log.tenancy, log.admitted_or_rejected) {
+        (Some(t), _) => Some(t.clone()),
+        (None, true) => None,
+        (None, false) => {
+            let call_info = CallInfo {
+                mock: &rt.name,
+                operation_id: &operation_id,
+                headers,
+            };
+            rt.ext.tenants.resolve(&call_info).await.ok()
+        }
+    };
+    if let Some(tenancy) = tenancy {
+        rt.ext.usage.record(&UsageEvent {
+            tenancy,
+            mock: rt.name.clone(),
+            operation_id: operation_id.clone(),
+            status,
+            source: log.source.unwrap_or(NO_SOURCE).to_string(),
+            latency,
+            prompt_tokens: log.prompt_tokens,
+            completion_tokens: log.completion_tokens,
+        });
     }
-    respond(generated)
+    if let Some(recorder) = &rt.recorder {
+        let media = media_type(headers).or(log.declared_body_type);
+        recorder.record(RequestRecord {
+            mock: rt.name.clone(),
+            operation_id: log.operation_id,
+            session: log.session,
+            method: method.as_str().to_string(),
+            path: uri.path().to_string(),
+            status,
+            source: log.source.map(str::to_string),
+            latency,
+            prompt_tokens: log.prompt_tokens,
+            completion_tokens: log.completion_tokens,
+            request: json!({
+                "query": recorded_query(uri),
+                "headers": recorded_headers(headers),
+                "body": request_body_record(raw_body, media.as_deref(), log.request_body),
+            }),
+            request_body_bytes: Some(raw_body.len()),
+            response: log.response,
+        });
+    }
 }
 
 /// 404 when no operation has this path, 405 when only the method differs.
-fn unrouted(routes: &RouteTable, method: &Method, path: &str) -> Response {
+fn unrouted(routes: &RouteTable, method: &Method, path: &str, log: &mut CallLog) -> Response {
     let allowed = routes.allowed(path);
     if allowed.is_empty() {
-        return problem(
+        return log.problem(
             404,
             "Not Found",
             format!("no operation matches {method} {path}"),
@@ -222,7 +489,7 @@ fn unrouted(routes: &RouteTable, method: &Method, path: &str) -> Response {
         .map(|m| method_name(*m))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut resp = problem(
+    let mut resp = log.problem(
         405,
         "Method Not Allowed",
         format!("{method} is not allowed on {path}"),
@@ -345,7 +612,7 @@ fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
         };
     }
     if content_type == Some(FORM_CONTENT_TYPE) {
-        return serde_urlencoded::from_bytes::<Vec<(String, String)>>(raw)
+        return form_pairs(raw)
             .map(|pairs| Some(Value::Object(coerce_params(group(pairs), schema))))
             .map_err(|e| format!("body: not valid form data: {e}"));
     }
@@ -371,7 +638,12 @@ fn check(
 
 /// The contract's 400, 422 or `default` error shape if it declares one, else
 /// problem+json 400. Never calls the LLM.
-fn invalid_input(rt: &MockRuntime, op: &Operation, errors: &[String]) -> Response {
+fn invalid_input(
+    rt: &MockRuntime,
+    op: &Operation,
+    errors: &[String],
+    log: &mut CallLog,
+) -> Response {
     let declared = [
         StatusSelector::Code(400),
         StatusSelector::Code(422),
@@ -389,7 +661,7 @@ fn invalid_input(rt: &MockRuntime, op: &Operation, errors: &[String]) -> Respons
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            respond(rt.engine.fallback(
+            log.generated(rt.engine.fallback(
                 &rt.bundle,
                 op,
                 variant,
@@ -398,7 +670,7 @@ fn invalid_input(rt: &MockRuntime, op: &Operation, errors: &[String]) -> Respons
                 &GenerationContext::default(),
             ))
         }
-        None => problem(400, "Invalid request", errors.join("; ")),
+        None => log.problem(400, "Invalid request", errors.join("; ")),
     }
 }
 
@@ -406,6 +678,7 @@ struct Overrides {
     session: String,
     status: Option<u16>,
     latency: Option<Duration>,
+    scenario: Option<String>,
 }
 
 impl Overrides {
@@ -415,13 +688,19 @@ impl Overrides {
             session: DEFAULT_SESSION.into(),
             status: None,
             latency: None,
+            scenario: None,
         };
         if !enabled {
             return Ok(out);
         }
-        if let Some(s) = header_text(headers, SESSION_HEADER)?
-            && !s.is_empty()
-        {
+        // An empty value means the default session.
+        if let Some(s) = header_text(headers, SESSION_HEADER)?.filter(|s| !s.is_empty()) {
+            if !is_session_id(s) {
+                return Err(format!(
+                    "X-Mockingbird-Session must be 1-{MAX_SESSION_LEN} characters of \
+                     [A-Za-z0-9._-], got {s:?}"
+                ));
+            }
             out.session = s.to_string();
         }
         if let Some(s) = header_text(headers, STATUS_HEADER)? {
@@ -439,8 +718,17 @@ impl Overrides {
                 .map_err(|e| format!("X-Mockingbird-Latency must be a duration like 150ms: {e}"))?;
             out.latency = Some(latency.min(MAX_LATENCY));
         }
+        out.scenario = header_text(headers, SCENARIO_HEADER)?.map(str::to_string);
         Ok(out)
     }
+}
+
+/// 1-128 characters of `[A-Za-z0-9._-]`. (An empty header is the default
+/// session and never reaches this check.)
+fn is_session_id(s: &str) -> bool {
+    (1..=MAX_SESSION_LEN).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, String> {
@@ -496,10 +784,120 @@ fn reference_prefix(field: &str) -> Option<&str> {
         .filter(|p| !p.is_empty())
 }
 
+/// State-store access for one call. The first failing call marks the mock
+/// degraded and makes the rest of the call stateless; a successful call
+/// clears the mark. While degraded, [`crate::StateHealth`] lets one call per
+/// retry interval try the store; the rest skip it entirely. The breaker is
+/// consulted lazily, on the first actual store call, so a call that never
+/// touches the store does not use up the retry.
+struct StateAccess<'a> {
+    rt: &'a MockRuntime,
+    gate: Gate,
+    /// A read succeeded, so the session needs a [`StateAccess::touch`].
+    read: bool,
+    /// A write succeeded; writes refresh the session themselves.
+    wrote: bool,
+}
+
+/// Whether this call may use the store.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// No store call yet; the breaker has not been asked.
+    Unasked,
+    Open,
+    /// Held off by the breaker, or a store call failed.
+    Closed,
+}
+
+impl<'a> StateAccess<'a> {
+    fn new(rt: &'a MockRuntime) -> Self {
+        Self {
+            rt,
+            gate: Gate::Unasked,
+            read: false,
+            wrote: false,
+        }
+    }
+
+    /// Keeps the session alive once per call: reads do not refresh it, so a
+    /// call that only read touches it here. A no-op when nothing was read,
+    /// when a write already refreshed it, or when the store is unavailable.
+    async fn touch(&mut self, s: &SessionKey) {
+        if self.read && !self.wrote && self.gate == Gate::Open {
+            let r = self.rt.state.touch(s).await;
+            self.settle(r);
+        }
+    }
+
+    /// Whether the next store call may run, asking the breaker on first use.
+    fn open(&mut self) -> bool {
+        if self.gate == Gate::Unasked {
+            self.gate = if self.rt.state_health.try_acquire() {
+                Gate::Open
+            } else {
+                Gate::Closed
+            };
+        }
+        self.gate == Gate::Open
+    }
+
+    /// `None` when the store is unavailable for this call.
+    fn settle<T>(&mut self, result: Result<T, StateError>) -> Option<T> {
+        match result {
+            Ok(v) => {
+                self.rt.state_health.record_success();
+                Some(v)
+            }
+            Err(e) => {
+                tracing::warn!(mock = %self.rt.name, error = %e, "state store failed; serving statelessly");
+                self.rt.state_health.record_failure();
+                metrics::counter!("mb_state_errors_total", "mock" => self.rt.name.clone())
+                    .increment(1);
+                self.gate = Gate::Closed;
+                None
+            }
+        }
+    }
+
+    async fn get(&mut self, s: &SessionKey, t: &str, id: &str) -> Option<StoredResource> {
+        if !self.open() {
+            return None;
+        }
+        let r = self.rt.state.get(s, t, id).await;
+        let found = self.settle(r);
+        self.read |= found.is_some();
+        found.flatten()
+    }
+
+    async fn list(&mut self, s: &SessionKey, t: &str, limit: usize) -> Vec<StoredResource> {
+        if !self.open() {
+            return Vec::new();
+        }
+        let r = self.rt.state.list(s, t, limit).await;
+        let found = self.settle(r);
+        self.read |= found.is_some();
+        found.unwrap_or_default()
+    }
+
+    async fn upsert(&mut self, s: &SessionKey, r: StoredResource) {
+        if self.open() {
+            let r = self.rt.state.upsert(s, r).await;
+            self.wrote |= self.settle(r).is_some();
+        }
+    }
+
+    async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) {
+        if self.open() {
+            let r = self.rt.state.delete(s, t, id).await;
+            self.wrote |= self.settle(r).is_some();
+        }
+    }
+}
+
 /// Resources the response should stay consistent with: recent items for a
 /// list query, plus anything referenced by `<x>Id` fields.
 async fn related(
-    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
     has_target: bool,
@@ -511,7 +909,7 @@ async fn related(
         && !has_target
         && let Some(t) = op.resource_type.as_deref()
     {
-        out = rt.state.list(session, t, LIST_CONTEXT_LIMIT).await;
+        out = state.list(session, t, LIST_CONTEXT_LIMIT).await;
     }
     let body_fields = body.and_then(Value::as_object).into_iter().flatten();
     for (field, value) in query.iter().chain(body_fields) {
@@ -519,7 +917,7 @@ async fn related(
             continue;
         };
         for t in [format!("{prefix}s"), prefix.to_string()] {
-            if let Some(hit) = rt.state.get(session, &t, id).await {
+            if let Some(hit) = state.get(session, &t, id).await {
                 if !out
                     .iter()
                     .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
@@ -534,15 +932,15 @@ async fn related(
 }
 
 async fn write_state(
-    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
     resource_type: &str,
     target_id: Option<String>,
     generated: &GeneratedResponse,
-    request_body: Option<Value>,
+    request_body: Option<&Value>,
 ) {
-    let data = generated.body.clone().or(request_body);
+    let data = generated.body.clone().or_else(|| request_body.cloned());
     match op.kind {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
@@ -550,51 +948,47 @@ async fn write_state(
             let Some(id) = data.get(field).and_then(id_string) else {
                 return;
             };
-            rt.state
-                .upsert(
-                    session,
-                    StoredResource {
-                        resource_type: resource_type.into(),
-                        id,
-                        data,
-                    },
-                )
-                .await;
+            let resource = StoredResource {
+                resource_type: resource_type.into(),
+                id,
+                data,
+            };
+            state.upsert(session, resource).await;
         }
         OperationKind::Command(Effect::Update) => {
-            if let (Some(id), Some(data)) = (target_id, data) {
-                rt.state
-                    .upsert(
-                        session,
-                        StoredResource {
-                            resource_type: resource_type.into(),
-                            id,
-                            data,
-                        },
-                    )
-                    .await;
-            }
+            let (Some(id), Some(data)) = (target_id, data) else {
+                return;
+            };
+            let resource = StoredResource {
+                resource_type: resource_type.into(),
+                id,
+                data,
+            };
+            state.upsert(session, resource).await;
         }
         OperationKind::Command(Effect::Delete) => {
-            if let Some(id) = target_id {
-                rt.state.delete(session, resource_type, &id).await;
-            }
+            let Some(id) = target_id else { return };
+            state.delete(session, resource_type, &id).await;
         }
         _ => {}
     }
 }
 
-/// Forward non-sensitive, UTF-8 request headers to the prompt.
-fn forwarded_headers(headers: &HeaderMap) -> Map<String, Value> {
+fn is_sensitive(name: &str) -> bool {
+    SENSITIVE_HEADERS.contains(&name)
+        || ["token", "secret", "password", "api-key"]
+            .iter()
+            .any(|s| name.contains(s))
+}
+
+/// Non-sensitive, UTF-8 request headers, optionally keeping
+/// `X-Mockingbird-*` override headers.
+fn safe_headers(headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value> {
     headers
         .iter()
         .filter(|(name, _)| {
             let n = name.as_str();
-            !SENSITIVE_HEADERS.contains(&n)
-                && !n.starts_with("x-mockingbird-")
-                && !["token", "secret", "password", "api-key"]
-                    .iter()
-                    .any(|s| n.contains(s))
+            !is_sensitive(n) && (keep_overrides || !n.starts_with("x-mockingbird-"))
         })
         .filter_map(|(name, v)| {
             Some((
@@ -605,7 +999,90 @@ fn forwarded_headers(headers: &HeaderMap) -> Map<String, Value> {
         .collect()
 }
 
-fn respond(generated: GeneratedResponse) -> Response {
+/// Headers forwarded to the prompt.
+fn forwarded_headers(headers: &HeaderMap) -> Map<String, Value> {
+    safe_headers(headers, false)
+}
+
+/// Headers kept in the request record (overrides included).
+fn recorded_headers(headers: &HeaderMap) -> Map<String, Value> {
+    safe_headers(headers, true)
+}
+
+/// The raw query as recorded: repeated keys become arrays of strings.
+fn recorded_query(uri: &Uri) -> Value {
+    let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
+        .unwrap_or_default();
+    Value::Object(string_params(pairs))
+}
+
+/// `pairs` as an object of strings; repeated keys become arrays of strings.
+fn string_params(pairs: Vec<(String, String)>) -> Map<String, Value> {
+    group(pairs)
+        .into_iter()
+        .map(|(k, mut values)| {
+            let v = if values.len() == 1 {
+                Value::String(values.remove(0))
+            } else {
+                Value::Array(values.into_iter().map(Value::String).collect())
+            };
+            (k, v)
+        })
+        .collect()
+}
+
+/// Decodes an `application/x-www-form-urlencoded` body.
+fn form_pairs(raw: &[u8]) -> Result<Vec<(String, String)>, serde_urlencoded::de::Error> {
+    serde_urlencoded::from_bytes::<Vec<(String, String)>>(raw)
+}
+
+/// The lowercased media type of the request's `Content-Type`, without
+/// parameters.
+fn media_type(headers: &HeaderMap) -> Option<String> {
+    let ct = headers.get(header::CONTENT_TYPE)?.to_str().ok()?;
+    let media = ct.split(';').next().unwrap_or_default().trim();
+    (!media.is_empty()).then(|| media.to_ascii_lowercase())
+}
+
+/// Recorded in place of a multipart body.
+const MULTIPART_OMITTED: &str = "[multipart omitted]";
+/// Recorded in place of a form body that does not decode.
+const FORM_UNDECODABLE: &str = "[undecodable form body omitted]";
+
+/// The request body as recorded, given its media type: a form body as an
+/// object of its fields (so field redaction applies), a multipart body as
+/// [`MULTIPART_OMITTED`], otherwise JSON when it parses, else text, else
+/// null.
+fn recorded_body(raw: &[u8], media_type: Option<&str>) -> Value {
+    if media_type == Some(MULTIPART_CONTENT_TYPE) {
+        return Value::String(MULTIPART_OMITTED.into());
+    }
+    if raw.iter().all(u8::is_ascii_whitespace) {
+        return Value::Null;
+    }
+    if media_type == Some(FORM_CONTENT_TYPE) {
+        return match form_pairs(raw) {
+            Ok(pairs) => Value::Object(string_params(pairs)),
+            Err(_) => Value::String(FORM_UNDECODABLE.into()),
+        };
+    }
+    serde_json::from_slice(raw)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(raw).into_owned()))
+}
+
+/// The request body for the record: the JSON `serve` already decoded
+/// (`decoded`) unless the media type calls for form or multipart handling,
+/// else [`recorded_body`] of the raw bytes.
+fn request_body_record(raw: &[u8], media_type: Option<&str>, decoded: Option<Value>) -> Value {
+    match decoded {
+        Some(body) if !matches!(media_type, Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)) => {
+            body
+        }
+        _ => recorded_body(raw, media_type),
+    }
+}
+
+fn respond(generated: &GeneratedResponse) -> Response {
     let Ok(status) = StatusCode::from_u16(generated.status) else {
         return problem(
             500,
@@ -678,6 +1155,55 @@ mod tests {
         assert_eq!(
             out,
             json!({"n": 3, "x": 1.5, "b": true, "s": "7", "tags": [1, 2], "free": "b"})
+        );
+    }
+
+    fn generated() -> GeneratedResponse {
+        GeneratedResponse {
+            status: 200,
+            content_type: None,
+            body: Some(json!({"id": "o1"})),
+            source: mb_engine::Source::Fallback,
+            usage: Default::default(),
+        }
+    }
+
+    /// Without a recorder the response body is not kept for the record.
+    #[test]
+    fn call_log_keeps_bodies_only_for_a_recorder() {
+        let mut log = CallLog::new(false);
+        let resp = log.generated(generated());
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(log.response.is_none());
+        log.problem(404, "Not Found", "nope");
+        assert!(log.response.is_none());
+
+        let mut log = CallLog::new(true);
+        log.generated(generated());
+        assert_eq!(log.response, Some(json!({"id": "o1"})));
+    }
+
+    /// The record reuses the body `serve` decoded as JSON, but decodes
+    /// form and multipart bodies (and anything not decoded) from the raw
+    /// bytes.
+    #[test]
+    fn recorded_body_reuses_decoded_json() {
+        let decoded = Some(json!({"reused": true}));
+        assert_eq!(
+            request_body_record(br#"{"raw":1}"#, Some("application/json"), decoded.clone()),
+            json!({"reused": true})
+        );
+        assert_eq!(
+            request_body_record(b"a=1", Some(FORM_CONTENT_TYPE), decoded.clone()),
+            json!({"a": "1"})
+        );
+        assert_eq!(
+            request_body_record(b"x", Some(MULTIPART_CONTENT_TYPE), decoded),
+            json!(MULTIPART_OMITTED)
+        );
+        assert_eq!(
+            request_body_record(br#"{"raw":1}"#, None, None),
+            json!({"raw": 1})
         );
     }
 

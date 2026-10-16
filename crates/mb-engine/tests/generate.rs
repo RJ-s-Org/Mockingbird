@@ -66,6 +66,7 @@ fn ctx() -> GenerationContext<'static> {
         related: &[],
         target: None,
         forced_status: None,
+        scenario: None,
     }
 }
 
@@ -188,6 +189,7 @@ async fn forced_status_uses_error_variant() {
             &call("getOrder"),
             GenerationContext {
                 forced_status: Some(404),
+                scenario: None,
                 ..ctx()
             },
         )
@@ -213,6 +215,7 @@ async fn undeclared_forced_status_errors() {
             &call("getOrder"),
             GenerationContext {
                 forced_status: Some(418),
+                scenario: None,
                 ..ctx()
             },
         )
@@ -281,6 +284,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     related: &related,
                     target: Some(&target),
                     forced_status: None,
+                    scenario: None,
                 },
             )
             .await

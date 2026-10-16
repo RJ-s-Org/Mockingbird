@@ -34,13 +34,14 @@ struct Harness {
 fn harness(script: Option<Vec<Result<String, LlmError>>>, header_overrides: bool) -> Harness {
     let provider = script.map(|s| Arc::new(ScriptedProvider::new(s)));
     let dyn_provider = provider.clone().map(|p| p as Arc<dyn Provider>);
-    let rt = Arc::new(MockRuntime {
-        name: "orders".into(),
-        bundle: orders(),
-        engine: Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
-        state: Arc::new(MemoryStore::new(Duration::from_secs(3600))),
-        header_overrides,
-    });
+    let mut rt = MockRuntime::new(
+        "orders",
+        orders(),
+        Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.header_overrides = header_overrides;
+    let rt = Arc::new(rt);
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
         rt,
@@ -133,6 +134,7 @@ async fn sessions_isolate_state() {
         h.rt.state
             .get(&session("a"), "orders", "o1")
             .await
+            .unwrap()
             .is_some()
     );
 
@@ -151,6 +153,7 @@ async fn sessions_isolate_state() {
         h.rt.state
             .get(&session("b"), "orders", "o1")
             .await
+            .unwrap()
             .is_none()
     );
 }
@@ -168,6 +171,7 @@ async fn delete_returns_204_and_removes_state() {
         h.rt.state
             .get(&session("default"), "orders", "o1")
             .await
+            .unwrap()
             .is_some()
     );
 
@@ -181,6 +185,7 @@ async fn delete_returns_204_and_removes_state() {
         h.rt.state
             .get(&session("default"), "orders", "o1")
             .await
+            .unwrap()
             .is_none()
     );
     // Only the create call reached the LLM.
@@ -212,7 +217,8 @@ async fn routes_trailing_slash_query_and_unknown() {
                 data: order("o 1", "c9"),
             },
         )
-        .await;
+        .await
+        .unwrap();
     let resp = send(&h, get("/orders/o%201")).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
@@ -334,13 +340,12 @@ async fn fallback_source_header() {
 /// A runtime for an inline contract, served offline (faker only).
 fn offline_contract(src: &str) -> Harness {
     let bundle = Arc::new(compile(src.as_bytes()).unwrap());
-    let rt = Arc::new(MockRuntime {
-        name: "inline".into(),
+    let rt = Arc::new(MockRuntime::new(
+        "inline",
         bundle,
-        engine: Arc::new(Engine::new(None, EngineConfig::default())),
-        state: Arc::new(MemoryStore::new(Duration::from_secs(3600))),
-        header_overrides: true,
-    });
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ));
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
         rt,

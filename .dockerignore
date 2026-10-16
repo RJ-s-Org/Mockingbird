@@ -1,0 +1,7 @@
+target
+.git
+.github
+.superpowers
+docs
+fixtures
+**/*.rs.bk

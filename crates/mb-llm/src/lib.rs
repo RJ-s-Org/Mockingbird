@@ -1,14 +1,17 @@
 //! LLM provider abstraction and an OpenAI-compatible client.
 
+use std::ops::Add;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
+pub mod fallback;
 pub mod openai;
 #[cfg(feature = "testing")]
 pub mod scripted;
 
+pub use fallback::{FallbackProvider, HopSettings};
 pub use openai::{OpenAiCompatible, OpenAiConfig};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;
@@ -58,6 +61,18 @@ pub struct Usage {
     pub completion_tokens: u32,
 }
 
+impl Add for Usage {
+    type Output = Usage;
+
+    /// Saturating, so a misreporting provider cannot overflow a total.
+    fn add(self, rhs: Usage) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens.saturating_add(rhs.prompt_tokens),
+            completion_tokens: self.completion_tokens.saturating_add(rhs.completion_tokens),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatResponse {
     pub content: String,
@@ -86,4 +101,11 @@ pub enum LlmError {
 pub trait Provider: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// The longest a [`Provider::complete`] call with `request_timeout` may
+    /// take: the request timeout for a single provider; the sum over every
+    /// hop for a [`FallbackProvider`]. Callers bound the call by this.
+    fn total_timeout(&self, request_timeout: Duration) -> Duration {
+        request_timeout
+    }
 }

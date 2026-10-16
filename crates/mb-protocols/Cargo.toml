@@ -24,7 +24,9 @@ http-rest = [
 axum = { workspace = true, optional = true }
 humantime = { workspace = true, optional = true }
 matchit = { workspace = true, optional = true }
+metrics.workspace = true
 mb-engine.workspace = true
+mb-ext.workspace = true
 mb-mcm.workspace = true
 mb-state.workspace = true
 serde_json.workspace = true
@@ -35,6 +37,7 @@ tower-http = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }

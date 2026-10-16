@@ -2,22 +2,27 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use clap::Parser;
-use mockingbird::config::{Cli, Command, LlmEnv, ServeArgs, build_app};
+use mockingbird::client::{self, ClientCommand, ClientError};
+use mockingbird::config::{
+    Cli, Command, LlmEnv, ServeArgs, bind_admin, build_app, missing_env_api_key, resolve_config,
+};
+use mockingbird::telemetry;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    // Kept alive until exit so buffered spans are flushed.
+    let _telemetry = match telemetry::init("mockingbird") {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("warning: telemetry disabled: {e:#}");
+            None
+        }
+    };
     let result = match cli.cmd {
         Command::Serve(args) => serve(args).await,
         Command::Validate { contract } => validate(&contract),
+        Command::Client(cmd) => client(&cli.admin_url, cmd).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -25,6 +30,7 @@ async fn main() -> ExitCode {
             eprintln!("{msg}");
             ExitCode::from(2)
         }
+        Err(Failure::Silent) => ExitCode::from(1),
         Err(Failure::Other(e)) => {
             eprintln!("error: {e:#}");
             ExitCode::from(1)
@@ -34,12 +40,36 @@ async fn main() -> ExitCode {
 
 enum Failure {
     Usage(String),
+    /// Already reported on stderr; exit 1.
+    Silent,
     Other(anyhow::Error),
 }
 
 impl From<anyhow::Error> for Failure {
     fn from(e: anyhow::Error) -> Self {
         Failure::Other(e)
+    }
+}
+
+/// Runs a client subcommand: JSON on stdout, problem details on stderr.
+async fn client(admin_url: &str, cmd: ClientCommand) -> Result<(), Failure> {
+    match client::run(admin_url, cmd).await {
+        Ok(Some(value)) => {
+            let text = serde_json::to_string_pretty(&value).map_err(anyhow::Error::from)?;
+            println!("{text}");
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(ClientError::Api { status, body }) => {
+            let body = match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(problem) => serde_json::to_string_pretty(&problem).unwrap_or(body),
+                Err(_) if body.trim().is_empty() => format!("HTTP {status}"),
+                Err(_) => format!("HTTP {status}: {body}"),
+            };
+            eprintln!("{body}");
+            Err(Failure::Silent)
+        }
+        Err(ClientError::Other(e)) => Err(Failure::Other(e)),
     }
 }
 
@@ -71,22 +101,54 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
 }
 
 async fn serve(args: ServeArgs) -> Result<(), Failure> {
-    args.check_bind().map_err(Failure::Usage)?;
     let llm = LlmEnv::from_env();
-    if !args.offline && llm.api_key.is_none() {
+    let cfg = resolve_config(&args, Some(&llm))?;
+    cfg.server.check_bind().map_err(Failure::Usage)?;
+    if missing_env_api_key(&cfg, args.offline) {
         return Err(Failure::Usage(
             "MB_LLM_API_KEY is not set (use --offline for faker-only mode)".into(),
         ));
     }
-    let app = build_app(&args, Some(llm))?;
-    let addr = SocketAddr::new(args.host, args.port);
-    let listener = tokio::net::TcpListener::bind(addr)
+    let data_addr = SocketAddr::new(cfg.server.host, cfg.server.port);
+    let admin_addr = SocketAddr::new(cfg.server.host, cfg.server.admin_port);
+    let data_listener = tokio::net::TcpListener::bind(data_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("cannot bind {addr}: {e}"))?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(|e| anyhow::anyhow!("cannot bind {data_addr}: {e}"))?;
+    let admin_listener = bind_admin(admin_addr, cfg.server.admin_port_explicit).await?;
+
+    let app = build_app(&args, Some(llm)).await?;
+    match &admin_listener {
+        Some(_) => {
+            tracing::info!("data plane on http://{data_addr}, admin API on http://{admin_addr}")
+        }
+        None => tracing::info!("data plane on http://{data_addr}, no admin API"),
+    }
+
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    });
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
+    let data = axum::serve(data_listener, app.data.clone())
+        .with_graceful_shutdown(stopped(stop_rx.clone()));
+    let admin_router = app.admin.clone();
+    let admin = async move {
+        match admin_listener {
+            Some(listener) => {
+                axum::serve(listener, admin_router)
+                    .with_graceful_shutdown(stopped(stop_rx))
+                    .await
+            }
+            None => Ok(()),
+        }
+    };
+    let (data, admin) = tokio::join!(data, admin);
+    data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
+    admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
+    app.shutdown().await;
     Ok(())
 }
 

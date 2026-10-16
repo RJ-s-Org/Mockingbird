@@ -18,6 +18,11 @@ allow = [
     "CDLA-Permissive-2.0",
     "MIT-0",
 ]
+# notify (required by the plan for --watch) is CC0-1.0, a public-domain
+# dedication; allowed for that crate only rather than globally.
+exceptions = [
+    { allow = ["CC0-1.0"], crate = "notify" },
+]
 
 [bans]
 multiple-versions = "warn"

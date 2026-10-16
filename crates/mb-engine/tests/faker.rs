@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
-use mb_engine::{Faker, SchemaValidator};
+use mb_engine::faker::Costs;
+use mb_engine::{Engine, EngineConfig, Faker, GenerationContext, OperationCall, SchemaValidator};
 use mb_import::compile;
 use mb_mcm::Bundle;
 use proptest::prelude::*;
@@ -339,5 +340,125 @@ fn node_budget_bounds_wide_unsatisfiable_recursion() {
         start.elapsed() < std::time::Duration::from_secs(5),
         "{:?}",
         start.elapsed()
+    );
+}
+
+/// `Expr: oneOf [And, Leaf]` where `And` splits its object across `allOf`:
+/// one member declares the recursive properties, another requires them.
+/// `Leaf` has three required `$ref`s, so a cost that ignores the split
+/// `required` makes the non-terminating `And` look cheaper.
+fn allof_split_expr_schema() -> Value {
+    json!({
+        "$ref": "#/$defs/Expr",
+        "$defs": {
+            "Expr": {"oneOf": [{"$ref": "#/$defs/And"}, {"$ref": "#/$defs/Leaf"}]},
+            "And": {
+                "type": "object",
+                "allOf": [
+                    {"properties": {"l": {"$ref": "#/$defs/Expr"}, "r": {"$ref": "#/$defs/Expr"}}},
+                    {"required": ["l", "r"]}
+                ]
+            },
+            "Leaf": {
+                "type": "object",
+                "required": ["f0", "f1", "f2"],
+                "properties": {
+                    "f0": {"$ref": "#/$defs/S"},
+                    "f1": {"$ref": "#/$defs/S"},
+                    "f2": {"$ref": "#/$defs/S"}
+                }
+            },
+            "S": {"type": "string"}
+        }
+    })
+}
+
+#[test]
+fn allof_split_required_is_costed() {
+    let schema = allof_split_expr_schema();
+    let validator = SchemaValidator::new(&schema).unwrap();
+    for depth in [0usize, 6] {
+        let faker = Faker::new(depth);
+        for seed in 0..30u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let start = std::time::Instant::now();
+            let v = faker.fake(&schema, &mut rng);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_millis(50),
+                "depth {depth} seed {seed}: {elapsed:?}"
+            );
+            assert!(
+                validator.validate(&v).is_ok(),
+                "depth {depth} seed {seed}: {v}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fake_with_costs_matches_fake_with_branch() {
+    let schema = allof_split_expr_schema();
+    let costs = Costs::compute(&schema);
+    let faker = Faker::default();
+    for seed in 0..10u64 {
+        let a = faker.fake_with_branch(&schema, Some(1), &mut StdRng::seed_from_u64(seed));
+        let b = faker.fake_with_costs(&schema, Some(1), &costs, &mut StdRng::seed_from_u64(seed));
+        assert_eq!(a, b, "seed {seed}");
+    }
+}
+
+/// An OpenAPI contract whose response is a linear chain of `n` definitions,
+/// each requiring the next. Every faker draw is cut off by the hard depth
+/// limit, so `Engine::fallback` runs all of its attempts.
+fn chain_contract(n: usize) -> String {
+    let mut schemas = serde_json::Map::new();
+    for i in 0..n {
+        let def = if i + 1 == n {
+            json!({"type": "string"})
+        } else {
+            json!({
+                "type": "object",
+                "required": ["next"],
+                "properties": {"next": {"$ref": format!("#/components/schemas/D{:03}", i + 1)}}
+            })
+        };
+        schemas.insert(format!("D{i:03}"), def);
+    }
+    json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Chain", "version": "1"},
+        "paths": {"/chain": {"get": {
+            "operationId": "getChain",
+            "responses": {"200": {
+                "description": "OK",
+                "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/D000"}
+                }}
+            }}
+        }}},
+        "components": {"schemas": schemas}
+    })
+    .to_string()
+}
+
+#[test]
+fn costs_computed_once_per_response() {
+    let bundle = compile(chain_contract(400).as_bytes()).unwrap();
+    let op = bundle.operation("getChain").unwrap();
+    let variant = op.success_output().unwrap();
+    let engine = Engine::new(None, EngineConfig::default());
+    let call = OperationCall {
+        operation_id: "getChain".into(),
+        ..OperationCall::default()
+    };
+    let ctx = GenerationContext::default();
+    let start = std::time::Instant::now();
+    let out = engine.fallback(&bundle, op, variant, 200, &call, &ctx);
+    let elapsed = start.elapsed();
+    assert!(out.body.is_some());
+    assert!(
+        elapsed < std::time::Duration::from_millis(300),
+        "{elapsed:?}"
     );
 }
