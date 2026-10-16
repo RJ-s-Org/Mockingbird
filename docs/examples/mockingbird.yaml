@@ -6,6 +6,7 @@ server:
   host: 127.0.0.1          # MB_HOST / --host; non-loopback needs insecure_no_auth
   port: 8080               # data plane; MB_PORT / --port
   admin_port: 9090         # Admin API and /healthz, /readyz, /metrics; MB_ADMIN_PORT / --admin-port
+  grpc_port: 50051         # gRPC (h2c), shared by every gRPC mock; MB_GRPC_PORT / --grpc-port
   insecure_no_auth: false  # --insecure-no-auth
   # Secret references an LLM profile may use when it is created or updated
   # through the Admin API (globs, * = any characters). Anything else is a 422.
@@ -43,6 +44,22 @@ observability:
   # these: token also hides access_token, refresh_token (and tokenizer_version).
   redact_fields: [password, token, secret, authorization, apiKey, api_key]
 
+# Protocol settings shared by every mock. Read at startup.
+protocols:
+  graphql:
+    path: /graphql          # GraphQL endpoint below each GraphQL mock's route prefix
+    introspection: true
+    max_depth: 15
+    max_complexity: 1000
+  stream:                   # streamed responses: SSE, GraphQL subscriptions, gRPC streams
+    default_items: 5        # items when the request asks for no count (X-Mockingbird-Stream-Items)
+    max_items: 50
+    item_interval: 0s       # pause between items
+  sse:
+    keepalive: 15s          # interval between keepalive comments
+  grpc:
+    max_message_bytes: 4194304   # largest message decoded or encoded
+
 mocks:
   orders:
     contract: ../../fixtures/openapi/orders-3.0.yaml   # relative to this file
@@ -60,3 +77,9 @@ mocks:
         operations: [createOrder]
       slow:
         latency: 2s
+  events:
+    contract: ../../fixtures/openapi/events-3.1.yaml   # GET /ticks streams server-sent events
+    scenarios:
+      trickle:
+        stream_items: 3              # items per streamed response
+        stream_item_interval: 500ms  # pause between streamed items

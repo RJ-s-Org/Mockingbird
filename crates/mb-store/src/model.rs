@@ -81,6 +81,13 @@ pub struct ScenarioRules {
     pub set: Option<Value>,
     #[serde(default)]
     pub operations: Vec<String>,
+    /// Items per streamed response unless `X-Mockingbird-Stream-Items`
+    /// overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_items: Option<u32>,
+    /// Pause between streamed items, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_item_interval_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

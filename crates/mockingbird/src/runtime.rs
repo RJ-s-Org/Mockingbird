@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwapOption;
-use mb_engine::{Engine, EngineConfig, ScenarioSpec};
+use mb_engine::{Engine, EngineConfig, ScenarioSpec, StreamConfig};
 use mb_ext::{Extensions, Tenancy};
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
-use mb_protocols::{MockRuntime, RequestRecorder, ScenarioRuntime};
+use mb_protocols::{MockRuntime, ProtocolSettings, RequestRecorder, ScenarioRuntime};
 use mb_state::StateStore;
 use mb_store::{ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, Scenario};
 
@@ -29,6 +29,10 @@ pub struct RuntimeDeps {
     /// Profile for mocks that name none. Shared with the config watcher,
     /// which swaps it when a reload changes `llm.default_profile`.
     pub default_profile: DefaultProfile,
+    /// Protocol knobs (the `protocols:` config section).
+    pub protocols: ProtocolSettings,
+    /// Stream limits and pacing handed to every engine.
+    pub stream: StreamConfig,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so
@@ -72,6 +76,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
 
     let mut config = EngineConfig {
         persona: mock.persona.clone(),
+        stream: deps.stream.clone(),
         ..EngineConfig::default()
     };
     let provider = match profile_name(deps, mock)? {
@@ -108,6 +113,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     rt.scenarios = scenarios;
     rt.ext = deps.ext.clone();
     rt.recorder = deps.recorder.clone();
+    rt.protocols = deps.protocols.clone();
     Ok(Some(rt))
 }
 
@@ -254,7 +260,7 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         status: s.rules.status,
         latency: s.rules.latency_ms.map(Duration::from_millis),
         operations: s.rules.operations,
-        stream_items: None,
-        stream_item_interval: None,
+        stream_items: s.rules.stream_items.and_then(|n| usize::try_from(n).ok()),
+        stream_item_interval: s.rules.stream_item_interval_ms.map(Duration::from_millis),
     }
 }

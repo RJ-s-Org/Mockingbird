@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use mockingbird::client::{self, ClientCommand, ClientError};
 use mockingbird::config::{
-    Cli, Command, LlmEnv, ServeArgs, bind_admin, build_app, missing_env_api_key, resolve_config,
+    Cli, Command, LlmEnv, ServeArgs, bind_admin, bind_grpc, build_app, missing_env_api_key,
+    resolve_config,
 };
 use mockingbird::telemetry;
 
@@ -111,6 +112,8 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
         .await
         .map_err(|e| anyhow::anyhow!("cannot bind {data_addr}: {e}"))?;
     let admin_listener = bind_admin(admin_addr, cfg.server.admin_port_explicit).await?;
+    let grpc_addr = SocketAddr::new(cfg.server.host, cfg.server.grpc_port);
+    let grpc_listener = bind_grpc(grpc_addr, cfg.server.grpc_port_explicit).await?;
 
     let app = build_app(&args, Some(llm)).await?;
     match &admin_listener {
@@ -118,6 +121,10 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
             tracing::info!("data plane on http://{data_addr}, admin API on http://{admin_addr}")
         }
         None => tracing::info!("data plane on http://{data_addr}, no admin API"),
+    }
+    match &grpc_listener {
+        Some(_) => tracing::info!("gRPC (h2c) on {grpc_addr}"),
+        None => tracing::info!("no gRPC listener"),
     }
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -131,19 +138,33 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
     let data = axum::serve(data_listener, app.data.clone())
         .with_graceful_shutdown(stopped(stop_rx.clone()));
     let admin_router = app.admin.clone();
+    let admin_stop = stop_rx.clone();
     let admin = async move {
         match admin_listener {
             Some(listener) => {
                 axum::serve(listener, admin_router)
+                    .with_graceful_shutdown(stopped(admin_stop))
+                    .await
+            }
+            None => Ok(()),
+        }
+    };
+    // axum serves HTTP/2 prior knowledge (h2c), which is what gRPC uses.
+    let grpc_router = app.grpc.clone();
+    let grpc = async move {
+        match grpc_listener {
+            Some(listener) => {
+                axum::serve(listener, grpc_router)
                     .with_graceful_shutdown(stopped(stop_rx))
                     .await
             }
             None => Ok(()),
         }
     };
-    let (data, admin) = tokio::join!(data, admin);
+    let (data, admin, grpc) = tokio::join!(data, admin, grpc);
     data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
     admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
+    grpc.map_err(|e| anyhow::anyhow!("gRPC: {e}"))?;
     app.shutdown().await;
     Ok(())
 }

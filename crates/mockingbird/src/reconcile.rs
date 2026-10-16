@@ -284,7 +284,13 @@ async fn validate<'a>(
             {
                 bail!("mock {name:?}, scenario {sname:?}: operation {op:?} is not in the contract");
             }
-            latency_ms(name, sname, s.latency)?;
+            if let Some(items) = s.stream_items
+                && !(1..=10_000).contains(&items)
+            {
+                bail!("mock {name:?}, scenario {sname:?}: stream_items {items} is not 1-10000");
+            }
+            duration_ms(name, sname, "latency", s.latency)?;
+            duration_ms(name, sname, "stream_item_interval", s.stream_item_interval)?;
         }
 
         prepared.push(Prepared {
@@ -406,9 +412,16 @@ async fn apply_mock(
             instructions: s.instructions.clone(),
             rules: ScenarioRules {
                 status: s.status,
-                latency_ms: latency_ms(name, sname, s.latency)?,
+                latency_ms: duration_ms(name, sname, "latency", s.latency)?,
                 set: s.set.clone(),
                 operations: s.operations.clone(),
+                stream_items: s.stream_items,
+                stream_item_interval_ms: duration_ms(
+                    name,
+                    sname,
+                    "stream_item_interval",
+                    s.stream_item_interval,
+                )?,
             },
             source: ResourceSource::File,
         };
@@ -453,15 +466,16 @@ fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
     })
 }
 
-fn latency_ms(
+fn duration_ms(
     mock: &str,
     scenario: &str,
-    latency: Option<std::time::Duration>,
+    field: &str,
+    duration: Option<std::time::Duration>,
 ) -> anyhow::Result<Option<u64>> {
-    latency
+    duration
         .map(|d| {
             u64::try_from(d.as_millis())
-                .map_err(|_| anyhow!("mock {mock:?}, scenario {scenario:?}: latency is too long"))
+                .map_err(|_| anyhow!("mock {mock:?}, scenario {scenario:?}: {field} is too long"))
         })
         .transpose()
 }

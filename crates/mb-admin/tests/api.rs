@@ -698,6 +698,58 @@ async fn scenarios_crud() {
     );
 }
 
+/// The stream settings of a scenario are stored and listed; absent ones are
+/// omitted from the view.
+#[tokio::test]
+async fn scenario_stream_fields_round_trip() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/trickle",
+            json!({ "stream_items": 3, "stream_item_interval_ms": 250 }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()["stream_items"], 3);
+    assert_eq!(r.json()["stream_item_interval_ms"], 250);
+    let list = h.get("/api/v1/mocks/orders/scenarios").await.json();
+    assert_eq!(list[0]["stream_items"], 3);
+    assert_eq!(list[0]["stream_item_interval_ms"], 250);
+    let m = h
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = h.store.list_scenarios(m.id).await.unwrap();
+    assert_eq!(stored[0].rules.stream_items, Some(3));
+    assert_eq!(stored[0].rules.stream_item_interval_ms, Some(250));
+
+    // PUT replaces the whole scenario: absent fields are cleared and omitted.
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/trickle",
+            json!({ "status": 503 }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let view = r.json();
+    assert!(view.get("stream_items").is_none(), "{view}");
+    assert!(view.get("stream_item_interval_ms").is_none(), "{view}");
+
+    h.json(
+        Method::PUT,
+        "/api/v1/mocks/orders/scenarios/trickle",
+        json!({ "stream_items": 0 }),
+    )
+    .await
+    .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 /// With an active contract, a scenario's operations must exist in it; with
 /// none, any operation ids are accepted.
 #[tokio::test]
