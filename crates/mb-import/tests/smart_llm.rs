@@ -394,3 +394,72 @@ async fn summarize_fills_missing_only() {
     assert_eq!(codes(&warnings), vec!["summaries_skipped"]);
     assert!(provider.requests().is_empty());
 }
+
+/// Schemas with internal references compile on their own but not once
+/// embedded in the OpenAPI document, where `#` is the document root. They
+/// are dropped like any invalid schema, so one answer cannot fail the job.
+#[test]
+fn self_referencing_schemas_are_dropped() {
+    let tree = json!({
+        "$defs": {"Node": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}}
+        }}},
+        "$ref": "#/$defs/Node"
+    });
+    let root_ref = json!({"type": "object", "properties": {"a": {"$ref": "#"}}});
+    let with_id = json!({"$id": "https://example.com/pet", "type": "object"});
+    let content = answer(json!([{
+        "method": "GET", "path": "/pets/{id}",
+        "parameters": [{"name": "id", "in": "path", "schema": with_id}],
+        "request": {"content_type": "application/json", "schema": root_ref},
+        "responses": [{"status": 200, "content_type": "application/json",
+                       "schema": tree, "example": {"name": "a", "children": []}}]
+    }]));
+    let (ops, warnings) = parse_extraction(&content, &chunk(PETS_TEXT)).unwrap();
+    assert_eq!(
+        codes(&warnings),
+        vec!["invalid_schema", "invalid_schema", "invalid_schema"],
+        "{warnings:?}"
+    );
+    assert_eq!(ops[0].responses[0].schema, None);
+    let (merged, _) = merge_operations(ops);
+    let (doc, _, _) = mb_import::smart::assemble::assemble_openapi("Pets", &[], &merged);
+    if let Err(issues) = mb_import::smart::assemble::compile_draft(&doc) {
+        panic!("the draft does not compile: {issues:?}");
+    }
+}
+
+#[test]
+fn implicated_operations_follow_pointers_and_ids() {
+    use mb_import::smart::assemble::{DraftIssue, assemble_openapi, implicated_operations};
+    let with_method = |method: &str, path: &str| DraftOperation {
+        method: method.to_string(),
+        ..op(path, 1.0, "")
+    };
+    let ops = vec![
+        with_method("GET", "/pets"),
+        with_method("POST", "/pets"),
+        with_method("GET", "/pets/{id}"),
+    ];
+    let (_, ids, _) = assemble_openapi("Pets", &[], &ops);
+    let issues = vec![
+        DraftIssue {
+            pointer: "/paths/~1pets/post/responses/200/content/application~1json/schema".into(),
+            message: "invalid schema".into(),
+        },
+        DraftIssue {
+            pointer: "/".into(),
+            message: format!(
+                "#/$defs/Node: unresolvable $ref referenced from operation {}",
+                ids[2]
+            ),
+        },
+    ];
+    assert_eq!(implicated_operations(&issues, &ops, &ids), vec![1, 2]);
+    let unrelated = vec![DraftIssue {
+        pointer: "/info/title".into(),
+        message: "missing required field".into(),
+    }];
+    assert!(implicated_operations(&unrelated, &ops, &ids).is_empty());
+}

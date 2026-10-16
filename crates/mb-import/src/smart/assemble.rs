@@ -319,6 +319,47 @@ pub fn assemble_openapi(
     (doc, ids, warnings)
 }
 
+/// Indexes (ascending) of the operations in `ops`, assembled with `ids`,
+/// that `issues` implicate: by a pointer at or under
+/// `/paths/{path}/{method}`, or by naming `operation {id}` in the message.
+pub fn implicated_operations(
+    issues: &[DraftIssue],
+    ops: &[DraftOperation],
+    ids: &[String],
+) -> Vec<usize> {
+    ops.iter()
+        .zip(ids)
+        .enumerate()
+        .filter(|(_, (op, id))| {
+            let at = format!(
+                "/paths/{}/{}",
+                escape(&op.path),
+                op.method.to_ascii_lowercase()
+            );
+            issues.iter().any(|issue| {
+                issue.pointer == at
+                    || issue
+                        .pointer
+                        .strip_prefix(&at)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                    || names_operation(&issue.message, id)
+            })
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Whether `message` contains `operation {id}` as a whole word.
+fn names_operation(message: &str, id: &str) -> bool {
+    let needle = format!("operation {id}");
+    message.match_indices(&needle).any(|(at, _)| {
+        !message
+            .get(at + needle.len()..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    })
+}
+
 /// The members of an object value with their escaped keys.
 fn objects(v: Option<&Value>) -> Vec<(String, &Value)> {
     v.and_then(Value::as_object)

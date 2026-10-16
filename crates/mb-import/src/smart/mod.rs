@@ -20,7 +20,7 @@ use mb_mcm::Bundle;
 use serde::Serialize;
 use serde_json::Value;
 
-use assemble::{assemble_openapi, compile_draft};
+use assemble::{DraftIssue, assemble_openapi, compile_draft, implicated_operations};
 use chunk::{CHUNK_OVERLAP_TOKENS, CHUNK_TOKENS, chunk};
 use fetch::{FetchPolicy, Fetched, Resolver, SystemResolver, fetch_with};
 pub use llm::ExtractLlm;
@@ -210,6 +210,16 @@ pub struct DraftResult {
 
 /// Reports progress; errs with [`SmartError::Canceled`] when the observer
 /// cancels.
+/// The job error for a draft that does not compile: its first problem.
+fn compile_error(issues: &[DraftIssue]) -> SmartError {
+    let first = issues.first();
+    SmartError::Compile(format!(
+        "{}: {}",
+        first.map_or("/", |i| i.pointer.as_str()),
+        first.map_or("unknown problem", |i| i.message.as_str())
+    ))
+}
+
 async fn report(
     observer: &dyn ImportObserver,
     phase: Phase,
@@ -417,16 +427,42 @@ pub async fn run_import_with(
     }
 
     report(observer, Phase::Assembling, 0, 1).await?;
-    let (document, ids, assembly_warnings) =
+    let mut extracted = extracted;
+    let (mut document, mut ids, mut assembly_warnings) =
         assemble_openapi(&extracted.title, &extracted.servers, &extracted.operations);
-    let (source, bundle) = compile_draft(&document).map_err(|issues| {
-        let first = issues.first();
-        SmartError::Compile(format!(
-            "{}: {}",
-            first.map_or("/", |i| i.pointer.as_str()),
-            first.map_or("unknown problem", |i| i.message.as_str())
-        ))
-    })?;
+    let compiled = match compile_draft(&document) {
+        Ok(compiled) => compiled,
+        Err(issues) => {
+            // Skip the operations the problems point at, never the job
+            // (§11.3); a problem elsewhere still fails it.
+            let bad = implicated_operations(&issues, &extracted.operations, &ids);
+            if bad.is_empty() || bad.len() == extracted.operations.len() {
+                return Err(compile_error(&issues));
+            }
+            let problems: Vec<String> = issues
+                .iter()
+                .take(3)
+                .map(|i| format!("{}: {}", i.pointer, i.message))
+                .collect();
+            for &i in bad.iter().rev() {
+                let target = extracted.operations.remove(i).target();
+                extracted.warnings.push(
+                    DraftWarning::new(
+                        "invalid_operation",
+                        format!(
+                            "{target} was skipped because the draft does not compile with it ({})",
+                            problems.join("; ")
+                        ),
+                    )
+                    .for_operation(target),
+                );
+            }
+            (document, ids, assembly_warnings) =
+                assemble_openapi(&extracted.title, &extracted.servers, &extracted.operations);
+            compile_draft(&document).map_err(|issues| compile_error(&issues))?
+        }
+    };
+    let (source, bundle) = compiled;
     let operations = ids
         .into_iter()
         .zip(&extracted.operations)

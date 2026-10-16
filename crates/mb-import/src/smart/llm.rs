@@ -386,18 +386,45 @@ fn checked_schema(
     warnings: &mut Vec<DraftWarning>,
 ) -> Option<Value> {
     let schema = schema?;
-    match jsonschema::validator_for(schema) {
-        Ok(_) => Some(schema.clone()),
-        Err(e) => {
-            warnings.push(
-                DraftWarning::new(
-                    "invalid_schema",
-                    format!("{target}: the proposed schema of {place} was dropped: {e}"),
-                )
-                .for_operation(target.to_string()),
-            );
-            None
-        }
+    let problem = match identity_keyword(schema) {
+        Some(keyword) => format!("it uses {keyword}, which is not supported in drafts"),
+        None => match jsonschema::validator_for(schema) {
+            Ok(_) => return Some(schema.clone()),
+            Err(e) => e.to_string(),
+        },
+    };
+    warnings.push(
+        DraftWarning::new(
+            "invalid_schema",
+            format!("{target}: the proposed schema of {place} was dropped: {problem}"),
+        )
+        .for_operation(target.to_string()),
+    );
+    None
+}
+
+/// Keywords that refer to or rename schema resources. A schema using them
+/// compiles on its own, but once embedded in the OpenAPI document `#` means
+/// the document root and the draft no longer compiles.
+const IDENTITY_KEYWORDS: [&str; 7] = [
+    "$ref",
+    "$dynamicRef",
+    "$recursiveRef",
+    "$id",
+    "$anchor",
+    "$dynamicAnchor",
+    "$recursiveAnchor",
+];
+
+/// The first [`IDENTITY_KEYWORDS`] key found anywhere in `value`.
+fn identity_keyword(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::Object(map) => IDENTITY_KEYWORDS
+            .into_iter()
+            .find(|k| map.contains_key(*k))
+            .or_else(|| map.values().find_map(identity_keyword)),
+        Value::Array(items) => items.iter().find_map(identity_keyword),
+        _ => None,
     }
 }
 
