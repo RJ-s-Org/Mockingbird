@@ -307,6 +307,23 @@ impl Bundle {
         self.operations.iter().find(|o| o.id == id)
     }
 
+    /// Full names (`pkg.Service`, or `Service` without a package) of the
+    /// gRPC services this bundle's operations bind to, sorted.
+    pub fn grpc_services(&self) -> std::collections::BTreeSet<String> {
+        self.operations
+            .iter()
+            .filter_map(|op| match &op.binding {
+                Binding::Grpc {
+                    package, service, ..
+                } if package.is_empty() => Some(service.clone()),
+                Binding::Grpc {
+                    package, service, ..
+                } => Some(format!("{package}.{service}")),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Clone `schema` with this bundle's definitions attached as `$defs`, so
     /// it can be validated or faked standalone.
     pub fn with_defs(&self, schema: &Value) -> Value {

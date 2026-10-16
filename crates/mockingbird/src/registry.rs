@@ -5,7 +5,7 @@
 //! and SOAP mocks are dispatched by route prefix on the data plane; gRPC
 //! mocks hold no prefix and are published to the shared [`GrpcServer`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -85,8 +85,11 @@ impl Mounted {
 /// unmounted only when it is deleted or has no active contract.
 ///
 /// After every change the gRPC mocks are published to [`MockRegistry::grpc`].
-/// A gRPC mock serving a service that a mock sorting first by name already
-/// serves is skipped (and listed as failed) until that service is free.
+/// A gRPC service has one holder across every workspace: a mock already
+/// published keeps its services, and a mock that would serve a service
+/// another mock holds is skipped (and listed as failed in `/readyz`) until
+/// that service is free. Among mocks not yet published, the one sorting
+/// first by (workspace, name) wins.
 pub struct MockRegistry {
     mounted: ArcSwap<Vec<Mounted>>,
     /// `(workspace, name)` → why the mock's last rebuild failed.
@@ -94,6 +97,8 @@ pub struct MockRegistry {
     /// `(workspace, name)` → the service collision that kept it off the
     /// gRPC server.
     grpc_skipped: std::sync::Mutex<BTreeMap<MockKey, String>>,
+    /// The gRPC mocks of the last publish: they keep their services.
+    grpc_published: std::sync::Mutex<BTreeSet<MockKey>>,
     /// The h2c server every gRPC mock is published to.
     grpc: Arc<GrpcServer>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
@@ -106,6 +111,7 @@ impl MockRegistry {
             mounted: ArcSwap::from_pointee(Vec::new()),
             failed: std::sync::Mutex::new(BTreeMap::new()),
             grpc_skipped: std::sync::Mutex::new(BTreeMap::new()),
+            grpc_published: std::sync::Mutex::new(BTreeSet::new()),
             grpc: GrpcServer::new(),
             reload: Mutex::new(()),
         })
@@ -366,11 +372,20 @@ impl MockRegistry {
         self.publish_grpc(grpc).await;
     }
 
-    /// Publishes the gRPC mocks of every workspace, in (workspace, name)
-    /// order: a mock serving a service an earlier one already serves (in
-    /// any workspace; the gRPC listener is shared) is skipped and recorded.
+    /// Publishes the gRPC mocks of every workspace: the mocks of the last
+    /// publish first, then the others, each group in (workspace, name)
+    /// order. A mock serving a service an earlier one already serves (in
+    /// any workspace; the gRPC listener is shared) is skipped and recorded,
+    /// so a service stays with the mock that held it.
     async fn publish_grpc(&self, mut mocks: Vec<(MockKey, Arc<GrpcMock>)>) {
-        mocks.sort_by(|a, b| a.0.cmp(&b.0));
+        let previous = self
+            .grpc_published
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default();
+        mocks.sort_by(|a, b| {
+            (!previous.contains(&a.0), &a.0).cmp(&(!previous.contains(&b.0), &b.0))
+        });
         let mut holders: BTreeMap<String, String> = BTreeMap::new();
         let mut skipped = BTreeMap::new();
         let mut published = Vec::new();
@@ -389,10 +404,19 @@ impl MockRegistry {
             for service in services {
                 holders.insert(service, label.clone());
             }
-            published.push(mock);
+            published.push((key, mock));
         }
-        if let Err(error) = self.grpc.publish(published).await {
-            tracing::error!(%error, "cannot publish the gRPC mocks; keeping the previous set");
+        let keys: BTreeSet<MockKey> = published.iter().map(|(k, _)| k.clone()).collect();
+        let mocks = published.into_iter().map(|(_, m)| m).collect();
+        match self.grpc.publish(mocks).await {
+            Ok(()) => {
+                if let Ok(mut slot) = self.grpc_published.lock() {
+                    *slot = keys;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot publish the gRPC mocks; keeping the previous set");
+            }
         }
         if let Ok(mut slot) = self.grpc_skipped.lock() {
             *slot = skipped;

@@ -629,11 +629,11 @@ async fn grpc_mock_published_to_grpc_server() {
     assert!(registry.failed_mocks().is_empty());
 }
 
-/// A service already served by a mock that sorts first by name skips the
-/// later mock, which is reported as failed; the skipped mock takes over
-/// when the holder goes away.
+/// A service already served by a mock stays with it: a newcomer serving
+/// the same service is skipped and reported as failed, whatever the names'
+/// order, and takes over only when the holder goes away.
 #[tokio::test]
-async fn grpc_service_collision_skips_later_mock() {
+async fn grpc_service_collision_keeps_the_holder() {
     let store = store().await;
     let b = create_mock(&store, "b-routes", "/b", None).await;
     activate(&store, &b, &fixture_text("proto/route_guide.proto")).await;
@@ -645,27 +645,29 @@ async fn grpc_service_collision_skips_later_mock() {
         services(&[("routeguide.RouteGuide", "b-routes")])
     );
 
-    // `a-routes` sorts first, so it takes the service over.
+    // `a-routes` sorts first but arrives second: `b-routes` keeps it.
     let a = create_mock(&store, "a-routes", "/a", None).await;
     activate(&store, &a, &fixture_text("proto/route_guide.proto")).await;
     registry.reload_mock(&deps, "default", "a-routes").await;
     assert_eq!(
         grpc_services(&registry),
-        services(&[("routeguide.RouteGuide", "a-routes")])
+        services(&[("routeguide.RouteGuide", "b-routes")])
     );
     let failed = registry.failed_mocks();
     assert_eq!(failed.len(), 1, "{failed:?}");
-    assert_eq!(failed[0].0, "b-routes");
+    assert_eq!(failed[0].0, "a-routes");
     assert_eq!(
         failed[0].1,
-        "service routeguide.RouteGuide is already served by mock a-routes"
+        "service routeguide.RouteGuide is already served by mock b-routes"
     );
 
-    // A full reload keeps the same winner.
+    // Neither a full reload nor a rebuild of the holder moves it.
     registry.reload_all(&deps).await.unwrap();
+    registry.reload_mock(&deps, "default", "b-routes").await;
+    registry.reload_mock(&deps, "default", "a-routes").await;
     assert_eq!(
         grpc_services(&registry),
-        services(&[("routeguide.RouteGuide", "a-routes")])
+        services(&[("routeguide.RouteGuide", "b-routes")])
     );
     assert_eq!(registry.failed_mocks().len(), 1);
 
@@ -677,25 +679,64 @@ async fn grpc_service_collision_skips_later_mock() {
         grpc_services(&registry),
         services(&[
             ("helloworld.Greeter", "hello"),
-            ("routeguide.RouteGuide", "a-routes"),
+            ("routeguide.RouteGuide", "b-routes"),
         ])
     );
 
     assert!(
         store
-            .delete_mock(DEFAULT_WORKSPACE, "a-routes")
+            .delete_mock(DEFAULT_WORKSPACE, "b-routes")
             .await
             .unwrap()
     );
-    registry.reload_mock(&deps, "default", "a-routes").await;
+    registry.reload_mock(&deps, "default", "b-routes").await;
     assert_eq!(
         grpc_services(&registry),
         services(&[
             ("helloworld.Greeter", "hello"),
-            ("routeguide.RouteGuide", "b-routes"),
+            ("routeguide.RouteGuide", "a-routes"),
         ])
     );
     assert!(registry.failed_mocks().is_empty());
+}
+
+/// A mock in another workspace cannot take a service over either, even
+/// when its workspace sorts first.
+#[tokio::test]
+async fn grpc_service_holder_survives_cross_workspace_newcomer() {
+    let store = store().await;
+    let holder = create_mock(&store, "routes", "/routes", None).await;
+    activate(&store, &holder, &fixture_text("proto/route_guide.proto")).await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+
+    store.create_workspace("aaa", "aaa").await.unwrap();
+    let thief = store
+        .create_mock(
+            "aaa",
+            NewMock {
+                name: "routes".into(),
+                route_prefix: Some("/aaa-routes".into()),
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    activate(&store, &thief, &fixture_text("proto/route_guide.proto")).await;
+    registry.reload_mock(&deps, "aaa", "routes").await;
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        grpc_services(&registry),
+        services(&[("routeguide.RouteGuide", "routes")])
+    );
+    let failed = registry.failed_mocks();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0, "aaa/routes");
 }
 
 #[tokio::test]

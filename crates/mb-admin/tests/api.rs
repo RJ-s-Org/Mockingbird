@@ -1582,6 +1582,11 @@ async fn upload_graphql_proto_wsdl_and_archive() {
         ("multi-zip", multi_zip, "application/zip", "application/zip"),
     ];
     for (mock, bytes, content_type, source_type) in cases {
+        if mock == "multi-zip" {
+            // Its services are those of `multi`: one active holder only.
+            let r = h.delete("/api/v1/mocks/multi").await;
+            assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+        }
         h.create_mock(mock).await;
         let expected = mb_import::compile(&bytes).unwrap().operations.len();
         assert!(expected > 0, "{mock}");
@@ -1716,4 +1721,93 @@ async fn api_responses_are_never_rendered() {
             "{uri}"
         );
     }
+}
+
+/// gRPC mocks share one listener, so a service may be served by one
+/// active contract only, across every workspace.
+#[tokio::test]
+async fn grpc_services_are_unique_across_workspaces() {
+    let h = harness().await;
+    let r = h
+        .json(
+            Method::POST,
+            "/api/v1/workspaces",
+            json!({ "name": "team-b" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    h.create_mock("routes").await;
+    let route_guide = fixture("proto/route_guide.proto");
+    let r = h
+        .upload_bytes("routes", route_guide.clone(), "text/x-protobuf")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    let r = h
+        .json(
+            Method::POST,
+            "/api/v1/workspaces/team-b/mocks",
+            json!({ "name": "hijack" }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let upload = |bytes: Vec<u8>, query: &'static str| {
+        let uri = format!("/api/v1/workspaces/team-b/mocks/hijack/contracts{query}");
+        let h = &h;
+        async move {
+            h.send(
+                Method::POST,
+                &uri,
+                Body::from(bytes),
+                Some("text/x-protobuf"),
+            )
+            .await
+        }
+    };
+
+    // The first upload activates itself: refused, nothing stored.
+    let body = upload(route_guide.clone(), "")
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("routeguide.RouteGuide") && detail.contains("default/routes"),
+        "{detail}"
+    );
+    let r = h
+        .get("/api/v1/workspaces/team-b/mocks/hijack/contracts")
+        .await;
+    assert_eq!(r.json(), json!([]));
+
+    // Another service is fine; the clashing one may be stored but neither
+    // activated on upload nor later.
+    let r = upload(fixture("proto/helloworld.proto"), "").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    upload(route_guide.clone(), "?activate=true")
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    let r = upload(route_guide.clone(), "?activate=false").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    assert_eq!(r.json()["status"], "approved");
+    let version = r.json()["version"].as_i64().unwrap();
+    h.post_empty_json(&format!(
+        "/api/v1/workspaces/team-b/mocks/hijack/contracts/{version}/activate"
+    ))
+    .await
+    .assert_problem(StatusCode::CONFLICT);
+
+    // A mock may re-upload and re-activate its own services.
+    let r = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks/routes/contracts?activate=true",
+            Body::from(route_guide),
+            Some("text/x-protobuf"),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let r = h
+        .post_empty_json("/api/v1/mocks/routes/contracts/1/activate")
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
 }

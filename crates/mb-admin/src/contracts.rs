@@ -215,7 +215,7 @@ async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<Contra
     responses(
         (status = 201, body = UploadResult),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Managed by config file, or the version would be activated and binds a gRPC service another mock's active contract serves", body = Problem, content_type = "application/problem+json"),
         (status = 413, body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "Not a contract media type", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The contract does not compile", body = Problem, content_type = "application/problem+json"),
@@ -268,6 +268,11 @@ pub async fn upload(
     let bundle =
         compiled.map_err(|e| Problem::unprocessable(format!("contract does not compile: {e}")))?;
     let operations = bundle.operations.len();
+    let activate =
+        params.activate.unwrap_or(false) || st.store.active_contract(m.id).await?.is_none();
+    if activate {
+        ensure_grpc_services_free(&st, &m, &bundle).await?;
+    }
 
     let added = st
         .store
@@ -281,8 +286,6 @@ pub async fn upload(
             },
         )
         .await?;
-    let activate =
-        params.activate.unwrap_or(false) || st.store.active_contract(m.id).await?.is_none();
     let stored = if activate {
         st.store
             .activate_contract_version(m.id, added.version)
@@ -305,6 +308,31 @@ pub async fn upload(
         )
         .await;
     Ok((StatusCode::CREATED, Json(result)))
+}
+
+/// A 409 problem when `bundle` binds a gRPC service that the active
+/// contract of another mock, in any workspace, already serves: every gRPC
+/// mock shares one listener, so a service has a single holder.
+async fn ensure_grpc_services_free(st: &AdminState, mock: &Mock, bundle: &Bundle) -> ApiResult<()> {
+    let services = bundle.grpc_services();
+    if services.is_empty() {
+        return Ok(());
+    }
+    for other in st.store.list_all_mocks().await? {
+        if other.id == mock.id {
+            continue;
+        }
+        let Some(active) = st.store.active_contract(other.id).await? else {
+            continue;
+        };
+        if let Some(service) = active.bundle.grpc_services().intersection(&services).next() {
+            return Err(Problem::conflict(format!(
+                "gRPC service {service:?} is already served by mock {}/{}",
+                other.workspace, other.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -504,7 +532,7 @@ fn source_content_type(source: &[u8]) -> &'static str {
     responses(
         (status = 200, description = "Now the only active version; the previous one is approved", body = ContractVersionSummary),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "A draft, or managed by config file", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "A draft, managed by config file, or binds a gRPC service another mock's active contract serves", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "Content-Type is not application/json (the body is ignored)", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -526,6 +554,7 @@ pub async fn activate(
             "contract version {number} of mock {mock:?} is a draft and cannot be activated"
         )));
     }
+    ensure_grpc_services_free(&st, &m, &v.bundle).await?;
     let active = st.store.activate_contract_version(m.id, number).await?;
     let view = ContractVersionSummary::from(&active);
     access

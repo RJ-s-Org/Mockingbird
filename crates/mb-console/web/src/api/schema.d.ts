@@ -1540,7 +1540,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Managed by config file */
+            /** @description Managed by config file, or the version would be activated and binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1640,7 +1640,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A draft, or managed by config file */
+            /** @description A draft, managed by config file, or binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2950,7 +2950,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Managed by config file */
+            /** @description Managed by config file, or the version would be activated and binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3054,7 +3054,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A draft, or managed by config file */
+            /** @description A draft, managed by config file, or binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;

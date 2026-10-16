@@ -707,6 +707,78 @@ async fn reconcile_rejects_prefix_clash_with_api_mock() {
     );
 }
 
+/// gRPC services are unique across workspaces: two file mocks, or a file
+/// mock and an API mock's active contract, may not serve the same one.
+#[tokio::test]
+async fn reconcile_rejects_grpc_service_clashes() {
+    let ws = Workspace::new();
+    let proto = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/proto/route_guide.proto"),
+    )
+    .unwrap();
+    std::fs::write(ws.dir.path().join("routes.proto"), &proto).unwrap();
+    let store = store().await;
+
+    let cfg = ws.load(
+        "mocks:\n  a:\n    contract: routes.proto\n  b:\n    workspace: team-b\n    contract: routes.proto\n",
+    );
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("routeguide.RouteGuide"), "{text}");
+    assert!(store.list_all_mocks().await.unwrap().is_empty());
+
+    // An API mock's active contract holds the service.
+    let api = store
+        .create_mock(
+            DEFAULT_WORKSPACE,
+            NewMock {
+                name: "api-routes".into(),
+                route_prefix: None,
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let v = store
+        .add_contract_version(
+            api.id,
+            NewContractVersion {
+                bundle: mb_import::compile(&proto).unwrap(),
+                source: proto.clone(),
+                status: ContractStatus::Approved,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .activate_contract_version(api.id, v.version)
+        .await
+        .unwrap();
+    let cfg = ws.load("mocks:\n  a:\n    workspace: team-b\n    contract: routes.proto\n");
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("routeguide.RouteGuide") && text.contains("api-routes"),
+        "{text}"
+    );
+    assert_eq!(store.list_all_mocks().await.unwrap().len(), 1);
+
+    // Different services are fine.
+    let cfg = ws.load("mocks:\n  a:\n    workspace: team-b\n    contract: orders.yaml\n");
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn reconcile_deletes_removed_file_mocks() {
     let ws = Workspace::new();

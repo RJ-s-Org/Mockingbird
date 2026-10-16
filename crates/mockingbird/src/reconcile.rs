@@ -61,9 +61,10 @@ struct Prepared<'a> {
 /// session state in `state`.
 ///
 /// The whole config is validated first (workspace names, names, route
-/// prefixes across every workspace, data-plane auth headers, profile
-/// references, secret references, contracts and scenario operations, and
-/// clashes with API-owned resources, route prefixes included); any error
+/// prefixes and gRPC services across every workspace, data-plane auth
+/// headers, profile references, secret references, contracts and scenario
+/// operations, and clashes with API-owned resources, route prefixes and
+/// active gRPC services included); any error
 /// returns `Err` with nothing applied.
 pub async fn reconcile(
     store: &dyn ControlStore,
@@ -377,6 +378,40 @@ async fn validate<'a>(
             source,
             bundle,
         });
+    }
+    // gRPC services are unique across every workspace (one shared
+    // listener): among the file mocks, and against the active contracts of
+    // the mocks the API owns.
+    let mut grpc: BTreeMap<String, String> = BTreeMap::new();
+    for p in &prepared {
+        let label = mock_label(p.workspace, p.name);
+        for service in p.bundle.grpc_services() {
+            if let Some(other) = grpc.insert(service.clone(), label.clone()) {
+                bail!("mocks {other:?} and {label:?} both serve the gRPC service {service:?}");
+            }
+        }
+    }
+    if !grpc.is_empty() {
+        for api_mock in existing_mocks
+            .values()
+            .filter(|m| m.source == ResourceSource::Api)
+        {
+            let api_label = mock_label(&api_mock.workspace, &api_mock.name);
+            let Some(active) = store
+                .active_contract(api_mock.id)
+                .await
+                .with_context(|| format!("loading the active contract of mock {api_label:?}"))?
+            else {
+                continue;
+            };
+            for service in active.bundle.grpc_services() {
+                if let Some(label) = grpc.get(&service) {
+                    bail!(
+                        "mock {label:?}: gRPC service {service:?} is already served by mock {api_label:?}, which is managed through the API"
+                    );
+                }
+            }
+        }
     }
     // A file mock may not take the prefix of a mock the API owns, in any
     // workspace.
