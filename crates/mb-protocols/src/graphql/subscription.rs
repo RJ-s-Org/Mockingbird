@@ -5,19 +5,21 @@
 //! the resources of its type upserted in the same session, each projected
 //! like a query result. It runs until the client completes it or
 //! disconnects, or the process shuts down, and is reported once, when its
-//! stream is dropped.
+//! stream is dropped. A subscription chaos drops ends after its planned
+//! number of generated items with an `error` message (code `UNAVAILABLE`)
+//! for its id.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use async_graphql::Data;
 use async_graphql::dynamic::{
     FieldValue, ResolverContext, Schema, SubscriptionField, SubscriptionFieldFuture,
 };
 use async_graphql::http::{WebSocket, WebSocketProtocols, WsMessage};
 use async_graphql::parser::types::{FieldDefinition, Type};
+use async_graphql::{Data, ErrorExtensions};
 use axum::extract::WebSocketUpgrade;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
@@ -219,11 +221,27 @@ async fn run(
             Ok(data)
         });
     futures::pin_mut!(messages);
+    // Operations chaos dropped: their `complete` is not sent.
+    let mut dropped = HashSet::new();
     while let Some(message) = messages.next().await {
         let (out, last) = match message {
             WsMessage::Text(text) => {
+                let text = match dropped_error(&text, protocol) {
+                    Some((id, error)) => {
+                        dropped.insert(id);
+                        error
+                    }
+                    None => text,
+                };
+                let op = operation_message(&text);
+                if let Some((ty, id)) = &op
+                    && ty == "complete"
+                    && dropped.remove(id)
+                {
+                    continue;
+                }
                 // A finished operation frees its slot.
-                if let Some((ty, id)) = operation_message(&text)
+                if let Some((ty, id)) = op
                     && matches!(ty.as_str(), "complete" | "error")
                 {
                     lock(&active).remove(&id);
@@ -245,6 +263,31 @@ async fn run(
             break;
         }
     }
+}
+
+/// A `next` (`data`) message carrying the error of a subscription chaos
+/// dropped, rewritten as an `error` message for its id; with the id.
+fn dropped_error(text: &str, protocol: WebSocketProtocols) -> Option<(String, String)> {
+    // Most messages are not: skip parsing them.
+    if !text.contains(r#""chaos":"drop""#) {
+        return None;
+    }
+    let msg: Value = serde_json::from_str(text).ok()?;
+    if !matches!(msg.get("type")?.as_str()?, "next" | "data") {
+        return None;
+    }
+    let id = msg.get("id")?.as_str()?.to_string();
+    let errors = msg.get("payload")?.get("errors")?.as_array()?;
+    let error = errors
+        .iter()
+        .find(|e| e["extensions"]["chaos"] == "drop")?
+        .clone();
+    let payload = match protocol {
+        WebSocketProtocols::GraphQLWS => json!([error]),
+        _ => error,
+    };
+    let frame = json!({"type": "error", "id": id, "payload": payload});
+    Some((id, frame.to_string()))
 }
 
 /// The open operations of one connection, by id.
@@ -531,8 +574,14 @@ async fn open(
         }
     };
 
-    if let Some(status) = plan.forced_status.filter(|s| !(200..300).contains(s)) {
-        let failure = Failure::new(status, forced_message(status));
+    let refused = if plan.chaos.inject_error {
+        Some(Failure::chaos(plan.forced_status))
+    } else {
+        plan.forced_status
+            .filter(|s| !(200..300).contains(s))
+            .map(|status| Failure::new(status, forced_message(status)))
+    };
+    if let Some(failure) = refused {
         report.fail(&failure);
         let error = failure.error;
         return Ok(stream::once(async move {
@@ -567,8 +616,12 @@ async fn open(
         report,
         ty,
         shapes,
+        dropped: false,
     };
     Ok(stream::unfold(state, |mut st| async move {
+        if st.dropped {
+            return None;
+        }
         let span = st.report.span.clone();
         let piece = st.pieces.next().instrument(span).await?;
         let out = st.render(piece);
@@ -585,10 +638,13 @@ enum Piece {
     Changed(Value),
     /// The engine stream could not be opened.
     Failed(String),
+    /// Chaos drops the subscription here.
+    Dropped,
 }
 
 /// The engine's items for this call, opened when first polled (after any
-/// latency); generation runs only while the subscription polls it.
+/// latency), followed by [`Piece::Dropped`] after `plan.chaos.drop_after`
+/// items; generation runs only while the subscription polls it.
 fn generated(
     rt: Arc<MockRuntime>,
     plan: &CallPlan<'_>,
@@ -599,7 +655,8 @@ fn generated(
     let scenario = plan.scenario.cloned();
     let stream_items = plan.stream_items;
     let tenancy = plan.tenancy.clone();
-    stream::once(async move {
+    let drop_after = plan.chaos.drop_after;
+    let items = stream::once(async move {
         let plan = CallPlan {
             op: &op,
             session,
@@ -608,6 +665,7 @@ fn generated(
             delay: None,
             stream_items,
             tenancy,
+            chaos: Default::default(),
         };
         match call::open_stream(&rt, &plan, call, Vec::new()).await {
             Ok(items) => items.map(Piece::Item).boxed(),
@@ -617,8 +675,11 @@ fn generated(
             }
         }
     })
-    .flatten()
-    .boxed()
+    .flatten();
+    match drop_after {
+        Some(n) => items.take(n).chain(stream::iter([Piece::Dropped])).boxed(),
+        None => items.boxed(),
+    }
 }
 
 /// A running subscription: what is left to send and what to report.
@@ -628,6 +689,8 @@ struct Subscription {
     /// The field's type, to project each item.
     ty: Type,
     shapes: Arc<Shapes>,
+    /// Chaos dropped the subscription: nothing more is sent.
+    dropped: bool,
 }
 
 impl Subscription {
@@ -643,6 +706,14 @@ impl Subscription {
             Piece::Changed(value) => value,
             Piece::Failed(detail) => {
                 let failure = Failure::new(500, detail);
+                self.report.fail(&failure);
+                return Err(failure.error);
+            }
+            Piece::Dropped => {
+                self.dropped = true;
+                crate::chaos::count(&self.report.rt.name, "drop");
+                let mut failure = Failure::unavailable(crate::chaos::STREAM_DROPPED);
+                failure.error = failure.error.extend_with(|_, e| e.set("chaos", "drop"));
                 self.report.fail(&failure);
                 return Err(failure.error);
             }

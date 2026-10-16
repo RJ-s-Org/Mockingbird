@@ -41,6 +41,7 @@ pub use xml_json::envelope_body_to_json;
 pub(crate) use xml_json::json_to_xml;
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const SOAP_ACTION_HEADER: &str = "soapaction";
 const PROBLEM_JSON: &str = "application/problem+json";
 /// The request record's body when the envelope could not be decoded.
@@ -313,6 +314,8 @@ struct Answer {
     retry_after: Option<Duration>,
     /// The `WWW-Authenticate` challenge of a data-plane auth failure.
     www_authenticate: Option<String>,
+    /// The answer is an error injected by chaos.
+    chaos: bool,
 }
 
 impl Answer {
@@ -335,6 +338,7 @@ impl Answer {
             record: json!({ "fault": { "client": client, "message": message } }),
             retry_after: None,
             www_authenticate: None,
+            chaos: false,
         }
     }
 
@@ -410,6 +414,9 @@ async fn serve_call(
     );
     if let Some(source) = answer.source {
         h.insert(SOURCE_HEADER, HeaderValue::from_static(source.as_str()));
+    }
+    if answer.chaos {
+        h.insert(CHAOS_HEADER, HeaderValue::from_static("error"));
     }
     if let Some(after) = answer.retry_after {
         let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
@@ -511,8 +518,19 @@ async fn answer(
         body: input,
         ..Default::default()
     };
+    if plan.native_chaos_error() {
+        let message = format!("Service Unavailable ({})", crate::chaos::CHAOS_ERROR_DETAIL);
+        let mut answer = Answer::fault(version, 503, message).with_http(503);
+        answer.chaos = true;
+        return answer;
+    }
+    let chaos = plan.chaos.inject_error;
     match plan.forced_status.filter(|s| !(200..300).contains(s)) {
-        Some(status) => forced_fault(st, op, plan, &call, version, status, report).await,
+        Some(status) => {
+            let mut answer = forced_fault(st, op, plan, &call, version, status, report).await;
+            answer.chaos = chaos;
+            answer
+        }
         None => match call::generate_once(rt, &plan, &call).await {
             Ok(generated) => {
                 report.usage = generated.usage;
@@ -535,6 +553,7 @@ async fn answer(
                         record: body,
                         retry_after: None,
                         www_authenticate: None,
+                        chaos: false,
                     },
                     Err(e) => Answer::fault(version, 500, e),
                 }

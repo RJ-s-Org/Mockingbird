@@ -20,6 +20,7 @@ use mb_state::{ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::chaos::{self, CHAOS_HEADER, ChaosDecision};
 pub(crate) use crate::dp_auth::Unauthorized;
 use crate::dp_auth::{authenticate, verify_key};
 use crate::{MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime};
@@ -54,6 +55,8 @@ pub(crate) struct Overrides {
     pub latency: Option<Duration>,
     pub scenario: Option<String>,
     pub stream_items: Option<usize>,
+    /// `X-Mockingbird-Chaos: off`: no fault injection for this call.
+    pub chaos_off: bool,
 }
 
 impl Overrides {
@@ -65,6 +68,7 @@ impl Overrides {
             latency: None,
             scenario: None,
             stream_items: None,
+            chaos_off: false,
         };
         if !enabled {
             return Ok(out);
@@ -108,6 +112,12 @@ impl Overrides {
                 })?;
             out.stream_items = Some(items);
         }
+        if let Some(s) = header_text(headers, CHAOS_HEADER)? {
+            if !s.eq_ignore_ascii_case("off") {
+                return Err(r#"X-Mockingbird-Chaos must be "off""#.into());
+            }
+            out.chaos_off = true;
+        }
         Ok(out)
     }
 }
@@ -138,11 +148,24 @@ pub(crate) struct CallPlan<'a> {
     pub scenario: Option<&'a ScenarioRuntime>,
     /// Header status, else the scenario's status where `op` declares it.
     pub forced_status: Option<u16>,
-    /// Injected latency (header, else scenario), capped at 30 s.
+    /// Injected latency (header, else scenario) plus any chaos latency,
+    /// capped at 30 s.
     pub delay: Option<Duration>,
     /// Header item count, else the scenario's.
     pub stream_items: Option<usize>,
     pub tenancy: Tenancy,
+    /// The call's faults. An injected error comes with `forced_status` set
+    /// to the declared error status it uses; with `forced_status` unset,
+    /// the adapter answers its protocol-native error.
+    pub chaos: ChaosDecision,
+}
+
+impl CallPlan<'_> {
+    /// Whether the call answers an injected error that the operation
+    /// declares no status for (the protocol-native answer applies).
+    pub(crate) fn native_chaos_error(&self) -> bool {
+        self.chaos.inject_error && self.forced_status.is_none()
+    }
 }
 
 /// The credentials a call presents beyond its headers (for gRPC: its
@@ -333,9 +356,12 @@ impl PlanFailure {
 
 /// Admission (`tenants.resolve`, then `quota.admit`, then the mock's rate
 /// limit, unless [`Presented::admitted`]), then data-plane auth
-/// (spec §11.2), then override headers, then the scenario. Header status and latency beat the
-/// scenario's; a scenario status applies only where `op` declares it.
-/// Records the session on the current span.
+/// (spec §11.2), then override headers, then the scenario, then chaos.
+/// Header status and latency beat the scenario's; a scenario status
+/// applies only where `op` declares it. Chaos comes from the applying
+/// scenario, else the mock, unless `X-Mockingbird-Chaos: off`; it injects
+/// no error when a status is already forced. Records the session on the
+/// current span.
 pub(crate) async fn plan<'a>(
     rt: &'a MockRuntime,
     op: &'a Operation,
@@ -403,14 +429,21 @@ pub(crate) async fn plan<'a>(
     let scenario_status = scenario
         .and_then(|s| s.status)
         .filter(|code| op.output_for_status(*code).is_some());
-    let forced_status = overrides.status.or(scenario_status);
-    let delay = overrides
+    let mut forced_status = overrides.status.or(scenario_status);
+    let mut delay = overrides
         .latency
         .or_else(|| scenario.and_then(|s| s.latency))
         .map(|d| d.min(MAX_LATENCY));
     let stream_items = overrides
         .stream_items
         .or_else(|| scenario.and_then(|s| s.stream_items));
+    let chaos = decide_chaos(rt, op, scenario, &overrides, forced_status, stream_items);
+    if chaos.inject_error {
+        forced_status = chaos::error_status(op);
+    }
+    if !chaos.extra_latency.is_zero() {
+        delay = Some((delay.unwrap_or_default() + chaos.extra_latency).min(MAX_LATENCY));
+    }
     Ok(CallPlan {
         op,
         session: SessionKey {
@@ -423,7 +456,44 @@ pub(crate) async fn plan<'a>(
         delay,
         stream_items,
         tenancy,
+        chaos,
     })
+}
+
+/// The call's faults, from the applying scenario's chaos, else the mock's;
+/// none with `X-Mockingbird-Chaos: off`. No error is injected over a
+/// status already forced. Counts the error and latency faults.
+fn decide_chaos(
+    rt: &MockRuntime,
+    op: &Operation,
+    scenario: Option<&ScenarioRuntime>,
+    overrides: &Overrides,
+    forced_status: Option<u16>,
+    stream_items: Option<usize>,
+) -> ChaosDecision {
+    if overrides.chaos_off {
+        return ChaosDecision::default();
+    }
+    let Some(source) = scenario
+        .and_then(|s| s.chaos.as_ref())
+        .or(rt.chaos.as_ref())
+    else {
+        return ChaosDecision::default();
+    };
+    let streaming = op.kind.streams_response();
+    let limits = &rt.engine.config().stream;
+    let planned_items = stream_items
+        .unwrap_or(limits.default_items)
+        .clamp(1, limits.max_items.max(1));
+    let mut decision = source.decide(streaming, planned_items);
+    decision.inject_error &= forced_status.is_none();
+    if decision.inject_error {
+        chaos::count(&rt.name, "error");
+    }
+    if !decision.extra_latency.is_zero() {
+        chaos::count(&rt.name, "latency");
+    }
+    decision
 }
 
 /// The id of the resource this operation reads, updates or deletes: the

@@ -38,7 +38,7 @@ use super::status::{Failure, oversized};
 use crate::call::{
     self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
 };
-use crate::{MockRuntime, ScenarioRuntime};
+use crate::{ChaosDecision, MockRuntime, ScenarioRuntime};
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const SOURCE_METADATA: &str = "x-mockingbird-source";
@@ -68,6 +68,12 @@ type MessageStream = BoxStream<'static, Result<DynamicMessage, Status>>;
 /// Generated JSON that does not fit the response message is replaced by
 /// the engine's fallback; if that does not fit either, the call fails with
 /// `INTERNAL`.
+///
+/// An error injected by chaos fails the call (after any latency) with the
+/// code of the declared error status, else `UNAVAILABLE`, and the metadata
+/// `x-mockingbird-chaos: error`. A server or bidi stream chaos drops ends
+/// with `UNAVAILABLE` ("stream dropped by chaos") after its planned
+/// number of messages.
 pub struct GrpcMock {
     rt: Arc<MockRuntime>,
     /// By gRPC path (`/<package>.<Service>/<Method>`).
@@ -293,6 +299,10 @@ impl CallState {
         };
         rep.tenancy = Some(plan.tenancy.clone());
         rep.session = plan.session.session.clone();
+        if plan.chaos.inject_error {
+            sleep(plan.delay).await;
+            return Err(Failure::chaos(plan.forced_status));
+        }
         if let Some(status) = plan.forced_status.filter(|s| !(200..300).contains(s)) {
             sleep(plan.delay).await;
             return Err(Failure::forced(status));
@@ -459,6 +469,7 @@ impl CallState {
         let state = ServerStream {
             call: Arc::clone(&self),
             delay: plan.delay,
+            drop_after: plan.chaos.drop_after,
             plan,
             op_call: call,
             items,
@@ -536,6 +547,7 @@ impl CallState {
         let state = Bidi {
             call: Arc::clone(&self),
             delay: plan.delay,
+            drop_after: plan.chaos.drop_after,
             plan,
             inbound,
             earlier: VecDeque::new(),
@@ -564,6 +576,8 @@ struct ServerStream {
     rep: Reporter,
     /// Slept before the first message.
     delay: Option<Duration>,
+    /// Messages sent before chaos drops the stream.
+    drop_after: Option<usize>,
     ended: bool,
 }
 
@@ -571,6 +585,13 @@ impl ServerStream {
     async fn next(&mut self) -> Option<Result<DynamicMessage, Status>> {
         if self.ended {
             return None;
+        }
+        if self.drop_after == Some(self.rep.items) {
+            self.ended = true;
+            sleep(self.delay.take()).await;
+            let failure = Failure::dropped(self.call.rt());
+            self.rep.fail(&failure);
+            return Some(Err(failure.status));
         }
         let Some(item) = self.items.next().await else {
             self.ended = true;
@@ -608,6 +629,8 @@ struct Bidi {
     delay: Option<Duration>,
     /// Client messages read so far.
     received: usize,
+    /// Replies sent before chaos drops the stream.
+    drop_after: Option<usize>,
     ended: bool,
 }
 
@@ -615,6 +638,13 @@ impl Bidi {
     async fn next(&mut self) -> Option<Result<DynamicMessage, Status>> {
         if self.ended {
             return None;
+        }
+        if self.drop_after == Some(self.rep.items) {
+            self.ended = true;
+            sleep(self.delay.take()).await;
+            let failure = Failure::dropped(self.call.rt());
+            self.rep.fail(&failure);
+            return Some(Err(failure.status));
         }
         let reply = async {
             let Some(message) = self.inbound.message().await.map_err(Failure::request)? else {
@@ -719,6 +749,7 @@ struct OwnedPlan {
     stream_items: Option<usize>,
     tenancy: Tenancy,
     forced_status: Option<u16>,
+    chaos: ChaosDecision,
 }
 
 impl OwnedPlan {
@@ -731,6 +762,7 @@ impl OwnedPlan {
             stream_items: plan.stream_items,
             tenancy: plan.tenancy.clone(),
             forced_status: plan.forced_status,
+            chaos: plan.chaos,
         }
     }
 
@@ -743,6 +775,7 @@ impl OwnedPlan {
             delay: self.delay,
             stream_items: self.stream_items,
             tenancy: self.tenancy.clone(),
+            chaos: self.chaos,
         }
     }
 }

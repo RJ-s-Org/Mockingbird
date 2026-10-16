@@ -24,6 +24,7 @@ use mb_state::StateStore;
     allow(dead_code)
 )]
 mod call;
+pub mod chaos;
 #[cfg_attr(
     not(any(
         feature = "http-rest",
@@ -49,6 +50,7 @@ pub mod soap;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
+pub use chaos::{CHAOS_HEADER, ChaosDecision, ChaosRuntime, ChaosSpec};
 use dp_auth::CredentialNames;
 pub use dp_auth::{
     API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
@@ -129,6 +131,8 @@ pub struct ScenarioRuntime {
     pub stream_items: Option<usize>,
     /// Pause between streamed items, overriding the engine's default.
     pub stream_item_interval: Option<Duration>,
+    /// Replaces the mock's chaos while the scenario applies.
+    pub chaos: Option<Arc<ChaosRuntime>>,
 }
 
 impl ScenarioRuntime {
@@ -243,6 +247,9 @@ pub struct MockRuntime {
     pub protocols: ProtocolSettings,
     /// The mock's rate limit and request size cap.
     pub limits: RuntimeLimits,
+    /// Fault injection; `None` injects nothing. A scenario's own chaos
+    /// replaces it while the scenario applies.
+    pub chaos: Option<Arc<ChaosRuntime>>,
     /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
     /// process begins to shut down. Never fires by default.
     pub shutdown: Shutdown,
@@ -281,8 +288,8 @@ impl Shutdown {
 impl MockRuntime {
     /// A runtime in workspace `default` with header overrides enabled, no
     /// scenarios, the self-hosted extensions, no recorder, no data-plane
-    /// auth, default protocol settings and default limits (no rate limit,
-    /// 1 MiB requests).
+    /// auth, default protocol settings, default limits (no rate limit,
+    /// 1 MiB requests) and no chaos.
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
@@ -306,6 +313,7 @@ impl MockRuntime {
             data_plane_keys: None,
             protocols: ProtocolSettings::default(),
             limits: RuntimeLimits::default(),
+            chaos: None,
             shutdown: Shutdown::default(),
             credential_names,
         }

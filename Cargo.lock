@@ -3552,6 +3552,7 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "quick-xml",
+ "rand 0.10.3",
  "rdkafka",
  "reqwest",
  "rumqttc",

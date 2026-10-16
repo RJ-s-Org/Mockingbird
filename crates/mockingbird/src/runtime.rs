@@ -16,13 +16,13 @@ use mb_import::smart::ExtractLlm;
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
 use mb_protocols::events::EventDeps;
 use mb_protocols::{
-    DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, ProtocolSettings, RateLimiter,
-    RequestRecorder, RuntimeLimits, ScenarioRuntime, Shutdown,
+    ChaosRuntime, ChaosSpec, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime,
+    ProtocolSettings, RateLimiter, RequestRecorder, RuntimeLimits, ScenarioRuntime, Shutdown,
 };
 use mb_state::StateStore;
 use mb_store::{
-    ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode as StoredAuthMode,
-    LlmProfile, Mock, Scenario,
+    ChaosSettings, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig,
+    DataPlaneAuthMode as StoredAuthMode, LlmProfile, Mock, Scenario,
 };
 
 use crate::budget::StoreTokenBudget;
@@ -324,6 +324,11 @@ pub async fn build_runtime_with_budget(
     rt.recorder = deps.recorder.clone();
     rt.protocols = deps.protocols.clone();
     rt.limits = runtime_limits(deps, mock);
+    rt.chaos = mock
+        .chaos
+        .as_ref()
+        .filter(|c| !c.is_noop())
+        .map(chaos_runtime);
     rt.shutdown = Shutdown::new(STOP.subscribe());
     Ok(Some((rt, budget)))
 }
@@ -500,6 +505,23 @@ fn chain_names(chain: &[LlmProfile]) -> String {
         .join(" -> ")
 }
 
+/// The runtime form of stored chaos settings, seeded from `MB_CHAOS_SEED`
+/// when it is set.
+pub fn chaos_runtime(settings: &ChaosSettings) -> Arc<ChaosRuntime> {
+    let spec = ChaosSpec {
+        error_rate: settings.error_rate,
+        latency_jitter: settings.latency_jitter.as_ref().map(|j| {
+            (
+                Duration::from_millis(j.min_ms),
+                Duration::from_millis(j.max_ms),
+            )
+        }),
+        drop_stream_rate: settings.drop_stream_rate,
+    };
+    Arc::new(ChaosRuntime::new(spec, ChaosRuntime::seed_from_env()))
+}
+
+/// A scenario's chaos replaces the mock's even when it injects nothing.
 fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
     ScenarioRuntime {
         spec: ScenarioSpec {
@@ -512,5 +534,6 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         operations: s.rules.operations,
         stream_items: s.rules.stream_items.and_then(|n| usize::try_from(n).ok()),
         stream_item_interval: s.rules.stream_item_interval_ms.map(Duration::from_millis),
+        chaos: s.rules.chaos.as_ref().map(chaos_runtime),
     }
 }

@@ -132,6 +132,31 @@ impl Failure {
         }
     }
 
+    /// The field error of an error injected by chaos: the declared
+    /// `status` when the operation has one, else `UNAVAILABLE` (503).
+    /// Carries `extensions.chaos = "error"`.
+    pub(crate) fn chaos(status: Option<u16>) -> Self {
+        let detail = crate::chaos::CHAOS_ERROR_DETAIL;
+        let mut failure = match status {
+            Some(status) => {
+                let reason = canonical_reason(status).unwrap_or("Error");
+                Self::new(status, format!("{reason} ({detail})"))
+            }
+            None => Self::unavailable(format!("Service Unavailable ({detail})")),
+        };
+        failure.error = failure.error.extend_with(|_, e| e.set("chaos", "error"));
+        failure
+    }
+
+    /// An `UNAVAILABLE` field error (HTTP 503).
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        let error = Error::new(message).extend_with(|_, e| {
+            e.set("code", "UNAVAILABLE");
+            e.set("status", 503);
+        });
+        Self { status: 503, error }
+    }
+
     fn rejected(r: Rejection) -> Self {
         let mut failure = Self::new(r.status, r.detail);
         if let Some(after) = r.retry_after {
@@ -243,6 +268,7 @@ async fn generate(
             report.session = plan.session.session.clone();
             delay = plan.delay;
             match plan.forced_status.filter(|s| !(200..300).contains(s)) {
+                _ if plan.chaos.inject_error => Err(Failure::chaos(plan.forced_status)),
                 Some(status) => Err(Failure::new(status, forced_message(status))),
                 None => {
                     let call = OperationCall {
@@ -297,13 +323,16 @@ async fn generate(
 }
 
 pub(crate) fn forced_message(status: u16) -> String {
-    match StatusCode::from_u16(status)
-        .ok()
-        .and_then(|c| c.canonical_reason())
-    {
+    match canonical_reason(status) {
         Some(reason) => format!("{reason} (forced status {status})"),
         None => format!("forced status {status}"),
     }
+}
+
+fn canonical_reason(status: u16) -> Option<&'static str> {
+    StatusCode::from_u16(status)
+        .ok()
+        .and_then(|c| c.canonical_reason())
 }
 
 /// Resolves a nested field: the parent object's member `name`, missing

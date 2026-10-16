@@ -27,6 +27,7 @@ use crate::call::{
 };
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
 
@@ -386,6 +387,14 @@ async fn serve(
         body,
     };
 
+    // An injected error the contract declares no status for: 503.
+    if plan.native_chaos_error() {
+        log.delay = plan.delay;
+        let mut resp = log.problem(503, "Service Unavailable", crate::chaos::CHAOS_ERROR_DETAIL);
+        mark_chaos(&mut resp);
+        return resp;
+    }
+
     // A stream, unless a non-2xx status is forced: that is answered once.
     if op.kind == OperationKind::StreamServer
         && plan
@@ -419,7 +428,17 @@ async fn serve(
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
-    log.generated(generated)
+    let mut resp = log.generated(generated);
+    if plan.chaos.inject_error {
+        mark_chaos(&mut resp);
+    }
+    resp
+}
+
+/// Marks a response as an error injected by chaos.
+fn mark_chaos(resp: &mut Response) {
+    resp.headers_mut()
+        .insert(CHAOS_HEADER, HeaderValue::from_static("error"));
 }
 
 /// The event stream answering a `StreamServer` call.

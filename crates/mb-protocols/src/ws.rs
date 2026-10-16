@@ -18,6 +18,9 @@ const CLOSE_TOO_BIG: u16 = 1009;
 const CLOSE_NORMAL: u16 = 1000;
 /// Close code for any other read failure.
 const CLOSE_PROTOCOL_ERROR: u16 = 1002;
+/// Close code for a server-side failure ending an operation (`1011`,
+/// internal error), e.g. a WebSocket operation stream chaos drops.
+pub const CLOSE_INTERNAL_ERROR: u16 = 1011;
 /// Messages queued in each direction before the other side waits.
 const QUEUE: usize = 32;
 

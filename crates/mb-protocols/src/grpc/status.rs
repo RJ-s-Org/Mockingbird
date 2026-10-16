@@ -44,6 +44,24 @@ impl Failure {
         Self::new(http, format!("forced by x-mockingbird-status: {http}"))
     }
 
+    /// An error injected by chaos: the code of the declared `status`, else
+    /// `UNAVAILABLE` (503), with the metadata `x-mockingbird-chaos: error`.
+    pub(crate) fn chaos(status: Option<u16>) -> Self {
+        let mut failure = Self::new(status.unwrap_or(503), crate::chaos::CHAOS_ERROR_DETAIL);
+        failure.status.metadata_mut().insert(
+            crate::CHAOS_HEADER,
+            tonic::metadata::AsciiMetadataValue::from_static("error"),
+        );
+        failure
+    }
+
+    /// A stream chaos dropped (counted as a `drop` of `rt`'s mock):
+    /// `UNAVAILABLE`, reported as a 503.
+    pub(crate) fn dropped(rt: &crate::MockRuntime) -> Self {
+        crate::chaos::count(&rt.name, "drop");
+        Self::new(503, crate::chaos::STREAM_DROPPED)
+    }
+
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new(500, message)
     }
