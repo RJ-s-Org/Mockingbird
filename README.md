@@ -370,7 +370,7 @@ The official image is built two ways:
 | full (default) | `docker build -t mockingbird .` | Kafka, AMQP, MQTT, memory, WebSocket channels |
 | slim | `docker build --build-arg FEATURES=--no-default-features -t mockingbird:slim .` | memory and WebSocket channels only |
 
-A plain `cargo build` includes MQTT and AMQP (pure Rust). Kafka is opt-in: `cargo build --release --features full` (or `--features kafka`) compiles librdkafka from source, which needs `cmake` (3.x), a C/C++ toolchain, `libssl-dev` and `zlib1g-dev`. A broker kind the binary was built without is reported by `/readyz`.
+A plain `cargo build` includes MQTT and AMQP (pure Rust). Kafka is opt-in: `cargo build --release --features full` (or `--features kafka`) compiles librdkafka from source, which needs `cmake` (3.x), a C/C++ toolchain, `libssl-dev` and `zlib1g-dev`. Declaring a broker whose kind the binary was built without is a startup error that names the kind and the fix (`brokers.<name>: this build has no <kind> support (use the full image or build with --features <kind>)`). Channels whose protocol no configured broker of a compiled kind serves stay inactive and are reported by `/readyz`.
 
 ### Known limits
 
