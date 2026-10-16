@@ -14,6 +14,9 @@ use crate::mocks::{ChaosSchema, MockPath};
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, valid_identifier};
 
+/// Longest accepted `stream_item_interval_ms` (30 s).
+const MAX_STREAM_ITEM_INTERVAL_MS: u64 = 30_000;
+
 /// A named scenario of a mock.
 #[derive(Serialize, ToSchema, Debug)]
 pub struct ScenarioView {
@@ -79,8 +82,9 @@ pub struct PutScenario {
     /// `X-Mockingbird-Stream-Items` overrides it.
     #[serde(default)]
     pub stream_items: Option<u32>,
-    /// Pause between streamed items, in milliseconds.
+    /// Pause between streamed items, in milliseconds (at most 30000).
     #[serde(default)]
+    #[schema(maximum = 30000)]
     pub stream_item_interval_ms: Option<u64>,
     /// Replaces the mock's chaos while the scenario applies.
     #[serde(default)]
@@ -172,6 +176,14 @@ pub async fn put(
         return Err(Problem::unprocessable(
             "stream_items must be between 1 and 10000",
         ));
+    }
+    if body
+        .stream_item_interval_ms
+        .is_some_and(|ms| ms > MAX_STREAM_ITEM_INTERVAL_MS)
+    {
+        return Err(Problem::unprocessable(format!(
+            "stream_item_interval_ms must be at most {MAX_STREAM_ITEM_INTERVAL_MS} (30 s)"
+        )));
     }
     if body.set.as_ref().is_some_and(|s| !s.is_object()) {
         return Err(Problem::unprocessable("set must be a JSON object"));

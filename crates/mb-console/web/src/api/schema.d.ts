@@ -1245,7 +1245,7 @@ export interface components {
             status?: number | null;
             /**
              * Format: int64
-             * @description Pause between streamed items, in milliseconds.
+             * @description Pause between streamed items, in milliseconds (at most 30000).
              */
             stream_item_interval_ms?: number | null;
             /**

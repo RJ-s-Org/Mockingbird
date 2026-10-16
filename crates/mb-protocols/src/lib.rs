@@ -78,6 +78,17 @@ pub struct ProtocolSettings {
     pub ws_keepalive: Duration,
     /// Largest gRPC message decoded or encoded.
     pub grpc_max_message_bytes: usize,
+    /// Most root fields one GraphQL operation may select.
+    pub graphql_max_root_fields: usize,
+    /// Most concurrent subscriptions on one GraphQL WebSocket connection.
+    pub graphql_max_subscriptions_per_connection: usize,
+    /// Most concurrent GraphQL WebSocket connections to one mock.
+    pub graphql_max_connections_per_mock: usize,
+    /// Whether `X-Forwarded-*` request headers are trusted (behind a
+    /// reverse proxy).
+    pub trust_forwarded_headers: bool,
+    /// Whether Mockingbird itself terminates TLS on the data plane.
+    pub tls_terminated: bool,
 }
 
 impl Default for ProtocolSettings {
@@ -90,6 +101,11 @@ impl Default for ProtocolSettings {
             sse_keepalive: Duration::from_secs(15),
             ws_keepalive: Duration::from_secs(30),
             grpc_max_message_bytes: 4 * 1024 * 1024,
+            graphql_max_root_fields: 20,
+            graphql_max_subscriptions_per_connection: 16,
+            graphql_max_connections_per_mock: 1000,
+            trust_forwarded_headers: false,
+            tls_terminated: false,
         }
     }
 }

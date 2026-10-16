@@ -93,6 +93,10 @@ pub struct ServeArgs {
     /// LLM timeout of the default profile [default: 3s].
     #[arg(long)]
     pub llm_timeout: Option<humantime::Duration>,
+    /// Which planes this node serves [default: all]; `control` and `data`
+    /// need shared Postgres (and Postgres or Redis state) stores.
+    #[arg(long, value_enum)]
+    pub role: Option<file_config::Role>,
     /// Reconcile again whenever the config file or a contract changes.
     #[arg(long, requires = "config")]
     pub watch: bool,
@@ -243,6 +247,9 @@ pub fn apply_flags(cfg: &mut FileConfig, args: &ServeArgs) {
     if args.insecure_no_auth {
         cfg.server.insecure_no_auth = true;
     }
+    if let Some(role) = args.role {
+        cfg.server.role = role;
+    }
     if let Some(url) = &args.storage_url {
         cfg.storage.url = url.clone();
     }
@@ -391,7 +398,7 @@ pub async fn build_app_with(
         cfg.observability.request_log_retention,
         cfg.observability.redact_fields.clone(),
     );
-    let (protocols, stream) = cfg.protocols.settings();
+    let (protocols, stream) = cfg.protocol_settings();
     let deps = RuntimeDeps {
         store: store.clone(),
         state: state.clone(),
@@ -517,6 +524,7 @@ pub async fn build_app_with(
             let prepare: watch::Prepare = Arc::new(move |cfg: &mut FileConfig| {
                 file_config::apply_env(cfg)?;
                 apply_flags(cfg, &flags);
+                cfg.validate_ranges().map_err(|e| anyhow!(e))?;
                 // Brokers are connected at startup only: a reload that
                 // changes them is rejected as a whole.
                 ensure_brokers_unchanged(&initial_brokers, cfg)

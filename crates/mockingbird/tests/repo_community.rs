@@ -133,9 +133,6 @@ fn gallery_configs_load() {
             )),
             "README has no serve line for {name}"
         );
-        if name == "chaos" {
-            continue;
-        }
         let path = dir.join("mockingbird.yaml");
         let cfg = mockingbird::file_config::load(&path)
             .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
@@ -152,5 +149,8 @@ fn gallery_configs_load() {
         loaded.push(name);
     }
     loaded.sort();
-    assert_eq!(loaded, ["events", "graphql", "grpc", "rest", "soap"]);
+    assert_eq!(
+        loaded,
+        ["chaos", "events", "graphql", "grpc", "rest", "soap"]
+    );
 }

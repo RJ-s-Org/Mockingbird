@@ -137,3 +137,42 @@ async fn put_scenario_with_chaos() {
         "{problem}"
     );
 }
+
+#[tokio::test]
+async fn put_scenario_interval_over_30s_422() {
+    let h = harness().await;
+    let (status, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({ "name": "orders" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, problem) = h
+        .send(
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/slow",
+            Some(json!({ "stream_item_interval_ms": 30_001 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .unwrap()
+            .contains("stream_item_interval_ms"),
+        "{problem}"
+    );
+
+    let (status, view) = h
+        .send(
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/slow",
+            Some(json!({ "stream_item_interval_ms": 30_000 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["stream_item_interval_ms"], 30_000);
+}

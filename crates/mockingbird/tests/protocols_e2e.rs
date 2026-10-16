@@ -30,7 +30,7 @@ fn config() -> String {
     format!(
         r#"
 protocols:
-  sse: {{keepalive: 300ms}}
+  sse: {{keepalive: 1s}}
 mocks:
   events:
     contract: {events}

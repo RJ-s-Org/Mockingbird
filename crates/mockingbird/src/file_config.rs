@@ -12,10 +12,14 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use mb_engine::StreamConfig;
+use mb_engine::pii::{BuiltinPattern, CustomPattern, Scrubber, ScrubberConfig};
 use mb_mcm::{StateChangeKind, Trigger};
 use mb_protocols::ProtocolSettings;
 use mb_protocols::events::{BrokerConfig, BrokerKind, MQTT_TLS_UNSUPPORTED, SaslConfig};
-use mb_store::{DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode};
+use mb_store::{
+    ChaosSettings, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode, LatencyJitter,
+    MockLimits, RateLimit,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -45,6 +49,159 @@ pub struct FileConfig {
     pub mocks: BTreeMap<String, FileMock>,
     pub auth: AuthConfig,
     pub audit: AuditConfig,
+    /// Outbound HTTP (LLM providers, webhooks, OIDC): extra CA and proxy.
+    pub outbound: OutboundConfig,
+    /// The cross-node change bus.
+    pub bus: BusConfig,
+    /// Global admission limits.
+    pub limits: LimitsConfig,
+    /// The output PII scrubber.
+    pub pii: PiiConfig,
+}
+
+/// Which planes a node serves (`server.role`, `MB_ROLE`, `--role`).
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Control and data plane in one process.
+    #[default]
+    All,
+    /// Admin API, console, reconcile and maintenance only.
+    Control,
+    /// Mocks only.
+    Data,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::All => "all",
+            Role::Control => "control",
+            Role::Data => "data",
+        }
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Ok(Role::All),
+            "control" => Ok(Role::Control),
+            "data" => Ok(Role::Data),
+            other => Err(format!(
+                "unknown role {other:?}; expected all, control or data"
+            )),
+        }
+    }
+}
+
+/// `server.tls`: Mockingbird terminates TLS itself. Both files or none.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct TlsConfig {
+    /// PEM certificate chain.
+    pub cert_file: PathBuf,
+    /// PEM private key.
+    pub key_file: PathBuf,
+}
+
+/// The `outbound:` section.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct OutboundConfig {
+    /// PEM bundle trusted in addition to the default roots.
+    pub ca_file: Option<PathBuf>,
+    /// `http(s)://` proxy for outbound requests.
+    pub proxy: Option<String>,
+    /// Hosts (or `.domain` suffixes) reached without the proxy.
+    pub no_proxy: Vec<String>,
+}
+
+/// The `bus:` section.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct BusConfig {
+    /// `redis://`, `rediss://`, `postgres://` or `local`; unset follows
+    /// `storage.url` (see [`FileConfig::bus_target`]).
+    pub url: Option<String>,
+}
+
+/// Where cross-node change notifications travel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BusTarget {
+    /// In-process only (a single node).
+    Local,
+    /// Postgres `LISTEN/NOTIFY` at this URL.
+    Postgres(String),
+    /// Redis pub/sub at this URL.
+    Redis(String),
+}
+
+/// The `limits:` section: global admission limits.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsConfig {
+    /// LLM generations running at once, across every mock.
+    pub max_concurrent_generations: usize,
+    /// Largest request body accepted, in bytes.
+    pub max_request_bytes: u64,
+    /// Largest response body generated, in bytes.
+    pub max_response_bytes: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_generations: 64,
+            max_request_bytes: 1_048_576,
+            max_response_bytes: 1_048_576,
+        }
+    }
+}
+
+/// The `pii:` section: the output PII scrubber.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct PiiConfig {
+    pub enabled: bool,
+    /// Builtin patterns to replace.
+    pub patterns: Vec<BuiltinPattern>,
+    /// Extra patterns `{name, regex, replacement}`.
+    #[serde(deserialize_with = "strict_custom_patterns")]
+    pub custom: Vec<CustomPattern>,
+}
+
+impl Default for PiiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            patterns: BuiltinPattern::ALL.to_vec(),
+            custom: Vec::new(),
+        }
+    }
+}
+
+/// [`CustomPattern`]s, rejecting unknown keys like the rest of the file.
+fn strict_custom_patterns<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<CustomPattern>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Strict {
+        name: String,
+        regex: String,
+        replacement: String,
+    }
+    Ok(Vec::<Strict>::deserialize(d)?
+        .into_iter()
+        .map(|s| CustomPattern {
+            name: s.name,
+            regex: s.regex,
+            replacement: s.replacement,
+        })
+        .collect())
 }
 
 /// How the Admin API authenticates callers.
@@ -220,6 +377,13 @@ pub struct ServerConfig {
     /// Admin API. Profiles in this file are not restricted. Read at
     /// startup.
     pub api_secret_refs: Vec<String>,
+    /// Which planes this node serves.
+    pub role: Role,
+    /// Whether `X-Forwarded-*` request headers are trusted (only behind a
+    /// reverse proxy that sets them).
+    pub trust_forwarded_headers: bool,
+    /// TLS termination; absent serves plain HTTP.
+    pub tls: Option<TlsConfig>,
     /// Whether `admin_port` was set explicitly (config file key,
     /// `MB_ADMIN_PORT` or `--admin-port`). When it was not, a busy default
     /// port is skipped with a warning instead of failing startup.
@@ -244,6 +408,9 @@ impl Default for ServerConfig {
                 .iter()
                 .map(|r| r.to_string())
                 .collect(),
+            role: Role::All,
+            trust_forwarded_headers: false,
+            tls: None,
             admin_port_explicit: false,
             grpc_port_explicit: false,
         }
@@ -407,6 +574,9 @@ impl ProtocolsConfig {
             graphql_max_complexity: self.graphql.max_complexity,
             sse_keepalive: self.sse.keepalive,
             grpc_max_message_bytes: self.grpc.max_message_bytes,
+            graphql_max_root_fields: self.graphql.max_root_fields,
+            graphql_max_subscriptions_per_connection: self.graphql.max_subscriptions_per_connection,
+            graphql_max_connections_per_mock: self.graphql.max_connections_per_mock,
             ..ProtocolSettings::default()
         };
         let stream = StreamConfig {
@@ -427,6 +597,12 @@ pub struct GraphqlConfig {
     pub introspection: bool,
     pub max_depth: usize,
     pub max_complexity: usize,
+    /// Most root fields one operation may select.
+    pub max_root_fields: usize,
+    /// Most concurrent subscriptions on one WebSocket connection.
+    pub max_subscriptions_per_connection: usize,
+    /// Most concurrent WebSocket connections to one mock.
+    pub max_connections_per_mock: usize,
 }
 
 impl Default for GraphqlConfig {
@@ -436,6 +612,9 @@ impl Default for GraphqlConfig {
             introspection: true,
             max_depth: 15,
             max_complexity: 1000,
+            max_root_fields: 20,
+            max_subscriptions_per_connection: 16,
+            max_connections_per_mock: 1000,
         }
     }
 }
@@ -650,6 +829,110 @@ pub struct FileMock {
     pub channels: BTreeMap<String, FileChannel>,
     #[serde(default, deserialize_with = "strict_data_plane_auth")]
     pub data_plane_auth: DataPlaneAuthConfig,
+    /// Fault injection; absent injects nothing.
+    #[serde(default)]
+    pub chaos: Option<FileChaos>,
+    /// Admission limits; unset fields use the global `limits:`.
+    #[serde(default)]
+    pub limits: FileMockLimits,
+}
+
+/// A mock's (or scenario's) `chaos:`.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct FileChaos {
+    /// Probability (0–1) that a call answers with an injected error.
+    pub error_rate: f64,
+    /// Uniformly random latency added to every call.
+    pub latency_jitter: Option<FileJitter>,
+    /// Probability (0–1) that a streamed response is cut short.
+    pub drop_stream_rate: f64,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct FileJitter {
+    #[serde(with = "humantime_serde")]
+    pub min: Duration,
+    #[serde(with = "humantime_serde")]
+    pub max: Duration,
+}
+
+impl FileChaos {
+    /// The stored form (jitter in milliseconds).
+    pub fn to_store(&self) -> ChaosSettings {
+        ChaosSettings {
+            error_rate: self.error_rate,
+            latency_jitter: self.latency_jitter.as_ref().map(|j| LatencyJitter {
+                min_ms: millis(j.min),
+                max_ms: millis(j.max),
+            }),
+            drop_stream_rate: self.drop_stream_rate,
+        }
+    }
+
+    /// Range checks; messages name the key below `prefix` (e.g.
+    /// `mocks.orders.`).
+    fn validate(&self, prefix: &str) -> Result<(), String> {
+        if let Some(j) = &self.latency_jitter {
+            if j.min > j.max {
+                return Err(format!(
+                    "{prefix}chaos.latency_jitter.min ({}) must not exceed {prefix}chaos.latency_jitter.max ({})",
+                    humantime::format_duration(j.min),
+                    humantime::format_duration(j.max)
+                ));
+            }
+            if j.max > MAX_STREAM_INTERVAL {
+                return Err(format!(
+                    "{prefix}chaos.latency_jitter.max must be at most 30s"
+                ));
+            }
+        }
+        self.to_store()
+            .validate()
+            .map_err(|e| format!("{prefix}{e}"))
+    }
+}
+
+/// Milliseconds, saturating.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A mock's `limits.rate_limit`.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct FileRateLimit {
+    pub requests_per_second: f64,
+    pub burst: u32,
+}
+
+/// A mock's `limits:`.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct FileMockLimits {
+    pub rate_limit: Option<FileRateLimit>,
+    /// Tokens per UTC day, across all replicas.
+    pub daily_token_budget: Option<u64>,
+    /// Overrides `limits.max_request_bytes` for this mock.
+    pub max_request_bytes: Option<u64>,
+    /// Overrides `limits.max_response_bytes` for this mock.
+    pub max_response_bytes: Option<u64>,
+}
+
+impl FileMockLimits {
+    /// The stored form.
+    pub fn to_store(&self) -> MockLimits {
+        MockLimits {
+            rate_limit: self.rate_limit.as_ref().map(|r| RateLimit {
+                requests_per_second: r.requests_per_second,
+                burst: r.burst,
+            }),
+            daily_token_budget: self.daily_token_budget,
+            max_request_bytes: self.max_request_bytes,
+            max_response_bytes: self.max_response_bytes,
+        }
+    }
 }
 
 /// [`DataPlaneAuthConfig`], rejecting unknown keys like the rest of the file.
@@ -687,6 +970,8 @@ impl FileMock {
             broker: None,
             channels: BTreeMap::new(),
             data_plane_auth: DataPlaneAuthConfig::default(),
+            chaos: None,
+            limits: FileMockLimits::default(),
         }
     }
 
@@ -766,6 +1051,8 @@ pub struct FileScenario {
     /// Pause between streamed items.
     #[serde(with = "humantime_serde")]
     pub stream_item_interval: Option<Duration>,
+    /// Replaces the mock's chaos while the scenario applies.
+    pub chaos: Option<FileChaos>,
 }
 
 /// Longest accepted `auth.session_ttl`.
@@ -774,11 +1061,32 @@ pub const MAX_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Accepted `audit.retention_days`.
 pub const RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=3650;
 
+/// Longest accepted stream item interval and latency jitter.
+pub const MAX_STREAM_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Accepted `limits.max_concurrent_generations`.
+pub const MAX_CONCURRENT_GENERATIONS: std::ops::RangeInclusive<usize> = 1..=4096;
+
+/// Smallest accepted `protocols.grpc.max_message_bytes`.
+pub const MIN_GRPC_MESSAGE_BYTES: usize = 1024;
+
 impl FileConfig {
-    /// Range checks that do not depend on the auth mode:
-    /// `auth.session_ttl` ≤ 30 days and `audit.retention_days` in
-    /// 1..=3650.
+    /// Every range and consistency check that does not depend on the auth
+    /// mode, each error naming its key: `auth.session_ttl` ≤ 30 days,
+    /// `audit.retention_days` in 1..=3650, the `server.role` storage rule,
+    /// `server.tls` (both files or neither), `bus.url`'s scheme,
+    /// `outbound.proxy`, the `limits:` and `protocols:` ranges, every mock's
+    /// and scenario's `chaos`, `limits` and `stream_item_interval`, and the
+    /// `pii:` patterns.
     pub fn validate_ranges(&self) -> Result<(), String> {
+        self.validate_file()?;
+        self.validate_role()
+    }
+
+    /// [`Self::validate_ranges`] without the `server.role` storage rule,
+    /// which the environment and flags may still satisfy (`MB_ROLE`,
+    /// `MB_STORAGE_URL`, `MB_STATE_URL`, `--role`, `--storage-url`).
+    fn validate_file(&self) -> Result<(), String> {
         if self.auth.session_ttl > MAX_SESSION_TTL {
             return Err(format!(
                 "auth.session_ttl {} exceeds the maximum of 30d",
@@ -793,8 +1101,214 @@ impl FileConfig {
                 RETENTION_DAYS.end()
             ));
         }
+        if let Some(tls) = &self.server.tls
+            && (tls.cert_file.as_os_str().is_empty() || tls.key_file.as_os_str().is_empty())
+        {
+            return Err(
+                "server.tls requires both cert_file and key_file (or omit server.tls)".into(),
+            );
+        }
+        if let Some(url) = &self.bus.url
+            && url != "local"
+            && !matches!(
+                scheme(url).as_deref(),
+                Some("redis" | "rediss" | "postgres" | "postgresql")
+            )
+        {
+            return Err(format!(
+                "bus.url {url:?} must be a redis://, rediss:// or postgres:// URL, or local"
+            ));
+        }
+        if let Some(proxy) = &self.outbound.proxy {
+            let ok = reqwest::Url::parse(proxy).is_ok_and(|u| {
+                matches!(u.scheme(), "http" | "https")
+                    && u.host_str().is_some_and(|h| !h.is_empty())
+            });
+            if !ok {
+                return Err(format!(
+                    "outbound.proxy {proxy:?} must be an http:// or https:// URL"
+                ));
+            }
+        }
+        self.validate_limits()?;
+        self.validate_protocols()?;
+        for (name, mock) in &self.mocks {
+            let prefix = format!("mocks.{name}.");
+            if let Some(chaos) = &mock.chaos {
+                chaos.validate(&prefix)?;
+            }
+            mock.limits
+                .to_store()
+                .validate()
+                .map_err(|e| format!("{prefix}{e}"))?;
+            for (sname, scenario) in &mock.scenarios {
+                let prefix = format!("mocks.{name}.scenarios.{sname}.");
+                if let Some(chaos) = &scenario.chaos {
+                    chaos.validate(&prefix)?;
+                }
+                if let Some(interval) = scenario.stream_item_interval
+                    && interval > MAX_STREAM_INTERVAL
+                {
+                    return Err(format!(
+                        "{prefix}stream_item_interval {} must be at most 30s",
+                        humantime::format_duration(interval)
+                    ));
+                }
+            }
+        }
+        Scrubber::new(&ScrubberConfig {
+            builtins: self.pii.patterns.clone(),
+            custom: self.pii.custom.clone(),
+        })
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    fn validate_limits(&self) -> Result<(), String> {
+        let l = &self.limits;
+        in_range(
+            "limits.max_concurrent_generations",
+            l.max_concurrent_generations,
+            MAX_CONCURRENT_GENERATIONS,
+        )?;
+        in_range(
+            "limits.max_request_bytes",
+            l.max_request_bytes,
+            MockLimits::MIN_BYTES..=MockLimits::MAX_REQUEST_BYTES,
+        )?;
+        in_range(
+            "limits.max_response_bytes",
+            l.max_response_bytes,
+            MockLimits::MIN_BYTES..=MockLimits::MAX_RESPONSE_BYTES,
+        )
+    }
+
+    fn validate_protocols(&self) -> Result<(), String> {
+        let p = &self.protocols;
+        if p.sse.keepalive < Duration::from_secs(1) {
+            return Err(format!(
+                "protocols.sse.keepalive must be at least 1s (got {})",
+                humantime::format_duration(p.sse.keepalive)
+            ));
+        }
+        if !p.graphql.path.starts_with('/') {
+            return Err(format!(
+                "protocols.graphql.path must start with '/' (got {:?})",
+                p.graphql.path
+            ));
+        }
+        if p.grpc.max_message_bytes < MIN_GRPC_MESSAGE_BYTES {
+            return Err(format!(
+                "protocols.grpc.max_message_bytes {} must be at least {MIN_GRPC_MESSAGE_BYTES}",
+                p.grpc.max_message_bytes
+            ));
+        }
+        if p.stream.item_interval > MAX_STREAM_INTERVAL {
+            return Err(format!(
+                "protocols.stream.item_interval {} must be at most 30s",
+                humantime::format_duration(p.stream.item_interval)
+            ));
+        }
+        in_range(
+            "protocols.graphql.max_root_fields",
+            p.graphql.max_root_fields,
+            1..=1000,
+        )?;
+        in_range(
+            "protocols.graphql.max_subscriptions_per_connection",
+            p.graphql.max_subscriptions_per_connection,
+            1..=1000,
+        )?;
+        in_range(
+            "protocols.graphql.max_connections_per_mock",
+            p.graphql.max_connections_per_mock,
+            1..=100_000,
+        )
+    }
+
+    /// `control` and `data` nodes share their stores with other nodes: the
+    /// control store must be Postgres and the state store Postgres or Redis.
+    fn validate_role(&self) -> Result<(), String> {
+        let role = self.server.role;
+        if role == Role::All {
+            return Ok(());
+        }
+        let role = role.as_str();
+        if !is_postgres(&self.storage.url) {
+            return Err(format!(
+                "server.role {role} requires a postgres:// storage.url; SQLite deployments are single-node"
+            ));
+        }
+        let state = self.storage.effective_state_url();
+        if !is_postgres(state) && !is_redis(state) {
+            return Err(format!(
+                "server.role {role} requires a shared state store (storage.state_url postgres:// or redis://)"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Where change notifications travel: `bus.url` `local` is in-process,
+    /// `redis(s)://` Redis and `postgres(ql)://` Postgres; unset uses
+    /// `storage.url` when it is Postgres and is in-process otherwise. (Any
+    /// other `bus.url` fails [`Self::validate_ranges`]; it maps to `Local`.)
+    pub fn bus_target(&self) -> BusTarget {
+        match &self.bus.url {
+            Some(url) if is_redis(url) => BusTarget::Redis(url.clone()),
+            Some(url) if is_postgres(url) => BusTarget::Postgres(url.clone()),
+            Some(_) => BusTarget::Local,
+            None if is_postgres(&self.storage.url) => BusTarget::Postgres(self.storage.url.clone()),
+            None => BusTarget::Local,
+        }
+    }
+
+    /// The PII scrubber's patterns; `None` unless `pii.enabled`.
+    pub fn scrubber_config(&self) -> Option<ScrubberConfig> {
+        self.pii.enabled.then(|| ScrubberConfig {
+            builtins: self.pii.patterns.clone(),
+            custom: self.pii.custom.clone(),
+        })
+    }
+
+    /// The adapters' settings ([`ProtocolsConfig::settings`] plus the
+    /// `server:` keys they need) and the engine's stream limits.
+    pub fn protocol_settings(&self) -> (ProtocolSettings, StreamConfig) {
+        let (mut settings, stream) = self.protocols.settings();
+        settings.trust_forwarded_headers = self.server.trust_forwarded_headers;
+        settings.tls_terminated = self.server.tls.is_some();
+        (settings, stream)
+    }
+}
+
+/// `Err` naming `key` unless `value` is in `range`.
+fn in_range<T: PartialOrd + std::fmt::Display>(
+    key: &str,
+    value: T,
+    range: std::ops::RangeInclusive<T>,
+) -> Result<(), String> {
+    if range.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{key} {value} must be between {} and {}",
+            range.start(),
+            range.end()
+        ))
+    }
+}
+
+/// A URL's scheme, lowercased.
+fn scheme(url: &str) -> Option<String> {
+    url.split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+}
+
+fn is_postgres(url: &str) -> bool {
+    matches!(scheme(url).as_deref(), Some("postgres" | "postgresql"))
+}
+
+fn is_redis(url: &str) -> bool {
+    matches!(scheme(url).as_deref(), Some("redis" | "rediss"))
 }
 
 /// Reads and parses `path`, resolving contract paths against its directory.
@@ -828,7 +1342,7 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
             mock.contract = dir.join(&mock.contract);
         }
     }
-    cfg.validate_ranges()
+    cfg.validate_file()
         .map_err(|e| anyhow!(e))
         .with_context(|| format!("invalid config file {}", path.display()))?;
     Ok(cfg)
@@ -871,8 +1385,10 @@ pub fn apply_env(cfg: &mut FileConfig) -> anyhow::Result<()> {
     apply_env_from(cfg, |k| std::env::var(k).ok())
 }
 
-/// Applies `MB_HOST`, `MB_PORT`, `MB_ADMIN_PORT`, `MB_GRPC_PORT` and
-/// `MB_STORAGE_URL`, and the `MB_LLM_*` variables to the [`ENV_PROFILE`]
+/// Applies `MB_HOST`, `MB_PORT`, `MB_ADMIN_PORT`, `MB_GRPC_PORT`,
+/// `MB_STORAGE_URL`, `MB_STATE_URL` (`storage.state_url`), `MB_BUS_URL`
+/// (`bus.url`) and `MB_ROLE` (`server.role`: `all`, `control` or `data`),
+/// and the `MB_LLM_*` variables to the [`ENV_PROFILE`]
 /// profile (created with
 /// the documented defaults if absent, and made the default profile when
 /// none is set). `MB_LLM_API_KEY` is stored as the reference
@@ -898,6 +1414,18 @@ pub fn apply_env_from(
     }
     if let Some(v) = get("MB_STORAGE_URL") {
         cfg.storage.url = v;
+    }
+    if let Some(v) = get("MB_STATE_URL") {
+        cfg.storage.state_url = Some(v);
+    }
+    if let Some(v) = get("MB_BUS_URL") {
+        cfg.bus.url = Some(v);
+    }
+    if let Some(v) = get("MB_ROLE") {
+        cfg.server.role = v
+            .parse()
+            .map_err(|e: String| anyhow!(e))
+            .with_context(|| format!("MB_ROLE={v:?}"))?;
     }
 
     let base_url = get("MB_LLM_BASE_URL");
