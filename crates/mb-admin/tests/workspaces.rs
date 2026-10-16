@@ -472,6 +472,38 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
     }
 }
 
+/// Generated clients key operations by id, so every id must be unique.
+#[tokio::test]
+async fn openapi_operation_ids_are_unique() {
+    let h = harness().await;
+    let doc = h.get("/api/openapi.json").await.ok(StatusCode::OK);
+    let mut seen = std::collections::BTreeSet::new();
+    for (path, item) in doc["paths"].as_object().unwrap() {
+        for (method, op) in item.as_object().unwrap() {
+            if let Some(id) = op["operationId"].as_str() {
+                assert!(
+                    seen.insert(id.to_string()),
+                    "duplicate {id} at {method} {path}"
+                );
+            }
+        }
+    }
+    let paths = &doc["paths"];
+    assert_eq!(
+        paths["/api/v1/workspaces/{ws}/mocks"]["get"]["operationId"],
+        "mocks_list"
+    );
+    assert_eq!(
+        paths["/api/v1/workspaces/{ws}/mocks/{mock}/contracts"]["get"]["operationId"],
+        "contracts_list"
+    );
+    assert_eq!(
+        paths["/api/v1/mocks"]["get"]["operationId"],
+        "mocks_list_default"
+    );
+    assert_eq!(paths["/api/v1/me"]["get"]["operationId"], "me");
+}
+
 /// Authenticates every request as a viewer of `team-a` only.
 struct TeamAViewer;
 

@@ -11,7 +11,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list_global"];
+        get: operations["audit_list_global"];
         put?: never;
         post?: never;
         delete?: never;
@@ -28,7 +28,7 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["list_default"];
+        get: operations["llm_profiles_list_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -45,12 +45,12 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["get_one_default"];
+        get: operations["llm_profiles_get_one_default"];
         /** @deprecated */
-        put: operations["put_default"];
+        put: operations["llm_profiles_put_default"];
         post?: never;
         /** @deprecated */
-        delete: operations["delete_default"];
+        delete: operations["llm_profiles_delete_default"];
         options?: never;
         head?: never;
         patch?: never;
@@ -80,10 +80,10 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["list_default"];
+        get: operations["mocks_list_default"];
         put?: never;
         /** @deprecated */
-        post: operations["create_default"];
+        post: operations["mocks_create_default"];
         delete?: never;
         options?: never;
         head?: never;
@@ -98,15 +98,15 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["get_one_default"];
+        get: operations["mocks_get_one_default"];
         put?: never;
         post?: never;
         /** @deprecated */
-        delete: operations["delete_default"];
+        delete: operations["mocks_delete_default"];
         options?: never;
         head?: never;
         /** @deprecated */
-        patch: operations["patch_default"];
+        patch: operations["mocks_patch_default"];
         trace?: never;
     };
     "/api/v1/mocks/{mock}/contracts": {
@@ -117,10 +117,10 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["list_default"];
+        get: operations["contracts_list_default"];
         put?: never;
         /** @deprecated */
-        post: operations["upload_default"];
+        post: operations["contracts_upload_default"];
         delete?: never;
         options?: never;
         head?: never;
@@ -135,7 +135,7 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["get_one_default"];
+        get: operations["contracts_get_one_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -154,7 +154,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** @deprecated */
-        post: operations["activate_default"];
+        post: operations["contracts_activate_default"];
         delete?: never;
         options?: never;
         head?: never;
@@ -169,7 +169,7 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["source_default"];
+        get: operations["contracts_source_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -186,7 +186,7 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["list_default"];
+        get: operations["requests_list_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -206,7 +206,7 @@ export interface paths {
          * @deprecated
          * @description Server-sent events: `event: request` with one served call per event, `event: lagged` with `{"dropped": N}` when this subscriber fell behind; a keep-alive comment every 15 s.
          */
-        get: operations["stream_default"];
+        get: operations["requests_stream_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -223,7 +223,7 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["list_default"];
+        get: operations["scenarios_list_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -241,10 +241,10 @@ export interface paths {
         };
         get?: never;
         /** @deprecated */
-        put: operations["put_default"];
+        put: operations["scenarios_put_default"];
         post?: never;
         /** @deprecated */
-        delete: operations["delete_default"];
+        delete: operations["scenarios_delete_default"];
         options?: never;
         head?: never;
         patch?: never;
@@ -258,7 +258,7 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["list_default"];
+        get: operations["sessions_list_default"];
         put?: never;
         post?: never;
         delete?: never;
@@ -275,12 +275,12 @@ export interface paths {
             cookie?: never;
         };
         /** @deprecated */
-        get: operations["export_default"];
+        get: operations["sessions_export_default"];
         /** @deprecated */
-        put: operations["seed_default"];
+        put: operations["sessions_seed_default"];
         post?: never;
         /** @deprecated */
-        delete: operations["reset_default"];
+        delete: operations["sessions_reset_default"];
         options?: never;
         head?: never;
         patch?: never;
@@ -293,9 +293,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["workspaces_list"];
         put?: never;
-        post: operations["create"];
+        post: operations["workspaces_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -309,13 +309,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get_one"];
+        get: operations["workspaces_get_one"];
         put?: never;
         post?: never;
-        delete: operations["delete"];
+        delete: operations["workspaces_delete"];
         options?: never;
         head?: never;
-        patch: operations["patch"];
+        patch: operations["workspaces_patch"];
         trace?: never;
     };
     "/api/v1/workspaces/{ws}/api-keys": {
@@ -325,9 +325,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["api_keys_list"];
         put?: never;
-        post: operations["create"];
+        post: operations["api_keys_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -344,7 +344,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete: operations["revoke"];
+        delete: operations["api_keys_revoke"];
         options?: never;
         head?: never;
         patch?: never;
@@ -357,7 +357,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["audit_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -373,7 +373,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["llm_profiles_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -389,10 +389,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get_one"];
-        put: operations["put"];
+        get: operations["llm_profiles_get_one"];
+        put: operations["llm_profiles_put"];
         post?: never;
-        delete: operations["delete"];
+        delete: operations["llm_profiles_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -405,9 +405,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["mocks_list"];
         put?: never;
-        post: operations["create"];
+        post: operations["mocks_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -421,13 +421,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get_one"];
+        get: operations["mocks_get_one"];
         put?: never;
         post?: never;
-        delete: operations["delete"];
+        delete: operations["mocks_delete"];
         options?: never;
         head?: never;
-        patch: operations["patch"];
+        patch: operations["mocks_patch"];
         trace?: never;
     };
     "/api/v1/workspaces/{ws}/mocks/{mock}/contracts": {
@@ -437,9 +437,9 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["contracts_list"];
         put?: never;
-        post: operations["upload"];
+        post: operations["contracts_upload"];
         delete?: never;
         options?: never;
         head?: never;
@@ -453,7 +453,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get_one"];
+        get: operations["contracts_get_one"];
         put?: never;
         post?: never;
         delete?: never;
@@ -471,7 +471,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["activate"];
+        post: operations["contracts_activate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -485,7 +485,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["source"];
+        get: operations["contracts_source"];
         put?: never;
         post?: never;
         delete?: never;
@@ -501,7 +501,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["requests_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -518,7 +518,7 @@ export interface paths {
             cookie?: never;
         };
         /** @description Server-sent events: `event: request` with one served call per event, `event: lagged` with `{"dropped": N}` when this subscriber fell behind; a keep-alive comment every 15 s. */
-        get: operations["stream"];
+        get: operations["requests_stream"];
         put?: never;
         post?: never;
         delete?: never;
@@ -534,7 +534,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["scenarios_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -551,9 +551,9 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put: operations["put"];
+        put: operations["scenarios_put"];
         post?: never;
-        delete: operations["delete"];
+        delete: operations["scenarios_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -566,7 +566,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list"];
+        get: operations["sessions_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -582,10 +582,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["export"];
-        put: operations["seed"];
+        get: operations["sessions_export"];
+        put: operations["sessions_seed"];
         post?: never;
-        delete: operations["reset"];
+        delete: operations["sessions_reset"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1009,7 +1009,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    list_global: {
+    audit_list_global: {
         parameters: {
             query?: {
                 /** @description Only this action, e.g. `mock.create`. */
@@ -1057,7 +1057,7 @@ export interface operations {
             };
         };
     };
-    list_default: {
+    llm_profiles_list_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1076,7 +1076,7 @@ export interface operations {
             };
         };
     };
-    get_one_default: {
+    llm_profiles_get_one_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1106,7 +1106,7 @@ export interface operations {
             };
         };
     };
-    put_default: {
+    llm_profiles_put_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1150,7 +1150,7 @@ export interface operations {
             };
         };
     };
-    delete_default: {
+    llm_profiles_delete_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1226,7 +1226,7 @@ export interface operations {
             };
         };
     };
-    list_default: {
+    mocks_list_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1245,7 +1245,7 @@ export interface operations {
             };
         };
     };
-    create_default: {
+    mocks_create_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1286,7 +1286,7 @@ export interface operations {
             };
         };
     };
-    get_one_default: {
+    mocks_get_one_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1316,7 +1316,7 @@ export interface operations {
             };
         };
     };
-    delete_default: {
+    mocks_delete_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1363,7 +1363,7 @@ export interface operations {
             };
         };
     };
-    patch_default: {
+    mocks_patch_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1414,7 +1414,7 @@ export interface operations {
             };
         };
     };
-    list_default: {
+    contracts_list_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1445,7 +1445,7 @@ export interface operations {
             };
         };
     };
-    upload_default: {
+    contracts_upload_default: {
         parameters: {
             query?: {
                 /**
@@ -1527,7 +1527,7 @@ export interface operations {
             };
         };
     };
-    get_one_default: {
+    contracts_get_one_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1559,7 +1559,7 @@ export interface operations {
             };
         };
     };
-    activate_default: {
+    contracts_activate_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1610,7 +1610,7 @@ export interface operations {
             };
         };
     };
-    source_default: {
+    contracts_source_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1643,7 +1643,7 @@ export interface operations {
             };
         };
     };
-    list_default: {
+    requests_list_default: {
         parameters: {
             query?: {
                 /** @description Operation id. */
@@ -1693,7 +1693,7 @@ export interface operations {
             };
         };
     };
-    stream_default: {
+    requests_stream_default: {
         parameters: {
             query?: {
                 /** @description Only this operation id. */
@@ -1748,7 +1748,7 @@ export interface operations {
             };
         };
     };
-    list_default: {
+    scenarios_list_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1778,7 +1778,7 @@ export interface operations {
             };
         };
     };
-    put_default: {
+    scenarios_put_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1832,7 +1832,7 @@ export interface operations {
             };
         };
     };
-    delete_default: {
+    scenarios_delete_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1872,7 +1872,7 @@ export interface operations {
             };
         };
     };
-    list_default: {
+    sessions_list_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1912,7 +1912,7 @@ export interface operations {
             };
         };
     };
-    export_default: {
+    sessions_export_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -1962,7 +1962,7 @@ export interface operations {
             };
         };
     };
-    seed_default: {
+    sessions_seed_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -2015,7 +2015,7 @@ export interface operations {
             };
         };
     };
-    reset_default: {
+    sessions_reset_default: {
         parameters: {
             query?: never;
             header?: never;
@@ -2063,7 +2063,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    workspaces_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -2083,7 +2083,7 @@ export interface operations {
             };
         };
     };
-    create: {
+    workspaces_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -2133,7 +2133,7 @@ export interface operations {
             };
         };
     };
-    get_one: {
+    workspaces_get_one: {
         parameters: {
             query?: never;
             header?: never;
@@ -2172,7 +2172,7 @@ export interface operations {
             };
         };
     };
-    delete: {
+    workspaces_delete: {
         parameters: {
             query?: {
                 /**
@@ -2233,7 +2233,7 @@ export interface operations {
             };
         };
     };
-    patch: {
+    workspaces_patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -2283,7 +2283,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    api_keys_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -2314,7 +2314,7 @@ export interface operations {
             };
         };
     };
-    create: {
+    api_keys_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -2359,7 +2359,7 @@ export interface operations {
             };
         };
     };
-    revoke: {
+    api_keys_revoke: {
         parameters: {
             query?: never;
             header?: never;
@@ -2399,7 +2399,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    audit_list: {
         parameters: {
             query?: {
                 /** @description Only this action, e.g. `mock.create`. */
@@ -2449,7 +2449,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    llm_profiles_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -2471,7 +2471,7 @@ export interface operations {
             };
         };
     };
-    get_one: {
+    llm_profiles_get_one: {
         parameters: {
             query?: never;
             header?: never;
@@ -2503,7 +2503,7 @@ export interface operations {
             };
         };
     };
-    put: {
+    llm_profiles_put: {
         parameters: {
             query?: never;
             header?: never;
@@ -2549,7 +2549,7 @@ export interface operations {
             };
         };
     };
-    delete: {
+    llm_profiles_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2598,7 +2598,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    mocks_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -2620,7 +2620,7 @@ export interface operations {
             };
         };
     };
-    create: {
+    mocks_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -2664,7 +2664,7 @@ export interface operations {
             };
         };
     };
-    get_one: {
+    mocks_get_one: {
         parameters: {
             query?: never;
             header?: never;
@@ -2696,7 +2696,7 @@ export interface operations {
             };
         };
     };
-    delete: {
+    mocks_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2745,7 +2745,7 @@ export interface operations {
             };
         };
     };
-    patch: {
+    mocks_patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -2798,7 +2798,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    contracts_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -2831,7 +2831,7 @@ export interface operations {
             };
         };
     };
-    upload: {
+    contracts_upload: {
         parameters: {
             query?: {
                 /**
@@ -2915,7 +2915,7 @@ export interface operations {
             };
         };
     };
-    get_one: {
+    contracts_get_one: {
         parameters: {
             query?: never;
             header?: never;
@@ -2949,7 +2949,7 @@ export interface operations {
             };
         };
     };
-    activate: {
+    contracts_activate: {
         parameters: {
             query?: never;
             header?: never;
@@ -3002,7 +3002,7 @@ export interface operations {
             };
         };
     };
-    source: {
+    contracts_source: {
         parameters: {
             query?: never;
             header?: never;
@@ -3037,7 +3037,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    requests_list: {
         parameters: {
             query?: {
                 /** @description Operation id. */
@@ -3089,7 +3089,7 @@ export interface operations {
             };
         };
     };
-    stream: {
+    requests_stream: {
         parameters: {
             query?: {
                 /** @description Only this operation id. */
@@ -3146,7 +3146,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    scenarios_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3178,7 +3178,7 @@ export interface operations {
             };
         };
     };
-    put: {
+    scenarios_put: {
         parameters: {
             query?: never;
             header?: never;
@@ -3234,7 +3234,7 @@ export interface operations {
             };
         };
     };
-    delete: {
+    scenarios_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3276,7 +3276,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    sessions_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3318,7 +3318,7 @@ export interface operations {
             };
         };
     };
-    export: {
+    sessions_export: {
         parameters: {
             query?: never;
             header?: never;
@@ -3370,7 +3370,7 @@ export interface operations {
             };
         };
     };
-    seed: {
+    sessions_seed: {
         parameters: {
             query?: never;
             header?: never;
@@ -3425,7 +3425,7 @@ export interface operations {
             };
         };
     };
-    reset: {
+    sessions_reset: {
         parameters: {
             query?: never;
             header?: never;

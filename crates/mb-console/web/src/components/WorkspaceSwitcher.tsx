@@ -1,11 +1,8 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { rememberWorkspace, useCreateWorkspace, useWorkspaces } from "../api/queries";
-import { Dialog, primaryButton, secondaryButton } from "./ConfirmDialog";
+import { Dialog, inputClass, primaryButton, secondaryButton } from "./ConfirmDialog";
 import { ProblemAlert } from "./ProblemAlert";
-
-const inputClass =
-  "w-full rounded-md border border-slate-400 bg-white px-2 py-1.5 text-sm text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-indigo-700";
 
 /** Picks the current workspace; a sysadmin can also create one. */
 export function WorkspaceSwitcher({ current, sysadmin }: { current?: string; sysadmin: boolean }) {

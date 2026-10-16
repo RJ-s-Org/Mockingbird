@@ -11,6 +11,10 @@ import { lastWorkspace, workspacesQuery } from "./api/queries";
 import { Layout } from "./components/Layout";
 import { ProblemAlert } from "./components/ProblemAlert";
 import { Home, Pending } from "./pages/Home";
+import { Contracts } from "./pages/mocks/Contracts";
+import { MockLayout } from "./pages/mocks/MockLayout";
+import { MocksList } from "./pages/mocks/MocksList";
+import { Overview } from "./pages/mocks/Overview";
 import { NotFound } from "./pages/NotFound";
 
 export interface RouterContext {
@@ -60,13 +64,19 @@ const workspaceIndexRoute = createRoute({
 const mocksRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "/mocks",
-  component: () => <Pending title="Mocks" />,
+  component: function MocksPage() {
+    const { ws } = mocksRoute.useParams();
+    return <MocksList ws={ws} />;
+  },
 });
 
 const mockRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "/mocks/$mock",
-  component: Outlet,
+  component: function MockFrame() {
+    const { ws, mock } = mockRoute.useParams();
+    return <MockLayout ws={ws} mock={mock} />;
+  },
 });
 
 const mockIndexRoute = createRoute({
@@ -84,8 +94,24 @@ const mockTab = <P extends string>(path: P, title: string) =>
     component: () => <Pending title={title} />,
   });
 
-const mockOverviewRoute = mockTab("/overview", "Overview");
-const mockContractsRoute = mockTab("/contracts", "Contracts");
+const mockOverviewRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/overview",
+  component: function OverviewPage() {
+    const { ws, mock } = mockOverviewRoute.useParams();
+    return <Overview ws={ws} mock={mock} />;
+  },
+});
+
+const mockContractsRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/contracts",
+  component: function ContractsPage() {
+    const { ws, mock } = mockContractsRoute.useParams();
+    return <Contracts ws={ws} mock={mock} />;
+  },
+});
+
 const mockScenariosRoute = mockTab("/scenarios", "Scenarios");
 const mockSessionsRoute = mockTab("/sessions", "Sessions");
 const mockRequestsRoute = mockTab("/requests", "Requests");

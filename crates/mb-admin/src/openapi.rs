@@ -115,8 +115,18 @@ const ALIASED: [&str; 2] = ["/mocks", "/llm-profiles"];
 /// The admin API's OpenAPI document: [`ApiDoc`] plus, for every canonical
 /// `mocks`/`llm-profiles` path, its deprecated `/api/v1/…` alias without
 /// the `ws` parameter and with operation ids suffixed `_default`.
+///
+/// Operation ids are `<tag>_<handler>` (the tag in snake case, e.g.
+/// `mocks_list`, `llm_profiles_put`), or just the handler when it is named
+/// after its tag (`me`): generated clients key operations by id, and
+/// several modules share handler names.
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     let mut doc = ApiDoc::openapi();
+    doc.paths
+        .paths
+        .values_mut()
+        .flat_map(operations_mut)
+        .for_each(qualify_operation_id);
     let aliases: Vec<(String, PathItem)> = doc
         .paths
         .paths
@@ -136,7 +146,13 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 /// `item` as a deprecated alias for workspace `default`.
 fn alias(mut item: PathItem) -> PathItem {
     item.parameters = item.parameters.take().map(without_ws);
-    for op in [
+    operations_mut(&mut item).for_each(alias_operation);
+    item
+}
+
+/// Every operation of `item`.
+fn operations_mut(item: &mut PathItem) -> impl Iterator<Item = &mut Operation> {
+    [
         &mut item.get,
         &mut item.put,
         &mut item.post,
@@ -149,13 +165,19 @@ fn alias(mut item: PathItem) -> PathItem {
     ]
     .into_iter()
     .flatten()
-    {
-        alias_operation(op);
-    }
-    item.additional_operations
-        .values_mut()
-        .for_each(alias_operation);
-    item
+    .chain(item.additional_operations.values_mut())
+}
+
+/// Prefixes `op`'s id with its first tag, unless the id already is the tag.
+fn qualify_operation_id(op: &mut Operation) {
+    let Some(tag) = op.tags.as_ref().and_then(|t| t.first()) else {
+        return;
+    };
+    let tag = tag.replace('-', "_");
+    op.operation_id = op
+        .operation_id
+        .take()
+        .map(|id| if id == tag { id } else { format!("{tag}_{id}") });
 }
 
 fn alias_operation(op: &mut Operation) {

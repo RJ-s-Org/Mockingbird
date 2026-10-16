@@ -52,6 +52,8 @@ export const buttonClass =
   "rounded-md px-3 py-1.5 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 disabled:opacity-60";
 export const primaryButton = `${buttonClass} bg-indigo-700 text-white hover:bg-indigo-800`;
 export const secondaryButton = `${buttonClass} border border-slate-400 bg-white text-slate-900 hover:bg-slate-100`;
+export const inputClass =
+  "w-full rounded-md border border-slate-400 bg-white px-2 py-1.5 text-sm text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-indigo-700 disabled:bg-slate-100 disabled:text-slate-700";
 export const dangerButton = `${buttonClass} bg-red-700 text-white hover:bg-red-800`;
 
 /** A modal dialog: traps focus, closes on Escape or a click on the backdrop. */
