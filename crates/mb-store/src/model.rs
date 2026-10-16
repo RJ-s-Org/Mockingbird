@@ -229,6 +229,106 @@ impl Default for RequestLogFilter {
     }
 }
 
+/// A stored API key. Only the hex sha256 of its secret is kept.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ApiKey {
+    pub key_id: String,
+    pub workspace: String,
+    pub name: String,
+    /// `viewer`, `editor`, `admin` or `owner`.
+    pub role: String,
+    /// `admin` and/or `data-plane`.
+    pub scopes: Vec<String>,
+    pub sysadmin: bool,
+    /// Hex sha256 of the secret bytes.
+    pub secret_hash: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// A server-side console session, keyed by the hex sha256 of its cookie value.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AdminSession {
+    pub id_hash: String,
+    pub principal: Value,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AuditEvent {
+    pub id: i64,
+    /// `None` for events outside any workspace (e.g. logins).
+    pub workspace: Option<String>,
+    pub actor_subject: String,
+    pub actor_kind: String,
+    pub action: String,
+    pub target: String,
+    pub before: Option<Value>,
+    pub after: Option<Value>,
+    pub request_id: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// An [`AuditEvent`] before the store assigns its id.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NewAuditEvent {
+    pub workspace: Option<String>,
+    pub actor_subject: String,
+    pub actor_kind: String,
+    pub action: String,
+    pub target: String,
+    pub before: Option<Value>,
+    pub after: Option<Value>,
+    pub request_id: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// Audit-log query. Results are ordered by id, newest first.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AuditFilter {
+    /// `None` lists every workspace's events (and those without one).
+    pub workspace: Option<String>,
+    pub action: Option<String>,
+    /// Matches `actor_subject` exactly.
+    pub actor: Option<String>,
+    /// Clamped to `1..=1000`; defaults to 100.
+    #[serde(default = "AuditFilter::default_limit")]
+    pub limit: u32,
+    /// Only events with `id < before_id` (keyset pagination).
+    pub before_id: Option<i64>,
+}
+
+impl AuditFilter {
+    pub const DEFAULT_LIMIT: u32 = 100;
+    pub const MAX_LIMIT: u32 = 1000;
+
+    fn default_limit() -> u32 {
+        Self::DEFAULT_LIMIT
+    }
+
+    /// `limit` clamped to `1..=1000`.
+    pub fn effective_limit(&self) -> u32 {
+        self.limit.clamp(1, Self::MAX_LIMIT)
+    }
+}
+
+impl Default for AuditFilter {
+    fn default() -> Self {
+        Self {
+            workspace: None,
+            action: None,
+            actor: None,
+            limit: Self::DEFAULT_LIMIT,
+            before_id: None,
+        }
+    }
+}
+
 /// Published on every control-plane mutation. Scenario and contract changes
 /// publish the owning mock.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

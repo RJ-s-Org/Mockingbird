@@ -7,17 +7,19 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    ACQUIRE_TIMEOUT, CHANGE_CHANNEL_CAPACITY, ContractStatus, ContractVersion, ControlChange,
-    ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
-    NewRequestLogEntry, PruneCounter, RequestLogEntry, RequestLogFilter, ResourceSource, Scenario,
-    ScenarioRules, StoreError, Workspace, missing_workspace, now, sha256_hex, validate_header_name,
-    validate_mock_name, validate_route_prefix, validate_workspace_name,
+    ACQUIRE_TIMEOUT, AdminSession, ApiKey, AuditEvent, AuditFilter, CHANGE_CHANNEL_CAPACITY,
+    ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
+    Mock, NewAuditEvent, NewContractVersion, NewMock, NewRequestLogEntry, PruneCounter,
+    RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError,
+    Workspace, missing_workspace, now, sha256_hex, validate_header_name, validate_mock_name,
+    validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -36,6 +38,15 @@ const VERSION_COLUMNS: &str =
 const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundle::text AS bundle, status, created_by, created_at";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
      max_tokens, fallback_profile, source";
+const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
+     created_at, expires_at, last_used_at, revoked_at";
+/// [`API_KEY_COLUMNS`] with JSON read back as text.
+const API_KEY_SELECT: &str = "key_id, workspace, name, role, scopes::text AS scopes, sysadmin, secret_hash, \
+     created_by, created_at, expires_at, last_used_at, revoked_at";
+const SESSION_SELECT: &str =
+    "id_hash, principal::text AS principal, created_at, expires_at, last_seen";
+const AUDIT_SELECT: &str = "id, workspace, actor_subject, actor_kind, action, target, \
+     before_value::text AS before_value, after_value::text AS after_value, request_id, at";
 const LOG_SELECT: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
      prompt_tokens, completion_tokens, request::text AS request, response::text AS response, at";
 
@@ -245,6 +256,52 @@ fn log_from_row(row: &PgRow) -> Result<RequestLogEntry, StoreError> {
     })
 }
 
+fn api_key_from_row(row: &PgRow) -> Result<ApiKey, StoreError> {
+    let scopes: String = row.try_get("scopes")?;
+    Ok(ApiKey {
+        key_id: row.try_get("key_id")?,
+        workspace: row.try_get("workspace")?,
+        name: row.try_get("name")?,
+        role: row.try_get("role")?,
+        scopes: serde_json::from_str(&scopes)?,
+        sysadmin: row.try_get("sysadmin")?,
+        secret_hash: row.try_get("secret_hash")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
+fn session_from_row(row: &PgRow) -> Result<AdminSession, StoreError> {
+    let principal: String = row.try_get("principal")?;
+    Ok(AdminSession {
+        id_hash: row.try_get("id_hash")?,
+        principal: serde_json::from_str(&principal)?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_seen: row.try_get("last_seen")?,
+    })
+}
+
+fn audit_from_row(row: &PgRow) -> Result<AuditEvent, StoreError> {
+    let before: Option<String> = row.try_get("before_value")?;
+    let after: Option<String> = row.try_get("after_value")?;
+    Ok(AuditEvent {
+        id: row.try_get("id")?,
+        workspace: row.try_get("workspace")?,
+        actor_subject: row.try_get("actor_subject")?,
+        actor_kind: row.try_get("actor_kind")?,
+        action: row.try_get("action")?,
+        target: row.try_get("target")?,
+        before: before.map(|v| serde_json::from_str(&v)).transpose()?,
+        after: after.map(|v| serde_json::from_str(&v)).transpose()?,
+        request_id: row.try_get("request_id")?,
+        at: row.try_get("at")?,
+    })
+}
+
 fn mock_name_conflict(name: &str) -> impl FnOnce(sqlx::Error) -> StoreError + '_ {
     move |e| match StoreError::from(e) {
         StoreError::Conflict(_) => StoreError::Conflict(format!("mock {name:?} already exists")),
@@ -370,6 +427,7 @@ impl ControlStore for PgStore {
         for sql in [
             "DELETE FROM mocks WHERE workspace = $1",
             "DELETE FROM llm_profiles WHERE workspace = $1",
+            "DELETE FROM api_keys WHERE workspace = $1",
             "DELETE FROM workspaces WHERE name = $1",
         ] {
             sqlx::query(sql).bind(name).execute(&mut *tx).await?;
@@ -876,6 +934,216 @@ impl ControlStore for PgStore {
             .iter()
             .map(log_from_row)
             .collect()
+    }
+
+    async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        lock_workspace(&mut tx, &k.workspace).await?;
+        let sql = format!(
+            "INSERT INTO api_keys ({API_KEY_COLUMNS}) \
+             VALUES ($1, $2, $3, $4, $5::json, $6, $7, $8, $9, $10, $11, $12)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&k.key_id)
+            .bind(&k.workspace)
+            .bind(&k.name)
+            .bind(&k.role)
+            .bind(serde_json::to_string(&k.scopes)?)
+            .bind(k.sysadmin)
+            .bind(&k.secret_hash)
+            .bind(&k.created_by)
+            .bind(k.created_at)
+            .bind(k.expires_at)
+            .bind(k.last_used_at)
+            .bind(k.revoked_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match StoreError::from(e) {
+                StoreError::Conflict(_) => {
+                    StoreError::Conflict(format!("api key {:?} already exists", k.key_id))
+                }
+                other => other,
+            })?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_api_key(&self, key_id: &str) -> Result<Option<ApiKey>, StoreError> {
+        let sql = format!("SELECT {API_KEY_SELECT} FROM api_keys WHERE key_id = $1");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(key_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(api_key_from_row)
+            .transpose()
+    }
+
+    async fn list_api_keys(&self, ws: &str) -> Result<Vec<ApiKey>, StoreError> {
+        let sql = format!(
+            "SELECT {API_KEY_SELECT} FROM api_keys WHERE workspace = $1 \
+             ORDER BY created_at DESC, key_id COLLATE \"C\""
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(ws)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(api_key_from_row)
+            .collect()
+    }
+
+    async fn revoke_api_key(&self, ws: &str, key_id: &str) -> Result<bool, StoreError> {
+        let revoked = sqlx::query(
+            "UPDATE api_keys SET revoked_at = $1 \
+             WHERE workspace = $2 AND key_id = $3 AND revoked_at IS NULL",
+        )
+        .bind(now())
+        .bind(ws)
+        .bind(key_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0;
+        Ok(revoked)
+    }
+
+    async fn touch_api_key(&self, key_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        sqlx::query("UPDATE api_keys SET last_used_at = $1 WHERE key_id = $2")
+            .bind(at)
+            .bind(key_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_admin_session(&self, s: &AdminSession) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO admin_sessions (id_hash, principal, created_at, expires_at, last_seen) \
+             VALUES ($1, $2::json, $3, $4, $5)",
+        )
+        .bind(&s.id_hash)
+        .bind(serde_json::to_string(&s.principal)?)
+        .bind(s.created_at)
+        .bind(s.expires_at)
+        .bind(s.last_seen)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match StoreError::from(e) {
+            StoreError::Conflict(_) => StoreError::Conflict("admin session already exists".into()),
+            other => other,
+        })?;
+        Ok(())
+    }
+
+    async fn get_admin_session(&self, id_hash: &str) -> Result<Option<AdminSession>, StoreError> {
+        let sql = format!("SELECT {SESSION_SELECT} FROM admin_sessions WHERE id_hash = $1");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id_hash)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(session_from_row)
+            .transpose()
+    }
+
+    async fn touch_admin_session(
+        &self,
+        id_hash: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE admin_sessions SET last_seen = $1 WHERE id_hash = $2")
+            .bind(at)
+            .bind(id_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError> {
+        Ok(sqlx::query("DELETE FROM admin_sessions WHERE id_hash = $1")
+            .bind(id_hash)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
+    async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(
+            sqlx::query("DELETE FROM admin_sessions WHERE expires_at <= $1")
+                .bind(now)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
+    async fn append_audit(&self, e: NewAuditEvent) -> Result<AuditEvent, StoreError> {
+        let before = e.before.as_ref().map(serde_json::to_string).transpose()?;
+        let after = e.after.as_ref().map(serde_json::to_string).transpose()?;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO audit_events (workspace, actor_subject, actor_kind, action, target, \
+             before_value, after_value, request_id, at) \
+             VALUES ($1, $2, $3, $4, $5, $6::json, $7::json, $8, $9) RETURNING id",
+        )
+        .bind(&e.workspace)
+        .bind(&e.actor_subject)
+        .bind(&e.actor_kind)
+        .bind(&e.action)
+        .bind(&e.target)
+        .bind(before)
+        .bind(after)
+        .bind(&e.request_id)
+        .bind(e.at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(AuditEvent {
+            id,
+            workspace: e.workspace,
+            actor_subject: e.actor_subject,
+            actor_kind: e.actor_kind,
+            action: e.action,
+            target: e.target,
+            before: e.before,
+            after: e.after,
+            request_id: e.request_id,
+            at: e.at,
+        })
+    }
+
+    async fn list_audit(&self, f: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError> {
+        let mut qb = QueryBuilder::<Postgres>::new(format!(
+            "SELECT {AUDIT_SELECT} FROM audit_events WHERE TRUE"
+        ));
+        if let Some(ws) = &f.workspace {
+            qb.push(" AND workspace = ").push_bind(ws.clone());
+        }
+        if let Some(action) = &f.action {
+            qb.push(" AND action = ").push_bind(action.clone());
+        }
+        if let Some(actor) = &f.actor {
+            qb.push(" AND actor_subject = ").push_bind(actor.clone());
+        }
+        if let Some(before) = f.before_id {
+            qb.push(" AND id < ").push_bind(before);
+        }
+        qb.push(" ORDER BY id DESC LIMIT ")
+            .push_bind(i64::from(f.effective_limit()));
+        qb.build()
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(audit_from_row)
+            .collect()
+    }
+
+    async fn prune_audit(&self, older_than: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(sqlx::query("DELETE FROM audit_events WHERE at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {

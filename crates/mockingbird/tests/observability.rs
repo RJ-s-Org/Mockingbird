@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use mb_ext::Extensions;
 use mb_protocols::{RequestRecord, RequestRecorder};
 use mb_state::{
@@ -13,9 +14,10 @@ use mb_state::{
     StoredResource,
 };
 use mb_store::{
-    ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
-    Mock, NewContractVersion, NewMock, NewRequestLogEntry, PgStore, RequestLogEntry,
-    RequestLogFilter, ResourceSource, Scenario, SqliteControlStore, StoreError, Workspace,
+    AdminSession, ApiKey, AuditEvent, AuditFilter, ContractStatus, ContractVersion, ControlChange,
+    ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewAuditEvent, NewContractVersion, NewMock,
+    NewRequestLogEntry, PgStore, RequestLogEntry, RequestLogFilter, ResourceSource, Scenario,
+    SqliteControlStore, StoreError, Workspace,
 };
 use mockingbird::ops::{self, OpsState};
 use mockingbird::recorder::StoreRecorder;
@@ -150,6 +152,49 @@ impl ControlStore for StubControl {
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError> {
         self.inner.list_request_log(mock_id, f).await
+    }
+    async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError> {
+        self.inner.create_api_key(k).await
+    }
+    async fn get_api_key(&self, key_id: &str) -> Result<Option<ApiKey>, StoreError> {
+        self.inner.get_api_key(key_id).await
+    }
+    async fn list_api_keys(&self, ws: &str) -> Result<Vec<ApiKey>, StoreError> {
+        self.inner.list_api_keys(ws).await
+    }
+    async fn revoke_api_key(&self, ws: &str, key_id: &str) -> Result<bool, StoreError> {
+        self.inner.revoke_api_key(ws, key_id).await
+    }
+    async fn touch_api_key(&self, key_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        self.inner.touch_api_key(key_id, at).await
+    }
+    async fn create_admin_session(&self, s: &AdminSession) -> Result<(), StoreError> {
+        self.inner.create_admin_session(s).await
+    }
+    async fn get_admin_session(&self, id_hash: &str) -> Result<Option<AdminSession>, StoreError> {
+        self.inner.get_admin_session(id_hash).await
+    }
+    async fn touch_admin_session(
+        &self,
+        id_hash: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.inner.touch_admin_session(id_hash, at).await
+    }
+    async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError> {
+        self.inner.delete_admin_session(id_hash).await
+    }
+    async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+        self.inner.delete_expired_admin_sessions(now).await
+    }
+    async fn append_audit(&self, e: NewAuditEvent) -> Result<AuditEvent, StoreError> {
+        self.inner.append_audit(e).await
+    }
+    async fn list_audit(&self, f: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError> {
+        self.inner.list_audit(f).await
+    }
+    async fn prune_audit(&self, older_than: DateTime<Utc>) -> Result<u64, StoreError> {
+        self.inner.prune_audit(older_than).await
     }
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {
         self.inner.subscribe()

@@ -1,5 +1,6 @@
 //! Control-plane persistence: workspaces, mocks, contract versions, scenarios,
-//! LLM profiles and the request log, behind the backend-neutral [`ControlStore`].
+//! LLM profiles, the request log, API keys, admin sessions and the audit log,
+//! behind the backend-neutral [`ControlStore`].
 
 mod error;
 mod model;
@@ -56,6 +57,7 @@ pub trait ControlStore: Send + Sync {
     /// `false` if it does not exist. The default workspace is a `Conflict`,
     /// as is a non-empty one (any mock or profile) without `force`; with
     /// `force` its mocks (cascading) and profiles go in the same transaction.
+    /// Its API keys are always deleted with it; audit events are kept.
     async fn delete_workspace(&self, name: &str, force: bool) -> Result<bool, StoreError>;
     /// Every workspace's mocks, `(workspace, name)` ascending.
     async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError>;
@@ -116,6 +118,31 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError>;
+    /// `NotFound` if the key's workspace does not exist, `Conflict` if the
+    /// `key_id` is taken. A workspace's keys go with it when it is deleted.
+    async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError>;
+    async fn get_api_key(&self, key_id: &str) -> Result<Option<ApiKey>, StoreError>;
+    /// Newest (`created_at`) first, revoked keys included.
+    async fn list_api_keys(&self, ws: &str) -> Result<Vec<ApiKey>, StoreError>;
+    /// Sets `revoked_at`; `false` if the key is not in `ws` or already revoked.
+    async fn revoke_api_key(&self, ws: &str, key_id: &str) -> Result<bool, StoreError>;
+    /// Sets `last_used_at`; an unknown key is ignored.
+    async fn touch_api_key(&self, key_id: &str, at: DateTime<Utc>) -> Result<(), StoreError>;
+    /// `Conflict` if `id_hash` is taken.
+    async fn create_admin_session(&self, s: &AdminSession) -> Result<(), StoreError>;
+    async fn get_admin_session(&self, id_hash: &str) -> Result<Option<AdminSession>, StoreError>;
+    /// Sets `last_seen`; an unknown session is ignored.
+    async fn touch_admin_session(&self, id_hash: &str, at: DateTime<Utc>)
+    -> Result<(), StoreError>;
+    async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError>;
+    /// Deletes sessions with `expires_at <= now`; returns how many.
+    async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError>;
+    /// Assigns the next id.
+    async fn append_audit(&self, e: NewAuditEvent) -> Result<AuditEvent, StoreError>;
+    /// Newest (highest id) first.
+    async fn list_audit(&self, f: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError>;
+    /// Deletes events with `at < older_than`; returns how many.
+    async fn prune_audit(&self, older_than: DateTime<Utc>) -> Result<u64, StoreError>;
     fn subscribe(&self) -> broadcast::Receiver<ControlChange>;
 }
 
