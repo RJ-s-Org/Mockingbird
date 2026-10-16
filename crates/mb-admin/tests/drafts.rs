@@ -718,3 +718,87 @@ async fn openapi_document_lists_import_and_draft_paths() {
         "imported missing"
     );
 }
+
+#[derive(Default)]
+struct RefusePreview(std::sync::Mutex<Vec<(mb_ext::Tenancy, String, String)>>);
+
+#[async_trait]
+impl mb_ext::QuotaGuard for RefusePreview {
+    async fn admit(
+        &self,
+        t: &mb_ext::Tenancy,
+        call: &mb_ext::CallInfo<'_>,
+    ) -> Result<(), mb_ext::Rejection> {
+        self.0.lock().unwrap().push((
+            t.clone(),
+            call.mock.to_string(),
+            call.operation_id.to_string(),
+        ));
+        Err(mb_ext::Rejection {
+            status: 429,
+            title: "Quota exceeded".into(),
+            detail: "no previews left".into(),
+            retry_after: None,
+        })
+    }
+}
+
+#[derive(Default)]
+struct CollectPreview(std::sync::Mutex<Vec<mb_ext::UsageEvent>>);
+
+impl mb_ext::UsageSink for CollectPreview {
+    fn record(&self, event: &mb_ext::UsageEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+#[tokio::test]
+async fn preview_is_admitted_and_recorded() {
+    let mut h = harness().await;
+    let sink = Arc::new(CollectPreview::default());
+    h.st.ext.usage = sink.clone();
+    h.app = router(h.st.clone());
+    let v = h.har_draft().await;
+    let view = h.draft(v).await;
+    let op_id = operation(&view, "GET", PET_PATH)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    h.call(
+        "editor",
+        Method::POST,
+        &Harness::url(v, "/preview"),
+        Some(json!({ "operation_id": op_id })),
+    )
+    .await
+    .expect(StatusCode::OK, "preview");
+    let events = sink.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].mock, "pets");
+    assert_eq!(events[0].operation_id, op_id);
+    assert_eq!(events[0].source, "fallback");
+    assert_eq!(events[0].status, 200);
+
+    let guard = Arc::new(RefusePreview::default());
+    h.st.ext.quota = guard.clone();
+    h.app = router(h.st.clone());
+    let p = h
+        .call(
+            "editor",
+            Method::POST,
+            &Harness::url(v, "/preview"),
+            Some(json!({ "operation_id": op_id })),
+        )
+        .await
+        .expect(StatusCode::TOO_MANY_REQUESTS, "refused preview");
+    assert_eq!(p["detail"], "no previews left");
+    let seen = guard.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0.workspace, DEFAULT_WORKSPACE);
+    assert_eq!(seen[0].1, "pets");
+    assert_eq!(
+        sink.0.lock().unwrap().len(),
+        1,
+        "a refused preview is not recorded"
+    );
+}

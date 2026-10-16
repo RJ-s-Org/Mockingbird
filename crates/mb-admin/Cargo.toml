@@ -18,6 +18,7 @@ chrono.workspace = true
 hmac.workspace = true
 mb-auth.workspace = true
 mb-engine.workspace = true
+mb-ext.workspace = true
 mb-import = { workspace = true, features = ["smart"] }
 mb-llm.workspace = true
 mb-mcm.workspace = true

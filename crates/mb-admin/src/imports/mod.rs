@@ -15,6 +15,7 @@ use axum::response::IntoResponse;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
+use mb_ext::CallInfo;
 use mb_import::smart::fetch::{FetchPolicy, validate_url};
 use mb_import::smart::redact::redacted_url;
 use mb_import::smart::{ImportKind, MAX_IMPORT_BYTES, SmartError, detect_kind};
@@ -43,6 +44,10 @@ const ACCEPTED_MEDIA: &str = "application/json, multipart/form-data";
 const LIST_LIMIT: u32 = 50;
 /// The job kind of an import from a URL.
 const URL_KIND: &str = "url";
+/// The operation id import jobs are admitted under and their LLM calls
+/// reported with (`CallInfo::operation_id`, `UsageEvent::operation_id` and
+/// `UsageEvent::source`).
+pub const IMPORT_OPERATION: &str = "import";
 
 /// How imports run (`import:` in the config file).
 #[derive(Clone, Debug)]
@@ -435,7 +440,8 @@ async fn job_of(st: &AdminState, mock: &Mock, id: Uuid) -> ApiResult<ImportJob> 
         (status = 413, body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "Neither JSON nor multipart with the upload header", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM", body = Problem, content_type = "application/problem+json"),
-        (status = 429, description = "The mock has `import.max_active_jobs_per_mock` queued or running jobs", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "The mock has `import.max_active_jobs_per_mock` queued or running jobs, or the quota refused the import (another status is possible when a quota extension uses one)", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Seconds to wait, when the quota says"))),
     )
 )]
 pub async fn create(
@@ -500,6 +506,17 @@ pub async fn create(
             ),
         ));
     }
+
+    let call = CallInfo {
+        mock: &mock,
+        operation_id: IMPORT_OPERATION,
+        headers: &headers,
+    };
+    st.ext
+        .quota
+        .admit(&crate::tenancy(&access.ws), &call)
+        .await
+        .map_err(Problem::from)?;
 
     let created = st
         .store

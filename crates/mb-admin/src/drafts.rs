@@ -2,10 +2,11 @@
 //! review, edit, approve and preview imported draft contract versions.
 
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mb_auth::Permission;
 use mb_engine::{EngineError, GenerationContext, OperationCall};
+use mb_ext::{CallInfo, UsageEvent};
 use mb_import::smart::assemble::{DraftIssue, compile_draft, diff_bundles, refresh_meta};
 use mb_import::smart::model::DraftMeta;
 use mb_mcm::Binding;
@@ -464,6 +465,8 @@ pub async fn approve(
         (status = 404, description = "No such version or operation", body = Problem, content_type = "application/problem+json"),
         (status = 415, body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The status is not declared by the operation, or it has no response", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "The quota refused the preview (another status is possible when a quota extension uses one)", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Seconds to wait, when the quota says"))),
         (status = 502, description = "The mock's LLM is unavailable", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -474,6 +477,7 @@ pub async fn preview(
         mock,
         version: number,
     }): Path<VersionPath>,
+    headers: HeaderMap,
     _json: RequireJson,
     Json(body): Json<PreviewRequest>,
 ) -> ApiResult<Json<PreviewResponse>> {
@@ -491,11 +495,24 @@ pub async fn preview(
                 body.operation_id
             ))
         })?;
+    // Admitted and reported like a data-plane call of the operation.
+    let tenancy = crate::tenancy(&access.ws);
+    let call_info = CallInfo {
+        mock: &mock,
+        operation_id: &op.id,
+        headers: &headers,
+    };
+    st.ext
+        .quota
+        .admit(&tenancy, &call_info)
+        .await
+        .map_err(Problem::from)?;
     let engine = st
         .llm
         .preview_engine(&m)
         .await
         .map_err(|e| Problem::new(StatusCode::BAD_GATEWAY, e))?;
+    let started = std::time::Instant::now();
     let call = OperationCall {
         operation_id: body.operation_id.clone(),
         ..Default::default()
@@ -513,6 +530,16 @@ pub async fn preview(
             }
             EngineError::Schema(_) => internal(e.to_string()),
         })?;
+    st.ext.usage.record(&UsageEvent {
+        tenancy,
+        mock: mock.clone(),
+        operation_id: op.id.clone(),
+        status: generated.status,
+        source: generated.source.as_str().to_string(),
+        latency: started.elapsed(),
+        prompt_tokens: generated.usage.prompt_tokens,
+        completion_tokens: generated.usage.completion_tokens,
+    });
     Ok(Json(PreviewResponse {
         status: generated.status,
         content_type: generated.content_type,

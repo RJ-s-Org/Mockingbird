@@ -2675,6 +2675,7 @@ dependencies = [
  "http-body-util",
  "mb-auth",
  "mb-engine",
+ "mb-ext",
  "mb-import",
  "mb-llm",
  "mb-mcm",

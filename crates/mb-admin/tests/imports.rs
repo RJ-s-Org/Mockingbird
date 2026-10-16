@@ -152,7 +152,8 @@ impl Provider for HangingProvider {
 
     async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
         let _guard = SetOnDrop(self.dropped.clone());
-        self.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         std::future::pending().await
     }
 }
@@ -860,7 +861,10 @@ async fn url_import_stores_and_audits_redacted_url() {
             .unwrap();
     let after = audit[0].after.clone().unwrap().to_string();
     assert!(after.contains("REDACTED"), "{after}");
-    assert!(!after.contains("s3cret") && !after.contains("t0ken"), "{after}");
+    assert!(
+        !after.contains("s3cret") && !after.contains("t0ken"),
+        "{after}"
+    );
 }
 
 /// The control stores to run backend-parity tests on: SQLite, and Postgres
@@ -907,7 +911,9 @@ async fn control_characters_in_names_are_stripped_on_every_backend() {
                 "editor",
                 Method::POST,
                 &format!("{BASE}/pets/imports"),
-                Some(json!({ "kind": "har", "text": har, "filename": "pet\u{0}store\n.har\u{7f}" })),
+                Some(
+                    json!({ "kind": "har", "text": har, "filename": "pet\u{0}store\n.har\u{7f}" }),
+                ),
             )
             .await
             .expect(StatusCode::ACCEPTED, backend);
@@ -1074,7 +1080,10 @@ async fn dropping_workers_aborts_a_running_pipeline() {
     .expect(StatusCode::ACCEPTED, "create");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !provider.entered.load(Ordering::SeqCst) {
-        assert!(tokio::time::Instant::now() < deadline, "no LLM call started");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no LLM call started"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     drop(workers);
@@ -1110,8 +1119,15 @@ async fn active_jobs_per_mock_are_capped() {
     // Other mocks have their own allowance.
     h.upload_har("other").await;
     // A running job still counts; a finished one does not.
-    let claimed = h.st.store.claim_import_job(chrono::Utc::now()).await.unwrap();
-    assert_eq!(claimed.unwrap().id.to_string(), first["id"].as_str().unwrap());
+    let claimed =
+        h.st.store
+            .claim_import_job(chrono::Utc::now())
+            .await
+            .unwrap();
+    assert_eq!(
+        claimed.unwrap().id.to_string(),
+        first["id"].as_str().unwrap()
+    );
     h.call(
         "editor",
         Method::POST,
@@ -1129,4 +1145,203 @@ async fn active_jobs_per_mock_are_capped() {
     .await
     .expect(StatusCode::OK, "cancel");
     h.upload_har("pets").await;
+}
+
+/// Refuses every call with 429 and `Retry-After: 7`, recording what it saw.
+#[derive(Default)]
+struct Refuse(std::sync::Mutex<Vec<(mb_ext::Tenancy, String, String)>>);
+
+#[async_trait]
+impl mb_ext::QuotaGuard for Refuse {
+    async fn admit(
+        &self,
+        t: &mb_ext::Tenancy,
+        call: &mb_ext::CallInfo<'_>,
+    ) -> Result<(), mb_ext::Rejection> {
+        self.0.lock().unwrap().push((
+            t.clone(),
+            call.mock.to_string(),
+            call.operation_id.to_string(),
+        ));
+        Err(mb_ext::Rejection {
+            status: 429,
+            title: "Quota exceeded".into(),
+            detail: "the workspace spent its import allowance".into(),
+            retry_after: Some(Duration::from_secs(7)),
+        })
+    }
+}
+
+/// Collects every usage event.
+#[derive(Default)]
+struct Collect(std::sync::Mutex<Vec<mb_ext::UsageEvent>>);
+
+impl mb_ext::UsageSink for Collect {
+    fn record(&self, event: &mb_ext::UsageEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+fn default_tenancy() -> mb_ext::Tenancy {
+    mb_ext::Tenancy {
+        tenant: "default".into(),
+        workspace: DEFAULT_WORKSPACE.into(),
+    }
+}
+
+#[tokio::test]
+async fn import_create_is_admitted_by_the_quota_guard() {
+    let mut h = harness().await;
+    let guard = Arc::new(Refuse::default());
+    h.st.ext.quota = guard.clone();
+    h.app = router(h.st.clone());
+    let har = fixture("smart/petstore.har");
+    let r = h
+        .multipart(
+            &format!("{BASE}/pets/imports"),
+            true,
+            &[("file", Some("petstore.har"), &har)],
+        )
+        .await;
+    let p = r.expect(StatusCode::TOO_MANY_REQUESTS, "refused");
+    assert_eq!(p["title"], "Quota exceeded");
+    assert_eq!(p["detail"], "the workspace spent its import allowance");
+    assert_eq!(r.headers[header::RETRY_AFTER], "7");
+    assert_eq!(
+        guard.0.lock().unwrap().clone(),
+        vec![(default_tenancy(), "pets".to_string(), "import".to_string())]
+    );
+    assert!(
+        h.st.store
+            .list_import_jobs(h.mock("pets").await.id, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(h.actions().await.iter().all(|a| a != "import.create"));
+}
+
+fn usage(prompt: u32, completion: u32) -> mb_llm::Usage {
+    mb_llm::Usage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+    }
+}
+
+/// A harness whose usage sink is collected.
+async fn metered(provider: Arc<dyn Provider>) -> (Harness, Arc<Collect>) {
+    let mut h = harness_with(Some(provider)).await;
+    let sink = Arc::new(Collect::default());
+    h.st.ext.usage = sink.clone();
+    h.app = router(h.st.clone());
+    (h, sink)
+}
+
+async fn import_markdown(h: &Harness) -> String {
+    let view = h
+        .call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/pets/imports"),
+            Some(json!({ "kind": "markdown", "text": md_text() })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "create");
+    assert!(h.run().await);
+    let job = h.job("pets", view["id"].as_str().unwrap()).await;
+    job["status"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn import_llm_calls_are_recorded_as_usage() {
+    let provider = Arc::new(ScriptedProvider::with_usage(vec![Ok((
+        pets_answer(),
+        usage(100, 20),
+    ))]));
+    let (h, sink) = metered(provider).await;
+    assert_eq!(import_markdown(&h).await, "done");
+    let events = sink.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].tenancy, default_tenancy());
+    assert_eq!(events[0].mock, "pets");
+    assert_eq!(events[0].operation_id, "import");
+    assert_eq!(events[0].source, "import");
+    assert_eq!(events[0].status, 200);
+    assert_eq!(
+        (events[0].prompt_tokens, events[0].completion_tokens),
+        (100, 20)
+    );
+}
+
+#[tokio::test]
+async fn failed_import_llm_calls_are_recorded_as_usage() {
+    let provider = Arc::new(ScriptedProvider::new(vec![Err(LlmError::Timeout)]));
+    let (h, sink) = metered(provider).await;
+    assert_eq!(import_markdown(&h).await, "failed");
+    let events = sink.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].status, 502);
+    assert_eq!(events[0].mock, "pets");
+}
+
+#[tokio::test]
+async fn canceled_import_llm_calls_are_recorded_as_usage() {
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut st = AdminState {
+        auth: Arc::new(TestAuth),
+        ..AdminState::new(store.clone(), state)
+    };
+    let sink = Arc::new(Collect::default());
+    st.ext.usage = sink.clone();
+    let h0 = Harness {
+        app: router(st.clone()),
+        st: st.clone(),
+    };
+    h0.create_mock("pets").await;
+    let mock = h0.mock("pets").await;
+    st.llm = Arc::new(TestLlm(Some(Arc::new(CancelingProvider {
+        store,
+        mock_id: mock.id,
+    }))));
+    let h = Harness {
+        app: router(st.clone()),
+        st,
+    };
+    assert_eq!(import_markdown(&h).await, "canceled");
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn import_tokens_metric_counts_unfinished_jobs() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                // An answer with no operations: the job fails, the tokens
+                // were still spent.
+                let provider = Arc::new(ScriptedProvider::with_usage(vec![Ok((
+                    json!({"operations": []}).to_string(),
+                    usage(40, 2),
+                ))]));
+                let (h, _sink) = metered(provider).await;
+                assert_eq!(import_markdown(&h).await, "failed");
+            });
+    });
+    let tokens: u64 = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == "mb_import_tokens_total")
+        .map(|(.., value)| match value {
+            DebugValue::Counter(n) => n,
+            other => panic!("unexpected {other:?}"),
+        })
+        .sum();
+    assert_eq!(tokens, 42);
 }

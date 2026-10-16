@@ -440,6 +440,7 @@ pub async fn build_app_with(
         auth,
         audit,
         web_auth,
+        ext: deps.ext.clone(),
         llm: Arc::new(RuntimeLlm {
             deps: deps.clone(),
             import_profile: cfg.import.llm_profile.clone(),

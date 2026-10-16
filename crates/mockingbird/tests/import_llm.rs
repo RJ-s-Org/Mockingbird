@@ -200,3 +200,77 @@ async fn build_engine_matches_runtime_profile() {
     assert_eq!(engine.config().max_tokens, defaults.max_tokens);
     assert_eq!(engine.config().persona.as_deref(), Some("terse"));
 }
+
+/// Maps profile `importer` to `vetted`, refuses `forbidden`, and records
+/// what it was asked.
+struct RemapPolicy(std::sync::Mutex<Vec<(mb_ext::Tenancy, String, Option<String>)>>);
+
+impl mb_ext::ProviderPolicy for RemapPolicy {
+    fn choose(
+        &self,
+        t: &mb_ext::Tenancy,
+        mock: &str,
+        configured: Option<&str>,
+    ) -> Result<Option<String>, mb_ext::Rejection> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((t.clone(), mock.to_string(), configured.map(str::to_string)));
+        match configured {
+            Some("forbidden") => Err(mb_ext::Rejection {
+                status: 403,
+                title: "Forbidden".into(),
+                detail: "profile forbidden is not allowed".into(),
+                retry_after: None,
+            }),
+            Some("importer") => Ok(Some("vetted".into())),
+            other => Ok(other.map(str::to_string)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn import_llm_override_goes_through_provider_policy() {
+    let store = store().await;
+    store.create_workspace("team-a", "Team A").await.unwrap();
+    store
+        .put_profile(&profile(DEFAULT_WORKSPACE, "importer", 200_000, 32_000))
+        .await
+        .unwrap();
+    store
+        .put_profile(&profile(DEFAULT_WORKSPACE, "vetted", 130_000, 10_000))
+        .await
+        .unwrap();
+    let m = mock(&store, "team-a", "pets", None).await;
+    let policy = Arc::new(RemapPolicy(std::sync::Mutex::new(Vec::new())));
+    let mut deps = deps(store.clone(), false, None);
+    deps.ext.providers = policy.clone();
+
+    let llm = import_provider(&deps, &m, Some("importer"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        llm.settings.timeout,
+        Duration::from_secs(130),
+        "the policy's pick"
+    );
+    let asked = policy.0.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        vec![(
+            mb_ext::Tenancy {
+                tenant: "default".into(),
+                workspace: "team-a".into()
+            },
+            "pets".to_string(),
+            Some("importer".to_string())
+        )]
+    );
+
+    let err = import_provider(&deps, &m, Some("forbidden"))
+        .await
+        .err()
+        .unwrap();
+    assert!(format!("{err:#}").contains("not allowed"), "{err:#}");
+}

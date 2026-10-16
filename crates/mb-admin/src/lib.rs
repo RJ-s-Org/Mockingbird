@@ -14,6 +14,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::{any, get, post};
 use mb_auth::{Authenticate, LocalAuth};
+use mb_ext::{Extensions, Tenancy};
 use mb_state::StateStore;
 use mb_store::{ContractStatus, ControlStore, Mock, ResourceSource};
 use serde::Serialize;
@@ -47,9 +48,9 @@ pub use auth_routes::{
 pub use imports::llm::{LlmResolver, OfflineLlm};
 pub use imports::worker::{ImportWorkers, run_next_import, spawn_import_workers};
 pub use imports::{
-    CreateImport, DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK, ImportJobView, ImportKindSchema,
-    ImportProgressView, ImportSettings, ImportStatusSchema, Imports, MAX_IMPORT_REQUEST_BYTES,
-    UPLOAD_HEADER,
+    CreateImport, DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK, IMPORT_OPERATION, ImportJobView,
+    ImportKindSchema, ImportProgressView, ImportSettings, ImportStatusSchema, Imports,
+    MAX_IMPORT_REQUEST_BYTES, UPLOAD_HEADER,
 };
 pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
 pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUPPRESSED_METRIC};
@@ -97,6 +98,10 @@ pub struct AdminState {
     pub llm: Arc<dyn LlmResolver>,
     /// Import settings and the worker wake-up signal.
     pub imports: Imports,
+    /// The extension points: import jobs and draft previews are admitted by
+    /// `quota` and their LLM calls reported to `usage`, like data-plane
+    /// calls ([`Extensions::default`] by default).
+    pub ext: Extensions,
 }
 
 impl AdminState {
@@ -122,7 +127,20 @@ impl AdminState {
             login_failures: Arc::new(LoginFailureLimiter::new()),
             llm: Arc::new(OfflineLlm),
             imports: Imports::default(),
+            ext: Extensions::default(),
         }
+    }
+}
+
+/// The tenant every admin call is attributed to (as the runtime attributes
+/// its provider choices).
+pub const DEFAULT_TENANT: &str = "default";
+
+/// The tenancy of a call in workspace `ws`.
+pub(crate) fn tenancy(ws: &str) -> Tenancy {
+    Tenancy {
+        tenant: DEFAULT_TENANT.to_string(),
+        workspace: ws.to_string(),
     }
 }
 

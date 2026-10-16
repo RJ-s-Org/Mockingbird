@@ -138,10 +138,12 @@ pub async fn import_provider(
         return Ok(None);
     }
     let (workspace, name) = match profile_override {
-        Some(name) => (
-            own_or_default_workspace(deps, mock, name).await?,
-            name.to_string(),
-        ),
+        // The override is chosen through the provider policy like any
+        // other profile; the policy may swap or refuse it.
+        Some(name) => match choose_profile(deps, mock, Some(name))? {
+            Some(name) => (own_or_default_workspace(deps, mock, &name).await?, name),
+            None => return Ok(None),
+        },
         None => match profile_name(deps, mock)? {
             Some(name) => (profile_workspace(deps, mock, &name).await?, name),
             None => return Ok(None),
@@ -332,12 +334,21 @@ fn hop_settings(profile: &LlmProfile) -> HopSettings {
 
 /// The profile the provider policy picks for `mock`, if any.
 fn profile_name(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<String>> {
+    let default_profile = deps.default_profile.get();
+    let configured = mock.llm_profile.as_deref().or(default_profile.as_deref());
+    choose_profile(deps, mock, configured)
+}
+
+/// The profile the provider policy picks for `mock` given `configured`.
+fn choose_profile(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    configured: Option<&str>,
+) -> anyhow::Result<Option<String>> {
     let tenancy = Tenancy {
         tenant: "default".into(),
         workspace: mock.workspace.clone(),
     };
-    let default_profile = deps.default_profile.get();
-    let configured = mock.llm_profile.as_deref().or(default_profile.as_deref());
     deps.ext
         .providers
         .choose(&tenancy, &mock.name, configured)

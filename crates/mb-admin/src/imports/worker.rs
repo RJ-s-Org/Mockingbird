@@ -7,9 +7,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use mb_ext::{Tenancy, UsageEvent, UsageSink};
 use mb_import::smart::{
-    ImportInput, ImportKind, ImportObserver, ImportOptions, Phase, SmartError, run_import,
+    ExtractLlm, ImportInput, ImportKind, ImportObserver, ImportOptions, Phase, SmartError,
+    run_import,
 };
+use mb_llm::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider};
 use mb_store::{
     ContractStatus, ControlStore, ImportJob, ImportOutcome, ImportProgress, NewAuditEvent,
     NewContractVersion, StoreError,
@@ -18,6 +21,7 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use super::IMPORT_OPERATION;
 use crate::AdminState;
 
 /// How often worker 0 fails stale jobs and prunes old ones, at most.
@@ -108,6 +112,47 @@ async fn maintain(st: &AdminState) {
     }
 }
 
+/// One import job's provider: reports every call to the usage sink and its
+/// tokens to `mb_import_tokens_total`, so failed and canceled jobs are
+/// metered like finished ones.
+struct MeteredProvider {
+    inner: Arc<dyn Provider>,
+    usage: Arc<dyn UsageSink>,
+    tenancy: Tenancy,
+    mock: String,
+}
+
+#[async_trait]
+impl Provider for MeteredProvider {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn total_timeout(&self, request_timeout: Duration) -> Duration {
+        self.inner.total_timeout(request_timeout)
+    }
+
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let started = Instant::now();
+        let result = self.inner.complete(req).await;
+        let usage = result.as_ref().map(|r| r.usage).unwrap_or_default();
+        self.usage.record(&UsageEvent {
+            tenancy: self.tenancy.clone(),
+            mock: self.mock.clone(),
+            operation_id: IMPORT_OPERATION.to_string(),
+            status: if result.is_ok() { 200 } else { 502 },
+            source: IMPORT_OPERATION.to_string(),
+            latency: started.elapsed(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+        });
+        metrics::counter!("mb_import_tokens_total").increment(
+            u64::from(usage.prompt_tokens).saturating_add(u64::from(usage.completion_tokens)),
+        );
+        result
+    }
+}
+
 /// Records progress in the store; a job no longer running cancels.
 struct StoreObserver {
     store: Arc<dyn ControlStore>,
@@ -170,7 +215,16 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         _ => return fail(st, job, MOCK_DELETED.to_string()).await,
     };
     let llm = match st.llm.for_import(&mock).await {
-        Ok(llm) => llm,
+        // Every call is reported, whatever becomes of the job.
+        Ok(llm) => llm.map(|llm| ExtractLlm {
+            provider: Arc::new(MeteredProvider {
+                inner: llm.provider,
+                usage: st.ext.usage.clone(),
+                tenancy: crate::tenancy(&job.workspace),
+                mock: job.mock.clone(),
+            }),
+            settings: llm.settings,
+        }),
         Err(e) => return fail(st, job, e).await,
     };
     let input = if job.kind == "url" {
@@ -222,11 +276,6 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
     };
     let operations = draft.bundle.operations.len();
     let warnings = draft.meta.warnings.len();
-    let tokens = draft
-        .meta
-        .usage
-        .prompt_tokens
-        .saturating_add(draft.meta.usage.completion_tokens);
     // The draft is stored only if the job is still running, in the same
     // transaction that marks it done: a cancel or stale sweep that won the
     // race leaves no orphaned draft and no audit event.
@@ -254,7 +303,6 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         Err(e) => return fail(st, job, format!("the draft could not be stored: {e}")).await,
     };
     count("done");
-    metrics::counter!("mb_import_tokens_total").increment(tokens);
     st.audit
         .record(NewAuditEvent {
             workspace: Some(job.workspace.clone()),
