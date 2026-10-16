@@ -14,6 +14,8 @@ import { ApiKeys } from "./pages/ApiKeys";
 import { Audit } from "./pages/Audit";
 import { Home } from "./pages/Home";
 import { Contracts } from "./pages/mocks/Contracts";
+import { ImportProgress } from "./pages/mocks/ImportProgress";
+import { ImportWizard } from "./pages/mocks/ImportWizard";
 import { LiveRequests } from "./pages/mocks/LiveRequests";
 import { MockLayout } from "./pages/mocks/MockLayout";
 import { MocksList } from "./pages/mocks/MocksList";
@@ -112,6 +114,38 @@ const mockContractsRoute = createRoute({
   },
 });
 
+/** The import tab's search: `job` resumes a started import's progress. */
+interface ImportSearch {
+  job?: string;
+}
+
+const mockImportRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/import",
+  validateSearch: (search: Record<string, unknown>): ImportSearch =>
+    typeof search.job === "string" && search.job !== "" ? { job: search.job } : {},
+  component: function ImportPage() {
+    const { ws, mock } = mockImportRoute.useParams();
+    const { job } = mockImportRoute.useSearch();
+    return job ? <ImportProgress key={job} ws={ws} mock={mock} job={job} /> : <ImportWizard ws={ws} mock={mock} />;
+  },
+});
+
+/** A draft version's review page; a placeholder until the review page lands. */
+const mockDraftRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/contracts/$version/draft",
+  component: function DraftPage() {
+    const { version } = mockDraftRoute.useParams();
+    return (
+      <section className="space-y-2">
+        <h2 className="text-lg font-semibold">Draft version {version}</h2>
+        <p className="text-sm text-slate-700">Draft review is not available yet.</p>
+      </section>
+    );
+  },
+});
+
 const mockScenariosRoute = createRoute({
   getParentRoute: () => mockRoute,
   path: "/scenarios",
@@ -190,6 +224,8 @@ const routeTree = rootRoute.addChildren([
       mockIndexRoute,
       mockOverviewRoute,
       mockContractsRoute,
+      mockDraftRoute,
+      mockImportRoute,
       mockScenariosRoute,
       mockSessionsRoute,
       mockRequestsRoute,

@@ -6,6 +6,8 @@ export interface Problem {
   title: string;
   detail: string;
   status: number;
+  /** Per-field problems (e.g. a 422 on a draft edit), each at a JSON pointer. */
+  errors?: { pointer: string; message: string }[];
 }
 
 /** A failed Admin API call; `problem` is the server's problem body, if any. */
@@ -32,8 +34,15 @@ function isProblem(v: unknown): v is Problem {
 
 function toProblem(v: unknown): Problem | undefined {
   if (!isProblem(v)) return undefined;
-  const p = v as Partial<Problem>;
-  return { title: String(p.title ?? ""), detail: String(p.detail ?? ""), status: Number(p.status) };
+  const p = v as Partial<Problem> & { errors?: unknown };
+  const problem: Problem = { title: String(p.title ?? ""), detail: String(p.detail ?? ""), status: Number(p.status) };
+  if (Array.isArray(p.errors)) {
+    problem.errors = p.errors.map((e: unknown) => {
+      const item = (typeof e === "object" && e !== null ? e : {}) as { pointer?: unknown; message?: unknown };
+      return { pointer: String(item.pointer ?? ""), message: String(item.message ?? "") };
+    });
+  }
+  return problem;
 }
 
 async function readProblem(response: Response): Promise<Problem | undefined> {
