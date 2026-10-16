@@ -26,6 +26,7 @@ fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
         api_key: Some("k".into()),
         model: "m".into(),
         json_schema,
+        http: HttpOptions::default(),
     })
     .unwrap()
 }

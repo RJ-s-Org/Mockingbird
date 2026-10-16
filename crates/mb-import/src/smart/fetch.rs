@@ -116,6 +116,9 @@ pub struct FetchPolicy {
     pub max_bytes: usize,
     pub timeout: Duration,
     pub max_redirects: usize,
+    /// PEM certificates trusted in addition to the platform's roots
+    /// (`outbound.ca_file`). The fetch never uses a proxy.
+    pub extra_roots_pem: Vec<u8>,
 }
 
 impl Default for FetchPolicy {
@@ -125,6 +128,7 @@ impl Default for FetchPolicy {
             max_bytes: MAX_FETCH_BYTES,
             timeout: FETCH_TIMEOUT,
             max_redirects: MAX_REDIRECTS,
+            extra_roots_pem: Vec::new(),
         }
     }
 }
@@ -357,9 +361,14 @@ async fn pinned_client(
     policy: &FetchPolicy,
     resolver: &dyn Resolver,
 ) -> Result<reqwest::Client, FetchError> {
-    let builder = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
+    if !policy.extra_roots_pem.is_empty() {
+        let roots =
+            reqwest::Certificate::from_pem_bundle(&policy.extra_roots_pem).map_err(transport)?;
+        builder = builder.tls_certs_merge(roots);
+    }
     let builder = match url.host() {
         Some(Host::Ipv4(v4)) => {
             check_addr(&v4.to_string(), IpAddr::V4(v4), false, policy)?;

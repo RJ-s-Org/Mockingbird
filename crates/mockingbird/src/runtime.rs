@@ -81,6 +81,9 @@ pub struct RuntimeDeps {
     pub scrubber: Option<Arc<Scrubber>>,
     /// The global `limits:`, for mocks that set none of their own.
     pub limits: LimitsConfig,
+    /// Extra CA roots and the proxy of every LLM provider client
+    /// (`outbound:`).
+    pub http: mb_llm::HttpOptions,
     /// What the runtimes run (see [`ServeMode`]).
     pub mode: ServeMode,
 }
@@ -492,6 +495,7 @@ async fn openai_provider(
         api_key,
         model: profile.model.clone(),
         json_schema: profile.json_schema,
+        http: deps.http.clone(),
     })
     .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?;
     Ok(Arc::new(provider))

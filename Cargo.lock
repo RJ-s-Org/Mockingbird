@@ -639,6 +639,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "hyper 1.12.0",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1958,6 +1980,16 @@ checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
  "num",
  "num-bigint",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -3364,6 +3396,7 @@ dependencies = [
  "chrono",
  "http 1.5.0",
  "jsonwebtoken",
+ "mb-llm",
  "mb-store",
  "openidconnect",
  "rand 0.10.3",
@@ -3803,6 +3836,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "axum 0.8.9",
+ "axum-server",
  "base64 0.23.1",
  "chrono",
  "clap",
@@ -3830,6 +3864,7 @@ dependencies = [
  "predicates",
  "prost-reflect",
  "reqwest",
+ "rustls",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3839,6 +3874,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tonic",
+ "tonic-health",
  "tower",
  "tracing",
  "tracing-opentelemetry",
@@ -5558,6 +5594,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -6866,6 +6903,7 @@ dependencies = [
  "socket2 0.6.5",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",

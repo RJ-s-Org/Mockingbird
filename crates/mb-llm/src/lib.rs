@@ -8,11 +8,13 @@ use futures::stream::BoxStream;
 use serde_json::Value;
 
 pub mod fallback;
+pub mod http;
 pub mod openai;
 #[cfg(feature = "testing")]
 pub mod scripted;
 
 pub use fallback::{FallbackProvider, HopSettings};
+pub use http::{HttpOptions, http_client};
 pub use openai::{OpenAiCompatible, OpenAiConfig};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;

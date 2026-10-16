@@ -3,7 +3,8 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::{
-    Capabilities, ChatRequest, ChatResponse, LlmError, Provider, ResponseFormat, TextStream, Usage,
+    Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, Provider, ResponseFormat,
+    TextStream, Usage,
 };
 
 #[derive(Clone, Debug)]
@@ -12,6 +13,8 @@ pub struct OpenAiConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub json_schema: bool,
+    /// Extra CA roots and the proxy (`outbound:`).
+    pub http: HttpOptions,
 }
 
 pub struct OpenAiCompatible {
@@ -21,9 +24,7 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     pub fn new(config: OpenAiConfig) -> Result<Self, LlmError> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+        let client = crate::http_client(&config.http, None)?;
         Ok(Self { client, config })
     }
 

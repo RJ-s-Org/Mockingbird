@@ -83,6 +83,8 @@ scraper = "0.27"
 pulldown-cmark = { version = "0.13", default-features = false }
 url = "2.5"
 ipnet = "2.12"
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev

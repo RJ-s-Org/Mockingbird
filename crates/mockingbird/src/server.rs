@@ -5,6 +5,8 @@
 
 use std::net::SocketAddr;
 
+use axum_server::Handle;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use mb_ext::Extensions;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -110,17 +112,21 @@ pub async fn run_with(
 
     let app = build_app_with(&args, llm, ext).await?;
     tracing::info!(role = role.as_str(), "starting");
+    let (scheme, grpc_mode) = match app.tls {
+        Some(_) => ("https", "TLS"),
+        None => ("http", "h2c"),
+    };
     match &data {
-        Some(_) => tracing::info!("data plane on http://{data_addr}"),
+        Some(_) => tracing::info!("data plane on {scheme}://{data_addr}"),
         None => tracing::info!("no data plane"),
     }
     match &admin {
-        Some(_) if role == Role::Data => tracing::info!("ops endpoints on http://{admin_addr}"),
-        Some(_) => tracing::info!("admin API on http://{admin_addr}"),
+        Some(_) if role == Role::Data => tracing::info!("ops endpoints on {scheme}://{admin_addr}"),
+        Some(_) => tracing::info!("admin API on {scheme}://{admin_addr}"),
         None => tracing::info!("no admin API"),
     }
     match &grpc {
-        Some(_) => tracing::info!("gRPC (h2c) on {grpc_addr}"),
+        Some(_) => tracing::info!("gRPC ({grpc_mode}) on {grpc_addr}"),
         None => tracing::info!("no gRPC listener"),
     }
 
@@ -136,59 +142,23 @@ pub async fn run_with(
 }
 
 /// Serves `app` on `listeners` (the data plane, the admin port with the
-/// peer address, gRPC as h2c) until `stop` turns true, then drains the open
-/// connections for at most [`GRACEFUL_SHUTDOWN_TIMEOUT`] and calls
-/// [`App::shutdown`].
+/// peer address, gRPC as h2c; all three over TLS when [`App::tls`] is set)
+/// until `stop` turns true, then drains the open connections for at most
+/// [`GRACEFUL_SHUTDOWN_TIMEOUT`] and calls [`App::shutdown`].
 pub async fn serve_app(
     app: App,
     listeners: Listeners,
     stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let stopped = |mut rx: watch::Receiver<bool>| async move {
-        let _ = rx.wait_for(|stop| *stop).await;
-    };
     let Listeners { data, admin, grpc } = listeners;
     let grace_rx = stop.clone();
-    let data_router = app.data.clone();
-    let data_stop = stop.clone();
-    let data = async move {
-        match data {
-            Some(listener) => {
-                axum::serve(listener, data_router)
-                    .with_graceful_shutdown(stopped(data_stop))
-                    .await
-            }
-            None => Ok(()),
-        }
-    };
-    let admin_router = app.admin.clone();
-    let admin_stop = stop.clone();
-    let admin = async move {
-        match admin {
-            Some(listener) => {
-                // The peer address keys the login-failure audit rate limit.
-                axum::serve(
-                    listener,
-                    admin_router.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(stopped(admin_stop))
-                .await
-            }
-            None => Ok(()),
-        }
-    };
-    // axum serves HTTP/2 prior knowledge (h2c), which is what gRPC uses.
-    let grpc_router = app.grpc.clone();
-    let grpc = async move {
-        match grpc {
-            Some(listener) => {
-                axum::serve(listener, grpc_router)
-                    .with_graceful_shutdown(stopped(stop))
-                    .await
-            }
-            None => Ok(()),
-        }
-    };
+    let tls = app.tls.clone();
+    // The peer address keys the login-failure audit rate limit.
+    let data = serve_listener(data, app.data.clone(), tls.clone(), stop.clone());
+    let admin = serve_listener(admin, app.admin.clone(), tls.clone(), stop.clone());
+    // axum serves HTTP/2 prior knowledge (h2c), which is what gRPC uses;
+    // over TLS, ALPN negotiates h2.
+    let grpc = serve_listener(grpc, app.grpc.clone(), tls, stop);
     let servers = async { tokio::join!(data, admin, grpc) };
     // Connections still open this long after the stop signal (a gRPC
     // stream, a WebSocket) are abandoned, so the request log is still
@@ -209,6 +179,49 @@ pub async fn serve_app(
     }
     app.shutdown().await;
     Ok(())
+}
+
+/// Resolves once `rx` turns true.
+async fn stopped(mut rx: watch::Receiver<bool>) {
+    let _ = rx.wait_for(|stop| *stop).await;
+}
+
+/// Serves `router` (with the peer address as connect info) on `listener`
+/// until `stop` turns true: plain HTTP, or TLS with `tls` through
+/// `axum_server`, whose [`Handle`] then shuts down gracefully within
+/// [`GRACEFUL_SHUTDOWN_TIMEOUT`]. Nothing to do without a listener.
+async fn serve_listener(
+    listener: Option<TcpListener>,
+    router: axum::Router,
+    tls: Option<RustlsConfig>,
+    stop: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let Some(listener) = listener else {
+        return Ok(());
+    };
+    let service = router.into_make_service_with_connect_info::<SocketAddr>();
+    match tls {
+        None => {
+            axum::serve(listener, service)
+                .with_graceful_shutdown(stopped(stop))
+                .await
+        }
+        Some(tls) => {
+            let handle = Handle::<SocketAddr>::new();
+            let shutdown = handle.clone();
+            let watcher = tokio::spawn(async move {
+                stopped(stop).await;
+                shutdown.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_TIMEOUT));
+            });
+            let served = axum_server::Server::from_listener(listener)
+                .acceptor(RustlsAcceptor::new(tls))
+                .handle(handle)
+                .serve(service)
+                .await;
+            watcher.abort();
+            served
+        }
+    }
 }
 
 /// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM.

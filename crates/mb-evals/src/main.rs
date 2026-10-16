@@ -165,6 +165,7 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         // The server default (`MB_LLM_JSON_SCHEMA` unset): JSON mode, which
         // every OpenAI-compatible provider supports.
         json_schema: false,
+        http: mb_llm::HttpOptions::default(),
     })
     .context("building the LLM client")?;
     let mut report = run_evals(

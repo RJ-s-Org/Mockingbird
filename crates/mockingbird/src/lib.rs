@@ -17,4 +17,5 @@ pub mod registry;
 pub mod runtime;
 pub mod server;
 pub mod telemetry;
+pub mod tls;
 pub mod watch;

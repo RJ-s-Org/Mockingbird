@@ -19,16 +19,25 @@ pub struct HttpError(pub String);
 /// A reqwest client that never follows redirects (an OAuth endpoint that
 /// redirects is misconfigured or hostile) and gives up after 10 s.
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    http_client_with(&mb_llm::HttpOptions::default())
+}
+
+/// [`http_client`] with the outbound CA roots and proxy of `opts`.
+pub fn http_client_with(opts: &mb_llm::HttpOptions) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(TIMEOUT)
-        .build()
-        .unwrap_or_else(|e| {
-            // Only fails when the TLS backend cannot initialise, in which
-            // case the default client fails the same way on first use.
-            tracing::error!(error = %e, "building the identity-provider HTTP client failed");
-            reqwest::Client::new()
-        })
+        .timeout(TIMEOUT);
+    let built = opts
+        .apply(builder)
+        .map_err(|e| e.to_string())
+        .and_then(|b| b.build().map_err(|e| e.to_string()));
+    built.unwrap_or_else(|e| {
+        // The options are checked at startup and the TLS backend only
+        // fails to initialise when the default client fails the same way
+        // on first use, so this is not expected.
+        tracing::error!(error = %e, "building the identity-provider HTTP client failed");
+        reqwest::Client::new()
+    })
 }
 
 /// Sends an openidconnect request through `client`.

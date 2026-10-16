@@ -481,6 +481,7 @@ fn deps(
         limiter: mb_engine::GenerationLimiter::new(64),
         scrubber: None,
         limits: Default::default(),
+        http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
     }
 }

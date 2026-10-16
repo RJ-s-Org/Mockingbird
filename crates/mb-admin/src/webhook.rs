@@ -35,6 +35,12 @@ pub struct WebhookSink {
 }
 
 impl WebhookSink {
+    /// The HTTP client for [`WebhookSink::spawn`], with the outbound CA
+    /// roots and proxy of `opts`.
+    pub fn client(opts: &mb_llm::HttpOptions) -> Result<reqwest::Client, mb_llm::LlmError> {
+        mb_llm::http_client(opts, None)
+    }
+
     /// Starts delivering to `url` with the default 1 s, 2 s, 4 s backoff.
     /// Must be called inside a Tokio runtime.
     pub fn spawn(url: String, secret: Option<String>, http: reqwest::Client) -> Self {

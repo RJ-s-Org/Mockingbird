@@ -188,6 +188,11 @@ pub struct App {
     /// The state store the mocks and the Admin API use, its change feed
     /// shared across nodes (see [`Ha::shared_state`]).
     pub state: Arc<dyn StateStore>,
+    /// With `server.tls`: the certificates every listener serves, reloaded
+    /// when the files change (see [`crate::tls::spawn_reloader`]).
+    pub tls: Option<axum_server::tls_rustls::RustlsConfig>,
+    /// Stops the certificate reloader when the app is dropped.
+    pub tls_reloader: Option<crate::tls::ReloaderGuard>,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
@@ -200,6 +205,7 @@ impl App {
     /// [`SHUTDOWN_DRAIN_TIMEOUT`], concurrently).
     pub async fn shutdown(self) {
         drop(self.leader_work);
+        drop(self.tls_reloader);
         tokio::join!(
             self.brokers.shutdown(SHUTDOWN_DRAIN_TIMEOUT),
             self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT)
@@ -322,6 +328,7 @@ pub fn resolve_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<
     apply_flags(&mut cfg, args);
     cfg.validate_ranges().map_err(|e| anyhow!(e))?;
     cfg.auth.validate().map_err(|e| anyhow!(e))?;
+    crate::tls::check_external_url(&cfg).map_err(|e| anyhow!(e))?;
     Ok(cfg)
 }
 
@@ -448,6 +455,13 @@ async fn build_app_on(
     if role == Role::Data && args.watch {
         bail!("{WATCH_ON_DATA_NODE}");
     }
+    // The certificate files and the CA bundle are read before anything is
+    // opened, so a bad file fails startup at once.
+    let tls = match &cfg.server.tls {
+        Some(tls) => Some((tls.clone(), crate::tls::load_rustls(tls).await?)),
+        None => None,
+    };
+    let http = crate::tls::outbound_options(&cfg.outbound)?;
     if let Some(key) = llm.as_ref().and_then(|l| l.api_key.clone()) {
         ext.secrets = Arc::new(EnvKeyOverlay {
             key,
@@ -477,11 +491,11 @@ async fn build_app_on(
     let (auth, web_auth) = match role {
         // Data nodes take API keys only: no console login, no OIDC discovery.
         Role::Data => data_node_auth(&cfg.auth, &store),
-        Role::All | Role::Control => admin_auth(&cfg.auth, &store, &ext).await?,
+        Role::All | Role::Control => admin_auth(&cfg.auth, &store, &ext, &http).await?,
     };
     let audit_sink = match role {
         Role::Data => None,
-        Role::All | Role::Control => audit_webhook(&cfg, &ext).await?,
+        Role::All | Role::Control => audit_webhook(&cfg, &ext, &http).await?,
     };
     let audit = mb_admin::Auditor::new(store.clone(), audit_sink);
 
@@ -550,6 +564,7 @@ async fn build_app_on(
         limiter: GenerationLimiter::new(cfg.limits.max_concurrent_generations),
         scrubber,
         limits: cfg.limits.clone(),
+        http: http.clone(),
         mode: match role {
             Role::Control => ServeMode::ControlOnly,
             Role::All | Role::Data => ServeMode::Full,
@@ -615,7 +630,12 @@ async fn build_app_on(
             import_profile: cfg.import.llm_profile.clone(),
         }),
         imports: mb_admin::Imports {
-            settings: cfg.import.settings().map_err(|e| anyhow!(e))?,
+            settings: {
+                let mut settings = cfg.import.settings().map_err(|e| anyhow!(e))?;
+                // CA bundle only: the SSRF-guarded fetch never uses a proxy.
+                settings.fetch.extra_roots_pem = http.extra_roots_pem.clone();
+                settings
+            },
             ..Default::default()
         },
         ..mb_admin::AdminState::new(store.clone(), state.clone())
@@ -725,6 +745,13 @@ async fn build_app_on(
         }
     };
 
+    let (tls, tls_reloader) = match tls {
+        Some((files, rustls)) => {
+            let reloader = crate::tls::spawn_reloader(files, rustls.clone());
+            (Some(rustls), Some(crate::tls::ReloaderGuard(reloader)))
+        }
+        None => (None, None),
+    };
     Ok(App {
         data,
         admin,
@@ -740,6 +767,8 @@ async fn build_app_on(
         import_workers,
         ha,
         state,
+        tls,
+        tls_reloader,
     })
 }
 
@@ -817,6 +846,7 @@ async fn admin_auth(
     auth: &AuthConfig,
     store: &Arc<dyn ControlStore>,
     ext: &Extensions,
+    http: &mb_llm::HttpOptions,
 ) -> anyhow::Result<(Arc<dyn mb_auth::Authenticate>, Option<mb_admin::WebAuth>)> {
     let oidc = match (auth.mode, &auth.oidc) {
         (AuthMode::None, _) => return Ok((Arc::new(mb_auth::LocalAuth), None)),
@@ -846,7 +876,7 @@ async fn admin_auth(
             sysadmin_subjects: auth.sysadmin_subjects.clone(),
         },
     };
-    let client = mb_auth::OidcClient::discover(settings, mb_auth::http_client())
+    let client = mb_auth::OidcClient::discover(settings, mb_auth::http_client_with(http))
         .await
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("cannot set up OIDC with issuer {}", oidc.issuer))?;
@@ -871,6 +901,7 @@ async fn admin_auth(
 async fn audit_webhook(
     cfg: &FileConfig,
     ext: &Extensions,
+    http: &mb_llm::HttpOptions,
 ) -> anyhow::Result<Option<mb_admin::WebhookSink>> {
     let Some(url) = &cfg.audit.webhook_url else {
         return Ok(None);
@@ -888,7 +919,9 @@ async fn audit_webhook(
     Ok(Some(mb_admin::WebhookSink::spawn(
         url.clone(),
         secret,
-        reqwest::Client::new(),
+        mb_admin::WebhookSink::client(http)
+            .map_err(|e| anyhow!("{e}"))
+            .context("building the audit webhook client")?,
     )))
 }
 
