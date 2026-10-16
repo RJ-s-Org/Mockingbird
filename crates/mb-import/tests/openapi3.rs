@@ -27,7 +27,8 @@ fn compiles_orders_30() {
         get.identity,
         Some(Identity {
             path_param: Some("orderId".into()),
-            field: "id".into()
+            field: "id".into(),
+            input_field: None,
         })
     );
     let create = b.operation("createOrder").unwrap();

@@ -475,6 +475,10 @@ fn reflect(
             overlay(validator, body, call.body.as_ref())
         }
         OperationKind::Command(_) => body,
+        // Streams have no stored target to reflect.
+        OperationKind::StreamServer | OperationKind::StreamClient | OperationKind::StreamBidi => {
+            body
+        }
     };
     response.body = Some(force_identity(validator, op, call, body));
     response
@@ -528,8 +532,9 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
     best
 }
 
-/// Set `body[identity.field]` to the path id, as a string or (when the
-/// schema wants one) a number.
+/// Set `body[identity.field]` to the path id (else the request body's
+/// `identity.input_field`), as a string or (when the schema wants one) a
+/// number.
 fn force_identity(
     validator: &SchemaValidator,
     op: &Operation,
@@ -539,11 +544,15 @@ fn force_identity(
     let Some(identity) = &op.identity else {
         return body;
     };
-    let Some(id) = identity
+    let from_path = identity
         .path_param
         .as_ref()
-        .and_then(|p| call.path_params.get(p))
-    else {
+        .and_then(|p| call.path_params.get(p));
+    let from_body = || {
+        let field = identity.input_field.as_ref()?;
+        call.body.as_ref()?.get(field)
+    };
+    let Some(id) = from_path.or_else(from_body) else {
         return body;
     };
     if !body.is_object() || body.get(&identity.field) == Some(id) {

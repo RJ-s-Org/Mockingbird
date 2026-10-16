@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use mb_mcm::{Binding, Bundle, Effect, HttpMethod, OperationKind};
+use mb_mcm::{Binding, Bundle, HttpMethod, Protocol};
 use mb_store::{ContractStatus, ContractVersion, Mock, NewContractVersion};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -65,12 +65,18 @@ pub struct ContractVersionSummary {
 #[derive(Serialize, ToSchema, Debug, PartialEq)]
 pub struct OperationSummary {
     pub id: String,
-    /// Upper-case HTTP method.
+    /// Upper-case HTTP method (empty for non-HTTP operations).
     pub method: String,
-    /// Path template with `{param}` placeholders.
+    /// Path template with `{param}` placeholders (empty for non-HTTP operations).
     pub path: String,
-    /// `query`, `create`, `update`, `delete` or `other`.
+    /// `query`, `create`, `update`, `delete`, `other`, `stream-server`,
+    /// `stream-client` or `stream-bidi`.
     pub kind: String,
+    /// `http`, `graphql`, `grpc` or `soap`.
+    pub protocol: String,
+    /// `GET /orders/{id}`, `query user`, `/pkg.Service/Method` or
+    /// `Service/Port Operation`.
+    pub target: String,
 }
 
 /// A contract version's metadata and operations.
@@ -110,21 +116,24 @@ fn operations(bundle: &Bundle) -> Vec<OperationSummary> {
                 Binding::Http { method, path } => (method_name(*method), path.clone()),
                 _ => ("", String::new()),
             };
-            let kind = match &op.kind {
-                OperationKind::Query => "query",
-                OperationKind::Command(Effect::Create) => "create",
-                OperationKind::Command(Effect::Update) => "update",
-                OperationKind::Command(Effect::Delete) => "delete",
-                OperationKind::Command(Effect::Other) => "other",
-            };
             OperationSummary {
                 id: op.id.clone(),
                 method: method.into(),
                 path,
-                kind: kind.into(),
+                kind: op.kind.label().into(),
+                protocol: protocol_name(op.protocol),
+                target: op.target(),
             }
         })
         .collect()
+}
+
+/// The protocol's serde name (`http`, `graphql`, `grpc`, `soap`).
+fn protocol_name(p: Protocol) -> String {
+    serde_json::to_value(p)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn method_name(m: HttpMethod) -> &'static str {

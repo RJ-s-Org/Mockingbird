@@ -16,13 +16,67 @@ pub struct Bundle {
     pub operations: Vec<Operation>,
     /// JSON Schema 2020-12 definitions.
     pub defs: Map<String, Value>,
+    /// The protocol-native source the adapters need on the wire (SDL,
+    /// descriptor set or WSDL); absent for HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_payload: Option<ProtocolPayload>,
 }
 
+/// Protocol-native material carried next to the operations.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolPayload {
+    /// A serialized `google.protobuf.FileDescriptorSet` (standard base64 in JSON).
+    Grpc {
+        #[serde(with = "base64_bytes")]
+        file_descriptor_set: Vec<u8>,
+    },
+    /// GraphQL SDL.
+    Graphql { sdl: String },
+    /// The WSDL document, with imported schemas inlined.
+    Soap { wsdl: String },
+}
+
+mod base64_bytes {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Protocol {
     Http,
+    Graphql,
+    Grpc,
+    Soap,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphqlOperationType {
+    Query,
+    Mutation,
+    Subscription,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SoapVersion {
+    #[serde(rename = "soap11")]
+    Soap11,
+    #[serde(rename = "soap12")]
+    Soap12,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -31,6 +85,46 @@ pub enum Protocol {
 pub enum Binding {
     /// `path` uses `{param}` placeholders.
     Http { method: HttpMethod, path: String },
+    /// A root field of the `Query`, `Mutation` or `Subscription` type.
+    Graphql {
+        operation_type: GraphqlOperationType,
+        field: String,
+    },
+    /// `service` is the short service name; `package` may be empty.
+    Grpc {
+        package: String,
+        service: String,
+        method: String,
+    },
+    /// A WSDL operation reached through `service`/`port` at `address_path`.
+    Soap {
+        service: String,
+        port: String,
+        operation: String,
+        soap_action: Option<String>,
+        version: SoapVersion,
+        address_path: String,
+    },
+}
+
+impl Binding {
+    /// The gRPC request path, `/pkg.Service/Method` (`/Service/Method` for
+    /// an empty package); `None` for other bindings.
+    pub fn grpc_path(&self) -> Option<String> {
+        match self {
+            Binding::Grpc {
+                package,
+                service,
+                method,
+            } if package.is_empty() => Some(format!("/{service}/{method}")),
+            Binding::Grpc {
+                package,
+                service,
+                method,
+            } => Some(format!("/{package}.{service}/{method}")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +139,53 @@ pub enum HttpMethod {
     Options,
 }
 
+/// What an operation does. For the streaming kinds, the success
+/// [`OutputVariant`]'s schema is the schema of ONE stream item (or of the
+/// single response, for [`OperationKind::StreamClient`]).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     Query,
     Command(Effect),
+    /// One request, a stream of responses.
+    StreamServer,
+    /// A stream of requests, one response.
+    StreamClient,
+    /// Streams in both directions.
+    StreamBidi,
+}
+
+impl OperationKind {
+    /// Whether the response is a stream of items.
+    pub fn streams_response(&self) -> bool {
+        matches!(
+            self,
+            OperationKind::StreamServer | OperationKind::StreamBidi
+        )
+    }
+
+    /// Whether the request is a stream of items.
+    pub fn streams_request(&self) -> bool {
+        matches!(
+            self,
+            OperationKind::StreamClient | OperationKind::StreamBidi
+        )
+    }
+
+    /// `query`, `create`, `update`, `delete`, `other`, `stream-server`,
+    /// `stream-client` or `stream-bidi`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            OperationKind::Query => "query",
+            OperationKind::Command(Effect::Create) => "create",
+            OperationKind::Command(Effect::Update) => "update",
+            OperationKind::Command(Effect::Delete) => "delete",
+            OperationKind::Command(Effect::Other) => "other",
+            OperationKind::StreamServer => "stream-server",
+            OperationKind::StreamClient => "stream-client",
+            OperationKind::StreamBidi => "stream-bidi",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,9 +249,19 @@ pub struct OutputVariant {
 pub struct Identity {
     pub path_param: Option<String>,
     pub field: String,
+    /// Top-level request-body field carrying the target id (non-HTTP protocols).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_field: Option<String>,
 }
 
 impl Bundle {
+    /// The first operation's protocol; [`Protocol::Http`] when there are none.
+    pub fn protocol(&self) -> Protocol {
+        self.operations
+            .first()
+            .map_or(Protocol::Http, |o| o.protocol)
+    }
+
     pub fn operation(&self, id: &str) -> Option<&Operation> {
         self.operations.iter().find(|o| o.id == id)
     }
@@ -190,6 +336,43 @@ fn collect_def_refs(value: &Value, out: &mut Vec<String>) {
 }
 
 impl Operation {
+    /// The schema of one response stream item (the single response, for
+    /// client streaming): the success output's schema, for streaming kinds.
+    pub fn stream_item_schema(&self) -> Option<&Value> {
+        match self.kind {
+            OperationKind::StreamServer
+            | OperationKind::StreamClient
+            | OperationKind::StreamBidi => self.success_output().and_then(|o| o.schema.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// A human-readable call target: `GET /orders/{id}`, `query user`,
+    /// `/pkg.Service/Method` or `Service/Port Operation`.
+    pub fn target(&self) -> String {
+        match &self.binding {
+            Binding::Http { method, path } => format!("{} {path}", method_name(*method)),
+            Binding::Graphql {
+                operation_type,
+                field,
+            } => {
+                let t = match operation_type {
+                    GraphqlOperationType::Query => "query",
+                    GraphqlOperationType::Mutation => "mutation",
+                    GraphqlOperationType::Subscription => "subscription",
+                };
+                format!("{t} {field}")
+            }
+            Binding::Grpc { .. } => self.binding.grpc_path().unwrap_or_default(),
+            Binding::Soap {
+                service,
+                port,
+                operation,
+                ..
+            } => format!("{service}/{port} {operation}"),
+        }
+    }
+
     /// Lowest `Code` in 200..=299, else `Default`.
     pub fn success_output(&self) -> Option<&OutputVariant> {
         self.outputs
@@ -231,5 +414,17 @@ impl Operation {
         self.outputs
             .iter()
             .find(|o| o.status == StatusSelector::Default)
+    }
+}
+
+fn method_name(m: HttpMethod) -> &'static str {
+    match m {
+        HttpMethod::Get => "GET",
+        HttpMethod::Post => "POST",
+        HttpMethod::Put => "PUT",
+        HttpMethod::Patch => "PATCH",
+        HttpMethod::Delete => "DELETE",
+        HttpMethod::Head => "HEAD",
+        HttpMethod::Options => "OPTIONS",
     }
 }

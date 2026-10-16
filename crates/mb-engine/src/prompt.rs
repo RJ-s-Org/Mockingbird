@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use mb_llm::{ChatMessage, Role};
-use mb_mcm::{Binding, Bundle, Operation};
+use mb_mcm::{Binding, Bundle, Operation, OperationKind};
 use serde_json::Value;
 
 use crate::{GenerationContext, OperationCall};
@@ -58,9 +58,27 @@ fn system_message(
     }
     let _ = writeln!(s, "API: {}", bundle.title);
     let _ = writeln!(s, "Operation: {}", op.id);
-    if let Binding::Http { method, path } = &op.binding {
-        let method = format!("{method:?}").to_uppercase();
-        let _ = writeln!(s, "HTTP: {method} {path}");
+    match &op.binding {
+        Binding::Http { method, path } => {
+            let method = format!("{method:?}").to_uppercase();
+            let _ = writeln!(s, "HTTP: {method} {path}");
+        }
+        Binding::Graphql { .. } => {
+            let _ = writeln!(s, "GraphQL: {}", op.target());
+        }
+        Binding::Soap { .. } => {
+            let _ = writeln!(s, "SOAP: {}", op.target());
+        }
+        Binding::Grpc { .. } => {
+            let call_kind = match op.kind {
+                OperationKind::StreamServer => "server streaming",
+                OperationKind::StreamClient => "client streaming",
+                OperationKind::StreamBidi => "bidi streaming",
+                _ => "unary",
+            };
+            let _ = writeln!(s, "gRPC: {} ({call_kind})", op.target());
+        }
+        _ => {}
     }
     if let Some(summary) = &op.summary {
         let _ = writeln!(s, "Summary: {summary}");

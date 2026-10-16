@@ -77,5 +77,6 @@ pub(crate) fn infer_identity(
     Some(Identity {
         path_param: path_param.map(str::to_owned),
         field,
+        input_field: None,
     })
 }

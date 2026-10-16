@@ -481,9 +481,12 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(
         Value::Array(ops),
         json!([
-            { "id": "createOrder", "method": "POST", "path": "/orders", "kind": "create" },
-            { "id": "getOrder", "method": "GET", "path": "/orders/{id}", "kind": "query" },
-            { "id": "listOrders", "method": "GET", "path": "/orders", "kind": "query" },
+            { "id": "createOrder", "method": "POST", "path": "/orders", "kind": "create",
+              "protocol": "http", "target": "POST /orders" },
+            { "id": "getOrder", "method": "GET", "path": "/orders/{id}", "kind": "query",
+              "protocol": "http", "target": "GET /orders/{id}" },
+            { "id": "listOrders", "method": "GET", "path": "/orders", "kind": "query",
+              "protocol": "http", "target": "GET /orders" },
         ])
     );
 
@@ -503,6 +506,30 @@ async fn upload_activate_and_list_versions() {
     h.upload("nope", &v1, None)
         .await
         .assert_problem(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn operation_summaries_report_protocol_and_target() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let path = format!(
+        "{}/../../fixtures/openapi/orders-3.0.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(path).unwrap();
+    let r = h.upload("orders", &source, None).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let r = h.get("/api/v1/mocks/orders/contracts/1").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let detail = r.json();
+    let ops = detail["operations"].as_array().unwrap();
+    let get = ops.iter().find(|o| o["id"] == "getOrder").unwrap();
+    assert_eq!(get["protocol"], "http", "{get}");
+    assert_eq!(get["target"], "GET /orders/{orderId}", "{get}");
+    assert_eq!(get["kind"], "query", "{get}");
+    for op in ops {
+        assert_eq!(op["protocol"], "http", "{op}");
+    }
 }
 
 #[tokio::test]

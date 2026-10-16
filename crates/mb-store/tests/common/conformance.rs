@@ -48,6 +48,7 @@ fn bundle(title: &str) -> Bundle {
         source_digest: "abc".into(),
         operations: vec![],
         defs: serde_json::Map::new(),
+        protocol_payload: None,
     }
 }
 
