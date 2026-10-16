@@ -13,6 +13,7 @@ import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
 import { ConfirmDialog, dangerButton, inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { ChaosLimits } from "./ChaosLimits";
 import { ProfileSelect } from "./CreateMockDialog";
 
 const MODES: { value: DataPlaneAuthMode; label: string }[] = [
@@ -28,20 +29,34 @@ export function readOnlyReason(mock: Mock, canEdit: boolean): string | undefined
   return undefined;
 }
 
-/** A mock's settings; Save sends only the changed fields. */
+/** A mock's settings, then its chaos and limits; each Save sends its own patch. */
 export function Overview({ ws, mock }: { ws: string; mock: string }) {
   const m = useMock(ws, mock);
+  const me = useMe();
   const [savedAt, setSavedAt] = useState<string>();
+  const [chaosSavedAt, setChaosSavedAt] = useState<string>();
   if (!m.data) return m.isPending ? <p className="text-slate-700">Loading…</p> : null;
-  // Re-seed the form whenever the stored mock changes.
+  const canEdit = me.data ? can(me.data, ws, "edit") : false;
+  // Re-seed the forms whenever the stored mock changes.
   return (
-    <OverviewForm
-      key={m.data.updated_at}
-      ws={ws}
-      mock={m.data}
-      saved={savedAt === m.data.updated_at}
-      onSaved={(updated) => setSavedAt(updated.updated_at)}
-    />
+    <div className="space-y-8">
+      <OverviewForm
+        key={m.data.updated_at}
+        ws={ws}
+        mock={m.data}
+        saved={savedAt === m.data.updated_at}
+        onSaved={(updated) => setSavedAt(updated.updated_at)}
+      />
+      <ChaosLimits
+        key={`chaos-${m.data.updated_at}`}
+        ws={ws}
+        mock={m.data}
+        canEdit={canEdit}
+        reason={readOnlyReason(m.data, canEdit)}
+        saved={chaosSavedAt === m.data.updated_at}
+        onSaved={(updated) => setChaosSavedAt(updated.updated_at)}
+      />
+    </div>
   );
 }
 
