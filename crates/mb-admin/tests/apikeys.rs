@@ -261,8 +261,24 @@ async fn token_shown_once() {
     assert!(!list.text.contains(token), "{}", list.text);
     assert!(!list.text.contains("token"), "{}", list.text);
     assert!(!list.text.contains("secret_hash"), "{}", list.text);
-    let secret = token.rsplit_once('_').unwrap().1;
+    let secret = secret_of(token);
     assert!(!list.text.contains(secret), "{}", list.text);
+}
+
+/// The secret part of an `mbk_<key_id>_<secret>` token (the secret itself
+/// may contain `_`).
+fn secret_of(token: &str) -> &str {
+    assert!(mb_auth::parse_token(token).is_some(), "{token}");
+    &token["mbk_".len() + 12 + 1..]
+}
+
+#[test]
+fn secret_of_handles_underscores_in_the_secret() {
+    let secret = "QYS7Til8dMXkE_qTNbuuCmPzW-phLSFD8rJ8IKHM_t8";
+    assert_eq!(secret.len(), 43);
+    let token = format!("mbk_abcdefghijkl_{secret}");
+    assert!(mb_auth::parse_token(&token).is_some());
+    assert_eq!(secret_of(&token), secret);
 }
 
 #[tokio::test]

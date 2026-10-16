@@ -523,7 +523,9 @@ async fn audit_never_contains_secrets() {
         .ok(StatusCode::CREATED);
     let token = created["token"].as_str().unwrap().to_string();
     assert!(token.starts_with("mbk_"));
-    let secret = token.rsplit_once('_').unwrap().1.to_string();
+    // `mbk_<12-char key_id>_<secret>`; the secret may itself contain `_`.
+    assert!(mb_auth::parse_token(&token).is_some(), "{token}");
+    let secret = token["mbk_".len() + 12 + 1..].to_string();
 
     let r = h
         .call(
