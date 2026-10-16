@@ -5,7 +5,7 @@
 //! DOCTYPE declarations are rejected and no entity is ever expanded: only
 //! the five predefined entities and character references are resolved.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use quick_xml::XmlVersion;
@@ -23,6 +23,10 @@ const WSDL_SOAP11_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap/";
 const WSDL_SOAP12_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap12/";
 /// Deeper documents are rejected.
 const MAX_DEPTH: usize = 256;
+/// More namespace declarations on one element are rejected.
+const MAX_NS_PER_ELEMENT: usize = 64;
+/// More namespace declarations in one document are rejected.
+const MAX_NS_PER_DOCUMENT: usize = 256;
 pub(crate) const DOCTYPE_MESSAGE: &str = "DOCTYPE is not allowed";
 
 /// An expanded name: namespace URI (empty for none) and local name.
@@ -41,8 +45,29 @@ impl QName {
     }
 }
 
-/// In-scope prefix bindings (`""` is the default namespace).
-type Scope = Arc<BTreeMap<String, String>>;
+/// In-scope prefix bindings (`""` is the default namespace): a persistent
+/// linked list of the declarations of each enclosing element, so an
+/// element shares its parent's bindings instead of copying them.
+type Scope = Option<Arc<ScopeNode>>;
+
+#[derive(Debug)]
+struct ScopeNode {
+    /// `(prefix, namespace)` declared on one element.
+    bindings: Vec<(String, String)>,
+    parent: Scope,
+}
+
+/// The namespace bound to `prefix` in `scope`, innermost first.
+fn lookup_in<'s>(scope: &'s Scope, prefix: &str) -> Option<&'s str> {
+    let mut node = scope.as_deref();
+    while let Some(n) = node {
+        if let Some((_, ns)) = n.bindings.iter().rev().find(|(p, _)| p == prefix) {
+            return Some(ns);
+        }
+        node = n.parent.as_deref();
+    }
+    None
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Element {
@@ -72,8 +97,10 @@ fn syntax(e: impl std::fmt::Display) -> String {
     format!("malformed XML: {e}")
 }
 
-fn open(e: &BytesStart<'_>, parent: &Scope) -> Result<Element, String> {
-    let mut bindings: Option<BTreeMap<String, String>> = None;
+/// Opens element `e` under `parent`; `declared` counts the namespace
+/// declarations seen so far in the document.
+fn open(e: &BytesStart<'_>, parent: &Scope, declared: &mut usize) -> Result<Element, String> {
+    let mut bindings: Vec<(String, String)> = Vec::new();
     let mut raw_attrs = Vec::new();
     for attr in e.attributes() {
         let attr = attr.map_err(syntax)?;
@@ -82,34 +109,49 @@ fn open(e: &BytesStart<'_>, parent: &Scope) -> Result<Element, String> {
             .normalized_value(XmlVersion::Implicit1_0)
             .map_err(syntax)?
             .into_owned();
-        let declared = if key == "xmlns" {
+        let prefix = if key == "xmlns" {
             Some(String::new())
         } else {
             key.strip_prefix("xmlns:").map(str::to_owned)
         };
-        match declared {
+        match prefix {
             Some(prefix) => {
-                bindings
-                    .get_or_insert_with(|| (**parent).clone())
-                    .insert(prefix, value);
+                *declared += 1;
+                if bindings.len() >= MAX_NS_PER_ELEMENT {
+                    return Err(syntax(format!(
+                        "more than {MAX_NS_PER_ELEMENT} namespace declarations on one element"
+                    )));
+                }
+                if *declared > MAX_NS_PER_DOCUMENT {
+                    return Err(syntax(format!(
+                        "more than {MAX_NS_PER_DOCUMENT} namespace declarations in the document"
+                    )));
+                }
+                bindings.push((prefix, value));
             }
             None => raw_attrs.push((key, value)),
         }
     }
-    let scope = bindings.map_or_else(|| Arc::clone(parent), Arc::new);
+    let scope = if bindings.is_empty() {
+        parent.clone()
+    } else {
+        Some(Arc::new(ScopeNode {
+            bindings,
+            parent: parent.clone(),
+        }))
+    };
     let lookup = |prefix: &str| -> Result<String, String> {
         if prefix == "xml" {
             return Ok(XML_NS.to_owned());
         }
-        scope
-            .get(prefix)
-            .cloned()
+        lookup_in(&scope, prefix)
+            .map(str::to_owned)
             .ok_or_else(|| syntax(format!("unbound namespace prefix \"{prefix}\"")))
     };
     let raw_name = e.name().as_ref().to_owned();
     let (prefix, local) = split(&raw_name);
     let ns = if prefix.is_empty() {
-        scope.get("").cloned().unwrap_or_default()
+        lookup_in(&scope, "").unwrap_or_default().to_owned()
     } else {
         lookup(prefix)?
     };
@@ -138,7 +180,8 @@ pub(crate) fn parse(text: &str) -> Result<Element, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut reader = Reader::from_str(text);
     reader.config_mut().check_end_names = true;
-    let root_scope: Scope = Arc::new(BTreeMap::new());
+    let root_scope: Scope = None;
+    let mut declared = 0usize;
     let mut stack: Vec<Element> = Vec::new();
     let mut root: Option<Element> = None;
     loop {
@@ -154,12 +197,12 @@ pub(crate) fn parse(text: &str) -> Result<Element, String> {
                     return Err(syntax("more than one root element"));
                 }
                 let scope = stack.last().map_or(&root_scope, |p| &p.scope);
-                let el = open(&e, scope)?;
+                let el = open(&e, scope, &mut declared)?;
                 stack.push(el);
             }
             Event::Empty(e) => {
                 let scope = stack.last().map_or(&root_scope, |p| &p.scope);
-                let el = open(&e, scope)?;
+                let el = open(&e, scope, &mut declared)?;
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(el),
                     None if root.is_none() => root = Some(el),
@@ -427,6 +470,64 @@ mod tests {
                 .unwrap_err()
                 .starts_with("malformed XML")
         );
+    }
+
+    /// Namespace bindings stored across the tree, each shared scope
+    /// node counted once.
+    fn stored_bindings(el: &Element, seen: &mut std::collections::HashSet<usize>) -> usize {
+        let mut own = 0;
+        let mut node = el.scope.as_ref();
+        while let Some(n) = node {
+            if !seen.insert(Arc::as_ptr(n) as usize) {
+                break;
+            }
+            own += n.bindings.len();
+            node = n.parent.as_ref();
+        }
+        own + el
+            .children
+            .iter()
+            .map(|c| stored_bindings(c, seen))
+            .sum::<usize>()
+    }
+
+    fn many_namespaces(root_decls: usize, children: usize) -> String {
+        let decls: String = (0..root_decls)
+            .map(|i| format!(" xmlns:p{i}=\"urn:p{i}\""))
+            .collect();
+        let kids = "<c xmlns:z=\"urn:z\"/>".repeat(children);
+        format!(
+            "<soap:Envelope xmlns:soap=\"{SOAP11_ENV_NS}\"{decls}><soap:Body><a>{kids}</a></soap:Body></soap:Envelope>"
+        )
+    }
+
+    #[test]
+    fn namespace_scopes_are_linked_not_copied() {
+        // N declarations on the root and M siblings declaring one prefix
+        // each must store O(N + M) bindings, not O(N * M).
+        let (n, m) = (60, 190);
+        let root = parse(&many_namespaces(n, m)).unwrap();
+        let stored = stored_bindings(&root, &mut Default::default());
+        assert!(stored <= n + m + 1, "{stored} bindings stored");
+        let a = &root.children[0].children[0];
+        assert_eq!(a.children.len(), m);
+        assert_eq!(a.children[m - 1].name, QName::new("", "c"));
+    }
+
+    #[test]
+    fn caps_namespace_declarations() {
+        let per_element: String = (0..=MAX_NS_PER_ELEMENT)
+            .map(|i| format!(" xmlns:p{i}=\"urn:p\""))
+            .collect();
+        let err = parse(&format!("<r{per_element}/>")).unwrap_err();
+        assert!(err.contains("namespace declarations"), "{err}");
+        // Under the per-element cap, over the per-document one.
+        let err = parse(&many_namespaces(4, MAX_NS_PER_DOCUMENT)).unwrap_err();
+        assert!(err.contains("namespace declarations"), "{err}");
+        // The reviewer's N = M = 2000 envelope is refused outright.
+        assert!(parse(&many_namespaces(2000, 2000)).is_err());
+        // At the caps, a document still parses.
+        assert!(parse(&many_namespaces(MAX_NS_PER_ELEMENT - 1, 100)).is_ok());
     }
 
     #[test]
