@@ -94,6 +94,38 @@ fn binary_targets_exact() {
     assert_eq!(targets, expected);
 }
 
+/// GitHub retired the macos-13 hosted image (2025-12-04); a matrix leg on it
+/// never gets a runner, and `release` (which needs `binaries`) never runs.
+/// The x86_64 macOS binary is cross-built on an Apple Silicon runner.
+#[test]
+fn binary_runners_live() {
+    let doc = workflow();
+    let retired = [
+        "macos-13",
+        "macos-12",
+        "macos-11",
+        "ubuntu-20.04",
+        "windows-2019",
+    ];
+    for entry in jobs(&doc)["binaries"]["strategy"]["matrix"]["include"]
+        .as_array()
+        .expect("binaries matrix include list")
+    {
+        let runner = scalar(&entry["runner"]);
+        let target = scalar(&entry["target"]);
+        assert!(
+            !retired.contains(&runner.as_str()),
+            "{target} runs on retired image {runner}"
+        );
+        if target.ends_with("-apple-darwin") {
+            assert!(
+                matches!(runner.as_str(), "macos-14" | "macos-15"),
+                "{target} must build on an Apple Silicon runner (macos-14/15), got {runner}"
+            );
+        }
+    }
+}
+
 #[test]
 fn images_scan_and_sign() {
     let doc = workflow();
