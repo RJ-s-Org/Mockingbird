@@ -798,6 +798,37 @@ async fn bidi_stream_meters_each_item() {
 }
 
 #[tokio::test]
+async fn bidi_stream_meters_each_items_tokens() {
+    let bundle = route_guide();
+    let reply = |i: usize| json!({"location": {"latitude": i + 1, "longitude": 5}, "message": format!("reply-{i}")});
+    let streams = (0..3)
+        .map(|i| Ok(vec![Ok::<_, LlmError>(format!("{}\n", reply(i)))]))
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(vec![]).with_streams(streams));
+    let usage = Arc::new(Usage::default());
+    let mut rt = runtime("routes", Arc::clone(&bundle), Some(provider));
+    rt.ext =
+        std::mem::take(&mut rt.ext).with_usage(Arc::clone(&usage) as Arc<dyn mb_ext::UsageSink>);
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    let (tx, mut replies) = route_chat(&mut client).await;
+    for i in 0..3 {
+        tx.send(note(&client, i)).await.unwrap();
+        replies.message().await.unwrap().unwrap();
+    }
+    drop(tx);
+    assert!(replies.message().await.unwrap().is_none());
+    let events = usage.settled().await;
+    assert_eq!(events.len(), 3, "{events:?}");
+    for e in &events {
+        assert_eq!(e.source, "llm", "{e:?}");
+        // Each reply is its own one-item engine stream: its prompt and text.
+        assert!(e.prompt_tokens > 0, "{e:?}");
+        assert!(e.completion_tokens > 0, "{e:?}");
+    }
+}
+
+#[tokio::test]
 async fn client_stream_admits_each_item() {
     let usage = Arc::new(Usage::default());
     let quota = CountingQuota::new(usize::MAX);

@@ -167,6 +167,10 @@ pub struct StreamContext {
 pub struct StreamItem {
     pub value: Value,
     pub source: Source,
+    /// Tokens attributed to this item: its share of the provider stream's
+    /// estimate (see [`Engine::generate_stream`]) plus any repair call; zero
+    /// for a faker item that read nothing from the provider.
+    pub usage: Usage,
 }
 
 /// Faker attempts (cycling through top-level `oneOf`/`anyOf` branches and

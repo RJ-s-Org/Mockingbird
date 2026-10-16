@@ -368,13 +368,13 @@ impl CallState {
     }
 
     /// The first item of a one-item engine stream for `call`, as a
-    /// response message.
+    /// response message, with the tokens that item cost.
     async fn one_item(
         &self,
         plan: &OwnedPlan,
         call: OperationCall,
         request_stream: Vec<Value>,
-    ) -> Result<(DynamicMessage, Value, Source), Failure> {
+    ) -> Result<((DynamicMessage, Value, Source), Usage), Failure> {
         let mut single = plan.plan();
         single.stream_items = Some(1);
         let mut items = call::open_stream(self.rt(), &single, call.clone(), request_stream)
@@ -382,11 +382,15 @@ impl CallState {
             .map_err(engine_failure)?;
         let first = items.next().await;
         drop(items);
-        let (body, source) = match first {
-            Some(StreamItem { value, source }) => (Some(value), source),
-            None => (None, Source::Fallback),
+        let (body, source, usage) = match first {
+            Some(StreamItem {
+                value,
+                source,
+                usage,
+            }) => (Some(value), source, usage),
+            None => (None, Source::Fallback, Usage::default()),
         };
-        self.response(plan, &call, body, source)
+        Ok((self.response(plan, &call, body, source)?, usage))
     }
 
     async fn unary(self: Arc<Self>, req: tonic::Request<DynamicMessage>) -> UnaryResult {
@@ -494,7 +498,8 @@ impl CallState {
             }
             let request_stream = Vec::from(request_stream);
             let call = self.operation_call(&rep.headers, last);
-            let reply = self.one_item(&plan, call, request_stream).await?;
+            let (reply, usage) = self.one_item(&plan, call, request_stream).await?;
+            rep.usage = usage;
             sleep(plan.delay).await;
             Ok(reply)
         }
@@ -636,15 +641,14 @@ impl Bidi {
         }
         .await;
         match reply {
-            Ok(Some(((message, _, source), latency))) => {
-                // Stream items carry no token counts of their own.
+            Ok(Some((((message, _, source), usage), latency))) => {
                 call::meter(
                     self.call.rt(),
                     self.plan.tenancy.clone(),
                     &self.call.method.op_id,
                     source,
                     latency,
-                    Usage::default(),
+                    usage,
                 );
                 self.rep.items += 1;
                 self.rep.add_source(source);

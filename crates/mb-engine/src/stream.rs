@@ -87,6 +87,10 @@ impl Engine {
             repair_system,
             lines: VecDeque::new(),
             permit: None,
+            prompt_bytes: 0,
+            completion_bytes: 0,
+            attributed: Usage::default(),
+            repair_usage: Usage::default(),
         };
         Ok(futures::stream::unfold(state, |mut state| async move {
             let item = state.next_item().await?;
@@ -130,15 +134,22 @@ struct StreamMeter {
 
 impl Drop for StreamMeter {
     fn drop(&mut self) {
-        let estimate = |bytes: usize| u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX);
-        let total = self.prompt_bytes + self.completion_bytes;
-        // Round the sum, not each half, so the charge is ceil(total / 4).
-        let prompt_tokens = estimate(self.prompt_bytes);
-        let completion_tokens = estimate(total).saturating_sub(prompt_tokens);
-        self.engine.spend(Usage {
-            prompt_tokens,
-            completion_tokens,
-        });
+        self.engine
+            .spend(estimate_usage(self.prompt_bytes, self.completion_bytes));
+    }
+}
+
+/// The estimated tokens of a provider stream: `ceil(bytes / 4)` of the
+/// prompt, and of the prompt plus the text received for the total (the sum
+/// is rounded, not each half).
+fn estimate_usage(prompt_bytes: usize, completion_bytes: usize) -> Usage {
+    let estimate = |bytes: usize| u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX);
+    let prompt_tokens = estimate(prompt_bytes);
+    let completion_tokens =
+        estimate(prompt_bytes.saturating_add(completion_bytes)).saturating_sub(prompt_tokens);
+    Usage {
+        prompt_tokens,
+        completion_tokens,
     }
 }
 
@@ -162,6 +173,14 @@ struct StreamState {
     /// The generation permit, held from opening the provider stream until
     /// it has no more candidates (or this stream is done or dropped).
     permit: Option<GenerationPermit>,
+    /// Bytes of the provider stream's prompt and of the text received so
+    /// far (mirrors its [`StreamMeter`], which outlives no item).
+    prompt_bytes: usize,
+    completion_bytes: usize,
+    /// The stream estimate already attributed to emitted items.
+    attributed: Usage,
+    /// Repair-call tokens not yet attributed to an item.
+    repair_usage: Usage,
 }
 
 impl StreamState {
@@ -178,10 +197,31 @@ impl StreamState {
             _ => (self.fake(), Source::Fallback),
         };
         self.emitted += 1;
+        let usage = self.take_usage();
         Some(StreamItem {
             value: self.apply_scenario(value),
             source,
+            usage,
         })
+    }
+
+    /// The tokens spent since the previous item: the growth of the provider
+    /// stream's estimate (the prompt counts toward the first item that reads
+    /// it) plus any repair call. Summed over every item, this is what the
+    /// stream charges to the token budget, less text received after the last
+    /// item.
+    fn take_usage(&mut self) -> Usage {
+        let total = estimate_usage(self.prompt_bytes, self.completion_bytes);
+        let stream = Usage {
+            prompt_tokens: total
+                .prompt_tokens
+                .saturating_sub(self.attributed.prompt_tokens),
+            completion_tokens: total
+                .completion_tokens
+                .saturating_sub(self.attributed.completion_tokens),
+        };
+        self.attributed = total;
+        stream + std::mem::take(&mut self.repair_usage)
     }
 
     /// The next candidate line from the provider, or `None` once it has
@@ -218,6 +258,7 @@ impl StreamState {
                     let prompt_bytes = request.messages.iter().map(|m| m.content.len()).sum();
                     match tokio::time::timeout_at(deadline, provider.stream(request)).await {
                         Ok(Ok(stream)) => {
+                            self.prompt_bytes = prompt_bytes;
                             self.upstream = Upstream::Open {
                                 stream,
                                 splitter: LineSplitter::new(),
@@ -239,6 +280,7 @@ impl StreamState {
                 } => match tokio::time::timeout_at(deadline, stream.next()).await {
                     Ok(Some(Ok(delta))) => {
                         meter.completion_bytes += delta.len();
+                        self.completion_bytes += delta.len();
                         self.lines.extend(splitter.push(&delta));
                         self.upstream = Upstream::Open {
                             stream,
@@ -323,6 +365,7 @@ impl StreamState {
         let text = match tokio::time::timeout(limit, provider.complete(request)).await {
             Ok(Ok(response)) => {
                 engine.spend(response.usage);
+                self.repair_usage = self.repair_usage + response.usage;
                 response.content
             }
             Ok(Err(e)) => return Err(e.to_string()),
