@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 pub mod extract;
 pub mod faker;
+pub mod message;
 pub mod ndjson;
 pub mod prompt;
 pub mod scenario;
@@ -21,7 +22,8 @@ pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker};
-pub use prompt::{build_messages, build_stream_messages};
+pub use message::{GeneratedMessage, MessageContext};
+pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
 pub use validate::SchemaValidator;
 
