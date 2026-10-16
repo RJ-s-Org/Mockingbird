@@ -71,8 +71,12 @@ use crate::{
 pub struct ApiDoc;
 
 /// The document, serialised once.
-static DOCUMENT: LazyLock<String> =
-    LazyLock::new(|| ApiDoc::openapi().to_json().unwrap_or_else(|_| "{}".into()));
+static DOCUMENT: LazyLock<String> = LazyLock::new(|| {
+    ApiDoc::openapi()
+        .merge_from(crate::channels::ChannelsDoc::openapi())
+        .to_json()
+        .unwrap_or_else(|_| "{}".into())
+});
 
 pub async fn serve() -> Response {
     (

@@ -1480,6 +1480,11 @@ async fn openapi_lists_all_paths() {
             &["get", "put", "delete"],
         ),
         ("/api/v1/mocks/{mock}/requests", &["get"]),
+        ("/api/v1/mocks/{mock}/channels", &["get"]),
+        ("/api/v1/mocks/{mock}/channels/{channel}", &["get", "put"]),
+        ("/api/v1/mocks/{mock}/channels/{channel}/publish", &["post"]),
+        ("/api/v1/mocks/{mock}/event-settings", &["get", "put"]),
+        ("/api/v1/brokers", &["get"]),
     ];
     for (path, methods) in expected {
         let item = &doc["paths"][*path];
@@ -1497,7 +1502,15 @@ async fn openapi_lists_all_paths() {
     let listed: usize = expected.iter().map(|(_, m)| m.len()).sum();
     assert_eq!(documented, listed, "unexpected extra operations");
     let schemas = doc["components"]["schemas"].as_object().unwrap();
-    for name in ["Problem", "MockView", "LlmProfileView", "ScenarioView"] {
+    for name in [
+        "Problem",
+        "MockView",
+        "LlmProfileView",
+        "ScenarioView",
+        "ChannelView",
+        "ChannelDetail",
+        "BrokerView",
+    ] {
         assert!(schemas.contains_key(name), "schema {name} missing");
     }
 }

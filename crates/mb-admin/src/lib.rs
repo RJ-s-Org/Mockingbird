@@ -12,6 +12,7 @@ use mb_store::{ContractStatus, ControlStore, DEFAULT_WORKSPACE, Mock, ResourceSo
 use serde::Serialize;
 use utoipa::ToSchema;
 
+pub mod channels;
 mod contracts;
 mod mocks;
 mod openapi;
@@ -115,7 +116,8 @@ pub fn router(st: AdminState) -> Router {
                 .put(sessions::seed)
                 .delete(sessions::reset),
         )
-        .route("/mocks/{mock}/requests", get(requests::list));
+        .route("/mocks/{mock}/requests", get(requests::list))
+        .merge(channels::routes());
 
     Router::new()
         .nest(API_BASE, api)

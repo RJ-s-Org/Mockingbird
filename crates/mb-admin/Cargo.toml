@@ -11,6 +11,7 @@ description = "Mockingbird Admin REST API with its OpenAPI document"
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum = { workspace = true, features = ["macros"] }
 chrono.workspace = true
 mb-import.workspace = true
@@ -25,7 +26,6 @@ utoipa.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower.workspace = true
 tracing-subscriber.workspace = true
