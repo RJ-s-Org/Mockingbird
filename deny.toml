@@ -5,6 +5,7 @@ all-features = true
 version = 2
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing attack affects private-key decryption; Mockingbird only verifies signatures (openidconnect) and signs in tests" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained (no fix available); it is a mandatory dependency of lopdf 0.42 under pdf-extract 0.12.1, used only by lopdf's font embedding, which smart import never calls" },
 ]
 
 [licenses]

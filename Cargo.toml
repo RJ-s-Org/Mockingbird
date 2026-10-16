@@ -69,6 +69,11 @@ rust-embed = { version = "8.13", features = ["debug-embed", "mime-guess"] }
 openidconnect = { version = "4.0", default-features = false }
 jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 rsa = { version = "0.9", features = ["pem"] }
+pdf-extract = "0.12.1"
+scraper = "0.27"
+pulldown-cmark = { version = "0.13", default-features = false }
+url = "2.5"
+ipnet = "2.12"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev

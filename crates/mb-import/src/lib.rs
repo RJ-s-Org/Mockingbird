@@ -9,6 +9,8 @@ mod openapi3;
 mod proto;
 mod schema;
 mod security;
+#[cfg(feature = "smart")]
+pub mod smart;
 mod swagger2;
 mod wsdl;
 
