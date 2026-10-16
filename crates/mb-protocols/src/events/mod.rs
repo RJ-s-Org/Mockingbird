@@ -9,6 +9,7 @@ mod memory;
 mod produce;
 mod runtime;
 mod triggers;
+mod ws;
 
 pub use address::{address_matches, param_names, param_values, resolve_binding, sanitize_param};
 pub use broker::{
@@ -20,6 +21,7 @@ pub use runtime::{
     ChannelActivity, ChannelRuntime, ChannelSetup, EventDeps, EventSetup, PublishError, Published,
 };
 pub use triggers::{AlwaysLeader, LEASE_RENEW, LEASE_TTL, LeaseProvider};
+pub use ws::CLOSE_RUNTIME_REPLACED;
 
 /// Largest message payload produced or consumed (1 MiB).
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;

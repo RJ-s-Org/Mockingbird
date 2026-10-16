@@ -168,27 +168,53 @@ impl Origin {
 }
 
 /// Fan-out of produced WebSocket channel messages, by path template.
-#[derive(Default)]
+/// Closing it drops every sender, which ends the subscribed sockets.
 pub(crate) struct WsHub {
-    senders: Mutex<HashMap<String, broadcast::Sender<String>>>,
+    /// `None` once closed.
+    senders: Mutex<Option<HashMap<String, broadcast::Sender<String>>>>,
+}
+
+impl Default for WsHub {
+    fn default() -> Self {
+        Self {
+            senders: Mutex::new(Some(HashMap::new())),
+        }
+    }
 }
 
 impl WsHub {
+    /// Create the sender of `path` unless it exists or the hub is closed.
+    pub(crate) fn open(&self, path: &str) {
+        if let Some(senders) = lock(&self.senders).as_mut() {
+            senders
+                .entry(path.to_string())
+                .or_insert_with(|| broadcast::channel(WS_QUEUE).0);
+        }
+    }
+
     /// Send `text` to every subscriber of `path`; the number reached.
     pub(crate) fn send(&self, path: &str, text: String) -> usize {
-        match lock(&self.senders).get(path) {
+        match lock(&self.senders).as_ref().and_then(|s| s.get(path)) {
             Some(tx) => tx.send(text).unwrap_or(0),
             None => 0,
         }
     }
 
-    /// Receive what is sent to `path` from now on.
-    #[allow(dead_code)] // used by the WebSocket channel routes
+    /// Receive what is sent to `path` from now on. On a closed hub the
+    /// receiver reports closed at once.
     pub(crate) fn subscribe(&self, path: &str) -> broadcast::Receiver<String> {
-        lock(&self.senders)
-            .entry(path.to_string())
-            .or_insert_with(|| broadcast::channel(WS_QUEUE).0)
-            .subscribe()
+        match lock(&self.senders).as_mut() {
+            Some(senders) => senders
+                .entry(path.to_string())
+                .or_insert_with(|| broadcast::channel(WS_QUEUE).0)
+                .subscribe(),
+            None => broadcast::channel(1).1,
+        }
+    }
+
+    /// Drop every sender; later subscribers see a closed hub.
+    pub(crate) fn close(&self) {
+        lock(&self.senders).take();
     }
 }
 
@@ -395,11 +421,17 @@ pub struct ChannelRuntime {
 }
 
 impl ChannelRuntime {
-    /// Resolve the broker, start a consumer for every enabled, active
-    /// broker channel the mock consumes and the triggers of every enabled,
-    /// active channel it publishes. Must run inside a Tokio runtime.
+    /// Resolve the broker, open the hub of every WebSocket channel, start
+    /// a consumer for every enabled, active broker channel the mock
+    /// consumes and the triggers of every enabled, active channel it
+    /// publishes. Must run inside a Tokio runtime.
     pub fn start(rt: Arc<MockRuntime>, deps: EventDeps, setup: EventSetup) -> Arc<Self> {
         let inner = Arc::new(ChannelInner::new(rt, deps, setup));
+        for channel in &inner.rt.bundle.channels {
+            if let ChannelBinding::WebSocket { path } = &channel.binding {
+                inner.hub.open(path);
+            }
+        }
         let mut tasks = JoinSet::new();
         if let Some(broker) = &inner.broker {
             for channel in &inner.rt.bundle.channels {
@@ -422,6 +454,12 @@ impl ChannelRuntime {
             inner,
             tasks: Mutex::new(tasks),
         })
+    }
+
+    /// The routes of the mock's enabled WebSocket channels; `None` when it
+    /// has none. Dropping the runtime closes every socket they opened.
+    pub fn ws_router(&self) -> Option<axum::Router> {
+        super::ws::router(&self.inner)
     }
 
     /// Generate and publish `count` (clamped to 1..=100) messages on
@@ -500,5 +538,6 @@ impl ChannelRuntime {
 impl Drop for ChannelRuntime {
     fn drop(&mut self) {
         lock(&self.tasks).abort_all();
+        self.inner.hub.close();
     }
 }

@@ -17,6 +17,7 @@ use super::{
     BrokerError, HEADER_HOP, HEADER_MOCK, HEADER_SOURCE, MAX_MESSAGE_BYTES, OutMessage,
     param_values, resolve_binding,
 };
+use crate::ws::Outbound;
 use crate::{RequestKind, RequestRecord};
 
 /// How long one publish attempt may take.
@@ -105,6 +106,18 @@ impl ChannelInner {
         channel: &Channel,
         origin: Origin,
         related: Vec<StoredResource>,
+    ) -> Result<Published, PublishError> {
+        self.produce_to(channel, origin, related, None).await
+    }
+
+    /// [`Self::produce`], sending a WebSocket channel's message to
+    /// `socket` alone when given, else to every subscriber of its path.
+    pub(crate) async fn produce_to(
+        self: &Arc<Self>,
+        channel: &Channel,
+        origin: Origin,
+        related: Vec<StoredResource>,
+        socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
     ) -> Result<Published, PublishError> {
         let started = Instant::now();
         let broker = match &channel.binding {
@@ -227,9 +240,18 @@ impl ChannelInner {
 
         let outcome = match (&broker, &channel.binding) {
             (_, ChannelBinding::WebSocket { path }) => {
-                self.hub
-                    .send(path, String::from_utf8_lossy(&payload).into_owned());
-                Ok(())
+                let text = String::from_utf8_lossy(&payload).into_owned();
+                match socket {
+                    Some(socket) => socket
+                        .send(Outbound::Text(text))
+                        .await
+                        .map_err(|_| BrokerError::Publish("WebSocket client disconnected".into())),
+                    // Zero subscribers is still a success.
+                    None => {
+                        self.hub.send(path, text);
+                        Ok(())
+                    }
+                }
             }
             (Some(broker), _) => {
                 let msg = OutMessage {

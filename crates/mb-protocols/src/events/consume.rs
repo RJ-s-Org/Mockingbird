@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use super::produce::find_header;
 use super::runtime::{ChannelInner, DEFAULT_SESSION, Flow, Origin, PublishError, WORKSPACE};
 use super::{BrokerError, HEADER_HOP, InMessage, MAX_HOPS, MAX_MESSAGE_BYTES};
+use crate::ws::Outbound;
 use crate::{RequestKind, RequestRecord};
 
 /// How long subscribing may take.
@@ -107,6 +108,17 @@ impl ChannelInner {
         channel: &Channel,
         msg: InMessage,
     ) -> Option<Value> {
+        self.receive_from(channel, msg, None).await
+    }
+
+    /// [`Self::receive`] for a message from a WebSocket client: a reply on
+    /// a WebSocket channel goes to `socket` only, not to every subscriber.
+    pub(crate) async fn receive_from(
+        self: &Arc<Self>,
+        channel: &Channel,
+        msg: InMessage,
+        socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
+    ) -> Option<Value> {
         let started = Instant::now();
         let bytes = msg.payload.len();
         let headers: Map<String, Value> = msg
@@ -160,7 +172,7 @@ impl ChannelInner {
             if let Some(outcome) = self.apply_state_effect(channel, &session, payload).await {
                 response.insert("state".into(), Value::String(outcome));
             }
-            if let Some(outcome) = self.reply(channel, payload, &msg.headers).await {
+            if let Some(outcome) = self.reply(channel, payload, &msg.headers, socket).await {
                 response.insert("reply".into(), Value::String(outcome));
             }
         }
@@ -251,6 +263,7 @@ impl ChannelInner {
         channel: &Channel,
         payload: &Value,
         headers: &[(String, String)],
+        socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
     ) -> Option<String> {
         let reply = channel.reply.as_ref()?;
         let hop = find_header(headers, HEADER_HOP)
@@ -276,7 +289,7 @@ impl ChannelInner {
             headers: headers.to_vec(),
             hop,
         };
-        match self.produce(target, origin, Vec::new()).await {
+        match self.produce_to(target, origin, Vec::new(), socket).await {
             Ok(_) => None,
             Err(e) => Some(format!("error: {e}")),
         }
