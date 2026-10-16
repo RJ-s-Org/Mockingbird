@@ -36,6 +36,8 @@ test("log in through Rauthy, serve a mock and find it all in the audit log", asy
   await page.getByRole("button", { name: "New mock" }).click();
   const dialog = page.getByRole("dialog", { name: "New mock" });
   await dialog.getByLabel("Name").fill("e2e");
+  // Step 4 steers the session with X-Mockingbird-Session, which needs this on.
+  await expect(dialog.getByLabel("Header overrides")).toBeChecked();
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/w\/default\/mocks\/e2e\/overview$/);
 

@@ -67,7 +67,10 @@ describe("mocks", () => {
     await user.type(within(dialog).getByLabelText("Persona"), "A friendly pet shop");
     await within(dialog).findByRole("option", { name: "fast" });
     await user.selectOptions(within(dialog).getByLabelText("LLM profile"), "fast");
-    await user.click(within(dialog).getByLabelText("Header overrides"));
+    // On by default, as in the API; unticking it sends false.
+    const overrides = within(dialog).getByLabelText<HTMLInputElement>("Header overrides");
+    expect(overrides.checked).toBe(true);
+    await user.click(overrides);
     await user.click(within(dialog).getByRole("button", { name: "Create" }));
 
     const alert = await within(dialog).findByRole("alert");
@@ -79,7 +82,7 @@ describe("mocks", () => {
       route_prefix: null,
       persona: "A friendly pet shop",
       llm_profile: "fast",
-      header_overrides: true,
+      header_overrides: false,
     });
     // The dialog stays open so the name or prefix can be fixed.
     expect(screen.getByRole("dialog", { name: "New mock" })).toBeTruthy();

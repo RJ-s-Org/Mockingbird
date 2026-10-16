@@ -19,7 +19,8 @@ export function CreateMockDialog({
   const [prefix, setPrefix] = useState("");
   const [persona, setPersona] = useState("");
   const [profile, setProfile] = useState("");
-  const [headerOverrides, setHeaderOverrides] = useState(false);
+  // On by default, like the API's `header_overrides` and the config file.
+  const [headerOverrides, setHeaderOverrides] = useState(true);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
