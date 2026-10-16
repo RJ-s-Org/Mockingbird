@@ -91,6 +91,22 @@ pub enum ChannelControlError {
     Conflict(String),
     /// Generating or publishing failed (502).
     Failed(String),
+    /// A publish failed with `error` after `published` messages had gone
+    /// out (they stay on the broker); answered as `error` is.
+    Partial {
+        published: Vec<PublishedMessage>,
+        error: Box<ChannelControlError>,
+    },
+}
+
+impl ChannelControlError {
+    /// The problem detail.
+    fn detail(&self) -> &str {
+        match self {
+            Self::NotRunning(d) | Self::Unknown(d) | Self::Conflict(d) | Self::Failed(d) => d,
+            Self::Partial { error, .. } => error.detail(),
+        }
+    }
 }
 
 /// The event runtime, as seen by the Admin API.
@@ -518,6 +534,7 @@ fn control_problem(err: ChannelControlError) -> Problem {
             };
             Problem::titled(StatusCode::BAD_GATEWAY, title, d)
         }
+        ChannelControlError::Partial { error, .. } => control_problem(*error),
     }
 }
 
@@ -566,25 +583,62 @@ pub async fn publish(
             "Event runtime not available",
         ));
     };
-    let context = body.context.clone();
-    let messages = control
+    // The context is caller-supplied prompt input: only its top-level keys
+    // are audited, never its values.
+    let context_keys: Option<Vec<String>> = body
+        .context
+        .as_ref()
+        .and_then(Value::as_object)
+        .map(|c| c.keys().cloned().collect());
+    let result = control
         .publish(&access.ws, &m.name, &id, count as usize, body.context)
-        .await
-        .map_err(control_problem)?;
-    access
-        .audit(
-            &st.audit,
-            "channel.publish",
-            format!("channel:{mock}/{id}"),
-            None,
-            Some(serde_json::json!({
-                "count": count,
-                "context": context,
-                "addresses": messages.iter().map(|m| m.address.as_str()).collect::<Vec<_>>(),
-            })),
-        )
         .await;
-    Ok(Json(PublishResult { messages }))
+    let (messages, error) = match result {
+        Ok(messages) => (messages, None),
+        Err(ChannelControlError::Partial { published, error }) => (published, Some(*error)),
+        Err(e) => return Err(control_problem(e)),
+    };
+    // Every publish that sent something is audited, a partial one too.
+    if !messages.is_empty() {
+        let mut after = serde_json::json!({
+            "count": count,
+            "published": messages.len(),
+            "addresses": messages.iter().map(|m| m.address.as_str()).collect::<Vec<_>>(),
+        });
+        if let Some(keys) = &context_keys {
+            after["context_keys"] = serde_json::json!(keys);
+        }
+        if let Some(e) = &error {
+            after["error"] = Value::String(e.detail().to_string());
+        }
+        access
+            .audit(
+                &st.audit,
+                "channel.publish",
+                format!("channel:{mock}/{id}"),
+                None,
+                Some(after),
+            )
+            .await;
+    }
+    match error {
+        None => Ok(Json(PublishResult { messages })),
+        Some(e) => {
+            let sent = messages.len();
+            let detail = format!(
+                "{} ({sent} of {count} messages were published before the failure)",
+                e.detail()
+            );
+            Err(control_problem(match e {
+                ChannelControlError::Unknown(_) => ChannelControlError::Unknown(detail),
+                ChannelControlError::Conflict(_) => ChannelControlError::Conflict(detail),
+                ChannelControlError::NotRunning(_) => ChannelControlError::NotRunning(detail),
+                ChannelControlError::Failed(_) | ChannelControlError::Partial { .. } => {
+                    ChannelControlError::Failed(detail)
+                }
+            }))
+        }
+    }
 }
 
 #[utoipa::path(

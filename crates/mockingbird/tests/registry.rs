@@ -867,7 +867,10 @@ async fn settings_change_restarts_runtime() {
         .unwrap();
     assert!(!Arc::ptr_eq(&before, &after));
     assert_eq!(
-        after.publish_manual("orderCreated", 1, None).await,
+        after
+            .publish_manual("orderCreated", 1, None)
+            .await
+            .map_err(|f| f.error),
         Err(PublishError::Disabled("orderCreated".into()))
     );
 }

@@ -28,6 +28,8 @@ struct State {
     /// Every message ever published.
     published_count: usize,
     subscribers: Vec<Subscriber>,
+    /// Publishes left to succeed before `failures` apply.
+    successes_first: usize,
     /// Publishes left to fail.
     failures: usize,
     /// The consumer group of every subscription, in order.
@@ -98,7 +100,15 @@ impl MemoryBroker {
 
     /// Make the next `n` publishes fail with [`BrokerError::Publish`].
     pub fn fail_publishes(&self, n: usize) {
-        self.state().failures = n;
+        self.fail_publishes_after(0, n);
+    }
+
+    /// Let the next `ok` publishes succeed, then make `n` fail with
+    /// [`BrokerError::Publish`].
+    pub fn fail_publishes_after(&self, ok: usize, n: usize) {
+        let mut state = self.state();
+        state.successes_first = ok;
+        state.failures = n;
     }
 }
 
@@ -121,7 +131,9 @@ impl BrokerClient for MemoryBroker {
     async fn publish(&self, target: &ChannelBinding, msg: OutMessage) -> Result<(), BrokerError> {
         {
             let mut state = self.state();
-            if state.failures > 0 {
+            if state.successes_first > 0 {
+                state.successes_first -= 1;
+            } else if state.failures > 0 {
                 state.failures -= 1;
                 return Err(BrokerError::Publish("injected failure".into()));
             }

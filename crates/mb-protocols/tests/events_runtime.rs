@@ -10,7 +10,7 @@ use mb_ext::EnvFileSecrets;
 use mb_mcm::{Bundle, ChannelBinding, Direction, Reply};
 use mb_protocols::events::{
     BrokerConfig, BrokerKind, Brokers, ChannelRuntime, ChannelSetup, EventDeps, EventSetup,
-    InMessage, MemoryBroker, PublishError,
+    InMessage, MemoryBroker, PublishError, PublishFailure,
 };
 use mb_protocols::{MockRuntime, RequestKind, RequestRecord, RequestRecorder};
 use mb_state::{MemoryStore, SessionKey, StateStore};
@@ -203,15 +203,21 @@ async fn manual_publish_errors() {
     );
     assert_eq!(
         h.channels.publish_manual("nope", 1, None).await,
-        Err(PublishError::UnknownChannel("nope".into()))
+        Err(PublishFailure::from(PublishError::UnknownChannel(
+            "nope".into()
+        )))
     );
     assert_eq!(
         h.channels.publish_manual("cancelOrder", 1, None).await,
-        Err(PublishError::NotPublishable("cancelOrder".into()))
+        Err(PublishFailure::from(PublishError::NotPublishable(
+            "cancelOrder".into()
+        )))
     );
     assert_eq!(
         h.channels.publish_manual("orderCancelled", 1, None).await,
-        Err(PublishError::Disabled("orderCancelled".into()))
+        Err(PublishFailure::from(PublishError::Disabled(
+            "orderCancelled".into()
+        )))
     );
     assert!(h.broker.published().is_empty());
 }
@@ -227,7 +233,12 @@ async fn no_broker_reason_in_health() {
             .any(|r| r.contains("no broker configured for amqp channels")),
         "{health:?}"
     );
-    match h.channels.publish_manual("orderCreated", 1, None).await {
+    match h
+        .channels
+        .publish_manual("orderCreated", 1, None)
+        .await
+        .map_err(|f| f.error)
+    {
         Err(PublishError::NoBroker(reason)) => {
             assert!(reason.contains("no broker configured"), "{reason}")
         }
@@ -454,7 +465,12 @@ async fn oversized_generated_message_not_published() {
     bundle.channels.push(huge);
     let h = runtime_with(bundle, EventSetup::default());
 
-    match h.channels.publish_manual("huge", 1, None).await {
+    match h
+        .channels
+        .publish_manual("huge", 1, None)
+        .await
+        .map_err(|f| f.error)
+    {
         Err(PublishError::TooLarge(n)) => assert!(n > 1024 * 1024),
         other => panic!("expected TooLarge, got {other:?}"),
     }
@@ -472,7 +488,13 @@ async fn publish_failure_retries_then_records_503() {
     h.broker.fail_publishes(4);
     let started = tokio::time::Instant::now();
     match h.channels.publish_manual("orderCreated", 1, None).await {
-        Err(PublishError::Broker(e)) => assert!(e.contains("injected failure"), "{e}"),
+        Err(PublishFailure {
+            error: PublishError::Broker(e),
+            published,
+        }) => {
+            assert!(e.contains("injected failure"), "{e}");
+            assert!(published.is_empty());
+        }
         other => panic!("expected Broker, got {other:?}"),
     }
     // 200 + 400 + 800 ms between four attempts.
@@ -498,6 +520,30 @@ async fn publish_failure_retries_then_records_503() {
     );
     assert_eq!(h.broker.published().len(), 1);
     assert_eq!(h.records.records().last().unwrap().status, 200);
+}
+
+#[tokio::test(start_paused = true)]
+async fn manual_publish_failing_partway_returns_what_was_published() {
+    let h = runtime_with(orders(), EventSetup::default());
+
+    // Three publishes go out, then the broker fails every attempt.
+    h.broker.fail_publishes_after(3, usize::MAX);
+    let failure = h
+        .channels
+        .publish_manual("orderCreated", 10, None)
+        .await
+        .unwrap_err();
+    match &failure.error {
+        PublishError::Broker(e) => assert!(e.contains("injected failure"), "{e}"),
+        other => panic!("expected Broker, got {other:?}"),
+    }
+    assert_eq!(failure.published.len(), 3, "{failure:?}");
+    assert_eq!(h.broker.published().len(), 3);
+    for p in &failure.published {
+        assert_eq!(p.channel, "orderCreated");
+        assert_eq!(p.address, "orders.created");
+    }
+    assert_eq!(h.channels.activity()["orderCreated"].published, 3);
 }
 
 #[tokio::test]

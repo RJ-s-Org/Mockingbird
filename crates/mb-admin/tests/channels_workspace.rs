@@ -58,6 +58,8 @@ impl Authenticate for TestAuth {
 #[derive(Default)]
 struct FakeControl {
     calls: Mutex<Vec<(String, String, String)>>,
+    /// When set, a publish delivers this many messages and then fails.
+    fail_after: Mutex<Option<usize>>,
 }
 
 #[async_trait]
@@ -74,7 +76,8 @@ impl ChannelControl for FakeControl {
             .lock()
             .unwrap()
             .push((ws.into(), mock.into(), channel.into()));
-        Ok((0..count)
+        let fail_after = *self.fail_after.lock().unwrap();
+        let messages = (0..fail_after.unwrap_or(count).min(count))
             .map(|i| PublishedMessage {
                 address: "orders.created".into(),
                 key: None,
@@ -82,7 +85,14 @@ impl ChannelControl for FakeControl {
                 payload: json!({ "id": format!("o{i}") }),
                 source: "fallback".into(),
             })
-            .collect())
+            .collect();
+        if fail_after.is_some() {
+            return Err(ChannelControlError::Partial {
+                published: messages,
+                error: Box::new(ChannelControlError::Failed("broker unreachable".into())),
+            });
+        }
+        Ok(messages)
     }
 
     fn activity(&self, ws: &str, mock: &str) -> BTreeMap<String, ChannelActivityView> {
@@ -273,7 +283,7 @@ async fn channels_are_workspace_scoped_rbac_checked_and_audited() {
             Some("team-editor"),
             Method::POST,
             &publish,
-            Some(json!({"count": n})),
+            Some(json!({"count": n, "context": {"customer": {"email": "ada@example.com"}, "token": "s3cret"}})),
         )
         .await;
         assert_eq!(s, StatusCode::OK, "{body}");
@@ -290,6 +300,15 @@ async fn channels_are_workspace_scoped_rbac_checked_and_audited() {
     assert_eq!(events[0]["target"], "channel:orders/orderCreated");
     assert_eq!(events[0]["after"]["count"], 1);
     assert_eq!(events[1]["after"]["count"], 2);
+    assert_eq!(events[0]["after"]["published"], 1);
+    // The caller's context is not stored, only its top-level keys.
+    assert_eq!(
+        events[0]["after"]["context_keys"],
+        json!(["customer", "token"])
+    );
+    let stored = serde_json::to_string(&events).unwrap();
+    assert!(!stored.contains("s3cret"), "{stored}");
+    assert!(!stored.contains("ada@example.com"), "{stored}");
 
     // Editors change channel and event settings, each audited once.
     let (s, body) = send(
@@ -345,4 +364,45 @@ async fn brokers_need_a_principal() {
     .await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(body[0]["name"], "local");
+}
+
+#[tokio::test]
+async fn publish_failing_partway_is_audited_with_what_went_out() {
+    let (app, control) = setup().await;
+    let publish = format!("/api/v1/workspaces/{WS}/mocks/orders/channels/orderCreated/publish");
+
+    *control.fail_after.lock().unwrap() = Some(2);
+    let (s, body) = send(
+        &app,
+        Some("team-editor"),
+        Method::POST,
+        &publish,
+        Some(json!({"count": 5})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(detail.contains("broker unreachable"), "{detail}");
+    assert!(detail.contains("2 of 5 messages"), "{detail}");
+
+    let events = audit(&app, "channel.publish").await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let after = &events[0]["after"];
+    assert_eq!(after["count"], 5);
+    assert_eq!(after["published"], 2);
+    assert_eq!(after["error"], "broker unreachable");
+    assert_eq!(after["addresses"].as_array().unwrap().len(), 2);
+
+    // A publish that delivers nothing is not audited.
+    *control.fail_after.lock().unwrap() = Some(0);
+    let (s, body) = send(
+        &app,
+        Some("team-editor"),
+        Method::POST,
+        &publish,
+        Some(json!({"count": 3})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(audit(&app, "channel.publish").await.len(), 1);
 }

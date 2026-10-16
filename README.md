@@ -340,7 +340,7 @@ Paths below are relative to `/api/v1/workspaces/{ws}` (and, for workspace `defau
 | `GET /mocks/{mock}/channels` | viewer | the channels with their effective settings and activity |
 | `GET /mocks/{mock}/channels/{channel}` | viewer | one channel with its message, key, header and parameter schemas |
 | `PUT /mocks/{mock}/channels/{channel}` | editor | `{"enabled": true, "triggers": [...]}`; `triggers: null` restores the contract's (audited as `channel.update`) |
-| `POST /mocks/{mock}/channels/{channel}/publish` | editor | `{"count": 3, "context": {...}}`: generate and publish now, 1–100 messages (audited as `channel.publish`) |
+| `POST /mocks/{mock}/channels/{channel}/publish` | editor | `{"count": 3, "context": {...}}`: generate and publish now, 1–100 messages (audited as `channel.publish` with the requested and published counts and the context's top-level keys, never its values; a publish that fails partway is still audited, and its error says how many messages went out) |
 | `GET/PUT /mocks/{mock}/event-settings` | viewer / editor | `{"broker": "rabbit"}`; `null` picks automatically (`PUT` audited as `event_settings.update`) |
 | `GET /api/v1/brokers` | any authenticated caller | the configured brokers and their status (global, read-only) |
 

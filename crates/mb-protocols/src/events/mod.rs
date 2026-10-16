@@ -31,7 +31,8 @@ pub use memory::MemoryBroker;
 #[cfg(feature = "mqtt")]
 pub use mqtt::MqttClient;
 pub use runtime::{
-    ChannelActivity, ChannelRuntime, ChannelSetup, EventDeps, EventSetup, PublishError, Published,
+    ChannelActivity, ChannelRuntime, ChannelSetup, EventDeps, EventSetup, PublishError,
+    PublishFailure, Published,
 };
 pub use triggers::{AlwaysLeader, LEASE_RENEW, LEASE_TTL, LeaseProvider};
 pub use ws::CLOSE_RUNTIME_REPLACED;

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use mb_admin::channels::{
     BrokerView, ChannelActivityView, ChannelControl, ChannelControlError, PublishedMessage,
 };
-use mb_protocols::events::{Brokers, LeaseProvider, PublishError};
+use mb_protocols::events::{Brokers, LeaseProvider, PublishError, PublishFailure, Published};
 use mb_store::ControlStore;
 use serde_json::Value;
 use uuid::Uuid;
@@ -58,20 +58,18 @@ impl ChannelControl for RegistryChannels {
                 crate::registry::mock_label(ws, mock)
             )));
         };
-        let published = runtime
-            .publish_manual(channel, count, context)
-            .await
-            .map_err(control_error)?;
-        Ok(published
-            .into_iter()
-            .map(|p| PublishedMessage {
-                address: p.address,
-                key: p.key,
-                headers: p.headers,
-                payload: p.payload,
-                source: p.source.as_str().to_string(),
-            })
-            .collect())
+        match runtime.publish_manual(channel, count, context).await {
+            Ok(published) => Ok(published.into_iter().map(message).collect()),
+            Err(PublishFailure { published, error }) if published.is_empty() => {
+                Err(control_error(error))
+            }
+            // Messages that went out before the failure stay on the broker:
+            // the caller still learns (and audits) them.
+            Err(PublishFailure { published, error }) => Err(ChannelControlError::Partial {
+                published: published.into_iter().map(message).collect(),
+                error: Box::new(control_error(error)),
+            }),
+        }
     }
 
     fn activity(&self, ws: &str, mock: &str) -> BTreeMap<String, ChannelActivityView> {
@@ -105,6 +103,16 @@ impl ChannelControl for RegistryChannels {
                 status: info.status,
             })
             .collect()
+    }
+}
+
+fn message(p: Published) -> PublishedMessage {
+    PublishedMessage {
+        address: p.address,
+        key: p.key,
+        headers: p.headers,
+        payload: p.payload,
+        source: p.source.as_str().to_string(),
     }
 }
 

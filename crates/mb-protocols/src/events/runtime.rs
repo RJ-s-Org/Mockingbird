@@ -113,6 +113,25 @@ pub enum PublishError {
     TooLarge(usize),
 }
 
+/// A manual publish that failed, with the messages already delivered
+/// before (or alongside) the failure: those stay on the broker.
+#[derive(thiserror::Error, Debug, Clone, PartialEq)]
+#[error("{error}")]
+pub struct PublishFailure {
+    pub published: Vec<Published>,
+    pub error: PublishError,
+}
+
+impl From<PublishError> for PublishFailure {
+    /// A failure before anything was published.
+    fn from(error: PublishError) -> Self {
+        Self {
+            published: Vec::new(),
+            error,
+        }
+    }
+}
+
 /// Message counts and the latest outcome of one channel.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChannelActivity {
@@ -514,35 +533,58 @@ impl ChannelRuntime {
     }
 
     /// Generate and publish `count` (clamped to 1..=100) messages on
-    /// `channel`, in order, stopping at the first error.
+    /// `channel`, in order. After the first error no further message is
+    /// started; those already under way finish, and the failure carries
+    /// every message that was delivered.
     pub async fn publish_manual(
         &self,
         channel: &str,
         count: usize,
         context: Option<Value>,
-    ) -> Result<Vec<Published>, PublishError> {
+    ) -> Result<Vec<Published>, PublishFailure> {
         let inner = &self.inner;
         let Some(ch) = inner.rt.bundle().channel(channel) else {
-            return Err(PublishError::UnknownChannel(channel.to_string()));
+            return Err(PublishError::UnknownChannel(channel.to_string()).into());
         };
         if ch.direction == Direction::Subscribe {
-            return Err(PublishError::NotPublishable(channel.to_string()));
+            return Err(PublishError::NotPublishable(channel.to_string()).into());
         }
         if !inner.enabled(ch) {
-            return Err(PublishError::Disabled(channel.to_string()));
+            return Err(PublishError::Disabled(channel.to_string()).into());
         }
         if let Some(reason) = inner.inactive_reason(channel) {
-            return Err(PublishError::NoBroker(reason.to_string()));
+            return Err(PublishError::NoBroker(reason.to_string()).into());
         }
         let count = count.clamp(1, MAX_MANUAL_COUNT);
+        let stop = AtomicBool::new(false);
+        let stop = &stop;
         let mut results = futures::stream::iter(0..count)
-            .map(|_| inner.produce(ch, Origin::Manual(context.clone()), Vec::new()))
+            .map(|_| {
+                let context = context.clone();
+                async move {
+                    if stop.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    Some(inner.produce(ch, Origin::Manual(context), Vec::new()).await)
+                }
+            })
             .buffered(MANUAL_CONCURRENCY);
         let mut published = Vec::with_capacity(count);
+        let mut error = None;
         while let Some(result) = results.next().await {
-            published.push(result?);
+            match result {
+                Some(Ok(p)) => published.push(p),
+                Some(Err(e)) => {
+                    stop.store(true, Ordering::SeqCst);
+                    error.get_or_insert(e);
+                }
+                None => {}
+            }
         }
-        Ok(published)
+        match error {
+            None => Ok(published),
+            Some(error) => Err(PublishFailure { published, error }),
+        }
     }
 
     /// Per-channel activity, by channel id.
