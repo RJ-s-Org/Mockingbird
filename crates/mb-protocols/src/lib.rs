@@ -14,10 +14,15 @@ use mb_mcm::Bundle;
 use mb_state::StateStore;
 
 // Until an adapter is compiled in, nothing calls the shared pipeline.
-#[cfg_attr(not(any(feature = "http-rest", feature = "graphql")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "http-rest", feature = "graphql", feature = "grpc")),
+    allow(dead_code)
+)]
 mod call;
 #[cfg(feature = "graphql")]
 pub mod graphql;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 mod record;
