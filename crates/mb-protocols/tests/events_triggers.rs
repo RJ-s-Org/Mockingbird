@@ -302,3 +302,95 @@ async fn manual_only_spawns_nothing() {
     assert_eq!(h.broker.published().len(), 0);
     assert!(!h.channels.is_leader());
 }
+
+/// One topic both consumed with a state effect and published on that
+/// state's changes: every consumed message would trigger a publish to the
+/// topic it came from.
+const LOOP_SPEC: &str = r#"
+asyncapi: 2.6.0
+info: {title: Loop, version: 1.0.0}
+servers:
+  k: {url: localhost:9092, protocol: kafka}
+defaultContentType: application/json
+channels:
+  orders:
+    publish:
+      operationId: orderIn
+      x-mockingbird-state: {resource_type: orders, id_field: id}
+      message:
+        name: OrderIn
+        payload:
+          type: object
+          required: [id]
+          properties:
+            id: {type: string}
+    subscribe:
+      operationId: orderOut
+      x-mockingbird-triggers:
+        - on_state_change: {resource_type: orders}
+      message:
+        name: OrderOut
+        payload:
+          type: object
+          required: [id]
+          properties:
+            id: {type: string}
+"#;
+
+#[tokio::test]
+async fn state_effect_and_trigger_on_one_topic_stay_bounded() {
+    let bundle = mb_import::compile(LOOP_SPEC.as_bytes()).unwrap();
+    let records = Arc::new(Capture::default());
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut rt = MockRuntime::new(
+        "loop",
+        Arc::new(bundle),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::clone(&state),
+    );
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn RequestRecorder>);
+    let brokers = memory_brokers();
+    let broker = brokers.memory("mem").unwrap();
+    let deps = EventDeps {
+        brokers,
+        lease: ScriptedLease::new(vec![Ok(true)]),
+        holder: "replica-1".into(),
+    };
+    let setup = EventSetup {
+        broker: None,
+        channels: HashMap::new(),
+        lease_key: "default/loop".into(),
+    };
+    let _channels = ChannelRuntime::start(Arc::new(rt), deps, setup);
+    // Let the consumer subscribe.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let binding = mb_mcm::ChannelBinding::Kafka {
+        topic: "orders".into(),
+        partitions_hint: None,
+    };
+    broker.inject(
+        &binding,
+        mb_protocols::events::InMessage {
+            address: "orders".into(),
+            key: None,
+            headers: Vec::new(),
+            payload: br#"{"id":"o-1"}"#.to_vec(),
+        },
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let published = broker.published();
+    // One publish per hop (1, 2, 3); a message at the hop limit changes
+    // state but triggers nothing.
+    assert_eq!(published.len(), 3, "got {} publishes", published.len());
+    let hops: Vec<String> = published
+        .iter()
+        .map(|(_, m)| {
+            m.headers
+                .iter()
+                .find(|(k, _)| k == "x-mockingbird-hop")
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(hops, vec!["1", "2", "3"]);
+}

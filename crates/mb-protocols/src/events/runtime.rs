@@ -27,6 +27,12 @@ const MAX_MANUAL_COUNT: usize = 100;
 const MANUAL_CONCURRENCY: usize = 4;
 /// Capacity of each WebSocket channel's broadcast queue.
 const WS_QUEUE: usize = 256;
+/// Most pending state-change hop counts kept; past it they are dropped
+/// (a lost count only restarts that chain at hop 0).
+const MAX_STATE_HOPS: usize = 10_000;
+
+/// A resource changed by a consumed message: session, type and id.
+type StateRef = (String, String, String);
 
 /// The stored settings of one channel.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,9 +144,11 @@ impl Flow {
 /// What made a channel produce a message.
 #[derive(Clone, Debug)]
 pub(crate) enum Origin {
-    /// A trigger firing; carries the trigger JSON (with `"session"` for
-    /// a state change).
-    Trigger(Value),
+    /// A trigger firing: the trigger JSON (with `"session"` for a state
+    /// change) and the hop count the message carries (above 0 for a state
+    /// change made by a consumed message, so loops through state end at
+    /// [`super::MAX_HOPS`]).
+    Trigger { trigger: Value, hop: u32 },
     /// A manual publish, with its optional context.
     Manual(Option<Value>),
     /// A reply to a consumed message.
@@ -156,7 +164,7 @@ impl Origin {
     /// `default`.
     pub(crate) fn session(&self) -> String {
         match self {
-            Origin::Trigger(trigger) => trigger
+            Origin::Trigger { trigger, .. } => trigger
                 .get("session")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
@@ -242,6 +250,11 @@ pub(crate) struct ChannelInner {
     consumer_errors: Mutex<BTreeMap<String, String>>,
     /// Whether this replica holds the mock's scheduler lease.
     leader: AtomicBool,
+    /// Whether some state-change trigger listens to the mock's changes.
+    state_triggers: AtomicBool,
+    /// The hop count of the consumed message behind each pending state
+    /// change, until the state-change listener takes it.
+    state_hops: Mutex<HashMap<StateRef, u32>>,
 }
 
 impl ChannelInner {
@@ -264,7 +277,34 @@ impl ChannelInner {
             activity: Mutex::new(activity),
             consumer_errors: Mutex::new(BTreeMap::new()),
             leader: AtomicBool::new(false),
+            state_triggers: AtomicBool::new(false),
+            state_hops: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Mark that a state-change listener runs for this mock.
+    pub(crate) fn listen_state_changes(&self) {
+        self.state_triggers.store(true, Ordering::SeqCst);
+    }
+
+    /// Remember that a consumed message with `hop` is changing `resource`,
+    /// so the trigger it fires carries the hop on. Nothing is kept when no
+    /// state-change trigger listens.
+    pub(crate) fn note_state_hop(&self, resource: StateRef, hop: u32) {
+        if !self.state_triggers.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut hops = lock(&self.state_hops);
+        if hops.len() >= MAX_STATE_HOPS && !hops.contains_key(&resource) {
+            hops.clear();
+        }
+        hops.insert(resource, hop);
+    }
+
+    /// Take the hop count noted for `resource`; `None` when the change was
+    /// not made by a consumed message.
+    pub(crate) fn take_state_hop(&self, resource: &StateRef) -> Option<u32> {
+        lock(&self.state_hops).remove(resource)
     }
 
     /// Whether this replica holds the mock's scheduler lease.

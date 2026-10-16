@@ -134,7 +134,7 @@ impl ChannelInner {
         };
         let session = origin.session();
         let (trigger, context, received, incoming, hop) = match origin {
-            Origin::Trigger(trigger) => (trigger, None, None, Vec::new(), 0),
+            Origin::Trigger { trigger, hop } => (trigger, None, None, Vec::new(), hop),
             Origin::Manual(context) => (json!({"kind": "manual"}), context, None, Vec::new(), 0),
             Origin::Reply {
                 received,

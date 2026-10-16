@@ -83,6 +83,13 @@ pub(crate) async fn run_consumer(inner: Arc<ChannelInner>, channel: Channel, bro
     }
 }
 
+/// The hop count a received message carries (0 without a valid header).
+fn received_hop(headers: &[(String, String)]) -> u32 {
+    find_header(headers, HEADER_HOP)
+        .and_then(|h| h.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 /// 1-128 characters of `[A-Za-z0-9._-]`.
 fn is_session_id(s: &str) -> bool {
     (1..=MAX_SESSION_LEN).contains(&s.len())
@@ -169,7 +176,11 @@ impl ChannelInner {
         };
 
         if let (Some(payload), Some(Value::Object(response))) = (&valid, response.as_mut()) {
-            if let Some(outcome) = self.apply_state_effect(channel, &session, payload).await {
+            let hop = received_hop(&msg.headers);
+            if let Some(outcome) = self
+                .apply_state_effect(channel, &session, payload, hop)
+                .await
+            {
                 response.insert("state".into(), Value::String(outcome));
             }
             if let Some(outcome) = self.reply(channel, payload, &msg.headers, socket).await {
@@ -218,6 +229,7 @@ impl ChannelInner {
         channel: &Channel,
         session: &str,
         payload: &Value,
+        hop: u32,
     ) -> Option<String> {
         let effect = channel.state_effect.as_ref()?;
         let Some(id) = id_text(payload.get(&effect.id_field)) else {
@@ -228,6 +240,12 @@ impl ChannelInner {
             mock: self.rt.name.clone(),
             session: session.to_string(),
         };
+        let resource = (
+            session.to_string(),
+            effect.resource_type.clone(),
+            id.clone(),
+        );
+        self.note_state_hop(resource.clone(), hop);
         let result = if effect.delete {
             self.rt
                 .state
@@ -250,6 +268,7 @@ impl ChannelInner {
         match result {
             Ok(()) => None,
             Err(e) => {
+                self.take_state_hop(&resource);
                 tracing::warn!(channel = %channel.id, error = %e, "state effect failed");
                 Some(format!("error: {e}"))
             }
@@ -266,9 +285,7 @@ impl ChannelInner {
         socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
     ) -> Option<String> {
         let reply = channel.reply.as_ref()?;
-        let hop = find_header(headers, HEADER_HOP)
-            .and_then(|h| h.trim().parse::<u32>().ok())
-            .unwrap_or(0);
+        let hop = received_hop(headers);
         if hop >= MAX_HOPS {
             return Some("skipped: hop limit".into());
         }

@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use super::MAX_HOPS;
 use super::runtime::{ChannelInner, Origin, WORKSPACE};
 
 /// Grants the scheduler lease of a mock to one holder at a time.
@@ -97,6 +98,7 @@ pub(crate) fn spawn_triggers(inner: &Arc<ChannelInner>, tasks: &mut JoinSet<()>)
     if !on_change.is_empty() {
         // Subscribe now so no change after `start` returns is missed.
         let changes = inner.rt.state.subscribe();
+        inner.listen_state_changes();
         tasks.spawn(run_state_changes(Arc::clone(inner), changes, on_change));
     }
     if timed {
@@ -123,7 +125,10 @@ async fn run_schedule(inner: Arc<ChannelInner>, channel: Channel, every: Duratio
             fire(
                 &inner,
                 &channel,
-                Origin::Trigger(origin.clone()),
+                Origin::Trigger {
+                    trigger: origin.clone(),
+                    hop: 0,
+                },
                 Vec::new(),
                 &mut stopped,
             )
@@ -165,7 +170,10 @@ async fn run_cron(inner: Arc<ChannelInner>, channel: Channel, expr: String) {
             fire(
                 &inner,
                 &channel,
-                Origin::Trigger(origin.clone()),
+                Origin::Trigger {
+                    trigger: origin.clone(),
+                    hop: 0,
+                },
                 Vec::new(),
                 &mut stopped,
             )
@@ -227,6 +235,22 @@ async fn run_state_changes(
         if change.session.workspace != WORKSPACE || change.session.mock != inner.rt.name {
             continue;
         }
+        // A change made by a consumed message continues its hop count, so
+        // a channel consuming what this trigger publishes stops at the
+        // hop limit instead of looping.
+        let hop = match inner.take_state_hop(&(
+            change.session.session.clone(),
+            change.resource_type.clone(),
+            change.id.clone(),
+        )) {
+            Some(received) if received >= MAX_HOPS => {
+                tracing::debug!(mock = %inner.rt.name, resource_type = %change.resource_type,
+                    id = %change.id, "state-change trigger skipped: hop limit");
+                continue;
+            }
+            Some(received) => received + 1,
+            None => 0,
+        };
         let matching: Vec<&Channel> = triggers
             .iter()
             .filter(|(_, ty, kind)| *ty == change.resource_type && kind_matches(*kind, change.kind))
@@ -256,7 +280,10 @@ async fn run_state_changes(
             fire(
                 &inner,
                 channel,
-                Origin::Trigger(origin.clone()),
+                Origin::Trigger {
+                    trigger: origin.clone(),
+                    hop,
+                },
                 related.clone(),
                 &mut stopped,
             )
