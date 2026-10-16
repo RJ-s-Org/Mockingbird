@@ -179,9 +179,15 @@ describe("mocks", () => {
     });
     renderAt("/w/default/mocks");
 
-    await user.click(await screen.findByRole("link", { name: "pets" }));
-    await screen.findByLabelText("Persona");
+    // Wait for both the list and `me` (the header's Sign out renders only once
+    // `me` has loaded), so the Edit gate on "New mock" has been evaluated.
+    const list = await screen.findByRole("table", { name: "Mocks" });
+    await screen.findByRole("button", { name: "Sign out" });
+    expect(screen.getByText("Vera")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "New mock" })).toBeNull();
+
+    await user.click(within(list).getByRole("link", { name: "pets" }));
+    await screen.findByLabelText("Persona");
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Delete/ })).toBeNull();
     expect(isDisabled(screen.getByLabelText("Persona"))).toBe(true);
