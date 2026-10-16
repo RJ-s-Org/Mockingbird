@@ -1,0 +1,21 @@
+# REST: an OpenAPI 3.0 order API with session state and scenarios.
+# Run from the repository root:
+#   mockingbird serve -c examples/gallery/rest/mockingbird.yaml --offline
+# then try:
+#   curl -i localhost:8080/orders/orders -H 'content-type: application/json' -d '{"customerId":"c1","total":10}'
+#   curl -i localhost:8080/orders/orders -H 'X-Mockingbird-Scenario: slow'
+mocks:
+  orders:
+    contract: ../../../fixtures/openapi/orders-3.0.yaml
+    route_prefix: /orders
+    persona: Terse, realistic retail data for a European web shop.
+    scenarios:
+      out-of-stock:
+        status: 409
+        instructions: Explain that the item is out of stock.
+        operations: [createOrder]
+      slow:
+        latency: 2s
+      vip:
+        set:
+          customerId: vip-0001

@@ -1,0 +1,16 @@
+# SOAP: a WSDL 1.1 calculator, served as SOAP 1.1 and 1.2.
+# Run from the repository root:
+#   mockingbird serve -c examples/gallery/soap/mockingbird.yaml --offline
+# then try:
+#   curl -s 'localhost:8080/calculator/calculator.asmx?wsdl'
+#   curl -s localhost:8080/calculator/calculator.asmx \
+#     -H 'content-type: text/xml; charset=utf-8' -H 'SOAPAction: "http://tempuri.org/Add"' \
+#     -d '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><Add xmlns="http://tempuri.org/"><intA>1</intA><intB>2</intB></Add></soap:Body></soap:Envelope>'
+mocks:
+  calculator:
+    contract: ../../../fixtures/wsdl/calculator.wsdl
+    route_prefix: /calculator
+    scenarios:
+      fault:
+        status: 500
+        operations: [Divide]
