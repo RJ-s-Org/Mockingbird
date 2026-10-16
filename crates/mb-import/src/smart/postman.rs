@@ -7,19 +7,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
-use super::infer::{infer_scalar, infer_schema};
+use super::SmartError;
+use super::infer::{base_mime, distinct_examples, infer_scalar, schema_of, typed_examples};
 use super::model::{
     DraftBody, DraftOperation, DraftParam, DraftResponse, DraftWarning, EXCERPT_CHARS,
     MAX_PROVENANCE, ParamLocation, Provenance, RecordedImport,
 };
 use super::paths::{infer_templates, is_id_like, normalize_path, path_key};
 use super::redact::{REDACTED, is_sensitive_name, redact};
-use super::{MAX_EXAMPLES, SmartError};
 
 /// Confidence of an operation whose path has an inferred slug parameter.
 const SLUG_CONFIDENCE: f32 = 0.8;
-/// Most bodies fed to schema inference per request body or response.
-const MAX_SCHEMA_SAMPLES: usize = 20;
 const UNSUPPORTED_VERSION: &str = "only Postman collection v2.0 and v2.1 are supported";
 const JSON: &str = "application/json";
 
@@ -469,14 +467,6 @@ fn parse_example(example: &Value) -> Option<Example> {
     })
 }
 
-fn base_mime(raw: &str) -> String {
-    raw.split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase()
-}
-
 /// One operation from the items sharing a merge key: union of examples,
 /// parameters and tags; the first summary and description win.
 fn build_operation(
@@ -633,25 +623,6 @@ fn scalar_param(
     }
 }
 
-/// Distinct observed values, typed after the inferred scalar schema.
-fn typed_examples(values: &[&str], schema: &Value) -> Vec<Value> {
-    let kind = schema.get("type").and_then(Value::as_str);
-    let mut out: Vec<Value> = Vec::new();
-    for value in values {
-        let typed = match kind {
-            Some("integer") => value.parse::<i64>().ok().map(Value::from),
-            Some("number") => value.parse::<f64>().ok().map(Value::from),
-            Some("boolean") => value.parse::<bool>().ok().map(Value::from),
-            _ => None,
-        }
-        .unwrap_or_else(|| Value::from(*value));
-        if out.len() < MAX_EXAMPLES && !out.contains(&typed) {
-            out.push(typed);
-        }
-    }
-    out
-}
-
 /// The request body: the bodies sharing the first body's content type.
 fn request(items: &[&Item]) -> Option<DraftBody> {
     let content_type = items.iter().find_map(|i| i.body.as_ref())?.content_type();
@@ -675,6 +646,7 @@ fn request(items: &[&Item]) -> Option<DraftBody> {
             }
         }
     }
+    let examples: Vec<&Value> = examples.iter().collect();
     let schema = if content_type == JSON {
         schema_of(&examples)
     } else {
@@ -687,7 +659,7 @@ fn request(items: &[&Item]) -> Option<DraftBody> {
     Some(DraftBody {
         content_type: content_type.to_string(),
         schema: Some(schema),
-        examples: distinct(examples),
+        examples: distinct_examples(&examples),
     })
 }
 
@@ -701,31 +673,14 @@ fn responses(items: &[&Item]) -> Vec<DraftResponse> {
         .into_iter()
         .map(|(status, examples)| {
             let content_type = examples.iter().find_map(|e| e.content_type.clone());
-            let bodies: Vec<Value> = examples.iter().filter_map(|e| e.body.clone()).collect();
+            let bodies: Vec<&Value> = examples.iter().filter_map(|e| e.body.as_ref()).collect();
             DraftResponse {
                 status,
                 description: None,
                 content_type,
                 schema: (!bodies.is_empty()).then(|| schema_of(&bodies)),
-                examples: distinct(bodies),
+                examples: distinct_examples(&bodies),
             }
         })
         .collect()
-}
-
-fn schema_of(values: &[Value]) -> Value {
-    infer_schema(&values[..values.len().min(MAX_SCHEMA_SAMPLES)])
-}
-
-fn distinct(values: Vec<Value>) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
-    for value in values {
-        if out.len() >= MAX_EXAMPLES {
-            break;
-        }
-        if !out.contains(&value) {
-            out.push(value);
-        }
-    }
-    out
 }

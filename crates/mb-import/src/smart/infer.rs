@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
+use super::MAX_EXAMPLES;
+
 /// Schemas nested deeper than this become `{}`.
 const MAX_DEPTH: usize = 32;
 /// Enum inference: the most distinct values an enum may have.
@@ -16,11 +18,68 @@ const ENUM_MAX_DISTINCT: usize = 5;
 const ENUM_MIN_SAMPLES: usize = 3;
 /// Enum inference: the longest value (in chars) an enum may hold.
 const ENUM_MAX_CHARS: usize = 24;
+/// Most bodies fed to schema inference per request body or response.
+pub(crate) const MAX_SCHEMA_SAMPLES: usize = 20;
 
 /// A JSON Schema 2020-12 every sample validates against.
 pub fn infer_schema(samples: &[Value]) -> Value {
     let refs: Vec<&Value> = samples.iter().collect();
     infer(&refs, 1)
+}
+
+/// The schema of a body set: inferred from at most `MAX_SCHEMA_SAMPLES`
+/// values, in the given order.
+pub(crate) fn schema_of(values: &[&Value]) -> Value {
+    let samples: Vec<Value> = values
+        .iter()
+        .take(MAX_SCHEMA_SAMPLES)
+        .map(|v| (*v).clone())
+        .collect();
+    infer_schema(&samples)
+}
+
+/// The first `MAX_EXAMPLES` distinct values, in the given order.
+pub(crate) fn distinct_examples(values: &[&Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for value in values {
+        if out.len() >= MAX_EXAMPLES {
+            break;
+        }
+        if !out.contains(value) {
+            out.push((*value).clone());
+        }
+    }
+    out
+}
+
+/// Distinct observed parameter values, typed after the inferred scalar
+/// schema, capped at `MAX_EXAMPLES`.
+pub(crate) fn typed_examples(values: &[&str], schema: &Value) -> Vec<Value> {
+    let kind = schema.get("type").and_then(Value::as_str);
+    let mut out: Vec<Value> = Vec::new();
+    for value in values {
+        let typed = match kind {
+            Some("integer") => value.parse::<i64>().ok().map(Value::from),
+            Some("number") => value.parse::<f64>().ok().map(Value::from),
+            Some("boolean") => value.parse::<bool>().ok().map(Value::from),
+            _ => None,
+        }
+        .unwrap_or_else(|| Value::from(*value));
+        if out.len() < MAX_EXAMPLES && !out.contains(&typed) {
+            out.push(typed);
+        }
+    }
+    out
+}
+
+/// A media type without parameters, lowercased (`Application/JSON; charset=utf-8`
+/// becomes `application/json`).
+pub(crate) fn base_mime(raw: &str) -> String {
+    raw.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// The schema of a query/path parameter from its observed string values.

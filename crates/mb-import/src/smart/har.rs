@@ -9,17 +9,15 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 use url::Url;
 
-use super::infer::{infer_scalar, infer_schema};
+use super::SmartError;
+use super::infer::{base_mime, distinct_examples, infer_scalar, schema_of, typed_examples};
 use super::model::{
     DraftBody, DraftOperation, DraftParam, DraftResponse, DraftWarning, EXCERPT_CHARS,
     MAX_PROVENANCE, ParamLocation, Provenance, RecordedImport,
 };
 use super::paths::{infer_templates, is_id_like, normalize_path};
 use super::redact::{is_sensitive_name, redact};
-use super::{MAX_EXAMPLES, SmartError};
 
-/// Most bodies fed to schema inference per request body or response.
-const MAX_SCHEMA_SAMPLES: usize = 20;
 /// Confidence of an operation whose path has an inferred slug parameter.
 const SLUG_CONFIDENCE: f32 = 0.8;
 /// Path suffixes of static assets, which are skipped.
@@ -238,14 +236,6 @@ fn response_body(status: u16, content: Option<&Value>) -> ResponseBody {
     )
 }
 
-fn base_mime(raw: &str) -> String {
-    raw.split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase()
-}
-
 fn is_json_mime(mime: &str) -> bool {
     mime == "application/json" || mime.ends_with("+json")
 }
@@ -388,25 +378,6 @@ fn query_parameters(entries: &[&Entry]) -> Vec<DraftParam> {
         .collect()
 }
 
-/// Distinct observed values, typed after the inferred scalar schema.
-fn typed_examples(values: &[&str], schema: &Value) -> Vec<Value> {
-    let kind = schema.get("type").and_then(Value::as_str);
-    let mut out: Vec<Value> = Vec::new();
-    for value in values {
-        let typed = match kind {
-            Some("integer") => value.parse::<i64>().ok().map(Value::from),
-            Some("number") => value.parse::<f64>().ok().map(Value::from),
-            Some("boolean") => value.parse::<bool>().ok().map(Value::from),
-            _ => None,
-        }
-        .unwrap_or_else(|| Value::from(*value));
-        if out.len() < MAX_EXAMPLES && !out.contains(&typed) {
-            out.push(typed);
-        }
-    }
-    out
-}
-
 fn request(entries: &[&Entry]) -> Option<DraftBody> {
     let bodies: Vec<&(String, Value)> = entries
         .iter()
@@ -452,26 +423,4 @@ fn responses(entries: &[&Entry]) -> Vec<DraftResponse> {
             }
         })
         .collect()
-}
-
-fn schema_of(values: &[&Value]) -> Value {
-    let samples: Vec<Value> = values
-        .iter()
-        .take(MAX_SCHEMA_SAMPLES)
-        .map(|v| (*v).clone())
-        .collect();
-    infer_schema(&samples)
-}
-
-fn distinct_examples(values: &[&Value]) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
-    for value in values {
-        if out.len() >= MAX_EXAMPLES {
-            break;
-        }
-        if !out.contains(value) {
-            out.push((*value).clone());
-        }
-    }
-    out
 }
