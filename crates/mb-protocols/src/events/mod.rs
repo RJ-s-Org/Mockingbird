@@ -1,10 +1,14 @@
 //! Event channels (spec §5, §7.3): the broker abstraction, the in-memory
 //! broker, the registry of configured broker connections and channel
-//! address handling.
+//! address handling, and the per-mock channel runtime.
 
 mod address;
 mod broker;
+mod consume;
 mod memory;
+mod produce;
+mod runtime;
+mod triggers;
 
 pub use address::{address_matches, param_names, param_values, resolve_binding, sanitize_param};
 pub use broker::{
@@ -12,6 +16,10 @@ pub use broker::{
     SaslConfig,
 };
 pub use memory::MemoryBroker;
+pub use runtime::{
+    ChannelActivity, ChannelRuntime, ChannelSetup, EventDeps, EventSetup, PublishError, Published,
+};
+pub use triggers::{AlwaysLeader, LeaseProvider};
 
 /// Largest message payload produced or consumed (1 MiB).
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
