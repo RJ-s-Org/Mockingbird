@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use mb_engine::{GeneratedMessage, MessageContext, Source};
-use mb_ext::{CallInfo, UsageEvent};
+use mb_ext::{CallInfo, Tenancy, UsageEvent};
 use mb_mcm::{Channel, ChannelBinding};
 use mb_state::StoredResource;
 use serde_json::{Value, json};
@@ -96,6 +96,8 @@ struct PublishReport<'a> {
     started: Instant,
     request: Value,
     error: Option<String>,
+    /// The caller's admitted tenancy; `None` resolves one for the mock.
+    tenancy: Option<Tenancy>,
 }
 
 impl ChannelInner {
@@ -133,19 +135,28 @@ impl ChannelInner {
             }
         };
         let session = origin.session();
-        let (trigger, context, received, incoming, hop) = match origin {
-            Origin::Trigger { trigger, hop } => (trigger, None, None, Vec::new(), hop),
-            Origin::Manual(context) => (json!({"kind": "manual"}), context, None, Vec::new(), 0),
+        let (trigger, context, received, incoming, hop, tenancy) = match origin {
+            Origin::Trigger { trigger, hop } => (trigger, None, None, Vec::new(), hop, None),
+            Origin::Manual(context) => (
+                json!({"kind": "manual"}),
+                context,
+                None,
+                Vec::new(),
+                0,
+                None,
+            ),
             Origin::Reply {
                 received,
                 headers,
                 hop,
+                tenancy,
             } => (
                 json!({"kind": "reply", "hop": hop}),
                 None,
                 Some(received),
                 headers,
                 hop.saturating_add(1),
+                tenancy,
             ),
         };
         let ctx = MessageContext {
@@ -229,6 +240,7 @@ impl ChannelInner {
             started,
             request,
             error: None,
+            tenancy,
         };
         if payload.len() > MAX_MESSAGE_BYTES {
             let error = PublishError::TooLarge(payload.len());
@@ -328,13 +340,19 @@ impl ChannelInner {
     async fn report_publish(&self, r: PublishReport<'_>) {
         let rt = &self.rt;
         let latency = r.started.elapsed();
-        let empty = HeaderMap::new();
-        let call_info = CallInfo {
-            mock: &rt.name,
-            operation_id: &r.channel.id,
-            headers: &empty,
+        let tenancy = match r.tenancy {
+            Some(tenancy) => Some(tenancy),
+            None => {
+                let empty = HeaderMap::new();
+                let call_info = CallInfo {
+                    mock: &rt.name,
+                    operation_id: &r.channel.id,
+                    headers: &empty,
+                };
+                rt.ext.tenants.resolve(&call_info).await.ok()
+            }
         };
-        if let Ok(tenancy) = rt.ext.tenants.resolve(&call_info).await {
+        if let Some(tenancy) = tenancy {
             rt.ext.usage.record(&UsageEvent {
                 tenancy,
                 mock: rt.name.clone(),

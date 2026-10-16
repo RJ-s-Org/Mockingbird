@@ -165,7 +165,7 @@ pub(crate) struct Presented<'a> {
 /// with operation id `operation_id`, for adapters that check the
 /// data-plane key once per request ([`check_key`]) and must admit first.
 /// `Err` carries the tenancy when it resolved.
-#[cfg_attr(not(feature = "graphql"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "graphql", feature = "events")), allow(dead_code))]
 pub(crate) async fn admit(
     rt: &MockRuntime,
     operation_id: &str,

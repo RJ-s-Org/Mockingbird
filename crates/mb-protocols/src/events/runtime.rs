@@ -154,7 +154,20 @@ pub(crate) enum Origin {
         received: Value,
         headers: Vec<(String, String)>,
         hop: u32,
+        /// The tenancy admitted for the caller (a WebSocket client's,
+        /// resolved at its upgrade); `None` resolves one for the mock.
+        tenancy: Option<mb_ext::Tenancy>,
     },
+}
+
+/// The WebSocket client a received frame came from: a reply goes to its
+/// socket only, is admitted against the tenancy resolved at its upgrade
+/// and is metered to it.
+pub(crate) struct WsClient {
+    pub socket: tokio::sync::mpsc::Sender<crate::ws::Outbound>,
+    pub tenancy: mb_ext::Tenancy,
+    /// The upgrade request's headers, shown to the quota guard.
+    pub headers: axum::http::HeaderMap,
 }
 
 impl Origin {

@@ -15,9 +15,9 @@ use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt};
 use mb_mcm::{Channel, ChannelBinding, Direction};
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
-use super::runtime::{ChannelInner, DEFAULT_SESSION};
+use super::runtime::{ChannelInner, DEFAULT_SESSION, WsClient};
 use super::{InMessage, MAX_MESSAGE_BYTES, address_matches};
 use crate::dp_auth::{Unauthorized, verify_key};
 use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
@@ -90,11 +90,16 @@ pub(crate) fn router(inner: &Arc<ChannelInner>) -> Option<Router> {
     Some(router)
 }
 
-/// Upgrades a request on a WebSocket channel path. In the mock's `api_key`
-/// data-plane auth mode the upgrade needs a valid data-plane key of the
-/// mock's workspace, in the key header or the `api_key` query parameter,
-/// like every other protocol; without one it is answered `401` (with a
-/// `WWW-Authenticate` challenge) and recorded as a refused event call.
+/// Upgrades a request on a WebSocket channel path. The upgrade is admitted
+/// first (`tenants.resolve`, then `quota.admit`, with the id of the first
+/// channel on the path as the operation id), like a call of every other
+/// protocol; a rejection is answered with its status (and `Retry-After`)
+/// and recorded as a refused event call. In the mock's `api_key`
+/// data-plane auth mode the upgrade then needs a valid data-plane key of
+/// the mock's workspace, in the key header or the `api_key` query
+/// parameter; without one it is answered `401` (with a `WWW-Authenticate`
+/// challenge) and recorded the same way. Each reply to the client's frames
+/// is admitted against the tenancy resolved here and metered to it.
 async fn upgrade_channel(
     inner: Arc<ChannelInner>,
     templates: Arc<Vec<String>>,
@@ -113,11 +118,26 @@ async fn upgrade_channel(
     if matched.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let operation_id = inner
+        .rt
+        .bundle()
+        .channels
+        .iter()
+        .find(|c| served_path(&inner, c).is_some_and(|p| matched.iter().any(|t| *t == p)))
+        .map(|c| c.id.clone())
+        .unwrap_or_default();
+    let tenancy = match crate::call::admit(&inner.rt, &operation_id, &headers).await {
+        Ok(tenancy) => tenancy,
+        Err((rejection, _)) => {
+            record_refusal(&inner, &headers, &path, rejection.status, &rejection.detail);
+            return rejected(rejection);
+        }
+    };
     let query = Query::<Vec<(String, String)>>::try_from_uri(&uri)
         .map(|q| q.0)
         .unwrap_or_default();
     if let Err(refused) = verify_key(&inner.rt, &headers, &query).await {
-        record_refusal(&inner, &headers, &path, &refused.detail);
+        record_refusal(&inner, &headers, &path, 401, &refused.detail);
         return unauthorized(refused);
     }
     let subscribers: Vec<Channel> = inner
@@ -139,33 +159,66 @@ async fn upgrade_channel(
         max_message_bytes: MAX_MESSAGE_BYTES,
     };
     serve_channel(upgrade, cfg, move |io| {
-        session(inner, Arc::new(subscribers), path, hub, io)
+        session(
+            inner,
+            Arc::new(subscribers),
+            path,
+            hub,
+            tenancy,
+            headers,
+            io,
+        )
     })
+}
+
+/// An RFC 9457 problem response.
+fn problem(status: StatusCode, title: &str, detail: &str) -> Response {
+    let body = serde_json::json!({
+        "type": "about:blank",
+        "title": title,
+        "status": status.as_u16(),
+        "detail": detail,
+    });
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/problem+json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// The problem answering an admission rejection, with `Retry-After` when
+/// it carries one.
+fn rejected(r: mb_ext::Rejection) -> Response {
+    let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::FORBIDDEN);
+    let mut resp = problem(status, &r.title, &r.detail);
+    if let Some(after) = r.retry_after {
+        let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    }
+    resp
 }
 
 /// A `401` problem carrying the challenge of `refused`.
 fn unauthorized(refused: Unauthorized) -> Response {
-    let body = serde_json::json!({
-        "type": "about:blank",
-        "title": "Unauthorized",
-        "status": 401,
-        "detail": refused.detail,
-    });
-    let mut resp = (
-        StatusCode::UNAUTHORIZED,
-        [(header::CONTENT_TYPE, "application/problem+json")],
-        body.to_string(),
-    )
-        .into_response();
+    let mut resp = problem(StatusCode::UNAUTHORIZED, "Unauthorized", &refused.detail);
     if let Ok(v) = HeaderValue::from_str(&refused.challenge) {
         resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
     }
     resp
 }
 
-/// Records an upgrade refused by data-plane auth as a `401` event call of
-/// the mock (credential headers and the query are left out).
-fn record_refusal(inner: &ChannelInner, headers: &HeaderMap, path: &str, detail: &str) {
+/// Records an upgrade refused by admission or data-plane auth as an event
+/// call of the mock with `status` (credential headers and the query are
+/// left out).
+fn record_refusal(
+    inner: &ChannelInner,
+    headers: &HeaderMap,
+    path: &str,
+    status: u16,
+    detail: &str,
+) {
     let Some(recorder) = &inner.rt.recorder else {
         return;
     };
@@ -176,7 +229,7 @@ fn record_refusal(inner: &ChannelInner, headers: &HeaderMap, path: &str, detail:
         session: DEFAULT_SESSION.into(),
         method: "GET".into(),
         path: path.to_string(),
-        status: 401,
+        status,
         source: None,
         latency: std::time::Duration::ZERO,
         prompt_tokens: 0,
@@ -220,6 +273,8 @@ async fn session(
     subscribers: Arc<Vec<Channel>>,
     path: String,
     mut hub: stream::SelectAll<BoxStream<'static, Option<String>>>,
+    tenancy: mb_ext::Tenancy,
+    headers: HeaderMap,
     io: ChannelIo,
 ) {
     let ChannelIo {
@@ -227,6 +282,11 @@ async fn session(
         outgoing,
         ..
     } = io;
+    let client = Arc::new(WsClient {
+        socket: outgoing.clone(),
+        tenancy,
+        headers,
+    });
     let mut handling: Option<BoxFuture<'static, ()>> = None;
     loop {
         tokio::select! {
@@ -255,7 +315,7 @@ async fn session(
                             Arc::clone(&subscribers),
                             path.clone(),
                             text,
-                            outgoing.clone(),
+                            Arc::clone(&client),
                         )
                         .boxed(),
                     );
@@ -273,7 +333,7 @@ async fn handle_text(
     subscribers: Arc<Vec<Channel>>,
     path: String,
     text: String,
-    socket: mpsc::Sender<Outbound>,
+    client: Arc<WsClient>,
 ) {
     let Some(first) = subscribers.first() else {
         return;
@@ -297,7 +357,7 @@ async fn handle_text(
         headers: Vec::new(),
         payload: text.into_bytes(),
     };
-    inner.receive_from(channel, msg, Some(&socket)).await;
+    inner.receive_from(channel, msg, Some(&client)).await;
 }
 
 #[cfg(test)]

@@ -10,9 +10,8 @@ use mb_state::{SessionKey, StoredResource};
 use serde_json::{Map, Value, json};
 
 use super::produce::find_header;
-use super::runtime::{ChannelInner, DEFAULT_SESSION, Flow, Origin, PublishError};
+use super::runtime::{ChannelInner, DEFAULT_SESSION, Flow, Origin, PublishError, WsClient};
 use super::{BrokerError, HEADER_HOP, InMessage, MAX_HOPS, MAX_MESSAGE_BYTES};
-use crate::ws::Outbound;
 use crate::{RequestKind, RequestRecord};
 
 /// How long subscribing may take.
@@ -140,13 +139,14 @@ impl ChannelInner {
         self.receive_from(channel, msg, None).await
     }
 
-    /// [`Self::receive`] for a message from a WebSocket client: a reply on
-    /// a WebSocket channel goes to `socket` only, not to every subscriber.
+    /// [`Self::receive`] for a message from a WebSocket client: the reply
+    /// is admitted against the client's tenancy and metered to it, and on a
+    /// WebSocket channel goes to the client only, not to every subscriber.
     pub(crate) async fn receive_from(
         self: &Arc<Self>,
         channel: &Channel,
         msg: InMessage,
-        socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
+        client: Option<&WsClient>,
     ) -> Option<Value> {
         let started = Instant::now();
         let bytes = msg.payload.len();
@@ -208,7 +208,7 @@ impl ChannelInner {
             {
                 response.insert("state".into(), Value::String(outcome));
             }
-            if let Some(outcome) = self.reply(channel, payload, &msg.headers, socket).await {
+            if let Some(outcome) = self.reply(channel, payload, &msg.headers, client).await {
                 response.insert("reply".into(), Value::String(outcome));
             }
         }
@@ -301,14 +301,15 @@ impl ChannelInner {
         }
     }
 
-    /// Send the reply to a valid message, unless the hop limit is reached.
-    /// `Some` carries a note for the record when no reply was sent.
+    /// Send the reply to a valid message, unless the hop limit is reached
+    /// or, for a WebSocket client, the quota refuses it. `Some` carries a
+    /// note for the record when no reply was sent.
     async fn reply(
         self: &Arc<Self>,
         channel: &Channel,
         payload: &Value,
         headers: &[(String, String)],
-        socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
+        client: Option<&WsClient>,
     ) -> Option<String> {
         let reply = channel.reply.as_ref()?;
         let hop = received_hop(headers);
@@ -327,11 +328,25 @@ impl ChannelInner {
                 PublishError::Disabled(reply.channel.clone())
             ));
         }
+        // A client's reply is generated on its behalf: each one is admitted
+        // like a call, against the tenancy resolved at the upgrade.
+        if let Some(client) = client {
+            let call_info = mb_ext::CallInfo {
+                mock: &self.rt.name,
+                operation_id: &target.id,
+                headers: &client.headers,
+            };
+            if let Err(r) = self.rt.ext.quota.admit(&client.tenancy, &call_info).await {
+                return Some(format!("rejected: {} {}", r.status, r.detail));
+            }
+        }
         let origin = Origin::Reply {
             received: payload.clone(),
             headers: headers.to_vec(),
             hop,
+            tenancy: client.map(|c| c.tenancy.clone()),
         };
+        let socket = client.map(|c| &c.socket);
         match self.produce_to(target, origin, Vec::new(), socket).await {
             Ok(_) => None,
             Err(e) => Some(format!("error: {e}")),
