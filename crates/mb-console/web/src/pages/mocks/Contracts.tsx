@@ -1,4 +1,5 @@
 import { useRef, useState, type FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   contractSourceUrl,
   useActivate,
@@ -72,6 +73,16 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
             >
               View operations
             </button>
+            {v.imported ? (
+              <Link
+                to="/w/$ws/mocks/$mock/contracts/$version/draft"
+                params={{ ws, mock, version: String(v.version) }}
+                className={linkClass}
+                aria-label={`Review version ${v.version}`}
+              >
+                Review
+              </Link>
+            ) : null}
             <a
               href={contractSourceUrl(ws, mock, v.version)}
               download

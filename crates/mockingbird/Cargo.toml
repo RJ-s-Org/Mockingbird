@@ -25,6 +25,7 @@ anyhow.workspace = true
 arc-swap.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, features = ["http2"] }
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 humantime.workspace = true
@@ -39,7 +40,7 @@ serde-saphyr.workspace = true
 sha2.workspace = true
 mb-engine.workspace = true
 mb-ext.workspace = true
-mb-import.workspace = true
+mb-import = { workspace = true, features = ["smart"] }
 mb-llm.workspace = true
 mb-mcm.workspace = true
 mb-protocols.workspace = true

@@ -4,6 +4,7 @@ import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  notFound,
   redirect,
   type RouterHistory,
 } from "@tanstack/react-router";
@@ -12,8 +13,11 @@ import { Layout } from "./components/Layout";
 import { ProblemAlert } from "./components/ProblemAlert";
 import { ApiKeys } from "./pages/ApiKeys";
 import { Audit } from "./pages/Audit";
+import { DraftReview } from "./pages/drafts/DraftReview";
 import { Home } from "./pages/Home";
 import { Contracts } from "./pages/mocks/Contracts";
+import { ImportProgress } from "./pages/mocks/ImportProgress";
+import { ImportWizard } from "./pages/mocks/ImportWizard";
 import { LiveRequests } from "./pages/mocks/LiveRequests";
 import { MockLayout } from "./pages/mocks/MockLayout";
 import { MocksList } from "./pages/mocks/MocksList";
@@ -112,6 +116,37 @@ const mockContractsRoute = createRoute({
   },
 });
 
+/** The import tab's search: `job` resumes a started import's progress. */
+interface ImportSearch {
+  job?: string;
+}
+
+const mockImportRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/import",
+  validateSearch: (search: Record<string, unknown>): ImportSearch =>
+    typeof search.job === "string" && search.job !== "" ? { job: search.job } : {},
+  component: function ImportPage() {
+    const { ws, mock } = mockImportRoute.useParams();
+    const { job } = mockImportRoute.useSearch();
+    return job ? <ImportProgress key={job} ws={ws} mock={mock} job={job} /> : <ImportWizard ws={ws} mock={mock} />;
+  },
+});
+
+/** An imported version's review page; a version that is not a number is not found. */
+const mockDraftRoute = createRoute({
+  getParentRoute: () => mockRoute,
+  path: "/contracts/$version/draft",
+  beforeLoad: ({ params }) => {
+    if (!/^\d+$/.test(params.version)) throw notFound();
+  },
+  component: function DraftPage() {
+    const { ws, mock, version } = mockDraftRoute.useParams();
+    const n = Number(version);
+    return <DraftReview key={n} ws={ws} mock={mock} version={n} />;
+  },
+});
+
 const mockScenariosRoute = createRoute({
   getParentRoute: () => mockRoute,
   path: "/scenarios",
@@ -190,6 +225,8 @@ const routeTree = rootRoute.addChildren([
       mockIndexRoute,
       mockOverviewRoute,
       mockContractsRoute,
+      mockDraftRoute,
+      mockImportRoute,
       mockScenariosRoute,
       mockSessionsRoute,
       mockRequestsRoute,

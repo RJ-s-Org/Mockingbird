@@ -9,8 +9,42 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+smart = [
+    "dep:mb-llm",
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:async-trait",
+    "dep:futures",
+    "dep:jsonschema",
+    "dep:chrono",
+    "dep:tracing",
+    "dep:pdf-extract",
+    "dep:scraper",
+    "dep:pulldown-cmark",
+    "dep:url",
+    "dep:ipnet",
+    "dep:base64",
+    "dep:weezl",
+]
+
 [dependencies]
 mb-mcm.workspace = true
+mb-llm = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+jsonschema = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+pdf-extract = { workspace = true, optional = true }
+scraper = { workspace = true, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+ipnet = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+weezl = { workspace = true, optional = true }
 async-graphql-parser.workspace = true
 prost.workspace = true
 prost-types.workspace = true
@@ -30,3 +64,35 @@ cron.workspace = true
 [dev-dependencies]
 insta.workspace = true
 jsonschema.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true
+proptest.workspace = true
+mb-llm = { workspace = true, features = ["testing"] }
+
+[[test]]
+name = "smart_text"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_fetch"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_infer"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_har"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_postman"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_llm"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_import"
+required-features = ["smart"]

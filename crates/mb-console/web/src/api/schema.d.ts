@@ -229,6 +229,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mocks/{mock}/contracts/{version}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @deprecated */
+        post: operations["contracts_approve_default"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/contracts/{version}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["contracts_get_draft_default"];
+        /** @deprecated */
+        put: operations["contracts_put_draft_default"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/contracts/{version}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @deprecated */
+        post: operations["contracts_preview_default"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mocks/{mock}/contracts/{version}/source": {
         parameters: {
             query?: never;
@@ -259,6 +311,42 @@ export interface paths {
         put: operations["channels_put_event_settings_default"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["imports_list_default"];
+        put?: never;
+        /** @deprecated */
+        post: operations["imports_create_default"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/imports/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["imports_get_one_default"];
+        put?: never;
+        post?: never;
+        /** @deprecated */
+        delete: operations["imports_cancel_default"];
         options?: never;
         head?: never;
         patch?: never;
@@ -612,6 +700,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["contracts_approve"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["contracts_get_draft"];
+        put: operations["contracts_put_draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["contracts_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/source": {
         parameters: {
             query?: never;
@@ -639,6 +775,38 @@ export interface paths {
         put: operations["channels_put_event_settings"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["imports_list"];
+        put?: never;
+        post: operations["imports_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/imports/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["imports_get_one"];
+        put?: never;
+        post?: never;
+        delete: operations["imports_cancel"];
         options?: never;
         head?: never;
         patch?: never;
@@ -884,6 +1052,11 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             created_by?: string | null;
+            /**
+             * @description Whether the version was produced by an import (it has draft review
+             *     metadata).
+             */
+            imported: boolean;
             /** @description Number of operations in the compiled contract. */
             operations: number;
             /** @description Hex sha256 of the source. */
@@ -907,6 +1080,21 @@ export interface components {
             scopes?: components["schemas"]["KeyScope"][];
             /** @description Acts as a sysadmin; only a sysadmin can create such a key. */
             sysadmin?: boolean;
+        };
+        /**
+         * @description A JSON import request: exactly one of `url`, `text` and
+         *     `content_base64`.
+         */
+        CreateImport: {
+            /** @description The document, base64-encoded, at most 20 MiB decoded. */
+            content_base64?: string | null;
+            /** @description The document's file name, shown as the job's source. */
+            filename?: string | null;
+            kind?: components["schemas"]["ImportKindSchema"] | null;
+            /** @description The document itself, at most 20 MiB. */
+            text?: string | null;
+            /** @description An http(s) URL to fetch. `kind` must be absent or `url`. */
+            url?: string | null;
         };
         /** @description A new mock. Mocks created through the API always have `source = api`. */
         CreateMock: {
@@ -952,6 +1140,84 @@ export interface components {
          * @enum {string}
          */
         DataPlaneAuthMode: "none" | "api_key" | "passthrough_validate";
+        /** @description What a draft changes compared with the active version. */
+        DraftDiffView: {
+            /** @description Operation targets (`GET /pets/{petId}`) only in the draft. */
+            added: string[];
+            /** Format: int64 */
+            against_version: number;
+            /** @description Operation targets in both whose definition differs. */
+            changed: string[];
+            /** @description Operation targets only in the active version. */
+            removed: string[];
+        };
+        /** @description One problem in a draft document. */
+        DraftIssueView: {
+            message: string;
+            /** @description JSON pointer into the submitted document. */
+            pointer: string;
+        };
+        /** @description How a draft was produced. */
+        DraftMetaView: {
+            /** Format: int32 */
+            chunk_count: number;
+            /** Format: int32 */
+            chunks_processed: number;
+            /** @description Whether the draft was edited through the API. */
+            edited: boolean;
+            source_kind: components["schemas"]["ImportKindSchema"];
+            source_name?: string | null;
+            source_url?: string | null;
+            usage: components["schemas"]["TokenUsageView"];
+            warnings: components["schemas"]["DraftWarningView"][];
+        };
+        /** @description One operation of a draft with its review metadata. */
+        DraftOperationView: {
+            /**
+             * Format: float
+             * @description 0..=1; 1.0 for operations recorded in traffic or edited by a person.
+             */
+            confidence: number;
+            /** @description Added or changed by an edit of the draft. */
+            edited: boolean;
+            id: string;
+            /** @description Upper-case HTTP method. */
+            method: string;
+            /** @description Path template with `{param}` placeholders. */
+            path: string;
+            provenance: components["schemas"]["ProvenanceView"][];
+            summary?: string | null;
+        };
+        /** @description 422 body: a Problem plus `errors`. */
+        DraftProblem: {
+            detail: string;
+            errors: components["schemas"]["DraftIssueView"][];
+            /** Format: int32 */
+            status: number;
+            title: string;
+            /** @description Always `about:blank`. */
+            type: string;
+        };
+        /** @description An imported contract version for review. */
+        DraftView: {
+            diff?: components["schemas"]["DraftDiffView"] | null;
+            /** @description The OpenAPI 3.1 document of the draft. */
+            document: Record<string, never>;
+            meta: components["schemas"]["DraftMetaView"];
+            /** @description Sorted by path, then method. */
+            operations: components["schemas"]["DraftOperationView"][];
+            status: components["schemas"]["VersionStatus"];
+            /** Format: int64 */
+            version: number;
+        };
+        /** @description A problem the importer noted. */
+        DraftWarningView: {
+            /** @description e.g. `chunk_skipped`, `invalid_schema`, `ungrounded_operation`. */
+            code: string;
+            message: string;
+            /** @description The target (`GET /pets`) of the operation the warning is about. */
+            operation?: string | null;
+        };
         /** @description A mock's event settings. */
         EventSettingsView: {
             /** @description `null` picks a broker automatically. */
@@ -959,6 +1225,56 @@ export interface components {
             /** @description `file` or `api`. */
             source: string;
         };
+        /** @description An import job. */
+        ImportJobView: {
+            /** Format: date-time */
+            created_at: string;
+            created_by?: string | null;
+            /** @description Why a `failed` job failed. */
+            error?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            kind: components["schemas"]["ImportKindSchema"];
+            mock: string;
+            progress: components["schemas"]["ImportProgressView"];
+            /**
+             * Format: int64
+             * @description The draft contract version a `done` job produced.
+             */
+            result_version?: number | null;
+            /**
+             * @description The file name (control characters removed) or URL (query values
+             *     replaced by `REDACTED`, fragment dropped) imported.
+             */
+            source_name?: string | null;
+            /** Format: date-time */
+            started_at?: string | null;
+            status: components["schemas"]["ImportStatusSchema"];
+        };
+        /**
+         * @description What an import reads.
+         * @enum {string}
+         */
+        ImportKindSchema: "markdown" | "html" | "pdf" | "text" | "har" | "postman" | "url";
+        /** @description How far a job has got. */
+        ImportProgressView: {
+            /** Format: int32 */
+            done: number;
+            /**
+             * @description `queued`, `fetching`, `extracting`, `analyzing`, `summarizing` or
+             *     `assembling`.
+             */
+            phase: string;
+            /** Format: int32 */
+            total: number;
+        };
+        /**
+         * @description Where an import job is.
+         * @enum {string}
+         */
+        ImportStatusSchema: "queued" | "running" | "done" | "failed" | "canceled";
         /**
          * @description The OpenAPI schema of [`KeyScope`] (which lives in `mb-auth`).
          * @enum {string}
@@ -1077,6 +1393,24 @@ export interface components {
         PatchWorkspace: {
             display_name: string;
         };
+        /** @description What to preview. */
+        PreviewRequest: {
+            operation_id: string;
+            /**
+             * Format: int32
+             * @description A declared status to generate instead of the success response.
+             */
+            status?: number | null;
+        };
+        /** @description A generated response; no session state is read or written. */
+        PreviewResponse: {
+            body: Record<string, never>;
+            content_type?: string | null;
+            /** @description `llm`, `repaired` or `fallback`. */
+            source: string;
+            /** Format: int32 */
+            status: number;
+        };
         /**
          * @description The OpenAPI schema of [`PrincipalKind`] (which lives in `mb-auth`).
          * @enum {string}
@@ -1109,6 +1443,18 @@ export interface components {
              */
             warnings: string[];
         };
+        /** @description Where in the source an operation was found. */
+        ProvenanceView: {
+            /**
+             * Format: int32
+             * @description The documentation chunk (absent for HAR and Postman imports).
+             */
+            chunk?: number | null;
+            /** @description At most 300 characters of the source. */
+            excerpt: string;
+            /** @description e.g. `entry 2`, a heading, or a collection item. */
+            location: string;
+        };
         /** @description A manual publish. */
         PublishRequest: {
             /** @description A JSON object handed to the message prompt. */
@@ -1140,6 +1486,11 @@ export interface components {
             enabled?: boolean;
             /** @description MCM triggers; only channels the mock publishes may have any. */
             triggers?: Record<string, never>[] | null;
+        };
+        /** @description A replacement draft document. */
+        PutDraft: {
+            /** @description An OpenAPI 3.x document. */
+            document: Record<string, never>;
         };
         /** @description A mock's event settings. */
         PutEventSettings: {
@@ -1281,6 +1632,13 @@ export interface components {
             data: Record<string, never>;
             id: string;
             resource_type: string;
+        };
+        /** @description LLM tokens spent by the import. */
+        TokenUsageView: {
+            /** Format: int64 */
+            completion_tokens: number;
+            /** Format: int64 */
+            prompt_tokens: number;
         };
         /** @description The outcome of a contract upload. */
         UploadResult: {
@@ -2195,6 +2553,229 @@ export interface operations {
             };
         };
     };
+    contracts_approve_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Approved; activate it to serve it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContractVersionSummary"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a draft, or managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Content-Type is not application/json (the body is ignored) */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_draft_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftView"];
+                };
+            };
+            /** @description No such version, or not an imported draft */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_put_draft_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutDraft"];
+            };
+        };
+        responses: {
+            /** @description The recompiled draft; changed and added operations are marked edited */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftView"];
+                };
+            };
+            /** @description No such version, or not an imported draft */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a draft, or managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The document does not compile */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["DraftProblem"];
+                };
+            };
+        };
+    };
+    contracts_preview_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description A generated response (may spend LLM tokens); no session state is read or written */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewResponse"];
+                };
+            };
+            /** @description No such version or operation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The status is not declared by the operation, or it has no response */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The quota refused the preview (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mock's LLM is unavailable */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     contracts_source_default: {
         parameters: {
             query?: never;
@@ -2321,6 +2902,205 @@ export interface operations {
             };
             /** @description Unknown broker */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_list_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The newest 50 jobs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_create_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        /** @description Either `application/json` (`CreateImport`), or `multipart/form-data` with part `file` (its file name becomes the job's source) and optional part `kind`, which must carry the header `X-Mockingbird-Upload` (any value). The input is at most 20 MiB; the request at most 28 MiB. Without a kind, the kind is detected from the content and file name. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateImport"];
+                "multipart/form-data": number[];
+            };
+        };
+        responses: {
+            /** @description Queued; `Location` names the job */
+            202: {
+                headers: {
+                    /** @description The job's URL */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Neither JSON nor multipart with the upload header */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mock has `import.max_active_jobs_per_mock` queued or running jobs, or the quota refused the import (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_get_one_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_cancel_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Canceled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The job has already finished */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3951,6 +4731,237 @@ export interface operations {
             };
         };
     };
+    contracts_approve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Approved; activate it to serve it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContractVersionSummary"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a draft, or managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Content-Type is not application/json (the body is ignored) */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftView"];
+                };
+            };
+            /** @description No such version, or not an imported draft */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_put_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutDraft"];
+            };
+        };
+        responses: {
+            /** @description The recompiled draft; changed and added operations are marked edited */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftView"];
+                };
+            };
+            /** @description No such version, or not an imported draft */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a draft, or managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The document does not compile */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["DraftProblem"];
+                };
+            };
+        };
+    };
+    contracts_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description A generated response (may spend LLM tokens); no session state is read or written */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewResponse"];
+                };
+            };
+            /** @description No such version or operation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The status is not declared by the operation, or it has no response */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The quota refused the preview (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mock's LLM is unavailable */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     contracts_source: {
         parameters: {
             query?: never;
@@ -4083,6 +5094,213 @@ export interface operations {
             };
             /** @description Unknown broker */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The newest 50 jobs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        /** @description Either `application/json` (`CreateImport`), or `multipart/form-data` with part `file` (its file name becomes the job's source) and optional part `kind`, which must carry the header `X-Mockingbird-Upload` (any value). The input is at most 20 MiB; the request at most 28 MiB. Without a kind, the kind is detected from the content and file name. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateImport"];
+                "multipart/form-data": number[];
+            };
+        };
+        responses: {
+            /** @description Queued; `Location` names the job */
+            202: {
+                headers: {
+                    /** @description The job's URL */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Neither JSON nor multipart with the upload header */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The mock has `import.max_active_jobs_per_mock` queued or running jobs, or the quota refused the import (another status is possible when a quota extension uses one) */
+            429: {
+                headers: {
+                    /** @description Seconds to wait, when the quota says */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    imports_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Import job id */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Canceled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportJobView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The job has already finished */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

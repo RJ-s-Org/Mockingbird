@@ -45,6 +45,77 @@ pub struct FileConfig {
     pub mocks: BTreeMap<String, FileMock>,
     pub auth: AuthConfig,
     pub audit: AuditConfig,
+    /// Smart imports (documentation, HAR, Postman). Read at startup.
+    pub import: ImportConfig,
+}
+
+/// The `import:` section.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ImportConfig {
+    /// Import worker tasks, 1..=16.
+    pub workers: usize,
+    /// Tokens one import job's LLM calls may spend, at least 1000.
+    pub max_tokens: u64,
+    /// Profile used for extraction instead of the mock's own (looked up in
+    /// the mock's workspace, then `default`).
+    pub llm_profile: Option<String>,
+    /// Hosts (`docs.internal`, `.corp.example`) and CIDRs URL imports may
+    /// reach although they are private.
+    pub url_allowlist: Vec<String>,
+    /// Most queued plus running jobs per mock, at least 1.
+    pub max_active_jobs_per_mock: u32,
+}
+
+impl Default for ImportConfig {
+    fn default() -> Self {
+        Self {
+            workers: 2,
+            max_tokens: mb_import::smart::DEFAULT_IMPORT_TOKENS,
+            llm_profile: None,
+            url_allowlist: Vec::new(),
+            max_active_jobs_per_mock: mb_admin::DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK,
+        }
+    }
+}
+
+/// Accepted `import.workers`.
+pub const IMPORT_WORKERS: std::ops::RangeInclusive<usize> = 1..=16;
+
+/// Smallest accepted `import.max_tokens`.
+pub const MIN_IMPORT_TOKENS: u64 = 1000;
+
+impl ImportConfig {
+    /// The worker pool's settings; `Err("import.<field>: <reason>")` when a
+    /// value is out of range or an allowlist entry does not parse.
+    pub fn settings(&self) -> Result<mb_admin::ImportSettings, String> {
+        if !IMPORT_WORKERS.contains(&self.workers) {
+            return Err(format!(
+                "import.workers: {} must be between {} and {}",
+                self.workers,
+                IMPORT_WORKERS.start(),
+                IMPORT_WORKERS.end()
+            ));
+        }
+        if self.max_tokens < MIN_IMPORT_TOKENS {
+            return Err(format!(
+                "import.max_tokens: {} must be at least {MIN_IMPORT_TOKENS}",
+                self.max_tokens
+            ));
+        }
+        if self.max_active_jobs_per_mock == 0 {
+            return Err("import.max_active_jobs_per_mock: 0 must be at least 1".to_string());
+        }
+        let fetch = mb_import::smart::fetch::FetchPolicy::from_allowlist(&self.url_allowlist)
+            .map_err(|e| format!("import.url_allowlist: {e}"))?;
+        Ok(mb_admin::ImportSettings {
+            workers: self.workers,
+            max_tokens: self.max_tokens,
+            fetch,
+            max_active_jobs_per_mock: self.max_active_jobs_per_mock,
+            ..mb_admin::ImportSettings::default()
+        })
+    }
 }
 
 /// How the Admin API authenticates callers.
@@ -776,8 +847,8 @@ pub const RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=3650;
 
 impl FileConfig {
     /// Range checks that do not depend on the auth mode:
-    /// `auth.session_ttl` ≤ 30 days and `audit.retention_days` in
-    /// 1..=3650.
+    /// `auth.session_ttl` ≤ 30 days, `audit.retention_days` in 1..=3650
+    /// and the `import:` section ([`ImportConfig::settings`]).
     pub fn validate_ranges(&self) -> Result<(), String> {
         if self.auth.session_ttl > MAX_SESSION_TTL {
             return Err(format!(
@@ -793,6 +864,7 @@ impl FileConfig {
                 RETENTION_DAYS.end()
             ));
         }
+        self.import.settings()?;
         Ok(())
     }
 }

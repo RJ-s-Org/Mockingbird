@@ -1473,6 +1473,18 @@ async fn openapi_lists_all_paths() {
             "/api/v1/mocks/{mock}/contracts/{version}/activate",
             &["post"],
         ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/draft",
+            &["get", "put"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/approve",
+            &["post"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/preview",
+            &["post"],
+        ),
         ("/api/v1/mocks/{mock}/scenarios", &["get"]),
         ("/api/v1/mocks/{mock}/scenarios/{name}", &["put", "delete"]),
         ("/api/v1/llm-profiles", &["get"]),
@@ -1489,6 +1501,8 @@ async fn openapi_lists_all_paths() {
         ("/api/v1/mocks/{mock}/event-settings", &["get", "put"]),
         ("/api/v1/brokers", &["get"]),
         ("/api/v1/mocks/{mock}/requests/stream", &["get"]),
+        ("/api/v1/mocks/{mock}/imports", &["get", "post"]),
+        ("/api/v1/mocks/{mock}/imports/{job}", &["get", "delete"]),
     ];
     for (path, methods) in expected {
         let item = &doc["paths"][*path];

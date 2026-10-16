@@ -111,6 +111,10 @@ pub struct ContractVersion {
     pub status: ContractStatus,
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Review metadata of a version produced by an import; `None` for
+    /// versions created any other way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_meta: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -402,6 +406,68 @@ impl Default for AuditFilter {
     }
 }
 
+/// Lifecycle of an [`ImportJob`]: `queued` → `running` → `done` | `failed`,
+/// or `canceled` from `queued` or `running`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportJobStatus {
+    Queued,
+    Running,
+    Done,
+    Failed,
+    Canceled,
+}
+
+/// How far a running import has got. `phase` is one of the progress phase
+/// wire strings (`queued`, `fetching`, `extracting`, …).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct ImportProgress {
+    pub phase: String,
+    pub done: u32,
+    pub total: u32,
+}
+
+/// A queued or processed import. The job's input is stored alongside it
+/// (see [`crate::ControlStore::import_job_input`]) until it finishes.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ImportJob {
+    pub id: Uuid,
+    pub workspace: String,
+    pub mock_id: Uuid,
+    /// The mock's name when the job was created.
+    pub mock: String,
+    pub kind: String,
+    pub source_name: Option<String>,
+    pub status: ImportJobStatus,
+    pub progress: ImportProgress,
+    /// The draft contract version a `done` job produced.
+    pub result_version: Option<i64>,
+    /// Why a `failed` job failed.
+    pub error: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NewImportJob {
+    pub mock_id: Uuid,
+    pub kind: String,
+    pub source_name: Option<String>,
+    pub input: Vec<u8>,
+    pub created_by: Option<String>,
+}
+
+/// How a running import ended.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportOutcome {
+    Done { version: i64 },
+    Failed { error: String },
+}
+
 /// Published on every control-plane mutation. Scenario and contract changes
 /// publish the owning mock.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -449,6 +515,39 @@ impl ContractStatus {
             "archived" => Ok(ContractStatus::Archived),
             other => Err(crate::StoreError::Db(format!(
                 "unknown contract status {other:?}"
+            ))),
+        }
+    }
+}
+
+impl ImportJobStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ImportJobStatus::Queued => "queued",
+            ImportJobStatus::Running => "running",
+            ImportJobStatus::Done => "done",
+            ImportJobStatus::Failed => "failed",
+            ImportJobStatus::Canceled => "canceled",
+        }
+    }
+
+    /// `done`, `failed` or `canceled`.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self,
+            ImportJobStatus::Done | ImportJobStatus::Failed | ImportJobStatus::Canceled
+        )
+    }
+
+    pub(crate) fn parse(s: &str) -> Result<Self, crate::StoreError> {
+        match s {
+            "queued" => Ok(ImportJobStatus::Queued),
+            "running" => Ok(ImportJobStatus::Running),
+            "done" => Ok(ImportJobStatus::Done),
+            "failed" => Ok(ImportJobStatus::Failed),
+            "canceled" => Ok(ImportJobStatus::Canceled),
+            other => Err(crate::StoreError::Db(format!(
+                "unknown import job status {other:?}"
             ))),
         }
     }

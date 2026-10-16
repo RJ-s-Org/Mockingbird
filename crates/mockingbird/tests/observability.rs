@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mb_engine::StreamConfig;
 use mb_ext::Extensions;
+use mb_mcm::Bundle;
 use mb_protocols::ProtocolSettings;
 use mb_protocols::events::EventDeps;
 use mb_protocols::{RequestKind, RequestRecord, RequestRecorder};
@@ -18,10 +19,10 @@ use mb_state::{
 };
 use mb_store::{
     AdminSession, ApiKey, AuditEvent, AuditFilter, ChannelSettings, ContractStatus,
-    ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
-    MockEventSettings, NewAuditEvent, NewContractVersion, NewMock, NewRequestLogEntry, PgStore,
-    RequestLogEntry, RequestLogFilter, ResourceSource, Scenario, SqliteControlStore, StoreError,
-    Workspace,
+    ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob, ImportOutcome,
+    ImportProgress, LlmProfile, Mock, MockEventSettings, NewAuditEvent, NewContractVersion,
+    NewImportJob, NewMock, NewRequestLogEntry, PgStore, RequestLogEntry, RequestLogFilter,
+    ResourceSource, Scenario, SqliteControlStore, StoreError, Workspace,
 };
 use mockingbird::ops::{self, OpsState};
 use mockingbird::recorder::StoreRecorder;
@@ -236,6 +237,86 @@ impl ControlStore for StubControl {
     }
     async fn prune_audit(&self, older_than: DateTime<Utc>) -> Result<u64, StoreError> {
         self.inner.prune_audit(older_than).await
+    }
+    async fn add_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        self.inner
+            .add_draft_contract_version(mock_id, v, draft_meta)
+            .await
+    }
+    async fn update_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        source: Vec<u8>,
+        bundle: Bundle,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        self.inner
+            .update_draft_contract_version(mock_id, version, source, bundle, draft_meta)
+            .await
+    }
+    async fn approve_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<ContractVersion, StoreError> {
+        self.inner.approve_contract_version(mock_id, version).await
+    }
+    async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
+        self.inner.create_import_job(j).await
+    }
+    async fn get_import_job(&self, id: Uuid) -> Result<Option<ImportJob>, StoreError> {
+        self.inner.get_import_job(id).await
+    }
+    async fn import_job_input(&self, id: Uuid) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.import_job_input(id).await
+    }
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError> {
+        self.inner.count_active_import_jobs(mock_id).await
+    }
+    async fn list_import_jobs(
+        &self,
+        mock_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<ImportJob>, StoreError> {
+        self.inner.list_import_jobs(mock_id, limit).await
+    }
+    async fn claim_import_job(&self, now: DateTime<Utc>) -> Result<Option<ImportJob>, StoreError> {
+        self.inner.claim_import_job(now).await
+    }
+    async fn update_import_progress(
+        &self,
+        id: Uuid,
+        p: &ImportProgress,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        self.inner.update_import_progress(id, p, now).await
+    }
+    async fn finish_import_job(
+        &self,
+        id: Uuid,
+        outcome: ImportOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        self.inner.finish_import_job(id, outcome, now).await
+    }
+    async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {
+        self.inner.cancel_import_job(id, now).await
+    }
+    async fn fail_stale_import_jobs(
+        &self,
+        updated_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        self.inner.fail_stale_import_jobs(updated_before, now).await
+    }
+    async fn prune_import_jobs(&self, finished_before: DateTime<Utc>) -> Result<u64, StoreError> {
+        self.inner.prune_import_jobs(finished_before).await
     }
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {
         self.inner.subscribe()

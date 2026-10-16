@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Petstore API Reference</title>
+  <style>body { font-family: sans-serif; } .hidden { display: none; }</style>
+  <script>function tracking() { return 1; } tracking();</script>
+</head>
+<body>
+  <nav>Home | About</nav>
+  <main>
+    <h1>Petstore API</h1>
+    <p>A sample API that manages the pets of a pet store.
+       All responses are JSON. The base URL is <code>https://petstore.example.com/v1</code>.</p>
+
+    <h2>Pets</h2>
+
+    <h3>List pets</h3>
+    <p>GET /pets</p>
+    <p>Returns all pets, newest first.</p>
+    <p>Query parameters:</p>
+    <ul>
+      <li><code>limit</code> (integer, optional): how many pets to return, at most 100.</li>
+    </ul>
+    <p>Example response (<code>200 OK</code>):</p>
+    <pre><code>[
+  {
+    "id": 1,
+    "name": "Rex",
+    "tag": "dog"
+  }
+]</code></pre>
+
+    <h3>Get a pet</h3>
+    <p>GET /pets/{petId}</p>
+    <p>Returns the pet with the given id, or <code>404 Not Found</code> when there is none.</p>
+    <pre><code>{
+  "id": 1,
+  "name": "Rex",
+  "tag": "dog"
+}</code></pre>
+
+    <h3>Create a pet</h3>
+    <p>POST /pets</p>
+    <p>Creates a pet. The request body is JSON:</p>
+    <pre><code>{
+  "name": "Rex",
+  "tag": "dog"
+}</code></pre>
+    <p>On success the API answers <code>201 Created</code> with the new pet:</p>
+    <pre><code>{
+  "id": 3,
+  "name": "Rex",
+  "tag": "dog"
+}</code></pre>
+
+    <h2>Pet fields</h2>
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>id</td><td>integer</td><td>The pet id</td></tr>
+        <tr><td>name</td><td>string</td><td>The pet name</td></tr>
+        <tr><td>tag</td><td>string</td><td>An optional tag</td></tr>
+      </tbody>
+    </table>
+  </main>
+  <noscript>Enable JavaScript</noscript>
+  <footer>Copyright Petstore</footer>
+</body>
+</html>

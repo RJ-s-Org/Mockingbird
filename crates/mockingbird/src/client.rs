@@ -21,8 +21,10 @@ pub enum ClientCommand {
     /// List, inspect, create and delete mocks.
     #[command(subcommand)]
     Mocks(MocksCommand),
-    /// Upload a contract as a new version of a mock, creating the mock
-    /// (`source = api`) if it does not exist.
+    /// Import a contract, API documentation, a HAR recording or a Postman
+    /// collection as a new version of a mock, creating the mock
+    /// (`source = api`) if it does not exist. Documentation, HAR and
+    /// Postman imports produce a draft version for review.
     Import(ImportArgs),
     /// List and reset the sessions of a mock.
     #[command(subcommand)]
@@ -106,16 +108,25 @@ pub enum MocksCommand {
 
 #[derive(Args, Debug)]
 pub struct ImportArgs {
-    /// Contract file (OpenAPI, Swagger, AsyncAPI, GraphQL, .proto,
-    /// descriptor set, WSDL, zip or tar.gz), or a directory, uploaded as a
-    /// tar.gz.
-    pub contract: PathBuf,
+    /// A contract file (OpenAPI, Swagger, AsyncAPI, GraphQL, .proto,
+    /// descriptor set, WSDL, zip or tar.gz) or a directory (uploaded as a tar.gz); or API
+    /// documentation (Markdown, HTML, PDF, text), a HAR recording or a
+    /// Postman collection as a file or an http(s) URL, imported as a draft.
+    #[arg(value_name = "FILE|URL")]
+    pub source: String,
     /// The mock to import into.
     #[arg(long = "as", value_name = "MOCK")]
     pub mock: String,
-    /// Activate the new version (the first version is always activated).
+    /// Activate the new version (the first contract version is always
+    /// activated; a draft needs --approve).
     #[arg(long)]
     pub activate: bool,
+    /// Approve the draft when the import reported no warnings.
+    #[arg(long)]
+    pub approve: bool,
+    /// How long to wait for a draft import to finish.
+    #[arg(long, default_value = "10m")]
+    pub timeout: humantime::Duration,
 }
 
 #[derive(Subcommand, Debug)]
@@ -148,8 +159,11 @@ pub enum ClientError {
     /// The Admin API answered with a non-2xx status; `body` is its problem
     /// details document (or whatever it sent).
     Api { status: StatusCode, body: String },
-    /// A command-line argument is invalid (exit 2).
+    /// The command line is inconsistent (exit 2).
     Usage(String),
+    /// The command ran but did not do everything asked: `output` is
+    /// printed on stdout, `message` on stderr, and the exit code is 1.
+    Incomplete { output: Value, message: String },
     /// The request could not be made, or a local input was invalid.
     Other(anyhow::Error),
 }
@@ -236,6 +250,13 @@ pub async fn run(
         }
     }
 }
+
+/// Message of `--activate` given for a draft import without `--approve`.
+const ACTIVATE_NEEDS_APPROVE: &str =
+    "--activate needs --approve for document, HAR and Postman imports";
+
+/// How often a draft import's job is polled.
+const IMPORT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 async fn channels(api: &AdminClient, cmd: ChannelsCommand) -> Result<Option<Value>, ClientError> {
     match cmd {
@@ -348,25 +369,72 @@ pub fn parse_trigger_spec(spec: &str) -> Result<Value, String> {
 }
 
 async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, ClientError> {
-    let source = mb_import::read_source(&args.contract)
-        .with_context(|| format!("cannot read {}", args.contract.display()))?;
-    match api.send(Method::GET, &["mocks", &args.mock], None).await {
-        Ok(_) => {}
-        Err(ClientError::Api { status, .. }) if status == StatusCode::NOT_FOUND => {
-            api.send(
-                Method::POST,
-                &["mocks"],
-                Some(Body::Json(json!({ "name": args.mock }))),
-            )
-            .await?;
-        }
-        Err(e) => return Err(e),
+    if is_url(&args.source) {
+        let body = json!({ "url": args.source });
+        return smart_import(api, &args, body).await;
     }
+    let path = PathBuf::from(&args.source);
+    if !path.is_dir() {
+        let bytes = read(&path)?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        if let Some(kind) = mb_import::smart::detect_kind(name.as_deref(), &bytes) {
+            let body = document_body(kind, name, bytes)
+                .with_context(|| format!("cannot import {}", path.display()))?;
+            return smart_import(api, &args, body).await;
+        }
+    }
+    upload_contract(api, &args, &path).await
+}
+
+/// Whether `source` is an http(s) URL rather than a path.
+fn is_url(source: &str) -> bool {
+    ["http://", "https://"].iter().any(|scheme| {
+        source
+            .get(..scheme.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+    })
+}
+
+/// The `POST …/imports` body for a document of `kind`: base64 for a PDF,
+/// text otherwise.
+fn document_body(
+    kind: mb_import::smart::ImportKind,
+    filename: Option<String>,
+    bytes: Vec<u8>,
+) -> anyhow::Result<Value> {
+    use base64::Engine as _;
+    let mut body = json!({ "kind": kind.as_str() });
+    if let Some(name) = filename {
+        body["filename"] = Value::String(name);
+    }
+    if kind == mb_import::smart::ImportKind::Pdf {
+        body["content_base64"] =
+            Value::String(base64::engine::general_purpose::STANDARD.encode(&bytes));
+    } else {
+        let text = String::from_utf8(bytes)
+            .map_err(|_| anyhow!("a {} document must be UTF-8 text", kind.as_str()))?;
+        body["text"] = Value::String(text);
+    }
+    Ok(body)
+}
+
+/// Uploads a contract file or directory to `…/contracts`.
+async fn upload_contract(
+    api: &AdminClient,
+    args: &ImportArgs,
+    path: &Path,
+) -> Result<Option<Value>, ClientError> {
+    let source =
+        mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
+    ensure_mock(api, &args.mock).await?;
     let mut url = api.url(&["mocks", &args.mock, "contracts"]);
     if args.activate {
         url.set_query(Some("activate=true"));
     }
-    let content_type = contract_media_type(&args.contract, &source);
+    let content_type = contract_media_type(path, &source);
     api.request(
         Method::POST,
         url,
@@ -376,6 +444,178 @@ async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, Cl
         }),
     )
     .await
+}
+
+/// Creates mock `name` (`source = api`) unless it exists.
+async fn ensure_mock(api: &AdminClient, name: &str) -> Result<(), ClientError> {
+    match api.send(Method::GET, &["mocks", name], None).await {
+        Ok(_) => Ok(()),
+        Err(ClientError::Api { status, .. }) if status == StatusCode::NOT_FOUND => {
+            api.send(
+                Method::POST,
+                &["mocks"],
+                Some(Body::Json(json!({ "name": name }))),
+            )
+            .await?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Starts an import job with `body`, waits for its draft and summarises
+/// it; with `--approve`, approves (and with `--activate` activates) a
+/// draft without warnings.
+async fn smart_import(
+    api: &AdminClient,
+    args: &ImportArgs,
+    body: Value,
+) -> Result<Option<Value>, ClientError> {
+    if args.activate && !args.approve {
+        return Err(ClientError::Usage(ACTIVATE_NEEDS_APPROVE.into()));
+    }
+    ensure_mock(api, &args.mock).await?;
+    let job = api
+        .send(
+            Method::POST,
+            &["mocks", &args.mock, "imports"],
+            Some(Body::Json(body)),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("the Admin API sent no import job"))?;
+    let id = job_field(&job, "id")?;
+    let job = wait_for_job(api, &args.mock, &id, args.timeout).await?;
+    let version = job
+        .get("result_version")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("import job {id} finished without a draft version"))?;
+    let version_segment = version.to_string();
+    let draft = api
+        .send(
+            Method::GET,
+            &["mocks", &args.mock, "contracts", &version_segment, "draft"],
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow!("the Admin API sent no draft"))?;
+    let operations: Vec<Value> = draft
+        .get("operations")
+        .and_then(Value::as_array)
+        .map(|ops| {
+            ops.iter()
+                .map(|op| {
+                    let method = op.get("method").and_then(Value::as_str).unwrap_or("");
+                    let path = op.get("path").and_then(Value::as_str).unwrap_or("");
+                    Value::String(format!("{method} {path}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let warnings: Vec<Value> = draft
+        .pointer("/meta/warnings")
+        .and_then(Value::as_array)
+        .map(|ws| {
+            ws.iter()
+                .filter_map(|w| w.get("message").cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut output = json!({
+        "job": id,
+        "version": version,
+        "status": draft.get("status").cloned().unwrap_or(Value::Null),
+        "operations": operations,
+        "warnings": warnings,
+        "approved": false,
+    });
+    if !args.approve {
+        return Ok(Some(output));
+    }
+    if !warnings.is_empty() {
+        let n = warnings.len();
+        let noun = if n == 1 { "warning" } else { "warnings" };
+        return Err(ClientError::Incomplete {
+            output,
+            message: format!("not approved: the draft has {n} {noun}; review it in the console"),
+        });
+    }
+    let mut summary = api
+        .send(
+            Method::POST,
+            &[
+                "mocks",
+                &args.mock,
+                "contracts",
+                &version_segment,
+                "approve",
+            ],
+            Some(Body::Json(json!({}))),
+        )
+        .await?;
+    output["approved"] = Value::Bool(true);
+    if args.activate {
+        summary = api
+            .send(
+                Method::POST,
+                &[
+                    "mocks",
+                    &args.mock,
+                    "contracts",
+                    &version_segment,
+                    "activate",
+                ],
+                Some(Body::Json(json!({}))),
+            )
+            .await?;
+    }
+    if let Some(status) = summary.as_ref().and_then(|s| s.get("status")) {
+        output["status"] = status.clone();
+    }
+    Ok(Some(output))
+}
+
+/// Polls import job `id` until it is `done`; `failed`, `canceled` or
+/// still running after `timeout` is an error.
+async fn wait_for_job(
+    api: &AdminClient,
+    mock: &str,
+    id: &str,
+    timeout: humantime::Duration,
+) -> Result<Value, ClientError> {
+    let deadline = tokio::time::Instant::now() + *timeout;
+    loop {
+        let job = api
+            .send(Method::GET, &["mocks", mock, "imports", id], None)
+            .await?
+            .ok_or_else(|| anyhow!("the Admin API sent no import job"))?;
+        match job_field(&job, "status")?.as_str() {
+            "done" => return Ok(job),
+            status @ ("failed" | "canceled") => {
+                let error = job
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason given");
+                return Err(anyhow!("import {status}: {error}").into());
+            }
+            _ => {}
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(anyhow!(
+                "import job {id} did not finish within {timeout}; it keeps running on the server"
+            )
+            .into());
+        }
+        tokio::time::sleep(IMPORT_POLL_INTERVAL.min(deadline - now)).await;
+    }
+}
+
+/// A string field of an import job.
+fn job_field(job: &Value, field: &str) -> anyhow::Result<String> {
+    job.get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("the import job has no {field}"))
 }
 
 /// The upload media type for a contract, by extension: `.graphql`,
