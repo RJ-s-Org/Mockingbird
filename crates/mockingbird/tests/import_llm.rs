@@ -9,6 +9,7 @@ use std::time::Duration;
 use mb_engine::StreamConfig;
 use mb_ext::Extensions;
 use mb_protocols::ProtocolSettings;
+use mb_protocols::events::EventDeps;
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewMock, ResourceSource};
 use mockingbird::runtime::{
@@ -31,6 +32,7 @@ fn deps(store: Arc<dyn ControlStore>, offline: bool, default_profile: Option<&st
         data_plane_keys: None,
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
+        events: EventDeps::default(),
     }
 }
 
