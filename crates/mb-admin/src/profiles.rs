@@ -2,6 +2,11 @@
 //! `file:/path`), never a raw key, and the API never resolves it. A ref
 //! written through the API must match one of the `server.api_secret_refs`
 //! globs; profiles from the config file are not restricted.
+//!
+//! Only a sysadmin may bind a secret to an endpoint: setting or changing a
+//! profile's `secret_ref`, or changing the `base_url` of a profile that has
+//! one. Otherwise a workspace admin could send the server's own LLM key (or
+//! any other allowed secret) to a host they control.
 
 use std::collections::{HashMap, HashSet};
 
@@ -238,6 +243,7 @@ pub async fn get_one(
     request_body = PutProfile,
     responses(
         (status = 200, body = ProfileWriteResult),
+        (status = 403, description = "Not an admin of the workspace, or not a sysadmin when setting or changing `secret_ref` or the `base_url` of a profile with one", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid profile, a raw `api_key`, or a `secret_ref` not allowed by `server.api_secret_refs`", body = Problem, content_type = "application/problem+json"),
     )
@@ -276,6 +282,18 @@ pub async fn put(
             "secret_ref not allowed by server.api_secret_refs (allowed: {})",
             st.api_secret_refs.join(", ")
         )));
+    }
+    if !access.principal.sysadmin
+        && let Some(r) = &body.secret_ref
+    {
+        let unchanged = existing.as_ref().is_some_and(|e| {
+            e.secret_ref.as_deref() == Some(r.as_str()) && e.base_url == body.base_url
+        });
+        if !unchanged {
+            return Err(Problem::forbidden(
+                "only a sysadmin may set or change secret_ref, or change the base_url of a profile with a secret_ref",
+            ));
+        }
     }
     let profile = LlmProfile {
         workspace: access.ws.clone(),

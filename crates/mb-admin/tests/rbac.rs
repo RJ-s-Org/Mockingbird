@@ -406,6 +406,79 @@ async fn admin_can_manage_profiles() {
 }
 
 #[tokio::test]
+async fn only_sysadmin_binds_a_secret_to_a_base_url() {
+    let h = harness().await;
+    let uri = |n: &str| format!("{DEFAULT}/llm-profiles/{n}");
+    let with = |base: &str, secret: Option<&str>, model: &str| json!({ "base_url": base, "model": model, "secret_ref": secret });
+    let key = Some("env:MB_LLM_API_KEY");
+    for who in ["admin", "owner"] {
+        let w = Some(who);
+        // A new profile that sends the server's key to an attacker.
+        h.call(
+            w,
+            Method::PUT,
+            &uri("evil"),
+            Some(with("https://attacker.example", key, "m")),
+        )
+        .await
+        .expect(
+            StatusCode::FORBIDDEN,
+            &format!("{who}: new profile with a secret"),
+        );
+    }
+    h.call(
+        Some("sysadmin"),
+        Method::PUT,
+        &uri("s"),
+        Some(with("https://llm", key, "m")),
+    )
+    .await
+    .expect(StatusCode::OK, "sysadmin sets the secret");
+    let a = Some("admin");
+    for (body, what) in [
+        (with("https://attacker.example", key, "m"), "new base_url"),
+        (
+            with("https://llm", Some("env:OTHER_API_KEY"), "m"),
+            "new secret_ref",
+        ),
+    ] {
+        h.call(a, Method::PUT, &uri("s"), Some(body))
+            .await
+            .expect(StatusCode::FORBIDDEN, what);
+    }
+    let r = h.call(Some("sysadmin"), Method::GET, &uri("s"), None).await;
+    r.expect(StatusCode::OK, "unchanged");
+    assert_eq!(r.json()["base_url"], "https://llm");
+    assert_eq!(r.json()["secret_ref"], "env:MB_LLM_API_KEY");
+    // Other fields stay the admin's to change, and so does a profile
+    // without a secret.
+    h.call(
+        a,
+        Method::PUT,
+        &uri("s"),
+        Some(with("https://llm", key, "m2")),
+    )
+    .await
+    .expect(StatusCode::OK, "admin changes the model");
+    h.call(
+        a,
+        Method::PUT,
+        &uri("s"),
+        Some(with("https://other", None, "m2")),
+    )
+    .await
+    .expect(StatusCode::OK, "admin drops the secret");
+    h.call(
+        a,
+        Method::PUT,
+        &uri("plain"),
+        Some(with("https://local", None, "m")),
+    )
+    .await
+    .expect(StatusCode::OK, "admin creates a profile without a secret");
+}
+
+#[tokio::test]
 async fn owner_can_patch_and_delete_workspace_admin_cannot() {
     let h = harness().await;
     h.call(Some("admin"), Method::DELETE, DEFAULT, None)
