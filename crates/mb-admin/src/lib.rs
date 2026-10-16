@@ -188,7 +188,11 @@ pub fn router(st: AdminState) -> Router {
         )
         .route(
             "/mocks/{mock}/contracts/{version}/draft",
-            get(drafts::get_draft).put(drafts::put_draft),
+            // Imported drafts are as large as contract uploads, and every
+            // console edit PUTs the whole document.
+            get(drafts::get_draft).put(drafts::put_draft).layer(
+                axum::extract::DefaultBodyLimit::max(contracts::MAX_CONTRACT_BYTES),
+            ),
         )
         .route(
             "/mocks/{mock}/contracts/{version}/approve",

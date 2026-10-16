@@ -356,6 +356,28 @@ async fn put_draft_recompiles_and_marks_edited() {
     );
 }
 
+/// Imports produce drafts far larger than axum's default 2 MiB body limit;
+/// the PUT that saves every edit must accept them like contract uploads.
+#[tokio::test]
+async fn put_draft_over_two_mib_is_accepted() {
+    let h = harness().await;
+    let v = h.har_draft().await;
+    let mut doc = h.draft(v).await["document"].clone();
+    doc["paths"][PET_PATH]["get"]["description"] = json!("x".repeat(2 * 1024 * 1024 + 1024));
+    let body = json!({ "document": doc });
+    assert!(body.to_string().len() > 2 * 1024 * 1024);
+    let view = h
+        .call(
+            "editor",
+            Method::PUT,
+            &Harness::url(v, "/draft"),
+            Some(body),
+        )
+        .await
+        .expect(StatusCode::OK, "put large draft");
+    assert_eq!(operation(&view, "GET", PET_PATH)["edited"], true);
+}
+
 #[tokio::test]
 async fn put_draft_invalid_422_with_pointers() {
     let h = harness().await;
