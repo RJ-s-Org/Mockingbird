@@ -35,6 +35,71 @@ pub enum BrokerError {
 /// Messages received on a subscription.
 pub type MessageStream = BoxStream<'static, Result<InMessage, BrokerError>>;
 
+/// Messages queued per subscription of the memory and MQTT brokers; past
+/// it new messages are dropped, so a slow consumer never grows memory.
+pub(crate) const SUBSCRIPTION_QUEUE: usize = 64;
+
+/// The sending side of one subscription's bounded queue. It never blocks:
+/// a message that does not fit is dropped and counted in
+/// `mb_broker_messages_dropped_total{kind, address}`.
+pub(crate) struct SubscriptionSender {
+    tx: futures::channel::mpsc::Sender<Result<InMessage, BrokerError>>,
+    kind: &'static str,
+    template: String,
+    /// Whether the last offer was dropped (warn once per run of drops).
+    dropping: bool,
+}
+
+/// A bounded subscription queue of broker `kind` for `template`.
+pub(crate) fn subscription(
+    kind: &'static str,
+    template: &str,
+) -> (SubscriptionSender, MessageStream) {
+    use futures::StreamExt;
+    // The channel holds `buffer + 1` (one slot per sender).
+    let (tx, rx) = futures::channel::mpsc::channel(SUBSCRIPTION_QUEUE - 1);
+    let sender = SubscriptionSender {
+        tx,
+        kind,
+        template: template.to_string(),
+        dropping: false,
+    };
+    (sender, rx.boxed())
+}
+
+impl SubscriptionSender {
+    /// Whether the subscription's stream is gone.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
+    /// Queue `msg`, dropping it when the queue is full. `false` once the
+    /// stream is gone.
+    pub(crate) fn offer(&mut self, msg: InMessage) -> bool {
+        match self.tx.try_send(Ok(msg)) {
+            Ok(()) => {
+                self.dropping = false;
+                true
+            }
+            Err(e) if e.is_full() => {
+                metrics::counter!(
+                    "mb_broker_messages_dropped_total",
+                    "kind" => self.kind,
+                    "address" => self.template.clone(),
+                )
+                .increment(1);
+                if !self.dropping {
+                    tracing::warn!(kind = self.kind, address = %self.template,
+                        "consumer is falling behind; dropping messages");
+                    self.dropping = true;
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 /// A connection to one broker.
 #[async_trait]
 pub trait BrokerClient: Send + Sync {
@@ -49,6 +114,16 @@ pub trait BrokerClient: Send + Sync {
     ) -> Result<MessageStream, BrokerError>;
     /// Flush queued messages (default: nothing to flush).
     async fn flush(&self, _timeout: Duration) {}
+    /// Whether the client can still be used. A client that cannot (its
+    /// connection is gone for good) is dropped and connected again.
+    fn is_connected(&self) -> bool {
+        true
+    }
+    /// The client's current connection problem, for a client that
+    /// reconnects by itself (default: none).
+    fn health(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Which kind of broker a configured connection talks to.
@@ -207,7 +282,17 @@ impl Brokers {
                 "broker \"{name}\" is not configured"
             )));
         };
-        let cached = lock(&self.clients).get(name).cloned();
+        let cached = {
+            let mut clients = lock(&self.clients);
+            match clients.get(name) {
+                Some(client) if !client.is_connected() => {
+                    tracing::warn!(broker = %name, "broker connection lost; reconnecting");
+                    clients.remove(name);
+                    None
+                }
+                other => other.cloned(),
+            }
+        };
         let result = match cached {
             Some(client) => Ok(client),
             None => self.connect(config).await.map(|client| {
@@ -293,11 +378,11 @@ impl Brokers {
     /// `(broker, last error)` for every broker whose last outcome was an
     /// error, sorted by broker.
     pub fn issues(&self) -> Vec<(String, String)> {
-        let health = lock(&self.health);
-        let mut issues: Vec<(String, String)> = health
-            .iter()
+        let mut issues: Vec<(String, String)> = self
+            .current_health()
+            .into_iter()
             .filter_map(|(name, h)| match h {
-                Health::Error(e) => Some((name.clone(), e.clone())),
+                Health::Error(e) => Some((name, e)),
                 Health::Ok => None,
             })
             .collect();
@@ -305,9 +390,26 @@ impl Brokers {
         issues
     }
 
+    /// The last reported outcome of each broker, overridden by the
+    /// current problem of its connected client: a client that reconnects
+    /// by itself may lose its broker without any call failing.
+    fn current_health(&self) -> HashMap<String, Health> {
+        let mut health = lock(&self.health).clone();
+        let clients: Vec<(String, Arc<dyn BrokerClient>)> = lock(&self.clients)
+            .iter()
+            .map(|(name, client)| (name.clone(), Arc::clone(client)))
+            .collect();
+        for (name, client) in clients {
+            if let Err(e) = client.health() {
+                health.insert(name, Health::Error(e));
+            }
+        }
+        health
+    }
+
     /// Every configured broker with its status, sorted by name.
     pub fn infos(&self) -> Vec<BrokerInfo> {
-        let health = lock(&self.health);
+        let health = self.current_health();
         self.configs
             .values()
             .map(|config| BrokerInfo {
@@ -353,6 +455,93 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A client whose connection state the test sets.
+    #[derive(Default)]
+    struct Fake {
+        dead: AtomicBool,
+        problem: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl BrokerClient for Fake {
+        async fn publish(&self, _: &ChannelBinding, _: OutMessage) -> Result<(), BrokerError> {
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _: &ChannelBinding,
+            _: &str,
+        ) -> Result<MessageStream, BrokerError> {
+            Err(BrokerError::Subscribe("fake".into()))
+        }
+        fn is_connected(&self) -> bool {
+            !self.dead.load(Ordering::SeqCst)
+        }
+        fn health(&self) -> Result<(), String> {
+            match lock(&self.problem).clone() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn memory_brokers() -> Arc<Brokers> {
+        Brokers::new(
+            vec![BrokerConfig {
+                name: "b".into(),
+                kind: BrokerKind::Memory,
+                url: String::new(),
+                tls: false,
+                ca_file: None,
+                sasl: None,
+                client_id_prefix: "mockingbird".into(),
+            }],
+            Arc::new(EnvFileSecrets),
+        )
+    }
+
+    #[tokio::test]
+    async fn dead_cached_client_is_replaced() {
+        let brokers = memory_brokers();
+        let fake = Arc::new(Fake::default());
+        lock(&brokers.clients).insert("b".into(), Arc::clone(&fake) as Arc<dyn BrokerClient>);
+        let client = brokers.client("b").await.unwrap();
+        assert!(Arc::ptr_eq(
+            &client,
+            &(Arc::clone(&fake) as Arc<dyn BrokerClient>)
+        ));
+
+        fake.dead.store(true, Ordering::SeqCst);
+        let client = brokers.client("b").await.unwrap();
+        assert!(!Arc::ptr_eq(
+            &client,
+            &(Arc::clone(&fake) as Arc<dyn BrokerClient>)
+        ));
+        assert!(client.is_connected());
+    }
+
+    #[tokio::test]
+    async fn client_health_reaches_issues_and_infos() {
+        let brokers = memory_brokers();
+        let fake = Arc::new(Fake::default());
+        lock(&brokers.clients).insert("b".into(), Arc::clone(&fake) as Arc<dyn BrokerClient>);
+        brokers.client("b").await.unwrap();
+        assert!(brokers.issues().is_empty());
+        assert_eq!(brokers.infos()[0].status, "ok");
+
+        *lock(&fake.problem) = Some("connection refused".into());
+        assert_eq!(
+            brokers.issues(),
+            vec![("b".to_string(), "connection refused".to_string())]
+        );
+        assert_eq!(brokers.infos()[0].status, "error: connection refused");
+
+        *lock(&fake.problem) = None;
+        assert!(brokers.issues().is_empty());
+    }
 
     #[test]
     fn strip_userinfo_cases() {

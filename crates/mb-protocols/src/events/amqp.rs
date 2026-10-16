@@ -284,6 +284,20 @@ impl AmqpClient {
 
 #[async_trait]
 impl BrokerClient for AmqpClient {
+    /// lapin does not recover connections: once the connection is lost
+    /// the client is replaced.
+    fn is_connected(&self) -> bool {
+        self.connection.status().connected()
+    }
+
+    fn health(&self) -> Result<(), String> {
+        if self.is_connected() {
+            Ok(())
+        } else {
+            Err("connection lost".into())
+        }
+    }
+
     async fn publish(&self, target: &ChannelBinding, msg: OutMessage) -> Result<(), BrokerError> {
         let (exchange, exchange_type, routing_key, queue) = amqp_binding(target)?;
         let routing_key = match (routing_key, queue) {

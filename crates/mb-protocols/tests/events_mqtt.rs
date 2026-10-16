@@ -305,3 +305,178 @@ async fn non_plain_sasl_rejected() {
         Ok(_) => panic!("expected a connect error"),
     }
 }
+
+/// A TCP proxy in front of the broker that the test can cut and restore.
+struct Proxy {
+    port: u16,
+    upstream: u16,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl Proxy {
+    async fn start(upstream: u16) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = Self {
+            port,
+            upstream,
+            tasks: Arc::default(),
+        };
+        proxy.serve(listener);
+        proxy
+    }
+
+    fn serve(&self, listener: tokio::net::TcpListener) {
+        let upstream = self.upstream;
+        let tasks = Arc::clone(&self.tasks);
+        let accept = tokio::spawn(async move {
+            loop {
+                let Ok((mut inbound, _)) = listener.accept().await else {
+                    return;
+                };
+                let conn = tokio::spawn(async move {
+                    if let Ok(mut outbound) =
+                        tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await
+                    {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+                tasks.lock().unwrap().push(conn);
+            }
+        });
+        self.tasks.lock().unwrap().push(accept);
+    }
+
+    /// Close the listener and every proxied connection.
+    fn cut(&self) {
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }
+
+    /// Listen again on the same port.
+    async fn restore(&self) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", self.port))
+            .await
+            .unwrap();
+        self.serve(listener);
+    }
+}
+
+/// Wait up to `timeout` for `cond`.
+async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cond()
+}
+
+#[tokio::test]
+async fn broker_lost_after_connect_reaches_issues() {
+    let proxy = Proxy::start(start_broker()).await;
+    let brokers = Brokers::new(vec![mqtt_config("m", proxy.port)], Arc::new(EnvFileSecrets));
+    let client = brokers.client("m").await.unwrap();
+    assert!(brokers.issues().is_empty());
+
+    proxy.cut();
+    assert!(
+        eventually(Duration::from_secs(5), || !brokers.issues().is_empty()).await,
+        "a lost connection must show in issues"
+    );
+    assert_eq!(brokers.issues()[0].0, "m");
+    assert!(brokers.infos()[0].status.starts_with("error: "));
+    // Publishing fails fast while disconnected.
+    let msg = OutMessage {
+        key: None,
+        headers: Vec::new(),
+        payload: b"{}".to_vec(),
+        content_type: String::new(),
+    };
+    assert!(matches!(
+        client.publish(&binding("a/b"), msg).await,
+        Err(BrokerError::Publish(_))
+    ));
+
+    proxy.restore().await;
+    assert!(
+        eventually(Duration::from_secs(10), || brokers.issues().is_empty()).await,
+        "issues: {:?}",
+        brokers.issues()
+    );
+}
+
+#[tokio::test]
+async fn slow_subscriber_drops_instead_of_queueing() {
+    let port = start_broker();
+    let client = mb_protocols::events::MqttClient::connect(&mqtt_config("m", port), None)
+        .await
+        .unwrap();
+    // Never read: its queue must stay bounded.
+    let _slow = client.subscribe(&binding("flood/x"), "g").await.unwrap();
+    let mut other = client.subscribe(&binding("other/x"), "g").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (sender, _rx, _task) = test_client(port, "flooder").await;
+    for i in 0..500 {
+        sender
+            .publish("flood/x", QoS::AtMostOnce, false, format!("{{\"i\":{i}}}"))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut slow = _slow;
+    let mut queued = 0;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(100), slow.next()).await {
+        queued += 1;
+    }
+    assert!(queued > 0 && queued <= 65, "queued {queued}");
+
+    // The event loop keeps delivering to other subscriptions.
+    sender
+        .publish("other/x", QoS::AtLeastOnce, false, "{}")
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), other.next())
+        .await
+        .unwrap();
+    assert!(matches!(got, Some(Ok(_))));
+}
+
+#[tokio::test]
+async fn shutdown_flushes_queued_publishes() {
+    let port = start_broker();
+    let (watcher, mut rx, _task) = test_client(port, "watcher").await;
+    watcher
+        .subscribe("flush/x", QoS::AtLeastOnce)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let brokers = Brokers::new(vec![mqtt_config("m", port)], Arc::new(EnvFileSecrets));
+    let client = brokers.client("m").await.unwrap();
+    for i in 0..50 {
+        let msg = OutMessage {
+            key: None,
+            headers: Vec::new(),
+            payload: format!("{{\"i\":{i}}}").into_bytes(),
+            content_type: String::new(),
+        };
+        client.publish(&binding("flush/x"), msg).await.unwrap();
+    }
+    brokers.shutdown(Duration::from_secs(5)).await;
+    drop(client);
+    drop(brokers);
+
+    let mut received = 0;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        received += 1;
+        if received == 50 {
+            break;
+        }
+    }
+    assert_eq!(received, 50);
+}

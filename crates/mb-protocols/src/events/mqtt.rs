@@ -1,13 +1,13 @@
 //! The MQTT 5 broker client (feature `mqtt`), built on rumqttc.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use futures::channel::mpsc::{UnboundedSender, unbounded};
 use mb_mcm::ChannelBinding;
+use rumqttc::Outgoing;
 use rumqttc::tokio_rustls::rustls;
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{Packet, Publish, PublishProperties};
@@ -15,7 +15,9 @@ use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions};
 use rumqttc::{TlsConfiguration, Transport};
 
 use super::address::param_names;
-use super::broker::{BrokerClient, BrokerConfig, BrokerError, MessageStream};
+use super::broker::{
+    BrokerClient, BrokerConfig, BrokerError, MessageStream, SubscriptionSender, subscription,
+};
 use super::{InMessage, MAX_MESSAGE_BYTES, OutMessage};
 
 /// How long the first connection may take.
@@ -44,13 +46,37 @@ const SYSTEM_CA_BUNDLES: &[&str] = &[
 struct Subscription {
     filter: String,
     qos: QoS,
-    tx: UnboundedSender<Result<InMessage, BrokerError>>,
+    tx: SubscriptionSender,
 }
 
 type Subscriptions = Arc<Mutex<Vec<Subscription>>>;
 
-fn lock(subs: &Mutex<Vec<Subscription>>) -> MutexGuard<'_, Vec<Subscription>> {
-    subs.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The connection state the event loop shares with the client handle.
+#[derive(Default)]
+struct Link {
+    /// The last connection error, until the broker acknowledges a
+    /// reconnect.
+    problem: Mutex<Option<String>>,
+    /// Set once `flush` has asked the event loop to disconnect.
+    closing: AtomicBool,
+    /// Set once the event loop has sent `Disconnect` or stopped.
+    closed: tokio::sync::watch::Sender<bool>,
+}
+
+impl Link {
+    fn problem(&self) -> Option<String> {
+        lock(&self.problem).clone()
+    }
+
+    fn set_problem(&self, problem: Option<String>) {
+        *lock(&self.problem) = problem;
+    }
 }
 
 /// A connection to an MQTT 5 broker. One task polls the event loop and
@@ -59,6 +85,7 @@ fn lock(subs: &Mutex<Vec<Subscription>>) -> MutexGuard<'_, Vec<Subscription>> {
 pub struct MqttClient {
     client: AsyncClient,
     subs: Subscriptions,
+    link: Arc<Link>,
     event_loop: tokio::task::JoinHandle<()>,
 }
 
@@ -245,14 +272,14 @@ fn in_message(publish: &Publish) -> InMessage {
 /// dropping subscriptions whose stream is gone.
 fn fan_out(subs: &Mutex<Vec<Subscription>>, publish: &Publish) {
     let msg = in_message(publish);
-    lock(subs).retain(|sub| {
+    lock(subs).retain_mut(|sub| {
         if sub.tx.is_closed() {
             return false;
         }
         if !filter_matches(&sub.filter, &msg.address) {
             return true;
         }
-        sub.tx.unbounded_send(Ok(msg.clone())).is_ok()
+        sub.tx.offer(msg.clone())
     });
 }
 
@@ -273,19 +300,34 @@ fn resubscribe(client: &AsyncClient, subs: &Mutex<Vec<Subscription>>) {
     }
 }
 
-/// Poll the event loop until aborted, reconnecting after errors.
-async fn run_event_loop(mut event_loop: EventLoop, client: AsyncClient, subs: Subscriptions) {
+/// Poll the event loop until aborted or disconnected by `flush`,
+/// reconnecting after errors. The connection state is kept in `link`.
+async fn run_event_loop(
+    mut event_loop: EventLoop,
+    client: AsyncClient,
+    subs: Subscriptions,
+    link: Arc<Link>,
+) {
     loop {
         match event_loop.poll().await {
             Ok(Event::Incoming(Packet::Publish(publish))) => fan_out(&subs, &publish),
-            Ok(Event::Incoming(Packet::ConnAck(_))) => resubscribe(&client, &subs),
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                link.set_problem(None);
+                resubscribe(&client, &subs);
+            }
+            Ok(Event::Outgoing(Outgoing::Disconnect)) => break,
             Ok(_) => {}
             Err(e) => {
+                if link.closing.load(Ordering::SeqCst) {
+                    break;
+                }
                 tracing::warn!(error = %e, "mqtt connection error; reconnecting");
+                link.set_problem(Some(e.to_string()));
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         }
     }
+    link.closed.send_replace(true);
 }
 
 /// Poll `event_loop` until the broker acknowledges the connection.
@@ -318,14 +360,17 @@ impl MqttClient {
             }
         }
         let subs: Subscriptions = Arc::new(Mutex::new(Vec::new()));
+        let link = Arc::new(Link::default());
         let event_loop = tokio::spawn(run_event_loop(
             event_loop,
             client.clone(),
             Arc::clone(&subs),
+            Arc::clone(&link),
         ));
         Ok(Self {
             client,
             subs,
+            link,
             event_loop,
         })
     }
@@ -346,6 +391,11 @@ impl BrokerClient for MqttClient {
                 "an mqtt broker serves only mqtt bindings".into(),
             ));
         };
+        // rumqttc would queue the message until it reconnects; report the
+        // lost connection instead, so the publish is retried and recorded.
+        if let Some(problem) = self.link.problem() {
+            return Err(BrokerError::Publish(format!("not connected: {problem}")));
+        }
         let mut properties = PublishProperties::default();
         for (name, value) in msg.headers {
             if name == HEADER_CORRELATION {
@@ -375,7 +425,7 @@ impl BrokerClient for MqttClient {
         };
         let filter = mqtt_filter(topic);
         let qos = qos(level);
-        let (tx, rx) = unbounded();
+        let (tx, rx) = subscription("mqtt", &filter);
         lock(&self.subs).push(Subscription {
             filter: filter.clone(),
             qos,
@@ -385,7 +435,39 @@ impl BrokerClient for MqttClient {
             .subscribe(filter, qos)
             .await
             .map_err(|e| BrokerError::Subscribe(e.to_string()))?;
-        Ok(rx.boxed())
+        Ok(rx)
+    }
+
+    /// Send what is queued: a `Disconnect` is queued behind the pending
+    /// publishes, then the event loop is awaited until it has sent it,
+    /// all within `timeout`. Nothing is waited for while disconnected.
+    async fn flush(&self, timeout: Duration) {
+        if self.link.problem().is_some() || *self.link.closed.borrow() {
+            return;
+        }
+        self.link.closing.store(true, Ordering::SeqCst);
+        let mut closed = self.link.closed.subscribe();
+        let drained = async {
+            if self.client.disconnect().await.is_err() {
+                return;
+            }
+            let _ = closed.wait_for(|closed| *closed).await;
+        };
+        if tokio::time::timeout(timeout, drained).await.is_err() {
+            tracing::warn!("mqtt flush timed out after {}s", timeout.as_secs());
+        }
+    }
+
+    /// The client reconnects by itself until `flush` disconnects it.
+    fn is_connected(&self) -> bool {
+        !*self.link.closed.borrow()
+    }
+
+    fn health(&self) -> Result<(), String> {
+        match self.link.problem() {
+            Some(problem) => Err(problem),
+            None => Ok(()),
+        }
     }
 }
 

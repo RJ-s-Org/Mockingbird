@@ -1,34 +1,39 @@
 //! An in-process broker: used by tests and by `memory` brokers.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use futures::channel::mpsc::{UnboundedSender, unbounded};
 use mb_mcm::ChannelBinding;
 use tokio::sync::Notify;
 
 use super::address::address_matches;
-use super::broker::{BrokerClient, BrokerError, MessageStream};
+use super::broker::{BrokerClient, BrokerError, MessageStream, SubscriptionSender, subscription};
 use super::{InMessage, OutMessage};
 
 /// A live subscription: its address template and where to deliver.
 struct Subscriber {
     template: String,
-    tx: UnboundedSender<Result<InMessage, BrokerError>>,
+    tx: SubscriptionSender,
 }
+
+/// Published messages kept for [`MemoryBroker::published`].
+const HISTORY: usize = 1000;
 
 #[derive(Default)]
 struct State {
-    published: Vec<(ChannelBinding, OutMessage)>,
+    /// The last [`HISTORY`] published messages.
+    published: VecDeque<(ChannelBinding, OutMessage)>,
+    /// Every message ever published.
+    published_count: usize,
     subscribers: Vec<Subscriber>,
     /// Publishes left to fail.
     failures: usize,
 }
 
-/// A broker that keeps every published message and delivers it to the
-/// subscribers whose address template matches.
+/// A broker that delivers each published message to the subscribers
+/// whose address template matches, and keeps the last 1,000.
 #[derive(Default)]
 pub struct MemoryBroker {
     state: Mutex<State>,
@@ -46,9 +51,14 @@ impl MemoryBroker {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Every message published so far, in order.
+    /// The last 1,000 messages published, in order.
     pub fn published(&self) -> Vec<(ChannelBinding, OutMessage)> {
-        self.state().published.clone()
+        self.state().published.iter().cloned().collect()
+    }
+
+    /// How many messages were ever published.
+    pub fn published_count(&self) -> usize {
+        self.state().published_count
     }
 
     /// The published messages once there are at least `n`, or whatever
@@ -88,14 +98,14 @@ impl MemoryBroker {
 /// Send `msg` to every live subscriber whose template matches `address`,
 /// dropping subscribers whose stream is gone.
 fn deliver(state: &mut State, address: &str, msg: &InMessage) {
-    state.subscribers.retain(|sub| {
+    state.subscribers.retain_mut(|sub| {
         if sub.tx.is_closed() {
             return false;
         }
         if !address_matches(&sub.template, address) {
             return true;
         }
-        sub.tx.unbounded_send(Ok(msg.clone())).is_ok()
+        sub.tx.offer(msg.clone())
     });
 }
 
@@ -116,7 +126,11 @@ impl BrokerClient for MemoryBroker {
                 payload: msg.payload.clone(),
             };
             deliver(&mut state, address, &delivered);
-            state.published.push((target.clone(), msg));
+            if state.published.len() >= HISTORY {
+                state.published.pop_front();
+            }
+            state.published.push_back((target.clone(), msg));
+            state.published_count += 1;
         }
         self.published.notify_waiters();
         Ok(())
@@ -127,11 +141,9 @@ impl BrokerClient for MemoryBroker {
         binding: &ChannelBinding,
         _group: &str,
     ) -> Result<MessageStream, BrokerError> {
-        let (tx, rx) = unbounded();
-        self.state().subscribers.push(Subscriber {
-            template: binding.address().to_string(),
-            tx,
-        });
-        Ok(rx.boxed())
+        let template = binding.address().to_string();
+        let (tx, rx) = subscription("memory", &template);
+        self.state().subscribers.push(Subscriber { template, tx });
+        Ok(rx)
     }
 }

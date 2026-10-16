@@ -328,3 +328,42 @@ fn param_values_from_context_then_faker() {
     let values = param_values(&engine, &bundle, &bare, &[]);
     assert_eq!(values["streetlightId"], "1");
 }
+
+#[tokio::test]
+async fn memory_keeps_a_bounded_history() {
+    let broker = MemoryBroker::new();
+    for i in 0..1500 {
+        broker
+            .publish(&mqtt("a/b"), out(&format!("{{\"i\":{i}}}")))
+            .await
+            .unwrap();
+    }
+    let published = broker.published();
+    assert_eq!(published.len(), 1000);
+    assert_eq!(published[0].1.payload, br#"{"i":500}"#.to_vec());
+    assert_eq!(published[999].1.payload, br#"{"i":1499}"#.to_vec());
+    assert_eq!(broker.published_count(), 1500);
+}
+
+#[tokio::test]
+async fn memory_slow_subscriber_queue_is_bounded() {
+    let broker = MemoryBroker::new();
+    let mut slow = broker.subscribe(&mqtt("a/{x}"), "g").await.unwrap();
+    for i in 0..500 {
+        broker
+            .publish(&mqtt("a/b"), out(&format!("{{\"i\":{i}}}")))
+            .await
+            .unwrap();
+    }
+    let mut queued = 0;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(50), slow.next()).await {
+        queued += 1;
+    }
+    assert!(queued > 0 && queued <= 64, "queued {queued}");
+    // The subscription keeps working once drained.
+    broker.publish(&mqtt("a/c"), out("{}")).await.unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(1), slow.next())
+        .await
+        .unwrap();
+    assert!(matches!(next, Some(Ok(_))));
+}
