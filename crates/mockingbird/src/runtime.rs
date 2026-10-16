@@ -131,7 +131,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
         deps.state.clone(),
     );
     rt.workspace = mock.workspace.clone();
-    rt.data_plane_auth = data_plane_auth(&mock.data_plane_auth);
+    rt.set_data_plane_auth(data_plane_auth(&mock.data_plane_auth));
     rt.data_plane_keys = deps.data_plane_keys.clone();
     rt.header_overrides = mock.header_overrides;
     rt.scenarios = scenarios;

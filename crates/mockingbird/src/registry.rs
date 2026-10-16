@@ -468,7 +468,7 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
         }
     };
     let state_health = Arc::clone(&runtime.state_health);
-    let protocol = runtime.bundle.protocol();
+    let protocol = runtime.bundle().protocol();
     let runtime = Arc::new(runtime);
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
