@@ -329,3 +329,20 @@ async fn introspection_query_over_http_lists_subscription_type() {
         "{body}"
     );
 }
+
+#[tokio::test]
+async fn shutdown_completes_open_subscriptions() {
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let mut rt = runtime(None);
+    rt.shutdown = mb_protocols::Shutdown::new(rx);
+    let addr = serve(rt).await;
+    let mut ws = init(&addr, json!({"x-mockingbird-stream-items": "1"})).await;
+    send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "1", "payload": {"query": SUBSCRIPTION}}),
+    )
+    .await;
+    assert_issue(&recv(&mut ws).await, "next");
+    stop.send_replace(true);
+    assert_eq!(recv(&mut ws).await, json!({"type": "complete", "id": "1"}));
+}

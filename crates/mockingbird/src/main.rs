@@ -9,6 +9,9 @@ use mockingbird::config::{
 };
 use mockingbird::telemetry;
 
+/// How long open connections may delay shutdown after the stop signal.
+const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -130,11 +133,14 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         shutdown_signal().await;
+        tracing::info!("shutting down");
+        mockingbird::runtime::stop_open_streams();
         let _ = stop_tx.send(true);
     });
     let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
         let _ = rx.wait_for(|stop| *stop).await;
     };
+    let grace_rx = stop_rx.clone();
     let data = axum::serve(data_listener, app.data.clone())
         .with_graceful_shutdown(stopped(stop_rx.clone()));
     let admin_router = app.admin.clone();
@@ -161,10 +167,24 @@ async fn serve(args: ServeArgs) -> Result<(), Failure> {
             None => Ok(()),
         }
     };
-    let (data, admin, grpc) = tokio::join!(data, admin, grpc);
-    data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
-    admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
-    grpc.map_err(|e| anyhow::anyhow!("gRPC: {e}"))?;
+    let servers = async { tokio::join!(data, admin, grpc) };
+    // Connections still open this long after the stop signal (a gRPC
+    // stream, a WebSocket) are abandoned, so the request log is still
+    // flushed before the supervisor's kill.
+    let grace = async {
+        stopped(grace_rx).await;
+        tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT).await;
+    };
+    tokio::select! {
+        (data, admin, grpc) = servers => {
+            data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
+            admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
+            grpc.map_err(|e| anyhow::anyhow!("gRPC: {e}"))?;
+        }
+        () = grace => tracing::warn!(
+            "connections still open {GRACEFUL_SHUTDOWN_TIMEOUT:?} after the stop signal; closing them"
+        ),
+    }
     app.shutdown().await;
     Ok(())
 }

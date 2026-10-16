@@ -195,6 +195,35 @@ pub struct MockRuntime {
     pub state_health: Arc<StateHealth>,
     /// Protocol knobs (GraphQL limits, keepalives, gRPC message size).
     pub protocols: ProtocolSettings,
+    /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
+    /// process begins to shut down. Never fires by default.
+    pub shutdown: Shutdown,
+}
+
+/// A process stop signal that open-ended streams end on, so a graceful
+/// shutdown is not held open by a connected client.
+#[derive(Clone, Debug, Default)]
+pub struct Shutdown(Option<tokio::sync::watch::Receiver<bool>>);
+
+impl Shutdown {
+    /// A signal that fires once `true` is sent on the channel of `stop`.
+    pub fn new(stop: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self(Some(stop))
+    }
+
+    /// Resolves once shutdown has begun; never for the default signal or
+    /// when the sender is dropped without sending.
+    pub fn stopped(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let stop = self.0.clone();
+        async move {
+            if let Some(mut stop) = stop
+                && stop.wait_for(|stop| *stop).await.is_ok()
+            {
+                return;
+            }
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl MockRuntime {
@@ -217,6 +246,7 @@ impl MockRuntime {
             recorder: None,
             state_health: Arc::new(StateHealth::default()),
             protocols: ProtocolSettings::default(),
+            shutdown: Shutdown::default(),
         }
     }
 }

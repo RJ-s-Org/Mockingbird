@@ -10,12 +10,23 @@ use arc_swap::ArcSwapOption;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec, StreamConfig};
 use mb_ext::{Extensions, Tenancy};
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
-use mb_protocols::{MockRuntime, ProtocolSettings, RequestRecorder, ScenarioRuntime};
+use mb_protocols::{MockRuntime, ProtocolSettings, RequestRecorder, ScenarioRuntime, Shutdown};
 use mb_state::StateStore;
 use mb_store::{ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, Scenario};
 
 /// Fallback hops followed from a mock's profile before the chain is rejected.
 pub const MAX_FALLBACK_DEPTH: usize = 3;
+
+/// The process-wide stop signal every runtime's open-ended streams end on.
+static STOP: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+/// Ends every open SSE stream and GraphQL subscription, so a graceful
+/// shutdown is not held open by connected clients. Called once the process
+/// is asked to stop.
+pub fn stop_open_streams() {
+    STOP.send_replace(true);
+}
 
 /// Everything shared by the runtimes of all mocks.
 #[derive(Clone)]
@@ -114,6 +125,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     rt.ext = deps.ext.clone();
     rt.recorder = deps.recorder.clone();
     rt.protocols = deps.protocols.clone();
+    rt.shutdown = Shutdown::new(STOP.subscribe());
     Ok(Some(rt))
 }
 

@@ -4,7 +4,8 @@
 //! A subscription root field streams its operation's engine items, then
 //! the resources of its type upserted in the same session, each projected
 //! like a query result. It runs until the client completes it or
-//! disconnects, and is reported once, when its stream is dropped.
+//! disconnects, or the process shuts down, and is reported once, when its
+//! stream is dropped.
 
 use std::sync::Arc;
 
@@ -252,8 +253,10 @@ async fn open(
         ..Default::default()
     };
     let generated = generated(Arc::clone(&rt), &plan, op.clone(), call);
+    // Open until the client stops it or the process shuts down.
     let merged = stream::select_with_strategy(generated, feed, |_: &mut ()| PollNext::Left)
-        .chain(stream::pending());
+        .chain(stream::pending())
+        .take_until(rt.shutdown.stopped());
     let pieces = stream::once(async move {
         sleep.await;
         merged

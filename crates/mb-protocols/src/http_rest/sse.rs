@@ -3,7 +3,7 @@
 //!
 //! The engine's stream items come first; resources of the operation's type
 //! upserted in the same session are interleaved as they arrive. The stream
-//! stays open until the client disconnects, and the call is reported once,
+//! stays open until the client disconnects or the process shuts down, and the call is reported once,
 //! when the response body is dropped.
 
 use std::convert::Infallible;
@@ -81,10 +81,13 @@ pub(crate) fn sse_response(
         source: None,
     };
     let delay = plan.delay;
+    let stopped = rt.shutdown.stopped();
     let generated = generated(rt, &plan, op, call);
-    // A generated item whenever one is ready; changes in between.
+    // A generated item whenever one is ready; changes in between. Open
+    // until the client disconnects or the process shuts down.
     let merged = stream::select_with_strategy(generated, feed, |_: &mut ()| PollNext::Left)
-        .chain(stream::pending());
+        .chain(stream::pending())
+        .take_until(stopped);
     let pieces = stream::once(async move {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;

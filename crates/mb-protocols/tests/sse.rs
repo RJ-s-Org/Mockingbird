@@ -298,3 +298,26 @@ async fn sse_latency_delays_first_event() {
     timeout(reader.next_event()).await;
     assert!(started.elapsed() >= Duration::from_millis(300));
 }
+
+#[tokio::test]
+async fn shutdown_ends_open_streams() {
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let mut rt = runtime(None);
+    rt.shutdown = mb_protocols::Shutdown::new(rx);
+    let base = serve(rt).await;
+    let resp = open(&base, &[("X-Mockingbird-Stream-Items", "1")]).await;
+    assert_eq!(resp.status(), 200);
+    let mut reader = Reader::new(resp);
+    reader.next_event().await;
+    stop.send_replace(true);
+    let rest = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut rest = String::new();
+        while let Some(chunk) = reader.body.next().await {
+            rest.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+        }
+        rest
+    })
+    .await
+    .expect("the stream stays open after shutdown");
+    assert!(!rest.contains("data:"), "{rest}");
+}
