@@ -80,3 +80,11 @@ tower.workspace = true
 [[test]]
 name = "events_mqtt"
 required-features = ["mqtt"]
+
+[[test]]
+name = "events_amqp"
+required-features = ["amqp"]
+
+[[test]]
+name = "events_kafka"
+required-features = ["kafka"]

@@ -3,8 +3,12 @@
 //! address handling, and the per-mock channel runtime.
 
 mod address;
+#[cfg(feature = "amqp")]
+mod amqp;
 mod broker;
 mod consume;
+#[cfg(feature = "kafka")]
+mod kafka;
 mod memory;
 #[cfg(feature = "mqtt")]
 mod mqtt;
@@ -14,10 +18,14 @@ mod triggers;
 mod ws;
 
 pub use address::{address_matches, param_names, param_values, resolve_binding, sanitize_param};
+#[cfg(feature = "amqp")]
+pub use amqp::AmqpClient;
 pub use broker::{
     BrokerClient, BrokerConfig, BrokerError, BrokerInfo, BrokerKind, Brokers, MessageStream,
     SaslConfig,
 };
+#[cfg(feature = "kafka")]
+pub use kafka::KafkaClient;
 pub use memory::MemoryBroker;
 #[cfg(feature = "mqtt")]
 pub use mqtt::MqttClient;
