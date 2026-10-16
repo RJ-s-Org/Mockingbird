@@ -56,7 +56,7 @@ async fn sqlite_file_persists_across_reconnect() {
 
 #[tokio::test]
 async fn unsupported_url_is_rejected() {
-    assert!(mb_state::connect("redis://x", LONG_TTL).await.is_err());
+    assert!(mb_state::connect("mysql://x", LONG_TTL).await.is_err());
 }
 
 /// Creates schema `mb_<uuid>` and returns `base` with its `search_path` set to

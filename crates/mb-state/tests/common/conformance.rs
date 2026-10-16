@@ -11,26 +11,39 @@ use tokio::sync::broadcast;
 /// Runs every behaviour except TTL expiry, which needs a store built with a
 /// short TTL (see [`ttl_expiry`]). Each check uses its own mock name, so they
 /// can share one store.
+#[allow(dead_code)] // Not every test binary uses both entry points.
 pub async fn run_all(store: Arc<dyn StateStore>) {
-    store.ping().await.expect("ping");
-    upsert_then_get_and_list(&store).await;
-    sessions_are_isolated(&store).await;
-    delete_removes_and_reports(&store).await;
-    reset_clears_session(&store).await;
-    reset_mock_clears_every_session(&store).await;
-    publishes_changes(&store).await;
-    upsert_replaces_and_moves_to_front(&store).await;
-    reads_do_not_create_sessions(&store).await;
-    sessions_lists_with_counts(&store).await;
-    export_then_seed_round_trips(&store).await;
+    run_all_in(store, "default").await;
 }
 
-fn key(mock: &str, session: &str) -> SessionKey {
+/// [`run_all`] with every session in `workspace`, so suites sharing one
+/// backend (such as a Redis server) never see each other's data.
+pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
+    let ws = workspace;
+    store.ping().await.expect("ping");
+    upsert_then_get_and_list(&store, ws).await;
+    sessions_are_isolated(&store, ws).await;
+    delete_removes_and_reports(&store, ws).await;
+    reset_clears_session(&store, ws).await;
+    reset_mock_clears_every_session(&store, ws).await;
+    publishes_changes(&store, ws).await;
+    upsert_replaces_and_moves_to_front(&store, ws).await;
+    reads_do_not_create_sessions(&store, ws).await;
+    sessions_lists_with_counts(&store, ws).await;
+    export_then_seed_round_trips(&store, ws).await;
+}
+
+fn key(ws: &str, mock: &str, session: &str) -> SessionKey {
     SessionKey {
-        workspace: "default".into(),
+        workspace: ws.into(),
         mock: mock.into(),
         session: session.into(),
     }
+}
+
+/// A second workspace, distinct from `ws`.
+fn other_ws(ws: &str) -> String {
+    format!("{ws}-other")
 }
 
 fn res(t: &str, id: &str, v: Value) -> StoredResource {
@@ -45,8 +58,8 @@ fn ids(items: &[StoredResource]) -> Vec<&str> {
     items.iter().map(|r| r.id.as_str()).collect()
 }
 
-async fn upsert_then_get_and_list(st: &Arc<dyn StateStore>) {
-    let k = key("crud", "a");
+async fn upsert_then_get_and_list(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "crud", "a");
     st.upsert(&k, res("order", "1", json!({"n": 1})))
         .await
         .expect("upsert");
@@ -65,20 +78,21 @@ async fn upsert_then_get_and_list(st: &Arc<dyn StateStore>) {
     assert_eq!(ids(&st.list(&k, "pet", 10).await.expect("list")), ["9"]);
 }
 
-async fn sessions_are_isolated(st: &Arc<dyn StateStore>) {
-    st.upsert(&key("iso", "a"), res("order", "1", json!("A")))
+async fn sessions_are_isolated(st: &Arc<dyn StateStore>, ws: &str) {
+    st.upsert(&key(ws, "iso", "a"), res("order", "1", json!("A")))
         .await
         .expect("upsert");
-    st.upsert(&key("iso", "b"), res("order", "1", json!("B")))
+    st.upsert(&key(ws, "iso", "b"), res("order", "1", json!("B")))
         .await
         .expect("upsert");
-    st.upsert(&key("iso-other", "a"), res("order", "1", json!("C")))
+    st.upsert(&key(ws, "iso-other", "a"), res("order", "1", json!("C")))
         .await
         .expect("upsert");
     let get = |m: &'static str, s: &'static str| {
         let st = st.clone();
+        let k = key(ws, m, s);
         async move {
-            st.get(&key(m, s), "order", "1")
+            st.get(&k, "order", "1")
                 .await
                 .expect("get")
                 .expect("found")
@@ -90,8 +104,8 @@ async fn sessions_are_isolated(st: &Arc<dyn StateStore>) {
     assert_eq!(get("iso-other", "a").await, json!("C"));
 }
 
-async fn delete_removes_and_reports(st: &Arc<dyn StateStore>) {
-    let k = key("del", "a");
+async fn delete_removes_and_reports(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "del", "a");
     st.upsert(&k, res("order", "1", json!({})))
         .await
         .expect("upsert");
@@ -100,11 +114,11 @@ async fn delete_removes_and_reports(st: &Arc<dyn StateStore>) {
     assert!(!st.delete(&k, "order", "1").await.expect("delete"));
     // Deleting from an unknown session reports false and creates nothing.
     assert!(
-        !st.delete(&key("del", "nope"), "order", "1")
+        !st.delete(&key(ws, "del", "nope"), "order", "1")
             .await
             .expect("delete")
     );
-    let sessions = st.sessions("default", "del").await.expect("sessions");
+    let sessions = st.sessions(ws, "del").await.expect("sessions");
     assert_eq!(
         sessions
             .iter()
@@ -114,23 +128,23 @@ async fn delete_removes_and_reports(st: &Arc<dyn StateStore>) {
     );
 }
 
-async fn reset_clears_session(st: &Arc<dyn StateStore>) {
-    let k = key("reset", "a");
+async fn reset_clears_session(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "reset", "a");
     st.upsert(&k, res("order", "1", json!({})))
         .await
         .expect("upsert");
-    st.upsert(&key("reset", "b"), res("order", "1", json!({})))
+    st.upsert(&key(ws, "reset", "b"), res("order", "1", json!({})))
         .await
         .expect("upsert");
     st.reset(&k).await.expect("reset");
     assert!(st.list(&k, "order", 10).await.expect("list").is_empty());
     assert!(
-        st.get(&key("reset", "b"), "order", "1")
+        st.get(&key(ws, "reset", "b"), "order", "1")
             .await
             .expect("get")
             .is_some()
     );
-    let sessions = st.sessions("default", "reset").await.expect("sessions");
+    let sessions = st.sessions(ws, "reset").await.expect("sessions");
     assert_eq!(
         sessions
             .iter()
@@ -140,21 +154,27 @@ async fn reset_clears_session(st: &Arc<dyn StateStore>) {
         "reset removes the session itself"
     );
     // Resetting an unknown session is fine.
-    st.reset(&key("reset", "nope")).await.expect("reset");
+    st.reset(&key(ws, "reset", "nope")).await.expect("reset");
 }
 
-async fn reset_mock_clears_every_session(st: &Arc<dyn StateStore>) {
+async fn reset_mock_clears_every_session(st: &Arc<dyn StateStore>, ws: &str) {
     for session in ["a", "b"] {
-        st.upsert(&key("reset-mock", session), res("order", "1", json!({})))
-            .await
-            .expect("upsert");
-    }
-    // Another mock, and the same mock name in another workspace, keep theirs.
-    st.upsert(&key("reset-mock-other", "a"), res("order", "1", json!({})))
+        st.upsert(
+            &key(ws, "reset-mock", session),
+            res("order", "1", json!({})),
+        )
         .await
         .expect("upsert");
+    }
+    // Another mock, and the same mock name in another workspace, keep theirs.
+    st.upsert(
+        &key(ws, "reset-mock-other", "a"),
+        res("order", "1", json!({})),
+    )
+    .await
+    .expect("upsert");
     let other_ws = SessionKey {
-        workspace: "other-ws".into(),
+        workspace: other_ws(ws),
         mock: "reset-mock".into(),
         session: "a".into(),
     };
@@ -162,23 +182,21 @@ async fn reset_mock_clears_every_session(st: &Arc<dyn StateStore>) {
         .await
         .expect("upsert");
 
-    st.reset_mock("default", "reset-mock")
-        .await
-        .expect("reset_mock");
+    st.reset_mock(ws, "reset-mock").await.expect("reset_mock");
     assert!(
-        st.sessions("default", "reset-mock")
+        st.sessions(ws, "reset-mock")
             .await
             .expect("sessions")
             .is_empty()
     );
     assert!(
-        st.get(&key("reset-mock", "a"), "order", "1")
+        st.get(&key(ws, "reset-mock", "a"), "order", "1")
             .await
             .expect("get")
             .is_none()
     );
     assert!(
-        st.get(&key("reset-mock-other", "a"), "order", "1")
+        st.get(&key(ws, "reset-mock-other", "a"), "order", "1")
             .await
             .expect("get")
             .is_some()
@@ -190,14 +208,14 @@ async fn reset_mock_clears_every_session(st: &Arc<dyn StateStore>) {
             .is_some()
     );
     // Resetting a mock with no state is fine.
-    st.reset_mock("default", "reset-mock-none")
+    st.reset_mock(ws, "reset-mock-none")
         .await
         .expect("reset_mock");
 }
 
-async fn publishes_changes(st: &Arc<dyn StateStore>) {
+async fn publishes_changes(st: &Arc<dyn StateStore>, ws: &str) {
     let mut rx = st.subscribe();
-    let k = key("bus", "a");
+    let k = key(ws, "bus", "a");
     st.upsert(&k, res("order", "1", json!({})))
         .await
         .expect("upsert");
@@ -218,8 +236,8 @@ async fn recv_change(rx: &mut broadcast::Receiver<StateChanged>) -> StateChanged
         .expect("recv")
 }
 
-async fn upsert_replaces_and_moves_to_front(st: &Arc<dyn StateStore>) {
-    let k = key("replace", "a");
+async fn upsert_replaces_and_moves_to_front(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "replace", "a");
     st.upsert(&k, res("order", "1", json!({"v": 1})))
         .await
         .expect("upsert");
@@ -234,23 +252,18 @@ async fn upsert_replaces_and_moves_to_front(st: &Arc<dyn StateStore>) {
     assert_eq!(l[0].data, json!({"v": 3}));
 }
 
-async fn reads_do_not_create_sessions(st: &Arc<dyn StateStore>) {
-    let k = key("reads", "x");
+async fn reads_do_not_create_sessions(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "reads", "x");
     assert!(st.get(&k, "order", "1").await.expect("get").is_none());
     assert!(st.list(&k, "order", 10).await.expect("list").is_empty());
     assert!(st.export(&k).await.expect("export").is_empty());
     st.touch(&k).await.expect("touch");
-    assert!(
-        st.sessions("default", "reads")
-            .await
-            .expect("sessions")
-            .is_empty()
-    );
+    assert!(st.sessions(ws, "reads").await.expect("sessions").is_empty());
 }
 
-async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>) {
-    let a = key("counts", "a");
-    let b = key("counts", "b");
+async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>, ws: &str) {
+    let a = key(ws, "counts", "a");
+    let b = key(ws, "counts", "b");
     st.upsert(&a, res("order", "1", json!({})))
         .await
         .expect("upsert");
@@ -265,11 +278,11 @@ async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>) {
         .await
         .expect("upsert");
     // Another mock's sessions are not listed.
-    st.upsert(&key("counts-other", "c"), res("order", "1", json!({})))
+    st.upsert(&key(ws, "counts-other", "c"), res("order", "1", json!({})))
         .await
         .expect("upsert");
 
-    let s = st.sessions("default", "counts").await.expect("sessions");
+    let s = st.sessions(ws, "counts").await.expect("sessions");
     let summary: Vec<(&str, usize)> = s
         .iter()
         .map(|i| (i.session.as_str(), i.resources))
@@ -282,7 +295,7 @@ async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>) {
     st.get(&a, "order", "1").await.expect("get");
     st.list(&a, "order", 10).await.expect("list");
     st.export(&a).await.expect("export");
-    let s = st.sessions("default", "counts").await.expect("sessions");
+    let s = st.sessions(ws, "counts").await.expect("sessions");
     assert_eq!(
         s.iter().map(|i| i.session.as_str()).collect::<Vec<_>>(),
         ["b", "a"],
@@ -292,22 +305,22 @@ async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>) {
     // `touch` does.
     tokio::time::sleep(Duration::from_millis(20)).await;
     st.touch(&a).await.expect("touch");
-    let s = st.sessions("default", "counts").await.expect("sessions");
+    let s = st.sessions(ws, "counts").await.expect("sessions");
     assert_eq!(
         s.iter().map(|i| i.session.as_str()).collect::<Vec<_>>(),
         ["a", "b"]
     );
     assert!(s[0].last_touched > s[1].last_touched);
     assert!(
-        st.sessions("other-ws", "counts")
+        st.sessions(&other_ws(ws), "counts")
             .await
             .expect("sessions")
             .is_empty()
     );
 }
 
-async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>) {
-    let src = key("fixtures", "src");
+async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>, ws: &str) {
+    let src = key(ws, "fixtures", "src");
     st.upsert(&src, res("order", "1", json!({"n": 1})))
         .await
         .expect("upsert");
@@ -326,7 +339,7 @@ async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>) {
     assert_eq!(parsed, exported);
 
     // Seed replaces existing contents.
-    let dst = key("fixtures", "dst");
+    let dst = key(ws, "fixtures", "dst");
     st.upsert(&dst, res("order", "stale", json!({})))
         .await
         .expect("upsert");
@@ -341,9 +354,9 @@ async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>) {
     );
 
     // Seed creates a session, even with no resources.
-    let empty = key("fixtures", "empty");
+    let empty = key(ws, "fixtures", "empty");
     st.seed(&empty, Vec::new()).await.expect("seed");
-    let s = st.sessions("default", "fixtures").await.expect("sessions");
+    let s = st.sessions(ws, "fixtures").await.expect("sessions");
     let summary: Vec<(&str, usize)> = s
         .iter()
         .map(|i| (i.session.as_str(), i.resources))
@@ -355,8 +368,15 @@ async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>) {
 /// Real-time TTL check. `store` must have been built with a 1 s TTL.
 ///
 /// `touch` extends a session's life; reads alone do not.
+#[allow(dead_code)] // Not every test binary uses both entry points.
 pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
-    let k = key("ttl", "a");
+    ttl_expiry_in(store, "default").await;
+}
+
+/// [`ttl_expiry`] with the session in `workspace`.
+pub async fn ttl_expiry_in(store: Arc<dyn StateStore>, workspace: &str) {
+    let ws = workspace;
+    let k = key(ws, "ttl", "a");
     store
         .upsert(&k, res("order", "1", json!({})))
         .await
@@ -377,7 +397,7 @@ pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
     assert!(store.get(&k, "order", "1").await.expect("get").is_none());
     assert!(
         store
-            .sessions("default", "ttl")
+            .sessions(ws, "ttl")
             .await
             .expect("sessions")
             .is_empty()
@@ -388,7 +408,7 @@ pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
         .await
         .expect("upsert");
     assert!(store.get(&k, "order", "1").await.expect("get").is_none());
-    let s = store.sessions("default", "ttl").await.expect("sessions");
+    let s = store.sessions(ws, "ttl").await.expect("sessions");
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].resources, 1);
 }

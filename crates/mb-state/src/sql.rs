@@ -155,7 +155,7 @@ impl SqlStateStore {
             Pool::Pg(connect_postgres(url).await?)
         } else {
             return Err(StateError::Backend(format!(
-                "unsupported state url scheme (expected memory, sqlite: or postgres://): {}",
+                "unsupported state url scheme (expected memory, sqlite:, postgres://, redis:// or rediss://): {}",
                 url.split(':').next().unwrap_or_default()
             )));
         };

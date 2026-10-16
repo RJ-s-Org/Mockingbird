@@ -10,8 +10,10 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 
 pub mod memory;
+pub mod redis;
 pub mod sql;
 
+pub use self::redis::RedisStateStore;
 pub use memory::MemoryStore;
 pub use sql::SqlStateStore;
 
@@ -113,11 +115,14 @@ pub trait StateStore: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<StateChanged>;
 }
 
-/// Opens a state store: `memory` gives a [`MemoryStore`]; `sqlite:…` and
-/// `postgres://…` give a [`SqlStateStore`].
+/// Opens a state store: `memory` gives a [`MemoryStore`]; `redis://…` and
+/// `rediss://…` give a [`RedisStateStore`]; `sqlite:…` and `postgres://…`
+/// give a [`SqlStateStore`].
 pub async fn connect(url: &str, ttl: Duration) -> Result<Arc<dyn StateStore>, StateError> {
     if url == "memory" {
         Ok(Arc::new(MemoryStore::new(ttl)))
+    } else if url.starts_with("redis://") || url.starts_with("rediss://") {
+        Ok(Arc::new(RedisStateStore::connect(url, ttl).await?))
     } else {
         Ok(Arc::new(SqlStateStore::connect(url, ttl).await?))
     }
