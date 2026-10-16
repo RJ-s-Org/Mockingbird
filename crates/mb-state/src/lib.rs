@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+pub mod bus;
+pub mod leader;
 pub mod memory;
 pub mod redis;
 pub mod sql;
 
 pub use self::redis::RedisStateStore;
+pub use bus::{Bus, BusEnvelope, BusEvent, LocalBus, MemoryBusHub, PgBus, RedisBus};
+pub use leader::{LeaderBackend, Leadership};
 pub use memory::MemoryStore;
 pub use sql::SqlStateStore;
 
