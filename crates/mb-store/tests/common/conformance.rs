@@ -2394,23 +2394,67 @@ async fn active_import_jobs_counted_per_mock(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-active").await;
     let other = create(store, "jobs-active-other").await;
-    assert_eq!(store.count_active_import_jobs(mock.id).await.expect("count"), 0);
+    assert_eq!(
+        store
+            .count_active_import_jobs(mock.id)
+            .await
+            .expect("count"),
+        0
+    );
     let first = create_job(store, mock.id, b"1").await;
     let second = create_job(store, mock.id, b"2").await;
     let third = create_job(store, mock.id, b"3").await;
     create_job(store, other.id, b"o").await;
-    assert_eq!(store.count_active_import_jobs(mock.id).await.expect("count"), 3);
+    assert_eq!(
+        store
+            .count_active_import_jobs(mock.id)
+            .await
+            .expect("count"),
+        3
+    );
     // Running jobs count; finished and canceled ones do not.
-    let claimed = store.claim_import_job(now_us()).await.expect("claim").expect("job");
+    let claimed = store
+        .claim_import_job(now_us())
+        .await
+        .expect("claim")
+        .expect("job");
     assert_eq!(claimed.id, first.id);
-    assert_eq!(store.count_active_import_jobs(mock.id).await.expect("count"), 3);
+    assert_eq!(
+        store
+            .count_active_import_jobs(mock.id)
+            .await
+            .expect("count"),
+        3
+    );
     store
-        .finish_import_job(first.id, ImportOutcome::Failed { error: "x".into() }, now_us())
+        .finish_import_job(
+            first.id,
+            ImportOutcome::Failed { error: "x".into() },
+            now_us(),
+        )
         .await
         .expect("finish");
-    store.cancel_import_job(second.id, now_us()).await.expect("cancel");
-    assert_eq!(store.count_active_import_jobs(mock.id).await.expect("count"), 1);
-    assert_eq!(store.count_active_import_jobs(other.id).await.expect("count"), 1);
-    store.cancel_import_job(third.id, now_us()).await.expect("cancel");
+    store
+        .cancel_import_job(second.id, now_us())
+        .await
+        .expect("cancel");
+    assert_eq!(
+        store
+            .count_active_import_jobs(mock.id)
+            .await
+            .expect("count"),
+        1
+    );
+    assert_eq!(
+        store
+            .count_active_import_jobs(other.id)
+            .await
+            .expect("count"),
+        1
+    );
+    store
+        .cancel_import_job(third.id, now_us())
+        .await
+        .expect("cancel");
     drain_queue(store).await;
 }

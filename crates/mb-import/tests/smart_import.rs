@@ -691,8 +691,10 @@ fn har(entries: &[(&str, String, String)]) -> Vec<u8> {
             })
         })
         .collect();
-    serde_json::to_vec(&json!({"log": {"version": "1.2", "creator": {"name": "t", "version": "1"},
-                                       "entries": entries}}))
+    serde_json::to_vec(
+        &json!({"log": {"version": "1.2", "creator": {"name": "t", "version": "1"},
+                                       "entries": entries}}),
+    )
     .unwrap()
 }
 
@@ -763,7 +765,10 @@ fn large_html_extraction_does_not_block_the_runtime() {
     let (stall, result) = longest_stall(async {
         run_import(input, Some(&llm(provider, 1000)), &opts, &NoopObserver).await
     });
-    assert!(matches!(result, Err(SmartError::NoOperations(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(SmartError::NoOperations(_))),
+        "{result:?}"
+    );
     assert!(
         stall < MAX_STALL,
         "the runtime stalled for {stall:?} of {:?}",
@@ -822,7 +827,11 @@ async fn deeply_nested_har_example_round_trips() {
         name: None,
         bytes: har(&[
             ("GET", "https://api.example.com/deep".into(), body),
-            ("GET", "https://api.example.com/flat".into(), json!({"id": 1}).to_string()),
+            (
+                "GET",
+                "https://api.example.com/flat".into(),
+                json!({"id": 1}).to_string(),
+            ),
         ]),
     };
     let draft = run_import(input, None, &ImportOptions::default(), &NoopObserver)
@@ -830,7 +839,11 @@ async fn deeply_nested_har_example_round_trips() {
         .unwrap();
     assert_round_trips(&draft.source, &draft.bundle, &draft.meta);
     assert_eq!(draft.bundle.operations.len(), 2);
-    assert!(codes(&draft.meta).contains(&"too_deep"), "{:?}", codes(&draft.meta));
+    assert!(
+        codes(&draft.meta).contains(&"too_deep"),
+        "{:?}",
+        codes(&draft.meta)
+    );
 }
 
 #[test]
@@ -909,5 +922,8 @@ async fn url_import_redacts_query_values() {
     assert_eq!(draft.meta.source_name.as_deref(), Some(expected.as_str()));
     let prompts = format!("{:?}", provider.requests());
     assert!(!prompts.contains("s3cret"), "the prompt carries the secret");
-    assert!(!prompts.contains("t0ken"), "the prompt carries the fragment");
+    assert!(
+        !prompts.contains("t0ken"),
+        "the prompt carries the fragment"
+    );
 }
