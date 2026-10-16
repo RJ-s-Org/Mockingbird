@@ -234,7 +234,9 @@ async fn validate<'a>(
         // File reads and compilation block: keep them off the runtime.
         let path = mock.contract.clone();
         let (source, bundle) = tokio::task::spawn_blocking(move || {
-            let source = std::fs::read(&path)
+            // A directory is packed as a deterministic tar.gz, so its
+            // digest is stable across reconciles.
+            let source = mb_import::read_source(&path)
                 .with_context(|| format!("cannot read contract {}", path.display()))?;
             let bundle = mb_import::compile(&source)
                 .with_context(|| format!("cannot compile contract {}", path.display()))?;

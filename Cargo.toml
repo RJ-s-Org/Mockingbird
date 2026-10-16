@@ -55,6 +55,9 @@ prost-types = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
 protox = "0.10.0"
 quick-xml = "0.42.0"
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
+tar = "0.4.46"
+flate2 = "1.1.10"
 json-patch = { version = "4", default-features = false }
 humantime-serde = "1"
 notify = "8"

@@ -2,6 +2,7 @@
 //! introspection, protobuf sources and descriptor sets, WSDL 1.1 with XSD)
 //! into the Mockingbird Contract Model.
 
+mod archive;
 mod graphql;
 mod heuristics;
 mod openapi3;
@@ -10,6 +11,10 @@ mod schema;
 mod swagger2;
 mod wsdl;
 
+pub use archive::{
+    MAX_ARCHIVE_BYTES, MAX_ARCHIVE_FILES, MAX_ARCHIVE_UNPACKED_BYTES, pack_dir, read_source,
+    unpack_archive,
+};
 use mb_mcm::Bundle;
 use serde_json::Value;
 
@@ -98,6 +103,9 @@ fn is_introspection(doc: &Value) -> bool {
 
 /// Detect the source format of uploaded bytes.
 pub fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
+    if archive::is_archive(bytes) {
+        return Ok(SourceFormat::Archive);
+    }
     if let Ok(doc) = serde_json::from_slice::<Value>(bytes) {
         if is_introspection(&doc) {
             return Ok(SourceFormat::GraphqlIntrospection);
@@ -146,14 +154,30 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
         SourceFormat::Proto => proto::compile_text(bytes),
         SourceFormat::FileDescriptorSet => proto::compile_descriptor_set(bytes),
         SourceFormat::Wsdl11 => wsdl::compile_text(bytes),
-        format @ SourceFormat::Archive => Err(ImportError::Unsupported(format!("{format:?}"))),
+        SourceFormat::Archive => {
+            let mut bundle = compile_files(&unpack_archive(bytes)?)?;
+            bundle.source_digest = proto::hex_digest(bytes);
+            Ok(bundle)
+        }
     }
 }
 
-/// Compile a multi-file contract: any `.proto` files are compiled together
-/// (imports resolve between them); else a single `.wsdl` is compiled with
-/// the other files available to its `schemaLocation`s; otherwise exactly
-/// one file is compiled on its own.
+/// Whether `path` names a GraphQL SDL file.
+fn is_graphql_path(path: &str) -> bool {
+    [".graphql", ".graphqls", ".gql"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
+}
+
+/// Compile a multi-file contract (an unpacked archive or loose files):
+/// 1. any `.proto` files are compiled together (imports resolve between
+///    them);
+/// 2. else exactly one `.wsdl` is compiled with the other files available
+///    to its `schemaLocation`s (several `.wsdl` files are invalid);
+/// 3. else the `.graphql`/`.graphqls`/`.gql` files are compiled as one SDL,
+///    joined by `\n` in path order;
+/// 4. else exactly one file is compiled on its own (it may not be another
+///    archive).
 pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
     let protos: Vec<&SourceFile> = files
         .iter()
@@ -182,7 +206,21 @@ pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
             });
         }
     }
+    let mut graphql: Vec<&SourceFile> = files.iter().filter(|f| is_graphql_path(&f.path)).collect();
+    if !graphql.is_empty() {
+        graphql.sort_by(|a, b| a.path.cmp(&b.path));
+        let sdl = graphql
+            .iter()
+            .map(|f| f.bytes.as_slice())
+            .collect::<Vec<_>>()
+            .join(&b'\n');
+        return graphql::compile_sdl(&sdl);
+    }
     match files {
+        [one] if archive::is_archive(&one.bytes) => Err(ImportError::Invalid {
+            pointer: one.path.clone(),
+            message: "nested archives are not supported".into(),
+        }),
         [one] => compile(&one.bytes),
         _ => Err(ImportError::Unsupported(
             "archive contains no recognised contract".into(),

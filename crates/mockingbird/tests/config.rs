@@ -1069,3 +1069,57 @@ async fn removing_file_profile_used_by_api_mock_warns() {
             .is_none()
     );
 }
+
+/// Copies `src` recursively into `dst`.
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn file_config_contract_directory() {
+    let ws = Workspace::new();
+    copy_dir(
+        &repo().join("fixtures/proto/multi"),
+        &ws.dir.path().join("protos"),
+    );
+    let cfg = ws.load("mocks:\n  orders:\n    contract: protos\n");
+    let store = store().await;
+
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.new_versions, [("orders".to_string(), 1)]);
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.new_versions.is_empty(), "{again:?}");
+
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let versions = store.list_contract_versions(mock.id).await.unwrap();
+    assert_eq!(versions.len(), 1);
+    let active = store.active_contract(mock.id).await.unwrap().unwrap();
+    assert_eq!(
+        active.source,
+        mb_import::pack_dir(&ws.dir.path().join("protos")).unwrap()
+    );
+    assert!(
+        active
+            .bundle
+            .operations
+            .iter()
+            .any(|o| o.id == "OrderService.GetOrder")
+    );
+}

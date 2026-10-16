@@ -108,7 +108,7 @@ impl Harness {
         Resp {
             status,
             content_type,
-            text: String::from_utf8(bytes.to_vec()).unwrap(),
+            text: String::from_utf8_lossy(&bytes).into_owned(),
         }
     }
 
@@ -153,6 +153,17 @@ impl Harness {
             &uri,
             Body::from(contract.to_owned()),
             Some("application/json"),
+        )
+        .await
+    }
+
+    /// Upload raw contract bytes with a content type.
+    async fn upload_bytes(&self, mock: &str, bytes: Vec<u8>, content_type: &str) -> Resp {
+        self.send(
+            Method::POST,
+            &format!("/api/v1/mocks/{mock}/contracts"),
+            Body::from(bytes),
+            Some(content_type),
         )
         .await
     }
@@ -925,14 +936,13 @@ async fn mutations_require_non_simple_content_types() {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
 
-    // Contract upload: JSON, YAML and OpenAPI media types only.
+    // Contract upload: contract media types only, none CORS-safelisted.
     let uri = "/api/v1/mocks/orders/contracts";
     for ct in [
         None,
         Some("text/plain"),
         Some("application/x-www-form-urlencoded"),
         Some("multipart/form-data; boundary=x"),
-        Some("application/octet-stream"),
     ] {
         h.send(Method::POST, uri, Body::from(contract_json("2.0")), ct)
             .await
@@ -1430,7 +1440,7 @@ async fn errors_are_problem_json() {
     .assert_problem(StatusCode::BAD_REQUEST);
 
     // An oversized contract upload.
-    let huge = "x".repeat(10 * 1024 * 1024 + 1);
+    let huge = "x".repeat(20 * 1024 * 1024 + 1);
     h.send(
         Method::POST,
         "/api/v1/mocks/orders/contracts",
@@ -1439,4 +1449,149 @@ async fn errors_are_problem_json() {
     )
     .await
     .assert_problem(StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+fn fixture(path: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/../../fixtures/{path}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+fn fixture_dir(path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures")
+        .join(path)
+}
+
+/// A zip of `(name, bytes)` entries, names stored verbatim.
+fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        w.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(bytes).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+#[tokio::test]
+async fn upload_graphql_proto_wsdl_and_archive() {
+    let h = harness().await;
+    let multi = mb_import::pack_dir(&fixture_dir("proto/multi")).unwrap();
+    let multi_zip = zip_of(&[
+        (
+            "multi/common/v1/money.proto",
+            &fixture("proto/multi/common/v1/money.proto"),
+        ),
+        (
+            "multi/orders/v1/orders.proto",
+            &fixture("proto/multi/orders/v1/orders.proto"),
+        ),
+    ]);
+    let cases: Vec<(&str, Vec<u8>, &str, &str)> = vec![
+        (
+            "sw",
+            fixture("graphql/starwars.graphql"),
+            "application/graphql",
+            "text/plain; charset=utf-8",
+        ),
+        (
+            "rg",
+            fixture("proto/route_guide.proto"),
+            "text/x-protobuf",
+            "text/plain; charset=utf-8",
+        ),
+        (
+            "calc",
+            fixture("wsdl/calculator.wsdl"),
+            "application/wsdl+xml",
+            "application/xml",
+        ),
+        (
+            "calc-xml",
+            fixture("wsdl/calculator.wsdl"),
+            "text/xml",
+            "application/xml",
+        ),
+        ("multi", multi, "application/gzip", "application/gzip"),
+        ("multi-zip", multi_zip, "application/zip", "application/zip"),
+    ];
+    for (mock, bytes, content_type, source_type) in cases {
+        h.create_mock(mock).await;
+        let expected = mb_import::compile(&bytes).unwrap().operations.len();
+        assert!(expected > 0, "{mock}");
+        let r = h.upload_bytes(mock, bytes.clone(), content_type).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{mock}: {}", r.text);
+        assert_eq!(
+            r.json(),
+            json!({ "version": 1, "status": "active", "operations": expected }),
+            "{mock}"
+        );
+        let r = h
+            .get(&format!("/api/v1/mocks/{mock}/contracts/1/source"))
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{mock}");
+        assert_eq!(r.content_type, source_type, "{mock}");
+    }
+
+    // A descriptor set uploads as application/x-protobuf; text/plain stays
+    // refused (it is CORS-safelisted).
+    h.create_mock("plain").await;
+    h.upload_bytes("plain", fixture("proto/route_guide.proto"), "text/plain")
+        .await
+        .assert_problem(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn upload_zip_slip_422() {
+    let h = harness().await;
+    h.create_mock("evil").await;
+    let zip = zip_of(&[("../evil.proto", b"syntax = \"proto3\";")]);
+    let problem = h
+        .upload_bytes("evil", zip, "application/zip")
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        problem["detail"]
+            .as_str()
+            .unwrap()
+            .contains("../evil.proto"),
+        "{problem}"
+    );
+    let list = h.get("/api/v1/mocks/evil/contracts").await.json();
+    assert_eq!(list, json!([]));
+}
+
+#[tokio::test]
+async fn upload_over_20_mib_413() {
+    let h = harness().await;
+    h.create_mock("big").await;
+    let mut body = b"PK\x03\x04".to_vec();
+    body.resize(20 * 1024 * 1024 + 1, 0);
+    h.upload_bytes("big", body, "application/zip")
+        .await
+        .assert_problem(StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn grpc_contract_detail_lists_protocol_target_kind() {
+    let h = harness().await;
+    h.create_mock("rg").await;
+    let r = h
+        .upload_bytes("rg", fixture("proto/route_guide.proto"), "text/x-protobuf")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let detail = h.get("/api/v1/mocks/rg/contracts/1").await.json();
+    let ops = detail["operations"].as_array().unwrap();
+    let list = ops
+        .iter()
+        .find(|o| o["target"] == "/routeguide.RouteGuide/ListFeatures")
+        .unwrap_or_else(|| panic!("{detail}"));
+    assert_eq!(list["protocol"], "grpc", "{list}");
+    assert_eq!(list["kind"], "stream-server", "{list}");
+    assert_eq!(list["method"], "", "{list}");
+    assert_eq!(list["path"], "", "{list}");
 }

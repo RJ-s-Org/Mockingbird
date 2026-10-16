@@ -75,7 +75,8 @@ async fn client(admin_url: &str, cmd: ClientCommand) -> Result<(), Failure> {
 
 fn validate(path: &std::path::Path) -> Result<(), Failure> {
     use anyhow::Context;
-    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bytes =
+        mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
     let bundle =
         mb_import::compile(&bytes).with_context(|| format!("cannot compile {}", path.display()))?;
     println!(
@@ -85,16 +86,11 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
         bundle.operations.len()
     );
     for op in &bundle.operations {
-        match &op.binding {
-            mb_mcm::Binding::Http { method, path } => {
-                println!(
-                    "{:<24} {:<7} {}",
-                    op.id,
-                    format!("{method:?}").to_uppercase(),
-                    path
-                );
-            }
-            _ => println!("{}", op.id),
+        let streams = op.kind.streams_request() || op.kind.streams_response();
+        if streams {
+            println!("{:<32} {} [{}]", op.id, op.target(), op.kind.label());
+        } else {
+            println!("{:<32} {}", op.id, op.target());
         }
     }
     Ok(())
