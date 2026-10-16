@@ -254,5 +254,7 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         status: s.rules.status,
         latency: s.rules.latency_ms.map(Duration::from_millis),
         operations: s.rules.operations,
+        stream_items: None,
+        stream_item_interval: None,
     }
 }

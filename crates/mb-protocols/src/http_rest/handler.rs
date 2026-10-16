@@ -7,11 +7,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use mb_engine::{
-    EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator,
+    EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator, Source,
 };
-use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
-use mb_mcm::{Binding, Effect, HttpMethod, Operation, OperationKind, StatusSelector};
-use mb_state::{SessionKey, StateError, StoredResource};
+use mb_ext::{Rejection, Tenancy};
+use mb_llm::Usage;
+use mb_mcm::{HttpMethod, Operation, StatusSelector};
 use serde_json::{Map, Number, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -19,33 +19,14 @@ use tracing::field::Empty;
 
 use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
-use crate::{MockRuntime, RequestRecord, ScenarioRuntime};
+use crate::MockRuntime;
+use crate::call::{
+    self, DEFAULT_SESSION, PlanError, PlanFailure, Report, forwarded_headers, recorded_headers,
+};
 
-const SESSION_HEADER: &str = "x-mockingbird-session";
-const STATUS_HEADER: &str = "x-mockingbird-status";
-const LATENCY_HEADER: &str = "x-mockingbird-latency";
-const SCENARIO_HEADER: &str = "x-mockingbird-scenario";
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
-const DEFAULT_SESSION: &str = "default";
-const WORKSPACE: &str = "default";
-const MAX_LATENCY: Duration = Duration::from_secs(30);
-const MAX_SESSION_LEN: usize = 128;
-const LIST_CONTEXT_LIMIT: usize = 20;
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
-/// Usage-event source for responses that were not generated (problems).
-const NO_SOURCE: &str = "none";
-
-/// Headers never forwarded to the engine or recorded (they may carry
-/// credentials).
-const SENSITIVE_HEADERS: [&str; 6] = [
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-api-key",
-    "x-auth-token",
-];
 
 pub(crate) struct RestState {
     rt: Arc<MockRuntime>,
@@ -99,9 +80,8 @@ struct CallLog {
     tenancy: Option<Tenancy>,
     /// Whether admission ran (a rejected call has no tenancy to bill).
     admitted_or_rejected: bool,
-    source: Option<&'static str>,
-    prompt_tokens: u32,
-    completion_tokens: u32,
+    source: Option<Source>,
+    usage: Usage,
     /// The response body, kept only when `record` is set.
     response: Option<Value>,
     /// The request body as decoded as JSON by `serve`, kept only when
@@ -123,8 +103,7 @@ impl CallLog {
             tenancy: None,
             admitted_or_rejected: false,
             source: None,
-            prompt_tokens: 0,
-            completion_tokens: 0,
+            usage: Usage::default(),
             response: None,
             request_body: None,
             record,
@@ -145,9 +124,8 @@ impl CallLog {
 
     /// A generated response, remembered for the request record.
     fn generated(&mut self, generated: GeneratedResponse) -> Response {
-        self.source = Some(generated.source.as_str());
-        self.prompt_tokens = generated.usage.prompt_tokens;
-        self.completion_tokens = generated.usage.completion_tokens;
+        self.source = Some(generated.source);
+        self.usage = generated.usage;
         let resp = respond(&generated);
         if self.record {
             self.response = generated.body;
@@ -195,7 +173,7 @@ pub(crate) async fn handle(
     let status = resp.status().as_u16();
     span.record("status", status);
     if let Some(source) = log.source {
-        span.record("source", source);
+        span.record("source", source.as_str());
     }
     let delay = log.delay;
     let latency = started.elapsed() + delay.unwrap_or_default();
@@ -284,78 +262,34 @@ async fn serve(
         return invalid_input(rt, op, &errors, log);
     }
 
-    // 3. Admission.
-    let call_info = CallInfo {
-        mock: &rt.name,
-        operation_id: &op.id,
-        headers,
-    };
+    // 3. Admission, overrides and scenario.
     log.admitted_or_rejected = true;
-    let tenancy = match rt.ext.tenants.resolve(&call_info).await {
-        Ok(t) => t,
-        Err(r) => return log.rejected(r),
-    };
-    let admitted = rt.ext.quota.admit(&tenancy, &call_info).await;
-    log.tenancy = Some(tenancy);
-    if let Err(r) = admitted {
-        return log.rejected(r);
-    }
-
-    // 4. Overrides and scenario.
-    let overrides = match Overrides::parse(headers, rt.header_overrides) {
-        Ok(o) => o,
-        Err(detail) => return log.problem(400, "Invalid override", detail),
-    };
-    tracing::Span::current().record("session", overrides.session.as_str());
-    log.session = overrides.session.clone();
-    let scenario = match overrides.scenario.as_deref() {
-        None => None,
-        Some(name) => match rt.scenarios.get(name) {
-            None => {
-                return log.problem(
+    let plan = match call::plan(rt, op, headers).await {
+        Ok(plan) => plan,
+        Err(PlanFailure {
+            error,
+            tenancy,
+            session,
+        }) => {
+            log.tenancy = tenancy;
+            if let Some(session) = session {
+                log.session = session;
+            }
+            return match error {
+                PlanError::Rejected(r) => log.rejected(r),
+                PlanError::BadOverride(detail) => log.problem(400, "Invalid override", detail),
+                PlanError::UnknownScenario(name) => log.problem(
                     400,
                     "Unknown scenario",
                     format!("mock {} has no scenario {name:?}", rt.name),
-                );
-            }
-            Some(s) => s.applies_to(&op.id).then_some(s),
-        },
+                ),
+            };
+        }
     };
-    // A scenario's status applies only where the contract declares it; the
-    // header override is used as given (an undeclared one is a 400).
-    let scenario_status = scenario
-        .and_then(|s| s.status)
-        .filter(|code| op.output_for_status(*code).is_some());
-    let forced_status = overrides.status.or(scenario_status);
-    let delay = overrides
-        .latency
-        .or_else(|| scenario.and_then(|s| s.latency))
-        .map(|d| d.min(MAX_LATENCY));
+    log.tenancy = Some(plan.tenancy.clone());
+    log.session = plan.session.session.clone();
 
-    // 5. State read.
-    let session = SessionKey {
-        workspace: WORKSPACE.into(),
-        mock: rt.name.clone(),
-        session: overrides.session,
-    };
-    let mut state = StateAccess::new(rt);
-    let resource_type = op.resource_type.as_deref();
-    let target_id = target_id(op, &path_params);
-    let target = match (resource_type, &target_id) {
-        (Some(t), Some(id)) => state.get(&session, t, id).await,
-        _ => None,
-    };
-    let related = related(
-        &mut state,
-        &session,
-        op,
-        target_id.is_some(),
-        &query,
-        body.as_ref(),
-    )
-    .await;
-
-    // 6. Generate.
+    // 4. State read, generate, state write.
     let call = OperationCall {
         operation_id: op.id.clone(),
         path_params,
@@ -363,13 +297,7 @@ async fn serve(
         headers: forwarded_headers(headers),
         body,
     };
-    let ctx = GenerationContext {
-        related: &related,
-        target: target.as_ref(),
-        forced_status,
-        scenario: scenario.map(|s: &ScenarioRuntime| &s.spec),
-    };
-    let generated = match rt.engine.generate(&rt.bundle, op, &call, ctx).await {
+    let generated = match call::generate_once(rt, &plan, &call).await {
         Ok(g) => g,
         Err(EngineError::UndeclaredStatus(code)) => {
             return log.problem(
@@ -380,23 +308,6 @@ async fn serve(
         }
         Err(e) => return log.problem(500, "Generation failed", e.to_string()),
     };
-
-    // 7. State write.
-    if (200..300).contains(&generated.status)
-        && let Some(t) = resource_type
-    {
-        write_state(
-            &mut state,
-            &session,
-            op,
-            t,
-            target_id,
-            &generated,
-            call.body.as_ref(),
-        )
-        .await;
-    }
-    state.touch(&session).await;
     // Kept for the record only when `serve` decoded it as JSON.
     if log.record
         && !matches!(
@@ -407,8 +318,8 @@ async fn serve(
         log.request_body = call.body;
     }
 
-    // 8. Respond (the handler sleeps `delay` after recording).
-    log.delay = delay;
+    // 5. Respond (the handler sleeps `delay` after recording).
+    log.delay = plan.delay;
     log.generated(generated)
 }
 
@@ -424,54 +335,33 @@ async fn report(
     status: u16,
     latency: Duration,
 ) {
-    let operation_id = log.operation_id.clone().unwrap_or_default();
-    // Calls that never reached admission are still attributed to a tenant.
-    let tenancy = match (&log.tenancy, log.admitted_or_rejected) {
-        (Some(t), _) => Some(t.clone()),
-        (None, true) => None,
-        (None, false) => {
-            let call_info = CallInfo {
-                mock: &rt.name,
-                operation_id: &operation_id,
-                headers,
-            };
-            rt.ext.tenants.resolve(&call_info).await.ok()
-        }
-    };
-    if let Some(tenancy) = tenancy {
-        rt.ext.usage.record(&UsageEvent {
-            tenancy,
-            mock: rt.name.clone(),
-            operation_id: operation_id.clone(),
-            status,
-            source: log.source.unwrap_or(NO_SOURCE).to_string(),
-            latency,
-            prompt_tokens: log.prompt_tokens,
-            completion_tokens: log.completion_tokens,
-        });
-    }
-    if let Some(recorder) = &rt.recorder {
+    // The record's request is built only when a recorder will receive it.
+    let request = if rt.recorder.is_some() {
         let media = media_type(headers).or(log.declared_body_type);
-        recorder.record(RequestRecord {
-            mock: rt.name.clone(),
-            operation_id: log.operation_id,
-            session: log.session,
-            method: method.as_str().to_string(),
-            path: uri.path().to_string(),
-            status,
-            source: log.source.map(str::to_string),
-            latency,
-            prompt_tokens: log.prompt_tokens,
-            completion_tokens: log.completion_tokens,
-            request: json!({
-                "query": recorded_query(uri),
-                "headers": recorded_headers(headers),
-                "body": request_body_record(raw_body, media.as_deref(), log.request_body),
-            }),
-            request_body_bytes: Some(raw_body.len()),
-            response: log.response,
-        });
-    }
+        json!({
+            "query": recorded_query(uri),
+            "headers": recorded_headers(headers),
+            "body": request_body_record(raw_body, media.as_deref(), log.request_body),
+        })
+    } else {
+        Value::Null
+    };
+    let r = Report {
+        operation_id: log.operation_id,
+        session: log.session,
+        method: method.as_str().to_string(),
+        path: uri.path().to_string(),
+        status,
+        source: log.source,
+        usage: log.usage,
+        latency,
+        tenancy: log.tenancy,
+        admission_ran: log.admitted_or_rejected,
+        request,
+        request_body_bytes: Some(raw_body.len()),
+        response: log.response,
+    };
+    call::report(rt, headers, r).await;
 }
 
 /// 404 when no operation has this path, 405 when only the method differs.
@@ -674,341 +564,6 @@ fn invalid_input(
     }
 }
 
-struct Overrides {
-    session: String,
-    status: Option<u16>,
-    latency: Option<Duration>,
-    scenario: Option<String>,
-}
-
-impl Overrides {
-    /// `Err` carries the problem detail for an unusable override header.
-    fn parse(headers: &HeaderMap, enabled: bool) -> Result<Self, String> {
-        let mut out = Self {
-            session: DEFAULT_SESSION.into(),
-            status: None,
-            latency: None,
-            scenario: None,
-        };
-        if !enabled {
-            return Ok(out);
-        }
-        // An empty value means the default session.
-        if let Some(s) = header_text(headers, SESSION_HEADER)?.filter(|s| !s.is_empty()) {
-            if !is_session_id(s) {
-                return Err(format!(
-                    "X-Mockingbird-Session must be 1-{MAX_SESSION_LEN} characters of \
-                     [A-Za-z0-9._-], got {s:?}"
-                ));
-            }
-            out.session = s.to_string();
-        }
-        if let Some(s) = header_text(headers, STATUS_HEADER)? {
-            let code = s
-                .parse::<u16>()
-                .ok()
-                .filter(|c| (100..=599).contains(c))
-                .ok_or_else(|| {
-                    format!("X-Mockingbird-Status must be an HTTP status code, got {s:?}")
-                })?;
-            out.status = Some(code);
-        }
-        if let Some(s) = header_text(headers, LATENCY_HEADER)? {
-            let latency = humantime::parse_duration(s)
-                .map_err(|e| format!("X-Mockingbird-Latency must be a duration like 150ms: {e}"))?;
-            out.latency = Some(latency.min(MAX_LATENCY));
-        }
-        out.scenario = header_text(headers, SCENARIO_HEADER)?.map(str::to_string);
-        Ok(out)
-    }
-}
-
-/// 1-128 characters of `[A-Za-z0-9._-]`. (An empty header is the default
-/// session and never reaches this check.)
-fn is_session_id(s: &str) -> bool {
-    (1..=MAX_SESSION_LEN).contains(&s.len())
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, String> {
-    match headers.get(name) {
-        None => Ok(None),
-        Some(v) => v
-            .to_str()
-            .map(|s| Some(s.trim()))
-            .map_err(|_| format!("{name} must be visible ASCII")),
-    }
-}
-
-/// The id of the resource this operation reads, updates or deletes.
-/// Falls back to the last path parameter for updates and deletes whose
-/// identity hint names none.
-fn target_id(op: &Operation, path_params: &Map<String, Value>) -> Option<String> {
-    let param = match op.identity.as_ref().and_then(|i| i.path_param.clone()) {
-        Some(p) => p,
-        None if matches!(
-            op.kind,
-            OperationKind::Command(Effect::Update | Effect::Delete)
-        ) =>
-        {
-            let Binding::Http { path, .. } = &op.binding else {
-                return None;
-            };
-            last_path_param(path)?
-        }
-        None => return None,
-    };
-    path_params.get(&param).and_then(id_string)
-}
-
-fn last_path_param(template: &str) -> Option<String> {
-    let start = template.rfind('{')?;
-    let end = start + template[start..].find('}')?;
-    Some(template[start + 1..end].to_string())
-}
-
-fn id_string(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-/// `customerId` / `customer_id` → `customer`.
-fn reference_prefix(field: &str) -> Option<&str> {
-    field
-        .strip_suffix("Id")
-        .or_else(|| field.strip_suffix("_id"))
-        .filter(|p| !p.is_empty())
-}
-
-/// State-store access for one call. The first failing call marks the mock
-/// degraded and makes the rest of the call stateless; a successful call
-/// clears the mark. While degraded, [`crate::StateHealth`] lets one call per
-/// retry interval try the store; the rest skip it entirely. The breaker is
-/// consulted lazily, on the first actual store call, so a call that never
-/// touches the store does not use up the retry.
-struct StateAccess<'a> {
-    rt: &'a MockRuntime,
-    gate: Gate,
-    /// A read succeeded, so the session needs a [`StateAccess::touch`].
-    read: bool,
-    /// A write succeeded; writes refresh the session themselves.
-    wrote: bool,
-}
-
-/// Whether this call may use the store.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Gate {
-    /// No store call yet; the breaker has not been asked.
-    Unasked,
-    Open,
-    /// Held off by the breaker, or a store call failed.
-    Closed,
-}
-
-impl<'a> StateAccess<'a> {
-    fn new(rt: &'a MockRuntime) -> Self {
-        Self {
-            rt,
-            gate: Gate::Unasked,
-            read: false,
-            wrote: false,
-        }
-    }
-
-    /// Keeps the session alive once per call: reads do not refresh it, so a
-    /// call that only read touches it here. A no-op when nothing was read,
-    /// when a write already refreshed it, or when the store is unavailable.
-    async fn touch(&mut self, s: &SessionKey) {
-        if self.read && !self.wrote && self.gate == Gate::Open {
-            let r = self.rt.state.touch(s).await;
-            self.settle(r);
-        }
-    }
-
-    /// Whether the next store call may run, asking the breaker on first use.
-    fn open(&mut self) -> bool {
-        if self.gate == Gate::Unasked {
-            self.gate = if self.rt.state_health.try_acquire() {
-                Gate::Open
-            } else {
-                Gate::Closed
-            };
-        }
-        self.gate == Gate::Open
-    }
-
-    /// `None` when the store is unavailable for this call.
-    fn settle<T>(&mut self, result: Result<T, StateError>) -> Option<T> {
-        match result {
-            Ok(v) => {
-                self.rt.state_health.record_success();
-                Some(v)
-            }
-            Err(e) => {
-                tracing::warn!(mock = %self.rt.name, error = %e, "state store failed; serving statelessly");
-                self.rt.state_health.record_failure();
-                metrics::counter!("mb_state_errors_total", "mock" => self.rt.name.clone())
-                    .increment(1);
-                self.gate = Gate::Closed;
-                None
-            }
-        }
-    }
-
-    async fn get(&mut self, s: &SessionKey, t: &str, id: &str) -> Option<StoredResource> {
-        if !self.open() {
-            return None;
-        }
-        let r = self.rt.state.get(s, t, id).await;
-        let found = self.settle(r);
-        self.read |= found.is_some();
-        found.flatten()
-    }
-
-    async fn list(&mut self, s: &SessionKey, t: &str, limit: usize) -> Vec<StoredResource> {
-        if !self.open() {
-            return Vec::new();
-        }
-        let r = self.rt.state.list(s, t, limit).await;
-        let found = self.settle(r);
-        self.read |= found.is_some();
-        found.unwrap_or_default()
-    }
-
-    async fn upsert(&mut self, s: &SessionKey, r: StoredResource) {
-        if self.open() {
-            let r = self.rt.state.upsert(s, r).await;
-            self.wrote |= self.settle(r).is_some();
-        }
-    }
-
-    async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) {
-        if self.open() {
-            let r = self.rt.state.delete(s, t, id).await;
-            self.wrote |= self.settle(r).is_some();
-        }
-    }
-}
-
-/// Resources the response should stay consistent with: recent items for a
-/// list query, plus anything referenced by `<x>Id` fields.
-async fn related(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    op: &Operation,
-    has_target: bool,
-    query: &Map<String, Value>,
-    body: Option<&Value>,
-) -> Vec<StoredResource> {
-    let mut out: Vec<StoredResource> = Vec::new();
-    if matches!(op.kind, OperationKind::Query)
-        && !has_target
-        && let Some(t) = op.resource_type.as_deref()
-    {
-        out = state.list(session, t, LIST_CONTEXT_LIMIT).await;
-    }
-    let body_fields = body.and_then(Value::as_object).into_iter().flatten();
-    for (field, value) in query.iter().chain(body_fields) {
-        let (Some(prefix), Some(id)) = (reference_prefix(field), value.as_str()) else {
-            continue;
-        };
-        for t in [format!("{prefix}s"), prefix.to_string()] {
-            if let Some(hit) = state.get(session, &t, id).await {
-                if !out
-                    .iter()
-                    .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
-                {
-                    out.push(hit);
-                }
-                break;
-            }
-        }
-    }
-    out
-}
-
-async fn write_state(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    op: &Operation,
-    resource_type: &str,
-    target_id: Option<String>,
-    generated: &GeneratedResponse,
-    request_body: Option<&Value>,
-) {
-    let data = generated.body.clone().or_else(|| request_body.cloned());
-    match op.kind {
-        OperationKind::Command(Effect::Create) => {
-            let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-            let Some(data) = data else { return };
-            let Some(id) = data.get(field).and_then(id_string) else {
-                return;
-            };
-            let resource = StoredResource {
-                resource_type: resource_type.into(),
-                id,
-                data,
-            };
-            state.upsert(session, resource).await;
-        }
-        OperationKind::Command(Effect::Update) => {
-            let (Some(id), Some(data)) = (target_id, data) else {
-                return;
-            };
-            let resource = StoredResource {
-                resource_type: resource_type.into(),
-                id,
-                data,
-            };
-            state.upsert(session, resource).await;
-        }
-        OperationKind::Command(Effect::Delete) => {
-            let Some(id) = target_id else { return };
-            state.delete(session, resource_type, &id).await;
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive(name: &str) -> bool {
-    SENSITIVE_HEADERS.contains(&name)
-        || ["token", "secret", "password", "api-key"]
-            .iter()
-            .any(|s| name.contains(s))
-}
-
-/// Non-sensitive, UTF-8 request headers, optionally keeping
-/// `X-Mockingbird-*` override headers.
-fn safe_headers(headers: &HeaderMap, keep_overrides: bool) -> Map<String, Value> {
-    headers
-        .iter()
-        .filter(|(name, _)| {
-            let n = name.as_str();
-            !is_sensitive(n) && (keep_overrides || !n.starts_with("x-mockingbird-"))
-        })
-        .filter_map(|(name, v)| {
-            Some((
-                name.as_str().to_string(),
-                Value::String(v.to_str().ok()?.into()),
-            ))
-        })
-        .collect()
-}
-
-/// Headers forwarded to the prompt.
-fn forwarded_headers(headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(headers, false)
-}
-
-/// Headers kept in the request record (overrides included).
-fn recorded_headers(headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(headers, true)
-}
-
 /// The raw query as recorded: repeated keys become arrays of strings.
 fn recorded_query(uri: &Uri) -> Value {
     let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
@@ -1205,15 +760,5 @@ mod tests {
             request_body_record(br#"{"raw":1}"#, None, None),
             json!({"raw": 1})
         );
-    }
-
-    #[test]
-    fn reference_fields() {
-        assert_eq!(reference_prefix("customerId"), Some("customer"));
-        assert_eq!(reference_prefix("customer_id"), Some("customer"));
-        assert_eq!(reference_prefix("Id"), None);
-        assert_eq!(reference_prefix("id"), None);
-        assert_eq!(last_path_param("/a/{x}/b/{y}"), Some("y".into()));
-        assert_eq!(last_path_param("/a"), None);
     }
 }

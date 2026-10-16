@@ -82,6 +82,7 @@ fn shipped(operations: &[&str]) -> ScenarioRuntime {
         status: None,
         latency: None,
         operations: operations.iter().map(|s| s.to_string()).collect(),
+        ..ScenarioRuntime::default()
     }
 }
 

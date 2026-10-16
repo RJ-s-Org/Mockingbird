@@ -1,6 +1,7 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
-//! Each adapter sits behind a cargo feature (`http-rest`, ...).
+//! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
+//! `grpc`, `soap`, `websocket`); all of them share the [`call`] pipeline.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,11 +13,54 @@ use mb_ext::Extensions;
 use mb_mcm::Bundle;
 use mb_state::StateStore;
 
+// Until an adapter is compiled in, nothing calls the shared pipeline.
+#[cfg_attr(not(feature = "http-rest"), allow(dead_code))]
+mod call;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 mod record;
 
 pub use record::{RequestRecord, RequestRecorder};
+
+/// Request header capping how many items a streamed response carries
+/// (an integer in `1..=10000`; the engine clamps it to its own maximum).
+pub const STREAM_ITEMS_HEADER: &str = "x-mockingbird-stream-items";
+
+/// A request extension carrying the mount prefix the dispatcher stripped
+/// before forwarding the request to a mock's router (e.g. `/calc`).
+#[derive(Clone, Debug)]
+pub struct MountPrefix(pub String);
+
+/// Protocol knobs shared by every mock (the `protocols:` config section).
+#[derive(Clone, Debug)]
+pub struct ProtocolSettings {
+    /// Path the GraphQL endpoint is served on, below the mount prefix.
+    pub graphql_path: String,
+    /// Whether GraphQL introspection queries are answered.
+    pub graphql_introspection: bool,
+    pub graphql_max_depth: usize,
+    pub graphql_max_complexity: usize,
+    /// Interval between SSE keepalive comments.
+    pub sse_keepalive: Duration,
+    /// Interval between WebSocket pings.
+    pub ws_keepalive: Duration,
+    /// Largest gRPC message decoded or encoded.
+    pub grpc_max_message_bytes: usize,
+}
+
+impl Default for ProtocolSettings {
+    fn default() -> Self {
+        Self {
+            graphql_path: "/graphql".into(),
+            graphql_introspection: true,
+            graphql_max_depth: 15,
+            graphql_max_complexity: 1000,
+            sse_keepalive: Duration::from_secs(15),
+            ws_keepalive: Duration::from_secs(30),
+            grpc_max_message_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
 
 /// A saved scenario as the data plane applies it (spec §7.1).
 #[derive(Clone, Debug, Default)]
@@ -30,6 +74,11 @@ pub struct ScenarioRuntime {
     pub latency: Option<Duration>,
     /// Operation ids the scenario applies to; empty means every operation.
     pub operations: Vec<String>,
+    /// Items per streamed response unless `X-Mockingbird-Stream-Items`
+    /// overrides it.
+    pub stream_items: Option<usize>,
+    /// Pause between streamed items, overriding the engine's default.
+    pub stream_item_interval: Option<Duration>,
 }
 
 impl ScenarioRuntime {
@@ -128,11 +177,13 @@ pub struct MockRuntime {
     /// The state store circuit breaker: degraded while the store is
     /// failing, when calls are served statelessly.
     pub state_health: Arc<StateHealth>,
+    /// Protocol knobs (GraphQL limits, keepalives, gRPC message size).
+    pub protocols: ProtocolSettings,
 }
 
 impl MockRuntime {
     /// A runtime with header overrides enabled, no scenarios, the
-    /// self-hosted extensions and no recorder.
+    /// self-hosted extensions, no recorder and default protocol settings.
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
@@ -149,6 +200,7 @@ impl MockRuntime {
             ext: Extensions::default(),
             recorder: None,
             state_health: Arc::new(StateHealth::default()),
+            protocols: ProtocolSettings::default(),
         }
     }
 }
