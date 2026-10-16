@@ -378,6 +378,35 @@ async fn data_plane_key_cannot_authenticate_admin() {
 }
 
 #[tokio::test]
+async fn api_key_principal_cannot_create_keys() {
+    let s = store().await;
+    let keys = ApiKeys::new(s);
+    let (_, token) = keys
+        .create(
+            &Principal::local(),
+            "default",
+            req("owner-key", Role::Owner),
+        )
+        .await
+        .unwrap();
+    let k = keys.verify(&token, KeyScope::Admin).await.unwrap();
+    let key_principal = ApiKeys::principal(&k);
+    assert_eq!(key_principal.kind, PrincipalKind::ApiKey);
+    assert!(matches!(
+        keys.create(&key_principal, "default", req("k", Role::Viewer))
+            .await,
+        Err(AuthError::Forbidden(_))
+    ));
+    // Users and the Local principal still can.
+    let owner = user(&[("default", Role::Owner)], false);
+    assert!(
+        keys.create(&owner, "default", req("k", Role::Viewer))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn key_role_capped_by_creator() {
     let s = store().await;
     let keys = ApiKeys::new(s);

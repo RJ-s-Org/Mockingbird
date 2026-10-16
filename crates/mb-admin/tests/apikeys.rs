@@ -414,3 +414,49 @@ async fn revoked_key_401_on_admin_api() {
         "Bearer realm=\"mockingbird\""
     );
 }
+
+#[tokio::test]
+async fn api_key_cannot_create_api_keys() {
+    let (store, state) = stores().await;
+    let api_keys = ApiKeys::new(store.clone());
+    let (_, token) = api_keys
+        .create(
+            &Principal::local(),
+            "default",
+            NewKeyRequest {
+                name: "automation".into(),
+                role: Role::Owner,
+                scopes: vec![],
+                expires_at: None,
+                sysadmin: true,
+            },
+        )
+        .await
+        .unwrap();
+    let app = router(AdminState {
+        auth: Arc::new(Authenticator {
+            api_keys,
+            sessions: None,
+            bearer: None,
+        }),
+        ..AdminState::new(store, state)
+    });
+    // Even a sysadmin owner key may list keys but not mint new ones.
+    call(&app, Some(&token), Method::GET, KEYS, None)
+        .await
+        .ok(StatusCode::OK);
+    let r = call(
+        &app,
+        Some(&token),
+        Method::POST,
+        KEYS,
+        Some(json!({"name": "child", "role": "viewer"})),
+    )
+    .await;
+    let p = r.problem(StatusCode::FORBIDDEN);
+    assert!(p["detail"].as_str().unwrap().contains("API key"), "{p}");
+    let listed = call(&app, Some(&token), Method::GET, KEYS, None)
+        .await
+        .ok(StatusCode::OK);
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+}

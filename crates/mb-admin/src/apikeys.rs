@@ -125,7 +125,7 @@ pub async fn list(
     request_body = CreateApiKey,
     responses(
         (status = 201, description = "The token is shown only here", body = CreatedApiKey),
-        (status = 403, description = "A role above the caller's, or a sysadmin key by a non-sysadmin", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A role above the caller's, a sysadmin key by a non-sysadmin, or a caller that is itself an API key", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid name", body = Problem, content_type = "application/problem+json"),
     )
 )]

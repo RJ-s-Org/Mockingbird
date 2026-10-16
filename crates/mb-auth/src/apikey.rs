@@ -125,6 +125,11 @@ impl ApiKeys {
         ws: &str,
         req: NewKeyRequest,
     ) -> Result<(ApiKey, String), AuthError> {
+        if creator.kind == PrincipalKind::ApiKey {
+            return Err(AuthError::Forbidden(
+                "an API key cannot create API keys; sign in as a user".to_string(),
+            ));
+        }
         let chars = req.name.chars().count();
         if chars == 0 || chars > MAX_NAME_CHARS {
             return Err(AuthError::Invalid(format!(

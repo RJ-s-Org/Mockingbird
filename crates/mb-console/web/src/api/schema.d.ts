@@ -2348,7 +2348,7 @@ export interface operations {
                     "application/json": components["schemas"]["CreatedApiKey"];
                 };
             };
-            /** @description A role above the caller's, or a sysadmin key by a non-sysadmin */
+            /** @description A role above the caller's, a sysadmin key by a non-sysadmin, or a caller that is itself an API key */
             403: {
                 headers: {
                     [name: string]: unknown;

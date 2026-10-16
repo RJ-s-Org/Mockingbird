@@ -210,7 +210,7 @@ Roles come from the `roles_claim` claim (default `groups`) of the ID token or JW
 
 ### API keys
 
-Workspace admins create keys in the console (**API keys**) or with `POST /api/v1/workspaces/{ws}/api-keys`. A key has a role (at most its creator's), optional expiry, and scopes:
+Workspace admins create keys in the console (**API keys**) or with `POST /api/v1/workspaces/{ws}/api-keys`; only users (or the Local principal in `auth.mode: none`) can, never another API key. A key has a role (at most its creator's), optional expiry, and scopes:
 
 - **`admin`** (the default): the key authenticates Admin API calls, with its role, like a user.
 - **`data-plane`**: the key unlocks mocks whose `data_plane_auth.mode` is `api_key` (see below).
