@@ -10,6 +10,7 @@ pub mod llm;
 pub mod merge;
 pub mod model;
 pub mod paths;
+mod pdfscan;
 pub mod postman;
 pub mod redact;
 pub mod text;

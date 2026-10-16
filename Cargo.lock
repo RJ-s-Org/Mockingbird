@@ -2805,6 +2805,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "weezl",
  "wiremock",
  "zip",
 ]

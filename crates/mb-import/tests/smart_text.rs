@@ -555,3 +555,141 @@ proptest! {
         }
     }
 }
+
+/// Little-endian bit writer for hand-made deflate data.
+struct Bits {
+    out: Vec<u8>,
+    acc: u64,
+    n: u32,
+}
+
+impl Bits {
+    fn push(&mut self, value: u64, bits: u32) {
+        self.acc |= value << self.n;
+        self.n += bits;
+        while self.n >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.n -= 8;
+        }
+    }
+
+    /// Huffman codes are stored most significant bit first.
+    fn code(&mut self, code: u64, bits: u32) {
+        let reversed = (0..bits).fold(0, |r, i| (r << 1) | ((code >> i) & 1));
+        self.push(reversed, bits);
+    }
+}
+
+/// A zlib stream that inflates to `1 + 258 * copies` zero bytes using one
+/// fixed-Huffman block: a literal 0, then (length 258, distance 1) copies.
+/// About 13 bits per 258 output bytes, so it is cheap to build.
+fn zlib_zeros(copies: usize) -> Vec<u8> {
+    let mut bits = Bits {
+        out: vec![0x78, 0x01],
+        acc: 0,
+        n: 0,
+    };
+    bits.push(1, 1); // BFINAL
+    bits.push(1, 2); // BTYPE = fixed Huffman
+    bits.code(0x30, 8); // literal 0
+    for _ in 0..copies {
+        bits.code(0b1100_0101, 8); // length code 285 (258 bytes)
+        bits.code(0, 5); // distance code 0 (distance 1)
+    }
+    bits.code(0, 7); // end of block
+    if bits.n > 0 {
+        let pad = 8 - bits.n;
+        bits.push(0, pad);
+    }
+    let len = 1 + 258 * copies as u64;
+    let adler = ((len % 65521) << 16) | 1;
+    bits.out.extend_from_slice(&(adler as u32).to_be_bytes());
+    bits.out
+}
+
+/// A one-page PDF whose content stream is `content`, under `filter`.
+fn pdf_with_stream(filter: Object, content: Vec<u8>) -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let resources_id = doc.add_object(dictionary! {});
+    let content_id = doc.add_object(Stream::new(dictionary! { "Filter" => filter }, content));
+    let page_id: ObjectId = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+    });
+    finish_pdf(doc, pages_id, resources_id, vec![page_id.into()])
+}
+
+fn assert_bomb_refused(pdf: &[u8]) {
+    match extract_pdf(pdf) {
+        Err(SmartError::Unreadable(m)) => assert!(m.contains("expands"), "{m}"),
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn zlib_zeros_inflates_to_zeros() {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::ZlibDecoder::new(&zlib_zeros(4)[..])
+        .read_to_end(&mut out)
+        .unwrap();
+    assert_eq!(out, vec![0; 1 + 258 * 4]);
+}
+
+#[test]
+fn pdf_flate_bomb_is_refused() {
+    // About 650 KB that inflates to 100 MiB, past the 64 MiB cap.
+    let bomb = zlib_zeros(100 * 1024 * 1024 / 258);
+    let pdf = pdf_with_stream("FlateDecode".into(), bomb);
+    assert!(pdf.len() < 1024 * 1024, "{}", pdf.len());
+    assert_bomb_refused(&pdf);
+}
+
+#[test]
+fn pdf_nested_flate_bomb_is_refused() {
+    use std::io::Write;
+    // The bomb compressed once more: only the second layer explodes.
+    let inner = zlib_zeros(100 * 1024 * 1024 / 258);
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(&inner).unwrap();
+    let outer = enc.finish().unwrap();
+    let filters = vec![Object::from("FlateDecode"), Object::from("FlateDecode")];
+    assert_bomb_refused(&pdf_with_stream(filters.into(), outer));
+}
+
+#[test]
+fn pdf_with_long_filter_chain_is_refused() {
+    let filters: Vec<Object> = (0..20).map(|_| Object::from("ASCII85Decode")).collect();
+    match extract_pdf(&pdf_with_stream(filters.into(), b"~>".to_vec())) {
+        Err(SmartError::Unreadable(_)) => {}
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}
+
+#[test]
+fn pdf_with_compressed_content_is_read() {
+    use std::io::Write;
+    let mut doc = Document::load_mem(&build_pdf(&["GET /pets"])).unwrap();
+    for object in doc.objects.values_mut() {
+        if let Object::Stream(stream) = object {
+            let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+            enc.write_all(&stream.content).unwrap();
+            stream.dict.set("Filter", "FlateDecode");
+            stream.set_content(enc.finish().unwrap());
+        }
+    }
+    let mut pdf = Vec::new();
+    doc.save_to(&mut pdf).unwrap();
+    assert!(
+        String::from_utf8_lossy(&pdf).contains("FlateDecode"),
+        "the fixture should be compressed"
+    );
+    let text = extract_pdf(&pdf).unwrap();
+    assert!(
+        text.blocks.iter().any(|b| b.text.contains("GET /pets")),
+        "{text:?}"
+    );
+}

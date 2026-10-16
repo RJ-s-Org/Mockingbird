@@ -435,6 +435,19 @@ fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, SmartError> {
 /// endpoint lines. Pages whose text cannot be extracted are skipped; when no
 /// page can be read the PDF is unreadable.
 pub fn extract_pdf(bytes: &[u8]) -> Result<TextDoc, SmartError> {
+    // Bound every decompression before lopdf runs one without limits.
+    super::pdfscan::check(bytes).map_err(|refusal| {
+        SmartError::Unreadable(match refusal {
+            super::pdfscan::Refusal::Expands => format!(
+                "the PDF expands to more than {} MiB when decompressed",
+                super::pdfscan::MAX_PDF_EXPANSION / (1024 * 1024)
+            ),
+            super::pdfscan::Refusal::TooComplex => {
+                "the PDF has too many streams or filters to read safely".into()
+            }
+            super::pdfscan::Refusal::Encrypted => "encrypted PDFs are not supported".into(),
+        })
+    })?;
     let doc = guarded(|| pdf_extract::Document::load_mem(bytes))?
         .map_err(|e| SmartError::Unreadable(format!("the PDF could not be parsed: {e}")))?;
     if doc.is_encrypted() {

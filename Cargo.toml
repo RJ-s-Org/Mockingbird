@@ -70,6 +70,7 @@ openidconnect = { version = "4.0", default-features = false }
 jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 rsa = { version = "0.9", features = ["pem"] }
 pdf-extract = "0.12.1"
+weezl = "0.1.12"
 scraper = "0.27"
 pulldown-cmark = { version = "0.13", default-features = false }
 url = "2.5"
