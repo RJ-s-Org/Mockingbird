@@ -1,0 +1,29 @@
+[package]
+name = "mockingbird-custom-ext-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Worked example: a Mockingbird binary with custom mb-ext extensions"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mockingbird-custom-ext"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+dashmap.workspace = true
+mb-ext.workspace = true
+mockingbird = { path = "../../crates/mockingbird" }
+tokio = { workspace = true, features = ["signal"] }
+
+[dev-dependencies]
+axum.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
