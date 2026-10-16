@@ -123,6 +123,12 @@ impl WsAccess {
     }
 }
 
+/// `now` minus `retention_days` days, or `None` when that is not a
+/// representable time.
+pub fn retention_cutoff(now: DateTime<Utc>, retention_days: u32) -> Option<DateTime<Utc>> {
+    chrono::TimeDelta::try_days(i64::from(retention_days)).and_then(|d| now.checked_sub_signed(d))
+}
+
 /// Prunes events older than `retention_days` now, then every 24 hours.
 pub fn spawn_retention(
     store: Arc<dyn ControlStore>,
@@ -133,7 +139,13 @@ pub fn spawn_retention(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+            let Some(cutoff) = retention_cutoff(Utc::now(), retention_days) else {
+                tracing::warn!(
+                    retention_days,
+                    "audit retention out of range; nothing pruned"
+                );
+                continue;
+            };
             match store.prune_audit(cutoff).await {
                 Ok(n) => tracing::debug!(pruned = n, retention_days, "audit retention ran"),
                 Err(e) => tracing::warn!(error = %e, "audit retention failed"),

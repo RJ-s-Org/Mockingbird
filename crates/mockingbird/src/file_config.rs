@@ -453,6 +453,35 @@ pub struct FileScenario {
     pub operations: Vec<String>,
 }
 
+/// Longest accepted `auth.session_ttl`.
+pub const MAX_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Accepted `audit.retention_days`.
+pub const RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=3650;
+
+impl FileConfig {
+    /// Range checks that do not depend on the auth mode:
+    /// `auth.session_ttl` ≤ 30 days and `audit.retention_days` in
+    /// 1..=3650.
+    pub fn validate_ranges(&self) -> Result<(), String> {
+        if self.auth.session_ttl > MAX_SESSION_TTL {
+            return Err(format!(
+                "auth.session_ttl {} exceeds the maximum of 30d",
+                humantime::format_duration(self.auth.session_ttl)
+            ));
+        }
+        if !RETENTION_DAYS.contains(&self.audit.retention_days) {
+            return Err(format!(
+                "audit.retention_days {} must be between {} and {}",
+                self.audit.retention_days,
+                RETENTION_DAYS.start(),
+                RETENTION_DAYS.end()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Reads and parses `path`, resolving contract paths against its directory.
 pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
     let text = std::fs::read_to_string(path)
@@ -482,6 +511,9 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
             mock.contract = dir.join(&mock.contract);
         }
     }
+    cfg.validate_ranges()
+        .map_err(|e| anyhow!(e))
+        .with_context(|| format!("invalid config file {}", path.display()))?;
     Ok(cfg)
 }
 

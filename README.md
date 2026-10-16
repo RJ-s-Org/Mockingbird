@@ -174,7 +174,7 @@ The admin port serves a web console at `/` (for example http://127.0.0.1:9090): 
 auth:
   mode: oidc
   external_url: https://mockingbird.example.com   # where browsers reach the admin port
-  session_ttl: 12h                                 # absolute console session lifetime
+  session_ttl: 12h                                 # absolute console session lifetime (max 30d)
   sysadmin_subjects: ["3f2c…"]                     # OIDC `sub` values that are always sysadmin
   public_metrics: true                             # serve /metrics without credentials
   oidc:
@@ -186,7 +186,7 @@ auth:
     group_prefix: mb                               # default
     audience: mockingbird                          # `aud` of bearer JWTs; default: client_id
 audit:
-  retention_days: 365
+  retention_days: 365                              # 1..=3650
   webhook_url: https://hooks.example.com/mockingbird
   webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET
 ```

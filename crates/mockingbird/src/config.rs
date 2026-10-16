@@ -261,6 +261,7 @@ pub fn resolve_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<
         }
     };
     apply_flags(&mut cfg, args);
+    cfg.validate_ranges().map_err(|e| anyhow!(e))?;
     cfg.auth.validate().map_err(|e| anyhow!(e))?;
     Ok(cfg)
 }

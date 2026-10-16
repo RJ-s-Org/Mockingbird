@@ -10,7 +10,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use chrono::Utc;
-use mb_admin::{AdminState, Auditor, WebhookSink, router, signature, spawn_retention};
+use mb_admin::{
+    AdminState, Auditor, WebhookSink, retention_cutoff, router, signature, spawn_retention,
+};
 use mb_auth::{AuthError, Authenticate, Principal, PrincipalKind, Role};
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{AuditEvent, AuditFilter, ControlStore, NewAuditEvent};
@@ -951,4 +953,23 @@ async fn retention_prunes_old_events() {
     task.abort();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].target, "mock:m2");
+}
+
+#[test]
+fn retention_cutoff_never_overflows() {
+    let now = Utc::now();
+    assert_eq!(
+        retention_cutoff(now, 365),
+        Some(now - chrono::Duration::days(365))
+    );
+    assert_eq!(retention_cutoff(now, u32::MAX), None);
+}
+
+#[tokio::test]
+async fn retention_with_huge_days_does_not_panic() {
+    let h = harness().await;
+    let task = spawn_retention(h.store.clone(), u32::MAX);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!task.is_finished(), "retention task died");
+    task.abort();
 }

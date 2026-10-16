@@ -37,7 +37,7 @@ mod workspaces;
 
 pub use access::{CurrentPrincipal, WsAccess};
 pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
-pub use audit::{AuditEventView, Auditor, spawn_retention};
+pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
 pub use auth_routes::{
     LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
 };

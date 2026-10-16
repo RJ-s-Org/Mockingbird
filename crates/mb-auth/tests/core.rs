@@ -480,6 +480,20 @@ async fn expired_session_is_none_and_deleted() {
 }
 
 #[tokio::test]
+async fn out_of_range_session_ttl_is_an_error_not_a_panic() {
+    let s = store().await;
+    // Fits chrono's TimeDelta but overflows `now + ttl`.
+    let years = Duration::from_secs(1_000_000 * 365 * 24 * 3600);
+    for ttl in [years, Duration::MAX] {
+        let sm = SessionManager::new(s.clone(), ttl, false);
+        assert!(matches!(
+            sm.create(&Principal::local()).await,
+            Err(AuthError::Invalid(_))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn session_ids_are_unique_and_hashed_at_rest() {
     let s = store().await;
     let sm = SessionManager::new(s.clone(), Duration::from_secs(3600), false);

@@ -243,6 +243,30 @@ fn auth_defaults() {
     }
 }
 
+#[test]
+fn session_ttl_and_retention_days_are_bounded() {
+    let ws = Workspace::new();
+    for yaml in [
+        "auth:\n  session_ttl: 31d\n",
+        "audit:\n  retention_days: 0\n",
+        "audit:\n  retention_days: 3651\n",
+        "audit:\n  retention_days: 4294967295\n",
+    ] {
+        ws.write(yaml);
+        let err = file_config::load(&ws.config_path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("auth.session_ttl") || msg.contains("audit.retention_days"),
+            "{yaml}: {msg}"
+        );
+    }
+    let cfg = ws.load("auth:\n  session_ttl: 30d\naudit:\n  retention_days: 3650\n");
+    assert_eq!(cfg.auth.session_ttl, Duration::from_secs(30 * 24 * 60 * 60));
+    assert_eq!(cfg.audit.retention_days, 3650);
+    let cfg = ws.load("audit:\n  retention_days: 1\n");
+    assert_eq!(cfg.audit.retention_days, 1);
+}
+
 fn oidc_args(ws: &Workspace) -> ServeArgs {
     ServeArgs {
         config: Some(ws.config_path()),

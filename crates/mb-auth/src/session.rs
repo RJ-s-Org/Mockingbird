@@ -43,12 +43,15 @@ impl SessionManager {
             .map_err(|e| AuthError::Invalid(format!("session ttl out of range: {e}")))?;
         let principal =
             serde_json::to_value(p).map_err(|e| AuthError::Invalid(format!("principal: {e}")))?;
+        let expires_at = now
+            .checked_add_signed(ttl)
+            .ok_or_else(|| AuthError::Invalid("session ttl out of range".into()))?;
         self.store
             .create_admin_session(&AdminSession {
                 id_hash: hash_cookie(&value),
                 principal,
                 created_at: now,
-                expires_at: now + ttl,
+                expires_at,
                 last_seen: now,
             })
             .await?;
