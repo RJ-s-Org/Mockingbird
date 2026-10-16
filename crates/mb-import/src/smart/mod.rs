@@ -3,8 +3,11 @@
 
 pub mod chunk;
 pub mod fetch;
+pub mod har;
 pub mod infer;
 pub mod model;
+pub mod paths;
+pub mod redact;
 pub mod text;
 
 pub use model::ImportKind;
@@ -12,6 +15,8 @@ use serde_json::Value;
 
 /// Largest accepted input (a file, decoded base64 or text).
 pub const MAX_IMPORT_BYTES: usize = 20 * 1024 * 1024;
+/// Most examples kept per request body or response while importing.
+pub const MAX_EXAMPLES: usize = 5;
 /// Default token budget of one import job.
 pub const DEFAULT_IMPORT_TOKENS: u64 = 200_000;
 

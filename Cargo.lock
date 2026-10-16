@@ -2773,6 +2773,7 @@ version = "0.1.0"
 dependencies = [
  "async-graphql-parser",
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "flate2",
  "futures",

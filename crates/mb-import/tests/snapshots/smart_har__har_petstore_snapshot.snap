@@ -1,0 +1,268 @@
+---
+source: crates/mb-import/tests/smart_har.rs
+expression: petstore()
+---
+title: petstore.example.com (HAR import)
+servers:
+  - "https://petstore.example.com"
+operations:
+  - method: POST
+    path: /api/login
+    operation_id: ~
+    summary: ~
+    description: ~
+    tags: []
+    parameters: []
+    request:
+      content_type: application/json
+      schema:
+        properties:
+          password:
+            type: string
+          username:
+            type: string
+        required:
+          - password
+          - username
+        type: object
+      examples:
+        - password: "<redacted>"
+          username: amy
+    responses:
+      - status: 200
+        description: ~
+        content_type: application/json
+        schema:
+          properties:
+            token:
+              type: string
+          required:
+            - token
+          type: object
+        examples:
+          - token: "<redacted>"
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: entry 7
+        excerpt: "POST https://petstore.example.com/api/login → 200"
+  - method: GET
+    path: /api/pets
+    operation_id: ~
+    summary: ~
+    description: ~
+    tags: []
+    parameters:
+      - name: status
+        in: query
+        required: false
+        description: ~
+        schema:
+          type: string
+        examples:
+          - available
+    request: ~
+    responses:
+      - status: 200
+        description: ~
+        content_type: application/json
+        schema:
+          items:
+            properties:
+              createdAt:
+                format: date-time
+                type: string
+              id:
+                type: integer
+              name:
+                enum:
+                  - Kiki
+                  - Rex
+                  - Tom
+                type: string
+              status:
+                enum:
+                  - available
+                  - pending
+                  - sold
+                type: string
+            required:
+              - createdAt
+              - id
+              - name
+              - status
+            type: object
+          type: array
+        examples:
+          - - createdAt: "2026-09-01T08:00:00Z"
+              id: 1
+              name: Rex
+              status: available
+          - - createdAt: "2026-09-01T08:00:00Z"
+              id: 1
+              name: Rex
+              status: available
+            - createdAt: "2026-09-02T09:30:00Z"
+              id: 2
+              name: Tom
+              status: sold
+            - createdAt: "2026-09-03T11:15:00+02:00"
+              id: 3
+              name: Kiki
+              status: pending
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: entry 0
+        excerpt: "GET https://petstore.example.com/api/pets → 200"
+      - chunk: ~
+        location: entry 1
+        excerpt: "GET https://petstore.example.com/api/pets → 200"
+  - method: POST
+    path: /api/pets
+    operation_id: ~
+    summary: ~
+    description: ~
+    tags: []
+    parameters: []
+    request:
+      content_type: application/json
+      schema:
+        properties:
+          name:
+            type: string
+          status:
+            type: string
+        required:
+          - name
+          - status
+        type: object
+      examples:
+        - name: Bella
+          status: available
+    responses:
+      - status: 201
+        description: ~
+        content_type: application/json
+        schema:
+          properties:
+            createdAt:
+              format: date-time
+              type: string
+            id:
+              type: integer
+            name:
+              type: string
+            status:
+              type: string
+          required:
+            - createdAt
+            - id
+            - name
+            - status
+          type: object
+        examples:
+          - createdAt: "2026-10-01T10:00:05Z"
+            id: 4
+            name: Bella
+            status: available
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: entry 5
+        excerpt: "POST https://petstore.example.com/api/pets → 201"
+  - method: DELETE
+    path: "/api/pets/{petId}"
+    operation_id: ~
+    summary: ~
+    description: ~
+    tags: []
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        description: ~
+        schema:
+          type: integer
+        examples:
+          - 2
+    request: ~
+    responses:
+      - status: 204
+        description: ~
+        content_type: ~
+        schema: ~
+        examples: []
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: entry 6
+        excerpt: "DELETE https://petstore.example.com/api/pets/2 → 204"
+  - method: GET
+    path: "/api/pets/{petId}"
+    operation_id: ~
+    summary: ~
+    description: ~
+    tags: []
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        description: ~
+        schema:
+          type: integer
+        examples:
+          - 1
+          - 2
+          - 3
+    request: ~
+    responses:
+      - status: 200
+        description: ~
+        content_type: application/json
+        schema:
+          properties:
+            createdAt:
+              format: date-time
+              type: string
+            id:
+              type: integer
+            name:
+              type: string
+            status:
+              type: string
+          required:
+            - createdAt
+            - id
+            - name
+            - status
+          type: object
+        examples:
+          - createdAt: "2026-09-01T08:00:00Z"
+            id: 1
+            name: Rex
+            status: available
+          - createdAt: "2026-09-02T09:30:00Z"
+            id: 2
+            name: Tom
+            status: sold
+          - createdAt: "2026-09-03T11:15:00+02:00"
+            id: 3
+            name: Kiki
+            status: pending
+    confidence: 1
+    provenance:
+      - chunk: ~
+        location: entry 2
+        excerpt: "GET https://petstore.example.com/api/pets/1 → 200"
+      - chunk: ~
+        location: entry 3
+        excerpt: "GET https://petstore.example.com/api/pets/2 → 200"
+      - chunk: ~
+        location: entry 4
+        excerpt: "GET https://petstore.example.com/api/pets/3 → 200"
+warnings:
+  - code: entries_skipped
+    message: "skipped 1 entry (static assets, non-JSON traffic or unreadable entries)"
+  - code: other_origins
+    message: "dropped entries on other origins (count): https://cdn.example.net (1)"
