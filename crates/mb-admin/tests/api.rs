@@ -13,7 +13,7 @@ use mb_state::{
 };
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
-    NewRequestLogEntry, ResourceSource, Scenario, ScenarioRules,
+    NewRequestLogEntry, RequestKind, ResourceSource, Scenario, ScenarioRules,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -1217,6 +1217,7 @@ async fn request_log_query() {
                     request: json!({ "query": {} }),
                     response: Some(json!({ "ok": true })),
                     at: Utc::now(),
+                    kind: RequestKind::Http,
                 },
                 1000,
             )
@@ -1274,6 +1275,67 @@ async fn request_log_query() {
     h.get("/api/v1/mocks/nope/requests")
         .await
         .assert_problem(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn request_log_kind_query() {
+    let h = harness().await;
+    let mock = h.create_mock("orders").await;
+    let mock_id = mock["id"].as_str().unwrap().parse().unwrap();
+    for (op, method, kind) in [
+        ("listOrders", "GET", RequestKind::Http),
+        ("orderPlaced", "PUBLISH", RequestKind::Event),
+    ] {
+        h.store
+            .append_request_log(
+                NewRequestLogEntry {
+                    mock_id,
+                    operation_id: Some(op.into()),
+                    session: "default".into(),
+                    method: method.into(),
+                    path: "orders.placed".into(),
+                    status: 200,
+                    source: Some("llm".into()),
+                    latency_ms: 1,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    request: json!({}),
+                    response: None,
+                    at: Utc::now(),
+                    kind,
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+    }
+
+    let r = h.get("/api/v1/mocks/orders/requests").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let kinds: Vec<Value> = r
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].clone())
+        .collect();
+    assert_eq!(kinds, [json!("event"), json!("http")]);
+
+    let r = h.get("/api/v1/mocks/orders/requests?kind=event").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let events = r.json();
+    assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+    assert_eq!(events[0]["operation_id"], "orderPlaced");
+    assert_eq!(events[0]["kind"], "event");
+
+    let r = h.get("/api/v1/mocks/orders/requests?kind=http").await;
+    assert_eq!(r.json()[0]["operation_id"], "listOrders");
+
+    let body = h
+        .get("/api/v1/mocks/orders/requests?kind=bogus")
+        .await
+        .assert_problem(StatusCode::BAD_REQUEST);
+    assert_eq!(body["detail"], "unknown request kind \"bogus\"", "{body}");
 }
 
 #[tokio::test]

@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use mb_mcm::Bundle;
+use mb_mcm::Trigger;
 use mb_store::{
-    ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
-    NewContractVersion, NewMock, NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError,
+    ChannelSettings, ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
+    Mock, MockEventSettings, NewContractVersion, NewMock, NewRequestLogEntry,
+    RETENTION_PRUNE_INTERVAL, RequestKind, RequestLogFilter, ResourceSource, Scenario,
+    ScenarioRules, StoreError,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -27,6 +29,11 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     request_log_retention_prunes(&store).await;
     request_log_retention_prunes_interleaved_mocks(&store).await;
     changes_are_published(&store).await;
+    channel_settings_crud(&store).await;
+    event_settings_upsert(&store).await;
+    scheduler_lease_exclusive(&store).await;
+    delete_mock_cascades_event_tables(&store).await;
+    request_log_kind_filter(&store).await;
 }
 
 fn new_mock(name: &str) -> NewMock {
@@ -84,6 +91,7 @@ fn log_entry(mock_id: Uuid, session: &str, op: &str, source: &str) -> NewRequest
         request: json!({"q": 1}),
         response: Some(json!({"ok": true})),
         at: Utc::now(),
+        kind: RequestKind::Http,
     }
 }
 
@@ -774,4 +782,267 @@ async fn changes_are_published(store: &Arc<dyn ControlStore>) {
         .await
         .expect("activate");
     assert_eq!(next_change(&mut rx, "activate change").await, expected);
+}
+
+fn channel_settings(mock_id: Uuid, channel_id: &str) -> ChannelSettings {
+    ChannelSettings {
+        mock_id,
+        channel_id: channel_id.to_string(),
+        enabled: true,
+        triggers: None,
+        source: ResourceSource::Api,
+        updated_at: micros_now(),
+    }
+}
+
+/// Now at microsecond precision, which every backend round-trips.
+fn micros_now() -> chrono::DateTime<Utc> {
+    use chrono::SubsecRound;
+    Utc::now().trunc_subsecs(6)
+}
+
+async fn channel_settings_crud(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "channels").await;
+    let mut rx = store.subscribe();
+    let expected = ControlChange::Mock {
+        workspace: DEFAULT_WORKSPACE.into(),
+        name: "channels".into(),
+    };
+
+    let first = channel_settings(mock.id, "lightMeasured");
+    store.put_channel_settings(&first).await.expect("put");
+    assert_eq!(next_change(&mut rx, "put change").await, expected);
+    assert_eq!(
+        store.list_channel_settings(mock.id).await.expect("list"),
+        vec![first.clone()],
+        "triggers: None round-trips as None"
+    );
+
+    let updated = ChannelSettings {
+        enabled: false,
+        triggers: Some(vec![
+            Trigger::Schedule {
+                every: std::time::Duration::from_millis(500),
+            },
+            Trigger::Manual,
+        ]),
+        updated_at: micros_now(),
+        ..first.clone()
+    };
+    store
+        .put_channel_settings(&updated)
+        .await
+        .expect("put again");
+    assert_eq!(next_change(&mut rx, "second put change").await, expected);
+    let other = channel_settings(mock.id, "alpha");
+    store.put_channel_settings(&other).await.expect("put other");
+    assert_eq!(next_change(&mut rx, "other put change").await, expected);
+    assert_eq!(
+        store.list_channel_settings(mock.id).await.expect("list"),
+        vec![other.clone(), updated.clone()],
+        "one row per channel, updated in place, sorted by channel id"
+    );
+
+    assert!(
+        store
+            .delete_channel_settings(mock.id, "lightMeasured")
+            .await
+            .expect("delete")
+    );
+    assert_eq!(next_change(&mut rx, "delete change").await, expected);
+    assert!(
+        !store
+            .delete_channel_settings(mock.id, "lightMeasured")
+            .await
+            .expect("delete again")
+    );
+    assert_eq!(
+        store.list_channel_settings(mock.id).await.expect("list"),
+        vec![other]
+    );
+}
+
+async fn event_settings_upsert(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "event-settings").await;
+    assert_eq!(store.get_event_settings(mock.id).await.expect("get"), None);
+    let mut rx = store.subscribe();
+    let expected = ControlChange::Mock {
+        workspace: DEFAULT_WORKSPACE.into(),
+        name: "event-settings".into(),
+    };
+    let s = MockEventSettings {
+        mock_id: mock.id,
+        broker: Some("local".into()),
+        source: ResourceSource::Api,
+        updated_at: micros_now(),
+    };
+    store.put_event_settings(&s).await.expect("put");
+    assert_eq!(next_change(&mut rx, "put change").await, expected);
+    assert_eq!(
+        store.get_event_settings(mock.id).await.expect("get"),
+        Some(s.clone())
+    );
+    let s2 = MockEventSettings {
+        broker: None,
+        source: ResourceSource::File,
+        updated_at: micros_now(),
+        ..s
+    };
+    store.put_event_settings(&s2).await.expect("put again");
+    assert_eq!(next_change(&mut rx, "second put change").await, expected);
+    assert_eq!(
+        store.get_event_settings(mock.id).await.expect("get"),
+        Some(s2)
+    );
+}
+
+async fn scheduler_lease_exclusive(store: &Arc<dyn ControlStore>) {
+    use std::time::Duration;
+    let mock = create(store, "lease").await;
+    let ttl = Duration::from_secs(30);
+    assert!(
+        store
+            .acquire_scheduler_lease(mock.id, "a", ttl)
+            .await
+            .expect("a")
+    );
+    assert!(
+        !store
+            .acquire_scheduler_lease(mock.id, "b", ttl)
+            .await
+            .expect("b")
+    );
+    assert!(
+        store
+            .acquire_scheduler_lease(mock.id, "a", ttl)
+            .await
+            .expect("a renews")
+    );
+    assert!(
+        store
+            .acquire_scheduler_lease(mock.id, "a", Duration::from_millis(1))
+            .await
+            .expect("a short")
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        store
+            .acquire_scheduler_lease(mock.id, "b", ttl)
+            .await
+            .expect("b after expiry")
+    );
+    assert!(
+        !store
+            .acquire_scheduler_lease(mock.id, "a", ttl)
+            .await
+            .expect("a after b took over")
+    );
+}
+
+async fn delete_mock_cascades_event_tables(store: &Arc<dyn ControlStore>) {
+    use std::time::Duration;
+    let mock = create(store, "event-cascade").await;
+    store
+        .put_channel_settings(&channel_settings(mock.id, "c"))
+        .await
+        .expect("channel settings");
+    store
+        .put_event_settings(&MockEventSettings {
+            mock_id: mock.id,
+            broker: Some("local".into()),
+            source: ResourceSource::Api,
+            updated_at: micros_now(),
+        })
+        .await
+        .expect("event settings");
+    assert!(
+        store
+            .acquire_scheduler_lease(mock.id, "a", Duration::from_secs(30))
+            .await
+            .expect("lease")
+    );
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "event-cascade")
+            .await
+            .expect("delete")
+    );
+    assert!(
+        store
+            .list_channel_settings(mock.id)
+            .await
+            .expect("list")
+            .is_empty()
+    );
+    assert_eq!(store.get_event_settings(mock.id).await.expect("get"), None);
+
+    // A mock re-created under the same name gets a fresh id; the old lease
+    // row went with the old mock, so another holder acquires at once.
+    let again = create(store, "event-cascade").await;
+    assert!(
+        store
+            .acquire_scheduler_lease(again.id, "b", Duration::from_secs(30))
+            .await
+            .expect("lease on new mock")
+    );
+    // Writing settings for the deleted mock fails rather than resurrecting rows.
+    assert!(
+        store
+            .put_channel_settings(&channel_settings(mock.id, "c"))
+            .await
+            .is_err()
+    );
+}
+
+async fn request_log_kind_filter(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "kinds").await;
+    let mut event = log_entry(mock.id, "s", "lightMeasured", "llm");
+    event.kind = RequestKind::Event;
+    event.method = "PUBLISH".into();
+    let event_id = store.append_request_log(event, 1000).await.expect("event");
+    let http_id = store
+        .append_request_log(log_entry(mock.id, "s", "listOrders", "llm"), 1000)
+        .await
+        .expect("http");
+    // A P2-shaped entry (no `kind`) is an `http` one.
+    let mut p2 = serde_json::to_value(log_entry(mock.id, "s", "getOrder", "llm")).expect("json");
+    p2.as_object_mut().expect("object").remove("kind");
+    let p2: NewRequestLogEntry = serde_json::from_value(p2).expect("p2 entry");
+    assert_eq!(p2.kind, RequestKind::Http);
+    let p2_id = store.append_request_log(p2, 1000).await.expect("p2");
+
+    let events = store
+        .list_request_log(
+            mock.id,
+            &RequestLogFilter {
+                kind: Some(RequestKind::Event),
+                ..RequestLogFilter::default()
+            },
+        )
+        .await
+        .expect("events");
+    assert_eq!(events.iter().map(|e| e.id).collect::<Vec<_>>(), [event_id]);
+    assert_eq!(events[0].kind, RequestKind::Event);
+
+    let http = store
+        .list_request_log(
+            mock.id,
+            &RequestLogFilter {
+                kind: Some(RequestKind::Http),
+                ..RequestLogFilter::default()
+            },
+        )
+        .await
+        .expect("http");
+    assert_eq!(
+        http.iter().map(|e| e.id).collect::<Vec<_>>(),
+        [p2_id, http_id]
+    );
+    assert!(http.iter().all(|e| e.kind == RequestKind::Http));
+
+    let all = store
+        .list_request_log(mock.id, &RequestLogFilter::default())
+        .await
+        .expect("all");
+    assert_eq!(all.len(), 3);
 }

@@ -223,6 +223,7 @@ impl Writer {
             request: r.request,
             response: r.response,
             at: Utc::now(),
+            kind: mb_store::RequestKind::parse(r.kind.as_str()).unwrap_or_default(),
         };
         if let Err(error) = self
             .store

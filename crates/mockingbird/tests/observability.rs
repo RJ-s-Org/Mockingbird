@@ -9,15 +9,16 @@ use async_trait::async_trait;
 use mb_engine::StreamConfig;
 use mb_ext::Extensions;
 use mb_protocols::ProtocolSettings;
-use mb_protocols::{RequestRecord, RequestRecorder};
+use mb_protocols::{RequestKind, RequestRecord, RequestRecorder};
 use mb_state::{
     MemoryStore, SessionInfo, SessionKey, SqlStateStore, StateChanged, StateError, StateStore,
     StoredResource,
 };
 use mb_store::{
-    ContractStatus, ContractVersion, ControlChange, ControlStore, DEFAULT_WORKSPACE, LlmProfile,
-    Mock, NewContractVersion, NewMock, NewRequestLogEntry, PgStore, RequestLogEntry,
-    RequestLogFilter, ResourceSource, Scenario, SqliteControlStore, StoreError,
+    ChannelSettings, ContractStatus, ContractVersion, ControlChange, ControlStore,
+    DEFAULT_WORKSPACE, LlmProfile, Mock, MockEventSettings, NewContractVersion, NewMock,
+    NewRequestLogEntry, PgStore, RequestLogEntry, RequestLogFilter, ResourceSource, Scenario,
+    SqliteControlStore, StoreError,
 };
 use mockingbird::ops::{self, OpsState};
 use mockingbird::recorder::StoreRecorder;
@@ -126,6 +127,43 @@ impl ControlStore for StubControl {
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError> {
         self.inner.list_request_log(mock_id, f).await
+    }
+    async fn list_channel_settings(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Vec<ChannelSettings>, StoreError> {
+        self.inner.list_channel_settings(mock_id).await
+    }
+    async fn put_channel_settings(&self, s: &ChannelSettings) -> Result<(), StoreError> {
+        self.inner.put_channel_settings(s).await
+    }
+    async fn delete_channel_settings(
+        &self,
+        mock_id: Uuid,
+        channel_id: &str,
+    ) -> Result<bool, StoreError> {
+        self.inner
+            .delete_channel_settings(mock_id, channel_id)
+            .await
+    }
+    async fn get_event_settings(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Option<MockEventSettings>, StoreError> {
+        self.inner.get_event_settings(mock_id).await
+    }
+    async fn put_event_settings(&self, s: &MockEventSettings) -> Result<(), StoreError> {
+        self.inner.put_event_settings(s).await
+    }
+    async fn acquire_scheduler_lease(
+        &self,
+        mock_id: Uuid,
+        holder: &str,
+        ttl: Duration,
+    ) -> Result<bool, StoreError> {
+        self.inner
+            .acquire_scheduler_lease(mock_id, holder, ttl)
+            .await
     }
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {
         self.inner.subscribe()
@@ -306,6 +344,7 @@ fn record(mock: &str, n: usize) -> RequestRecord {
         request: json!({"query": {}, "headers": {}, "body": null}),
         request_body_bytes: None,
         response: None,
+        kind: RequestKind::Http,
     }
 }
 
@@ -351,6 +390,7 @@ async fn request_log_redacts_fields() {
                     source: None,
                     limit: 10,
                     before_id: None,
+                    kind: None,
                 },
             )
             .await
@@ -406,6 +446,19 @@ async fn recorded_orders() -> (Arc<dyn ControlStore>, Mock, String) {
     registry.reload_all(&deps).await.unwrap();
     let base = serve(registry.router()).await;
     (store, mock, base)
+}
+
+/// A REST call is recorded as an `http` request.
+#[tokio::test]
+async fn recorded_kind_matches_protocol() {
+    let (store, mock, base) = recorded_orders().await;
+    reqwest::Client::new()
+        .get(format!("{base}/orders/orders"))
+        .send()
+        .await
+        .unwrap();
+    let entry = newest_entry(&store, &mock).await;
+    assert_eq!(entry.kind, mb_store::RequestKind::Http);
 }
 
 /// Form bodies are recorded decoded, so their fields are redacted too;

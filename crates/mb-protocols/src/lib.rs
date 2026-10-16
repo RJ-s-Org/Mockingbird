@@ -36,7 +36,7 @@ pub mod soap;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
-pub use record::{RequestRecord, RequestRecorder};
+pub use record::{RequestKind, RequestRecord, RequestRecorder};
 
 /// Request header capping how many items a streamed response carries
 /// (an integer in `1..=10000`; the engine clamps it to its own maximum).

@@ -15,12 +15,12 @@ use mb_engine::{
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
-use mb_mcm::{Binding, Effect, Operation, OperationKind};
+use mb_mcm::{Binding, Effect, Operation, OperationKind, Protocol};
 use mb_state::{ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::{MockRuntime, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime};
+use crate::{MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime};
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
@@ -503,7 +503,19 @@ pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
             request: r.request,
             request_body_bytes: r.request_body_bytes,
             response: r.response,
+            kind: request_kind(rt.bundle.protocol()),
         });
+    }
+}
+
+/// The request-log kind of a call to a mock serving `protocol`.
+fn request_kind(protocol: Protocol) -> RequestKind {
+    match protocol {
+        Protocol::Http => RequestKind::Http,
+        Protocol::Graphql => RequestKind::Graphql,
+        Protocol::Grpc => RequestKind::Grpc,
+        Protocol::Soap => RequestKind::Soap,
+        _ => RequestKind::Http,
     }
 }
 
@@ -766,6 +778,14 @@ mod tests {
     use mb_mcm::{Bundle, Identity, Protocol};
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
+
+    #[test]
+    fn request_kind_follows_protocol() {
+        assert_eq!(request_kind(Protocol::Http), RequestKind::Http);
+        assert_eq!(request_kind(Protocol::Graphql), RequestKind::Graphql);
+        assert_eq!(request_kind(Protocol::Grpc), RequestKind::Grpc);
+        assert_eq!(request_kind(Protocol::Soap), RequestKind::Soap);
+    }
 
     #[test]
     fn reference_fields() {
