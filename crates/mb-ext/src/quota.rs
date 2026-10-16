@@ -8,6 +8,7 @@ use crate::{CallInfo, Rejection, Tenancy};
 /// Admits or rejects a call before any generation work is done.
 #[async_trait]
 pub trait QuotaGuard: Send + Sync {
+    /// `Ok(())` admits the call; a rejection is answered to the caller.
     async fn admit(&self, t: &Tenancy, call: &CallInfo<'_>) -> Result<(), Rejection>;
 }
 

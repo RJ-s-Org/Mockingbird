@@ -344,25 +344,18 @@ impl ChannelInner {
             Some(tenancy) => Some(tenancy),
             None => {
                 let empty = HeaderMap::new();
-                let call_info = CallInfo {
-                    mock: &rt.name,
-                    operation_id: &r.channel.id,
-                    headers: &empty,
-                };
+                let call_info = CallInfo::new(&rt.name, &r.channel.id, &empty);
                 rt.ext.tenants.resolve(&call_info).await.ok()
             }
         };
         if let Some(tenancy) = tenancy {
-            rt.ext.usage.record(&UsageEvent {
-                tenancy,
-                mock: rt.name.clone(),
-                operation_id: r.channel.id.clone(),
-                status: r.status,
-                source: r.generated.source.as_str().to_string(),
-                latency,
-                prompt_tokens: r.generated.usage.prompt_tokens,
-                completion_tokens: r.generated.usage.completion_tokens,
-            });
+            let mut event = UsageEvent::new(tenancy, rt.name.clone(), r.channel.id.clone());
+            event.status = r.status;
+            event.source = r.generated.source.as_str().to_string();
+            event.latency = latency;
+            event.prompt_tokens = r.generated.usage.prompt_tokens;
+            event.completion_tokens = r.generated.usage.completion_tokens;
+            rt.ext.usage.record(&event);
         }
         if let Some(recorder) = &rt.recorder {
             recorder.record(RequestRecord {

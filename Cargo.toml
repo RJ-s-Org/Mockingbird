@@ -95,7 +95,7 @@ mb-llm = { path = "crates/mb-llm" }
 mb-engine = { path = "crates/mb-engine" }
 mb-state = { path = "crates/mb-state" }
 mb-protocols = { path = "crates/mb-protocols" }
-mb-ext = { path = "crates/mb-ext" }
+mb-ext = { path = "crates/mb-ext", version = "1.0.0" }
 mb-store = { path = "crates/mb-store" }
 mb-admin = { path = "crates/mb-admin" }
 mb-auth = { path = "crates/mb-auth" }

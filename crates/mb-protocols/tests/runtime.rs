@@ -272,12 +272,8 @@ struct SlowDown;
 #[async_trait]
 impl QuotaGuard for SlowDown {
     async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
-        Err(Rejection {
-            status: 429,
-            title: "Too Many Requests".into(),
-            detail: "quota exhausted".into(),
-            retry_after: Some(Duration::from_secs(2)),
-        })
+        Err(Rejection::new(429, "Too Many Requests", "quota exhausted")
+            .with_retry_after(Duration::from_secs(2)))
     }
 }
 

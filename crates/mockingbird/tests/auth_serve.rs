@@ -66,10 +66,7 @@ async fn build(
         offline: true,
         ..ServeArgs::default()
     };
-    let ext = Extensions {
-        secrets: Arc::new(OneSecret(reference)),
-        ..Extensions::default()
-    };
+    let ext = Extensions::default().with_secrets(Arc::new(OneSecret(reference)));
     (build_app_with(&args, None, ext).await, dir)
 }
 
@@ -389,11 +386,9 @@ async fn admin_hook_routes_are_authenticated() {
         offline: true,
         ..ServeArgs::default()
     };
-    let ext = Extensions {
-        secrets: Arc::new(OneSecret(reference)),
-        admin_hooks: Arc::new(EchoHook),
-        ..Extensions::default()
-    };
+    let ext = Extensions::default()
+        .with_secrets(Arc::new(OneSecret(reference)))
+        .with_admin_hooks(Arc::new(EchoHook));
     let h = Harness {
         app: build_app_with(&args, None, ext).await.unwrap(),
         provider,

@@ -1,28 +1,22 @@
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::HeaderMap;
 use mb_ext::{
-    AllowAll, CallInfo, ConfiguredProfile, EnvFileSecrets, ExtError, PrometheusUsage,
-    ProviderPolicy, QuotaGuard, SecretStore, SingleTenant, Tenancy, TenantResolver, UsageEvent,
-    UsageSink,
+    AllowAll, CallInfo, ConfiguredProfile, EnvFileSecrets, ExtError, Extensions, PrometheusUsage,
+    ProviderPolicy, QuotaGuard, Rejection, SecretStore, SingleTenant, Tenancy, TenantResolver,
+    UsageEvent, UsageSink,
 };
 use metrics_util::MetricKind;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
 fn call(headers: &HeaderMap) -> CallInfo<'_> {
-    CallInfo {
-        mock: "petstore",
-        operation_id: "listPets",
-        headers,
-    }
+    CallInfo::new("petstore", "listPets", headers)
 }
 
 fn default_tenancy() -> Tenancy {
-    Tenancy {
-        tenant: "default".to_string(),
-        workspace: "default".to_string(),
-    }
+    Tenancy::new("default", "default")
 }
 
 #[tokio::test]
@@ -96,16 +90,12 @@ fn configured_profile_passthrough() {
 fn prometheus_usage_records() {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
-    let event = UsageEvent {
-        tenancy: default_tenancy(),
-        mock: "petstore".to_string(),
-        operation_id: "listPets".to_string(),
-        status: 200,
-        source: "llm".to_string(),
-        latency: Duration::from_millis(42),
-        prompt_tokens: 10,
-        completion_tokens: 5,
-    };
+    let mut event = UsageEvent::new(default_tenancy(), "petstore", "listPets");
+    event.status = 200;
+    event.source = "llm".to_string();
+    event.latency = Duration::from_millis(42);
+    event.prompt_tokens = 10;
+    event.completion_tokens = 5;
     metrics::with_local_recorder(&recorder, || PrometheusUsage.record(&event));
 
     let entries: Vec<_> = snapshotter
@@ -167,4 +157,83 @@ fn prometheus_usage_records() {
     assert!(entries.iter().any(
         |(kind, n, _, _)| *kind == MetricKind::Histogram && n == "mb_request_duration_seconds"
     ));
+}
+
+/// A quota guard that refuses everything, to tell it apart from `AllowAll`.
+struct DenyAll;
+
+#[async_trait::async_trait]
+impl QuotaGuard for DenyAll {
+    async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
+        Err(Rejection::new(429, "Too Many Requests", "denied"))
+    }
+}
+
+#[tokio::test]
+async fn builders_replace_one_extension() {
+    let quota: Arc<dyn QuotaGuard> = Arc::new(DenyAll);
+    let ext = Extensions::default().with_quota(quota.clone());
+    assert!(Arc::ptr_eq(&ext.quota, &quota));
+
+    let headers = HeaderMap::new();
+    let info = call(&headers);
+    let denied = ext.quota.admit(&default_tenancy(), &info).await;
+    assert_eq!(denied.err().map(|r| r.status), Some(429));
+    // Every other extension keeps its default.
+    let tenancy = ext.tenants.resolve(&info).await.ok();
+    assert_eq!(tenancy, Some(default_tenancy()));
+    let chosen = ext
+        .providers
+        .choose(&default_tenancy(), "petstore", Some("p"));
+    assert_eq!(chosen.ok(), Some(Some("p".to_string())));
+    assert!(ext.admin_hooks.routes().is_none());
+
+    let tenants: Arc<dyn TenantResolver> = Arc::new(SingleTenant);
+    let usage: Arc<dyn UsageSink> = Arc::new(PrometheusUsage);
+    let secrets: Arc<dyn SecretStore> = Arc::new(EnvFileSecrets);
+    let providers: Arc<dyn ProviderPolicy> = Arc::new(ConfiguredProfile);
+    let hooks: Arc<dyn mb_ext::AdminHooks> = Arc::new(mb_ext::NoHooks);
+    let ext = Extensions::default()
+        .with_tenants(tenants.clone())
+        .with_usage(usage.clone())
+        .with_secrets(secrets.clone())
+        .with_providers(providers.clone())
+        .with_admin_hooks(hooks.clone());
+    assert!(Arc::ptr_eq(&ext.tenants, &tenants));
+    assert!(Arc::ptr_eq(&ext.usage, &usage));
+    assert!(Arc::ptr_eq(&ext.secrets, &secrets));
+    assert!(Arc::ptr_eq(&ext.providers, &providers));
+    assert!(Arc::ptr_eq(&ext.admin_hooks, &hooks));
+}
+
+#[test]
+fn rejection_new_and_retry_after() {
+    let r = Rejection::new(403, "Forbidden", "no access");
+    assert_eq!(
+        r,
+        Rejection {
+            status: 403,
+            title: "Forbidden".to_string(),
+            detail: "no access".to_string(),
+            retry_after: None,
+        }
+    );
+    let r = r.with_retry_after(Duration::from_secs(7));
+    assert_eq!(r.retry_after, Some(Duration::from_secs(7)));
+    assert_eq!(r.status, 403);
+}
+
+#[test]
+fn usage_event_new_defaults() {
+    let e = UsageEvent::new(Tenancy::new("t", "w"), "petstore", "listPets");
+    assert_eq!(e.tenancy, Tenancy::new("t", "w"));
+    assert_eq!(e.tenancy.tenant, "t");
+    assert_eq!(e.tenancy.workspace, "w");
+    assert_eq!(e.mock, "petstore");
+    assert_eq!(e.operation_id, "listPets");
+    assert_eq!(e.status, 0);
+    assert_eq!(e.source, "");
+    assert_eq!(e.latency, Duration::ZERO);
+    assert_eq!(e.prompt_tokens, 0);
+    assert_eq!(e.completion_tokens, 0);
 }

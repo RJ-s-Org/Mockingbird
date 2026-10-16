@@ -171,11 +171,7 @@ pub(crate) async fn admit(
     operation_id: &str,
     headers: &HeaderMap,
 ) -> Result<Tenancy, (Rejection, Option<Tenancy>)> {
-    let call_info = CallInfo {
-        mock: &rt.name,
-        operation_id,
-        headers,
-    };
+    let call_info = CallInfo::new(&rt.name, operation_id, headers);
     let tenancy = rt
         .ext
         .tenants
@@ -258,11 +254,7 @@ pub(crate) async fn plan<'a>(
     headers: &HeaderMap,
     presented: Presented<'_>,
 ) -> Result<CallPlan<'a>, PlanFailure> {
-    let call_info = CallInfo {
-        mock: &rt.name,
-        operation_id: &op.id,
-        headers,
-    };
+    let call_info = CallInfo::new(&rt.name, &op.id, headers);
     let tenancy = match presented.admitted {
         Some(t) => t.clone(),
         None => {
@@ -561,25 +553,18 @@ pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
         (Some(t), _) => Some(t),
         (None, true) => None,
         (None, false) => {
-            let call_info = CallInfo {
-                mock: &rt.name,
-                operation_id: &operation_id,
-                headers,
-            };
+            let call_info = CallInfo::new(&rt.name, &operation_id, headers);
             rt.ext.tenants.resolve(&call_info).await.ok()
         }
     };
     if let Some(tenancy) = tenancy {
-        rt.ext.usage.record(&UsageEvent {
-            tenancy,
-            mock: rt.name.clone(),
-            operation_id,
-            status: r.status,
-            source: r.source.map_or(NO_SOURCE, Source::as_str).to_string(),
-            latency: r.latency,
-            prompt_tokens: r.usage.prompt_tokens,
-            completion_tokens: r.usage.completion_tokens,
-        });
+        let mut event = UsageEvent::new(tenancy, rt.name.clone(), operation_id);
+        event.status = r.status;
+        event.source = r.source.map_or(NO_SOURCE, Source::as_str).to_string();
+        event.latency = r.latency;
+        event.prompt_tokens = r.usage.prompt_tokens;
+        event.completion_tokens = r.usage.completion_tokens;
+        rt.ext.usage.record(&event);
     }
     if let Some(recorder) = &rt.recorder {
         recorder.record(RequestRecord {

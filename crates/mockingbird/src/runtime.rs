@@ -256,10 +256,7 @@ fn hop_settings(profile: &LlmProfile) -> HopSettings {
 
 /// The profile the provider policy picks for `mock`, if any.
 fn profile_name(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<String>> {
-    let tenancy = Tenancy {
-        tenant: "default".into(),
-        workspace: mock.workspace.clone(),
-    };
+    let tenancy = Tenancy::new("default", mock.workspace.clone());
     let default_profile = deps.default_profile.get();
     let configured = mock.llm_profile.as_deref().or(default_profile.as_deref());
     deps.ext

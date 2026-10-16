@@ -331,11 +331,7 @@ impl ChannelInner {
         // A client's reply is generated on its behalf: each one is admitted
         // like a call, against the tenancy resolved at the upgrade.
         if let Some(client) = client {
-            let call_info = mb_ext::CallInfo {
-                mock: &self.rt.name,
-                operation_id: &target.id,
-                headers: &client.headers,
-            };
+            let call_info = mb_ext::CallInfo::new(&self.rt.name, &target.id, &client.headers);
             if let Err(r) = self.rt.ext.quota.admit(&client.tenancy, &call_info).await {
                 return Some(format!("rejected: {} {}", r.status, r.detail));
             }
