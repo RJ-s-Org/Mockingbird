@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mb_mcm::ChannelBinding;
-use rumqttc::Outgoing;
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{Packet, Publish, PublishProperties};
 use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions};
@@ -60,7 +59,7 @@ struct Link {
     problem: Mutex<Option<String>>,
     /// Set once `flush` has asked the event loop to disconnect.
     closing: AtomicBool,
-    /// Set once the event loop has sent `Disconnect` or stopped.
+    /// Set once the event loop has stopped.
     closed: tokio::sync::watch::Sender<bool>,
 }
 
@@ -253,6 +252,11 @@ fn resubscribe(client: &AsyncClient, subs: &Mutex<Vec<Subscription>>) {
 
 /// Poll the event loop until aborted or disconnected by `flush`,
 /// reconnecting after errors. The connection state is kept in `link`.
+///
+/// After `flush` has sent `Disconnect`, polling goes on until the broker
+/// closes the connection: dropping the socket while its acks are still
+/// unread makes the kernel reset the connection, and the broker then
+/// discards the publishes it has not read yet.
 async fn run_event_loop(
     mut event_loop: EventLoop,
     client: AsyncClient,
@@ -266,7 +270,6 @@ async fn run_event_loop(
                 link.set_problem(None);
                 resubscribe(&client, &subs);
             }
-            Ok(Event::Outgoing(Outgoing::Disconnect)) => break,
             Ok(_) => {}
             Err(e) => {
                 if link.closing.load(Ordering::SeqCst) {
@@ -390,8 +393,9 @@ impl BrokerClient for MqttClient {
     }
 
     /// Send what is queued: a `Disconnect` is queued behind the pending
-    /// publishes, then the event loop is awaited until it has sent it,
-    /// all within `timeout`. Nothing is waited for while disconnected.
+    /// publishes, then the event loop is awaited until the broker has
+    /// read it and closed the connection, all within `timeout`. Nothing
+    /// is waited for while disconnected.
     async fn flush(&self, timeout: Duration) {
         if self.link.problem().is_some() || *self.link.closed.borrow() {
             return;
