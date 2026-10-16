@@ -15,12 +15,13 @@ use mb_mcm::{Bundle, Operation};
 use serde_json::Value;
 use tokio::time::Instant;
 
+use crate::guards::{Checked, GenerationPermit};
 use crate::ndjson::LineSplitter;
 use crate::prompt::{self, build_stream_messages};
 use crate::validate::SchemaValidator;
 use crate::{
-    Engine, EngineError, OperationCall, Source, StreamContext, StreamItem, apply_set, check,
-    format_name, success_status,
+    Engine, EngineError, OperationCall, Source, StreamContext, StreamItem, apply_set, format_name,
+    success_status,
 };
 
 impl Engine {
@@ -85,6 +86,7 @@ impl Engine {
             upstream,
             repair_system,
             lines: VecDeque::new(),
+            permit: None,
         };
         Ok(futures::stream::unfold(state, |mut state| async move {
             let item = state.next_item().await?;
@@ -132,11 +134,15 @@ struct StreamState {
     repair_system: Option<ChatMessage>,
     /// Complete lines received but not yet consumed.
     lines: VecDeque<String>,
+    /// The generation permit, held from opening the provider stream until
+    /// it has no more candidates (or this stream is done or dropped).
+    permit: Option<GenerationPermit>,
 }
 
 impl StreamState {
     async fn next_item(&mut self) -> Option<StreamItem> {
         if self.emitted >= self.items {
+            self.release();
             return None;
         }
         if self.emitted > 0 && !self.interval.is_zero() {
@@ -172,8 +178,18 @@ impl StreamState {
                 }
             }
             match std::mem::replace(&mut self.upstream, Upstream::Closed) {
-                Upstream::Closed => return None,
+                Upstream::Closed => {
+                    self.permit = None;
+                    return None;
+                }
                 Upstream::Pending(request) => {
+                    match self.engine.admit(deadline).await {
+                        Ok(permit) => self.permit = permit,
+                        Err(reason) => {
+                            self.give_up(&reason);
+                            continue;
+                        }
+                    }
                     match tokio::time::timeout_at(deadline, provider.stream(request)).await {
                         Ok(Ok(stream)) => {
                             self.upstream = Upstream::Open {
@@ -201,6 +217,13 @@ impl StreamState {
         }
     }
 
+    /// Close the provider stream and release the generation permit.
+    fn release(&mut self) {
+        self.upstream = Upstream::Closed;
+        self.lines.clear();
+        self.permit = None;
+    }
+
     fn give_up(&mut self, reason: &str) {
         tracing::warn!(
             operation = %self.op_id,
@@ -213,9 +236,13 @@ impl StreamState {
     /// A candidate line as an item: valid → `Llm`; otherwise one repair
     /// call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
-        let errors = match check(&self.validator, line) {
-            Ok(value) => return (value, Source::Llm),
-            Err(errors) => errors,
+        let errors = match self.engine.check_output(&self.validator, line) {
+            Checked::Valid(value) => return (value, Source::Llm),
+            Checked::Rejected(reason) => {
+                tracing::warn!(operation = %self.op_id, %reason, "stream item fell back to faker");
+                return (self.fake(), Source::Fallback);
+            }
+            Checked::Invalid(errors) => errors,
         };
         match self.repair(provider, line, &errors).await {
             Ok(value) => (value, Source::Repaired),
@@ -235,6 +262,9 @@ impl StreamState {
         errors: &[String],
     ) -> Result<Value, String> {
         let engine = &self.engine;
+        if engine.budget_exhausted() {
+            return Err("token budget exhausted".into());
+        }
         let item = match serde_json::from_str::<Value>(line) {
             Ok(value) => prompt::data(&value),
             Err(_) => prompt::escape(line),
@@ -254,11 +284,18 @@ impl StreamState {
         let request = engine.chat_request(messages, format);
         let limit = provider.total_timeout(engine.config.timeout);
         let text = match tokio::time::timeout(limit, provider.complete(request)).await {
-            Ok(Ok(response)) => response.content,
+            Ok(Ok(response)) => {
+                engine.spend(response.usage);
+                response.content
+            }
             Ok(Err(e)) => return Err(e.to_string()),
             Err(_) => return Err("LLM repair timed out".into()),
         };
-        check(&self.validator, &text).map_err(|errors| errors.join("; "))
+        match engine.check_output(&self.validator, &text) {
+            Checked::Valid(value) => Ok(value),
+            Checked::Rejected(reason) => Err(reason),
+            Checked::Invalid(errors) => Err(errors.join("; ")),
+        }
     }
 
     fn fake(&self) -> Value {
