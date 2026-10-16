@@ -1,0 +1,18 @@
+# The `ha` profile's nodes (docker-compose.yml: mockingbird-control and
+# mockingbird-data). Both read this file; each passes its own --role, so
+# server.role is deliberately not set here.
+server:
+  host: 0.0.0.0
+  # DEVELOPMENT ONLY: no login, so the control node's console and Admin API
+  # (published on localhost:19090) are open to anyone who can reach them.
+  insecure_no_auth: true
+
+storage:
+  # Control-plane store, shared by both nodes.
+  url: postgres://postgres:postgres@postgres-ha:5432/postgres
+  # Session state, shared by every data node.
+  state_url: redis://redis:6379/0
+
+# Cross-node change bus: the control node publishes changes, data nodes reload.
+bus:
+  url: redis://redis:6379/0

@@ -1,0 +1,62 @@
+# CI: control and data planes over Postgres and Redis, autoscaled data,
+# a restricted NetworkPolicy and a ServiceMonitor.
+mode: split
+
+image:
+  flavor: slim
+
+config:
+  server:
+    insecure_no_auth: true
+  pii:
+    enabled: true
+
+storage:
+  existingSecret: mockingbird-db
+  existingSecretKey: url
+state:
+  url: redis://mockingbird-redis:6379/0
+bus:
+  url: redis://mockingbird-redis:6379/0
+llm:
+  existingSecret: mockingbird-llm
+
+env:
+  - name: RUST_LOG
+    value: info
+
+control:
+  replicas: 2
+data:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 60
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: data
+
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 5432
+          protocol: TCP
+        - port: 6379
+          protocol: TCP
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus

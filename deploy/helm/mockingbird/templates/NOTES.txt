@@ -1,0 +1,35 @@
+Mockingbird {{ .Chart.AppVersion }} is installed as {{ include "mockingbird.fullname" . }} (mode: {{ .Values.mode }}).
+{{- $config := include "mockingbird.configDict" . | fromYaml }}
+{{- $auth := default (dict) (get $config "auth") }}
+{{- $server := default (dict) (get $config "server") }}
+{{- if not (get $auth "mode") }}
+
+WARNING: config.auth.mode is not set, so the console and the Admin API have no
+login.
+{{- if get $server "insecure_no_auth" }} config.server.insecure_no_auth is true: anyone who can reach
+the admin service is a sysadmin.
+{{- else }} Mockingbird refuses to listen on {{ get $server "host" }} that way, so the pods
+will not start until you set config.auth (or, for a private test install only,
+config.server.insecure_no_auth: true).
+{{- end }}
+Configure OIDC under config.auth (see examples/rauthy-values.yaml).
+{{- end }}
+
+Console and Admin API:
+{{- if .Values.adminIngress.enabled }}
+{{- range .Values.adminIngress.hosts }}
+  http{{ if $.Values.adminIngress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "mockingbird.fullname" . }}-admin {{ .Values.service.ports.admin }}
+  then open http://127.0.0.1:{{ .Values.service.ports.admin }}/
+{{- end }}
+
+Mocks (HTTP):
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/<mock route prefix>
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "mockingbird.fullname" . }} {{ .Values.service.ports.http }}
+{{- end }}

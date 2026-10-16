@@ -25,6 +25,26 @@ Log in to the console as **`demo@localhost.test`** / **`Demo-Passw0rd-123!`**. T
 
 Mockingbird and the bootstrap job share Rauthy's network namespace (`network_mode: "service:rauthy"`). That is why `localhost:8081` is the same issuer for the browser, through the published port, and for the Mockingbird server, and why Rauthy's service publishes Mockingbird's ports 8080 and 9090.
 
+## Profiles: HA and brokers
+
+The default stack above starts without any profile. Profiles add services to it:
+
+| Profile | Services | Reach them at |
+| --- | --- | --- |
+| `ha` | `postgres-ha`, `redis` (`redis:7-alpine`), `mockingbird-control`, `mockingbird-data` | console and Admin API http://localhost:19090, data plane http://localhost:18080, gRPC localhost:15051 |
+| `kafka` | `kafka` (KRaft, one node) | `localhost:9092` from the host, `kafka:19092` from other containers |
+| `amqp` | `rabbitmq` (user `mockingbird`, password `mockingbird`) | `amqp://localhost:5672`, management UI http://localhost:15672 |
+| `mqtt` | `mosquitto` (anonymous) | `mqtt://localhost:1883` |
+
+```sh
+docker compose -f deploy/compose/docker-compose.yml --profile ha up --build
+docker compose -f deploy/compose/docker-compose.yml --profile kafka --profile mqtt up --build
+```
+
+**`ha`** runs Mockingbird split into roles, as a Kubernetes install does (see `deploy/helm/mockingbird`): `mockingbird-control` (`--role control`: console, Admin API, reconcile) and `mockingbird-data` (`--role data`: the mocks). Both read [`mockingbird-ha.yaml`](mockingbird-ha.yaml): Postgres storage on their own `postgres-ha` (so they never share mocks with the default `mockingbird` service), Redis session state and the Redis bus, over which the control node tells the data node to reload. The role comes from each service's `--role`, never from the file. Scale the data plane with `--scale mockingbird-data=2` after removing its published ports. The HA nodes run without login (`server.insecure_no_auth: true`) and offline (faker only), so keep the published ports on your machine.
+
+The broker profiles exist for testing event channels: point a `brokers:` entry of your `mockingbird.yaml` at them (from the default `mockingbird` service: `bootstrap_servers: kafka:19092`, `url: amqp://rabbitmq:5672` with `sasl: {mechanism: PLAIN, username: mockingbird, password: env:AMQP_PASSWORD}` and `url: mqtt://mosquitto:1883`).
+
 ## When the bootstrap fails
 
 The Rauthy admin API calls in `rauthy-bootstrap.sh` were checked against Rauthy 0.37.1; if Rauthy changed, compare them with the Swagger UI at http://localhost:8081/auth/v1/docs. If the job only prints `curl: (7) Failed to connect`, Rauthy itself did not start: read `docker compose -f deploy/compose/docker-compose.yml logs rauthy`. When a call fails, the script prints the response and these manual steps, and exits non-zero (Mockingbird then does not start):
@@ -47,11 +67,16 @@ The Rauthy admin API calls in `rauthy-bootstrap.sh` were checked against Rauthy 
 
 ## Resetting
 
-`docker compose -f deploy/compose/docker-compose.yml down -v` removes the containers and the `postgres`, `rauthy` and `bootstrap` volumes; the next `up` bootstraps from scratch.
+`docker compose -f deploy/compose/docker-compose.yml down -v` removes the containers and the `postgres`, `rauthy` and `bootstrap` volumes; the next `up` bootstraps from scratch. Add the same `--profile` flags to also remove the profiles' containers and the `postgres-ha` volume.
 
 ## End-to-end test
 
-CI's `e2e` job starts this stack and runs `crates/mb-console/web/e2e-rauthy/full-flow.spec.ts`. It logs in through Rauthy, creates a mock, uploads a contract, calls it, watches the live tail, resets a session and checks the audit log. To run it locally against a running stack:
+CI's `e2e` job starts this stack and runs the specs of `playwright.rauthy.config.ts`:
+
+- `crates/mb-console/web/e2e-rauthy/full-flow.spec.ts` logs in through Rauthy, creates a mock, uploads a contract, calls it, watches the live tail, resets a session and checks the audit log.
+- `crates/mb-console/web/e2e-compose/flow.spec.ts` logs in through Rauthy, creates the mock `flow`, imports `fixtures/smart/petstore.har` (a HAR import needs no LLM), approves and activates the draft, calls `GET /flow/api/pets/1` and `POST /flow/api/pets` in session `e2e`, finds the session in the Sessions tab and resets it.
+
+To run them locally against a running stack:
 
 ```sh
 cd crates/mb-console/web

@@ -1,0 +1,8 @@
+# The chart's base mockingbird.yaml. `config` in values.yaml is deep-merged
+# over it (later wins) and the result is rendered into the ConfigMap.
+#
+# Authentication is deliberately left out: set `config.auth` (OIDC), or, for
+# a cluster-internal test install only, `config.server.insecure_no_auth: true`.
+# Without either, Mockingbird refuses to bind 0.0.0.0 and the pods do not start.
+server:
+  host: 0.0.0.0

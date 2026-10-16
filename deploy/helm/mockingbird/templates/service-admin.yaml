@@ -1,0 +1,20 @@
+{{- /* The console and the Admin API: the control (or all-in-one) pods' admin port. */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mockingbird.fullname" . }}-admin
+  labels:
+    {{- include "mockingbird.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "mockingbird.adminComponent" . }}
+    {{- if eq .Values.mode "split" }}
+    mockingbird.io/metrics: "true"
+    {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "mockingbird.componentSelectorLabels" (dict "root" . "component" (include "mockingbird.adminComponent" .)) | nindent 4 }}
+  ports:
+    - name: admin
+      port: {{ .Values.service.ports.admin }}
+      targetPort: admin
+      protocol: TCP

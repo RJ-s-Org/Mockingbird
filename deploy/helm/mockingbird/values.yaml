@@ -1,0 +1,165 @@
+# Default values for the Mockingbird chart. See README.md for the reference.
+
+image:
+  repository: ghcr.io/rjs-git/mockingbird
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # full: every protocol and broker client; slim: no broker clients (the tag
+  # gets a `-slim` suffix).
+  flavor: full
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# allInOne: one Deployment serving both planes (`--role all`).
+# split: a control Deployment (console, Admin API, reconcile; leader-elected)
+# and a data Deployment (the mocks; autoscaled). Split needs Postgres storage
+# and Postgres or Redis state.
+mode: allInOne
+
+# mockingbird.yaml, deep-merged over files/default-config.yaml (later wins).
+# `server.role` comes from `mode` (`--role`); do not set it here.
+config: {}
+
+# Control-plane store -> MB_STORAGE_URL (required in split mode). Either a
+# URL in the values, or a key of an existing Secret.
+storage:
+  url: ""
+  existingSecret: ""
+  existingSecretKey: url
+
+# Session state store -> MB_STATE_URL (defaults to the storage URL).
+state:
+  url: ""
+  existingSecret: ""
+  existingSecretKey: url
+
+# Cross-node change bus -> MB_BUS_URL (defaults to Postgres LISTEN/NOTIFY
+# when storage is Postgres).
+bus:
+  url: ""
+  existingSecret: ""
+  existingSecretKey: url
+
+# The LLM API key -> MB_LLM_API_KEY, from an existing Secret.
+llm:
+  existingSecret: ""
+  apiKeyKey: api-key
+
+# Extra environment variables and sources for every container.
+env: []
+envFrom: []
+
+allInOne:
+  replicas: 1
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  topologySpreadConstraints: []
+
+control:
+  replicas: 2
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  topologySpreadConstraints: []
+
+data:
+  # Ignored while autoscaling is enabled.
+  replicas: 2
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  topologySpreadConstraints: []
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+service:
+  type: ClusterIP
+  ports:
+    http: 8080
+    grpc: 50051
+    admin: 9090
+
+# HTTP mocks (REST, GraphQL, SOAP, SSE, WebSocket) on the data service.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: mocks.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# gRPC mocks on the data service.
+grpcIngress:
+  enabled: false
+  className: ""
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: GRPC
+  hosts:
+    - host: grpc.mocks.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# The console and the Admin API on the control (or all-in-one) service.
+adminIngress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: mockingbird.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: false
+  # Peers (NetworkPolicyPeer) allowed to reach the pods; empty allows any.
+  ingressFrom: []
+  # Egress rules (NetworkPolicyEgressRule); empty allows all egress.
+  egress: []
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+serviceAccount:
+  create: true
+  # Defaults to the release's full name.
+  name: ""
+  annotations: {}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault

@@ -1,0 +1,9 @@
+{{- /* HTTP mocks to the data service, and the console and Admin API (adminIngress) to the admin service. */ -}}
+{{- if .Values.ingress.enabled }}
+---
+{{ include "mockingbird.ingress" (dict "root" . "values" .Values.ingress "suffix" "" "service" (include "mockingbird.fullname" .) "port" "http") }}
+{{- end }}
+{{- if .Values.adminIngress.enabled }}
+---
+{{ include "mockingbird.ingress" (dict "root" . "values" .Values.adminIngress "suffix" "-admin" "service" (printf "%s-admin" (include "mockingbird.fullname" .)) "port" "admin") }}
+{{- end }}

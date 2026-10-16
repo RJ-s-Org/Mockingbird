@@ -1,0 +1,57 @@
+# Mockingbird with OIDC login through an existing Rauthy (or any OIDC issuer),
+# split into control and data planes over Postgres and Redis.
+#
+#   kubectl create secret generic mockingbird-db --from-literal=url=postgres://...
+#   kubectl create secret generic mockingbird-oidc --from-literal=client-secret=...
+#   helm install mockingbird deploy/helm/mockingbird -f deploy/helm/mockingbird/examples/rauthy-values.yaml
+#
+# In Rauthy: create the confidential client `mockingbird` with the redirect URI
+# https://mockingbird.example.com/auth/callback, allow the scopes openid,
+# profile, email and groups, and the groups mb:sysadmin and
+# mb:<workspace>:<owner|admin|editor|viewer>.
+mode: split
+
+config:
+  auth:
+    mode: oidc
+    external_url: https://mockingbird.example.com
+    oidc:
+      # Exactly the `issuer` of Rauthy's discovery document (trailing slash included).
+      issuer: https://auth.example.com/auth/v1/
+      client_id: mockingbird
+      client_secret: env:MB_OIDC_CLIENT_SECRET
+
+storage:
+  existingSecret: mockingbird-db
+state:
+  url: redis://mockingbird-redis:6379/0
+bus:
+  url: redis://mockingbird-redis:6379/0
+
+env:
+  - name: MB_OIDC_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: mockingbird-oidc
+        key: client-secret
+
+adminIngress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: mockingbird.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts: [mockingbird.example.com]
+      secretName: mockingbird-tls
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: mocks.example.com
+      paths:
+        - path: /
+          pathType: Prefix

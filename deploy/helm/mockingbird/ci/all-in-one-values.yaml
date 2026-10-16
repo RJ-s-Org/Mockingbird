@@ -1,0 +1,54 @@
+# CI: one all-in-one Deployment with every ingress and the NetworkPolicy on.
+mode: allInOne
+
+config:
+  server:
+    # CI renders only; a real install configures auth instead.
+    insecure_no_auth: true
+  limits:
+    max_concurrent_generations: 32
+
+storage:
+  url: sqlite:///tmp/mockingbird.db
+state:
+  url: memory
+
+allInOne:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: mocks.ci.example
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts: [mocks.ci.example]
+      secretName: mocks-tls
+
+grpcIngress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: grpc.ci.example
+      paths:
+        - path: /
+          pathType: Prefix
+
+adminIngress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: admin.ci.example
+      paths:
+        - path: /
+          pathType: Prefix
+
+networkPolicy:
+  enabled: true

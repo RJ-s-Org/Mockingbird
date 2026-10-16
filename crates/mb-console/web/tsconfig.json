@@ -18,5 +18,5 @@
     "noEmit": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.tsbuildinfo"
   },
-  "include": ["src", "e2e", "e2e-rauthy", "vite.config.ts", "playwright.config.ts", "playwright.rauthy.config.ts"]
+  "include": ["src", "e2e", "e2e-rauthy", "e2e-compose", "vite.config.ts", "playwright.config.ts", "playwright.rauthy.config.ts"]
 }

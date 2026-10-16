@@ -1,0 +1,3 @@
+{{- if eq .Values.mode "allInOne" -}}
+{{ include "mockingbird.deployment" (dict "root" . "role" "all" "component" "all" "spec" .Values.allInOne "replicas" true) }}
+{{- end }}

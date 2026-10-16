@@ -1,0 +1,10 @@
+{{- include "mockingbird.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mockingbird.fullname" . }}
+  labels:
+    {{- include "mockingbird.labels" . | nindent 4 }}
+data:
+  mockingbird.yaml: |
+    {{- include "mockingbird.configDict" . | nindent 4 }}
