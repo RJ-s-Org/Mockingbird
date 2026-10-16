@@ -1,6 +1,9 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { useCreateApiKey } from "../api/queries";
 import type { Me } from "../auth/me";
 import { json, localMe, renderAt, serve, shell, viewerMe } from "./harness";
 
@@ -32,6 +35,23 @@ function keyView(overrides: Record<string, unknown> = {}) {
 }
 
 describe("api keys", () => {
+  it("the created token does not linger in the mutation cache", async () => {
+    serve({ [`POST ${BASE}/api-keys`]: () => json({ token: TOKEN, key: keyView() }, 201) });
+    const queryClient = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result, unmount } = renderHook(() => useCreateApiKey("default"), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ name: "ci", role: "editor", scopes: ["admin"] });
+    });
+    expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data))).toContain(TOKEN);
+    // Closing the dialog resets the mutation and unmounts its observer.
+    act(() => result.current.reset());
+    unmount();
+    await waitFor(() => expect(queryClient.getMutationCache().getAll()).toHaveLength(0));
+  });
+
   it("lists keys with their status", async () => {
     serve({
       ...shell(localMe),

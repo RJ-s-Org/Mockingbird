@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useCreateApiKey, type CreateApiKey, type CreatedApiKey, type KeyScope, type Role } from "../api/queries";
 import { Dialog, inputClass, primaryButton, secondaryButton } from "../components/ConfirmDialog";
 import { ProblemAlert } from "../components/ProblemAlert";
@@ -36,6 +36,11 @@ export function CreateKeyDialog({
   const [expires, setExpires] = useState("");
   const [asSysadmin, setAsSysadmin] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // However the dialog goes away, the mutation (and its copy of the token)
+  // is released so the cache can drop it.
+  const { reset } = create;
+  useEffect(() => reset, [reset]);
 
   const close = () => {
     // Drop every copy of the token: ours and the mutation's.

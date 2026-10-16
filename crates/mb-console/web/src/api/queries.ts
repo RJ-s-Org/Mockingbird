@@ -372,10 +372,16 @@ export function useApiKeys(ws: string, enabled = true) {
   });
 }
 
-/** `POST …/api-keys`: the result carries the token, which is never shown again. */
+/**
+ * `POST …/api-keys`: the result carries the token, which is never shown
+ * again. `gcTime: 0` drops the mutation (and the token in its data) from the
+ * mutation cache as soon as nothing observes it, i.e. once the dialog
+ * resets it or unmounts.
+ */
 export function useCreateApiKey(ws: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (body: CreateApiKey): Promise<CreatedApiKey> =>
       unwrap(await api.POST("/api/v1/workspaces/{ws}/api-keys", { params: { path: { ws } }, body })),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.apiKeys(ws) }),
