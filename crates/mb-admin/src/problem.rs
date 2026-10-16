@@ -144,13 +144,20 @@ impl From<StoreError> for Problem {
     }
 }
 
+/// The detail of every 502 caused by the identity provider.
+pub const UPSTREAM_DETAIL: &str = "identity provider unavailable";
+
 impl From<AuthError> for Problem {
     fn from(err: AuthError) -> Self {
         match err {
             AuthError::Unauthenticated(d) => Problem::unauthorized(d),
             AuthError::Forbidden(d) => Problem::forbidden(d),
             AuthError::Invalid(d) => Problem::bad_request(d),
-            e @ AuthError::Upstream(_) => Problem::new(StatusCode::BAD_GATEWAY, e.to_string()),
+            AuthError::Upstream(chain) => {
+                // The chain can name provider URLs: log it, answer generically.
+                tracing::warn!(error = %chain, "identity provider unavailable");
+                Problem::new(StatusCode::BAD_GATEWAY, UPSTREAM_DETAIL)
+            }
             AuthError::Store(e) => e.into(),
         }
     }

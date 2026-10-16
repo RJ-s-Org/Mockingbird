@@ -185,7 +185,7 @@ async fn callback(
             // anonymous requests cannot grow the audit log or fill the
             // webhook queue.
             if attributable {
-                tracing::info!(%reason, "console login failed");
+                tracing::warn!(%reason, "console login failed");
                 st.audit
                     .record(mb_store::NewAuditEvent {
                         workspace: None,
@@ -256,21 +256,26 @@ impl Failure {
         }
     }
 
-    fn detail(&self) -> String {
+    /// The problem detail the browser sees: fixed text, never anything the
+    /// provider or the token exchange returned.
+    fn detail(&self) -> &'static str {
         match self {
-            Failure::Provider(e) => format!("the identity provider answered with error {e:?}"),
-            Failure::MissingParams => "the callback needs `code` and `state`".to_string(),
-            Failure::StateMismatch => {
-                "the login state does not match this browser's login".to_string()
-            }
-            Failure::Rejected(e) => format!("the login could not be completed: {e}"),
+            Failure::Provider(_) => "the identity provider reported an error",
+            Failure::MissingParams => "the callback needs `code` and `state`",
+            Failure::StateMismatch => "the login state does not match this browser's login",
+            Failure::Rejected(_) => "the login could not be completed",
         }
     }
 }
 
+/// The full reason, for the server log only.
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.detail())
+        match self {
+            Failure::Provider(e) => write!(f, "the identity provider answered with error {e:?}"),
+            Failure::Rejected(e) => write!(f, "the login could not be completed: {e}"),
+            other => f.write_str(other.detail()),
+        }
     }
 }
 

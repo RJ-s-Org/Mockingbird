@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use crate::authenticator::BearerVerifier;
 use crate::error::AuthError;
 use crate::mapping::RoleMapping;
+use crate::oidc::error_chain;
 use crate::principal::Principal;
 
 /// The only signature algorithms a bearer JWT may use.
@@ -94,12 +95,9 @@ impl JwtVerifier {
     }
 
     async fn fetch_jwks(&self) -> Result<JwkSet, AuthError> {
-        let resp = self
-            .http
-            .get(&self.jwks_uri)
-            .send()
-            .await
-            .map_err(|e| AuthError::Upstream(format!("fetching JWKS failed: {e}")))?;
+        let resp = self.http.get(&self.jwks_uri).send().await.map_err(|e| {
+            AuthError::Upstream(format!("fetching JWKS failed: {}", error_chain(&e)))
+        })?;
         if !resp.status().is_success() {
             return Err(AuthError::Upstream(format!(
                 "fetching JWKS failed: HTTP {}",
@@ -108,7 +106,7 @@ impl JwtVerifier {
         }
         resp.json::<JwkSet>()
             .await
-            .map_err(|e| AuthError::Upstream(format!("invalid JWKS: {e}")))
+            .map_err(|e| AuthError::Upstream(format!("invalid JWKS: {}", error_chain(&e))))
     }
 }
 

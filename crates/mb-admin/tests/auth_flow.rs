@@ -723,3 +723,60 @@ async fn openapi_documents_me_but_not_auth_routes() {
             .all(|p| !p.starts_with("/auth"))
     );
 }
+
+/// Answers `path` on the provider with HTTP 500 from now on.
+async fn break_endpoint(h: &Harness, endpoint: &str) {
+    wiremock::Mock::given(wiremock::matchers::path(endpoint))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&h.provider.server)
+        .await;
+}
+
+#[tokio::test]
+async fn upstream_failure_is_a_generic_502() {
+    let h = harness().await;
+    break_endpoint(&h, "/jwks").await;
+    // The bearer verifier has not fetched the JWKS yet: it must now.
+    let token = h.provider.sign(h.provider.claims("alice", &[], None));
+    let r = get_with(
+        &h.app,
+        "/api/v1/me",
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    let p = r.problem(StatusCode::BAD_GATEWAY);
+    assert_eq!(p["detail"], "identity provider unavailable");
+    assert!(!r.text.contains(&h.provider.issuer()), "{}", r.text);
+    assert!(!r.text.contains("http"), "{}", r.text);
+}
+
+#[tokio::test]
+async fn login_failure_detail_is_generic() {
+    let h = harness().await;
+    // The token exchange fails: the caller learns nothing about the IdP.
+    break_endpoint(&h, "/token").await;
+    let started = h.start_login("/").await;
+    let nonce = MockOidcProvider::query_param(&started.url, "nonce").unwrap();
+    let cookies = format!("mb_login={}", cookie_value(&started.state_cookie));
+    let r = h.callback(&started, "alice", &[], &nonce, &cookies).await;
+    let p = r.problem(StatusCode::BAD_REQUEST);
+    assert_eq!(p["title"], "Login failed");
+    assert_eq!(p["detail"], "the login could not be completed");
+    assert!(!r.text.contains(&h.provider.issuer()), "{}", r.text);
+    assert!(!r.text.contains("http"), "{}", r.text);
+
+    // The provider's error text is not echoed back either.
+    let started = h.start_login("/").await;
+    let state = MockOidcProvider::query_param(&started.url, "state").unwrap();
+    let cookies = format!("mb_login={}", cookie_value(&started.state_cookie));
+    let r = get_with(
+        &h.app,
+        &format!("/auth/callback?error=see_https%3A%2F%2Fevil.example&state={state}"),
+        &[("cookie", &cookies)],
+    )
+    .await;
+    let p = r.problem(StatusCode::BAD_REQUEST);
+    assert_eq!(p["detail"], "the identity provider reported an error");
+    assert!(!r.text.contains("evil"), "{}", r.text);
+}
