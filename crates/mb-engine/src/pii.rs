@@ -128,9 +128,10 @@ pub struct Scrubber {
     custom: Vec<CompiledCustom>,
 }
 
-fn compile(pattern: &str) -> Result<Regex, regex::Error> {
+fn compile(pattern: &str, unicode: bool) -> Result<Regex, regex::Error> {
     RegexBuilder::new(pattern)
         .size_limit(REGEX_SIZE_LIMIT)
+        .unicode(unicode)
         .build()
 }
 
@@ -144,11 +145,13 @@ fn valid_custom_name(name: &str) -> bool {
 impl Scrubber {
     pub fn new(cfg: &ScrubberConfig) -> Result<Self, PiiError> {
         // The builtin regexes are constants that always compile (covered by
-        // the per-builtin tests).
+        // the per-builtin tests). They are compiled with Unicode mode off, so
+        // `\d`, `\b` and the classes are ASCII-only: every candidate is pure
+        // ASCII, which the validators rely on when slicing by byte offset.
         let builtins = RUN_ORDER
             .into_iter()
             .filter(|kind| cfg.builtins.contains(kind))
-            .filter_map(|kind| compile(kind.regex()).ok().map(|re| (kind, re)))
+            .filter_map(|kind| compile(kind.regex(), false).ok().map(|re| (kind, re)))
             .collect();
         if cfg.custom.len() > MAX_CUSTOM_PATTERNS {
             return Err(PiiError::Custom {
@@ -164,7 +167,7 @@ impl Scrubber {
                     reason: format!("name {:?} must match [a-z0-9_]{{1,32}}", c.name),
                 });
             }
-            let regex = compile(&c.regex).map_err(|e| PiiError::Custom {
+            let regex = compile(&c.regex, true).map_err(|e| PiiError::Custom {
                 index,
                 reason: format!("invalid regex: {e}"),
             })?;

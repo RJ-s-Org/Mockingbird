@@ -330,6 +330,54 @@ fn oversized_strings_are_left_alone() {
     assert_eq!(total(&counts), 0);
 }
 
+/// Maps every ASCII digit in `s` to the same digit in another Unicode
+/// decimal-digit block (`zero` is that block's digit zero).
+fn redigit(s: &str, zero: char) -> String {
+    s.chars()
+        .map(|c| match c.to_digit(10) {
+            Some(d) if c.is_ascii_digit() => char::from_u32(zero as u32 + d).unwrap(),
+            _ => c,
+        })
+        .collect()
+}
+
+#[test]
+fn non_ascii_digits_never_panic_and_are_left_alone() {
+    // Shapes that every builtin replaces when written with ASCII digits.
+    let shapes: [(BuiltinPattern, &str); 9] = [
+        (BuiltinPattern::Email, "jane.doe1@corp-mail.com"),
+        (BuiltinPattern::Phone, "(415) 555-2671"),
+        (BuiltinPattern::Phone, "+14155552671"),
+        (BuiltinPattern::CreditCard, "4111 1111 1111 1111"),
+        (BuiltinPattern::CreditCard, "4111111111111111"),
+        (BuiltinPattern::UsSsn, "123-45-6789"),
+        (BuiltinPattern::Iban, "GB82 WEST 1234 5698 7654 32"),
+        (BuiltinPattern::Iban, "DE89370400440532013000"),
+        (BuiltinPattern::Ipv4, "8.8.8.8"),
+    ];
+    // Devanagari, Arabic-Indic and fullwidth digit zeros.
+    let zeros = ['\u{0966}', '\u{0660}', '\u{FF10}'];
+    for (p, shape) in shapes {
+        for zero in zeros {
+            let input = redigit(shape, zero);
+            for s in [only(p), all()] {
+                let (out, counts) = s.scrub_str(&input);
+                assert_eq!(out, input, "{p:?} on {input:?}");
+                assert_eq!(total(&counts), 0, "{p:?} on {input:?}");
+            }
+            // Mixed: ASCII and non-ASCII digits in one candidate.
+            let mixed = format!("{}{}", redigit(&shape[..4], zero), &shape[4..]);
+            let (out, _) = all().scrub_str(&mixed);
+            assert_eq!(all().scrub_str(&out).0, out, "{p:?} on {mixed:?}");
+        }
+    }
+    // The reported crash input.
+    let input = "DE\u{0969}\u{0969}12345678901";
+    let (out, counts) = all().scrub_str(input);
+    assert_eq!(out, input);
+    assert_eq!(total(&counts), 0);
+}
+
 static SHARED: std::sync::LazyLock<Scrubber> = std::sync::LazyLock::new(all);
 
 proptest! {
@@ -340,6 +388,7 @@ proptest! {
             "\\PC{0,200}",
             "[0-9 .()+@A-Za-z-]{0,120}",
             "([0-9]{1,6}[ .-]){0,8}[0-9]{0,6}",
+            "[0-9\u{0660}-\u{0669}\u{0966}-\u{096F}\u{FF10}-\u{FF19} .()+@A-Z-]{0,80}",
         ]
     ) {
         let s = &*SHARED;
