@@ -48,6 +48,7 @@ use crate::{
         contracts::ContractVersionSummary,
         contracts::ContractVersionDetail,
         contracts::OperationSummary,
+        contracts::ChannelSummary,
         scenarios::ScenarioView,
         scenarios::PutScenario,
         profiles::LlmProfileView,

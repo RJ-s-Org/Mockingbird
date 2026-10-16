@@ -246,7 +246,7 @@ async fn import_directory_uploads_archive() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert_eq!(
         out.json(),
-        json!({ "version": 1, "status": "active", "operations": 3 })
+        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0 })
     );
     let source = reqwest::get(format!("{admin}/api/v1/mocks/orders/contracts/1/source"))
         .await
@@ -296,4 +296,50 @@ fn validate_handles_proto_and_wsdl() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains("GetOrder"), "{stdout}");
+}
+
+#[test]
+fn validate_prints_channels() {
+    let out = Command::cargo_bin("mockingbird")
+        .unwrap()
+        .arg("validate")
+        .arg(repo_path("fixtures/asyncapi/streetlights-kafka-3.0.yaml"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.starts_with("Streetlights Kafka API 1.0.0 (0 operations, 4 channels)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "{:<32} publish kafka smartylighting.streetlights.1.0.action.{{streetlightId}}.turn.on\n",
+            "turnOn"
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("receiveLightMeasurement"), "{stdout}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_asyncapi_uses_asyncapi_media_type() {
+    let admin = admin_url().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("lights.asyncapi.yaml");
+    std::fs::copy(
+        repo_path("fixtures/asyncapi/streetlights-kafka-3.0.yaml"),
+        &file,
+    )
+    .unwrap();
+    let out = run(
+        &admin,
+        &["import", file.to_str().unwrap(), "--as", "lights"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        out.json(),
+        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4 })
+    );
 }

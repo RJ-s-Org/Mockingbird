@@ -5,6 +5,7 @@
 mod avro;
 mod bindings;
 mod v2;
+mod v3;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,6 +17,7 @@ use crate::schema::{collect_refs, normalize_schema};
 use crate::{ImportError, triggers::validate_triggers, version_string};
 
 pub(crate) use v2::compile_v2;
+pub(crate) use v3::compile_v3;
 
 /// Source prefix of component schema references.
 pub(crate) const REF_PREFIX: &str = "#/components/schemas/";
@@ -164,6 +166,34 @@ pub(crate) fn apply_traits(doc: &Value, item: &Value, at: &str) -> Result<Value,
     Ok(out)
 }
 
+/// `item` with its `traits` merged in declared order under it (3.0
+/// semantics: the item's own values win).
+pub(crate) fn apply_traits_under(
+    doc: &Value,
+    item: &Value,
+    at: &str,
+) -> Result<Value, ImportError> {
+    let Some(traits) = item.get("traits").and_then(Value::as_array) else {
+        return Ok(item.clone());
+    };
+    let mut own = item.clone();
+    if let Value::Object(obj) = &mut own {
+        obj.remove("traits");
+    }
+    let mut out = Value::Object(Map::new());
+    for (i, t) in traits.iter().enumerate() {
+        let t = resolve(doc, t, &format!("{at}/traits/{i}"))?;
+        merge_patch(&mut out, t);
+    }
+    merge_patch(&mut out, &own);
+    Ok(out)
+}
+
+/// A non-empty string field of `v`.
+pub(crate) fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
 /// How a message payload is written.
 enum PayloadFormat {
     JsonSchema,
@@ -207,23 +237,142 @@ pub(crate) fn message_payload(
     schema_format: Option<&str>,
     at: &str,
 ) -> Result<Value, ImportError> {
+    payload_schema(
+        ctx,
+        message.get("payload"),
+        schema_format,
+        at,
+        &format!("{at}/payload"),
+    )
+}
+
+/// The JSON Schema of a payload (`{}` when there is none) written in
+/// `schema_format`. `at` points at the message, `payload_at` at the schema.
+pub(crate) fn payload_schema(
+    ctx: &mut Ctx,
+    payload: Option<&Value>,
+    schema_format: Option<&str>,
+    at: &str,
+    payload_at: &str,
+) -> Result<Value, ImportError> {
     let format = payload_format(schema_format).ok_or_else(|| {
         ImportError::Unsupported(format!(
             "schemaFormat {} at {at}",
             schema_format.unwrap_or_default()
         ))
     })?;
-    let Some(payload) = message.get("payload") else {
+    let Some(payload) = payload else {
         return Ok(json!({}));
     };
-    let payload_at = format!("{at}/payload");
     match format {
-        PayloadFormat::JsonSchema => normalize(payload, &payload_at),
+        PayloadFormat::JsonSchema => normalize(payload, payload_at),
         PayloadFormat::Avro => {
-            let payload = resolve(ctx.doc, payload, &payload_at)?;
-            avro_payload(ctx, payload, &payload_at)
+            let payload = resolve(ctx.doc, payload, payload_at)?;
+            avro_payload(ctx, payload, payload_at)
         }
     }
+}
+
+/// One message of an operation, with its traits merged.
+pub(crate) struct MessageInput {
+    pub(crate) value: Value,
+    /// The name used when the message has neither `name` nor `messageId`.
+    pub(crate) fallback_name: Option<String>,
+    pub(crate) at: String,
+}
+
+/// What a channel takes from its messages.
+pub(crate) struct MessageSet {
+    pub(crate) message_schema: Value,
+    pub(crate) message_names: Vec<String>,
+    pub(crate) content_type: String,
+    pub(crate) key_schema: Option<Value>,
+    pub(crate) headers_schema: Option<Value>,
+    /// The messages' summaries and descriptions.
+    pub(crate) hints: Vec<String>,
+}
+
+/// Reads a message's payload schema; `at` points at the message.
+pub(crate) type PayloadReader = fn(&mut Ctx, &Value, &str) -> Result<Value, ImportError>;
+
+/// Collects the schemas, names, content type, Kafka key and headers of the
+/// messages of channel `id`.
+pub(crate) fn collect_messages(
+    ctx: &mut Ctx,
+    msgs: &[MessageInput],
+    id: &str,
+    protocol: &str,
+    default_content_type: &str,
+    read_payload: PayloadReader,
+) -> Result<MessageSet, ImportError> {
+    let mut schemas = Vec::new();
+    let mut names = Vec::new();
+    let mut headers = Vec::new();
+    let mut key_schema = None;
+    let mut hints = Vec::new();
+    for (n, m) in msgs.iter().enumerate() {
+        let v = &m.value;
+        schemas.push(read_payload(ctx, v, &m.at)?);
+        names.push(
+            str_of(v, "name")
+                .or_else(|| str_of(v, "messageId"))
+                .map(str::to_owned)
+                .or_else(|| m.fallback_name.clone())
+                .unwrap_or_else(|| format!("{id}-message-{}", n + 1)),
+        );
+        headers.push(
+            v.get("headers")
+                .map(|h| normalize(h, &format!("{}/headers", m.at)))
+                .transpose()?,
+        );
+        if protocol == "kafka"
+            && key_schema.is_none()
+            && let Some(k) = v.pointer("/bindings/kafka/key")
+        {
+            key_schema = Some(normalize(k, &format!("{}/bindings/kafka/key", m.at))?);
+        }
+        hints.extend(
+            [str_of(v, "summary"), str_of(v, "description")]
+                .into_iter()
+                .flatten()
+                .map(str::to_owned),
+        );
+    }
+    let content_type = msgs
+        .first()
+        .and_then(|m| str_of(&m.value, "contentType"))
+        .unwrap_or(default_content_type)
+        .to_owned();
+    Ok(MessageSet {
+        message_schema: one_of(schemas),
+        message_names: names,
+        content_type,
+        key_schema,
+        headers_schema: headers_schema(headers),
+        hints,
+    })
+}
+
+/// `tags[].name` of an operation.
+pub(crate) fn tag_names(op: &Value) -> Vec<String> {
+    op.get("tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|t| str_of(t, "name"))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Hex sha256 of `bytes`.
+pub(crate) fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Converts an Avro payload. Avro names resolve only against the Avro

@@ -2,12 +2,11 @@
 
 use mb_mcm::{Bundle, Channel, Direction, Reply};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
 use super::{
-    Ctx, address_params, apply_traits, binding, bundle_info, channel_protocol, check_replies,
-    escape, extensions, finish_defs, headers_schema, message_payload, normalize, one_of, ref_name,
-    resolve, slug,
+    Ctx, MessageInput, address_params, apply_traits, binding, bundle_info, channel_protocol,
+    check_replies, collect_messages, digest, escape, extensions, finish_defs, message_payload,
+    normalize, ref_name, resolve, slug, str_of, tag_names,
 };
 use crate::ImportError;
 
@@ -25,16 +24,9 @@ fn direction_label(direction: Direction) -> &'static str {
     }
 }
 
-/// One message of an operation, with its traits merged.
-struct Message {
-    value: Value,
-    ref_name: Option<String>,
-    at: String,
-}
-
 /// The operation's messages: one message, `{oneOf: [...]}` or a `$ref` to
 /// either.
-fn messages(doc: &Value, op: &Value, op_at: &str) -> Result<Vec<Message>, ImportError> {
+fn messages(doc: &Value, op: &Value, op_at: &str) -> Result<Vec<MessageInput>, ImportError> {
     let Some(raw) = op.get("message") else {
         return Ok(Vec::new());
     };
@@ -54,10 +46,10 @@ fn messages(doc: &Value, op: &Value, op_at: &str) -> Result<Vec<Message>, Import
         };
     items
         .into_iter()
-        .map(|(value, ref_name, at)| {
-            Ok(Message {
+        .map(|(value, fallback_name, at)| {
+            Ok(MessageInput {
                 value: apply_traits(doc, value, &at)?,
-                ref_name,
+                fallback_name,
                 at,
             })
         })
@@ -91,8 +83,14 @@ fn parameters(
     Ok(out)
 }
 
-fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+/// A 2.x message payload, read per the message's `schemaFormat`.
+fn read_payload(ctx: &mut Ctx, message: &Value, at: &str) -> Result<Value, ImportError> {
+    message_payload(
+        ctx,
+        message,
+        message.get("schemaFormat").and_then(Value::as_str),
+        at,
+    )
 }
 
 pub(crate) fn compile_v2(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> {
@@ -134,62 +132,23 @@ pub(crate) fn compile_v2(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportErro
             };
             ctx.claim_id(&id, format!("{op_at}/operationId"))?;
 
-            let mut message_schemas = Vec::new();
-            let mut message_names = Vec::new();
-            let mut headers = Vec::new();
-            let mut key_schema = None;
             let mut semantic_hints: Vec<String> =
                 [str_of(item, "description"), str_of(&op, "description")]
                     .into_iter()
                     .flatten()
                     .map(str::to_owned)
                     .collect();
-            if let Some(tags) = op.get("tags").and_then(Value::as_array) {
-                semantic_hints.extend(
-                    tags.iter()
-                        .filter_map(|t| str_of(t, "name"))
-                        .map(str::to_owned),
-                );
-            }
+            semantic_hints.extend(tag_names(&op));
             let msgs = messages(doc, &op, &op_at)?;
-            for (n, m) in msgs.iter().enumerate() {
-                let v = &m.value;
-                message_schemas.push(message_payload(
-                    &mut ctx,
-                    v,
-                    v.get("schemaFormat").and_then(Value::as_str),
-                    &m.at,
-                )?);
-                message_names.push(
-                    str_of(v, "name")
-                        .or_else(|| str_of(v, "messageId"))
-                        .map(str::to_owned)
-                        .or_else(|| m.ref_name.clone())
-                        .unwrap_or_else(|| format!("{id}-message-{}", n + 1)),
-                );
-                headers.push(
-                    v.get("headers")
-                        .map(|h| normalize(h, &format!("{}/headers", m.at)))
-                        .transpose()?,
-                );
-                if protocol == "kafka"
-                    && key_schema.is_none()
-                    && let Some(k) = v.pointer("/bindings/kafka/key")
-                {
-                    key_schema = Some(normalize(k, &format!("{}/bindings/kafka/key", m.at))?);
-                }
-                semantic_hints.extend(
-                    [str_of(v, "summary"), str_of(v, "description")]
-                        .into_iter()
-                        .flatten()
-                        .map(str::to_owned),
-                );
-            }
-            let content_type = msgs
-                .first()
-                .and_then(|m| str_of(&m.value, "contentType"))
-                .unwrap_or(default_content_type)
-                .to_owned();
+            let set = collect_messages(
+                &mut ctx,
+                &msgs,
+                &id,
+                protocol,
+                default_content_type,
+                read_payload,
+            )?;
+            semantic_hints.extend(set.hints);
 
             let ext = extensions(&op, &ctx, &op_at)?.or(channel_ext.clone());
             ext.check(direction)?;
@@ -208,11 +167,11 @@ pub(crate) fn compile_v2(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportErro
                     &op_at,
                 )?,
                 direction,
-                message_schema: one_of(message_schemas),
-                message_names,
-                content_type,
-                key_schema,
-                headers_schema: headers_schema(headers),
+                message_schema: set.message_schema,
+                message_names: set.message_names,
+                content_type: set.content_type,
+                key_schema: set.key_schema,
+                headers_schema: set.headers_schema,
                 parameters: params.clone(),
                 triggers: ext.triggers.map(|(t, _)| t).unwrap_or_default(),
                 reply: ext.reply.map(|(channel, _)| Reply {
@@ -229,12 +188,11 @@ pub(crate) fn compile_v2(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportErro
     channels.sort_by(|a, b| a.id.cmp(&b.id));
     let defs = finish_defs(&channels, ctx.defs)?;
 
-    let digest = Sha256::digest(bytes);
     Ok(Bundle {
         id: slug(&title),
         title,
         version,
-        source_digest: digest.iter().map(|b| format!("{b:02x}")).collect(),
+        source_digest: digest(bytes),
         operations: Vec::new(),
         defs,
         protocol_payload: None,

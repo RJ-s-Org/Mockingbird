@@ -58,8 +58,9 @@ pub enum MocksCommand {
 
 #[derive(Args, Debug)]
 pub struct ImportArgs {
-    /// Contract file (OpenAPI, Swagger, GraphQL, .proto, descriptor set,
-    /// WSDL, zip or tar.gz), or a directory, uploaded as a tar.gz.
+    /// Contract file (OpenAPI, Swagger, AsyncAPI, GraphQL, .proto,
+    /// descriptor set, WSDL, zip or tar.gz), or a directory, uploaded as a
+    /// tar.gz.
     pub contract: PathBuf,
     /// The mock to import into.
     #[arg(long = "as", value_name = "MOCK")]
@@ -211,7 +212,8 @@ async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, Cl
 /// The upload media type for a contract, by extension: `.graphql`,
 /// `.graphqls`, `.gql` (GraphQL), `.proto`, `.pb`/`.desc` (descriptor set),
 /// `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz` and directories (packed
-/// as tar.gz); else `.json`/`.yaml`/`.yml`, else JSON when the document
+/// as tar.gz), `.asyncapi.yaml`/`.asyncapi.yml`/`.asyncapi.json`
+/// (AsyncAPI); else `.json`/`.yaml`/`.yml`, else JSON when the document
 /// starts with `{`, else YAML.
 fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
     if path.is_dir() {
@@ -224,6 +226,12 @@ fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
         .unwrap_or_default();
     if name.ends_with(".tar.gz") {
         return "application/gzip";
+    }
+    if name.ends_with(".asyncapi.yaml") || name.ends_with(".asyncapi.yml") {
+        return "application/vnd.aai.asyncapi+yaml";
+    }
+    if name.ends_with(".asyncapi.json") {
+        return "application/vnd.aai.asyncapi+json";
     }
     let ext = path
         .extension()
@@ -365,6 +373,10 @@ mod tests {
             ("a.zip", "application/zip"),
             ("a.tgz", "application/gzip"),
             ("a.TAR.GZ", "application/gzip"),
+            ("lights.asyncapi.yaml", "application/vnd.aai.asyncapi+yaml"),
+            ("lights.AsyncAPI.yml", "application/vnd.aai.asyncapi+yaml"),
+            ("lights.asyncapi.json", "application/vnd.aai.asyncapi+json"),
+            ("asyncapi.yaml", "application/yaml"),
         ] {
             assert_eq!(
                 contract_media_type(Path::new(name), b""),

@@ -1,0 +1,142 @@
+---
+source: crates/mb-import/tests/asyncapi.rs
+expression: streetlights_30()
+---
+id: streetlights-kafka-api
+title: Streetlights Kafka API
+version: 1.0.0
+source_digest: "[digest]"
+operations: []
+defs:
+  dimLightPayload:
+    properties:
+      percentage:
+        description: Percentage to which the light should be dimmed to.
+        maximum: 100
+        minimum: 0
+        type: integer
+      sentAt:
+        $ref: "#/$defs/sentAt"
+    type: object
+  lightMeasuredPayload:
+    properties:
+      lumens:
+        description: Light intensity measured in lumens.
+        minimum: 0
+        type: integer
+      sentAt:
+        $ref: "#/$defs/sentAt"
+    type: object
+  sentAt:
+    description: Date and time when the message was sent.
+    format: date-time
+    type: string
+  turnOnOffPayload:
+    properties:
+      command:
+        description: Whether to turn on or off the light.
+        enum:
+          - "on"
+          - "off"
+        type: string
+      sentAt:
+        $ref: "#/$defs/sentAt"
+    type: object
+channels:
+  - id: dimLight
+    title: "smartylighting.streetlights.1.0.action.{streetlightId}.dim"
+    address: "smartylighting.streetlights.1.0.action.{streetlightId}.dim"
+    binding:
+      kafka:
+        topic: "smartylighting.streetlights.1.0.action.{streetlightId}.dim"
+    direction: publish
+    message_schema:
+      $ref: "#/$defs/dimLightPayload"
+    message_names:
+      - dimLight
+    content_type: application/json
+    headers_schema:
+      properties:
+        my-app-header:
+          maximum: 100
+          minimum: 0
+          type: integer
+      type: object
+    parameters:
+      streetlightId:
+        type: string
+    semantic_hints:
+      - Command a particular streetlight to dim the lights.
+  - id: receiveLightMeasurement
+    title: Inform about environmental lighting conditions of a particular streetlight.
+    address: "smartylighting.streetlights.1.0.event.{streetlightId}.lighting.measured"
+    binding:
+      kafka:
+        topic: "smartylighting.streetlights.1.0.event.{streetlightId}.lighting.measured"
+    direction: subscribe
+    message_schema:
+      $ref: "#/$defs/lightMeasuredPayload"
+    message_names:
+      - lightMeasured
+    content_type: application/json
+    headers_schema:
+      properties:
+        my-app-header:
+          maximum: 100
+          minimum: 0
+          type: integer
+      type: object
+    parameters:
+      streetlightId:
+        type: string
+    semantic_hints:
+      - The topic on which measured values may be produced and consumed.
+      - Inform about environmental lighting conditions of a particular streetlight.
+  - id: turnOff
+    title: "smartylighting.streetlights.1.0.action.{streetlightId}.turn.off"
+    address: "smartylighting.streetlights.1.0.action.{streetlightId}.turn.off"
+    binding:
+      kafka:
+        topic: "smartylighting.streetlights.1.0.action.{streetlightId}.turn.off"
+    direction: publish
+    message_schema:
+      $ref: "#/$defs/turnOnOffPayload"
+    message_names:
+      - turnOnOff
+    content_type: application/json
+    headers_schema:
+      properties:
+        my-app-header:
+          maximum: 100
+          minimum: 0
+          type: integer
+      type: object
+    parameters:
+      streetlightId:
+        type: string
+    semantic_hints:
+      - Command a particular streetlight to turn the lights on or off.
+  - id: turnOn
+    title: "smartylighting.streetlights.1.0.action.{streetlightId}.turn.on"
+    address: "smartylighting.streetlights.1.0.action.{streetlightId}.turn.on"
+    binding:
+      kafka:
+        topic: "smartylighting.streetlights.1.0.action.{streetlightId}.turn.on"
+    direction: publish
+    message_schema:
+      $ref: "#/$defs/turnOnOffPayload"
+    message_names:
+      - turnOnOff
+    content_type: application/json
+    headers_schema:
+      properties:
+        my-app-header:
+          maximum: 100
+          minimum: 0
+          type: integer
+      type: object
+    parameters:
+      streetlightId:
+        type: string
+    semantic_hints:
+      - Command a particular streetlight to turn the lights on or off.

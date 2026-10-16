@@ -1,6 +1,6 @@
 //! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0, GraphQL SDL and
 //! introspection, protobuf sources and descriptor sets, WSDL 1.1 with XSD,
-//! AsyncAPI 2.x) into the Mockingbird Contract Model.
+//! AsyncAPI 2.x and 3.0) into the Mockingbird Contract Model.
 
 mod archive;
 mod asyncapi;
@@ -183,7 +183,7 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
         SourceFormat::FileDescriptorSet => proto::compile_descriptor_set(bytes),
         SourceFormat::Wsdl11 => wsdl::compile_text(bytes),
         SourceFormat::AsyncApi2 => asyncapi::compile_v2(&parse_document(bytes)?, bytes),
-        SourceFormat::AsyncApi3 => Err(ImportError::Unsupported("asyncapi 3.0".into())),
+        SourceFormat::AsyncApi3 => asyncapi::compile_v3(&parse_document(bytes)?, bytes),
         SourceFormat::Archive => {
             let mut bundle = compile_files(&unpack_archive(bytes)?)?;
             bundle.source_digest = proto::hex_digest(bytes);

@@ -426,7 +426,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 1, "status": "active", "operations": 3 })
+        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0 })
     );
 
     // Later uploads stay approved unless asked to activate; YAML is accepted.
@@ -434,7 +434,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 2, "status": "approved", "operations": 1 })
+        json!({ "version": 2, "status": "approved", "operations": 1, "channels": 0 })
     );
     assert_eq!(h.active_version("orders").await, 1);
 
@@ -442,7 +442,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 3, "status": "active", "operations": 3 })
+        json!({ "version": 3, "status": "active", "operations": 3, "channels": 0 })
     );
     assert_eq!(h.active_version("orders").await, 3);
 
@@ -1579,7 +1579,7 @@ async fn upload_graphql_proto_wsdl_and_archive() {
         assert_eq!(r.status, StatusCode::CREATED, "{mock}: {}", r.text);
         assert_eq!(
             r.json(),
-            json!({ "version": 1, "status": "active", "operations": expected }),
+            json!({ "version": 1, "status": "active", "operations": expected, "channels": 0 }),
             "{mock}"
         );
         let r = h
@@ -1646,4 +1646,68 @@ async fn grpc_contract_detail_lists_protocol_target_kind() {
     assert_eq!(list["kind"], "stream-server", "{list}");
     assert_eq!(list["method"], "", "{list}");
     assert_eq!(list["path"], "", "{list}");
+}
+
+#[tokio::test]
+async fn upload_asyncapi_reports_channels() {
+    let h = harness().await;
+    h.create_mock("lights").await;
+    let r = h
+        .upload_bytes(
+            "lights",
+            fixture("asyncapi/streetlights-kafka-3.0.yaml"),
+            "application/vnd.aai.asyncapi+yaml",
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    assert_eq!(
+        r.json(),
+        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4 })
+    );
+
+    let r = h.get("/api/v1/mocks/lights/contracts").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()[0]["channels"], 4);
+
+    let r = h.get("/api/v1/mocks/lights/contracts/1").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let detail = r.json();
+    assert_eq!(detail["operations"], json!([]));
+    let ids: Vec<&str> = detail["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["dimLight", "receiveLightMeasurement", "turnOff", "turnOn"]
+    );
+    assert_eq!(
+        detail["channels"][3],
+        json!({
+            "id": "turnOn",
+            "direction": "publish",
+            "protocol": "kafka",
+            "address": "smartylighting.streetlights.1.0.action.{streetlightId}.turn.on",
+            "messages": ["turnOnOff"],
+        })
+    );
+    assert_eq!(detail["channels"][1]["direction"], "subscribe");
+
+    for media in [
+        "application/vnd.aai.asyncapi",
+        "application/vnd.aai.asyncapi+json",
+    ] {
+        h.create_mock(&format!("m-{}", media.len())).await;
+        let r = h
+            .upload_bytes(
+                &format!("m-{}", media.len()),
+                fixture("asyncapi/sensors-mqtt-3.0.yaml"),
+                media,
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{media}: {}", r.text);
+        assert_eq!(r.json()["channels"], 3, "{media}");
+    }
 }
