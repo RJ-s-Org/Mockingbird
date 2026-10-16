@@ -1,5 +1,14 @@
 # syntax=docker/dockerfile:1
 
+# Builds the console (the Vite build that mb-console embeds) into
+# /src/crates/mb-console/dist.
+FROM node:22-bookworm AS console
+WORKDIR /src/crates/mb-console/web
+COPY crates/mb-console/web/package.json crates/mb-console/web/package-lock.json ./
+RUN npm ci
+COPY crates/mb-console/web ./
+RUN npm run build
+
 # Collects only the Cargo manifests, so the dependency layer below is rebuilt
 # only when a manifest or the lockfile changes.
 FROM rust:1.97-bookworm AS manifests
@@ -24,6 +33,7 @@ RUN for manifest in crates/*/Cargo.toml; do \
  && cargo build --release --locked -p mockingbird \
  && rm -rf crates
 COPY crates crates
+COPY --from=console /src/crates/mb-console/dist crates/mb-console/dist
 # COPY keeps the context's timestamps, which can be older than the stub
 # build; touch the sources so Cargo rebuilds the workspace crates.
 RUN find crates -name '*.rs' -exec touch {} + \

@@ -1489,3 +1489,29 @@ async fn reconcile_applies_data_plane_auth() {
         .unwrap_err();
     assert!(format!("{err:#}").contains("header"), "{err:#}");
 }
+
+/// The Compose stack's config (deploy/compose) parses and is a valid `oidc`
+/// config for an all-interfaces bind.
+#[test]
+fn compose_config_is_a_valid_oidc_config() {
+    let cfg = file_config::load(&repo().join("deploy/compose/mockingbird.yaml")).unwrap();
+    assert_eq!(cfg.auth.mode, AuthMode::Oidc);
+    assert_eq!(cfg.auth.external_url, "http://localhost:9090");
+    assert_eq!(
+        cfg.storage.url,
+        "postgres://postgres:postgres@postgres:5432/postgres"
+    );
+    assert_eq!(cfg.llm.default_profile, None);
+    let oidc = cfg.auth.oidc.as_ref().unwrap();
+    assert_eq!(oidc.issuer, "http://localhost:8081/auth/v1");
+    assert_eq!(oidc.client_id, "mockingbird");
+    assert_eq!(
+        oidc.client_secret.as_deref(),
+        Some("file:/bootstrap/client_secret")
+    );
+    let server = ServerConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        ..cfg.server.clone()
+    };
+    server.check_bind(&cfg.auth).unwrap();
+}
