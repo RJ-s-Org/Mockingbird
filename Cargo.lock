@@ -3235,6 +3235,8 @@ dependencies = [
  "mb-state",
  "proptest",
  "rand 0.10.3",
+ "regex",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

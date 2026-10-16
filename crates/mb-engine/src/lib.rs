@@ -15,6 +15,7 @@ pub mod extract;
 pub mod faker;
 pub mod message;
 pub mod ndjson;
+pub mod pii;
 pub mod prompt;
 pub mod scenario;
 pub mod stream;
