@@ -501,16 +501,27 @@ async fn failed_mutation_writes_no_event() {
 
 #[tokio::test]
 async fn audit_never_contains_secrets() {
-    // SAFETY: no other test in this binary reads this variable.
-    unsafe { std::env::set_var("MB_LLM_AUDIT_TEST", "sk-123") };
-    let h = harness().await;
+    // The secret is injected through a file reference, not the process
+    // environment.
+    let dir = tempfile::tempdir().unwrap();
+    let secret_file = dir.path().join("llm-key");
+    std::fs::write(&secret_file, "sk-123").unwrap();
+    let secret_ref = format!("file:{}", secret_file.display());
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let h = Harness {
+        app: router(AdminState {
+            auth: Arc::new(TestAuth),
+            api_secret_refs: Arc::new(vec![secret_ref.clone()]),
+            ..AdminState::new(store.clone(), state)
+        }),
+        store,
+    };
     h.call(
         None,
         Method::PUT,
         "/api/v1/llm-profiles/p",
-        Some(
-            json!({"base_url": "https://llm", "model": "m", "secret_ref": "env:MB_LLM_AUDIT_TEST"}),
-        ),
+        Some(json!({"base_url": "https://llm", "model": "m", "secret_ref": secret_ref})),
     )
     .await
     .ok(StatusCode::OK);
