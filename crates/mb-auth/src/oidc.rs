@@ -7,15 +7,16 @@ use std::time::{Duration, Instant};
 
 use openidconnect::core::{
     CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
-    CoreGenderClaim, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
-    CoreProviderMetadata, CoreRevocableToken, CoreRevocationErrorResponse,
-    CoreTokenIntrospectionResponse, CoreTokenType,
+    CoreGenderClaim, CoreIdTokenVerifier, CoreJsonWebKey, CoreJsonWebKeySet,
+    CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm, CoreProviderMetadata,
+    CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
 };
 use openidconnect::{
     AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl, Nonce,
-    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError,
-    Scope, StandardErrorResponse, StandardTokenResponse, TokenResponse, UserInfoClaims,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl, JsonWebKeySetUrl,
+    Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+    RequestTokenError, Scope, StandardErrorResponse, StandardTokenResponse, TokenResponse,
+    UserInfoClaims,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -30,6 +31,8 @@ use crate::principal::Principal;
 const PENDING_TTL: Duration = Duration::from_secs(600);
 /// The most logins in flight at once; the oldest is evicted beyond this.
 const MAX_PENDING: usize = 10_000;
+/// Minimum time between JWKS refetches for ID-token verification.
+const ID_TOKEN_JWKS_REFETCH: Duration = Duration::from_secs(30);
 
 /// Every claim that is not a standard OIDC claim (for example `groups`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -100,8 +103,70 @@ struct Pending {
     created: Instant,
 }
 
+/// The keys ID tokens are verified with: the JWKS from discovery, replaced
+/// when an ID token fails verification and the last refetch (if any) is
+/// older than [`ID_TOKEN_JWKS_REFETCH`], so a provider key rotation does not
+/// break logins until a restart.
+struct IdTokenKeys {
+    jwks_uri: JsonWebKeySetUrl,
+    client_id: ClientId,
+    client_secret: Option<ClientSecret>,
+    issuer: IssuerUrl,
+    algs: Vec<CoreJwsSigningAlgorithm>,
+    /// The key set and when it was last refetched (`None`: only discovery).
+    cache: tokio::sync::RwLock<(CoreJsonWebKeySet, Option<Instant>)>,
+}
+
+impl IdTokenKeys {
+    fn verifier(&self, jwks: CoreJsonWebKeySet) -> CoreIdTokenVerifier<'static> {
+        let v = match &self.client_secret {
+            Some(secret) => CoreIdTokenVerifier::new_confidential_client(
+                self.client_id.clone(),
+                secret.clone(),
+                self.issuer.clone(),
+                jwks,
+            ),
+            None => CoreIdTokenVerifier::new_public_client(
+                self.client_id.clone(),
+                self.issuer.clone(),
+                jwks,
+            ),
+        };
+        v.set_allowed_algs(self.algs.clone())
+    }
+
+    /// Refetches the key set unless a refetch happened within the
+    /// throttle window (or another caller just refetched); returns whether
+    /// the set may have changed.
+    async fn refetch(&self, http: &reqwest::Client, seen: &CoreJsonWebKeySet) -> bool {
+        let mut cache = self.cache.write().await;
+        if !same_keys(&cache.0, seen) {
+            return true;
+        }
+        if cache.1.is_some_and(|t| t.elapsed() < ID_TOKEN_JWKS_REFETCH) {
+            return false;
+        }
+        cache.1 = Some(Instant::now());
+        match CoreJsonWebKeySet::fetch_async(&self.jwks_uri, &OidcHttp(http)).await {
+            Ok(jwks) => {
+                cache.0 = jwks;
+                true
+            }
+            Err(e) => {
+                tracing::warn!("refetching the OIDC JWKS failed: {}", error_chain(&e));
+                false
+            }
+        }
+    }
+}
+
+fn same_keys(a: &CoreJsonWebKeySet, b: &CoreJsonWebKeySet) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+}
+
 pub struct OidcClient {
     client: Client,
+    id_keys: IdTokenKeys,
     http: reqwest::Client,
     scopes: Vec<String>,
     mapping: RoleMapping,
@@ -129,6 +194,14 @@ impl OidcClient {
             .await
             .map_err(|e| upstream("OIDC discovery failed", error_chain(&e)))?;
         let jwks_uri = metadata.jwks_uri().url().to_string();
+        let id_keys = IdTokenKeys {
+            jwks_uri: metadata.jwks_uri().clone(),
+            client_id: ClientId::new(settings.client_id.clone()),
+            client_secret: settings.client_secret.clone().map(ClientSecret::new),
+            issuer: metadata.issuer().clone(),
+            algs: metadata.id_token_signing_alg_values_supported().clone(),
+            cache: tokio::sync::RwLock::new((metadata.jwks().clone(), None)),
+        };
 
         let client = Client::from_provider_metadata(
             metadata,
@@ -150,6 +223,7 @@ impl OidcClient {
 
         Ok(OidcClient {
             client,
+            id_keys,
             http,
             scopes: settings.scopes,
             mapping: settings.mapping,
@@ -242,10 +316,24 @@ impl OidcClient {
         let id_token = token
             .id_token()
             .ok_or_else(|| AuthError::Upstream("token response has no id_token".to_string()))?;
-        let verifier = self.client.id_token_verifier();
-        let id_claims = id_token
-            .claims(&verifier, &pending.nonce)
-            .map_err(|e| AuthError::Unauthenticated(format!("invalid ID token: {e}")))?;
+        let invalid = |e: openidconnect::ClaimsVerificationError| {
+            AuthError::Unauthenticated(format!("invalid ID token: {e}"))
+        };
+        let jwks = self.id_keys.cache.read().await.0.clone();
+        let id_claims = match id_token.claims(&self.id_keys.verifier(jwks.clone()), &pending.nonce)
+        {
+            Ok(claims) => claims,
+            // The provider may have rotated its keys since discovery.
+            Err(e) => {
+                if !self.id_keys.refetch(&self.http, &jwks).await {
+                    return Err(invalid(e));
+                }
+                let jwks = self.id_keys.cache.read().await.0.clone();
+                id_token
+                    .claims(&self.id_keys.verifier(jwks), &pending.nonce)
+                    .map_err(invalid)?
+            }
+        };
         let mut claims = to_map(id_claims)?;
 
         if !claims.contains_key(&self.mapping.roles_claim) && self.client.user_info_url().is_some()
@@ -319,7 +407,7 @@ pub fn validate_return_to(s: &str) -> Result<String, AuthError> {
         Ok(s.to_string())
     } else {
         Err(AuthError::Invalid(
-            "return_to must be a path starting with a single `/`".to_string(),
+            "return_to must be a path of at most 2048 bytes starting with a single `/`".to_string(),
         ))
     }
 }

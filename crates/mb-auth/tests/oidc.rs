@@ -202,6 +202,47 @@ async fn return_to_validation() {
     ));
 }
 
+/// Runs one login with `sub` and returns its outcome.
+async fn login(
+    p: &MockOidcProvider,
+    c: &OidcClient,
+    code: &str,
+) -> Result<mb_auth::CompletedLogin, AuthError> {
+    let login = c.begin_login("/").unwrap();
+    let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
+    p.issue_code(code, p.claims("alice", &[], Some(&nonce)))
+        .await;
+    c.complete_login(&login.state, code).await
+}
+
+#[tokio::test]
+async fn login_after_key_rotation() {
+    let p = MockOidcProvider::start().await;
+    let c = client(&p).await;
+    login(&p, &c, "c1").await.unwrap();
+    p.rotate_key().await;
+    let done = login(&p, &c, "c2").await.unwrap();
+    assert_eq!(done.principal.subject, "alice");
+    // The new key is cached: the next login fetches nothing.
+    let before = jwks_requests(&p).await;
+    login(&p, &c, "c3").await.unwrap();
+    assert_eq!(jwks_requests(&p).await, before);
+}
+
+#[tokio::test]
+async fn id_token_jwks_refetch_throttled() {
+    let p = MockOidcProvider::start().await;
+    let c = client(&p).await;
+    p.rotate_key().await;
+    login(&p, &c, "c1").await.unwrap();
+    let after_first = jwks_requests(&p).await;
+    // A second rotation within the throttle window is not refetched.
+    p.rotate_key().await;
+    assert_unauthenticated(login(&p, &c, "c2").await);
+    assert_unauthenticated(login(&p, &c, "c3").await);
+    assert_eq!(jwks_requests(&p).await, after_first);
+}
+
 #[tokio::test]
 async fn bearer_jwt_accepted() {
     let p = MockOidcProvider::start().await;
