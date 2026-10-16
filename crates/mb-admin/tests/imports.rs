@@ -1088,3 +1088,45 @@ async fn dropping_workers_aborts_a_running_pipeline() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+#[tokio::test]
+async fn active_jobs_per_mock_are_capped() {
+    let mut h = harness().await;
+    h.st.imports.settings.max_active_jobs_per_mock = 2;
+    h.app = router(h.st.clone());
+    h.create_mock("other").await;
+    let first = h.upload_har("pets").await;
+    h.upload_har("pets").await;
+    let har = fixture("smart/petstore.har");
+    let r = h
+        .multipart(
+            &format!("{BASE}/pets/imports"),
+            true,
+            &[("file", Some("petstore.har"), &har)],
+        )
+        .await;
+    let p = r.expect(StatusCode::TOO_MANY_REQUESTS, "third job");
+    assert!(p["detail"].as_str().unwrap().contains('2'), "{p}");
+    // Other mocks have their own allowance.
+    h.upload_har("other").await;
+    // A running job still counts; a finished one does not.
+    let claimed = h.st.store.claim_import_job(chrono::Utc::now()).await.unwrap();
+    assert_eq!(claimed.unwrap().id.to_string(), first["id"].as_str().unwrap());
+    h.call(
+        "editor",
+        Method::POST,
+        &format!("{BASE}/pets/imports"),
+        Some(json!({ "url": "https://x.test/a" })),
+    )
+    .await
+    .expect(StatusCode::TOO_MANY_REQUESTS, "still full");
+    h.call(
+        "editor",
+        Method::DELETE,
+        &format!("{BASE}/pets/imports/{}", first["id"].as_str().unwrap()),
+        None,
+    )
+    .await
+    .expect(StatusCode::OK, "cancel");
+    h.upload_har("pets").await;
+}

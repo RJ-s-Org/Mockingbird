@@ -243,6 +243,8 @@ pub trait ControlStore: Send + Sync {
             .await?
             .then_some(version))
     }
+    /// How many of the mock's jobs are `queued` or `running`.
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError>;
     /// Moves a `queued` or `running` job to `canceled` and clears its input;
     /// `false` otherwise.
     async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError>;

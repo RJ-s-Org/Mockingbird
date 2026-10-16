@@ -1791,18 +1791,21 @@ fn import_section_defaults() {
     assert_eq!(cfg.import.max_tokens, 200_000);
     assert_eq!(cfg.import.llm_profile, None);
     assert!(cfg.import.url_allowlist.is_empty());
+    assert_eq!(cfg.import.max_active_jobs_per_mock, 10);
     let settings = cfg.import.settings().unwrap();
     assert_eq!(settings.workers, 2);
     assert_eq!(settings.max_tokens, 200_000);
+    assert_eq!(settings.max_active_jobs_per_mock, 10);
 
     let cfg = ws.load(
-        "import:\n  workers: 4\n  max_tokens: 50000\n  llm_profile: big\n  url_allowlist: [docs.internal, 10.0.0.0/8]\n",
+        "import:\n  workers: 4\n  max_tokens: 50000\n  llm_profile: big\n  url_allowlist: [docs.internal, 10.0.0.0/8]\n  max_active_jobs_per_mock: 3\n",
     );
     assert_eq!(cfg.import.workers, 4);
     assert_eq!(cfg.import.llm_profile.as_deref(), Some("big"));
     let settings = cfg.import.settings().unwrap();
     assert_eq!(settings.workers, 4);
     assert_eq!(settings.max_tokens, 50_000);
+    assert_eq!(settings.max_active_jobs_per_mock, 3);
     assert!(settings.fetch.host_allowed("docs.internal"));
 }
 
@@ -1813,6 +1816,10 @@ fn import_section_validation() {
         ("import:\n  workers: 0\n", "import.workers"),
         ("import:\n  workers: 17\n", "import.workers"),
         ("import:\n  max_tokens: 999\n", "import.max_tokens"),
+        (
+            "import:\n  max_active_jobs_per_mock: 0\n",
+            "import.max_active_jobs_per_mock",
+        ),
         (
             "import:\n  url_allowlist: [\"10.0.0.0/33\"]\n",
             "import.url_allowlist",

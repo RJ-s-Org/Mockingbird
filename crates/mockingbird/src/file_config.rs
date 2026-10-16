@@ -58,6 +58,8 @@ pub struct ImportConfig {
     /// Hosts (`docs.internal`, `.corp.example`) and CIDRs URL imports may
     /// reach although they are private.
     pub url_allowlist: Vec<String>,
+    /// Most queued plus running jobs per mock, at least 1.
+    pub max_active_jobs_per_mock: u32,
 }
 
 impl Default for ImportConfig {
@@ -67,6 +69,7 @@ impl Default for ImportConfig {
             max_tokens: mb_import::smart::DEFAULT_IMPORT_TOKENS,
             llm_profile: None,
             url_allowlist: Vec::new(),
+            max_active_jobs_per_mock: mb_admin::DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK,
         }
     }
 }
@@ -95,12 +98,16 @@ impl ImportConfig {
                 self.max_tokens
             ));
         }
+        if self.max_active_jobs_per_mock == 0 {
+            return Err("import.max_active_jobs_per_mock: 0 must be at least 1".to_string());
+        }
         let fetch = mb_import::smart::fetch::FetchPolicy::from_allowlist(&self.url_allowlist)
             .map_err(|e| format!("import.url_allowlist: {e}"))?;
         Ok(mb_admin::ImportSettings {
             workers: self.workers,
             max_tokens: self.max_tokens,
             fetch,
+            max_active_jobs_per_mock: self.max_active_jobs_per_mock,
             ..mb_admin::ImportSettings::default()
         })
     }

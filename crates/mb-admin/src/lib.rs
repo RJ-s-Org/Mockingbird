@@ -47,8 +47,9 @@ pub use auth_routes::{
 pub use imports::llm::{LlmResolver, OfflineLlm};
 pub use imports::worker::{ImportWorkers, run_next_import, spawn_import_workers};
 pub use imports::{
-    CreateImport, ImportJobView, ImportKindSchema, ImportProgressView, ImportSettings,
-    ImportStatusSchema, Imports, MAX_IMPORT_REQUEST_BYTES, UPLOAD_HEADER,
+    CreateImport, DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK, ImportJobView, ImportKindSchema,
+    ImportProgressView, ImportSettings, ImportStatusSchema, Imports, MAX_IMPORT_REQUEST_BYTES,
+    UPLOAD_HEADER,
 };
 pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
 pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUPPRESSED_METRIC};

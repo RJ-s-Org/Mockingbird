@@ -1474,6 +1474,16 @@ impl ControlStore for PgStore {
         Ok(Some(version))
     }
 
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM import_jobs WHERE mock_id = $1 AND status IN ('queued', 'running')",
+        )
+        .bind(mock_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {
         Ok(sqlx::query(
             "UPDATE import_jobs SET status = 'canceled', input = ''::bytea, finished_at = $1, \

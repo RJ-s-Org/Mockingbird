@@ -364,6 +364,7 @@ import:
   workers: 2                 # import worker tasks, 1..=16
   max_tokens: 200000         # LLM token budget per job, at least 1000
   llm_profile: importer      # optional; default: the mock's own profile
+  max_active_jobs_per_mock: 10  # queued plus running jobs per mock, at least 1
   url_allowlist:             # private hosts URL imports may reach (default: none)
     - docs.internal          # an exact host name
     - "*.corp.example"       # any subdomain of corp.example
@@ -389,7 +390,7 @@ URL imports are fetched by the server, so they are guarded against server-side r
 
 | Endpoint | Role | Result |
 | --- | --- | --- |
-| `POST /mocks/{mock}/imports` | Edit | `202` with the job and a `Location` header. `409 managed_by_file` for a mock from the config file; `422` for an unknown kind, a contract, or a document import without an LLM. |
+| `POST /mocks/{mock}/imports` | Edit | `202` with the job and a `Location` header. `409 managed_by_file` for a mock from the config file; `422` for an unknown kind, a contract, or a document import without an LLM; `429` when the mock already has `import.max_active_jobs_per_mock` queued or running jobs. |
 | `GET /mocks/{mock}/imports`, `GET …/imports/{job}` | Read | The newest 50 jobs; one job. Finished jobs are kept for 7 days. |
 | `DELETE …/imports/{job}` | Edit | Cancels a queued or running job; `409` once it has finished. |
 | `GET …/contracts/{version}/draft`, `PUT …/draft` | Read, Edit | The draft for review; replace its document (`409` unless the version is a draft). |
@@ -629,6 +630,7 @@ With a config file, mount it and its contracts and pass `-c`; use Postgres (`MB_
 | `import.workers` | `2` | Import worker tasks, 1 to 16. |
 | `import.max_tokens` | `200000` | LLM token budget of one import job, at least 1000. |
 | `import.llm_profile` | none | LLM profile for extraction instead of the mock's own (mock's workspace first, then `default`). |
+| `import.max_active_jobs_per_mock` | `10` | Most queued plus running import jobs one mock may have; another `POST …/imports` is answered `429`. At least 1. |
 | `import.url_allowlist` | `[]` | Host names, `*.suffix` host suffixes, addresses and CIDR ranges that URL imports may reach although they are private. |
 
 ## License

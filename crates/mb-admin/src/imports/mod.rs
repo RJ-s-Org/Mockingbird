@@ -59,7 +59,13 @@ pub struct ImportSettings {
     pub poll_interval: Duration,
     /// How long finished jobs are kept.
     pub retention: Duration,
+    /// Most queued plus running jobs one mock may have; past it, creating a
+    /// job is refused with 429.
+    pub max_active_jobs_per_mock: u32,
 }
+
+/// Default [`ImportSettings::max_active_jobs_per_mock`].
+pub const DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK: u32 = 10;
 
 impl Default for ImportSettings {
     fn default() -> Self {
@@ -70,6 +76,7 @@ impl Default for ImportSettings {
             stale_after: Duration::from_secs(10 * 60),
             poll_interval: Duration::from_secs(2),
             retention: Duration::from_secs(7 * 24 * 60 * 60),
+            max_active_jobs_per_mock: DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK,
         }
     }
 }
@@ -428,6 +435,7 @@ async fn job_of(st: &AdminState, mock: &Mock, id: Uuid) -> ApiResult<ImportJob> 
         (status = 413, body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "Neither JSON nor multipart with the upload header", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Unknown kind, a contract (upload it to …/contracts), or a document import without an LLM", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "The mock has `import.max_active_jobs_per_mock` queued or running jobs", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn create(
@@ -478,6 +486,19 @@ pub async fn create(
         && matches!(st.llm.for_import(&m).await, Ok(None))
     {
         return Err(Problem::unprocessable(SmartError::LlmRequired.to_string()));
+    }
+
+    // Checked just before queuing: concurrent creates can overshoot the
+    // limit by at most the requests in flight.
+    let limit = st.imports.settings.max_active_jobs_per_mock;
+    if st.store.count_active_import_jobs(m.id).await? >= u64::from(limit) {
+        return Err(Problem::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "mock {mock:?} already has {limit} queued or running import jobs; \
+                 wait for one to finish or cancel one"
+            ),
+        ));
     }
 
     let created = st

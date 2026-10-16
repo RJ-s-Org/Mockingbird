@@ -238,6 +238,9 @@ impl ControlStore for StubControl {
     async fn import_job_input(&self, id: Uuid) -> Result<Option<Vec<u8>>, StoreError> {
         self.inner.import_job_input(id).await
     }
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError> {
+        self.inner.count_active_import_jobs(mock_id).await
+    }
     async fn list_import_jobs(
         &self,
         mock_id: Uuid,
