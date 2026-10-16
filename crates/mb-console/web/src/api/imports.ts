@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, unwrap } from "./client";
+import { keys, type ContractSummary } from "./queries";
 import type { components } from "./schema";
 
 export type ImportJob = components["schemas"]["ImportJobView"];
@@ -93,5 +94,69 @@ export function useCancelImport(ws: string, mock: string) {
       queryClient.setQueryData(importKeys.job(ws, mock, job.id), job);
       await queryClient.invalidateQueries({ queryKey: importKeys.imports(ws, mock), exact: true });
     },
+  });
+}
+
+export type DraftView = components["schemas"]["DraftView"];
+export type DraftOperation = components["schemas"]["DraftOperationView"];
+export type PreviewRequest = components["schemas"]["PreviewRequest"];
+export type PreviewResponse = components["schemas"]["PreviewResponse"];
+
+/** `GET …/contracts/{version}/draft`: an imported version with its review metadata. */
+export function useDraft(ws: string, mock: string, version: number) {
+  return useQuery({
+    queryKey: importKeys.draft(ws, mock, version),
+    queryFn: async (): Promise<DraftView> =>
+      unwrap(
+        await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft", {
+          params: { path: { ws, mock, version } },
+        }),
+      ),
+  });
+}
+
+/** `PUT …/contracts/{version}/draft`: replaces the draft's document; stores the new view. */
+export function usePutDraft(ws: string, mock: string, version: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (document: object): Promise<DraftView> =>
+      unwrap(
+        await api.PUT("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft", {
+          params: { path: { ws, mock, version } },
+          body: { document: document as DraftView["document"] },
+        }),
+      ),
+    onSuccess: async (view) => {
+      queryClient.setQueryData(importKeys.draft(ws, mock, version), view);
+      await queryClient.invalidateQueries({ queryKey: keys.contracts(ws, mock) });
+    },
+  });
+}
+
+/** `POST …/contracts/{version}/approve`: approves a draft; refreshes the mock's versions and the draft. */
+export function useApproveDraft(ws: string, mock: string, version: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<ContractSummary> =>
+      unwrap(
+        await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/approve", {
+          params: { path: { ws, mock, version } },
+        }),
+      ),
+    // `["ws", ws, "mocks", mock]` prefixes the mock, its contracts and its drafts.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.mock(ws, mock) }),
+  });
+}
+
+/** `POST …/contracts/{version}/preview`: generates one response of an operation (may spend tokens). */
+export function usePreview(ws: string, mock: string, version: number) {
+  return useMutation({
+    mutationFn: async (request: PreviewRequest): Promise<PreviewResponse> =>
+      unwrap(
+        await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/preview", {
+          params: { path: { ws, mock, version } },
+          body: request,
+        }),
+      ),
   });
 }

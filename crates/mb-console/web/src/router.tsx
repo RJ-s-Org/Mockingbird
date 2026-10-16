@@ -4,6 +4,7 @@ import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  notFound,
   redirect,
   type RouterHistory,
 } from "@tanstack/react-router";
@@ -12,6 +13,7 @@ import { Layout } from "./components/Layout";
 import { ProblemAlert } from "./components/ProblemAlert";
 import { ApiKeys } from "./pages/ApiKeys";
 import { Audit } from "./pages/Audit";
+import { DraftReview } from "./pages/drafts/DraftReview";
 import { Home } from "./pages/Home";
 import { Contracts } from "./pages/mocks/Contracts";
 import { ImportProgress } from "./pages/mocks/ImportProgress";
@@ -131,18 +133,17 @@ const mockImportRoute = createRoute({
   },
 });
 
-/** A draft version's review page; a placeholder until the review page lands. */
+/** An imported version's review page; a version that is not a number is not found. */
 const mockDraftRoute = createRoute({
   getParentRoute: () => mockRoute,
   path: "/contracts/$version/draft",
+  beforeLoad: ({ params }) => {
+    if (!/^\d+$/.test(params.version)) throw notFound();
+  },
   component: function DraftPage() {
-    const { version } = mockDraftRoute.useParams();
-    return (
-      <section className="space-y-2">
-        <h2 className="text-lg font-semibold">Draft version {version}</h2>
-        <p className="text-sm text-slate-700">Draft review is not available yet.</p>
-      </section>
-    );
+    const { ws, mock, version } = mockDraftRoute.useParams();
+    const n = Number(version);
+    return <DraftReview key={n} ws={ws} mock={mock} version={n} />;
   },
 });
 
