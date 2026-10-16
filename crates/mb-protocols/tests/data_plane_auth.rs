@@ -67,7 +67,7 @@ fn api_key_mode(header: &str) -> DataPlaneAuth {
 /// The orders mock in `api_key` mode with the stub keys.
 fn orders_api_key() -> MockRuntime {
     let mut rt = runtime("orders", bundle("openapi/orders-3.0.yaml"), None, memory());
-    rt.data_plane_auth = api_key_mode("x-api-key");
+    rt.set_data_plane_auth(api_key_mode("x-api-key"));
     rt.data_plane_keys = Some(stub());
     rt
 }
@@ -80,10 +80,10 @@ fn widgets_passthrough() -> Router {
         None,
         memory(),
     );
-    rt.data_plane_auth = DataPlaneAuth {
+    rt.set_data_plane_auth(DataPlaneAuth {
         mode: DataPlaneAuthMode::PassthroughValidate,
         ..DataPlaneAuth::default()
-    };
+    });
     http_rest::router(Arc::new(rt))
 }
 
@@ -173,7 +173,7 @@ async fn missing_or_bad_key_401_with_www_authenticate() {
 
     // The challenge names the configured header.
     let mut rt = orders_api_key();
-    rt.data_plane_auth = api_key_mode("x-key");
+    rt.set_data_plane_auth(api_key_mode("x-key"));
     let router = http_rest::router(Arc::new(rt));
     let resp = send(&router, get("/orders/o1", &[("x-api-key", "good")])).await;
     assert_unauthorized(
@@ -213,7 +213,7 @@ async fn data_plane_key_never_reaches_prompt_or_record() {
         Some(provider.clone() as Arc<dyn Provider>),
         memory(),
     );
-    rt.data_plane_auth = api_key_mode("x-key");
+    rt.set_data_plane_auth(api_key_mode("x-key"));
     rt.data_plane_keys = Some(stub());
     rt.recorder = Some(collect.clone());
     let router = http_rest::router(Arc::new(rt));
@@ -265,10 +265,10 @@ async fn passthrough_declared_api_keys_never_reach_prompt_or_record() {
         Some(provider.clone() as Arc<dyn Provider>),
         memory(),
     );
-    rt.data_plane_auth = DataPlaneAuth {
+    rt.set_data_plane_auth(DataPlaneAuth {
         mode: DataPlaneAuthMode::PassthroughValidate,
         ..DataPlaneAuth::default()
-    };
+    });
     rt.recorder = Some(collect.clone());
     let router = http_rest::router(Arc::new(rt));
 
@@ -480,9 +480,9 @@ async fn record_carries_workspace() {
 async fn none_mode_unchanged() {
     let collect = Arc::new(Collect::default());
     let mut rt = runtime("orders", bundle("openapi/orders-3.0.yaml"), None, memory());
-    assert_eq!(rt.data_plane_auth, DataPlaneAuth::default());
-    assert_eq!(rt.data_plane_auth.mode, DataPlaneAuthMode::None);
-    assert_eq!(rt.data_plane_auth.header, "x-api-key");
+    assert_eq!(*rt.data_plane_auth(), DataPlaneAuth::default());
+    assert_eq!(rt.data_plane_auth().mode, DataPlaneAuthMode::None);
+    assert_eq!(rt.data_plane_auth().header, "x-api-key");
     rt.recorder = Some(collect.clone());
     let router = http_rest::router(Arc::new(rt));
     let resp = send(&router, get("/orders/o1?api_key=anything&x=1", &[])).await;
@@ -524,7 +524,7 @@ async fn soap_api_key_mode() {
     let records = Arc::new(Records::default());
     let mut rt = runtime("calc", bundle("wsdl/calculator.wsdl"), None, memory());
     rt.workspace = "team-a".into();
-    rt.data_plane_auth = api_key_mode("x-api-key");
+    rt.set_data_plane_auth(api_key_mode("x-api-key"));
     rt.data_plane_keys = Some(Arc::new(StubKeys(vec![("team-a", "good")])));
     rt.recorder = Some(records.clone());
     let app = mb_protocols::soap::try_router(Arc::new(rt)).unwrap();

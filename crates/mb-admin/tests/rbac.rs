@@ -6,9 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use axum::{Extension, Router};
+use mb_admin::channels::{
+    BrokerView, ChannelActivityView, ChannelControl, ChannelControlError, PublishedMessage,
+    SharedChannelControl,
+};
 use mb_admin::{AdminState, router};
 use mb_auth::{AuthError, Authenticate, Principal, PrincipalKind, Role};
 use mb_state::{MemoryStore, StateStore};
@@ -56,6 +60,41 @@ impl Authenticate for TestAuth {
         Ok(Some(p))
     }
 }
+
+/// A channel runtime that publishes one message per requested one.
+struct FakeControl;
+
+#[async_trait::async_trait]
+impl ChannelControl for FakeControl {
+    async fn publish(
+        &self,
+        _ws: &str,
+        _mock: &str,
+        _channel: &str,
+        count: usize,
+        _context: Option<Value>,
+    ) -> Result<Vec<PublishedMessage>, ChannelControlError> {
+        Ok((0..count)
+            .map(|_| PublishedMessage {
+                address: "orders.created".into(),
+                key: None,
+                headers: BTreeMap::new(),
+                payload: json!({}),
+                source: "fallback".into(),
+            })
+            .collect())
+    }
+
+    fn activity(&self, _ws: &str, _mock: &str) -> BTreeMap<String, ChannelActivityView> {
+        BTreeMap::new()
+    }
+
+    fn brokers(&self) -> Vec<BrokerView> {
+        Vec::new()
+    }
+}
+
+const EVENTS: &str = include_str!("../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
 
 struct Harness {
     app: Router,
@@ -105,14 +144,17 @@ fn profile() -> Value {
 }
 
 /// A store holding workspace `team-a`, and in `default` a mock `orders` with
-/// one contract version, a scenario `s` and a profile `p`.
+/// one contract version, a scenario `s` and a profile `p`, and an event
+/// mock `stream` (AsyncAPI, channel `orderCreated`).
 async fn harness() -> Harness {
     let store = mb_store::connect("sqlite::memory:").await.unwrap();
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let control: SharedChannelControl = Arc::new(FakeControl);
     let app = router(AdminState {
         auth: Arc::new(TestAuth),
         ..AdminState::new(store, state)
-    });
+    })
+    .layer(Extension(control));
     let h = Harness { app };
     let sys = Some("sysadmin");
     h.call(
@@ -145,6 +187,22 @@ async fn harness() -> Harness {
     h.call(sys, Method::PUT, "/api/v1/llm-profiles/p", Some(profile()))
         .await
         .expect(StatusCode::OK, "profile");
+    h.call(
+        sys,
+        Method::POST,
+        "/api/v1/mocks",
+        Some(json!({ "name": "stream" })),
+    )
+    .await
+    .expect(StatusCode::CREATED, "create event mock");
+    let req = Request::post("/api/v1/mocks/stream/contracts")
+        .header(header::AUTHORIZATION, "Bearer sysadmin")
+        .header(header::CONTENT_TYPE, "application/vnd.aai.asyncapi+yaml")
+        .body(Body::from(EVENTS))
+        .unwrap();
+    h.send(req)
+        .await
+        .expect(StatusCode::CREATED, "upload AsyncAPI");
     h
 }
 
@@ -197,6 +255,7 @@ impl Harness {
     async fn edits(&self, who: &str, base: &str, allowed: bool) {
         let w = Some(who);
         let m = format!("{base}/mocks/orders");
+        let e = format!("{base}/mocks/stream");
         let calls: Vec<(Method, String, Option<Value>)> = vec![
             (
                 Method::POST,
@@ -213,6 +272,21 @@ impl Harness {
             (Method::DELETE, format!("{m}/scenarios/s"), None),
             (Method::PUT, format!("{m}/sessions/s1"), Some(json!([]))),
             (Method::DELETE, format!("{m}/sessions/s1"), None),
+            (
+                Method::PUT,
+                format!("{e}/channels/orderCreated"),
+                Some(json!({ "enabled": true })),
+            ),
+            (
+                Method::POST,
+                format!("{e}/channels/orderCreated/publish"),
+                Some(json!({ "count": 1 })),
+            ),
+            (
+                Method::PUT,
+                format!("{e}/event-settings"),
+                Some(json!({ "broker": null })),
+            ),
         ];
         let check = |r: Resp, what: String| {
             if allowed {
@@ -231,6 +305,7 @@ impl Harness {
 
     async fn reads(&self, who: &str, base: &str, expected: StatusCode) {
         let m = format!("{base}/mocks/orders");
+        let e = format!("{base}/mocks/stream");
         for uri in [
             format!("{base}/mocks"),
             m.clone(),
@@ -241,6 +316,9 @@ impl Harness {
             format!("{m}/sessions"),
             format!("{m}/sessions/s1"),
             format!("{m}/requests"),
+            format!("{e}/channels"),
+            format!("{e}/channels/orderCreated"),
+            format!("{e}/event-settings"),
             format!("{base}/llm-profiles"),
             format!("{base}/llm-profiles/p"),
         ] {
@@ -541,6 +619,7 @@ async fn cross_workspace_access_403() {
     h.reads("team-editor", "/api/v1", StatusCode::FORBIDDEN)
         .await;
     h.edits("team-editor", DEFAULT, false).await;
+    h.edits("team-editor", "/api/v1", false).await;
     h.call(t, Method::GET, DEFAULT, None)
         .await
         .expect(StatusCode::FORBIDDEN, "default workspace");

@@ -133,6 +133,7 @@ pub(crate) fn compile_upload(
         protocol_payload: Some(ProtocolPayload::Soap {
             wsdl: text.strip_prefix('\u{feff}').unwrap_or(text).to_owned(),
         }),
+        channels: Vec::new(),
     })
 }
 

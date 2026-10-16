@@ -1,0 +1,121 @@
+asyncapi: 3.0.0
+info:
+  title: Sensors
+  version: 1.0.0
+  description: Temperature sensors that report readings and accept commands over MQTT.
+defaultContentType: application/json
+servers:
+  mosquitto:
+    host: test.mosquitto.org:1883
+    protocol: mqtt
+channels:
+  temperature:
+    address: sensors/{sensorId}/temperature
+    description: Temperature readings of one sensor.
+    parameters:
+      sensorId:
+        $ref: '#/components/parameters/sensorId'
+    messages:
+      temperatureReading:
+        $ref: '#/components/messages/temperatureReading'
+  commands:
+    address: sensors/{sensorId}/commands
+    description: Commands sent to one sensor.
+    parameters:
+      sensorId:
+        $ref: '#/components/parameters/sensorId'
+    messages:
+      command:
+        $ref: '#/components/messages/command'
+  acks:
+    address: sensors/{sensorId}/acks
+    description: Acknowledgements of executed commands.
+    parameters:
+      sensorId:
+        $ref: '#/components/parameters/sensorId'
+    messages:
+      ack:
+        $ref: '#/components/messages/ack'
+operations:
+  publishTemperature:
+    action: send
+    channel:
+      $ref: '#/channels/temperature'
+    summary: Report the current temperature of a sensor.
+    bindings:
+      mqtt:
+        qos: 1
+    x-mockingbird-triggers:
+      - schedule:
+          every_ms: 5000
+    messages:
+      - $ref: '#/channels/temperature/messages/temperatureReading'
+  receiveCommand:
+    action: receive
+    channel:
+      $ref: '#/channels/commands'
+    summary: Execute a command and acknowledge it.
+    messages:
+      - $ref: '#/channels/commands/messages/command'
+    reply:
+      channel:
+        $ref: '#/channels/acks'
+      address:
+        location: $message.header#/replyTo
+components:
+  parameters:
+    sensorId:
+      description: The ID of the sensor.
+  messages:
+    temperatureReading:
+      name: temperatureReading
+      summary: A temperature reading.
+      payload:
+        $ref: '#/components/schemas/temperatureReading'
+    command:
+      name: command
+      summary: A command for a sensor.
+      headers:
+        type: object
+        properties:
+          replyTo:
+            type: string
+            description: Topic the acknowledgement is published to.
+      payload:
+        type: object
+        required:
+          - command
+        properties:
+          command:
+            type: string
+            enum:
+              - reset
+              - calibrate
+    ack:
+      name: ack
+      summary: The outcome of a command.
+      payload:
+        type: object
+        required:
+          - command
+          - ok
+        properties:
+          command:
+            type: string
+          ok:
+            type: boolean
+  schemas:
+    temperatureReading:
+      type: object
+      required:
+        - sensorId
+        - celsius
+        - at
+      properties:
+        sensorId:
+          type: string
+        celsius:
+          type: number
+        at:
+          type: string
+          format: date-time

@@ -5,7 +5,7 @@
 //! and SOAP mocks are dispatched by route prefix on the data plane; gRPC
 //! mocks hold no prefix and are published to the shared [`GrpcServer`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -13,11 +13,12 @@ use axum::Router;
 use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
-use mb_mcm::Protocol;
+use mb_mcm::{Channel, ChannelBinding, Direction, Protocol};
+use mb_protocols::events::{ChannelRuntime, ChannelSetup, EventSetup};
 use mb_protocols::grpc::{GrpcError, GrpcMock, GrpcServer};
 use mb_protocols::http_rest::{self, problem};
 use mb_protocols::{MountPrefix, StateHealth, graphql, soap};
-use mb_store::{ControlChange, DEFAULT_WORKSPACE, Mock};
+use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, Mock};
 use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
@@ -44,6 +45,11 @@ struct Mounted {
     served: Served,
     /// The runtime's state store circuit breaker.
     state_health: Arc<StateHealth>,
+    /// The channels of a mock whose contract has some. Dropping the last
+    /// handle (when the mock is replaced or unmounted) stops its tasks.
+    events: Option<Arc<ChannelRuntime>>,
+    /// The contract's channels, for the startup log.
+    channels: Vec<Channel>,
 }
 
 /// How a mounted mock is reached.
@@ -85,8 +91,11 @@ impl Mounted {
 /// unmounted only when it is deleted or has no active contract.
 ///
 /// After every change the gRPC mocks are published to [`MockRegistry::grpc`].
-/// A gRPC mock serving a service that a mock sorting first by name already
-/// serves is skipped (and listed as failed) until that service is free.
+/// A gRPC service has one holder across every workspace: a mock already
+/// published keeps its services, and a mock that would serve a service
+/// another mock holds is skipped (and listed as failed in `/readyz`) until
+/// that service is free. Among mocks not yet published, the one sorting
+/// first by (workspace, name) wins.
 pub struct MockRegistry {
     mounted: ArcSwap<Vec<Mounted>>,
     /// `(workspace, name)` → why the mock's last rebuild failed.
@@ -94,6 +103,8 @@ pub struct MockRegistry {
     /// `(workspace, name)` → the service collision that kept it off the
     /// gRPC server.
     grpc_skipped: std::sync::Mutex<BTreeMap<MockKey, String>>,
+    /// The gRPC mocks of the last publish: they keep their services.
+    grpc_published: std::sync::Mutex<BTreeSet<MockKey>>,
     /// The h2c server every gRPC mock is published to.
     grpc: Arc<GrpcServer>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
@@ -106,6 +117,7 @@ impl MockRegistry {
             mounted: ArcSwap::from_pointee(Vec::new()),
             failed: std::sync::Mutex::new(BTreeMap::new()),
             grpc_skipped: std::sync::Mutex::new(BTreeMap::new()),
+            grpc_published: std::sync::Mutex::new(BTreeSet::new()),
             grpc: GrpcServer::new(),
             reload: Mutex::new(()),
         })
@@ -330,6 +342,60 @@ impl MockRegistry {
         }
     }
 
+    /// The channel runtime of mounted mock `name` in `workspace`; `None`
+    /// when it is not mounted or its contract has no channels.
+    pub fn channel_runtime(&self, workspace: &str, name: &str) -> Option<Arc<ChannelRuntime>> {
+        self.mounted
+            .load()
+            .iter()
+            .find(|m| m.is(workspace, name))
+            .and_then(|m| m.events.clone())
+    }
+
+    /// `(label, reason)` for every reason a mounted mock's channels are not
+    /// all working (see [`ChannelRuntime::health`]), sorted; see
+    /// [`mock_label`].
+    pub fn event_issues(&self) -> Vec<(String, String)> {
+        let mut issues: Vec<(String, String)> = self
+            .mounted
+            .load()
+            .iter()
+            .filter_map(|m| m.events.as_ref().map(|events| (m.label(), events.health())))
+            .flat_map(|(label, reasons)| reasons.into_iter().map(move |r| (label.clone(), r)))
+            .collect();
+        issues.sort();
+        issues
+    }
+
+    /// `(mock label, protocol, channel id, direction, address)` of every channel
+    /// of the mounted mocks with a channel runtime, by mock. WebSocket
+    /// addresses are paths below the mock's route prefix.
+    pub fn served_channels(&self) -> Vec<ServedChannel> {
+        let mut out = Vec::new();
+        for m in self.mounted.load().iter().filter(|m| m.events.is_some()) {
+            for channel in &m.channels {
+                let address = match (&channel.binding, m.prefix()) {
+                    (ChannelBinding::WebSocket { path }, Some(prefix)) => {
+                        format!("{}{path}", prefix.trim_end_matches('/'))
+                    }
+                    (binding, _) => binding.address().to_string(),
+                };
+                out.push(ServedChannel {
+                    mock: m.label(),
+                    protocol: channel.binding.protocol(),
+                    id: channel.id.clone(),
+                    direction: match channel.direction {
+                        Direction::Publish => "publish",
+                        Direction::Subscribe => "subscribe",
+                    },
+                    address,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.mock.cmp(&b.mock));
+        out
+    }
+
     /// Labels (see [`mock_label`]) of mounted mocks currently serving
     /// statelessly because their state store calls are failing, sorted.
     pub fn degraded_mocks(&self) -> Vec<String> {
@@ -366,11 +432,20 @@ impl MockRegistry {
         self.publish_grpc(grpc).await;
     }
 
-    /// Publishes the gRPC mocks of every workspace, in (workspace, name)
-    /// order: a mock serving a service an earlier one already serves (in
-    /// any workspace; the gRPC listener is shared) is skipped and recorded.
+    /// Publishes the gRPC mocks of every workspace: the mocks of the last
+    /// publish first, then the others, each group in (workspace, name)
+    /// order. A mock serving a service an earlier one already serves (in
+    /// any workspace; the gRPC listener is shared) is skipped and recorded,
+    /// so a service stays with the mock that held it.
     async fn publish_grpc(&self, mut mocks: Vec<(MockKey, Arc<GrpcMock>)>) {
-        mocks.sort_by(|a, b| a.0.cmp(&b.0));
+        let previous = self
+            .grpc_published
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default();
+        mocks.sort_by(|a, b| {
+            (!previous.contains(&a.0), &a.0).cmp(&(!previous.contains(&b.0), &b.0))
+        });
         let mut holders: BTreeMap<String, String> = BTreeMap::new();
         let mut skipped = BTreeMap::new();
         let mut published = Vec::new();
@@ -389,10 +464,19 @@ impl MockRegistry {
             for service in services {
                 holders.insert(service, label.clone());
             }
-            published.push(mock);
+            published.push((key, mock));
         }
-        if let Err(error) = self.grpc.publish(published).await {
-            tracing::error!(%error, "cannot publish the gRPC mocks; keeping the previous set");
+        let keys: BTreeSet<MockKey> = published.iter().map(|(k, _)| k.clone()).collect();
+        let mocks = published.into_iter().map(|(_, m)| m).collect();
+        match self.grpc.publish(mocks).await {
+            Ok(()) => {
+                if let Ok(mut slot) = self.grpc_published.lock() {
+                    *slot = keys;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot publish the gRPC mocks; keeping the previous set");
+            }
         }
         if let Ok(mut slot) = self.grpc_skipped.lock() {
             *slot = skipped;
@@ -428,6 +512,19 @@ impl MockRegistry {
             Err(never) => match never {},
         }
     }
+}
+
+/// One channel of a mounted mock, as the startup log lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServedChannel {
+    pub mock: String,
+    /// `kafka`, `amqp`, `mqtt` or `websocket`.
+    pub protocol: &'static str,
+    pub id: String,
+    /// `publish` (the mock produces) or `subscribe` (it consumes).
+    pub direction: &'static str,
+    /// The broker address, or for WebSocket the path on the data plane.
+    pub address: String,
 }
 
 /// The path below `prefix`, with a leading `/`, when `path` lies under
@@ -468,11 +565,32 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
         }
     };
     let state_health = Arc::clone(&runtime.state_health);
-    let protocol = runtime.bundle.protocol();
+    let protocol = runtime.bundle().protocol();
+    let channels = runtime.bundle().channels.clone();
     let runtime = Arc::new(runtime);
+    let events = if channels.is_empty() {
+        None
+    } else {
+        let setup = event_setup(deps.store.as_ref(), mock, &channels)
+            .await
+            .map_err(|error| {
+                let error = format!("{error:#}");
+                tracing::error!(mock = %label, %error, "cannot load the event settings; keeping any previous version mounted");
+                error
+            })?;
+        Some(ChannelRuntime::start(
+            Arc::clone(&runtime),
+            deps.events.clone(),
+            setup,
+        ))
+    };
+    let ws = events.as_ref().and_then(|events| events.ws_router());
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
-        router,
+        router: match &ws {
+            Some(ws) => ws.clone().fallback_service(router),
+            None => router,
+        },
     };
     let served = match protocol {
         Protocol::Http => http_rest::try_router(runtime)
@@ -495,12 +613,56 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
             name: mock.name.clone(),
             served,
             state_health,
+            events,
+            channels,
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
             Err(format!("cannot route the contract: {error}"))
         }
     }
+}
+
+/// The stored event settings of `mock`: its broker and, by channel id,
+/// each stored channel's `enabled` and triggers (the contract's when the
+/// stored row keeps them).
+async fn event_setup(
+    store: &dyn ControlStore,
+    mock: &Mock,
+    channels: &[Channel],
+) -> anyhow::Result<EventSetup> {
+    use anyhow::Context as _;
+    let broker = store
+        .get_event_settings(mock.id)
+        .await
+        .with_context(|| format!("loading the event settings of mock {:?}", mock.name))?
+        .and_then(|s| s.broker);
+    let stored = store
+        .list_channel_settings(mock.id)
+        .await
+        .with_context(|| format!("loading the channel settings of mock {:?}", mock.name))?;
+    let channels = stored
+        .into_iter()
+        .map(|s| {
+            let triggers = s.triggers.unwrap_or_else(|| {
+                channels
+                    .iter()
+                    .find(|c| c.id == s.channel_id)
+                    .map(Channel::effective_triggers)
+                    .unwrap_or_default()
+            });
+            let setup = ChannelSetup {
+                enabled: s.enabled,
+                triggers,
+            };
+            (s.channel_id, setup)
+        })
+        .collect();
+    Ok(EventSetup {
+        broker,
+        channels,
+        lease_key: mock.id.to_string(),
+    })
 }
 
 #[cfg(test)]

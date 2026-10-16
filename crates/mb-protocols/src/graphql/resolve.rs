@@ -11,7 +11,7 @@ use async_graphql::parser::types::{BaseType, Type};
 use async_graphql::{Error, ErrorExtensions, Name};
 use axum::http::{HeaderMap, StatusCode};
 use mb_engine::{EngineError, OperationCall, Source};
-use mb_ext::Rejection;
+use mb_ext::{Rejection, Tenancy};
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -48,6 +48,10 @@ pub(crate) struct HttpCall {
     method: String,
     /// The request's variables, for the request record.
     variables: Value,
+    /// The tenancy the whole request was admitted with, in `api_key` mode
+    /// (admission runs before the key check); root fields are then not
+    /// admitted again.
+    admitted: Option<Tenancy>,
     collected: Mutex<Collected>,
 }
 
@@ -63,11 +67,17 @@ pub(crate) struct Collected {
 }
 
 impl HttpCall {
-    pub(crate) fn new(headers: HeaderMap, method: String, variables: Value) -> Self {
+    pub(crate) fn new(
+        headers: HeaderMap,
+        method: String,
+        variables: Value,
+        admitted: Option<Tenancy>,
+    ) -> Self {
         Self {
             headers,
             method,
             variables,
+            admitted,
             collected: Mutex::new(Collected::default()),
         }
     }
@@ -209,10 +219,12 @@ async fn generate(
     };
     let mut delay = None;
 
-    // The data-plane key was checked once for the whole HTTP request.
+    // The data-plane key was checked once for the whole HTTP request (after
+    // admitting it, in `api_key` mode).
     let presented = Presented {
         query: &[],
         key_verified: true,
+        admitted: http.admitted.as_ref(),
     };
     let outcome = match call::plan(rt, op, &http.headers, presented).await {
         Err(PlanFailure {

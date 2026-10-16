@@ -20,6 +20,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/brokers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["brokers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/llm-profiles": {
         parameters: {
             query?: never;
@@ -107,6 +123,58 @@ export interface paths {
         head?: never;
         /** @deprecated */
         patch: operations["mocks_patch_default"];
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["channels_list_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/channels/{channel}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["channels_get_one_default"];
+        /** @deprecated */
+        put: operations["channels_put_default"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/channels/{channel}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @deprecated */
+        post: operations["channels_publish_default"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/mocks/{mock}/contracts": {
@@ -223,6 +291,24 @@ export interface paths {
         /** @deprecated */
         get: operations["contracts_source_default"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/event-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["channels_get_event_settings_default"];
+        /** @deprecated */
+        put: operations["channels_put_event_settings_default"];
         post?: never;
         delete?: never;
         options?: never;
@@ -518,6 +604,54 @@ export interface paths {
         patch: operations["mocks_patch"];
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["channels_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/channels/{channel}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["channels_get_one"];
+        put: operations["channels_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/channels/{channel}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["channels_publish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/mocks/{mock}/contracts": {
         parameters: {
             query?: never;
@@ -623,6 +757,22 @@ export interface paths {
         };
         get: operations["contracts_source"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/event-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["channels_get_event_settings"];
+        put: operations["channels_put_event_settings"];
         post?: never;
         delete?: never;
         options?: never;
@@ -809,10 +959,81 @@ export interface components {
          * @enum {string}
          */
         AuditFormat: "json" | "jsonl";
-        /** @description A contract version's metadata and operations. */
+        /** @description A configured broker connection. */
+        BrokerView: {
+            /** @description `kafka`, `amqp`, `mqtt` or `memory`. */
+            kind: string;
+            name: string;
+            status: string;
+            /** @description The connection URL, without credentials. */
+            url: string;
+        };
+        /** @description A channel's runtime counters. */
+        ChannelActivityView: {
+            last_error?: string | null;
+            /** Format: date-time */
+            last_published_at?: string | null;
+            /** Format: date-time */
+            last_received_at?: string | null;
+            /** Format: int64 */
+            published: number;
+            /** Format: int64 */
+            received: number;
+        };
+        /** @description A channel with its schemas. */
+        ChannelDetail: components["schemas"]["ChannelView"] & {
+            headers_schema?: Record<string, never> | null;
+            key_schema?: Record<string, never> | null;
+            /** @description JSON Schema 2020-12 with the definitions it references as `$defs`. */
+            message_schema: Record<string, never>;
+            /** @description Address parameter name → schema. */
+            parameters: Record<string, never>;
+        };
+        /** @description One event channel of a compiled contract. */
+        ChannelSummary: {
+            /**
+             * @description Topic, routing key, queue or WebSocket path, with `{param}`
+             *     placeholders.
+             */
+            address: string;
+            /** @description `publish` (the mock produces) or `subscribe` (the mock consumes). */
+            direction: string;
+            id: string;
+            /** @description The channel's message names. */
+            messages: string[];
+            /** @description `kafka`, `amqp`, `mqtt` or `websocket`. */
+            protocol: string;
+        };
+        /** @description A channel of the active contract with its effective settings. */
+        ChannelView: {
+            activity?: components["schemas"]["ChannelActivityView"] | null;
+            /** @description As in the contract, with `{param}` placeholders kept. */
+            address: string;
+            content_type: string;
+            /** @description `publish` (the mock produces) or `subscribe` (the mock consumes). */
+            direction: string;
+            enabled: boolean;
+            id: string;
+            message_names: string[];
+            /** @description `kafka`, `amqp`, `mqtt` or `websocket`. */
+            protocol: string;
+            /** @description The id of the channel replies are published on. */
+            reply?: string | null;
+            /** @description Where `enabled` and `triggers` come from: `contract`, `file` or `api`. */
+            settings_source: string;
+            title: string;
+            /**
+             * @description The effective triggers, as MCM JSON (e.g. `"manual"`,
+             *     `{"cron": {"expr": "*\/5 * * * *"}}`, `{"schedule": {"every_ms": 1000}}`).
+             */
+            triggers: Record<string, never>[];
+        };
+        /** @description A contract version's metadata, operations and channels. */
         ContractVersionDetail: {
             /** @description The contract's `info.version`. */
             api_version: string;
+            /** @description The event channels, in bundle order. */
+            channels: components["schemas"]["ChannelSummary"][];
             /** Format: date-time */
             created_at: string;
             created_by?: string | null;
@@ -826,6 +1047,8 @@ export interface components {
         };
         /** @description A contract version without its source or compiled bundle. */
         ContractVersionSummary: {
+            /** @description Number of event channels in the compiled contract. */
+            channels: number;
             /** Format: date-time */
             created_at: string;
             created_by?: string | null;
@@ -995,6 +1218,13 @@ export interface components {
             /** @description The target (`GET /pets`) of the operation the warning is about. */
             operation?: string | null;
         };
+        /** @description A mock's event settings. */
+        EventSettingsView: {
+            /** @description `null` picks a broker automatically. */
+            broker?: string | null;
+            /** @description `file` or `api`. */
+            source: string;
+        };
         /** @description An import job. */
         ImportJobView: {
             /** Format: date-time */
@@ -1059,6 +1289,8 @@ export interface components {
             at: string;
             /** Format: int32 */
             completion_tokens: number;
+            /** @description Request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
+            kind: string;
             /** Format: int64 */
             latency_ms: number;
             method: string;
@@ -1223,10 +1455,47 @@ export interface components {
             /** @description e.g. `entry 2`, a heading, or a collection item. */
             location: string;
         };
+        /** @description A manual publish. */
+        PublishRequest: {
+            /** @description A JSON object handed to the message prompt. */
+            context?: Record<string, never> | null;
+            /**
+             * Format: int32
+             * @description 1–100, default 1.
+             */
+            count?: number | null;
+        };
+        /** @description The published messages, in order. */
+        PublishResult: {
+            messages: components["schemas"]["PublishedMessage"][];
+        };
+        /** @description A message produced by a manual publish. */
+        PublishedMessage: {
+            /** @description The resolved address it was published to. */
+            address: string;
+            headers: {
+                [key: string]: string;
+            };
+            key?: string | null;
+            payload: Record<string, never>;
+            /** @description `llm`, `repaired` or `fallback`. */
+            source: string;
+        };
+        /** @description A channel's settings. Absent `triggers` use the contract's. */
+        PutChannel: {
+            enabled?: boolean;
+            /** @description MCM triggers; only channels the mock publishes may have any. */
+            triggers?: Record<string, never>[] | null;
+        };
         /** @description A replacement draft document. */
         PutDraft: {
             /** @description An OpenAPI 3.x document. */
             document: Record<string, never>;
+        };
+        /** @description A mock's event settings. */
+        PutEventSettings: {
+            /** @description A configured broker's name; `null` picks automatically. */
+            broker?: string | null;
         };
         /** @description The full profile. A raw `api_key` is rejected: use `secret_ref`. */
         PutProfile: {
@@ -1292,6 +1561,8 @@ export interface components {
             completion_tokens: number;
             /** Format: int64 */
             id: number;
+            /** @description `http`, `graphql`, `grpc`, `soap` or `event`. */
+            kind: string;
             /** Format: int64 */
             latency_ms: number;
             method: string;
@@ -1371,6 +1642,8 @@ export interface components {
         };
         /** @description The outcome of a contract upload. */
         UploadResult: {
+            /** @description Number of event channels in the compiled contract. */
+            channels: number;
             /** @description Number of operations in the compiled contract. */
             operations: number;
             status: components["schemas"]["VersionStatus"];
@@ -1438,6 +1711,34 @@ export interface operations {
             };
             /** @description Not a sysadmin */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    brokers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The configured brokers, sorted by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrokerView"][];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1813,6 +2114,237 @@ export interface operations {
             };
         };
     };
+    channels_list_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active contract's channels, in contract order; empty without an active contract */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelView"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_get_one_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Channel id */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelDetail"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock, no active contract, or no such channel */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_put_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Channel id */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutChannel"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid triggers */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_publish_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Channel id */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishResult"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock or channel */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The channel is not one the mock publishes */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description count outside 1-100, or context not an object */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Broker publish failed, or the generated message is too large */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No event runtime, or the mock's channels are not running */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     contracts_list_default: {
         parameters: {
             query?: never;
@@ -1860,13 +2392,16 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream. */
+        /** @description A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, AsyncAPI 2.x or 3.0 (JSON or YAML), or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/vnd.aai.asyncapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream. */
         requestBody: {
             content: {
                 "application/graphql": string;
                 "application/gzip": number[];
                 "application/json": string;
                 "application/octet-stream": number[];
+                "application/vnd.aai.asyncapi": string;
+                "application/vnd.aai.asyncapi+json": string;
+                "application/vnd.aai.asyncapi+yaml": string;
                 "application/vnd.oai.openapi": string;
                 "application/vnd.oai.openapi+json": string;
                 "application/vnd.oai.openapi+yaml": string;
@@ -1898,7 +2433,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Managed by config file */
+            /** @description Managed by config file, or the version would be activated and binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1998,7 +2533,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A draft, or managed by config file */
+            /** @description A draft, managed by config file, or binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2255,9 +2790,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
+            /** @description The uploaded source bytes, always as an application/octet-stream attachment named <mock>-v<version>.<ext>, so a browser never renders them. The sniffed type is in X-Mockingbird-Source-Type: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
             200: {
                 headers: {
+                    /** @description attachment; filename="<mock>-v<version>.<ext>" */
+                    "Content-Disposition"?: string;
+                    /** @description The sniffed media type of the source */
+                    "X-Mockingbird-Source-Type"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -2265,6 +2804,104 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_get_event_settings_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSettingsView"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_put_event_settings_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutEventSettings"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSettingsView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown broker */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2486,6 +3123,8 @@ export interface operations {
                 limit?: number;
                 /** @description Only entries with a smaller id (keyset pagination). */
                 before?: number;
+                /** @description Request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
+                kind?: string;
             };
             header?: never;
             path: {
@@ -3637,6 +4276,245 @@ export interface operations {
             };
         };
     };
+    channels_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active contract's channels, in contract order; empty without an active contract */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelView"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Channel id */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelDetail"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock, no active contract, or no such channel */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Channel id */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutChannel"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid triggers */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_publish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Channel id */
+                channel: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishResult"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock or channel */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The channel is not one the mock publishes */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description count outside 1-100, or context not an object */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Broker publish failed, or the generated message is too large */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No event runtime, or the mock's channels are not running */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     contracts_list: {
         parameters: {
             query?: never;
@@ -3688,13 +4566,16 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream. */
+        /** @description A contract, at most 20 MiB: OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL or introspection JSON, a .proto file or binary FileDescriptorSet, WSDL 1.1, AsyncAPI 2.x or 3.0 (JSON or YAML), or a zip or tar.gz archive of several files (at most 500 files, 64 MiB unpacked). Content-Type must be application/json, application/yaml, application/x-yaml, text/yaml, application/vnd.oai.openapi(+json|+yaml), application/vnd.aai.asyncapi(+json|+yaml), application/graphql, text/x-protobuf, application/x-protobuf, application/xml, text/xml, application/wsdl+xml, application/zip, application/gzip or application/octet-stream. */
         requestBody: {
             content: {
                 "application/graphql": string;
                 "application/gzip": number[];
                 "application/json": string;
                 "application/octet-stream": number[];
+                "application/vnd.aai.asyncapi": string;
+                "application/vnd.aai.asyncapi+json": string;
+                "application/vnd.aai.asyncapi+yaml": string;
                 "application/vnd.oai.openapi": string;
                 "application/vnd.oai.openapi+json": string;
                 "application/vnd.oai.openapi+yaml": string;
@@ -3726,7 +4607,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Managed by config file */
+            /** @description Managed by config file, or the version would be activated and binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3830,7 +4711,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A draft, or managed by config file */
+            /** @description A draft, managed by config file, or binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4097,9 +4978,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The uploaded source bytes. The content type is sniffed: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
+            /** @description The uploaded source bytes, always as an application/octet-stream attachment named <mock>-v<version>.<ext>, so a browser never renders them. The sniffed type is in X-Mockingbird-Source-Type: application/zip, application/gzip, application/xml, application/json, text/plain; charset=utf-8 (GraphQL SDL or .proto), application/octet-stream (other binary) or application/yaml. */
             200: {
                 headers: {
+                    /** @description attachment; filename="<mock>-v<version>.<ext>" */
+                    "Content-Disposition"?: string;
+                    /** @description The sniffed media type of the source */
+                    "X-Mockingbird-Source-Type"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4107,6 +4992,108 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_get_event_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSettingsView"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    channels_put_event_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutEventSettings"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventSettingsView"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Unknown broker */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4336,6 +5323,8 @@ export interface operations {
                 limit?: number;
                 /** @description Only entries with a smaller id (keyset pagination). */
                 before?: number;
+                /** @description Request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
+                kind?: string;
             };
             header?: never;
             path: {

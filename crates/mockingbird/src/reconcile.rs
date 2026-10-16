@@ -1,7 +1,7 @@
 //! Applies a [`FileConfig`] to the control store: file-declared profiles,
-//! mocks, contracts and scenarios are created, updated or deleted to match
-//! the file, and the workspaces they name are created. API-owned resources
-//! and workspaces are never deleted.
+//! mocks, contracts, scenarios, channel settings and event settings are
+//! created, updated or deleted to match the file, and the workspaces they
+//! name are created. API-owned resources and workspaces are never deleted.
 //!
 //! Mocks and profiles are identified by `(workspace, name)`; reports label
 //! them with [`mock_label`] (`name` in `default`, else `workspace/name`).
@@ -9,12 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};
-use mb_mcm::Bundle;
+use chrono::Utc;
+use mb_mcm::{Bundle, Trigger};
 use mb_state::StateStore;
 use mb_store::{
-    ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
-    ResourceSource, Scenario, ScenarioRules, validate_header_name, validate_mock_name,
-    validate_route_prefix, validate_workspace_name,
+    ChannelSettings, ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
+    MockEventSettings, NewContractVersion, NewMock, ResourceSource, Scenario, ScenarioRules,
+    validate_header_name, validate_mock_name, validate_route_prefix, validate_workspace_name,
 };
 use sha2::{Digest, Sha256};
 
@@ -55,15 +56,22 @@ struct Prepared<'a> {
     source: Vec<u8>,
     digest: String,
     bundle: Bundle,
+    /// The `channels:` block, validated: channel id → (enabled, triggers).
+    channels: BTreeMap<String, FileChannelSettings>,
 }
+
+/// A validated `channels:` entry: `(enabled, triggers)`.
+type FileChannelSettings = (bool, Option<Vec<Trigger>>);
 
 /// Makes the store match `cfg`. Deleting a file mock also resets its
 /// session state in `state`.
 ///
 /// The whole config is validated first (workspace names, names, route
-/// prefixes across every workspace, data-plane auth headers, profile
-/// references, secret references, contracts and scenario operations, and
-/// clashes with API-owned resources, route prefixes included); any error
+/// prefixes and gRPC services across every workspace, data-plane auth
+/// headers, profile references, secret references, contracts, scenario
+/// operations, brokers, channel ids and triggers, and clashes with
+/// API-owned resources, route prefixes and active gRPC services included);
+/// any error
 /// returns `Err` with nothing applied.
 pub async fn reconcile(
     store: &dyn ControlStore,
@@ -368,6 +376,7 @@ async fn validate<'a>(
             )?;
         }
 
+        let channels = validate_channels(cfg, name, mock, &bundle)?;
         prepared.push(Prepared {
             workspace: ws,
             name,
@@ -376,7 +385,42 @@ async fn validate<'a>(
             digest: sha256_hex(&source),
             source,
             bundle,
+            channels,
         });
+    }
+    // gRPC services are unique across every workspace (one shared
+    // listener): among the file mocks, and against the active contracts of
+    // the mocks the API owns.
+    let mut grpc: BTreeMap<String, String> = BTreeMap::new();
+    for p in &prepared {
+        let label = mock_label(p.workspace, p.name);
+        for service in p.bundle.grpc_services() {
+            if let Some(other) = grpc.insert(service.clone(), label.clone()) {
+                bail!("mocks {other:?} and {label:?} both serve the gRPC service {service:?}");
+            }
+        }
+    }
+    if !grpc.is_empty() {
+        for api_mock in existing_mocks
+            .values()
+            .filter(|m| m.source == ResourceSource::Api)
+        {
+            let api_label = mock_label(&api_mock.workspace, &api_mock.name);
+            let Some(active) = store
+                .active_contract(api_mock.id)
+                .await
+                .with_context(|| format!("loading the active contract of mock {api_label:?}"))?
+            else {
+                continue;
+            };
+            for service in active.bundle.grpc_services() {
+                if let Some(label) = grpc.get(&service) {
+                    bail!(
+                        "mock {label:?}: gRPC service {service:?} is already served by mock {api_label:?}, which is managed through the API"
+                    );
+                }
+            }
+        }
     }
     // A file mock may not take the prefix of a mock the API owns, in any
     // workspace.
@@ -393,6 +437,37 @@ async fn validate<'a>(
         }
     }
     Ok(prepared)
+}
+
+/// Checks a file mock's `broker` and `channels` against the configured
+/// brokers and its compiled contract.
+fn validate_channels(
+    cfg: &FileConfig,
+    name: &str,
+    mock: &FileMock,
+    bundle: &Bundle,
+) -> anyhow::Result<BTreeMap<String, FileChannelSettings>> {
+    if let Some(broker) = &mock.broker
+        && !cfg.brokers.contains_key(broker)
+    {
+        bail!("mocks.{name}.broker: unknown broker \"{broker}\"");
+    }
+    let mut channels = BTreeMap::new();
+    for (id, fc) in &mock.channels {
+        let Some(channel) = bundle.channels.iter().find(|c| &c.id == id) else {
+            bail!("mocks.{name}.channels.{id}: no such channel in the contract");
+        };
+        let triggers = fc
+            .triggers
+            .as_ref()
+            .map(|ts| ts.iter().map(|t| t.to_trigger()).collect::<Vec<_>>());
+        if let Some(triggers) = &triggers {
+            mb_import::validate_triggers(triggers, channel.direction)
+                .map_err(|e| anyhow!("mocks.{name}.channels.{id}.triggers: {e}"))?;
+        }
+        channels.insert(id.clone(), (fc.enabled, triggers));
+    }
+    Ok(channels)
 }
 
 async fn apply_mock(
@@ -523,10 +598,88 @@ async fn apply_mock(
         }
     }
 
+    if apply_channels(store, p, &mock).await? {
+        changed = true;
+    }
+
     if changed && existing.is_some() {
         report.updated.push(name.to_string());
     }
     Ok(())
+}
+
+/// Makes a file mock's event settings and channel settings match its
+/// `broker` and `channels`. Returns whether anything changed.
+async fn apply_channels(
+    store: &dyn ControlStore,
+    p: &Prepared<'_>,
+    mock: &Mock,
+) -> anyhow::Result<bool> {
+    let label = mock_label(p.workspace, p.name);
+    let name = label.as_str();
+    let mut changed = false;
+
+    let events = store
+        .get_event_settings(mock.id)
+        .await
+        .with_context(|| format!("loading the event settings of mock {name:?}"))?;
+    let unchanged = match &events {
+        Some(e) => e.broker == p.mock.broker && e.source == ResourceSource::File,
+        // No row picks a broker automatically, as an absent `broker` does.
+        None => p.mock.broker.is_none(),
+    };
+    if !unchanged {
+        store
+            .put_event_settings(&MockEventSettings {
+                mock_id: mock.id,
+                broker: p.mock.broker.clone(),
+                source: ResourceSource::File,
+                updated_at: Utc::now(),
+            })
+            .await
+            .with_context(|| format!("saving the event settings of mock {name:?}"))?;
+        changed = true;
+    }
+
+    let current: HashMap<String, ChannelSettings> = store
+        .list_channel_settings(mock.id)
+        .await
+        .with_context(|| format!("listing the channel settings of mock {name:?}"))?
+        .into_iter()
+        .map(|s| (s.channel_id.clone(), s))
+        .collect();
+    for (id, (enabled, triggers)) in &p.channels {
+        let same = current.get(id).is_some_and(|s| {
+            s.enabled == *enabled && &s.triggers == triggers && s.source == ResourceSource::File
+        });
+        if same {
+            continue;
+        }
+        store
+            .put_channel_settings(&ChannelSettings {
+                mock_id: mock.id,
+                channel_id: id.clone(),
+                enabled: *enabled,
+                triggers: triggers.clone(),
+                source: ResourceSource::File,
+                updated_at: Utc::now(),
+            })
+            .await
+            .with_context(|| format!("saving the settings of channel {id:?} of mock {name:?}"))?;
+        changed = true;
+    }
+    for (id, s) in &current {
+        if s.source == ResourceSource::File && !p.channels.contains_key(id) {
+            store
+                .delete_channel_settings(mock.id, id)
+                .await
+                .with_context(|| {
+                    format!("deleting the settings of channel {id:?} of mock {name:?}")
+                })?;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
@@ -569,7 +722,7 @@ fn valid_identifier(name: &str) -> bool {
 }
 
 /// `env:NAME` or `file:/path` with a non-empty name or path.
-fn valid_secret_ref(reference: &str) -> bool {
+pub(crate) fn valid_secret_ref(reference: &str) -> bool {
     reference
         .strip_prefix("env:")
         .or_else(|| reference.strip_prefix("file:"))

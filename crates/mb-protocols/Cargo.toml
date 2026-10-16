@@ -10,7 +10,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["http-rest", "sse", "graphql", "grpc", "soap", "websocket"]
+default = ["http-rest", "sse", "graphql", "grpc", "soap", "websocket", "events"]
 http-rest = ["dep:matchit", "dep:serde_urlencoded", "dep:tower-http"]
 sse = ["http-rest"]
 websocket = ["axum/ws"]
@@ -27,16 +27,23 @@ grpc = [
     "dep:tokio-stream",
 ]
 soap = ["dep:quick-xml"]
+events = ["websocket", "dep:cron", "dep:chrono", "dep:uuid"]
+mqtt = ["events", "dep:rumqttc"]
+amqp = ["events", "dep:lapin"]
+kafka = ["events", "dep:rdkafka"]
 
 [dependencies]
 async-graphql = { workspace = true, optional = true }
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
+chrono = { workspace = true, optional = true }
+cron = { workspace = true, optional = true }
 futures.workspace = true
 http.workspace = true
 http-body = { workspace = true, optional = true }
 humantime.workspace = true
+lapin = { workspace = true, optional = true }
 matchit = { workspace = true, optional = true }
 metrics.workspace = true
 mb-engine.workspace = true
@@ -48,6 +55,8 @@ prost = { workspace = true, optional = true }
 prost-reflect = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 quick-xml = { workspace = true, optional = true }
+rdkafka = { workspace = true, optional = true }
+rumqttc = { workspace = true, optional = true }
 serde_json.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
 thiserror.workspace = true
@@ -58,11 +67,25 @@ tonic-health = { workspace = true, optional = true }
 tonic-reflection = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 tracing.workspace = true
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
 reqwest.workspace = true
+rumqttd.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 tower.workspace = true
+
+[[test]]
+name = "events_mqtt"
+required-features = ["mqtt"]
+
+[[test]]
+name = "events_amqp"
+required-features = ["amqp"]
+
+[[test]]
+name = "events_kafka"
+required-features = ["kafka"]

@@ -11,6 +11,7 @@ use mb_engine::{Engine, EngineConfig, ScenarioSpec, StreamConfig};
 use mb_ext::{Extensions, Tenancy};
 use mb_import::smart::ExtractLlm;
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
+use mb_protocols::events::EventDeps;
 use mb_protocols::{
     DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, ProtocolSettings,
     RequestRecorder, ScenarioRuntime, Shutdown,
@@ -54,6 +55,8 @@ pub struct RuntimeDeps {
     pub protocols: ProtocolSettings,
     /// Stream limits and pacing handed to every engine.
     pub stream: StreamConfig,
+    /// Brokers and the scheduler lease every channel runtime uses.
+    pub events: EventDeps,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so
@@ -218,7 +221,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
         deps.state.clone(),
     );
     rt.workspace = mock.workspace.clone();
-    rt.data_plane_auth = data_plane_auth(&mock.data_plane_auth);
+    rt.set_data_plane_auth(data_plane_auth(&mock.data_plane_auth));
     rt.data_plane_keys = deps.data_plane_keys.clone();
     rt.header_overrides = mock.header_overrides;
     rt.scenarios = scenarios;

@@ -146,20 +146,7 @@ pub(crate) async fn verify_key(
     if rt.data_plane_auth.mode != DataPlaneAuthMode::ApiKey {
         return Ok(());
     }
-    let from_header = rt
-        .credential_names()
-        .key_header
-        .as_deref()
-        .and_then(|h| headers.get(h))
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|k| !k.is_empty());
-    let key = from_header.or_else(|| {
-        query
-            .iter()
-            .find(|(k, v)| k == API_KEY_QUERY_PARAM && !v.is_empty())
-            .map(|(_, v)| v.as_str())
-    });
+    let key = presented_key(rt, headers, query);
     let valid = match (key, &rt.data_plane_keys) {
         (Some(key), Some(keys)) => keys.verify(&rt.workspace, key).await,
         _ => false,
@@ -171,6 +158,61 @@ pub(crate) async fn verify_key(
         challenge: api_key_challenge(&rt.data_plane_auth.header),
         detail: "a valid data-plane API key is required".into(),
     })
+}
+
+/// The data-plane key a request presents for `rt` (its key header, else
+/// the `api_key` query parameter), if any.
+pub(crate) fn presented_key<'a>(
+    rt: &MockRuntime,
+    headers: &'a HeaderMap,
+    query: &'a [(String, String)],
+) -> Option<&'a str> {
+    let from_header = rt
+        .credential_names()
+        .key_header
+        .as_deref()
+        .and_then(|h| headers.get(h))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    from_header.or_else(|| {
+        query
+            .iter()
+            .find(|(k, v)| k == API_KEY_QUERY_PARAM && !v.is_empty())
+            .map(|(_, v)| v.as_str())
+    })
+}
+
+/// The data-plane auth check of a request that covers the whole contract
+/// rather than one operation (SOAP `GET ?wsdl`, gRPC reflection): a valid
+/// key in `api_key` mode; in `passthrough_validate` mode the credentials
+/// of at least one operation (an operation without requirements always
+/// passes).
+#[cfg_attr(not(any(feature = "soap", feature = "grpc")), allow(dead_code))]
+pub(crate) async fn authenticate_contract(
+    rt: &MockRuntime,
+    headers: &HeaderMap,
+    query: &[(String, String)],
+) -> Result<(), Unauthorized> {
+    match rt.data_plane_auth.mode {
+        DataPlaneAuthMode::None => Ok(()),
+        DataPlaneAuthMode::ApiKey => verify_key(rt, headers, query).await,
+        DataPlaneAuthMode::PassthroughValidate => {
+            let ops = &rt.bundle.operations;
+            if ops.is_empty()
+                || ops
+                    .iter()
+                    .any(|op| passthrough_satisfied(&op.security, headers, query))
+            {
+                return Ok(());
+            }
+            let first = ops.first().map_or(&[][..], |op| op.security.as_slice());
+            Err(Unauthorized {
+                challenge: passthrough_challenge(first),
+                detail: "the contract requires the credentials it declares".into(),
+            })
+        }
+    }
 }
 
 /// The data-plane auth check of one call of operation `op_id` (spec

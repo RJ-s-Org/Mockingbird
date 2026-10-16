@@ -24,6 +24,7 @@ pub mod access;
 mod apikeys;
 mod audit;
 mod auth_routes;
+pub mod channels;
 mod contracts;
 mod drafts;
 pub mod imports;
@@ -179,9 +180,13 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// public. Other paths are left to the caller's fallback.
 ///
 /// Every mutating request needs a non-CORS-safelisted `Content-Type`
-/// (`application/json`, or a JSON/YAML/OpenAPI type for contract uploads;
-/// otherwise 415), so a cross-site page cannot reach the API with a simple
-/// request.
+/// (`application/json`, or one of the contract media types for contract
+/// uploads, see `contracts::CONTRACT_MEDIA_TYPES`: JSON, YAML, OpenAPI,
+/// GraphQL, protobuf, XML/WSDL, zip, gzip or octet-stream; otherwise 415),
+/// so a cross-site page cannot reach the API with a simple request.
+///
+/// Every `/api` response carries `X-Content-Type-Options: nosniff` and the
+/// sandboxing [`API_CSP`]; contract sources download as attachments.
 pub fn router(st: AdminState) -> Router {
     let import_body_limit = axum::extract::DefaultBodyLimit::max(MAX_IMPORT_REQUEST_BYTES);
     let resources: Router<AdminState> = Router::new()
@@ -251,7 +256,8 @@ pub fn router(st: AdminState) -> Router {
         .route(
             "/mocks/{mock}/imports/{job}",
             get(imports::get_one).delete(imports::cancel),
-        );
+        )
+        .merge(channels::routes());
     // Workspace-only resources: no P2 alias for `default`.
     let workspace_only: Router<AdminState> = resources
         .clone()
@@ -274,6 +280,7 @@ pub fn router(st: AdminState) -> Router {
         .merge(resources)
         .route("/audit", get(audit::list_global))
         .route("/me", get(auth_routes::me))
+        .route("/brokers", get(channels::brokers))
         .route_layer(axum::middleware::from_fn_with_state(
             st.clone(),
             access::authenticate,
@@ -286,7 +293,36 @@ pub fn router(st: AdminState) -> Router {
         .route("/api/{*rest}", any(problem::not_found))
         .method_not_allowed_fallback(problem::method_not_allowed)
         .layer(axum::middleware::from_fn(problem::log_server_errors))
+        .layer(axum::middleware::from_fn(api_security_headers))
         .with_state(st)
+}
+
+/// The `Content-Security-Policy` of every `/api` response.
+pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'; sandbox";
+
+/// Marks every `/api` response as never to be rendered: `nosniff` and a
+/// CSP that sandboxes it, so a stored document (a contract source, an
+/// echoed name) cannot run script in the console's origin even if a
+/// browser is navigated to it.
+async fn api_security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path();
+    let api = path == "/api" || path.starts_with("/api/");
+    let mut resp = next.run(req).await;
+    if api {
+        let headers = resp.headers_mut();
+        headers.insert(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        );
+        headers.insert(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(API_CSP),
+        );
+    }
+    resp
 }
 
 /// Where a resource is managed. `file` resources are read-only here.

@@ -13,6 +13,13 @@ workspace = true
 name = "mockingbird"
 path = "src/main.rs"
 
+[features]
+default = ["mqtt", "amqp"]
+mqtt = ["mb-protocols/mqtt"]
+amqp = ["mb-protocols/amqp"]
+kafka = ["mb-protocols/kafka"]
+full = ["mqtt", "amqp", "kafka"]
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
@@ -56,10 +63,12 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 assert_cmd.workspace = true
+futures.workspace = true
 mb-auth = { workspace = true, features = ["testing"] }
 prost-reflect.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tokio-tungstenite.workspace = true
 tonic.workspace = true
 wiremock.workspace = true
 predicates = "3"

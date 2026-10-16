@@ -5,12 +5,16 @@
 #     /bootstrap/client_secret for Mockingbird to read;
 #   - the demo user demo@localhost.test (password Demo-Passw0rd-123!) in both
 #     groups.
-# Idempotent: a 409 (already exists) counts as success, so it can run on every
-# `docker compose up`. Authenticates with Rauthy's bootstrap API key.
+# Idempotent: every object is looked up before it is created (Rauthy answers a
+# duplicate with 400, not 409), so it can run on every `docker compose up`.
+# Authenticates with Rauthy's bootstrap API key (`Authorization: API-Key
+# <name>$<secret>`), which needs Clients, Groups and Users access plus
+# Secrets read/update for the client secret.
 #
-# Rauthy's admin API is documented in its Swagger UI at
-# http://localhost:8081/auth/v1/docs. Where a call fails, the script prints the
-# manual steps (also in deploy/compose/README.md) and exits non-zero.
+# Checked against Rauthy 0.37.1 (src/api/src/{groups,clients,users}.rs and
+# src/api_types); the Swagger UI is at http://localhost:8081/auth/v1/docs.
+# Where a call fails, the script prints the manual steps (also in
+# deploy/compose/README.md) and exits non-zero.
 set -eu
 
 RAUTHY_URL="${RAUTHY_URL:-http://localhost:8081}"
@@ -55,11 +59,10 @@ call() {
     fi
 }
 
-# expect STATUS WHAT: 2xx and 409 pass; anything else prints the manual steps.
+# expect STATUS WHAT: 2xx passes; anything else prints the manual steps.
 expect() {
     case "$1" in
         2??) echo "rauthy-bootstrap: $2: ok ($1)" ;;
-        409) echo "rauthy-bootstrap: $2: already exists" ;;
         *)
             cat "$RESP" >&2 || true
             manual_steps "$2 failed with HTTP $1"
@@ -83,23 +86,34 @@ until curl -fsS -o /dev/null "$API/.well-known/openid-configuration"; do
     sleep 2
 done
 
-# Groups.
+# Groups: GET /groups lists [{"id","name"}]; POST /groups takes {"group": NAME}.
+status="$(call GET /groups)"
+expect "$status" "list groups"
+existing_groups="$(cat "$RESP")"
 for group in mb:sysadmin mb:default:admin; do
-    # verify against Rauthy docs (Swagger UI at /auth/v1/docs): POST /groups {"group": NAME}
+    case "$existing_groups" in
+        *"\"name\":\"$group\""*)
+            echo "rauthy-bootstrap: group $group: already exists"
+            continue
+            ;;
+    esac
     status="$(call POST /groups "{\"group\":\"$group\"}")"
     expect "$status" "group $group"
 done
 
-# The confidential client. New Rauthy clients allow the scopes openid,
-# profile, email and groups; the check below fails if `groups` is missing.
-# verify against Rauthy docs (Swagger UI at /auth/v1/docs): POST /clients (NewClientRequest)
-status="$(call POST /clients "{\"id\":\"$CLIENT_ID\",\"name\":\"Mockingbird\",\"confidential\":true,\"redirect_uris\":[\"$CONSOLE/auth/callback\"],\"post_logout_redirect_uris\":[\"$CONSOLE/\"]}")"
-expect "$status" "client $CLIENT_ID"
+# The confidential client (NewClientRequest). New Rauthy clients allow the
+# scopes openid, email, profile and groups and require PKCE S256; the check
+# below fails if `groups` is missing.
 client_created=false
-case "$status" in 2??) client_created=true ;; esac
-
-# verify against Rauthy docs (Swagger UI at /auth/v1/docs): GET /clients/{id}
 status="$(call GET "/clients/$CLIENT_ID")"
+if [ "$status" = 404 ]; then
+    status="$(call POST /clients "{\"id\":\"$CLIENT_ID\",\"name\":\"Mockingbird\",\"confidential\":true,\"redirect_uris\":[\"$CONSOLE/auth/callback\"],\"post_logout_redirect_uris\":[\"$CONSOLE/\"]}")"
+    expect "$status" "client $CLIENT_ID"
+    client_created=true
+    status="$(call GET "/clients/$CLIENT_ID")"
+elif [ "$status" = 200 ]; then
+    echo "rauthy-bootstrap: client $CLIENT_ID: already exists"
+fi
 expect "$status" "read client $CLIENT_ID"
 if ! grep -q 'groups' "$RESP"; then
     manual_steps "client $CLIENT_ID does not allow the groups scope"
@@ -108,7 +122,8 @@ fi
 # Its secret: generated when the client is new or the file is missing (a
 # rerun keeps the secret Mockingbird already uses).
 if [ "$client_created" = true ] || [ ! -s "$OUT_DIR/client_secret" ]; then
-    # verify against Rauthy docs (Swagger UI at /auth/v1/docs): PUT /clients/{id}/secret generates a new secret
+    # PUT /clients/{id}/secret (optional ClientSecretRequest) generates a new
+    # secret and returns ClientSecretResponse {"id","confidential","secret"}.
     status="$(call PUT "/clients/$CLIENT_ID/secret" '{}')"
     expect "$status" "client secret"
     secret="$(json_field secret)"
@@ -122,13 +137,13 @@ if [ "$client_created" = true ] || [ ! -s "$OUT_DIR/client_secret" ]; then
     echo "rauthy-bootstrap: wrote $OUT_DIR/client_secret"
 fi
 
-# The demo user.
-# verify against Rauthy docs (Swagger UI at /auth/v1/docs): POST /users (NewUserRequest)
-status="$(call POST /users "{\"email\":\"$DEMO_EMAIL\",\"given_name\":\"Demo\",\"family_name\":\"User\",\"language\":\"en\",\"roles\":[],\"groups\":$GROUPS_JSON}")"
-expect "$status" "user $DEMO_EMAIL"
-if [ "$status" = 409 ]; then
-    # verify against Rauthy docs (Swagger UI at /auth/v1/docs): GET /users/email/{email}
-    status="$(call GET "/users/email/$DEMO_EMAIL")"
+# The demo user: GET /users/email/{email}, else POST /users (NewUserRequest).
+# Both return a UserResponse whose first field is "id".
+status="$(call GET "/users/email/$DEMO_EMAIL")"
+if [ "$status" = 404 ]; then
+    status="$(call POST /users "{\"email\":\"$DEMO_EMAIL\",\"given_name\":\"Demo\",\"family_name\":\"User\",\"language\":\"en\",\"roles\":[],\"groups\":$GROUPS_JSON}")"
+    expect "$status" "user $DEMO_EMAIL"
+else
     expect "$status" "look up user $DEMO_EMAIL"
 fi
 user_id="$(json_field id)"
@@ -136,8 +151,7 @@ if [ -z "$user_id" ]; then
     manual_steps "no id for user $DEMO_EMAIL"
 fi
 
-# Its password and groups (set on every run).
-# verify against Rauthy docs (Swagger UI at /auth/v1/docs): PUT /users/{id} (UpdateUserRequest with password)
+# Its password and groups (set on every run): PUT /users/{id} (UpdateUserRequest).
 status="$(call PUT "/users/$user_id" "{\"email\":\"$DEMO_EMAIL\",\"given_name\":\"Demo\",\"family_name\":\"User\",\"language\":\"en\",\"password\":\"$DEMO_PASSWORD\",\"roles\":[],\"groups\":$GROUPS_JSON,\"enabled\":true,\"email_verified\":true}")"
 expect "$status" "password of $DEMO_EMAIL"
 

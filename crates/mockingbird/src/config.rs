@@ -8,11 +8,14 @@ use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use axum::Router;
 use clap::{Parser, Subcommand};
+use mb_admin::channels::SharedChannelControl;
 use mb_ext::{ExtError, Extensions, SecretStore};
+use mb_protocols::events::{Brokers, EventDeps};
 use mb_store::ControlStore;
 
 use crate::client::ClientCommand;
 use crate::dp_keys::StoreDataPlaneKeys;
+use crate::events::{RegistryChannels, StoreLease};
 use crate::file_config::{
     self, AuthConfig, AuthMode, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile,
 };
@@ -144,6 +147,8 @@ pub struct App {
     pub watch: Option<WatchGuard>,
     /// The request log writer.
     pub recorder: Arc<StoreRecorder>,
+    /// The configured message brokers (the `brokers:` section).
+    pub brokers: Arc<Brokers>,
     /// The session sweeper and audit retention; dropping it stops them.
     pub maintenance: Maintenance,
     /// The import worker pool; dropping it stops the workers.
@@ -154,12 +159,15 @@ pub struct App {
 pub const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl App {
-    /// Graceful shutdown: stops watching the config file and writes the
-    /// queued request-log entries (waiting at most
-    /// [`SHUTDOWN_DRAIN_TIMEOUT`]).
+    /// Graceful shutdown: stops watching the config file, flushes the
+    /// brokers' queued messages and writes the queued request-log entries
+    /// (each waiting at most [`SHUTDOWN_DRAIN_TIMEOUT`], concurrently).
     pub async fn shutdown(self) {
         drop(self.watch);
-        self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT).await;
+        tokio::join!(
+            self.brokers.shutdown(SHUTDOWN_DRAIN_TIMEOUT),
+            self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT)
+        );
     }
 }
 
@@ -371,6 +379,7 @@ pub async fn build_app_with(
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| "opening the state store")?;
 
+    let broker_configs = file_config::broker_configs(&cfg).context("applying the configuration")?;
     // Before anything is applied, so a bad auth setup changes nothing.
     let (auth, web_auth) = admin_auth(&cfg.auth, &store, &ext).await?;
     let audit = mb_admin::Auditor::new(store.clone(), audit_webhook(&cfg, &ext).await?);
@@ -396,7 +405,15 @@ pub async fn build_app_with(
         data_plane_keys: Some(StoreDataPlaneKeys::new(store.clone())),
         protocols,
         stream,
+        events: EventDeps {
+            brokers: Brokers::new(broker_configs.clone(), ext.secrets.clone()),
+            lease: Arc::new(StoreLease {
+                store: store.clone(),
+            }),
+            holder: uuid::Uuid::new_v4().to_string(),
+        },
     };
+    let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await?;
     registry.spawn_watcher(deps.clone());
@@ -406,6 +423,19 @@ pub async fn build_app_with(
             "serving {name} at http://{}:{}{prefix}",
             cfg.server.host,
             cfg.server.port
+        );
+    }
+    for c in registry.served_channels() {
+        let address = match c.protocol {
+            "websocket" => format!("ws://{}:{}{}", cfg.server.host, cfg.server.port, c.address),
+            _ => c.address,
+        };
+        tracing::info!(
+            "serving {} {} channel {} ({}) at {address}",
+            c.mock,
+            c.protocol,
+            c.id,
+            c.direction
         );
     }
     let grpc = registry.grpc();
@@ -460,16 +490,23 @@ pub async fn build_app_with(
         admin_state.clone(),
         mb_admin::console_gate,
     ));
-    let mut admin = mb_admin::router(admin_state).merge(ops::router_with_metrics_gate(
-        OpsState {
-            store: store.clone(),
-            state: state.clone(),
-            registry: registry.clone(),
-            prometheus,
-            readyz_auth,
-        },
-        metrics_gate,
-    ));
+    let mut admin = mb_admin::router(admin_state)
+        .merge(ops::router_with_metrics_gate(
+            OpsState {
+                store: store.clone(),
+                state: state.clone(),
+                registry: registry.clone(),
+                prometheus,
+                readyz_auth,
+            },
+            metrics_gate,
+        ))
+        .layer(axum::Extension::<SharedChannelControl>(Arc::new(
+            RegistryChannels {
+                registry: registry.clone(),
+                brokers: brokers.clone(),
+            },
+        )));
     if let Some(routes) = ext.admin_hooks.routes() {
         // Extension routes get the same authentication as the Admin API.
         admin = admin.merge(routes.layer(axum::middleware::from_fn_with_state(
@@ -489,10 +526,13 @@ pub async fn build_app_with(
     let watch = match (&args.config, args.watch) {
         (Some(path), true) => {
             let flags = args.clone();
+            let initial_brokers = broker_configs.clone();
             let prepare: watch::Prepare = Arc::new(move |cfg: &mut FileConfig| {
                 file_config::apply_env(cfg)?;
                 apply_flags(cfg, &flags);
-                Ok(())
+                // Brokers are connected at startup only: a reload that
+                // changes them is rejected as a whole.
+                ensure_brokers_unchanged(&initial_brokers, cfg)
             });
             let applied = applied_hook(registry.clone(), deps, recorder.clone());
             Some(watch::spawn_with_hook(
@@ -514,6 +554,7 @@ pub async fn build_app_with(
         config: cfg,
         watch,
         recorder,
+        brokers,
         maintenance,
         import_workers,
     })
@@ -646,6 +687,38 @@ fn applied_hook(
             }
         })
     })
+}
+
+/// `Ok` when `cfg`'s `brokers:` section validates to exactly `initial`
+/// (the brokers this process started with); otherwise an error saying
+/// "brokers changed: restart required" (and naming what changed), so a
+/// `--watch` reload that changes brokers is rejected and the previous
+/// state kept.
+pub fn ensure_brokers_unchanged(
+    initial: &[mb_protocols::events::BrokerConfig],
+    cfg: &FileConfig,
+) -> anyhow::Result<()> {
+    let next = file_config::broker_configs(cfg)?;
+    if next.as_slice() == initial {
+        return Ok(());
+    }
+    let names = |configs: &[mb_protocols::events::BrokerConfig]| {
+        configs
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let (old, new) = (names(initial), names(&next));
+    let added: Vec<_> = new.difference(&old).collect();
+    let removed: Vec<_> = old.difference(&new).collect();
+    let changed: Vec<_> = next
+        .iter()
+        .filter(|c| initial.iter().any(|i| i.name == c.name && i != *c))
+        .map(|c| &c.name)
+        .collect();
+    bail!(
+        "brokers changed: restart required (added {added:?}, removed {removed:?}, changed {changed:?}); the brokers are read at startup only"
+    )
 }
 
 /// Resolves `env:MB_LLM_API_KEY` to the key handed to [`build_app`], and

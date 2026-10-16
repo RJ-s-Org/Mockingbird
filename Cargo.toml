@@ -60,6 +60,12 @@ tar = "0.4.46"
 flate2 = "1.1.10"
 json-patch = { version = "4", default-features = false }
 humantime-serde = "1"
+cron = "0.17.0"
+# Plain TCP only: the TLS features pull rustls-webpki 0.102, which has open
+# advisories (MQTT over TLS is refused at config validation instead).
+rumqttc = { version = "0.25.1", default-features = false }
+lapin = "4.12.2"
+rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "tokio", "libz-static", "ssl"] }
 notify = "8"
 notify-debouncer-full = "0.6"
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
@@ -86,6 +92,7 @@ tower = { version = "0.5", features = ["util"] }
 assert_cmd = "2"
 tempfile = "3"
 tokio-tungstenite = "0.29"
+rumqttd = { version = "0.20.0", default-features = false }
 
 # internal
 mb-mcm = { path = "crates/mb-mcm" }

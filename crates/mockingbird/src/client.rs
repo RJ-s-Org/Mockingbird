@@ -1,5 +1,5 @@
 //! Admin API client subcommands: `mocks`, `import`, `sessions`,
-//! `export-fixtures` and `seed-fixtures`.
+//! `export-fixtures`, `seed-fixtures`, `channels` and `brokers`.
 //!
 //! Successful responses with a body are returned as JSON for the caller to
 //! print on stdout; a non-2xx response becomes [`ClientError::Api`], whose
@@ -33,6 +33,54 @@ pub enum ClientCommand {
     ExportFixtures(SessionArgs),
     /// Replace a session's contents with the resources in a JSON file.
     SeedFixtures(SeedArgs),
+    /// List, inspect, configure and publish on a mock's event channels.
+    #[command(subcommand)]
+    Channels(ChannelsCommand),
+    /// List the configured message brokers.
+    #[command(subcommand)]
+    Brokers(BrokersCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChannelsCommand {
+    /// List a mock's channels with their effective settings.
+    List { mock: String },
+    /// Show one channel with its schemas.
+    Get { mock: String, channel: String },
+    /// Set a channel's settings (`source = api`).
+    Set {
+        mock: String,
+        channel: String,
+        /// Disable the channel.
+        #[arg(long)]
+        disable: bool,
+        /// every:<duration> | cron:<expr> | state:<resource_type>[:upserted|deleted|any] | manual (repeatable)
+        #[arg(long = "trigger")]
+        triggers: Vec<String>,
+        /// Use the contract's triggers (conflicts with --trigger)
+        #[arg(long, conflicts_with = "triggers")]
+        contract_triggers: bool,
+    },
+    /// Generate and publish messages on a channel the mock publishes.
+    Publish {
+        mock: String,
+        channel: String,
+        /// Messages to publish (1-100).
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// A JSON object handed to the message prompt.
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Show the mock's broker; with a name, set it; with `-`, clear it
+    /// (pick automatically).
+    Broker { mock: String, name: Option<String> },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BrokersCommand {
+    /// List the configured brokers.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -60,8 +108,8 @@ pub enum MocksCommand {
 
 #[derive(Args, Debug)]
 pub struct ImportArgs {
-    /// A contract file (OpenAPI, Swagger, GraphQL, .proto, descriptor set,
-    /// WSDL, zip or tar.gz) or a directory (uploaded as a tar.gz); or API
+    /// A contract file (OpenAPI, Swagger, AsyncAPI, GraphQL, .proto,
+    /// descriptor set, WSDL, zip or tar.gz) or a directory (uploaded as a tar.gz); or API
     /// documentation (Markdown, HTML, PDF, text), a HAR recording or a
     /// Postman collection as a file or an http(s) URL, imported as a draft.
     #[arg(value_name = "FILE|URL")]
@@ -185,6 +233,10 @@ pub async fn run(
             api.send(Method::GET, &["mocks", &mock, "sessions", &session], None)
                 .await
         }
+        ClientCommand::Channels(cmd) => channels(&api, cmd).await,
+        ClientCommand::Brokers(BrokersCommand::List) => {
+            api.send(Method::GET, &["brokers"], None).await
+        }
         ClientCommand::SeedFixtures(SeedArgs { target, file }) => {
             let text = read(&file)?;
             let fixtures: Value = serde_json::from_slice(&text)
@@ -205,6 +257,116 @@ const ACTIVATE_NEEDS_APPROVE: &str =
 
 /// How often a draft import's job is polled.
 const IMPORT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn channels(api: &AdminClient, cmd: ChannelsCommand) -> Result<Option<Value>, ClientError> {
+    match cmd {
+        ChannelsCommand::List { mock } => {
+            api.send(Method::GET, &["mocks", &mock, "channels"], None)
+                .await
+        }
+        ChannelsCommand::Get { mock, channel } => {
+            api.send(Method::GET, &["mocks", &mock, "channels", &channel], None)
+                .await
+        }
+        ChannelsCommand::Set {
+            mock,
+            channel,
+            disable,
+            triggers,
+            contract_triggers,
+        } => {
+            let triggers = if contract_triggers || triggers.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(
+                    triggers
+                        .iter()
+                        .map(|t| parse_trigger_spec(t))
+                        .collect::<Result<_, _>>()
+                        .map_err(ClientError::Usage)?,
+                )
+            };
+            let body = json!({ "enabled": !disable, "triggers": triggers });
+            api.send(
+                Method::PUT,
+                &["mocks", &mock, "channels", &channel],
+                Some(Body::Json(body)),
+            )
+            .await
+        }
+        ChannelsCommand::Publish {
+            mock,
+            channel,
+            count,
+            context,
+        } => {
+            let context = match context {
+                Some(text) => serde_json::from_str::<Value>(&text)
+                    .map_err(|e| ClientError::Usage(format!("--context is not JSON: {e}")))?,
+                None => Value::Null,
+            };
+            api.send(
+                Method::POST,
+                &["mocks", &mock, "channels", &channel, "publish"],
+                Some(Body::Json(json!({ "count": count, "context": context }))),
+            )
+            .await
+        }
+        ChannelsCommand::Broker { mock, name: None } => {
+            api.send(Method::GET, &["mocks", &mock, "event-settings"], None)
+                .await
+        }
+        ChannelsCommand::Broker {
+            mock,
+            name: Some(name),
+        } => {
+            let broker = if name == "-" {
+                Value::Null
+            } else {
+                Value::String(name)
+            };
+            api.send(
+                Method::PUT,
+                &["mocks", &mock, "event-settings"],
+                Some(Body::Json(json!({ "broker": broker }))),
+            )
+            .await
+        }
+    }
+}
+
+/// Parses a `--trigger` spec into MCM trigger JSON:
+/// `every:<humantime>` → `{"schedule":{"every_ms":n}}`,
+/// `cron:<expr>` → `{"cron":{"expr":…}}`,
+/// `state:<type>[:<kind>]` → `{"on_state_change":{"resource_type":…,"kind":…}}`
+/// (kind `upserted`, `deleted` or `any`, the default) and
+/// `manual` → `"manual"`.
+pub fn parse_trigger_spec(spec: &str) -> Result<Value, String> {
+    let parsed = match spec.split_once(':') {
+        None if spec == "manual" => Some(Value::String("manual".into())),
+        None => None,
+        Some(("every", d)) => humantime::parse_duration(d.trim())
+            .ok()
+            .and_then(|d| u64::try_from(d.as_millis()).ok())
+            .map(|ms| json!({ "schedule": { "every_ms": ms } })),
+        Some(("cron", expr)) if !expr.trim().is_empty() => {
+            Some(json!({ "cron": { "expr": expr } }))
+        }
+        Some(("state", rest)) => {
+            let (resource_type, kind) = rest.split_once(':').unwrap_or((rest, "any"));
+            let known_kind = matches!(kind, "upserted" | "deleted" | "any");
+            (!resource_type.is_empty() && known_kind).then(
+                || json!({ "on_state_change": { "resource_type": resource_type, "kind": kind } }),
+            )
+        }
+        Some(_) => None,
+    };
+    parsed.ok_or_else(|| {
+        format!(
+            "unknown trigger spec \"{spec}\" (every:<duration>|cron:<expr>|state:<type>[:kind]|manual)"
+        )
+    })
+}
 
 async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, ClientError> {
     if is_url(&args.source) {
@@ -459,7 +621,8 @@ fn job_field(job: &Value, field: &str) -> anyhow::Result<String> {
 /// The upload media type for a contract, by extension: `.graphql`,
 /// `.graphqls`, `.gql` (GraphQL), `.proto`, `.pb`/`.desc` (descriptor set),
 /// `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz` and directories (packed
-/// as tar.gz); else `.json`/`.yaml`/`.yml`, else JSON when the document
+/// as tar.gz), `.asyncapi.yaml`/`.asyncapi.yml`/`.asyncapi.json`
+/// (AsyncAPI); else `.json`/`.yaml`/`.yml`, else JSON when the document
 /// starts with `{`, else YAML.
 fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
     if path.is_dir() {
@@ -472,6 +635,12 @@ fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
         .unwrap_or_default();
     if name.ends_with(".tar.gz") {
         return "application/gzip";
+    }
+    if name.ends_with(".asyncapi.yaml") || name.ends_with(".asyncapi.yml") {
+        return "application/vnd.aai.asyncapi+yaml";
+    }
+    if name.ends_with(".asyncapi.json") {
+        return "application/vnd.aai.asyncapi+json";
     }
     let ext = path
         .extension()
@@ -618,6 +787,10 @@ mod tests {
             ("a.zip", "application/zip"),
             ("a.tgz", "application/gzip"),
             ("a.TAR.GZ", "application/gzip"),
+            ("lights.asyncapi.yaml", "application/vnd.aai.asyncapi+yaml"),
+            ("lights.AsyncAPI.yml", "application/vnd.aai.asyncapi+yaml"),
+            ("lights.asyncapi.json", "application/vnd.aai.asyncapi+json"),
+            ("asyncapi.yaml", "application/yaml"),
         ] {
             assert_eq!(
                 contract_media_type(Path::new(name), b""),

@@ -134,6 +134,11 @@ impl GrpcMock {
         })
     }
 
+    /// The runtime this mock serves.
+    pub(crate) fn runtime(&self) -> &Arc<MockRuntime> {
+        &self.rt
+    }
+
     /// The mock's name.
     pub fn name(&self) -> &str {
         &self.rt.name

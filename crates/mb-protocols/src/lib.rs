@@ -1,11 +1,11 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
 //! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
-//! `grpc`, `soap`, `websocket`); all of them share the [`call`] pipeline.
+//! `grpc`, `soap`, `websocket`, `events`); all of them share the [`call`] pipeline.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mb_engine::{Engine, ScenarioSpec};
@@ -34,6 +34,8 @@ mod call;
     allow(dead_code)
 )]
 mod dp_auth;
+#[cfg(feature = "events")]
+pub mod events;
 #[cfg(feature = "graphql")]
 pub mod graphql;
 #[cfg(feature = "grpc")]
@@ -50,7 +52,7 @@ use dp_auth::CredentialNames;
 pub use dp_auth::{
     API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
 };
-pub use record::{RequestRecord, RequestRecorder};
+pub use record::{RequestKind, RequestRecord, RequestRecorder};
 
 /// Request header capping how many items a streamed response carries
 /// (an integer in `1..=10000`; the engine clamps it to its own maximum).
@@ -196,7 +198,9 @@ pub struct MockRuntime {
     /// The mock's workspace; used as `SessionKey::workspace`, in request
     /// records and to verify data-plane keys.
     pub workspace: String,
-    pub bundle: Arc<Bundle>,
+    /// The compiled contract; fixed at construction (see
+    /// [`MockRuntime::bundle`]).
+    bundle: Arc<Bundle>,
     pub engine: Arc<Engine>,
     pub state: Arc<dyn StateStore>,
     /// Honour `X-Mockingbird-*` override headers. Defaults to `true`.
@@ -210,8 +214,10 @@ pub struct MockRuntime {
     /// The state store circuit breaker: degraded while the store is
     /// failing, when calls are served statelessly.
     pub state_health: Arc<StateHealth>,
-    /// How data-plane callers authenticate. Defaults to no auth.
-    pub data_plane_auth: DataPlaneAuth,
+    /// How data-plane callers authenticate. Defaults to no auth; changed
+    /// only through [`MockRuntime::set_data_plane_auth`], which keeps
+    /// `credential_names` in step.
+    data_plane_auth: DataPlaneAuth,
     /// Verifies keys in [`DataPlaneAuthMode::ApiKey`] mode; without it every
     /// key is rejected.
     pub data_plane_keys: Option<Arc<dyn DataPlaneKeys>>,
@@ -221,9 +227,9 @@ pub struct MockRuntime {
     /// process begins to shut down. Never fires by default.
     pub shutdown: Shutdown,
     /// The credential header and query names derived from
-    /// `data_plane_auth` and `bundle` on first use (see
-    /// [`MockRuntime::credential_names`]).
-    credential_names: OnceLock<CredentialNames>,
+    /// `data_plane_auth` and `bundle`, recomputed whenever either changes
+    /// (see [`MockRuntime::credential_names`]).
+    credential_names: CredentialNames,
 }
 
 /// A process stop signal that open-ended streams end on, so a graceful
@@ -262,6 +268,8 @@ impl MockRuntime {
         engine: Arc<Engine>,
         state: Arc<dyn StateStore>,
     ) -> Self {
+        let data_plane_auth = DataPlaneAuth::default();
+        let credential_names = CredentialNames::new(&data_plane_auth, &bundle);
         Self {
             name: name.into(),
             workspace: "default".into(),
@@ -273,20 +281,42 @@ impl MockRuntime {
             ext: Extensions::default(),
             recorder: None,
             state_health: Arc::new(StateHealth::default()),
-            data_plane_auth: DataPlaneAuth::default(),
+            data_plane_auth,
             data_plane_keys: None,
             protocols: ProtocolSettings::default(),
             shutdown: Shutdown::default(),
-            credential_names: OnceLock::new(),
+            credential_names,
         }
+    }
+
+    /// The compiled contract this runtime serves.
+    pub fn bundle(&self) -> &Arc<Bundle> {
+        &self.bundle
+    }
+
+    /// How data-plane callers authenticate.
+    pub fn data_plane_auth(&self) -> &DataPlaneAuth {
+        &self.data_plane_auth
+    }
+
+    /// Sets how data-plane callers authenticate, recomputing the
+    /// credential names derived from it at once.
+    pub fn set_data_plane_auth(&mut self, auth: DataPlaneAuth) {
+        self.credential_names = CredentialNames::new(&auth, &self.bundle);
+        self.data_plane_auth = auth;
+    }
+
+    /// [`MockRuntime::set_data_plane_auth`], builder style.
+    pub fn with_data_plane_auth(mut self, auth: DataPlaneAuth) -> Self {
+        self.set_data_plane_auth(auth);
+        self
     }
 
     /// The request headers and query parameters that carry this mock's
     /// data-plane credentials: never forwarded to the engine or recorded.
-    /// Derived from `data_plane_auth` and `bundle` on first use, so both
-    /// must be final before the runtime serves its first call.
+    /// Computed eagerly from `data_plane_auth` and `bundle`, which can only
+    /// change through [`MockRuntime::set_data_plane_auth`].
     pub(crate) fn credential_names(&self) -> &CredentialNames {
-        self.credential_names
-            .get_or_init(|| CredentialNames::new(&self.data_plane_auth, &self.bundle))
+        &self.credential_names
     }
 }

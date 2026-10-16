@@ -1,8 +1,9 @@
 //! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0, GraphQL SDL and
-//! introspection, protobuf sources and descriptor sets, WSDL 1.1 with XSD)
-//! into the Mockingbird Contract Model.
+//! introspection, protobuf sources and descriptor sets, WSDL 1.1 with XSD,
+//! AsyncAPI 2.x and 3.0) into the Mockingbird Contract Model.
 
 mod archive;
+mod asyncapi;
 mod graphql;
 mod heuristics;
 mod openapi3;
@@ -12,6 +13,7 @@ mod security;
 #[cfg(feature = "smart")]
 pub mod smart;
 mod swagger2;
+mod triggers;
 mod wsdl;
 
 pub use archive::{
@@ -20,6 +22,7 @@ pub use archive::{
 };
 use mb_mcm::Bundle;
 use serde_json::Value;
+pub use triggers::validate_triggers;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
@@ -31,6 +34,10 @@ pub enum SourceFormat {
     FileDescriptorSet,
     Wsdl11,
     Archive,
+    /// AsyncAPI 2.0 through 2.6.
+    AsyncApi2,
+    /// AsyncAPI 3.0.
+    AsyncApi3,
 }
 
 /// One uploaded file of a multi-file contract.
@@ -60,8 +67,29 @@ fn version_string(v: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Detect the contract format from `"openapi": "3.x"` or `"swagger": "2.0"`.
+/// Whether `v` is an AsyncAPI 2.0.0 through 2.6.x version.
+fn is_asyncapi2(v: &str) -> bool {
+    let mut parts = v.split('.');
+    parts.next() == Some("2")
+        && parts
+            .next()
+            .and_then(|minor| minor.parse::<u32>().ok())
+            .is_some_and(|minor| minor <= 6)
+        && parts.next().is_some()
+}
+
+/// Detect the contract format from `"asyncapi": "2.x|3.0.x"`,
+/// `"openapi": "3.x"` or `"swagger": "2.0"`.
 pub fn detect_format(doc: &Value) -> Result<SourceFormat, ImportError> {
+    if let Some(v) = version_string(doc.get("asyncapi")) {
+        if is_asyncapi2(&v) {
+            return Ok(SourceFormat::AsyncApi2);
+        }
+        if v.starts_with("3.0.") {
+            return Ok(SourceFormat::AsyncApi3);
+        }
+        return Err(ImportError::Unsupported(format!("asyncapi {v}")));
+    }
     if let Some(v) = version_string(doc.get("openapi")) {
         if v.starts_with("3.") {
             return Ok(SourceFormat::OpenApi3);
@@ -75,7 +103,7 @@ pub fn detect_format(doc: &Value) -> Result<SourceFormat, ImportError> {
         return Err(ImportError::Unsupported(format!("swagger {v}")));
     }
     Err(ImportError::Unsupported(
-        "document has neither an `openapi` nor a `swagger` version field".into(),
+        "document has no `asyncapi`, `openapi` or `swagger` version field".into(),
     ))
 }
 
@@ -157,6 +185,8 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
         SourceFormat::Proto => proto::compile_text(bytes),
         SourceFormat::FileDescriptorSet => proto::compile_descriptor_set(bytes),
         SourceFormat::Wsdl11 => wsdl::compile_text(bytes),
+        SourceFormat::AsyncApi2 => asyncapi::compile_v2(&parse_document(bytes)?, bytes),
+        SourceFormat::AsyncApi3 => asyncapi::compile_v3(&parse_document(bytes)?, bytes),
         SourceFormat::Archive => {
             let mut bundle = compile_files(&unpack_archive(bytes)?)?;
             bundle.source_digest = proto::hex_digest(bytes);

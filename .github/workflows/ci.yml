@@ -22,8 +22,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      rabbitmq:
+        image: rabbitmq:3
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+      kafka:
+        # KRaft single node with the image's default config.
+        image: apache/kafka:3.9.1
+        ports:
+          - 9092:9092
     env:
       MB_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+      MB_TEST_AMQP_URL: amqp://guest:guest@localhost:5672/%2f
+      MB_TEST_KAFKA_URL: localhost:9092
     steps:
       - uses: actions/checkout@v4
       # The console is built first, so mb-console embeds the real build
@@ -39,9 +55,44 @@ jobs:
           toolchain: "1.97"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      - name: Check the slim binary
+        run: cargo check -p mockingbird --no-default-features
+
+  # Each mb-protocols feature (and none) must build on its own, warnings
+  # included (P4 Global Constraints; P5 adds the event features).
+  protocol-features:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [none, http-rest, sse, websocket, graphql, grpc, soap, events, mqtt, amqp, kafka]
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: protocols-${{ matrix.features }}
+      # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
+      - if: matrix.features == 'kafka'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      - name: cargo check -p mb-protocols (${{ matrix.features }})
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          if [ "$FEATURES" = none ]; then
+            cargo check -p mb-protocols --no-default-features
+          else
+            cargo check -p mb-protocols --no-default-features --features "$FEATURES"
+          fi
 
   console:
     runs-on: ubuntu-latest
@@ -85,23 +136,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - name: Build the full image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
           tags: mockingbird:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=full
+          cache-to: type=gha,mode=max,scope=full
+      - name: Build the slim image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          build-args: FEATURES=--no-default-features
+          tags: mockingbird:ci-slim
+          cache-from: type=gha,scope=slim
+          cache-to: type=gha,mode=max,scope=slim
       - name: Smoke test
-        run: docker run --rm mockingbird:ci --version
+        run: |
+          docker run --rm mockingbird:ci --version
+          docker run --rm mockingbird:ci-slim --version
 
   e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Start the Compose stack (Postgres, Rauthy, Mockingbird)
-        run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+        run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait --wait-timeout 300
       - name: Wait for Mockingbird
         run: |
           for _ in $(seq 1 90); do
@@ -123,7 +187,13 @@ jobs:
           npx playwright test -c playwright.rauthy.config.ts
       - name: Compose logs
         if: failure()
-        run: docker compose -f deploy/compose/docker-compose.yml logs
+        run: |
+          docker compose -f deploy/compose/docker-compose.yml ps -a
+          for service in rauthy rauthy-bootstrap mockingbird postgres; do
+            echo "::group::$service logs"
+            docker compose -f deploy/compose/docker-compose.yml logs --no-color --timestamps "$service"
+            echo "::endgroup::"
+          done
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

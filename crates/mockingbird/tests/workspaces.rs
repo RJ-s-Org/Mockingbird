@@ -53,6 +53,7 @@ fn deps(store: Arc<dyn ControlStore>, recorder: Option<Arc<dyn RequestRecorder>>
         recorder,
         offline: true,
         default_profile: None.into(),
+        events: mb_protocols::events::EventDeps::default(),
     }
 }
 

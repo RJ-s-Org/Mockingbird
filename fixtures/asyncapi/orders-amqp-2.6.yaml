@@ -1,0 +1,94 @@
+asyncapi: 2.6.0
+info:
+  title: Orders Events
+  version: 1.0.0
+  description: Order lifecycle events exchanged over RabbitMQ.
+servers:
+  rabbit:
+    url: amqp://localhost:5672
+    protocol: amqp
+defaultContentType: application/json
+channels:
+  orders.created:
+    description: Orders that were just placed.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: orders
+          type: topic
+          durable: true
+          autoDelete: false
+    subscribe:
+      operationId: orderCreated
+      summary: An order was created.
+      tags:
+        - name: orders
+      message:
+        $ref: '#/components/messages/OrderCreated'
+  orders.cancel:
+    description: Cancellation requests sent by clients.
+    bindings:
+      amqp:
+        is: queue
+        queue:
+          name: order-cancellations
+          durable: true
+    publish:
+      operationId: cancelOrder
+      summary: Cancel an order.
+      x-mockingbird-reply: orderCancelled
+      x-mockingbird-state:
+        resource_type: cancellations
+        id_field: orderId
+      message:
+        name: CancelOrder
+        payload:
+          type: object
+          required: [orderId]
+          properties:
+            orderId:
+              type: string
+            reason:
+              type: string
+  orders.cancelled:
+    description: Orders that were cancelled.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange:
+          name: orders
+          type: topic
+    subscribe:
+      operationId: orderCancelled
+      summary: An order was cancelled.
+      message:
+        name: OrderCancelled
+        payload:
+          type: object
+          required: [orderId, cancelledAt]
+          properties:
+            orderId:
+              type: string
+            cancelledAt:
+              type: string
+              format: date-time
+components:
+  messages:
+    OrderCreated:
+      summary: A newly placed order.
+      payload:
+        $ref: '#/components/schemas/Order'
+  schemas:
+    Order:
+      type: object
+      required: [id, status, total]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [placed, paid, shipped]
+        total:
+          type: number
+          minimum: 0

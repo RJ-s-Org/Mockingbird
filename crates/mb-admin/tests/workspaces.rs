@@ -421,6 +421,10 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
         "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/activate",
         "/api/v1/workspaces/{ws}/mocks/{mock}/requests",
         "/api/v1/workspaces/{ws}/llm-profiles/{name}",
+        "/api/v1/workspaces/{ws}/mocks/{mock}/channels",
+        "/api/v1/workspaces/{ws}/mocks/{mock}/channels/{channel}/publish",
+        "/api/v1/workspaces/{ws}/mocks/{mock}/event-settings",
+        "/api/v1/brokers",
     ] {
         assert!(paths.contains_key(path), "{path} missing");
     }
@@ -458,7 +462,9 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
             aliases += 1;
         }
     }
-    assert_eq!(aliases, 31, "every mock and profile operation has an alias");
+    // 23 P3 operations, the 6 channel and event-settings operations (P5)
+    // and the 8 import, draft and preview operations (P6).
+    assert_eq!(aliases, 37, "every mock and profile operation has an alias");
     assert!(paths["/api/v1/mocks"]["post"]["deprecated"] == true);
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
