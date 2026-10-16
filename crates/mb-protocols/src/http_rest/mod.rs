@@ -11,6 +11,8 @@ use crate::MockRuntime;
 mod handler;
 pub mod problem;
 pub mod routing;
+#[cfg(feature = "sse")]
+mod sse;
 
 pub use problem::problem;
 pub use routing::{RouteError, RouteTable};

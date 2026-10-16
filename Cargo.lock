@@ -1929,6 +1929,7 @@ dependencies = [
  "mb-mcm",
  "mb-state",
  "metrics",
+ "reqwest",
  "serde_json",
  "serde_urlencoded",
  "thiserror",

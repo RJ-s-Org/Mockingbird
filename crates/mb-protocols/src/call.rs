@@ -351,7 +351,7 @@ pub(crate) async fn generate_once(
 /// Reads the target and related resources like [`generate_once`], keeps
 /// the session alive, then opens an engine stream. Generated items are
 /// never written to state.
-#[allow(dead_code)] // first used by the SSE, GraphQL and gRPC adapters
+#[cfg_attr(not(feature = "sse"), allow(dead_code))] // also used by the GraphQL and gRPC adapters
 pub(crate) async fn open_stream(
     rt: &Arc<MockRuntime>,
     plan: &CallPlan<'_>,
@@ -379,7 +379,7 @@ pub(crate) async fn open_stream(
 /// `session` from now on, when it is a valid stream item of `op`. Events
 /// missed because the receiver lagged are skipped. Empty when `op` has no
 /// resource type.
-#[allow(dead_code)] // first used by the SSE and GraphQL adapters
+#[cfg_attr(not(feature = "sse"), allow(dead_code))] // also used by the GraphQL adapter
 pub(crate) fn change_feed(
     rt: &Arc<MockRuntime>,
     session: SessionKey,

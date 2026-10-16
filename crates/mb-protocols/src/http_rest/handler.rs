@@ -11,7 +11,7 @@ use mb_engine::{
 };
 use mb_ext::{Rejection, Tenancy};
 use mb_llm::Usage;
-use mb_mcm::{HttpMethod, Operation, StatusSelector};
+use mb_mcm::{HttpMethod, Operation, OperationKind, StatusSelector};
 use serde_json::{Map, Number, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -93,6 +93,9 @@ struct CallLog {
     delay: Option<Duration>,
     /// The body media type the matched operation declares (`x-content-type`).
     declared_body_type: Option<String>,
+    /// The response is an event stream, which reports the call itself when
+    /// its body is dropped and sleeps any latency before its first event.
+    streaming: bool,
 }
 
 impl CallLog {
@@ -109,6 +112,7 @@ impl CallLog {
             record,
             delay: None,
             declared_body_type: None,
+            streaming: false,
         }
     }
 
@@ -172,6 +176,9 @@ pub(crate) async fn handle(
         .await;
     let status = resp.status().as_u16();
     span.record("status", status);
+    if log.streaming {
+        return resp;
+    }
     if let Some(source) = log.source {
         span.record("source", source.as_str());
     }
@@ -289,7 +296,6 @@ async fn serve(
     log.tenancy = Some(plan.tenancy.clone());
     log.session = plan.session.session.clone();
 
-    // 4. State read, generate, state write.
     let call = OperationCall {
         operation_id: op.id.clone(),
         path_params,
@@ -297,6 +303,17 @@ async fn serve(
         headers: forwarded_headers(headers),
         body,
     };
+
+    // A stream, unless a non-2xx status is forced: that is answered once.
+    if op.kind == OperationKind::StreamServer
+        && plan
+            .forced_status
+            .is_none_or(|code| (200..300).contains(&code))
+    {
+        return stream(rt, plan, call, headers, log);
+    }
+
+    // 4. State read, generate, state write.
     let generated = match call::generate_once(rt, &plan, &call).await {
         Ok(g) => g,
         Err(EngineError::UndeclaredStatus(code)) => {
@@ -321,6 +338,38 @@ async fn serve(
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
     log.generated(generated)
+}
+
+/// The event stream answering a `StreamServer` call.
+#[cfg(feature = "sse")]
+fn stream(
+    rt: &Arc<MockRuntime>,
+    plan: call::CallPlan<'_>,
+    call: OperationCall,
+    headers: &HeaderMap,
+    log: &mut CallLog,
+) -> Response {
+    log.streaming = true;
+    super::sse::sse_response(Arc::clone(rt), plan, call, headers.clone())
+}
+
+/// Without the `sse` feature, streams are not served.
+#[cfg(not(feature = "sse"))]
+fn stream(
+    _rt: &Arc<MockRuntime>,
+    plan: call::CallPlan<'_>,
+    _call: OperationCall,
+    _headers: &HeaderMap,
+    log: &mut CallLog,
+) -> Response {
+    log.problem(
+        501,
+        "Streaming not enabled",
+        format!(
+            "operation {} streams its response, and this build has no sse feature",
+            plan.op.id
+        ),
+    )
 }
 
 /// Report a served call to the usage sink and the request recorder.
@@ -403,7 +452,7 @@ fn to_http_method(m: &Method) -> Option<HttpMethod> {
     })
 }
 
-fn method_name(m: HttpMethod) -> &'static str {
+pub(super) fn method_name(m: HttpMethod) -> &'static str {
     match m {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",

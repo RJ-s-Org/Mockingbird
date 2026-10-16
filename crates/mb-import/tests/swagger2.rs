@@ -159,3 +159,33 @@ fn imports_body_and_form_required() {
         "multipart/form-data"
     );
 }
+
+#[test]
+fn swagger_produces_event_stream_compiles_to_stream_server() {
+    let doc = json!({
+        "swagger": "2.0",
+        "info": {"title": "Events", "version": "1"},
+        "paths": {"/ticks": {"get": {
+            "operationId": "streamTicks",
+            "produces": ["text/event-stream"],
+            "responses": {
+                "200": {
+                    "description": "ticks",
+                    "x-mockingbird-sse-event": "tick",
+                    "schema": {"type": "array", "items": {"$ref": "#/definitions/Tick"}}
+                },
+                "503": {"description": "down", "schema": {"$ref": "#/definitions/Tick"}}
+            }
+        }}},
+        "definitions": {"Tick": {"type": "object", "properties": {"id": {"type": "string"}}}}
+    });
+    let b = compile(doc.to_string().as_bytes()).unwrap();
+    let op = b.operation("streamTicks").unwrap();
+    assert_eq!(op.kind, mb_mcm::OperationKind::StreamServer);
+    let out = op.success_output().unwrap();
+    assert_eq!(out.content_type.as_deref(), Some("text/event-stream"));
+    assert_eq!(
+        op.stream_item_schema(),
+        Some(&json!({"$ref": "#/$defs/Tick", "x-mockingbird-sse-event": "tick"}))
+    );
+}

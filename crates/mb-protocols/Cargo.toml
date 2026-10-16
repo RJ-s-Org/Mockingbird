@@ -40,5 +40,6 @@ tracing.workspace = true
 async-trait.workspace = true
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
+reqwest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true

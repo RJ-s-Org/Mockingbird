@@ -181,3 +181,71 @@ fn malformed_yaml_is_parse_error() {
     let r = compile(b"openapi: 3.0.0\npaths: [unclosed\n  - : {{{\n\t bad: *missing_anchor\n");
     assert!(matches!(r, Err(ImportError::Parse(_))), "got {r:?}");
 }
+
+#[test]
+fn openapi_event_stream_compiles_to_stream_server() {
+    let b = compile(&fixture("events-3.1.yaml")).unwrap();
+    let stream = b.operation("streamTicks").unwrap();
+    assert_eq!(stream.kind, OperationKind::StreamServer);
+    let out = stream.success_output().unwrap();
+    assert_eq!(out.content_type.as_deref(), Some("text/event-stream"));
+    assert_eq!(
+        stream.stream_item_schema(),
+        Some(&json!({"$ref": "#/$defs/Tick", "x-mockingbird-sse-event": "tick"}))
+    );
+    assert_eq!(stream.resource_type.as_deref(), Some("ticks"));
+    // The error variant stays a plain JSON response.
+    let err = stream.output_for_status(503).unwrap();
+    assert_eq!(err.content_type.as_deref(), Some("application/json"));
+    assert_eq!(err.schema, Some(json!({"$ref": "#/$defs/Error"})));
+
+    let create = b.operation("createTick").unwrap();
+    assert_eq!(create.kind, OperationKind::Command(Effect::Create));
+    assert_eq!(create.resource_type.as_deref(), Some("ticks"));
+    assert_eq!(
+        create.success_output().unwrap().schema,
+        Some(json!({"$ref": "#/$defs/Tick"}))
+    );
+}
+
+#[test]
+fn event_stream_item_schema_extension_and_plain_schema() {
+    let src = oas(r#"
+  /a:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              schema: {type: string}
+              x-mockingbird-item-schema:
+                type: object
+                properties: {n: {type: integer}}
+  /b:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream; charset=utf-8:
+              schema: {type: object, properties: {m: {type: string}}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let a = b.operation("get_a").unwrap();
+    assert_eq!(a.kind, OperationKind::StreamServer);
+    assert_eq!(
+        a.stream_item_schema(),
+        Some(&json!({"type": "object", "properties": {"n": {"type": "integer"}}}))
+    );
+    let bb = b.operation("get_b").unwrap();
+    assert_eq!(bb.kind, OperationKind::StreamServer);
+    assert_eq!(
+        bb.success_output().unwrap().content_type.as_deref(),
+        Some("text/event-stream")
+    );
+    assert_eq!(
+        bb.stream_item_schema(),
+        Some(&json!({"type": "object", "properties": {"m": {"type": "string"}}}))
+    );
+}

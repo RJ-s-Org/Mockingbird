@@ -4,7 +4,8 @@ use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::schema::{collect_refs, defs_name, normalize_schema};
 use mb_mcm::{
-    Binding, Bundle, HttpMethod, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector,
+    Binding, Bundle, HttpMethod, InputSchemas, Operation, OperationKind, OutputVariant, Protocol,
+    StatusSelector,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -131,6 +132,64 @@ pub(crate) fn is_json_media(ct: &str) -> bool {
     base == "application/json" || base.ends_with("+json")
 }
 
+/// The server-sent events media type.
+pub(crate) const EVENT_STREAM: &str = "text/event-stream";
+/// Extension giving a stream's item schema explicitly.
+const ITEM_SCHEMA_EXT: &str = "x-mockingbird-item-schema";
+/// Extension naming the SSE `event:` of a stream's items.
+pub(crate) const SSE_EVENT_EXT: &str = "x-mockingbird-sse-event";
+
+/// Whether `ct` is `text/event-stream` (parameters allowed).
+pub(crate) fn is_event_stream(ct: &str) -> bool {
+    ct.split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .eq_ignore_ascii_case(EVENT_STREAM)
+}
+
+/// The item schema of an event stream: `holder`'s
+/// `x-mockingbird-item-schema` if present, else `schema`'s `items` when it
+/// is an array, else `schema` (`{}` when there is none). `holder`'s
+/// `x-mockingbird-sse-event` is copied into it. `norm` normalizes a raw
+/// source schema.
+pub(crate) fn stream_item_schema(
+    holder: &Value,
+    schema: Option<&Value>,
+    norm: impl Fn(&Value) -> Value,
+) -> Value {
+    let mut item = match holder.get(ITEM_SCHEMA_EXT) {
+        Some(explicit) => norm(explicit),
+        None => {
+            let schema = schema.map(&norm).unwrap_or_else(|| json!({}));
+            let is_array = match schema.get("type") {
+                Some(Value::String(t)) => t == "array",
+                Some(Value::Array(ts)) => ts.iter().any(|t| t == "array"),
+                _ => false,
+            };
+            match schema.get("items") {
+                Some(items) if is_array && items.is_object() => items.clone(),
+                _ => schema,
+            }
+        }
+    };
+    if let (Some(name), Value::Object(obj)) =
+        (holder.get(SSE_EVENT_EXT).and_then(Value::as_str), &mut item)
+    {
+        obj.insert(SSE_EVENT_EXT.into(), json!(name));
+    }
+    item
+}
+
+/// An operation whose success response is an event stream streams its
+/// items to the client.
+pub(crate) fn stream_kind(op: &Operation) -> Option<OperationKind> {
+    op.success_output()
+        .and_then(|o| o.content_type.as_deref())
+        .filter(|ct| is_event_stream(ct))
+        .map(|_| OperationKind::StreamServer)
+}
+
 /// Pick the JSON media entry (preferring `application/json`), if any.
 fn json_media(content: &Map<String, Value>) -> Option<(&String, &Value)> {
     content
@@ -230,10 +289,20 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
         let rat = format!("{at}/responses/{status}");
         let resp = deref(doc, resp, &rat)?;
         let content = resp.get("content").and_then(Value::as_object);
-        let (content_type, schema) = match content {
-            None => (None, None),
-            Some(c) if c.is_empty() => (None, None),
-            Some(c) => match json_media(c) {
+        let is_2xx = matches!(selector, StatusSelector::Code(c) if (200..300).contains(&c));
+        let event_stream = content
+            .filter(|_| is_2xx)
+            .and_then(|c| c.iter().find(|(k, _)| is_event_stream(k)));
+        let (content_type, schema) = match (event_stream, content) {
+            (Some((_, media)), _) => (
+                Some(EVENT_STREAM.to_owned()),
+                Some(stream_item_schema(media, media.get("schema"), |s| {
+                    normalize_schema(s, REF_PREFIX, true)
+                })),
+            ),
+            (None, None) => (None, None),
+            (None, Some(c)) if c.is_empty() => (None, None),
+            (None, Some(c)) => match json_media(c) {
                 Some((ct, media)) => (Some(ct.clone()), Some(schema_of(media))),
                 None => (c.keys().next().cloned(), None),
             },
@@ -342,6 +411,9 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                 identity: None,
                 semantic_hints: Vec::new(),
             };
+            if let Some(kind) = stream_kind(&op_out) {
+                op_out.kind = kind;
+            }
             op_out.identity = infer_identity(
                 &op_out.kind,
                 path,
