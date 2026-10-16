@@ -406,3 +406,79 @@ async fn publish_failing_partway_is_audited_with_what_went_out() {
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(audit(&app, "channel.publish").await.len(), 1);
 }
+
+#[tokio::test]
+async fn team_a_principals_cannot_reach_team_b_channels() {
+    let (app, control) = setup().await;
+    let (s, body) = send(
+        &app,
+        Some("sysadmin"),
+        Method::POST,
+        "/api/v1/workspaces",
+        Some(json!({"name": "team-b"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    let (s, body) = send(
+        &app,
+        Some("sysadmin"),
+        Method::POST,
+        "/api/v1/workspaces/team-b/mocks",
+        Some(json!({"name": "orders", "route_prefix": "/orders-b"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    let req = Request::post("/api/v1/workspaces/team-b/mocks/orders/contracts")
+        .header(header::AUTHORIZATION, "Bearer sysadmin")
+        .header(header::CONTENT_TYPE, "application/vnd.aai.asyncapi+yaml")
+        .body(Body::from(ORDERS))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    // Same-named mock in another workspace, and the `default` aliases:
+    // every channel route is a 403 for team-a's principals.
+    for base in [
+        "/api/v1/workspaces/team-b/mocks/orders",
+        "/api/v1/mocks/orders",
+    ] {
+        for who in ["team-viewer", "team-editor"] {
+            for (method, uri, body) in [
+                (Method::GET, format!("{base}/channels"), None),
+                (Method::GET, format!("{base}/channels/orderCreated"), None),
+                (Method::GET, format!("{base}/event-settings"), None),
+                (
+                    Method::PUT,
+                    format!("{base}/channels/orderCreated"),
+                    Some(json!({"enabled": false})),
+                ),
+                (
+                    Method::POST,
+                    format!("{base}/channels/orderCreated/publish"),
+                    Some(json!({"count": 1})),
+                ),
+                (
+                    Method::PUT,
+                    format!("{base}/event-settings"),
+                    Some(json!({"broker": "local"})),
+                ),
+            ] {
+                let (s, body) = send(&app, Some(who), method.clone(), &uri, body).await;
+                assert_eq!(s, StatusCode::FORBIDDEN, "{who}: {method} {uri}: {body}");
+            }
+        }
+    }
+    assert!(control.calls.lock().unwrap().is_empty());
+    let (s, events) = send(
+        &app,
+        Some("sysadmin"),
+        Method::GET,
+        "/api/v1/workspaces/team-b/audit?action=channel.publish",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{events}");
+    assert!(events.as_array().unwrap().is_empty());
+}
