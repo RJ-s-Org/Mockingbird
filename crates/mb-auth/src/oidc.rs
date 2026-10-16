@@ -116,7 +116,10 @@ struct IdTokenKeys {
     issuer: IssuerUrl,
     algs: Vec<CoreJwsSigningAlgorithm>,
     /// The key set and when it was last refetched (`None`: only discovery).
+    /// Never held across a fetch.
     cache: tokio::sync::RwLock<(CoreJsonWebKeySet, Option<Instant>)>,
+    /// Held for the whole of a refetch (single flight).
+    fetch_guard: tokio::sync::Mutex<()>,
 }
 
 impl IdTokenKeys {
@@ -141,17 +144,20 @@ impl IdTokenKeys {
     /// throttle window (or another caller just refetched); returns whether
     /// the set may have changed.
     async fn refetch(&self, http: &reqwest::Client, seen: &CoreJsonWebKeySet) -> bool {
-        let mut cache = self.cache.write().await;
-        if !same_keys(&cache.0, seen) {
-            return true;
+        let _fetching = self.fetch_guard.lock().await;
+        {
+            let mut cache = self.cache.write().await;
+            if !same_keys(&cache.0, seen) {
+                return true;
+            }
+            if cache.1.is_some_and(|t| t.elapsed() < ID_TOKEN_JWKS_REFETCH) {
+                return false;
+            }
+            cache.1 = Some(Instant::now());
         }
-        if cache.1.is_some_and(|t| t.elapsed() < ID_TOKEN_JWKS_REFETCH) {
-            return false;
-        }
-        cache.1 = Some(Instant::now());
         match CoreJsonWebKeySet::fetch_async(&self.jwks_uri, &OidcHttp(http)).await {
             Ok(jwks) => {
-                cache.0 = jwks;
+                self.cache.write().await.0 = jwks;
                 true
             }
             Err(e) => {
@@ -203,6 +209,7 @@ impl OidcClient {
             issuer: metadata.issuer().clone(),
             algs: metadata.id_token_signing_alg_values_supported().clone(),
             cache: tokio::sync::RwLock::new((metadata.jwks().clone(), None)),
+            fetch_guard: tokio::sync::Mutex::new(()),
         };
 
         let client = Client::from_provider_metadata(

@@ -370,3 +370,64 @@ async fn unknown_kid_refetch_throttled() {
     }
     assert_eq!(jwks_requests(&p).await, 2);
 }
+
+#[tokio::test]
+async fn jwks_refetch_does_not_block_cached_kids() {
+    let p = MockOidcProvider::start().await;
+    let v = Arc::new(verifier(&p).with_refetch_interval(Duration::ZERO));
+    let cached = p.sign(p.claims("carol", &[], None));
+    v.verify(&cached).await.unwrap();
+
+    // From now on the JWKS endpoint takes 3 s to answer.
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(3)))
+        .with_priority(1)
+        .mount(&p.server)
+        .await;
+    p.rotate_key().await;
+    let unknown = p.sign(p.claims("carol", &[], None));
+    let slow = {
+        let v = Arc::clone(&v);
+        tokio::spawn(async move { v.verify(&unknown).await })
+    };
+    // Let the refetch start.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!slow.is_finished());
+
+    let started = std::time::Instant::now();
+    for _ in 0..5 {
+        v.verify(&cached).await.unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "cached-kid verifications waited {:?} for the refetch",
+        started.elapsed()
+    );
+    assert!(matches!(slow.await.unwrap(), Err(AuthError::Upstream(_))));
+}
+
+#[tokio::test]
+async fn concurrent_unknown_kids_share_one_refetch() {
+    let p = MockOidcProvider::start().await;
+    let v = Arc::new(verifier(&p).with_refetch_interval(Duration::from_secs(30)));
+    v.verify(&p.sign(p.claims("carol", &[], None)))
+        .await
+        .unwrap();
+    assert_eq!(jwks_requests(&p).await, 1);
+    // Within the throttle window an unknown kid is rejected without a
+    // fetch; many at once still cause none.
+    p.rotate_key().await;
+    let token = p.sign(p.claims("carol", &[], None));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let v = Arc::clone(&v);
+            let token = token.clone();
+            tokio::spawn(async move { v.verify(&token).await })
+        })
+        .collect();
+    for t in tasks {
+        assert_unauthenticated(t.await.unwrap());
+    }
+    assert_eq!(jwks_requests(&p).await, 1);
+}

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde_json::{Map, Value};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::authenticator::BearerVerifier;
 use crate::error::AuthError;
@@ -32,7 +32,12 @@ pub struct JwtVerifier {
     mapping: RoleMapping,
     http: reqwest::Client,
     /// The cached key set and when it was last fetched (`None`: never).
+    /// Never held across a fetch, so verifications with a cached `kid`
+    /// never wait for the provider.
     cache: RwLock<(JwkSet, Option<Instant>)>,
+    /// Held for the whole of a fetch: one refetch at a time (single
+    /// flight); callers that waited re-check the cache before fetching.
+    fetch_guard: Mutex<()>,
     refetch_interval: Duration,
 }
 
@@ -51,6 +56,7 @@ impl JwtVerifier {
             mapping,
             http,
             cache: RwLock::new((JwkSet::default(), None)),
+            fetch_guard: Mutex::new(()),
             refetch_interval: DEFAULT_REFETCH_INTERVAL,
         }
     }
@@ -64,30 +70,30 @@ impl JwtVerifier {
     /// The decoding key for `kid`, refetching the JWKS when the key is
     /// unknown and the last fetch is older than the refetch interval.
     async fn key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
-        {
-            let cache = self.cache.read().await;
-            if let Some(jwk) = cache.0.find(kid) {
-                return decoding_key(jwk);
-            }
-            if self.throttled(cache.1) {
-                return Err(unknown_kid(kid));
-            }
+        if let Some(found) = self.cached_key(kid).await {
+            return found;
         }
-        let mut cache = self.cache.write().await;
-        // Another request may have refetched while we waited for the lock.
-        if let Some(jwk) = cache.0.find(kid) {
-            return decoding_key(jwk);
-        }
-        if self.throttled(cache.1) {
-            return Err(unknown_kid(kid));
+        let _fetching = self.fetch_guard.lock().await;
+        // Another request may have refetched while we waited for the guard.
+        if let Some(found) = self.cached_key(kid).await {
+            return found;
         }
         // Record the attempt first so a failing provider is throttled too.
-        cache.1 = Some(Instant::now());
-        cache.0 = self.fetch_jwks().await?;
-        match cache.0.find(kid) {
-            Some(jwk) => decoding_key(jwk),
-            None => Err(unknown_kid(kid)),
+        self.cache.write().await.1 = Some(Instant::now());
+        let jwks = self.fetch_jwks().await?;
+        let found = jwks.find(kid).map(decoding_key);
+        self.cache.write().await.0 = jwks;
+        found.unwrap_or_else(|| Err(unknown_kid(kid)))
+    }
+
+    /// The answer the cache alone gives for `kid`: its key, or "unknown"
+    /// while a refetch is throttled; `None` when a refetch is due.
+    async fn cached_key(&self, kid: &str) -> Option<Result<DecodingKey, AuthError>> {
+        let cache = self.cache.read().await;
+        if let Some(jwk) = cache.0.find(kid) {
+            return Some(decoding_key(jwk));
         }
+        self.throttled(cache.1).then(|| Err(unknown_kid(kid)))
     }
 
     fn throttled(&self, last_fetch: Option<Instant>) -> bool {
