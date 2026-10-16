@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use mb_admin::AdminState;
 use mb_state::StateStore;
 use mb_store::ControlStore;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -33,10 +34,24 @@ pub struct OpsState {
 ///   `200 ready`. Each store ping is bounded by [`PING_TIMEOUT`].
 /// - `/metrics`: Prometheus text exposition.
 pub fn router(st: OpsState) -> Router {
+    router_with_metrics_gate(st, None)
+}
+
+/// [`router`], with `/metrics` behind [`mb_admin::console_gate`] when
+/// `metrics_gate` is set (`auth.public_metrics: false`): it then needs the
+/// same credentials as the Admin API.
+pub fn router_with_metrics_gate(st: OpsState, metrics_gate: Option<AdminState>) -> Router {
+    let metrics_route = match metrics_gate {
+        Some(admin) => get(metrics).route_layer(axum::middleware::from_fn_with_state(
+            admin,
+            mb_admin::console_gate,
+        )),
+        None => get(metrics),
+    };
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
+        .route("/metrics", metrics_route)
         .with_state(st)
 }
 

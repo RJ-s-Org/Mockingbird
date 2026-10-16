@@ -22,7 +22,8 @@ async fn main() -> ExitCode {
     let result = match cli.cmd {
         Command::Serve(args) => serve(args).await,
         Command::Validate { contract } => validate(&contract),
-        Command::Client(cmd) => client(&cli.admin_url, cmd).await,
+        Command::Openapi => openapi(),
+        Command::Client(cmd) => client(&cli.admin_url, cli.token.as_deref(), cmd).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -52,8 +53,8 @@ impl From<anyhow::Error> for Failure {
 }
 
 /// Runs a client subcommand: JSON on stdout, problem details on stderr.
-async fn client(admin_url: &str, cmd: ClientCommand) -> Result<(), Failure> {
-    match client::run(admin_url, cmd).await {
+async fn client(admin_url: &str, token: Option<&str>, cmd: ClientCommand) -> Result<(), Failure> {
+    match client::run(admin_url, token, cmd).await {
         Ok(Some(value)) => {
             let text = serde_json::to_string_pretty(&value).map_err(anyhow::Error::from)?;
             println!("{text}");
@@ -71,6 +72,15 @@ async fn client(admin_url: &str, cmd: ClientCommand) -> Result<(), Failure> {
         }
         Err(ClientError::Other(e)) => Err(Failure::Other(e)),
     }
+}
+
+/// Prints the Admin API's OpenAPI document.
+fn openapi() -> Result<(), Failure> {
+    let text = mb_admin::openapi_document()
+        .to_pretty_json()
+        .map_err(anyhow::Error::from)?;
+    println!("{text}");
+    Ok(())
 }
 
 fn validate(path: &std::path::Path) -> Result<(), Failure> {
@@ -103,7 +113,7 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
 async fn serve(args: ServeArgs) -> Result<(), Failure> {
     let llm = LlmEnv::from_env();
     let cfg = resolve_config(&args, Some(&llm))?;
-    cfg.server.check_bind().map_err(Failure::Usage)?;
+    cfg.server.check_bind(&cfg.auth).map_err(Failure::Usage)?;
     if missing_env_api_key(&cfg, args.offline) {
         return Err(Failure::Usage(
             "MB_LLM_API_KEY is not set (use --offline for faker-only mode)".into(),

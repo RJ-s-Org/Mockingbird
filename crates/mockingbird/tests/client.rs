@@ -55,6 +55,7 @@ async fn run(admin: &str, args: &[&str]) -> Output {
             .arg(&admin)
             .args(&args)
             .env_remove("MB_ADMIN_URL")
+            .env_remove("MB_ADMIN_TOKEN")
             .output()
             .unwrap();
         Output {

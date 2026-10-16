@@ -13,7 +13,11 @@ use mb_store::ControlStore;
 
 use crate::client::ClientCommand;
 use crate::dp_keys::StoreDataPlaneKeys;
-use crate::file_config::{self, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile};
+use crate::file_config::{
+    self, AuthConfig, AuthMode, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile,
+};
+use crate::host_guard::HostPolicy;
+use crate::maintenance::Maintenance;
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
 use crate::registry::{MockRegistry, mock_label};
@@ -35,6 +39,10 @@ pub struct Cli {
         default_value = crate::client::DEFAULT_ADMIN_URL
     )]
     pub admin_url: String,
+    /// Bearer token (an API key) the client subcommands send to the Admin
+    /// API.
+    #[arg(long, global = true, env = "MB_ADMIN_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
     #[command(subcommand)]
     pub cmd: Command,
 }
@@ -45,6 +53,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Compile a contract and print an operation summary.
     Validate { contract: PathBuf },
+    /// Print the Admin API's OpenAPI document as JSON.
+    Openapi,
     #[command(flatten)]
     Client(ClientCommand),
 }
@@ -67,7 +77,8 @@ pub struct ServeArgs {
     /// Control-plane storage: sqlite::memory:, sqlite://<path> or postgres://….
     #[arg(long)]
     pub storage_url: Option<String>,
-    /// Allow binding a non-loopback address (there is no auth yet).
+    /// Allow binding a non-loopback address without authentication
+    /// (`auth.mode: none`).
     #[arg(long)]
     pub insecure_no_auth: bool,
     /// Faker only, no LLM.
@@ -127,6 +138,8 @@ pub struct App {
     pub watch: Option<WatchGuard>,
     /// The request log writer.
     pub recorder: Arc<StoreRecorder>,
+    /// The session sweeper and audit retention; dropping it stops them.
+    pub maintenance: Maintenance,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
@@ -248,6 +261,7 @@ pub fn resolve_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<
         }
     };
     apply_flags(&mut cfg, args);
+    cfg.auth.validate().map_err(|e| anyhow!(e))?;
     Ok(cfg)
 }
 
@@ -292,8 +306,11 @@ pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<
     build_app_with(args, llm, Extensions::default()).await
 }
 
-/// Opens the stores, reconciles the configuration into the control store,
-/// mounts the mocks and builds both routers; with `--watch`, starts
+/// Opens the stores, sets up Admin API authentication (`auth.mode`; in
+/// `oidc` mode a failed provider discovery is an error) and the audit log,
+/// reconciles the configuration into the control store, mounts the mocks,
+/// starts the [`Maintenance`] jobs and builds both routers (the admin one
+/// behind the host guard, see [`HostPolicy`]); with `--watch`, starts
 /// watching the config file. `llm: None` (or `--offline`) means faker only
 /// in zero-config mode; `llm.api_key`, when set, is what the reference
 /// `env:MB_LLM_API_KEY` resolves to.
@@ -320,6 +337,10 @@ pub async fn build_app_with(
         .await
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| "opening the state store")?;
+
+    // Before anything is applied, so a bad auth setup changes nothing.
+    let (auth, web_auth) = admin_auth(&cfg.auth, &store, &ext).await?;
+    let audit = mb_admin::Auditor::new(store.clone(), audit_webhook(&cfg, &ext).await?);
 
     let report = reconcile::reconcile(store.as_ref(), state.as_ref(), &cfg)
         .await
@@ -359,27 +380,41 @@ pub async fn build_app_with(
         )
         .merge(registry.router());
 
+    let maintenance = Maintenance::start(
+        store.clone(),
+        web_auth.as_ref().map(|w| &w.sessions),
+        cfg.audit.retention_days,
+    );
+
     let prometheus = telemetry::install_prometheus()?;
-    let mut admin = mb_admin::router(mb_admin::AdminState {
+    let admin_state = mb_admin::AdminState {
         api_secret_refs: Arc::new(cfg.server.api_secret_refs.clone()),
         live: Some({
             let recorder = recorder.clone();
             Arc::new(move || recorder.live())
         }),
+        auth,
+        audit,
+        web_auth,
         ..mb_admin::AdminState::new(store.clone(), state.clone())
-    })
-    .merge(ops::router(OpsState {
-        store: store.clone(),
-        state: state.clone(),
-        registry: registry.clone(),
-        prometheus,
-    }));
+    };
+    let metrics_gate = (!cfg.auth.public_metrics).then(|| admin_state.clone());
+    let mut admin = mb_admin::router(admin_state).merge(ops::router_with_metrics_gate(
+        OpsState {
+            store: store.clone(),
+            state: state.clone(),
+            registry: registry.clone(),
+            prometheus,
+        },
+        metrics_gate,
+    ));
     if let Some(routes) = ext.admin_hooks.routes() {
         admin = admin.merge(routes);
     }
-    if cfg.server.host.is_loopback() {
-        admin = admin.layer(axum::middleware::from_fn(
-            crate::host_guard::require_loopback_host,
+    if let Some(policy) = host_policy(&cfg)? {
+        admin = admin.layer(axum::middleware::from_fn_with_state(
+            policy,
+            crate::host_guard::host_guard,
         ));
     }
 
@@ -410,6 +445,106 @@ pub async fn build_app_with(
         config: cfg,
         watch,
         recorder,
+        maintenance,
+    })
+}
+
+/// The Admin API's authenticator and, in `oidc` mode, the browser login.
+///
+/// `none` mode is [`mb_auth::LocalAuth`]. `oidc` mode resolves the client
+/// secret through `ext.secrets`, discovers the provider (a failure is an
+/// error naming the issuer) with the redirect URL
+/// `<external_url>/auth/callback`, and accepts API keys, console sessions
+/// and the provider's bearer JWTs.
+async fn admin_auth(
+    auth: &AuthConfig,
+    store: &Arc<dyn ControlStore>,
+    ext: &Extensions,
+) -> anyhow::Result<(Arc<dyn mb_auth::Authenticate>, Option<mb_admin::WebAuth>)> {
+    let oidc = match (auth.mode, &auth.oidc) {
+        (AuthMode::None, _) => return Ok((Arc::new(mb_auth::LocalAuth), None)),
+        (AuthMode::Oidc, Some(oidc)) => oidc,
+        (AuthMode::Oidc, None) => bail!("auth.mode oidc requires an auth.oidc section"),
+    };
+    let client_secret = match &oidc.client_secret {
+        Some(reference) => Some(
+            ext.secrets
+                .resolve(reference)
+                .await
+                .map_err(|e| anyhow!("{e}"))
+                .context("resolving auth.oidc.client_secret")?,
+        ),
+        None => None,
+    };
+    let settings = mb_auth::OidcSettings {
+        issuer: oidc.issuer.clone(),
+        client_id: oidc.client_id.clone(),
+        client_secret,
+        scopes: oidc.scopes.clone(),
+        audience: oidc.audience.clone(),
+        redirect_url: format!("{}/auth/callback", auth.external_base()),
+        mapping: mb_auth::RoleMapping {
+            roles_claim: oidc.roles_claim.clone(),
+            group_prefix: oidc.group_prefix.clone(),
+            sysadmin_subjects: auth.sysadmin_subjects.clone(),
+        },
+    };
+    let client = mb_auth::OidcClient::discover(settings, mb_auth::http_client())
+        .await
+        .map_err(|e| anyhow!("{e}"))
+        .with_context(|| format!("cannot set up OIDC with issuer {}", oidc.issuer))?;
+    let client = Arc::new(client);
+    let secure = auth.secure_cookies();
+    let sessions = mb_auth::SessionManager::new(store.clone(), auth.session_ttl, secure);
+    let authenticator = mb_auth::Authenticator {
+        api_keys: mb_auth::ApiKeys::new(store.clone()),
+        sessions: Some(sessions.clone()),
+        bearer: Some(client.bearer()),
+    };
+    let web = mb_admin::WebAuth {
+        oidc: client,
+        sessions,
+        secure_cookies: secure,
+    };
+    Ok((Arc::new(authenticator), Some(web)))
+}
+
+/// The audit webhook from `audit.webhook_url`, its secret resolved through
+/// `ext.secrets`; `None` without a URL.
+async fn audit_webhook(
+    cfg: &FileConfig,
+    ext: &Extensions,
+) -> anyhow::Result<Option<mb_admin::WebhookSink>> {
+    let Some(url) = &cfg.audit.webhook_url else {
+        return Ok(None);
+    };
+    let secret = match &cfg.audit.webhook_secret {
+        Some(reference) => Some(
+            ext.secrets
+                .resolve(reference)
+                .await
+                .map_err(|e| anyhow!("{e}"))
+                .context("resolving audit.webhook_secret")?,
+        ),
+        None => None,
+    };
+    Ok(Some(mb_admin::WebhookSink::spawn(
+        url.clone(),
+        secret,
+        reqwest::Client::new(),
+    )))
+}
+
+/// The admin port's [`HostPolicy`]: loopback names in `none` mode on a
+/// loopback bind, the `auth.external_url` host in `oidc` mode, and no
+/// check otherwise.
+fn host_policy(cfg: &FileConfig) -> anyhow::Result<Option<HostPolicy>> {
+    Ok(match cfg.auth.mode {
+        AuthMode::Oidc => Some(HostPolicy::Exact(
+            cfg.auth.external_host().map_err(|e| anyhow!(e))?,
+        )),
+        AuthMode::None if cfg.server.host.is_loopback() => Some(HostPolicy::Loopback),
+        AuthMode::None => None,
     })
 }
 
