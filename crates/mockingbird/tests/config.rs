@@ -190,6 +190,50 @@ fn loads_full_example_config() {
     let ticks = &cfg.mocks["events"].scenarios["trickle"];
     assert_eq!(ticks.stream_items, Some(3));
     assert_eq!(ticks.stream_item_interval, Some(Duration::from_millis(500)));
+
+    let ev = &cfg.mocks["order-events"];
+    assert_eq!(ev.broker.as_deref(), Some("local"));
+    let created = &ev.channels["orderCreated"];
+    assert!(created.enabled);
+    let triggers: Vec<mb_mcm::Trigger> = created
+        .triggers
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|t| t.to_trigger())
+        .collect();
+    assert_eq!(
+        triggers,
+        [
+            mb_mcm::Trigger::Schedule {
+                every: Duration::from_secs(30)
+            },
+            mb_mcm::Trigger::Cron {
+                expr: "0 9 * * 1-5".into()
+            },
+            mb_mcm::Trigger::OnStateChange {
+                resource_type: "orders".into(),
+                kind: mb_mcm::StateChangeKind::Upserted
+            },
+            mb_mcm::Trigger::Manual,
+        ]
+    );
+    assert!(!ev.channels["orderCancelled"].enabled);
+}
+
+#[tokio::test]
+async fn example_config_reconciles() {
+    let cfg = file_config::load(&repo().join("docs/examples/mockingbird.yaml")).unwrap();
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "order-events")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.list_channel_settings(mock.id).await.unwrap().len(), 2);
 }
 
 #[test]
@@ -1412,4 +1456,246 @@ fn slim_build_rejects_kafka_broker() {
         ),
         "{e}"
     );
+}
+
+// ---- channels and broker as code ----
+
+fn asyncapi_fixture() -> PathBuf {
+    repo().join("fixtures/asyncapi/orders-amqp-2.6.yaml")
+}
+
+/// A config with a `mem` broker and an `orders` AsyncAPI mock whose body
+/// (`broker:`/`channels:` lines, indented four spaces) is `extra`.
+fn channels_config(extra: &str) -> String {
+    format!(
+        "brokers:\n  mem:\n    kind: memory\nmocks:\n  orders:\n    contract: {}\n{extra}",
+        asyncapi_fixture().display()
+    )
+}
+
+const CHANNEL_BLOCK: &str = "    broker: mem\n    channels:\n      orderCreated:\n        triggers:\n          - every: 10s\n          - manual\n";
+
+#[test]
+fn file_trigger_forms_parse() {
+    let ws = Workspace::new();
+    let cfg = ws.load(&channels_config(
+        "    channels:\n      orderCreated:\n        enabled: false\n        triggers:\n          - every: 250ms\n          - cron: \"*/5 * * * *\"\n          - on_state_change: {resource_type: orders, kind: deleted}\n          - on_state_change: {resource_type: carts}\n          - manual\n      orderCancelled: {}\n",
+    ));
+    let m = &cfg.mocks["orders"];
+    assert_eq!(m.broker, None);
+    let c = &m.channels["orderCreated"];
+    assert!(!c.enabled);
+    let triggers: Vec<mb_mcm::Trigger> = c
+        .triggers
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|t| t.to_trigger())
+        .collect();
+    assert_eq!(
+        triggers,
+        [
+            mb_mcm::Trigger::Schedule {
+                every: Duration::from_millis(250)
+            },
+            mb_mcm::Trigger::Cron {
+                expr: "*/5 * * * *".into()
+            },
+            mb_mcm::Trigger::OnStateChange {
+                resource_type: "orders".into(),
+                kind: mb_mcm::StateChangeKind::Deleted
+            },
+            mb_mcm::Trigger::OnStateChange {
+                resource_type: "carts".into(),
+                kind: mb_mcm::StateChangeKind::Any
+            },
+            mb_mcm::Trigger::Manual,
+        ]
+    );
+    let other = &m.channels["orderCancelled"];
+    assert!(other.enabled);
+    assert_eq!(other.triggers, None);
+
+    ws.write(&channels_config(
+        "    channels:\n      orderCreated:\n        bogus: 1\n",
+    ));
+    assert!(file_config::load(&ws.config_path()).is_err());
+}
+
+#[tokio::test]
+async fn file_channel_settings_reconciled() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(&channels_config(CHANNEL_BLOCK));
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = store.list_channel_settings(mock.id).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].channel_id, "orderCreated");
+    assert!(rows[0].enabled);
+    assert_eq!(rows[0].source, ResourceSource::File);
+    assert_eq!(
+        rows[0].triggers,
+        Some(vec![
+            mb_mcm::Trigger::Schedule {
+                every: Duration::from_secs(10)
+            },
+            mb_mcm::Trigger::Manual
+        ])
+    );
+    let events = store.get_event_settings(mock.id).await.unwrap().unwrap();
+    assert_eq!(events.broker.as_deref(), Some("mem"));
+    assert_eq!(events.source, ResourceSource::File);
+
+    // Reconciling the same file again changes nothing.
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(report.is_empty(), "{report:?}");
+
+    // Removing the block deletes the row and clears the broker.
+    let cfg = ws.load(&channels_config(""));
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["orders"]);
+    assert!(
+        store
+            .list_channel_settings(mock.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let events = store.get_event_settings(mock.id).await.unwrap().unwrap();
+    assert_eq!(events.broker, None);
+}
+
+async fn channel_reconcile_error(extra: &str) -> (String, Arc<dyn ControlStore>) {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(&channels_config(extra));
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    (format!("{err:#}"), store)
+}
+
+#[tokio::test]
+async fn file_channel_invalid_cron_rejected() {
+    let (err, store) = channel_reconcile_error(
+        "    channels:\n      orderCreated:\n        triggers:\n          - cron: \"not a cron\"\n",
+    )
+    .await;
+    assert!(
+        err.contains("mocks.orders.channels.orderCreated.triggers: invalid cron expression"),
+        "{err}"
+    );
+    // Nothing was applied.
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn file_channel_unknown_id_rejected() {
+    let (err, store) =
+        channel_reconcile_error("    channels:\n      nope:\n        enabled: false\n").await;
+    assert!(
+        err.contains("mocks.orders.channels.nope: no such channel in the contract"),
+        "{err}"
+    );
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn file_unknown_broker_rejected() {
+    let (err, store) = channel_reconcile_error("    broker: rabbit\n").await;
+    assert!(
+        err.contains("mocks.orders.broker: unknown broker \"rabbit\""),
+        "{err}"
+    );
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn file_triggers_on_subscribe_channel_rejected() {
+    let (err, store) = channel_reconcile_error(
+        "    channels:\n      cancelOrder:\n        triggers:\n          - manual\n",
+    )
+    .await;
+    assert!(
+        err.contains("mocks.orders.channels.cancelOrder.triggers: triggers apply only"),
+        "{err}"
+    );
+    assert!(
+        store
+            .list_mocks(DEFAULT_WORKSPACE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn api_put_on_file_channel_409() {
+    let ws = Workspace::new();
+    ws.write(&channels_config(CHANNEL_BLOCK));
+    let app = start(config_args(&ws, false)).await;
+    let http = reqwest::Client::new();
+    let api = format!("{}/api/v1/mocks/orders", app.admin);
+
+    let r = http
+        .put(format!("{api}/channels/orderCreated"))
+        .json(&json!({"enabled": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.headers()["content-type"], "application/problem+json");
+
+    let view: Value = http
+        .get(format!("{api}/channels/orderCreated"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view["settings_source"], "file", "{view}");
+    assert_eq!(
+        view["triggers"],
+        json!([{"schedule": {"every_ms": 10000}}, "manual"]),
+        "{view}"
+    );
+    let events: Value = http
+        .get(format!("{api}/event-settings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(events, json!({"broker": "mem", "source": "file"}));
 }

@@ -73,6 +73,7 @@ async fn client(admin_url: &str, cmd: ClientCommand) -> Result<(), Failure> {
             eprintln!("{body}");
             Err(Failure::Silent)
         }
+        Err(ClientError::Usage(msg)) => Err(Failure::Usage(msg)),
         Err(ClientError::Other(e)) => Err(Failure::Other(e)),
     }
 }

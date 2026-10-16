@@ -1,5 +1,6 @@
 //! `mockingbird.yaml`: server, storage, LLM profiles, observability,
-//! protocol settings, message brokers and mocks declared as code.
+//! protocol settings, message brokers and mocks (with their channels and
+//! broker) declared as code.
 //!
 //! Precedence: the file < `MB_*` environment variables ([`apply_env`]) <
 //! command-line flags ([`crate::config::apply_flags`]).
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use mb_engine::StreamConfig;
+use mb_mcm::{StateChangeKind, Trigger};
 use mb_protocols::ProtocolSettings;
 use mb_protocols::events::{BrokerConfig, BrokerKind, SaslConfig};
 use serde::Deserialize;
@@ -448,6 +450,13 @@ pub struct FileMock {
     pub header_overrides: bool,
     #[serde(default)]
     pub scenarios: BTreeMap<String, FileScenario>,
+    /// The `brokers:` entry the mock's channels use; absent picks one
+    /// automatically.
+    #[serde(default)]
+    pub broker: Option<String>,
+    /// Per-channel settings, by channel id.
+    #[serde(default)]
+    pub channels: BTreeMap<String, FileChannel>,
 }
 
 impl FileMock {
@@ -460,6 +469,8 @@ impl FileMock {
             llm_profile: None,
             header_overrides: true,
             scenarios: BTreeMap::new(),
+            broker: None,
+            channels: BTreeMap::new(),
         }
     }
 
@@ -473,6 +484,53 @@ impl FileMock {
 
 fn default_true() -> bool {
     true
+}
+
+/// A `channels:` entry of a mock: overrides of one event channel.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileChannel {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Absent uses the contract's triggers.
+    #[serde(default)]
+    pub triggers: Option<Vec<FileTrigger>>,
+}
+
+/// A channel trigger as written in the config file.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTrigger {
+    /// `- every: 10s`
+    Every(#[serde(with = "humantime_serde")] Duration),
+    /// `- cron: "*/5 * * * *"`
+    Cron(String),
+    /// `- on_state_change: {resource_type: orders, kind: deleted}`
+    OnStateChange {
+        resource_type: String,
+        #[serde(default)]
+        kind: StateChangeKind,
+    },
+    /// `- manual`
+    Manual,
+}
+
+impl FileTrigger {
+    /// The MCM trigger.
+    pub fn to_trigger(&self) -> Trigger {
+        match self {
+            FileTrigger::Every(every) => Trigger::Schedule { every: *every },
+            FileTrigger::Cron(expr) => Trigger::Cron { expr: expr.clone() },
+            FileTrigger::OnStateChange {
+                resource_type,
+                kind,
+            } => Trigger::OnStateChange {
+                resource_type: resource_type.clone(),
+                kind: *kind,
+            },
+            FileTrigger::Manual => Trigger::Manual,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Default, PartialEq)]
