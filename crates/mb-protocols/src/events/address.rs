@@ -165,8 +165,9 @@ fn matches_from(pieces: &[Piece<'_>], actual: &str) -> bool {
                 let mut marked = 0;
                 for p in (0..=n).filter(|&p| reach[p]) {
                     let end = run_end[p];
-                    for q in (p + 1).max(marked + 1)..=end {
-                        next[q] = true;
+                    let from = (p + 1).max(marked + 1);
+                    if from <= end {
+                        next[from..=end].fill(true);
                         any = true;
                     }
                     marked = marked.max(end);
