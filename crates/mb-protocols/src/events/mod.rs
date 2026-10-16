@@ -21,8 +21,8 @@ pub use address::{address_matches, param_names, param_values, resolve_binding, s
 #[cfg(feature = "amqp")]
 pub use amqp::AmqpClient;
 pub use broker::{
-    BrokerClient, BrokerConfig, BrokerError, BrokerInfo, BrokerKind, Brokers, MessageStream,
-    SaslConfig,
+    BrokerClient, BrokerConfig, BrokerError, BrokerInfo, BrokerKind, Brokers, MQTT_TLS_UNSUPPORTED,
+    MessageStream, SaslConfig,
 };
 #[cfg(feature = "kafka")]
 pub use kafka::KafkaClient;

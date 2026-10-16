@@ -127,6 +127,10 @@ pub trait BrokerClient: Send + Sync {
 }
 
 /// Which kind of broker a configured connection talks to.
+/// Why an MQTT broker cannot use TLS: this build's rumqttc has no TLS
+/// stack (its rustls-webpki 0.102 has open advisories).
+pub const MQTT_TLS_UNSUPPORTED: &str = "MQTT over TLS is not supported in this build (rumqttc TLS stack has open advisories); use a TLS-terminating proxy or plain MQTT";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrokerKind {
     Kafka,

@@ -1958,11 +1958,11 @@ fn brokers_section_parses_and_validates() {
     #[cfg(feature = "mqtt")]
     {
         let cfg = ws.load(
-            "brokers:\n  m:\n    kind: mqtt\n    url: mqtt://user@127.0.0.1:1883\n    tls: true\n    client_id_prefix: mb\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: env:MQTT_PASSWORD\n",
+            "brokers:\n  m:\n    kind: mqtt\n    url: mqtt://user@127.0.0.1:1883\n    client_id_prefix: mb\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: env:MQTT_PASSWORD\n",
         );
         let configs = file_config::broker_configs(&cfg).unwrap();
         assert_eq!(configs[0].url, "mqtt://user@127.0.0.1:1883");
-        assert!(configs[0].tls);
+        assert!(!configs[0].tls);
         assert_eq!(configs[0].client_id_prefix, "mb");
         assert_eq!(
             configs[0].sasl.as_ref().unwrap().password_ref,
@@ -1973,6 +1973,35 @@ fn brokers_section_parses_and_validates() {
     // Unknown keys are rejected.
     ws.write("brokers:\n  b:\n    kind: memory\n    bogus: 1\n");
     assert!(file_config::load(&ws.config_path()).is_err());
+}
+
+/// rumqttc is built without its TLS stack (its rustls-webpki has open
+/// advisories), so every way of asking for MQTT over TLS is refused.
+#[test]
+fn mqtt_over_tls_is_rejected() {
+    const EXPECTED: &str = "brokers.b: MQTT over TLS is not supported in this build (rumqttc TLS stack has open advisories); use a TLS-terminating proxy or plain MQTT";
+    let ws = Workspace::new();
+    for body in [
+        "    kind: mqtt\n    url: mqtts://127.0.0.1:8883\n",
+        "    kind: mqtt\n    url: ssl://127.0.0.1:8883\n",
+        "    kind: mqtt\n    url: MQTTS://127.0.0.1:8883\n",
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    tls: true\n",
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    ca_file: /etc/ssl/ca.pem\n",
+    ] {
+        let e = broker_error(&ws, body);
+        assert!(e.contains(EXPECTED), "{body}: {e}");
+    }
+    // Plain MQTT, and TLS for the other kinds, stay accepted.
+    let cfg = ws.load("brokers:\n  m:\n    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n");
+    #[cfg(feature = "mqtt")]
+    assert!(file_config::broker_configs(&cfg).is_ok());
+    let _ = cfg;
+    let cfg = ws.load(
+        "brokers:\n  r:\n    kind: amqp\n    url: amqps://127.0.0.1:5671/%2f\n    tls: true\n",
+    );
+    #[cfg(feature = "amqp")]
+    assert!(file_config::broker_configs(&cfg).is_ok());
+    let _ = cfg;
 }
 
 #[tokio::test]

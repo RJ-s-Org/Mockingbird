@@ -100,7 +100,7 @@ brokers:
   #     mechanism: SCRAM-SHA-512                     # PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512
   #     username: mockingbird
   #     password: env:KAFKA_PASSWORD                 # a secret reference, never the password
-  #   client_id_prefix: mockingbird                  # client ids and consumer groups
+  #   client_id_prefix: mockingbird                  # client ids; Kafka consumer group <prefix>-<mock>
   # rabbit:
   #   kind: amqp
   #   url: amqp://mockingbird@127.0.0.1:5672/%2f
@@ -108,7 +108,8 @@ brokers:
   #   sasl: {mechanism: PLAIN, username: mockingbird, password: env:RABBIT_PASSWORD}
   # mosquitto:
   #   kind: mqtt
-  #   url: mqtt://127.0.0.1:1883
+  #   url: mqtt://127.0.0.1:1883                     # plain MQTT only: mqtts://, ssl://, tls and ca_file
+  #                                                  # are rejected (put a TLS-terminating proxy in front)
   # test:
   #   kind: memory                                   # in-process; nothing leaves Mockingbird
 

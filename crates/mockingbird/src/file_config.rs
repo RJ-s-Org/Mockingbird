@@ -14,7 +14,7 @@ use anyhow::{Context, anyhow, bail};
 use mb_engine::StreamConfig;
 use mb_mcm::{StateChangeKind, Trigger};
 use mb_protocols::ProtocolSettings;
-use mb_protocols::events::{BrokerConfig, BrokerKind, SaslConfig};
+use mb_protocols::events::{BrokerConfig, BrokerKind, MQTT_TLS_UNSUPPORTED, SaslConfig};
 use mb_store::{DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode};
 use serde::Deserialize;
 use serde_json::Value;
@@ -533,7 +533,9 @@ pub struct FileSasl {
 
 /// The broker connections of the `brokers:` section, validated: a known
 /// `kind` compiled into this build, the address that kind needs, no
-/// password in a `url` and a secret reference as the SASL password.
+/// password in a `url`, a secret reference as the SASL password, and no
+/// TLS for MQTT (`mqtts://`/`ssl://` URLs, `tls` or `ca_file`; see
+/// [`MQTT_TLS_UNSUPPORTED`]).
 pub fn broker_configs(cfg: &FileConfig) -> anyhow::Result<Vec<BrokerConfig>> {
     cfg.brokers
         .iter()
@@ -578,6 +580,19 @@ fn broker_config(name: &str, broker: &FileBroker) -> anyhow::Result<BrokerConfig
         }
         None => None,
     };
+    if kind == BrokerKind::Mqtt
+        && (broker.tls
+            || broker.ca_file.is_some()
+            || url
+                .get(..url.find("://").unwrap_or(0))
+                .is_some_and(|scheme| {
+                    ["mqtts", "ssl"]
+                        .iter()
+                        .any(|tls| scheme.eq_ignore_ascii_case(tls))
+                }))
+    {
+        bail!("brokers.{name}: {MQTT_TLS_UNSUPPORTED}");
+    }
     if !kind.compiled() {
         let kind = kind.as_str();
         bail!(

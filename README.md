@@ -268,7 +268,7 @@ brokers:
     kind: memory        # in-process; nothing leaves Mockingbird
 ```
 
-`kind` is `kafka`, `amqp`, `mqtt` or `memory`. Passwords are secret references in `sasl.password`, never part of a URL. [`docs/examples/mockingbird.yaml`](docs/examples/mockingbird.yaml) lists every key. A broker that cannot be reached is reported by `/readyz` (`degraded`, `mock <name>: broker <broker>: <error>`) and retried; the mocks keep serving.
+`kind` is `kafka`, `amqp`, `mqtt` or `memory`. Passwords are secret references in `sasl.password`, never part of a URL. MQTT brokers are reached over plain TCP only: this build's MQTT client (rumqttc) is compiled without its TLS stack, whose `rustls-webpki` 0.102 has open security advisories, so an `mqtts://` or `ssl://` URL, `tls: true` or a `ca_file` on an MQTT broker is a configuration error ("MQTT over TLS is not supported in this build …"). To reach a TLS-only MQTT broker, run a TLS-terminating proxy (e.g. stunnel or an Envoy/HAProxy sidecar) next to Mockingbird and point `url` at it. Kafka and AMQP support TLS as usual. [`docs/examples/mockingbird.yaml`](docs/examples/mockingbird.yaml) lists every key. A broker that cannot be reached is reported by `/readyz` (`degraded`, `mock <name>: broker <broker>: <error>`) and retried; the mocks keep serving.
 
 ### Mocks with channels
 
@@ -381,6 +381,7 @@ A plain `cargo build` includes MQTT and AMQP (pure Rust). Kafka is opt-in: `carg
 - Payloads are always JSON-encoded; Avro schemas are used for generation and validation, but Avro binary encoding is not produced.
 - MQTT subscriptions are not shared across instances: every instance consumes every message.
 - Kafka GSSAPI (Kerberos) authentication is unsupported; use PLAIN or SCRAM.
+- MQTT over TLS is unsupported (see [Brokers](#brokers)); use a TLS-terminating proxy or plain MQTT.
 - State-change triggers fire on the instance that observed the change.
 - The console Channels tab comes in P6; until then use the Admin API and the CLI.
 

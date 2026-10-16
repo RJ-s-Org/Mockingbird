@@ -3,17 +3,7 @@ all-features = true
 
 [advisories]
 version = 2
-# rumqttc 0.25.1 (the pinned MQTT client, and the latest release) depends on
-# rustls-webpki 0.102.8 and rustls-pemfile 2.2.0, which have no fixed release
-# in those lines. Only these advisory ids are ignored (each names one crate),
-# and the workspace's own rustls-webpki 0.103 is already patched against them.
-# Drop these once rumqttc moves to rustls-webpki >= 0.103.13.
 ignore = [
-    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8, only via rumqttc 0.25.1" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8, only via rumqttc 0.25.1" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8, only via rumqttc 0.25.1" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8, only via rumqttc 0.25.1" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.2.0 (unmaintained), only via rumqttc 0.25.1" },
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing attack affects private-key decryption; Mockingbird only verifies signatures (openidconnect) and signs in tests" },
 ]
 
