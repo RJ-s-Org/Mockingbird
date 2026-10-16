@@ -156,6 +156,36 @@ pub(crate) struct Presented<'a> {
     /// The adapter already checked the data-plane key for the whole request
     /// (see [`check_key`]).
     pub key_verified: bool,
+    /// The adapter already admitted the whole request (tenant, then quota)
+    /// before checking its key; the call is not admitted again.
+    pub admitted: Option<&'a Tenancy>,
+}
+
+/// Admission for a whole request (`tenants.resolve`, then `quota.admit`)
+/// with operation id `operation_id`, for adapters that check the
+/// data-plane key once per request ([`check_key`]) and must admit first.
+/// `Err` carries the tenancy when it resolved.
+#[cfg_attr(not(feature = "graphql"), allow(dead_code))]
+pub(crate) async fn admit(
+    rt: &MockRuntime,
+    operation_id: &str,
+    headers: &HeaderMap,
+) -> Result<Tenancy, (Rejection, Option<Tenancy>)> {
+    let call_info = CallInfo {
+        mock: &rt.name,
+        operation_id,
+        headers,
+    };
+    let tenancy = rt
+        .ext
+        .tenants
+        .resolve(&call_info)
+        .await
+        .map_err(|r| (r, None))?;
+    match rt.ext.quota.admit(&tenancy, &call_info).await {
+        Ok(()) => Ok(tenancy),
+        Err(r) => Err((r, Some(tenancy))),
+    }
 }
 
 /// The data-plane key check of `api_key` mode for a whole request, for
@@ -217,7 +247,8 @@ impl PlanFailure {
     }
 }
 
-/// Admission (`tenants.resolve`, then `quota.admit`), then data-plane auth
+/// Admission (`tenants.resolve`, then `quota.admit`, unless
+/// [`Presented::admitted`]), then data-plane auth
 /// (spec §11.2), then override headers, then the scenario. Header status and latency beat the
 /// scenario's; a scenario status applies only where `op` declares it.
 /// Records the session on the current span.
@@ -232,13 +263,19 @@ pub(crate) async fn plan<'a>(
         operation_id: &op.id,
         headers,
     };
-    let tenancy = match rt.ext.tenants.resolve(&call_info).await {
-        Ok(t) => t,
-        Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
+    let tenancy = match presented.admitted {
+        Some(t) => t.clone(),
+        None => {
+            let tenancy = match rt.ext.tenants.resolve(&call_info).await {
+                Ok(t) => t,
+                Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
+            };
+            if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+                return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
+            }
+            tenancy
+        }
     };
-    if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
-        return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
-    }
     let auth = authenticate(
         rt,
         &op.id,
@@ -564,11 +601,24 @@ pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
     }
 }
 
-fn is_sensitive(name: &str) -> bool {
-    SENSITIVE_HEADERS.contains(&name)
-        || ["token", "secret", "password", "api-key"]
-            .iter()
-            .any(|s| name.contains(s))
+/// Substrings that mark a header name as carrying credentials, matched
+/// case-insensitively (header names from a GraphQL `connection_init`
+/// payload may use any spelling, e.g. `apiKey`).
+const SENSITIVE_PATTERNS: [&str; 8] = [
+    "token",
+    "secret",
+    "password",
+    "api-key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+];
+
+pub(crate) fn is_sensitive(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    SENSITIVE_HEADERS.contains(&name.as_str())
+        || SENSITIVE_PATTERNS.iter().any(|s| name.contains(s))
 }
 
 /// Non-sensitive, UTF-8 request headers, optionally keeping
@@ -827,6 +877,62 @@ mod tests {
     use mb_mcm::{Bundle, Identity, Protocol};
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
+
+    #[test]
+    fn credential_like_headers_are_sensitive_in_any_case() {
+        for name in [
+            "api_key",
+            "apikey",
+            "apiKey",
+            "x-apikey",
+            "x-api-key",
+            "X-API-KEY",
+            "x-api_key",
+            "authorization",
+            "Authorization",
+            "proxy-authorization",
+            "cookie",
+            "Cookie",
+            "x-cookie-jar",
+            "x-auth-token",
+            "my-secret",
+            "x-password",
+        ] {
+            assert!(is_sensitive(name), "{name}");
+        }
+        for name in ["x-trace", "x-mockingbird-session", "accept", "user-agent"] {
+            assert!(!is_sensitive(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn credential_names_follow_data_plane_auth_changes() {
+        use crate::{DataPlaneAuth, DataPlaneAuthMode};
+        let bundle = Arc::new(compile(STREAM_CONTRACT.as_bytes()).unwrap());
+        let mut rt = MockRuntime::new(
+            "t",
+            bundle,
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::new(MemoryStore::new(Duration::from_secs(60))),
+        );
+        // Reading the names before auth is configured must not pin them.
+        assert!(rt.credential_names().headers.is_empty());
+        rt.set_data_plane_auth(DataPlaneAuth {
+            mode: DataPlaneAuthMode::ApiKey,
+            header: "x-tenant-pass".into(),
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant-pass", "k".parse().unwrap());
+        headers.insert("x-trace", "t".parse().unwrap());
+        let forwarded = forwarded_headers(&rt, &headers);
+        assert!(!forwarded.contains_key("x-tenant-pass"), "{forwarded:?}");
+        assert!(forwarded.contains_key("x-trace"), "{forwarded:?}");
+        assert!(public_query(&rt, &[("api_key".into(), "k".into())]).is_empty());
+
+        rt.set_data_plane_auth(DataPlaneAuth::default());
+        assert!(rt.credential_names().headers.is_empty());
+        assert!(forwarded_headers(&rt, &headers).contains_key("x-tenant-pass"));
+    }
 
     #[test]
     fn reference_fields() {

@@ -29,6 +29,7 @@ use crate::call::{
     self, CallPlan, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
     recorded_headers,
 };
+use crate::dp_auth::authenticate_contract;
 use crate::{MockRuntime, MountPrefix};
 
 mod envelope;
@@ -166,6 +167,15 @@ async fn handle(State(st): State<Arc<SoapState>>, req: Request) -> Response {
                 .await
         }
         Method::GET if is_wsdl_query(parts.uri.query()) => {
+            // The WSDL describes every operation: it needs the same
+            // credentials as calling them (HTTP headers only).
+            if let Err(u) = authenticate_contract(&st.rt, &parts.headers, &[]).await {
+                let mut resp = problem(401, "Unauthorized", u.detail);
+                if let Ok(v) = HeaderValue::from_str(&u.challenge) {
+                    resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+                }
+                return resp;
+            }
             let prefix = parts
                 .extensions
                 .get::<MountPrefix>()
