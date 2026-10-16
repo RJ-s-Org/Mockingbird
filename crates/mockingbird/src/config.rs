@@ -20,6 +20,7 @@ use crate::file_config::{
     self, AuthConfig, AuthMode, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile,
 };
 use crate::host_guard::HostPolicy;
+use crate::import_llm::RuntimeLlm;
 use crate::maintenance::Maintenance;
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
@@ -154,6 +155,8 @@ pub struct App {
     pub brokers: Arc<Brokers>,
     /// The session sweeper and audit retention; dropping it stops them.
     pub maintenance: Maintenance,
+    /// The import worker pool; dropping it stops the workers.
+    pub import_workers: mb_admin::ImportWorkers,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
@@ -474,8 +477,18 @@ pub async fn build_app_with(
         auth,
         audit,
         web_auth,
+        ext: deps.ext.clone(),
+        llm: Arc::new(RuntimeLlm {
+            deps: deps.clone(),
+            import_profile: cfg.import.llm_profile.clone(),
+        }),
+        imports: mb_admin::Imports {
+            settings: cfg.import.settings().map_err(|e| anyhow!(e))?,
+            ..Default::default()
+        },
         ..mb_admin::AdminState::new(store.clone(), state.clone())
     };
+    let import_workers = mb_admin::spawn_import_workers(&admin_state);
     let metrics_gate = (!cfg.auth.public_metrics).then(|| admin_state.clone());
     let hooks_auth = admin_state.clone();
     // In `oidc` mode only authenticated callers see why `/readyz` is not ready.
@@ -551,6 +564,7 @@ pub async fn build_app_with(
         recorder,
         brokers,
         maintenance,
+        import_workers,
     })
 }
 

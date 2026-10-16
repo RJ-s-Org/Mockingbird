@@ -1,6 +1,6 @@
 //! Control-plane persistence: workspaces, mocks, contract versions, scenarios,
-//! LLM profiles, the request log, API keys, admin sessions and the audit log,
-//! behind the backend-neutral [`ControlStore`].
+//! LLM profiles, the request log, API keys, admin sessions, the audit log and
+//! the import job queue, behind the backend-neutral [`ControlStore`].
 
 mod error;
 mod model;
@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
+use mb_mcm::Bundle;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -35,6 +37,12 @@ pub const RETENTION_PRUNE_INTERVAL: i64 = 100;
 /// How long a store call waits for a pooled connection before failing, so
 /// an unreachable database fails fast instead of stalling every request.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Upper bound of [`ControlStore::list_import_jobs`]'s `limit`.
+pub const MAX_IMPORT_JOB_LIST: u32 = 200;
+
+/// The error of a job failed by [`ControlStore::fail_stale_import_jobs`].
+pub const STALE_IMPORT_ERROR: &str = "interrupted: the import worker stopped responding";
 
 #[async_trait]
 pub trait ControlStore: Send + Sync {
@@ -184,6 +192,113 @@ pub trait ControlStore: Send + Sync {
     async fn list_audit(&self, f: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError>;
     /// Deletes events with `at < older_than`; returns how many.
     async fn prune_audit(&self, older_than: DateTime<Utc>) -> Result<u64, StoreError>;
+    /// Adds a `Draft` version (numbered like [`Self::add_contract_version`])
+    /// carrying `draft_meta`. `Invalid` unless `v.status` is `Draft`.
+    /// Publishes no [`ControlChange`]: drafts are never served.
+    async fn add_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError>;
+    /// Replaces a draft's source (recomputing `source_digest`), bundle and
+    /// metadata in place. `NotFound` for a missing version, `Conflict` unless
+    /// it is a `Draft`. Publishes nothing.
+    async fn update_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        source: Vec<u8>,
+        bundle: Bundle,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError>;
+    /// Moves a `Draft` to `Approved`, keeping its `draft_meta`. `NotFound`
+    /// for a missing version, `Conflict` unless it is a `Draft`. Publishes
+    /// nothing.
+    async fn approve_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<ContractVersion, StoreError>;
+    /// Queues a job with progress `{"queued", 0, 0}`, copying the mock's
+    /// workspace and name. `NotFound` if the mock does not exist.
+    async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError>;
+    async fn get_import_job(&self, id: Uuid) -> Result<Option<ImportJob>, StoreError>;
+    /// The job's input; `None` for an unknown or finished job (finishing
+    /// clears it).
+    async fn import_job_input(&self, id: Uuid) -> Result<Option<Vec<u8>>, StoreError>;
+    /// Newest (`created_at`) first; `limit` clamped to `1..=200`.
+    async fn list_import_jobs(
+        &self,
+        mock_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<ImportJob>, StoreError>;
+    /// Atomically moves the oldest queued job to `running` (`started_at` and
+    /// `updated_at` = `now`) and returns it; `None` when nothing is queued.
+    /// Concurrent callers never claim the same job.
+    async fn claim_import_job(&self, now: DateTime<Utc>) -> Result<Option<ImportJob>, StoreError>;
+    /// Records progress and bumps `updated_at`; `false` unless the job is
+    /// `running`.
+    async fn update_import_progress(
+        &self,
+        id: Uuid,
+        p: &ImportProgress,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError>;
+    /// Ends a `running` job as `done` or `failed` and clears its input;
+    /// `false` unless the job is `running`.
+    async fn finish_import_job(
+        &self,
+        id: Uuid,
+        outcome: ImportOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError>;
+    /// Adds `v` as a draft of `mock_id` (like
+    /// [`Self::add_draft_contract_version`]) and ends job `id` as `done` with
+    /// that version, atomically: `Ok(None)`, with nothing stored, unless the
+    /// job is `running` and belongs to the mock. Backends override the
+    /// default, which is not atomic.
+    async fn complete_import_job(
+        &self,
+        id: Uuid,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        let running = self
+            .get_import_job(id)
+            .await?
+            .is_some_and(|j| j.mock_id == mock_id && j.status == ImportJobStatus::Running);
+        if !running {
+            return Ok(None);
+        }
+        let version = self
+            .add_draft_contract_version(mock_id, v, draft_meta)
+            .await?;
+        let outcome = ImportOutcome::Done {
+            version: version.version,
+        };
+        Ok(self
+            .finish_import_job(id, outcome, now)
+            .await?
+            .then_some(version))
+    }
+    /// How many of the mock's jobs are `queued` or `running`.
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError>;
+    /// Moves a `queued` or `running` job to `canceled` and clears its input;
+    /// `false` otherwise.
+    async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError>;
+    /// Fails every `running` job whose `updated_at` is before
+    /// `updated_before` with [`STALE_IMPORT_ERROR`]; returns how many.
+    async fn fail_stale_import_jobs(
+        &self,
+        updated_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError>;
+    /// Deletes finished jobs with `finished_at < finished_before`; returns how
+    /// many.
+    async fn prune_import_jobs(&self, finished_before: DateTime<Utc>) -> Result<u64, StoreError>;
     fn subscribe(&self) -> broadcast::Receiver<ControlChange>;
 }
 
@@ -311,6 +426,32 @@ impl PruneCounter {
 /// Current time at microsecond precision, which every backend round-trips.
 pub(crate) fn now() -> DateTime<Utc> {
     Utc::now().trunc_subsecs(6)
+}
+
+/// The progress of a newly queued job.
+pub(crate) fn queued_progress() -> ImportProgress {
+    ImportProgress {
+        phase: "queued".into(),
+        done: 0,
+        total: 0,
+    }
+}
+
+/// `Invalid` unless a draft write carries `Draft` status.
+pub(crate) fn require_draft_status(v: &NewContractVersion) -> Result<(), StoreError> {
+    if v.status == ContractStatus::Draft {
+        Ok(())
+    } else {
+        Err(StoreError::Invalid(format!(
+            "a draft contract version must have status draft, not {}",
+            v.status.as_str()
+        )))
+    }
+}
+
+/// Error for a draft-only write to a version that is not a draft.
+pub(crate) fn not_a_draft(version: i64) -> StoreError {
+    StoreError::Conflict(format!("contract version {version} is not a draft"))
 }
 
 /// `(now + ttl, now)` at microsecond precision, for a lease acquisition.

@@ -77,6 +77,12 @@ openidconnect = { version = "4.0", default-features = false }
 jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 rsa = { version = "0.9", features = ["pem"] }
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "connection-manager", "tokio-rustls-comp", "script"] }
+pdf-extract = "0.12.1"
+weezl = "0.1.12"
+scraper = "0.27"
+pulldown-cmark = { version = "0.13", default-features = false }
+url = "2.5"
+ipnet = "2.12"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 
 # dev

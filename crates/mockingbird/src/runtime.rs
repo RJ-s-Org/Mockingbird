@@ -9,6 +9,7 @@ use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwapOption;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec, StreamConfig};
 use mb_ext::{Extensions, Tenancy};
+use mb_import::smart::ExtractLlm;
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
 use mb_protocols::events::EventDeps;
 use mb_protocols::{
@@ -86,17 +87,22 @@ impl From<Option<String>> for DefaultProfile {
     }
 }
 
-/// The runtime serving `mock`'s active contract, or `None` when it has none.
-pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<MockRuntime>> {
-    let Some(contract) = deps
-        .store
-        .active_contract(mock.id)
-        .await
-        .with_context(|| format!("loading the active contract of mock {:?}", mock.name))?
-    else {
-        return Ok(None);
-    };
+/// Lowest per-call timeout of an import's extraction calls; a profile's
+/// shorter timeout is raised to it.
+pub const IMPORT_MIN_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Lowest per-call token limit of an import's extraction calls; a profile's
+/// smaller limit is raised to it.
+pub const IMPORT_MIN_MAX_TOKENS: u32 = 8192;
+
+/// Highest temperature of an import's extraction calls.
+const IMPORT_MAX_TEMPERATURE: f32 = 0.2;
+
+/// The engine generating `mock`'s responses: its persona, the stream
+/// settings and, unless offline or no profile applies, the provider chain
+/// of its profile with the head profile's timeout, temperature and token
+/// limit.
+pub async fn build_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
     let mut config = EngineConfig {
         persona: mock.persona.clone(),
         stream: deps.stream.clone(),
@@ -113,10 +119,91 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
             config.timeout = head.timeout;
             config.temperature = head.temperature;
             config.max_tokens = head.max_tokens;
-            Some(chain_provider(deps, &chain).await?)
+            Some(chain_provider(deps, &chain, hop_settings).await?)
         }
         _ => None,
     };
+    Ok(Engine::new(provider, config))
+}
+
+/// The provider an import of `mock` extracts with, or `None` when the
+/// server is offline or no profile applies. The profile is
+/// `profile_override` (from the mock's workspace, else `default`) or the
+/// one the mock is served with; each hop's settings are raised to the
+/// import minimums ([`IMPORT_MIN_TIMEOUT`], [`IMPORT_MIN_MAX_TOKENS`]) and
+/// its temperature capped at 0.2.
+pub async fn import_provider(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    profile_override: Option<&str>,
+) -> anyhow::Result<Option<ExtractLlm>> {
+    if deps.offline {
+        return Ok(None);
+    }
+    let (workspace, name) = match profile_override {
+        // The override is chosen through the provider policy like any
+        // other profile; the policy may swap or refuse it.
+        Some(name) => match choose_profile(deps, mock, Some(name))? {
+            Some(name) => (own_or_default_workspace(deps, mock, &name).await?, name),
+            None => return Ok(None),
+        },
+        None => match profile_name(deps, mock)? {
+            Some(name) => (profile_workspace(deps, mock, &name).await?, name),
+            None => return Ok(None),
+        },
+    };
+    let chain = load_chain(deps, &workspace, &name).await?;
+    let settings = chain
+        .first()
+        .map(import_hop)
+        .ok_or_else(|| anyhow!("empty LLM profile chain"))?;
+    let provider = chain_provider(deps, &chain, import_hop).await?;
+    Ok(Some(ExtractLlm { provider, settings }))
+}
+
+/// The workspace profile `name` is loaded from for `mock` when it may come
+/// from `default`: the mock's own when it has the profile, else `default`.
+async fn own_or_default_workspace(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    name: &str,
+) -> anyhow::Result<String> {
+    if mock.workspace == DEFAULT_WORKSPACE {
+        return Ok(mock.workspace.clone());
+    }
+    let own = deps
+        .store
+        .get_profile(&mock.workspace, name)
+        .await
+        .with_context(|| format!("loading LLM profile {name:?}"))?;
+    Ok(match own {
+        Some(_) => mock.workspace.clone(),
+        None => DEFAULT_WORKSPACE.to_string(),
+    })
+}
+
+/// A profile's settings for import extraction calls.
+fn import_hop(profile: &LlmProfile) -> HopSettings {
+    let serving = hop_settings(profile);
+    HopSettings {
+        timeout: serving.timeout.max(IMPORT_MIN_TIMEOUT),
+        temperature: serving.temperature.min(IMPORT_MAX_TEMPERATURE),
+        max_tokens: serving.max_tokens.max(IMPORT_MIN_MAX_TOKENS),
+    }
+}
+
+/// The runtime serving `mock`'s active contract, or `None` when it has none.
+pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<MockRuntime>> {
+    let Some(contract) = deps
+        .store
+        .active_contract(mock.id)
+        .await
+        .with_context(|| format!("loading the active contract of mock {:?}", mock.name))?
+    else {
+        return Ok(None);
+    };
+
+    let engine = build_engine(deps, mock).await?;
 
     let scenarios = deps
         .store
@@ -130,7 +217,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     let mut rt = MockRuntime::new(
         mock.name.clone(),
         Arc::new(contract.bundle),
-        Arc::new(Engine::new(provider, config)),
+        Arc::new(engine),
         deps.state.clone(),
     );
     rt.workspace = mock.workspace.clone();
@@ -161,18 +248,10 @@ fn data_plane_auth(config: &DataPlaneAuthConfig) -> DataPlaneAuth {
 /// workspace, except that a default profile (the mock names none) missing
 /// there is taken from the `default` workspace.
 async fn profile_workspace(deps: &RuntimeDeps, mock: &Mock, name: &str) -> anyhow::Result<String> {
-    if mock.llm_profile.is_some() || mock.workspace == DEFAULT_WORKSPACE {
+    if mock.llm_profile.is_some() {
         return Ok(mock.workspace.clone());
     }
-    let own = deps
-        .store
-        .get_profile(&mock.workspace, name)
-        .await
-        .with_context(|| format!("loading LLM profile {name:?}"))?;
-    Ok(match own {
-        Some(_) => mock.workspace.clone(),
-        None => DEFAULT_WORKSPACE.to_string(),
-    })
+    own_or_default_workspace(deps, mock, name).await
 }
 
 /// The provider for `profile_name` in the `default` workspace, wrapped in
@@ -185,7 +264,7 @@ pub async fn build_provider(
     profile_name: &str,
 ) -> anyhow::Result<Arc<dyn Provider>> {
     let chain = load_chain(deps, DEFAULT_WORKSPACE, profile_name).await?;
-    chain_provider(deps, &chain).await
+    chain_provider(deps, &chain, hop_settings).await
 }
 
 /// `profile_name` and the profiles it falls back to, in order, all from
@@ -220,16 +299,18 @@ async fn load_chain(
     Ok(chain)
 }
 
-/// The provider for a loaded chain: each profile falls back to the next.
+/// The provider for a loaded chain: each profile falls back to the next,
+/// each hop with the settings `settings` gives its profile.
 async fn chain_provider(
     deps: &RuntimeDeps,
     chain: &[LlmProfile],
+    settings: fn(&LlmProfile) -> HopSettings,
 ) -> anyhow::Result<Arc<dyn Provider>> {
     // Built from the last hop backwards: (provider, its profile's settings).
     let mut fallback: Option<(Arc<dyn Provider>, HopSettings)> = None;
     for profile in chain.iter().rev() {
         let this = openai_provider(deps, profile).await?;
-        let settings = hop_settings(profile);
+        let settings = settings(profile);
         let provider = match fallback {
             None => this,
             Some((secondary, secondary_settings)) => Arc::new(
@@ -256,9 +337,18 @@ fn hop_settings(profile: &LlmProfile) -> HopSettings {
 
 /// The profile the provider policy picks for `mock`, if any.
 fn profile_name(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<String>> {
-    let tenancy = Tenancy::new("default", mock.workspace.clone());
     let default_profile = deps.default_profile.get();
     let configured = mock.llm_profile.as_deref().or(default_profile.as_deref());
+    choose_profile(deps, mock, configured)
+}
+
+/// The profile the provider policy picks for `mock` given `configured`.
+fn choose_profile(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    configured: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let tenancy = Tenancy::new("default", mock.workspace.clone());
     deps.ext
         .providers
         .choose(&tenancy, &mock.name, configured)

@@ -10,6 +10,7 @@ const activeTab = "border-indigo-700 text-slate-950";
 const TABS = [
   { to: "/w/$ws/mocks/$mock/overview", label: "Overview" },
   { to: "/w/$ws/mocks/$mock/contracts", label: "Contracts" },
+  { to: "/w/$ws/mocks/$mock/import", label: "Import" },
   { to: "/w/$ws/mocks/$mock/scenarios", label: "Scenarios" },
   { to: "/w/$ws/mocks/$mock/sessions", label: "Sessions" },
   { to: "/w/$ws/mocks/$mock/requests", label: "Live requests" },

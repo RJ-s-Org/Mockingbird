@@ -28,6 +28,10 @@ pub struct Problem {
     pub title: String,
     pub status: u16,
     pub detail: String,
+    /// Sent as a `Retry-After` header (whole seconds), not in the body.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub retry_after: Option<std::time::Duration>,
 }
 
 impl Problem {
@@ -41,6 +45,7 @@ impl Problem {
             title: title.into(),
             status: status.as_u16(),
             detail: detail.into(),
+            retry_after: None,
         }
     }
 
@@ -95,10 +100,28 @@ impl IntoResponse for Problem {
                 header::HeaderValue::from_static(WWW_AUTHENTICATE),
             );
         }
+        if let Some(after) = self.retry_after {
+            resp.headers_mut().insert(
+                header::RETRY_AFTER,
+                header::HeaderValue::from(after.as_secs().max(1)),
+            );
+        }
         if status.is_server_error() {
             resp.extensions_mut().insert(ProblemDetail(self.detail));
         }
         resp
+    }
+}
+
+/// An extension's refusal (quota, provider policy) with its status, title,
+/// detail and `Retry-After`.
+impl From<mb_ext::Rejection> for Problem {
+    fn from(r: mb_ext::Rejection) -> Self {
+        let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS);
+        Self {
+            retry_after: r.retry_after,
+            ..Self::titled(status, r.title, r.detail)
+        }
     }
 }
 

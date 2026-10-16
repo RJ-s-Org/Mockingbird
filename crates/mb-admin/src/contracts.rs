@@ -86,6 +86,9 @@ pub struct ContractVersionSummary {
     pub created_at: DateTime<Utc>,
     /// Number of operations in the compiled contract.
     pub operations: usize,
+    /// Whether the version was produced by an import (it has draft review
+    /// metadata).
+    pub imported: bool,
     /// Number of event channels in the compiled contract.
     pub channels: usize,
 }
@@ -149,6 +152,7 @@ impl From<&ContractVersion> for ContractVersionSummary {
             created_by: v.created_by.clone(),
             created_at: v.created_at,
             operations: v.bundle.operations.len(),
+            imported: v.draft_meta.is_some(),
             channels: v.bundle.channels.len(),
         }
     }
@@ -201,7 +205,7 @@ fn protocol_name(p: Protocol) -> String {
         .unwrap_or_default()
 }
 
-fn method_name(m: HttpMethod) -> &'static str {
+pub(crate) fn method_name(m: HttpMethod) -> &'static str {
     match m {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",
@@ -213,7 +217,11 @@ fn method_name(m: HttpMethod) -> &'static str {
     }
 }
 
-async fn version(st: &AdminState, mock: &Mock, version: i64) -> ApiResult<ContractVersion> {
+pub(crate) async fn version(
+    st: &AdminState,
+    mock: &Mock,
+    version: i64,
+) -> ApiResult<ContractVersion> {
     st.store
         .get_contract_version(mock.id, version)
         .await?

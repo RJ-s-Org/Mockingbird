@@ -14,6 +14,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::{any, get, post};
 use mb_auth::{Authenticate, LocalAuth};
+use mb_ext::{Extensions, Tenancy};
 use mb_state::StateStore;
 use mb_store::{ContractStatus, ControlStore, Mock, ResourceSource};
 use serde::Serialize;
@@ -25,6 +26,8 @@ mod audit;
 mod auth_routes;
 pub mod channels;
 mod contracts;
+mod drafts;
+pub mod imports;
 mod live;
 mod login_limit;
 mod mocks;
@@ -42,6 +45,13 @@ pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
 pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
 pub use auth_routes::{
     LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
+};
+pub use imports::llm::{LlmResolver, OfflineLlm};
+pub use imports::worker::{ImportWorkers, run_next_import, spawn_import_workers};
+pub use imports::{
+    CreateImport, DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK, IMPORT_OPERATION, ImportJobView,
+    ImportKindSchema, ImportProgressView, ImportSettings, ImportStatusSchema, Imports,
+    MAX_IMPORT_REQUEST_BYTES, UPLOAD_HEADER,
 };
 pub use live::{LiveRequestView, LiveSubscribe, StreamQuery};
 pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUPPRESSED_METRIC};
@@ -85,12 +95,21 @@ pub struct AdminState {
     pub web_auth: Option<WebAuth>,
     /// Rate limit for `auth.login_failed` audit events.
     pub login_failures: Arc<LoginFailureLimiter>,
+    /// LLM access of imports and draft previews ([`OfflineLlm`] by default).
+    pub llm: Arc<dyn LlmResolver>,
+    /// Import settings and the worker wake-up signal.
+    pub imports: Imports,
+    /// The extension points: import jobs and draft previews are admitted by
+    /// `quota` and their LLM calls reported to `usage`, like data-plane
+    /// calls ([`Extensions::default`] by default).
+    pub ext: Extensions,
 }
 
 impl AdminState {
     /// A state with [`LocalAuth`] (`auth.mode: none`), the
     /// [`DEFAULT_API_SECRET_REFS`], an [`Auditor`] without a webhook, no
-    /// live request feed and no browser login.
+    /// live request feed, no browser login, no LLM ([`OfflineLlm`]) and the
+    /// default [`ImportSettings`].
     pub fn new(store: Arc<dyn ControlStore>, state: Arc<dyn StateStore>) -> Self {
         Self {
             audit: Auditor::new(store.clone(), None),
@@ -107,7 +126,22 @@ impl AdminState {
             live_recheck: DEFAULT_LIVE_RECHECK,
             web_auth: None,
             login_failures: Arc::new(LoginFailureLimiter::new()),
+            llm: Arc::new(OfflineLlm),
+            imports: Imports::default(),
+            ext: Extensions::default(),
         }
+    }
+}
+
+/// The tenant every admin call is attributed to (as the runtime attributes
+/// its provider choices).
+pub const DEFAULT_TENANT: &str = "default";
+
+/// The tenancy of a call in workspace `ws`.
+pub(crate) fn tenancy(ws: &str) -> Tenancy {
+    Tenancy {
+        tenant: DEFAULT_TENANT.to_string(),
+        workspace: ws.to_string(),
     }
 }
 
@@ -154,6 +188,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// Every `/api` response carries `X-Content-Type-Options: nosniff` and the
 /// sandboxing [`API_CSP`]; contract sources download as attachments.
 pub fn router(st: AdminState) -> Router {
+    let import_body_limit = axum::extract::DefaultBodyLimit::max(MAX_IMPORT_REQUEST_BYTES);
     let resources: Router<AdminState> = Router::new()
         .route("/mocks", get(mocks::list).post(mocks::create))
         .route(
@@ -174,6 +209,22 @@ pub fn router(st: AdminState) -> Router {
         .route(
             "/mocks/{mock}/contracts/{version}/activate",
             post(contracts::activate),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/draft",
+            // Imported drafts are as large as contract uploads, and every
+            // console edit PUTs the whole document.
+            get(drafts::get_draft).put(drafts::put_draft).layer(
+                axum::extract::DefaultBodyLimit::max(contracts::MAX_CONTRACT_BYTES),
+            ),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/approve",
+            post(drafts::approve),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/preview",
+            post(drafts::preview),
         )
         .route("/mocks/{mock}/scenarios", get(scenarios::list))
         .route(
@@ -196,6 +247,16 @@ pub fn router(st: AdminState) -> Router {
         )
         .route("/mocks/{mock}/requests", get(requests::list))
         .route("/mocks/{mock}/requests/stream", get(live::stream))
+        .route(
+            "/mocks/{mock}/imports",
+            get(imports::list)
+                .post(imports::create)
+                .layer(import_body_limit),
+        )
+        .route(
+            "/mocks/{mock}/imports/{job}",
+            get(imports::get_one).delete(imports::cancel),
+        )
         .merge(channels::routes());
     // Workspace-only resources: no P2 alias for `default`.
     let workspace_only: Router<AdminState> = resources

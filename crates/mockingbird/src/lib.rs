@@ -6,6 +6,7 @@ pub mod dp_keys;
 pub mod events;
 pub mod file_config;
 pub mod host_guard;
+pub mod import_llm;
 pub mod maintenance;
 pub mod ops;
 pub mod reconcile;

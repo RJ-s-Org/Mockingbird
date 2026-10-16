@@ -14,13 +14,18 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use mb_mcm::Bundle;
+use serde_json::Value;
+
 use crate::{
     ACQUIRE_TIMEOUT, AdminSession, ApiKey, AuditEvent, AuditFilter, CHANGE_CHANNEL_CAPACITY,
     ChannelSettings, ContractStatus, ContractVersion, ControlChange, ControlStore,
-    DEFAULT_WORKSPACE, LlmProfile, Mock, MockEventSettings, NewAuditEvent, NewContractVersion,
+    DEFAULT_WORKSPACE, ImportJob, ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile,
+    MAX_IMPORT_JOB_LIST, Mock, MockEventSettings, NewAuditEvent, NewContractVersion, NewImportJob,
     NewMock, NewRequestLogEntry, PruneCounter, RequestKind, RequestLogEntry, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError, Workspace, lease_times, missing_workspace,
-    now, sha256_hex, validate_header_name, validate_mock_name, validate_mock_settings,
+    ResourceSource, STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace,
+    lease_times, missing_workspace, not_a_draft, now, queued_progress, require_draft_status,
+    sha256_hex, validate_header_name, validate_mock_name, validate_mock_settings,
     validate_route_prefix, validate_workspace_name,
 };
 
@@ -35,10 +40,14 @@ const MOCK_SELECT: &str = "id, workspace, name, route_prefix, persona, llm_profi
      data_plane_auth::text AS data_plane_auth, created_at, updated_at, chaos::text AS chaos, \
      limits::text AS limits";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
-const VERSION_COLUMNS: &str =
-    "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at";
+const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
+     draft_meta";
 /// [`VERSION_COLUMNS`] with JSON read back as text.
-const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundle::text AS bundle, status, created_by, created_at";
+const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundle::text AS bundle, status, \
+     created_by, created_at, draft_meta::text AS draft_meta";
+/// Every `import_jobs` column but `input`, with JSON read back as text.
+const JOB_SELECT: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress::text AS progress, \
+     result_version, error, created_by, created_at, started_at, finished_at, updated_at";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
      max_tokens, fallback_profile, source";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
@@ -202,6 +211,7 @@ fn mock_from_row(row: &PgRow) -> Result<Mock, StoreError> {
 fn version_from_row(row: &PgRow) -> Result<ContractVersion, StoreError> {
     let bundle: String = row.try_get("bundle")?;
     let status: String = row.try_get("status")?;
+    let draft_meta: Option<String> = row.try_get("draft_meta")?;
     Ok(ContractVersion {
         id: row.try_get("id")?,
         mock_id: row.try_get("mock_id")?,
@@ -212,6 +222,105 @@ fn version_from_row(row: &PgRow) -> Result<ContractVersion, StoreError> {
         status: ContractStatus::parse(&status)?,
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
+        draft_meta: draft_meta.map(|m| serde_json::from_str(&m)).transpose()?,
+    })
+}
+
+/// Inserts `v` as the mock's next version inside `tx`, demoting the active
+/// version when `v` is `Active`. The caller holds the mock's
+/// [`LOCK_FOR_VERSIONS`] lock.
+async fn insert_version(
+    tx: &mut Transaction<'_, Postgres>,
+    mock_id: Uuid,
+    v: NewContractVersion,
+    draft_meta: Option<Value>,
+) -> Result<ContractVersion, StoreError> {
+    let bundle = serde_json::to_string(&v.bundle)?;
+    let meta = draft_meta.as_ref().map(serde_json::to_string).transpose()?;
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM contract_versions WHERE mock_id = $1",
+    )
+    .bind(mock_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if v.status == ContractStatus::Active {
+        sqlx::query(
+            "UPDATE contract_versions SET status = 'approved' WHERE mock_id = $1 AND status = 'active'",
+        )
+        .bind(mock_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    let version = ContractVersion {
+        id: Uuid::new_v4(),
+        mock_id,
+        version: next,
+        source_digest: sha256_hex(&v.source),
+        source: v.source,
+        bundle: v.bundle,
+        status: v.status,
+        created_by: v.created_by,
+        created_at: now(),
+        draft_meta,
+    };
+    let sql = format!(
+        "INSERT INTO contract_versions ({VERSION_COLUMNS}) \
+         VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8, $9, $10::json)"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(version.id)
+        .bind(mock_id)
+        .bind(version.version)
+        .bind(&version.source_digest)
+        .bind(&version.source)
+        .bind(bundle)
+        .bind(version.status.as_str())
+        .bind(&version.created_by)
+        .bind(version.created_at)
+        .bind(meta)
+        .execute(&mut **tx)
+        .await?;
+    Ok(version)
+}
+
+/// The version's status inside `tx`; `NotFound` if it does not exist.
+async fn version_status(
+    tx: &mut Transaction<'_, Postgres>,
+    mock_id: Uuid,
+    version: i64,
+) -> Result<ContractStatus, StoreError> {
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM contract_versions WHERE mock_id = $1 AND version = $2",
+    )
+    .bind(mock_id)
+    .bind(version)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let status = status.ok_or_else(|| {
+        StoreError::NotFound(format!("contract version {version} of mock {mock_id}"))
+    })?;
+    ContractStatus::parse(&status)
+}
+
+fn job_from_row(row: &PgRow) -> Result<ImportJob, StoreError> {
+    let status: String = row.try_get("status")?;
+    let progress: String = row.try_get("progress")?;
+    Ok(ImportJob {
+        id: row.try_get("id")?,
+        workspace: row.try_get("workspace")?,
+        mock_id: row.try_get("mock_id")?,
+        mock: row.try_get("mock")?,
+        kind: row.try_get("kind")?,
+        source_name: row.try_get("source_name")?,
+        status: ImportJobStatus::parse(&status)?,
+        progress: serde_json::from_str::<ImportProgress>(&progress)?,
+        result_version: row.try_get("result_version")?,
+        error: row.try_get("error")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        started_at: row.try_get("started_at")?,
+        finished_at: row.try_get("finished_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
@@ -646,50 +755,9 @@ impl ControlStore for PgStore {
         mock_id: Uuid,
         v: NewContractVersion,
     ) -> Result<ContractVersion, StoreError> {
-        let bundle = serde_json::to_string(&v.bundle)?;
         let mut tx = self.pool.begin().await?;
         let (ws, name) = require_locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS).await?;
-        let next: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM contract_versions WHERE mock_id = $1",
-        )
-        .bind(mock_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if v.status == ContractStatus::Active {
-            sqlx::query(
-                "UPDATE contract_versions SET status = 'approved' WHERE mock_id = $1 AND status = 'active'",
-            )
-            .bind(mock_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-        let version = ContractVersion {
-            id: Uuid::new_v4(),
-            mock_id,
-            version: next,
-            source_digest: sha256_hex(&v.source),
-            source: v.source,
-            bundle: v.bundle,
-            status: v.status,
-            created_by: v.created_by,
-            created_at: now(),
-        };
-        let sql = format!(
-            "INSERT INTO contract_versions ({VERSION_COLUMNS}) \
-             VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8, $9)"
-        );
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(version.id)
-            .bind(mock_id)
-            .bind(version.version)
-            .bind(&version.source_digest)
-            .bind(&version.source)
-            .bind(bundle)
-            .bind(version.status.as_str())
-            .bind(&version.created_by)
-            .bind(version.created_at)
-            .execute(&mut *tx)
-            .await?;
+        let version = insert_version(&mut tx, mock_id, v, None).await?;
         tx.commit().await?;
         self.publish_mock(&ws, &name);
         Ok(version)
@@ -1360,6 +1428,317 @@ impl ControlStore for PgStore {
             .execute(&self.pool)
             .await?
             .rows_affected())
+    }
+
+    async fn add_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        require_draft_status(&v)?;
+        let mut tx = self.pool.begin().await?;
+        require_locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS).await?;
+        let version = insert_version(&mut tx, mock_id, v, Some(draft_meta)).await?;
+        tx.commit().await?;
+        Ok(version)
+    }
+
+    async fn update_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        source: Vec<u8>,
+        bundle: Bundle,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        let bundle = serde_json::to_string(&bundle)?;
+        let meta = serde_json::to_string(&draft_meta)?;
+        let digest = sha256_hex(&source);
+        let mut tx = self.pool.begin().await?;
+        require_locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS).await?;
+        if version_status(&mut tx, mock_id, version).await? != ContractStatus::Draft {
+            return Err(not_a_draft(version));
+        }
+        let sql = format!(
+            "UPDATE contract_versions SET source = $1, source_digest = $2, bundle = $3::json, \
+             draft_meta = $4::json WHERE mock_id = $5 AND version = $6 RETURNING {VERSION_SELECT}"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(source)
+            .bind(digest)
+            .bind(bundle)
+            .bind(meta)
+            .bind(mock_id)
+            .bind(version)
+            .fetch_one(&mut *tx)
+            .await?;
+        let updated = version_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    async fn approve_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<ContractVersion, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS).await?;
+        if version_status(&mut tx, mock_id, version).await? != ContractStatus::Draft {
+            return Err(not_a_draft(version));
+        }
+        let sql = format!(
+            "UPDATE contract_versions SET status = 'approved' \
+             WHERE mock_id = $1 AND version = $2 RETURNING {VERSION_SELECT}"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id)
+            .bind(version)
+            .fetch_one(&mut *tx)
+            .await?;
+        let approved = version_from_row(&row)?;
+        tx.commit().await?;
+        Ok(approved)
+    }
+
+    async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
+        let progress = queued_progress();
+        let progress_json = serde_json::to_string(&progress)?;
+        let mut tx = self.pool.begin().await?;
+        let (workspace, mock) = require_locked_mock_key(&mut tx, j.mock_id, LOCK_KEEP).await?;
+        let at = now();
+        let job = ImportJob {
+            id: Uuid::new_v4(),
+            workspace,
+            mock_id: j.mock_id,
+            mock,
+            kind: j.kind,
+            source_name: j.source_name,
+            status: ImportJobStatus::Queued,
+            progress,
+            result_version: None,
+            error: None,
+            created_by: j.created_by,
+            created_at: at,
+            started_at: None,
+            finished_at: None,
+            updated_at: at,
+        };
+        sqlx::query(
+            "INSERT INTO import_jobs (id, workspace, mock_id, mock, kind, source_name, input, status, \
+             progress, created_by, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12)",
+        )
+        .bind(job.id)
+        .bind(&job.workspace)
+        .bind(job.mock_id)
+        .bind(&job.mock)
+        .bind(&job.kind)
+        .bind(&job.source_name)
+        .bind(j.input)
+        .bind(job.status.as_str())
+        .bind(progress_json)
+        .bind(&job.created_by)
+        .bind(job.created_at)
+        .bind(job.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(job)
+    }
+
+    async fn get_import_job(&self, id: Uuid) -> Result<Option<ImportJob>, StoreError> {
+        let sql = format!("SELECT {JOB_SELECT} FROM import_jobs WHERE id = $1");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(job_from_row)
+            .transpose()
+    }
+
+    async fn import_job_input(&self, id: Uuid) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT input FROM import_jobs WHERE id = $1 AND status IN ('queued', 'running')",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn list_import_jobs(
+        &self,
+        mock_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<ImportJob>, StoreError> {
+        let sql = format!(
+            "SELECT {JOB_SELECT} FROM import_jobs WHERE mock_id = $1 \
+             ORDER BY created_at DESC, id DESC LIMIT $2"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id)
+            .bind(i64::from(limit.clamp(1, MAX_IMPORT_JOB_LIST)))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(job_from_row)
+            .collect()
+    }
+
+    async fn claim_import_job(&self, now: DateTime<Utc>) -> Result<Option<ImportJob>, StoreError> {
+        // `SKIP LOCKED` lets concurrent claimers pass over a row another
+        // transaction is claiming; the outer status check re-validates it.
+        let sql = format!(
+            "UPDATE import_jobs SET status = 'running', started_at = $1, updated_at = $1 \
+             WHERE status = 'queued' AND id = (SELECT id FROM import_jobs WHERE status = 'queued' \
+             ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING {JOB_SELECT}"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(job_from_row)
+            .transpose()
+    }
+
+    async fn update_import_progress(
+        &self,
+        id: Uuid,
+        p: &ImportProgress,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET progress = $1::json, updated_at = $2 \
+             WHERE id = $3 AND status = 'running'",
+        )
+        .bind(serde_json::to_string(p)?)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn finish_import_job(
+        &self,
+        id: Uuid,
+        outcome: ImportOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        let (status, version, error) = match outcome {
+            ImportOutcome::Done { version } => (ImportJobStatus::Done, Some(version), None),
+            ImportOutcome::Failed { error } => (ImportJobStatus::Failed, None, Some(error)),
+        };
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET status = $1, result_version = $2, error = $3, input = ''::bytea, \
+             finished_at = $4, updated_at = $4 WHERE id = $5 AND status = 'running'",
+        )
+        .bind(status.as_str())
+        .bind(version)
+        .bind(error)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn complete_import_job(
+        &self,
+        id: Uuid,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        require_draft_status(&v)?;
+        let mut tx = self.pool.begin().await?;
+        // The mock first, then the job: the order a mock delete locks them.
+        if locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let running: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM import_jobs WHERE id = $1 AND mock_id = $2 AND status = 'running' \
+             FOR UPDATE",
+        )
+        .bind(id)
+        .bind(mock_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if running.is_none() {
+            return Ok(None);
+        }
+        let version = insert_version(&mut tx, mock_id, v, Some(draft_meta)).await?;
+        sqlx::query(
+            "UPDATE import_jobs SET status = 'done', result_version = $1, error = NULL, \
+             input = ''::bytea, finished_at = $2, updated_at = $2 WHERE id = $3",
+        )
+        .bind(version.version)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(version))
+    }
+
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM import_jobs WHERE mock_id = $1 AND status IN ('queued', 'running')",
+        )
+        .bind(mock_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET status = 'canceled', input = ''::bytea, finished_at = $1, \
+             updated_at = $1 WHERE id = $2 AND status IN ('queued', 'running')",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn fail_stale_import_jobs(
+        &self,
+        updated_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET status = 'failed', error = $1, input = ''::bytea, \
+             finished_at = $2, updated_at = $2 WHERE status = 'running' AND updated_at < $3",
+        )
+        .bind(STALE_IMPORT_ERROR)
+        .bind(now)
+        .bind(updated_before)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    async fn prune_import_jobs(&self, finished_before: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(sqlx::query(
+            "DELETE FROM import_jobs WHERE status IN ('done', 'failed', 'canceled') \
+             AND finished_at < $1",
+        )
+        .bind(finished_before)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {

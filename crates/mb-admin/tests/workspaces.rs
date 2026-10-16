@@ -462,8 +462,9 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
             aliases += 1;
         }
     }
-    // 23 P3 operations and the 6 channel and event-settings operations (P5).
-    assert_eq!(aliases, 29, "every mock and profile operation has an alias");
+    // 23 P3 operations, the 6 channel and event-settings operations (P5)
+    // and the 8 import, draft and preview operations (P6).
+    assert_eq!(aliases, 37, "every mock and profile operation has an alias");
     assert!(paths["/api/v1/mocks"]["post"]["deprecated"] == true);
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();

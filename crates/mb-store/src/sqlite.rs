@@ -11,13 +11,18 @@ use uuid::Uuid;
 
 use chrono::{DateTime, Utc};
 
+use mb_mcm::Bundle;
+use serde_json::Value;
+
 use crate::{
     ACQUIRE_TIMEOUT, AdminSession, ApiKey, AuditEvent, AuditFilter, CHANGE_CHANNEL_CAPACITY,
     ChannelSettings, ContractStatus, ContractVersion, ControlChange, ControlStore,
-    DEFAULT_WORKSPACE, LlmProfile, Mock, MockEventSettings, NewAuditEvent, NewContractVersion,
+    DEFAULT_WORKSPACE, ImportJob, ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile,
+    MAX_IMPORT_JOB_LIST, Mock, MockEventSettings, NewAuditEvent, NewContractVersion, NewImportJob,
     NewMock, NewRequestLogEntry, PruneCounter, RequestKind, RequestLogEntry, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError, Workspace, lease_times, missing_workspace,
-    now, sha256_hex, validate_header_name, validate_mock_name, validate_mock_settings,
+    ResourceSource, STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace,
+    lease_times, missing_workspace, not_a_draft, now, queued_progress, require_draft_status,
+    sha256_hex, validate_header_name, validate_mock_name, validate_mock_settings,
     validate_route_prefix, validate_workspace_name,
 };
 
@@ -28,8 +33,8 @@ const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
      data_plane_auth, created_at, updated_at, chaos, limits";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
-const VERSION_COLUMNS: &str =
-    "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at";
+const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
+     draft_meta";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
      max_tokens, fallback_profile, source";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
@@ -37,6 +42,9 @@ const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, 
 const SESSION_COLUMNS: &str = "id_hash, principal, created_at, expires_at, last_seen";
 const AUDIT_COLUMNS: &str = "id, workspace, actor_subject, actor_kind, action, target, before_value, after_value, \
      request_id, at";
+/// Every `import_jobs` column but `input`.
+const JOB_COLUMNS: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress, result_version, \
+     error, created_by, created_at, started_at, finished_at, updated_at";
 const LOG_COLUMNS: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
      prompt_tokens, completion_tokens, request, response, at, kind";
 const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
@@ -113,6 +121,91 @@ impl SqliteControlStore {
             .await?
             .ok_or_else(|| StoreError::NotFound(format!("mock {id}")))
     }
+
+    /// Inserts `v` as the mock's next version, demoting the active version
+    /// when `v` is `Active`. Publishes nothing.
+    async fn insert_version(
+        &self,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Option<Value>,
+    ) -> Result<ContractVersion, StoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let version = Self::insert_version_in(&mut tx, mock_id, v, draft_meta).await?;
+        tx.commit().await?;
+        Ok(version)
+    }
+
+    /// [`Self::insert_version`] inside the caller's transaction.
+    async fn insert_version_in(
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Option<Value>,
+    ) -> Result<ContractVersion, StoreError> {
+        let bundle = serde_json::to_string(&v.bundle)?;
+        let meta = draft_meta.as_ref().map(serde_json::to_string).transpose()?;
+        let next: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM contract_versions WHERE mock_id = ?",
+        )
+        .bind(mock_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
+        if v.status == ContractStatus::Active {
+            sqlx::query("UPDATE contract_versions SET status = 'approved' WHERE mock_id = ? AND status = 'active'")
+                .bind(mock_id.to_string())
+                .execute(&mut **tx)
+                .await?;
+        }
+        let version = ContractVersion {
+            id: Uuid::new_v4(),
+            mock_id,
+            version: next,
+            source_digest: sha256_hex(&v.source),
+            source: v.source,
+            bundle: v.bundle,
+            status: v.status,
+            created_by: v.created_by,
+            created_at: now(),
+            draft_meta,
+        };
+        let sql = format!(
+            "INSERT INTO contract_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(version.id.to_string())
+            .bind(mock_id.to_string())
+            .bind(version.version)
+            .bind(&version.source_digest)
+            .bind(&version.source)
+            .bind(bundle)
+            .bind(version.status.as_str())
+            .bind(&version.created_by)
+            .bind(version.created_at)
+            .bind(meta)
+            .execute(&mut **tx)
+            .await?;
+        Ok(version)
+    }
+
+    /// The version's status inside `tx`; `NotFound` if it does not exist.
+    async fn version_status(
+        conn: &mut sqlx::SqliteConnection,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<ContractStatus, StoreError> {
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM contract_versions WHERE mock_id = ? AND version = ?",
+        )
+        .bind(mock_id.to_string())
+        .bind(version)
+        .fetch_optional(conn)
+        .await?;
+        let status = status.ok_or_else(|| {
+            StoreError::NotFound(format!("contract version {version} of mock {mock_id}"))
+        })?;
+        ContractStatus::parse(&status)
+    }
 }
 
 /// `NotFound` unless workspace `ws` exists.
@@ -175,6 +268,7 @@ fn version_from_row(row: &SqliteRow) -> Result<ContractVersion, StoreError> {
     let mock_id: String = row.try_get("mock_id")?;
     let bundle: String = row.try_get("bundle")?;
     let status: String = row.try_get("status")?;
+    let draft_meta: Option<String> = row.try_get("draft_meta")?;
     Ok(ContractVersion {
         id: parse_uuid(&id)?,
         mock_id: parse_uuid(&mock_id)?,
@@ -185,6 +279,31 @@ fn version_from_row(row: &SqliteRow) -> Result<ContractVersion, StoreError> {
         status: ContractStatus::parse(&status)?,
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
+        draft_meta: draft_meta.map(|m| serde_json::from_str(&m)).transpose()?,
+    })
+}
+
+fn job_from_row(row: &SqliteRow) -> Result<ImportJob, StoreError> {
+    let id: String = row.try_get("id")?;
+    let mock_id: String = row.try_get("mock_id")?;
+    let status: String = row.try_get("status")?;
+    let progress: String = row.try_get("progress")?;
+    Ok(ImportJob {
+        id: parse_uuid(&id)?,
+        workspace: row.try_get("workspace")?,
+        mock_id: parse_uuid(&mock_id)?,
+        mock: row.try_get("mock")?,
+        kind: row.try_get("kind")?,
+        source_name: row.try_get("source_name")?,
+        status: ImportJobStatus::parse(&status)?,
+        progress: serde_json::from_str::<ImportProgress>(&progress)?,
+        result_version: row.try_get("result_version")?,
+        error: row.try_get("error")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        started_at: row.try_get("started_at")?,
+        finished_at: row.try_get("finished_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
@@ -617,47 +736,7 @@ impl ControlStore for SqliteControlStore {
         v: NewContractVersion,
     ) -> Result<ContractVersion, StoreError> {
         let (ws, name) = self.require_mock_key(mock_id).await?;
-        let bundle = serde_json::to_string(&v.bundle)?;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let next: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM contract_versions WHERE mock_id = ?",
-        )
-        .bind(mock_id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        if v.status == ContractStatus::Active {
-            sqlx::query("UPDATE contract_versions SET status = 'approved' WHERE mock_id = ? AND status = 'active'")
-                .bind(mock_id.to_string())
-                .execute(&mut *tx)
-                .await?;
-        }
-        let version = ContractVersion {
-            id: Uuid::new_v4(),
-            mock_id,
-            version: next,
-            source_digest: sha256_hex(&v.source),
-            source: v.source,
-            bundle: v.bundle,
-            status: v.status,
-            created_by: v.created_by,
-            created_at: now(),
-        };
-        let sql = format!(
-            "INSERT INTO contract_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        );
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(version.id.to_string())
-            .bind(mock_id.to_string())
-            .bind(version.version)
-            .bind(&version.source_digest)
-            .bind(&version.source)
-            .bind(bundle)
-            .bind(version.status.as_str())
-            .bind(&version.created_by)
-            .bind(version.created_at)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+        let version = self.insert_version(mock_id, v, None).await?;
         self.publish_mock(&ws, &name);
         Ok(version)
     }
@@ -1305,6 +1384,312 @@ impl ControlStore for SqliteControlStore {
             .execute(&self.pool)
             .await?
             .rows_affected())
+    }
+
+    async fn add_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        require_draft_status(&v)?;
+        self.require_mock_key(mock_id).await?;
+        self.insert_version(mock_id, v, Some(draft_meta)).await
+    }
+
+    async fn update_draft_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        source: Vec<u8>,
+        bundle: Bundle,
+        draft_meta: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        let bundle = serde_json::to_string(&bundle)?;
+        let meta = serde_json::to_string(&draft_meta)?;
+        let digest = sha256_hex(&source);
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if Self::version_status(&mut tx, mock_id, version).await? != ContractStatus::Draft {
+            return Err(not_a_draft(version));
+        }
+        let sql = format!(
+            "UPDATE contract_versions SET source = ?, source_digest = ?, bundle = ?, draft_meta = ? \
+             WHERE mock_id = ? AND version = ? RETURNING {VERSION_COLUMNS}"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(source)
+            .bind(digest)
+            .bind(bundle)
+            .bind(meta)
+            .bind(mock_id.to_string())
+            .bind(version)
+            .fetch_one(&mut *tx)
+            .await?;
+        let updated = version_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    async fn approve_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<ContractVersion, StoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if Self::version_status(&mut tx, mock_id, version).await? != ContractStatus::Draft {
+            return Err(not_a_draft(version));
+        }
+        let sql = format!(
+            "UPDATE contract_versions SET status = 'approved' \
+             WHERE mock_id = ? AND version = ? RETURNING {VERSION_COLUMNS}"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .bind(version)
+            .fetch_one(&mut *tx)
+            .await?;
+        let approved = version_from_row(&row)?;
+        tx.commit().await?;
+        Ok(approved)
+    }
+
+    async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
+        let progress = queued_progress();
+        let progress_json = serde_json::to_string(&progress)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let key = sqlx::query("SELECT workspace, name FROM mocks WHERE id = ?")
+            .bind(j.mock_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("mock {}", j.mock_id)))?;
+        let at = now();
+        let job = ImportJob {
+            id: Uuid::new_v4(),
+            workspace: key.try_get("workspace")?,
+            mock_id: j.mock_id,
+            mock: key.try_get("name")?,
+            kind: j.kind,
+            source_name: j.source_name,
+            status: ImportJobStatus::Queued,
+            progress,
+            result_version: None,
+            error: None,
+            created_by: j.created_by,
+            created_at: at,
+            started_at: None,
+            finished_at: None,
+            updated_at: at,
+        };
+        sqlx::query(
+            "INSERT INTO import_jobs (id, workspace, mock_id, mock, kind, source_name, input, status, \
+             progress, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(job.id.to_string())
+        .bind(&job.workspace)
+        .bind(job.mock_id.to_string())
+        .bind(&job.mock)
+        .bind(&job.kind)
+        .bind(&job.source_name)
+        .bind(j.input)
+        .bind(job.status.as_str())
+        .bind(progress_json)
+        .bind(&job.created_by)
+        .bind(job.created_at)
+        .bind(job.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(job)
+    }
+
+    async fn get_import_job(&self, id: Uuid) -> Result<Option<ImportJob>, StoreError> {
+        let sql = format!("SELECT {JOB_COLUMNS} FROM import_jobs WHERE id = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(job_from_row)
+            .transpose()
+    }
+
+    async fn import_job_input(&self, id: Uuid) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT input FROM import_jobs WHERE id = ? AND status IN ('queued', 'running')",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn list_import_jobs(
+        &self,
+        mock_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<ImportJob>, StoreError> {
+        let sql = format!(
+            "SELECT {JOB_COLUMNS} FROM import_jobs WHERE mock_id = ? \
+             ORDER BY created_at DESC, id DESC LIMIT ?"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .bind(i64::from(limit.clamp(1, MAX_IMPORT_JOB_LIST)))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(job_from_row)
+            .collect()
+    }
+
+    async fn claim_import_job(&self, now: DateTime<Utc>) -> Result<Option<ImportJob>, StoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sql = format!(
+            "UPDATE import_jobs SET status = 'running', started_at = ?, updated_at = ? \
+             WHERE id = (SELECT id FROM import_jobs WHERE status = 'queued' \
+             ORDER BY created_at, id LIMIT 1) RETURNING {JOB_COLUMNS}"
+        );
+        let job = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(now)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await?
+            .as_ref()
+            .map(job_from_row)
+            .transpose()?;
+        tx.commit().await?;
+        Ok(job)
+    }
+
+    async fn update_import_progress(
+        &self,
+        id: Uuid,
+        p: &ImportProgress,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET progress = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(serde_json::to_string(p)?)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn finish_import_job(
+        &self,
+        id: Uuid,
+        outcome: ImportOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        let (status, version, error) = match outcome {
+            ImportOutcome::Done { version } => (ImportJobStatus::Done, Some(version), None),
+            ImportOutcome::Failed { error } => (ImportJobStatus::Failed, None, Some(error)),
+        };
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET status = ?, result_version = ?, error = ?, input = X'', \
+             finished_at = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(status.as_str())
+        .bind(version)
+        .bind(error)
+        .bind(now)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn complete_import_job(
+        &self,
+        id: Uuid,
+        mock_id: Uuid,
+        v: NewContractVersion,
+        draft_meta: Value,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        require_draft_status(&v)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let running: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM import_jobs WHERE id = ? AND mock_id = ? AND status = 'running'",
+        )
+        .bind(id.to_string())
+        .bind(mock_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if running.is_none() {
+            return Ok(None);
+        }
+        let version = Self::insert_version_in(&mut tx, mock_id, v, Some(draft_meta)).await?;
+        sqlx::query(
+            "UPDATE import_jobs SET status = 'done', result_version = ?, error = NULL, \
+             input = X'', finished_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(version.version)
+        .bind(now)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(version))
+    }
+
+    async fn count_active_import_jobs(&self, mock_id: Uuid) -> Result<u64, StoreError> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM import_jobs WHERE mock_id = ? AND status IN ('queued', 'running')",
+        )
+        .bind(mock_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    async fn cancel_import_job(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET status = 'canceled', input = X'', finished_at = ?, updated_at = ? \
+             WHERE id = ? AND status IN ('queued', 'running')",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn fail_stale_import_jobs(
+        &self,
+        updated_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE import_jobs SET status = 'failed', error = ?, input = X'', finished_at = ?, \
+             updated_at = ? WHERE status = 'running' AND updated_at < ?",
+        )
+        .bind(STALE_IMPORT_ERROR)
+        .bind(now)
+        .bind(now)
+        .bind(updated_before)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    async fn prune_import_jobs(&self, finished_before: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(sqlx::query(
+            "DELETE FROM import_jobs WHERE status IN ('done', 'failed', 'canceled') \
+             AND finished_at < ?",
+        )
+        .bind(finished_before)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ControlChange> {
