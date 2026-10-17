@@ -96,7 +96,7 @@ grpcIngress:
   tls: [{hosts: [grpc.mocks.example.com], secretName: grpc-mocks-tls}]
 ```
 
-gRPC through ingress-nginx needs TLS on the ingress. `auth.external_url` must be the admin ingress's URL: in `oidc` mode the admin port answers only to that host. For SSE and WebSocket mocks, raise the ingress's read timeout (`nginx.ingress.kubernetes.io/proxy-read-timeout`). Terminating TLS at the ingress is the usual setup; `config.server.tls` (with a mounted certificate) is for end-to-end TLS.
+gRPC through ingress-nginx needs TLS on the ingress. `auth.external_url` must be the admin ingress's URL: in `oidc` mode the admin port answers only to that host. For SSE and WebSocket mocks, raise the ingress's read timeout (`nginx.ingress.kubernetes.io/proxy-read-timeout`). With this chart, terminate TLS at the ingress and leave `config.server.tls` unset: the chart cannot mount certificate files into the pods, and its probes speak plain HTTP, so pods with `server.tls` set never become Ready.
 
 ## Monitoring
 
@@ -190,7 +190,7 @@ The sync route needs no patch: the driver keeps the Kubernetes Secret up to date
 
 ## Verifying images and binaries
 
-Release images (`ghcr.io/rjs-git/mockingbird:<version>` and `:<version>-slim`), the chart and the binaries are signed in CI with keyless cosign and carry SLSA build provenance and a CycloneDX SBOM attestation.
+Release images (`ghcr.io/rjs-git/mockingbird:<version>` and `:<version>-slim`) and the chart are signed in CI with keyless cosign; the images also carry SLSA build provenance and a CycloneDX SBOM attestation. Binary archives are not signed: each has SLSA build provenance and a sha256 checksum (its `.sha256` file and the release's `SHA256SUMS`).
 
 ```sh
 # Image signature (keyless, from the release workflow on a tag).
@@ -203,7 +203,8 @@ gh attestation verify oci://ghcr.io/rjs-git/mockingbird:0.1.0 --repo rjs-git/moc
 gh attestation verify oci://ghcr.io/rjs-git/mockingbird:0.1.0 --repo rjs-git/mockingbird \
   --predicate-type https://cyclonedx.org/bom
 
-# Build provenance of a binary archive.
+# Checksum and build provenance of a binary archive.
+sha256sum --check --ignore-missing SHA256SUMS
 gh attestation verify mockingbird-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo rjs-git/mockingbird
 
 # The chart's signature.

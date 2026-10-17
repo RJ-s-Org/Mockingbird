@@ -230,3 +230,28 @@ fn docs_links_resolve() {
     assert!(checked > 10, "only {checked} relative links found");
     assert!(broken.is_empty(), "broken links: {broken:#?}");
 }
+
+/// The Kubernetes guide claims only what the chart and the release
+/// workflow actually do.
+#[test]
+fn kubernetes_guide_matches_chart_and_release() {
+    let guide = read(&repo().join("docs/deploy/kubernetes.md"));
+    let release = read(&repo().join(".github/workflows/release.yml"));
+    let helpers = read(&repo().join("deploy/helm/mockingbird/templates/_helpers.tpl"));
+    // Binaries are signed only when the workflow signs blobs.
+    if !release.contains("cosign sign-blob") {
+        assert!(
+            !guide.contains("the binaries are signed"),
+            "the guide claims signed binaries; release.yml gives them provenance and sha256 only"
+        );
+        assert!(guide.contains("Binary archives are not signed"));
+        assert!(release.contains("SHA256SUMS") && guide.contains("SHA256SUMS"));
+    }
+    // TLS in the pod needs HTTPS probes (and a way to mount the files).
+    if !helpers.contains("scheme: HTTPS") {
+        assert!(
+            !guide.contains("end-to-end TLS"),
+            "the guide offers server.tls in the pods; the chart's probes are plain HTTP"
+        );
+    }
+}

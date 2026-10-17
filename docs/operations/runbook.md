@@ -50,7 +50,7 @@ Useful queries assume the default Prometheus naming; `X-Mockingbird-Source` is t
 
 **Signal:** `/readyz` reason `bus: <error>`; `mb_bus_connected` is 0; `mb_bus_events_total{direction="received"}` flat on data nodes.
 
-**Meaning:** this node misses change notifications, so a mock created, changed or deleted elsewhere is not reloaded here yet. The node keeps serving what it has. The bus reconnects with a backoff of 1 s doubling to 30 s, and every reconnect triggers a `Resync` that reloads all mocks, so nothing stays stale for longer than one reconnect cycle once the bus is back.
+**Meaning:** this node misses change notifications, so a mock created, changed or deleted elsewhere is not reloaded here yet. The node keeps serving what it has. The bus reconnects with a backoff of 1 s doubling to 30 s, and every reconnect triggers a `Resync` that reloads all mocks, so nothing stays stale for longer than one reconnect cycle once the bus is back. A link that went half-open without an error is caught by the 10 s heartbeat (5 s timeout), and every node also resyncs about every 5 minutes as a safety net.
 
 **Action:** restore Redis or Postgres (whichever `bus.url`, or `storage.url` when unset, points at). If a node does not reconnect, restart it; it loads every mock at startup. Watch for `mb_bus_events_total{type="resync"}` after recovery.
 
