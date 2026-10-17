@@ -3357,7 +3357,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.23.1",
  "chrono",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "http-body-util",
  "mb-auth",
  "mb-engine",
