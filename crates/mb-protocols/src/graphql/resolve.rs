@@ -41,9 +41,20 @@ pub(crate) enum Shape {
 pub(crate) type Shapes = HashMap<String, Shape>;
 
 /// One HTTP request being executed, shared by its root resolvers through
-/// the request data.
+/// the request data; or one query or mutation root field sent over a
+/// subscription WebSocket (see [`super::subscription::http_call`]).
 pub(crate) struct HttpCall {
+    /// The headers forwarded, recorded and reported.
     headers: HeaderMap,
+    /// The headers the call is admitted and authenticated with, when they
+    /// differ from `headers` (a WebSocket's `connection_init` credentials).
+    auth_headers: Option<HeaderMap>,
+    /// The raw query pairs (a WebSocket upgrade URL's), which may carry a
+    /// key; empty over HTTP.
+    query: Vec<(String, String)>,
+    /// The data-plane key was already checked: once for the whole HTTP
+    /// request, or once for the WebSocket connection in `api_key` mode.
+    key_verified: bool,
     /// `POST` or `GET`.
     method: String,
     /// The request's variables, for the request record.
@@ -75,10 +86,31 @@ impl HttpCall {
     ) -> Self {
         Self {
             headers,
+            auth_headers: None,
+            query: Vec::new(),
+            key_verified: true,
             method,
             variables,
             admitted,
             collected: Mutex::new(Collected::default()),
+        }
+    }
+
+    /// A call over a WebSocket: admitted per root field (no whole-request
+    /// admission), authenticated with `auth_headers` and `query` unless
+    /// the connection's key was `key_verified`.
+    pub(crate) fn websocket(
+        headers: HeaderMap,
+        auth_headers: HeaderMap,
+        query: Vec<(String, String)>,
+        key_verified: bool,
+        variables: Value,
+    ) -> Self {
+        Self {
+            auth_headers: Some(auth_headers),
+            query,
+            key_verified,
+            ..Self::new(headers, "GET".into(), variables, None)
         }
     }
 
@@ -177,7 +209,12 @@ pub(crate) async fn root(
     shapes: &Shapes,
     ctx: &ResolverContext<'_>,
 ) -> async_graphql::Result<Option<FieldValue<'static>>> {
-    let http = ctx.data::<Arc<HttpCall>>()?;
+    // Over a subscription WebSocket there is no HTTP request: the field
+    // is its own call, which sleeps its own injected latency.
+    let (http, websocket) = match ctx.data_opt::<Arc<HttpCall>>() {
+        Some(http) => (Arc::clone(http), false),
+        None => (Arc::new(super::subscription::http_call(ctx)?), true),
+    };
     let key = ctx.ctx.item.node.response_key().node.to_string();
     let span = tracing::info_span!(
         "mock.request",
@@ -196,9 +233,12 @@ pub(crate) async fn root(
                 .collect()
         })
     });
-    let result = generate(rt, op_id, http, key, args)
+    let result = generate(rt, op_id, &http, key, args)
         .instrument(span.clone())
         .await;
+    if websocket && let Some(delay) = http.collected().delay {
+        tokio::time::sleep(delay).await;
+    }
     match result {
         Ok(body) => Ok(span
             .in_scope(|| tracing::info_span!("mb.encode").in_scope(|| project(body, ty, shapes)))),
@@ -250,14 +290,15 @@ async fn generate(
     };
     let mut delay = None;
 
-    // The data-plane key was checked once for the whole HTTP request (after
-    // admitting it, in `api_key` mode).
+    // Over HTTP the data-plane key was checked once for the whole request
+    // (after admitting it, in `api_key` mode).
     let presented = Presented {
-        query: &[],
-        key_verified: true,
+        query: &http.query,
+        key_verified: http.key_verified,
         admitted: http.admitted.as_ref(),
     };
-    let outcome = match call::plan(rt, op, &http.headers, presented).await {
+    let auth_headers = http.auth_headers.as_ref().unwrap_or(&http.headers);
+    let outcome = match call::plan(rt, op, auth_headers, presented).await {
         Err(PlanFailure {
             error,
             tenancy,

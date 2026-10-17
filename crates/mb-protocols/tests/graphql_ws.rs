@@ -346,3 +346,61 @@ async fn shutdown_completes_open_subscriptions() {
     stop.send_replace(true);
     assert_eq!(recv(&mut ws).await, json!({"type": "complete", "id": "1"}));
 }
+
+/// Waits for at least `n` reported calls; returns them.
+async fn reported(records: &Records, n: usize) -> Vec<RequestRecord> {
+    for _ in 0..100 {
+        if records.0.lock().unwrap().len() >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    records.0.lock().unwrap().drain(..).collect()
+}
+
+#[tokio::test]
+async fn query_and_mutation_over_websocket_run_like_http() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let addr = serve(rt).await;
+    let mut ws = init(&addr, json!({})).await;
+    let cases = [
+        (
+            "1",
+            r#"{ issue(id: "i-1") { id title } }"#,
+            "issue",
+            "Query.issue",
+        ),
+        (
+            "2",
+            r#"mutation { createIssue(input: {repositoryId: "r-1", title: "t"}) { id title } }"#,
+            "createIssue",
+            "Mutation.createIssue",
+        ),
+    ];
+    for (id, query, field, operation) in cases {
+        send(
+            &mut ws,
+            json!({"type": "subscribe", "id": id, "payload": {"query": query}}),
+        )
+        .await;
+        let next = recv(&mut ws).await;
+        assert_eq!(next["type"], "next", "{next}");
+        assert_eq!(next["id"], id, "{next}");
+        assert!(next["payload"].get("errors").is_none(), "{next}");
+        let keys: Vec<&str> = next["payload"]["data"][field]
+            .as_object()
+            .unwrap_or_else(|| panic!("{next}"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["id", "title"], "{next}");
+        assert_eq!(recv(&mut ws).await, json!({"type": "complete", "id": id}));
+        let calls = reported(&records, 1).await;
+        assert_eq!(calls.len(), 1, "{operation}");
+        assert_eq!(calls[0].operation_id.as_deref(), Some(operation));
+        assert_eq!(calls[0].status, 200);
+        assert_eq!(calls[0].method, "GET");
+    }
+}

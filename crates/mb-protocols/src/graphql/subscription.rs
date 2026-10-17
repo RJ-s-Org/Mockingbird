@@ -33,7 +33,7 @@ use tokio::time::Instant;
 use tracing::field::Empty;
 use tracing::{Instrument, Span};
 
-use super::resolve::{Failure, Shapes, forced_message, project};
+use super::resolve::{Failure, HttpCall, Shapes, forced_message, project};
 use super::schema::{input_value, type_ref};
 use crate::call::{
     self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
@@ -59,6 +59,21 @@ struct WsCall {
     query: Vec<(String, String)>,
     /// The connection presented a valid data-plane key (`api_key` mode).
     key_verified: bool,
+}
+
+/// The call of a query or mutation root field sent over this connection,
+/// with the connection's credentials and override headers; an error when
+/// the field is not run over a subscription WebSocket.
+pub(crate) fn http_call(ctx: &ResolverContext<'_>) -> async_graphql::Result<HttpCall> {
+    let conn = ctx.data::<Arc<WsCall>>()?;
+    let variables = serde_json::to_value(&ctx.ctx.query_env.variables).unwrap_or(Value::Null);
+    Ok(HttpCall::websocket(
+        conn.headers.clone(),
+        conn.auth_headers.clone(),
+        conn.query.clone(),
+        conn.key_verified,
+        variables,
+    ))
 }
 
 /// `connection_init` payload members that carry a data-plane key, besides
