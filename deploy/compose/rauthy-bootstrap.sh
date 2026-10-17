@@ -139,10 +139,12 @@ fi
 
 # The demo user: GET /users/email/{email}, else POST /users (NewUserRequest).
 # Both return a UserResponse whose first field is "id".
+user_created=false
 status="$(call GET "/users/email/$DEMO_EMAIL")"
 if [ "$status" = 404 ]; then
     status="$(call POST /users "{\"email\":\"$DEMO_EMAIL\",\"given_name\":\"Demo\",\"family_name\":\"User\",\"language\":\"en\",\"roles\":[],\"groups\":$GROUPS_JSON}")"
     expect "$status" "user $DEMO_EMAIL"
+    user_created=true
 else
     expect "$status" "look up user $DEMO_EMAIL"
 fi
@@ -151,9 +153,18 @@ if [ -z "$user_id" ]; then
     manual_steps "no id for user $DEMO_EMAIL"
 fi
 
-# Its password and groups (set on every run): PUT /users/{id} (UpdateUserRequest).
-status="$(call PUT "/users/$user_id" "{\"email\":\"$DEMO_EMAIL\",\"given_name\":\"Demo\",\"family_name\":\"User\",\"language\":\"en\",\"password\":\"$DEMO_PASSWORD\",\"roles\":[],\"groups\":$GROUPS_JSON,\"enabled\":true,\"email_verified\":true}")"
-expect "$status" "password of $DEMO_EMAIL"
+# Its groups (on every run; the update replaces them, so a rerun changes
+# nothing) and, only when just created, its password: Rauthy refuses to set
+# one of the last 3 passwords again, so a rerun leaves it as it is.
+# PUT /users/{id} (UpdateUserRequest, whose password is optional).
+password_member=""
+what="groups of $DEMO_EMAIL"
+if [ "$user_created" = true ]; then
+    password_member="\"password\":\"$DEMO_PASSWORD\","
+    what="password and groups of $DEMO_EMAIL"
+fi
+status="$(call PUT "/users/$user_id" "{\"email\":\"$DEMO_EMAIL\",\"given_name\":\"Demo\",\"family_name\":\"User\",\"language\":\"en\",$password_member\"roles\":[],\"groups\":$GROUPS_JSON,\"enabled\":true,\"email_verified\":true}")"
+expect "$status" "$what"
 
 rm -f "$RESP"
 echo "rauthy-bootstrap: done"
