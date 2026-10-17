@@ -30,9 +30,47 @@ fn fixture(rel: &str) -> PathBuf {
         .join(rel)
 }
 
-/// `MB_TEST_POSTGRES_URL` (with a fresh schema as its search path) and
-/// `MB_TEST_REDIS_URL`, or `None` (skipped) when either is unset.
-async fn backends() -> Option<(String, String)> {
+/// The test's Postgres schema, dropped (with everything in it) when the
+/// test ends, passed or not.
+struct Schema {
+    /// `MB_TEST_POSTGRES_URL` as given.
+    server: String,
+    name: String,
+}
+
+impl Drop for Schema {
+    fn drop(&mut self) {
+        let (server, name) = (self.server.clone(), self.name.clone());
+        // Drop can neither await nor block the test's runtime: drop the
+        // schema from a thread with its own.
+        let dropped = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                use sqlx::Connection;
+                let mut conn = sqlx::postgres::PgConnection::connect(&server).await?;
+                // A node still running (after a failed assertion) may hold
+                // a lock: give up rather than hang.
+                let sql = format!("SET lock_timeout = '5s'; DROP SCHEMA IF EXISTS {name} CASCADE");
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(&mut conn)
+                    .await?;
+                conn.close().await?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+            })
+        })
+        .join();
+        if !matches!(dropped, Ok(Ok(()))) {
+            eprintln!("could not drop schema {}: {dropped:?}", self.name);
+        }
+    }
+}
+
+/// `MB_TEST_POSTGRES_URL` (with a fresh schema as its search path, dropped
+/// with the returned [`Schema`]) and `MB_TEST_REDIS_URL`, or `None`
+/// (skipped) when either is unset.
+async fn backends() -> Option<(String, String, Schema)> {
     use sqlx::Connection;
     let (Ok(pg), Ok(redis)) = (
         std::env::var("MB_TEST_POSTGRES_URL"),
@@ -52,6 +90,10 @@ async fn backends() -> Option<(String, String)> {
     Some((
         format!("{pg}{sep}options=-c%20search_path%3D{schema}"),
         redis,
+        Schema {
+            server: pg,
+            name: schema,
+        },
     ))
 }
 
@@ -245,7 +287,7 @@ fn mock_name(prefix: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cluster_end_to_end() {
-    let Some((pg, redis)) = backends().await else {
+    let Some((pg, redis, _schema)) = backends().await else {
         return;
     };
     let _serial = SERIAL.lock().await;
@@ -379,7 +421,7 @@ async fn cluster_end_to_end() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cluster_redis_bus_outage_degrades_then_recovers() {
-    let Some((pg, redis)) = backends().await else {
+    let Some((pg, redis, _schema)) = backends().await else {
         return;
     };
     let _serial = SERIAL.lock().await;
@@ -453,4 +495,32 @@ async fn cluster_redis_bus_outage_degrades_then_recovers() {
     control.kill().await;
     data.kill().await;
     wait_lease_released(&redis).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cluster_schema_is_dropped_on_teardown() {
+    use sqlx::Connection;
+    let Some((pg, _redis, schema)) = backends().await else {
+        return;
+    };
+    let (server, name) = (schema.server.clone(), schema.name.clone());
+    // The schema is in use, with tables in it, when it is dropped.
+    mb_store::connect(&pg).await.unwrap();
+    let mut conn = sqlx::postgres::PgConnection::connect(&server)
+        .await
+        .unwrap();
+    let count = "SELECT count(*) FROM pg_namespace WHERE nspname = $1";
+    let before: i64 = sqlx::query_scalar(count)
+        .bind(&name)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(before, 1);
+    drop(schema);
+    let after: i64 = sqlx::query_scalar(count)
+        .bind(&name)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(after, 0, "schema {name} left behind");
 }
