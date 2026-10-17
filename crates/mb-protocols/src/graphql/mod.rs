@@ -658,9 +658,9 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(2 << 20)
             .spawn(move || oversize(&query, None, 10))
-            .unwrap()
+            .expect("spawn")
             .join()
-            .unwrap()
+            .expect("no panic")
     }
 
     #[test]
