@@ -888,7 +888,10 @@ async fn admin_auth(
             sysadmin_subjects: auth.sysadmin_subjects.clone(),
         },
     };
-    let client = mb_auth::OidcClient::discover(settings, mb_auth::http_client_with(http))
+    let http = mb_auth::http_client_with(http)
+        .map_err(|e| anyhow!("{e}"))
+        .context("building the OIDC HTTP client from the outbound settings")?;
+    let client = mb_auth::OidcClient::discover(settings, http)
         .await
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("cannot set up OIDC with issuer {}", oidc.issuer))?;
