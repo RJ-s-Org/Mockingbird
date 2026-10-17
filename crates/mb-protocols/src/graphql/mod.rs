@@ -99,7 +99,7 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             "Not Found",
             format!("no GraphQL endpoint at {}", uri.path()),
         );
-        return refused(rt, &method, &headers, resp, None).await;
+        return refused_at(rt, &method, &headers, uri.path(), resp, None).await;
     }
     let query = Query::<Vec<(String, String)>>::try_from_uri(&uri)
         .map(|q| q.0)
@@ -345,11 +345,25 @@ pub(crate) async fn refused(
     resp: Response,
     response: Option<Value>,
 ) -> Response {
+    let path = rt.protocols.graphql_path.as_str();
+    refused_at(rt, method, headers, path, resp, response).await
+}
+
+/// [`refused`] for a request at `path` (an unknown path is reported at
+/// the path requested, not the GraphQL path).
+async fn refused_at(
+    rt: &MockRuntime,
+    method: &Method,
+    headers: &HeaderMap,
+    path: &str,
+    resp: Response,
+    response: Option<Value>,
+) -> Response {
     let report = call::Report {
         operation_id: None,
         session: call::DEFAULT_SESSION.into(),
         method: method.as_str().to_string(),
-        path: rt.protocols.graphql_path.clone(),
+        path: path.to_string(),
         status: resp.status().as_u16(),
         source: None,
         usage: Default::default(),

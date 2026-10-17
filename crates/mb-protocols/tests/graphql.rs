@@ -1028,3 +1028,24 @@ async fn rejections_are_recorded() {
     assert_eq!(recs.len(), 1, "401 ws: {recs:?}");
     assert_eq!(recs[0].status, 401);
 }
+
+#[tokio::test]
+async fn unknown_path_is_reported_at_the_requested_path() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let r = answer(
+        reqwest::Client::new()
+            .get(format!("{base}/other/path"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, 404);
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0].status, 404);
+    assert_eq!(recs[0].path, "/other/path");
+}
