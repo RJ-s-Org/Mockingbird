@@ -1320,7 +1320,8 @@ impl FileConfig {
     }
 
     /// `control` and `data` nodes share their stores with other nodes: the
-    /// control store must be Postgres and the state store Postgres or Redis.
+    /// control store must be Postgres, the state store Postgres or Redis,
+    /// and the bus not in-process.
     fn validate_role(&self) -> Result<(), String> {
         let role = self.server.role;
         if role == Role::All {
@@ -1336,6 +1337,13 @@ impl FileConfig {
         if !is_postgres(state) && !is_redis(state) {
             return Err(format!(
                 "server.role {role} requires a shared state store (storage.state_url postgres:// or redis://)"
+            ));
+        }
+        // An in-process bus would leave the data nodes deaf to changes and
+        // make every control node the leader.
+        if self.bus_target() == BusTarget::Local {
+            return Err(format!(
+                "server.role {role} requires a shared bus; bus.url local is single-node (leave it unset, or use postgres:// or redis://)"
             ));
         }
         Ok(())

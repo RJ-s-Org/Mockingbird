@@ -2591,6 +2591,18 @@ fn split_roles_require_shared_stores() {
             msg.contains(&format!("server.role {role}")) && msg.contains("storage.state_url"),
             "{msg}"
         );
+        // An in-process bus: the other nodes would never hear of changes,
+        // and every control node would lead.
+        let msg = load_resolve_err(
+            &ws,
+            &format!(
+                "server:\n  role: {role}\nstorage:\n  url: postgres://db/mb\nbus:\n  url: local\n"
+            ),
+        );
+        assert!(
+            msg.contains(&format!("server.role {role}")) && msg.contains("bus.url local"),
+            "{msg}"
+        );
     }
     // Postgres with the default state store (the same URL), or Redis state, pass.
     for yaml in [

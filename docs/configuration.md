@@ -27,7 +27,7 @@ Listeners and the node's role. Read at startup.
 | `server.grpc_port` | port | `50051` | Must be free when set explicitly | `MB_GRPC_PORT`, `--grpc-port` | gRPC (h2c, or h2 over TLS with `server.tls`), shared by every gRPC mock. Skipped with a warning like `admin_port`. |
 | `server.insecure_no_auth` | bool | `false` | | `--insecure-no-auth` | Allow a non-loopback `server.host` with `auth.mode: none`. Everyone who reaches the admin port is then a sysadmin. |
 | `server.api_secret_refs` | list of globs | `["env:MB_LLM_*", "env:*_API_KEY"]` | `*` matches any run of characters | | Secret references an LLM profile may use when it is created or updated through the Admin API; anything else is a 422. Profiles in this file are not restricted. |
-| `server.role` | `all`, `control`, `data` | `all` | `control` and `data` need a `postgres://` `storage.url` and a `postgres://` or `redis(s)://` effective state URL; SQLite and `memory` are refused | `MB_ROLE`, `--role` | Which planes the node serves; see [roles](architecture.md#roles). |
+| `server.role` | `all`, `control`, `data` | `all` | `control` and `data` need a `postgres://` `storage.url` and a `postgres://` or `redis(s)://` effective state URL and a shared bus; SQLite, `memory` and `bus.url: local` are refused | `MB_ROLE`, `--role` | Which planes the node serves; see [roles](architecture.md#roles). |
 | `server.trust_forwarded_headers` | bool | `false` | | | Trust `X-Forwarded-Proto`/`X-Forwarded-Host` (and RFC 7239 `Forwarded`) when building SOAP `?wsdl` addresses. Turn it on only behind a reverse proxy that sets them. |
 | `server.tls` | section | unset | Both files or neither | | Terminate TLS in Mockingbird on every port. Absent serves plain HTTP. |
 | `server.tls.cert_file` | path | | Readable PEM certificate chain at startup | | Server certificate chain. Checked every 60 s and reloaded when it changes. |
@@ -49,7 +49,7 @@ With `server.tls` set, `auth.external_url` must be an `https://` URL in every au
 | Key | Type | Default | Range / rule | Env / flag | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `bus` | section | | | | The cross-node change bus that tells other nodes to reload. |
-| `bus.url` | URL | unset | `redis://`, `rediss://`, `postgres://` or `local` | `MB_BUS_URL` | Unset: Postgres `LISTEN/NOTIFY` on `storage.url` when it is Postgres, else in-process. `local` is in-process (one node). |
+| `bus.url` | URL | unset | `redis://`, `rediss://`, `postgres://` or `local` | `MB_BUS_URL` | Unset: Postgres `LISTEN/NOTIFY` on `storage.url` when it is Postgres, else in-process. `local` is in-process (one node) and is refused for `server.role` `control`/`data`. |
 
 ## `outbound`
 
