@@ -88,6 +88,9 @@ pub struct ProtocolSettings {
     pub graphql_max_subscriptions_per_connection: usize,
     /// Most concurrent GraphQL WebSocket connections to one mock.
     pub graphql_max_connections_per_mock: usize,
+    /// How long a GraphQL WebSocket connection may stay open without a
+    /// `connection_init` before it is closed (4408) and its slot freed.
+    pub graphql_connection_init_timeout: Duration,
     /// Whether `X-Forwarded-*` request headers are trusted (behind a
     /// reverse proxy).
     pub trust_forwarded_headers: bool,
@@ -108,6 +111,7 @@ impl Default for ProtocolSettings {
             graphql_max_root_fields: 20,
             graphql_max_subscriptions_per_connection: 16,
             graphql_max_connections_per_mock: 1000,
+            graphql_connection_init_timeout: Duration::from_secs(5),
             trust_forwarded_headers: false,
             tls_terminated: false,
         }

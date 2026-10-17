@@ -110,6 +110,7 @@ protocols:
     max_root_fields: 20
     max_subscriptions_per_connection: 16
     max_connections_per_mock: 1000
+    connection_init_timeout: 5s
   stream:
     default_items: 5
     max_items: 50

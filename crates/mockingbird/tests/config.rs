@@ -2440,6 +2440,10 @@ fn p7_sections_default() {
     assert_eq!(cfg.protocols.graphql.max_root_fields, 20);
     assert_eq!(cfg.protocols.graphql.max_subscriptions_per_connection, 16);
     assert_eq!(cfg.protocols.graphql.max_connections_per_mock, 1000);
+    assert_eq!(
+        cfg.protocols.graphql.connection_init_timeout,
+        Duration::from_secs(5)
+    );
     let m = &cfg.mocks["orders"];
     assert_eq!(m.chaos, None);
     assert_eq!(m.limits, file_config::FileMockLimits::default());
@@ -2450,6 +2454,10 @@ fn p7_sections_default() {
     assert_eq!(settings.graphql_max_root_fields, 20);
     assert_eq!(settings.graphql_max_subscriptions_per_connection, 16);
     assert_eq!(settings.graphql_max_connections_per_mock, 1000);
+    assert_eq!(
+        settings.graphql_connection_init_timeout,
+        Duration::from_secs(5)
+    );
     assert!(!settings.trust_forwarded_headers);
     assert!(!settings.tls_terminated);
     let d = mb_protocols::ProtocolSettings::default();
@@ -2479,7 +2487,7 @@ pii:
   patterns: [email, ipv4]
   custom: [{name: order_ref, regex: "ORD-[0-9]{6}", replacement: "ORD-######"}]
 protocols:
-  graphql: {max_root_fields: 5, max_subscriptions_per_connection: 2, max_connections_per_mock: 10}
+  graphql: {max_root_fields: 5, max_subscriptions_per_connection: 2, max_connections_per_mock: 10, connection_init_timeout: 2s}
 "#,
     );
     let tls = cfg.server.tls.as_ref().unwrap();
@@ -2504,6 +2512,10 @@ protocols:
     assert_eq!(settings.graphql_max_root_fields, 5);
     assert_eq!(settings.graphql_max_subscriptions_per_connection, 2);
     assert_eq!(settings.graphql_max_connections_per_mock, 10);
+    assert_eq!(
+        settings.graphql_connection_init_timeout,
+        Duration::from_secs(2)
+    );
     assert!(settings.trust_forwarded_headers);
     assert!(settings.tls_terminated);
 }
@@ -2776,6 +2788,14 @@ fn protocols_validation() {
         (
             "protocols:\n  graphql: {max_connections_per_mock: 100001}\n",
             "protocols.graphql.max_connections_per_mock",
+        ),
+        (
+            "protocols:\n  graphql: {connection_init_timeout: 11s}\n",
+            "protocols.graphql.connection_init_timeout",
+        ),
+        (
+            "protocols:\n  graphql: {connection_init_timeout: 500ms}\n",
+            "protocols.graphql.connection_init_timeout",
         ),
         ("outbound:\n  proxy: ftp://proxy\n", "outbound.proxy"),
         ("outbound:\n  proxy: not a url\n", "outbound.proxy"),

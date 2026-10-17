@@ -113,6 +113,7 @@ protocols:
     # max_root_fields: 20                     # root fields per operation (1-1000)
     # max_subscriptions_per_connection: 16    # per WebSocket connection (1-1000)
     # max_connections_per_mock: 1000          # WebSocket connections per mock (1-100000)
+    # connection_init_timeout: 5s             # close sockets with no connection_init (1s-10s)
   stream:                   # streamed responses: SSE, GraphQL subscriptions, gRPC streams
     default_items: 5        # items when the request asks for no count (X-Mockingbird-Stream-Items)
     max_items: 50

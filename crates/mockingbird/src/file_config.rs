@@ -669,6 +669,7 @@ impl ProtocolsConfig {
             graphql_max_root_fields: self.graphql.max_root_fields,
             graphql_max_subscriptions_per_connection: self.graphql.max_subscriptions_per_connection,
             graphql_max_connections_per_mock: self.graphql.max_connections_per_mock,
+            graphql_connection_init_timeout: self.graphql.connection_init_timeout,
             ..ProtocolSettings::default()
         };
         let stream = StreamConfig {
@@ -695,6 +696,9 @@ pub struct GraphqlConfig {
     pub max_subscriptions_per_connection: usize,
     /// Most concurrent WebSocket connections to one mock.
     pub max_connections_per_mock: usize,
+    /// How long a WebSocket connection may wait before `connection_init`.
+    #[serde(with = "humantime_serde")]
+    pub connection_init_timeout: Duration,
 }
 
 impl Default for GraphqlConfig {
@@ -707,6 +711,7 @@ impl Default for GraphqlConfig {
             max_root_fields: 20,
             max_subscriptions_per_connection: 16,
             max_connections_per_mock: 1000,
+            connection_init_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -1312,6 +1317,13 @@ impl FileConfig {
             p.graphql.max_subscriptions_per_connection,
             1..=1000,
         )?;
+        let init_timeout = p.graphql.connection_init_timeout;
+        if !(Duration::from_secs(1)..=Duration::from_secs(10)).contains(&init_timeout) {
+            return Err(format!(
+                "protocols.graphql.connection_init_timeout must be between 1s and 10s (got {})",
+                humantime::format_duration(init_timeout)
+            ));
+        }
         in_range(
             "protocols.graphql.max_connections_per_mock",
             p.graphql.max_connections_per_mock,

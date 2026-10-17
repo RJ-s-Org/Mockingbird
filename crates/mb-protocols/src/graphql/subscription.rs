@@ -81,6 +81,8 @@ pub(crate) fn http_call(ctx: &ResolverContext<'_>) -> async_graphql::Result<Http
 const PAYLOAD_KEY_MEMBERS: [&str; 2] = ["api_key", "apiKey"];
 /// Close code for a connection refused by data-plane auth.
 const CLOSE_UNAUTHORIZED: u16 = 4401;
+/// Close code for a connection that sent no `connection_init` in time.
+const CLOSE_INIT_TIMEOUT: u16 = 4408;
 
 /// Upgrades a `GET` at the GraphQL path to a subscription channel. The
 /// override headers are `headers` (the upgrade request's), overlaid by
@@ -96,7 +98,9 @@ const CLOSE_UNAUTHORIZED: u16 = 4401;
 ///
 /// Once `graphql_max_connections_per_mock` connections are open
 /// (`connections` counts them), the upgrade is refused with a `503`
-/// problem and `Retry-After: 1`, reported as a call.
+/// problem and `Retry-After: 1`, reported as a call. A connection that
+/// sends no `connection_init` within `graphql_connection_init_timeout` is
+/// closed with code 4408, freeing its slot.
 pub(crate) async fn upgrade(
     schema: Schema,
     rt: &Arc<MockRuntime>,
@@ -198,6 +202,7 @@ async fn run(
     key_verified: bool,
 ) {
     // Without a negotiated subprotocol, speak the current one.
+    let init_timeout = rt.protocols.graphql_connection_init_timeout;
     let protocol = io
         .protocol
         .as_deref()
@@ -205,6 +210,8 @@ async fn run(
         .unwrap_or(WebSocketProtocols::GraphQLWS);
     let refused = Arc::new(AtomicBool::new(false));
     let refused_init = Arc::clone(&refused);
+    let initialised = Arc::new(AtomicBool::new(false));
+    let initialised_init = Arc::clone(&initialised);
     let active = Arc::new(Mutex::new(HashSet::new()));
     let incoming = capped(
         io.incoming,
@@ -216,6 +223,7 @@ async fn run(
     );
     let messages =
         WebSocket::new(schema, incoming, protocol).on_connection_init(move |payload| async move {
+            initialised_init.store(true, Ordering::Relaxed);
             let (auth_headers, headers) = overlay(&rt, headers, &payload);
             let api_key = rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey;
             if api_key
@@ -236,9 +244,26 @@ async fn run(
             Ok(data)
         });
     futures::pin_mut!(messages);
+    // A connection that never sends `connection_init` would hold its slot
+    // (counted against `graphql_max_connections_per_mock`) for as long as
+    // the client likes: close it once the init timeout passes.
+    let init_deadline = tokio::time::sleep(init_timeout);
+    futures::pin_mut!(init_deadline);
     // Operations chaos dropped: their `complete` is not sent.
     let mut dropped = HashSet::new();
-    while let Some(message) = messages.next().await {
+    loop {
+        let message = tokio::select! {
+            message = messages.next() => message,
+            () = &mut init_deadline, if !initialised.load(Ordering::Relaxed) => {
+                let close = Outbound::Close {
+                    code: CLOSE_INIT_TIMEOUT,
+                    reason: "Connection initialisation timeout".into(),
+                };
+                let _ = io.outgoing.send(close).await;
+                break;
+            }
+        };
+        let Some(message) = message else { break };
         let (out, last) = match message {
             WsMessage::Text(text) => {
                 let text = match dropped_error(&text, protocol) {

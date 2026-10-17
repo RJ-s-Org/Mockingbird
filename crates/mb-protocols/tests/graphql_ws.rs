@@ -404,3 +404,43 @@ async fn query_and_mutation_over_websocket_run_like_http() {
         assert_eq!(calls[0].method, "GET");
     }
 }
+
+#[tokio::test]
+async fn connection_without_init_is_closed_and_frees_its_slot() {
+    let mut rt = runtime(None);
+    rt.protocols.graphql_max_connections_per_mock = 1;
+    rt.protocols.graphql_connection_init_timeout = Duration::from_millis(200);
+    let addr = serve(rt).await;
+    let mut idle = connect(&addr, "graphql-transport-ws").await;
+    let close = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(3), idle.next())
+            .await
+            .expect("not closed")
+            .unwrap()
+            .unwrap();
+        match msg {
+            Message::Close(frame) => break frame.unwrap(),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(u16::from(close.code), 4408);
+    drop(idle);
+    // The slot is free again: a new connection is accepted and initialised.
+    let mut ok = false;
+    for _ in 0..50 {
+        let mut req = format!("ws://{addr}/graphql")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            "graphql-transport-ws".parse().unwrap(),
+        );
+        if tokio_tungstenite::connect_async(req).await.is_ok() {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ok, "slot not released");
+}

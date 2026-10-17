@@ -175,6 +175,7 @@ Knobs shared by every mock. Read at startup.
 | `protocols.graphql.max_root_fields` | integer | `20` | 1..=1000 | | Root fields one operation may select. |
 | `protocols.graphql.max_subscriptions_per_connection` | integer | `16` | 1..=1000 | | Concurrent subscriptions on one WebSocket connection. |
 | `protocols.graphql.max_connections_per_mock` | integer | `1000` | 1..=100000 | | Concurrent WebSocket connections to one mock. |
+| `protocols.graphql.connection_init_timeout` | duration | `5s` | `1s` to `10s` | | A WebSocket connection that sends no `connection_init` in time is closed (code 4408) and stops counting against `max_connections_per_mock`. |
 | `protocols.stream` | section | | | | Streamed responses: SSE, GraphQL subscriptions and gRPC streams. |
 | `protocols.stream.default_items` | integer | `5` | | | Items when the request asks for no count (`X-Mockingbird-Stream-Items`). |
 | `protocols.stream.max_items` | integer | `50` | | | Most items per streamed response. |
