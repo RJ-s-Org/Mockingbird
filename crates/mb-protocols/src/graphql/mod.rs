@@ -2,9 +2,9 @@
 //! schema built from the SDL the importer stored in the bundle.
 //!
 //! Every query or mutation root field is one engine call (see
-//! [`resolve`]); nested fields project from the generated JSON.
+//! `resolve`); nested fields project from the generated JSON.
 //! Subscriptions are served over WebSocket at the same path (see
-//! [`subscription`]). GraphQL parse and validation errors are
+//! `subscription`). GraphQL parse and validation errors are
 //! answered `200 {errors}`; only transport-level failures (unknown path,
 //! wrong method, oversized or unparseable body) are problem documents.
 

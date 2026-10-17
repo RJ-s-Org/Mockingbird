@@ -1,7 +1,7 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
 //! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
-//! `grpc`, `soap`, `websocket`, `events`); all of them share the [`call`] pipeline.
+//! `grpc`, `soap`, `websocket`, `events`); all of them share the `call` pipeline.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

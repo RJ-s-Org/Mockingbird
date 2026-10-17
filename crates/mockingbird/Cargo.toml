@@ -68,6 +68,7 @@ assert_cmd.workspace = true
 futures.workspace = true
 mb-auth = { workspace = true, features = ["testing"] }
 prost-reflect.workspace = true
+redis.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true

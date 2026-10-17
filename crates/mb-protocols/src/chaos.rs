@@ -1,7 +1,7 @@
 //! Fault injection (spec §7.1): per mock, or per scenario while it applies,
 //! an error rate, a latency jitter and a stream drop rate.
 //!
-//! [`crate::call::plan`] asks the applying scenario's [`ChaosRuntime`]
+//! `call::plan` asks the applying scenario's [`ChaosRuntime`]
 //! (else the mock's) for one [`ChaosDecision`] per call. An injected error
 //! uses the operation's first declared status of `503`, `500`, the smallest
 //! other `5xx`, or `429`; when none is declared, each adapter answers its

@@ -3,8 +3,8 @@
 //!
 //! A `POST` is dispatched by its action (`SOAPAction` for 1.1, the
 //! `action` content-type parameter for 1.2), else by the QName of the
-//! Body's first child, decoded to JSON (see [`xml_json`]), validated and
-//! run through the shared [`call`](crate::call) pipeline. Responses use
+//! Body's first child, decoded to JSON (see `xml_json`), validated and
+//! run through the shared `call` pipeline. Responses use
 //! the request's SOAP version; every failure is a SOAP Fault. `GET ?wsdl`
 //! serves the stored WSDL with its addresses pointing at this mock.
 

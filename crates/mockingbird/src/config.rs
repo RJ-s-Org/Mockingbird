@@ -80,6 +80,8 @@ pub enum Command {
     Client(ClientCommand),
 }
 
+// The doc comments are clap help text, not Markdown.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ServeArgs {
     /// Config file (`mockingbird.yaml`); without it the contracts are served

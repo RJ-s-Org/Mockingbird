@@ -16,8 +16,8 @@ pub const GLOBAL_LIMIT: usize = 100;
 pub const SUPPRESSED_METRIC: &str = "mb_auth_login_failed_suppressed_total";
 
 /// Decides whether a failed login is written to the audit log: at most one
-/// per source address per [`PER_SOURCE_WINDOW`] and at most
-/// [`GLOBAL_LIMIT`] per [`GLOBAL_WINDOW`] overall. Each refusal increments
+/// per source address per `PER_SOURCE_WINDOW` and at most
+/// `GLOBAL_LIMIT` per `GLOBAL_WINDOW` overall. Each refusal increments
 /// [`SUPPRESSED_METRIC`]. Requests without a known address share one source.
 #[derive(Debug, Default)]
 pub struct LoginFailureLimiter {

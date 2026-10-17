@@ -87,6 +87,8 @@ pub enum ProfilesCommand {
     Delete { name: String },
 }
 
+// The doc comments are clap help text, not Markdown.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum ChannelsCommand {
     /// List a mock's channels with their effective settings.
@@ -129,6 +131,8 @@ pub enum BrokersCommand {
     List,
 }
 
+// The doc comments are clap help text, not Markdown.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum MocksCommand {
     /// List every mock.

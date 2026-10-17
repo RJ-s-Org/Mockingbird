@@ -238,3 +238,99 @@ fn check_version_script() {
         String::from_utf8_lossy(&wrong.stderr)
     );
 }
+
+/// `.github/workflows/ci.yml`, parsed.
+fn ci_workflow() -> Value {
+    let path = repo().join(".github/workflows/ci.yml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_saphyr::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+#[test]
+fn ci_gates_present() {
+    let doc = ci_workflow();
+    let ids: BTreeSet<&str> = jobs(&doc).keys().map(String::as_str).collect();
+    for job in [
+        "check",
+        "protocol-features",
+        "console",
+        "deny",
+        "image",
+        "e2e",
+        "helm",
+        "semver",
+        "msrv",
+    ] {
+        assert!(ids.contains(job), "ci.yml has no {job} job: {ids:?}");
+    }
+    let all = steps(&doc);
+    let runs = |job: &str, needle: &str| {
+        all.iter()
+            .any(|(id, step)| id == job && scalar(&step["run"]).contains(needle))
+    };
+
+    let check = &jobs(&doc)["check"];
+    assert!(
+        scalar(&check["services"]["redis"]["image"]).starts_with("redis:7"),
+        "the check job needs a Redis service"
+    );
+    assert_eq!(
+        scalar(&check["env"]["MB_TEST_REDIS_URL"]),
+        "redis://localhost:6379"
+    );
+    assert!(runs(
+        "check",
+        "cargo doc --workspace --no-deps --all-features"
+    ));
+    assert!(runs(
+        "check",
+        "cargo test -p mockingbird-custom-ext-example"
+    ));
+
+    assert!(runs("helm", "scripts/check-helm.sh"));
+    assert!(runs("semver", "scripts/semver-check.sh"));
+    assert!(
+        all.iter().any(|(id, step)| id == "semver"
+            && uses(step).starts_with("actions/checkout@")
+            && scalar(&step["with"]["fetch-depth"]) == "0"),
+        "the semver job needs the full history (fetch-depth: 0)"
+    );
+    assert!(runs(
+        "msrv",
+        "cargo +1.97 check --workspace --all-features --locked"
+    ));
+
+    let trivy: Vec<_> = all
+        .iter()
+        .filter(|(id, step)| id == "image" && uses(step).starts_with("aquasecurity/trivy-action@"))
+        .collect();
+    assert_eq!(trivy.len(), 2, "the image job scans both images");
+    for (_, step) in trivy {
+        assert_eq!(scalar(&step["with"]["severity"]), "CRITICAL,HIGH");
+        assert_eq!(scalar(&step["with"]["exit-code"]), "1");
+        assert_eq!(scalar(&step["with"]["ignore-unfixed"]), "true");
+    }
+
+    assert!(runs("e2e", "e2e-compose/flow.spec.ts"));
+    assert!(runs("e2e", "--profile ha up -d --wait"));
+    assert!(runs("e2e", "stop mockingbird-control"));
+}
+
+#[test]
+fn ci_actions_pinned() {
+    let doc = ci_workflow();
+    for (job, step) in steps(&doc) {
+        let action = uses(&step);
+        if action.is_empty() {
+            continue;
+        }
+        let (_, reference) = action
+            .split_once('@')
+            .unwrap_or_else(|| panic!("{job}: {action} has no @ref"));
+        // dtolnay/rust-toolchain is pinned by its `toolchain` input instead.
+        if action.starts_with("dtolnay/rust-toolchain@") {
+            continue;
+        }
+        assert!(pinned(reference), "{job}: {action} is not pinned to a tag");
+    }
+}
