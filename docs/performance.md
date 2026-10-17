@@ -31,6 +31,10 @@ The result is printed and written as JSON (`BenchReport`).
 
 These are a baseline for spotting regressions, not a capacity promise: the client shares the CPUs with the server, and the in-memory SQLite store and request log run in the same process. On dedicated hardware with Postgres, scale out data nodes for more throughput (they share nothing but the stores).
 
+### Under load in a cluster
+
+The bench runs one node with an in-process bus. In a cluster, per-request bus traffic (state changes behind subscriptions and change feeds, request-log notices for the console's live view) shares each node's broadcast capacity (1024 events) with the control events. A node that falls behind runs a full local `Resync`, and every `Resync` rebuilds all its mocks: rate-limit buckets reset to full and event channels restart, disconnecting WebSocket channel subscribers. At high request rates per node, watch `mb_bus_events_total{type="resync"}` and scale out before lag sets in; see [frequent resyncs](operations/runbook.md#frequent-resyncs).
+
 ## Rerunning
 
 ```sh

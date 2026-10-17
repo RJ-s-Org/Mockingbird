@@ -54,13 +54,23 @@ Useful queries assume the default Prometheus naming; `X-Mockingbird-Source` is t
 
 **Action:** restore Redis or Postgres (whichever `bus.url`, or `storage.url` when unset, points at). If a node does not reconnect, restart it; it loads every mock at startup. Watch for `mb_bus_events_total{type="resync"}` after recovery.
 
+## Frequent resyncs
+
+**Signal:** `mb_bus_events_total{type="resync"}` rising faster than about once per 5 minutes per node; warnings `bus events lagged; resyncing` or `control changes lagged; resyncing`; WebSocket channel clients report disconnects, or a rate limit lets a burst through.
+
+**Meaning:** per-request bus traffic (state changes behind subscriptions and change feeds, request-log notices for the console) shares each node's broadcast capacity (1024 events) with the control events. When a node falls behind, it cannot tell which control changes it missed, so it runs a full local `Resync`. Every `Resync` rebuilds all mounted mocks: rate-limit buckets start full again, event channels restart (WebSocket channel subscribers are disconnected), and GraphQL subscriptions and SSE streams already open keep the previous build of the mock until the client reconnects. A networked bus also resyncs about every 5 minutes as a safety net, so some resyncs are normal.
+
+**Action:** scale out data nodes or reduce the per-node request rate until lag warnings stop. Make channel clients reconnect on close. Do not rely on a per-node rate limit for an exact count across a resync.
+
 ## Leader failover
 
 **Signal:** `mb_leader` (1 on the leader). Alert when `sum(mb_leader)` across control nodes is 0 for more than a minute, or above 1 at all. `/readyz` shows `"leader": true|false`.
 
 **Meaning:** one control (or `all`) node holds the `control` lock and runs the reconcile, `--watch` and maintenance (session expiry, audit and token-usage retention). A leader that loses its store connection stops that work within 5 s; another node takes over within 15 s (the Redis lease TTL; with Postgres, as soon as the advisory lock's session ends).
 
-**Action:** a short gap is normal during deployments. If no node leads, check the control nodes' connectivity to the lock's backend (Postgres for a Postgres or local bus, Redis for a Redis bus). Leaderless periods only delay reconcile and maintenance; the data plane is unaffected.
+With a Postgres lock, leadership can overlap: when the holder's session ends on the server, another node can take the lock at once, while the old holder notices only at its next renew, up to one renew interval (5 s) later, or 10 s when its connection hangs. `sum(mb_leader)` can then briefly read 2. Reconcile and retention are idempotent, so this costs duplicate work at worst; alert only when it persists.
+
+**Action:** a short gap is normal during deployments. If no node leads, check the control nodes' connectivity to the lock's backend (Postgres for a Postgres or local bus, Redis for a Redis bus). Leaderless periods only delay reconcile and maintenance; the data plane is unaffected. PgBouncer (or any pooler) in transaction mode is unsupported for the bus and the leader lock: it breaks `LISTEN/NOTIFY` and session advisory locks, so leadership flaps or several nodes lead. Connect `bus.url` to Postgres directly or through a session-mode pool, or use Redis for the bus.
 
 ## Broker unavailable
 
@@ -136,7 +146,7 @@ Data nodes keep no local state: sessions are in the state store and mocks are lo
 
 ## Draining for maintenance
 
-1. Stop routing new traffic to the node (cordon and evict on Kubernetes; the pod's 5 s `preStop` sleep lets endpoints drop it).
+1. Stop routing new traffic to the node (cordon and evict on Kubernetes; on Kubernetes 1.30 or newer the pod's 5 s `preStop` sleep lets endpoints drop it; on 1.27 to 1.29 the chart renders no `preStop`, so a request may still reach the pod briefly after SIGTERM: see [graceful shutdown](../deploy/kubernetes.md#graceful-shutdown)).
 2. On SIGTERM, Mockingbird stops accepting connections, finishes in-flight calls, stops its leader-only work, flushes queued broker messages and request-log entries (each for up to 5 s), and exits. The chart gives pods 30 s. Its leadership (and any per-mock scheduler lease) passes to another node when the lock or lease expires.
 3. Long-lived streams (SSE, WebSocket, gRPC streams) are closed at shutdown; clients should reconnect to another node.
 4. Draining the leader hands leadership to another control node within 15 s.

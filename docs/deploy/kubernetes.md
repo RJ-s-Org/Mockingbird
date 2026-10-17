@@ -51,7 +51,7 @@ Do not set `config.server.role`; the mode sets each Deployment's `--role`. See [
 
 - **Postgres**: one database for the control store, and optionally the session state and bus. Migrations run at startup under an advisory lock, so several pods starting together are safe. Pass the URL through `storage.existingSecret` (key `url` by default, `storage.existingSecretKey` to change it). Use `sslmode=require` (or stricter) in the URL for a managed database.
 - **Redis** for session state and the bus: a single primary (Redis Cluster is not supported) with **`maxmemory-policy noeviction`**, since an evicted key silently loses session data. Use `rediss://` for TLS.
-- With Postgres alone (no Redis), leave `state` and `bus` empty: state then lives in Postgres and the bus is `LISTEN/NOTIFY` on the storage URL. A pooler in transaction mode (PgBouncer) breaks `LISTEN/NOTIFY` and advisory locks; point `bus.url` at a direct connection, or use Redis for the bus.
+- With Postgres alone (no Redis), leave `state` and `bus` empty: state then lives in Postgres and the bus is `LISTEN/NOTIFY` on the storage URL. A pooler in transaction mode (PgBouncer) breaks `LISTEN/NOTIFY` and advisory locks, so it is unsupported for the bus and the leader lock (which follows the bus); point `bus.url` at a direct or session-mode connection, or use Redis for the bus. See [leader election](../architecture.md#leader-election) for the brief leadership overlap a Postgres lock allows.
 
 ## OIDC with Rauthy
 
@@ -119,6 +119,12 @@ networkPolicy:
     - ports: [{port: 5432, protocol: TCP}, {port: 6379, protocol: TCP}]
     - ports: [{port: 443, protocol: TCP}]
 ```
+
+## Graceful shutdown
+
+Pods get 30 s to shut down. The image is distroless (no shell, no `sleep` binary), so the 5 s `preStop` pause that lets Services and ingresses drop a terminating pod before it stops accepting connections uses the kubelet's own `sleep` action, which needs **Kubernetes 1.30 or newer**. The chart renders it only when `.Capabilities.KubeVersion` is at least 1.30. When rendering offline (`helm template`, or a GitOps tool that does not report the cluster), pass `--kube-version` so the check sees your cluster's version.
+
+On Kubernetes 1.27 to 1.29 the chart installs without a `preStop` hook. The pod gets SIGTERM while its endpoint removal is still propagating, stops accepting new connections at once and finishes the calls in flight; a request routed to it during that window (usually well under a second, longer with slow ingress controllers) fails with a refused or reset connection. Retry idempotent calls at the client or ingress, or upgrade to 1.30 for the pause.
 
 ## Autoscaling
 

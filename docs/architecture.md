@@ -85,6 +85,16 @@ Work that must run once per cluster is leader-gated: the startup reconcile of `m
 
 A node that loses its connection stops leader work within 5 s, and another takes over within 15 s. `mb_leader` is 1 on the leader, and `/readyz` shows `"role"` and `"leader"`.
 
+With Postgres, leadership can briefly overlap. The lock is released the moment the holder's session ends on the server (a terminated backend, a server restart, a dropped connection), so another node may acquire it at once, while the old holder only notices at its next renew (a `SELECT 1` every 5 s, itself timing out after 5 s). For up to one renew interval, and up to 10 s when the connection hangs rather than fails, both nodes may run leader work. Reconcile writes the same desired state from either node and the retention jobs are idempotent deletes, so an overlap costs duplicate work and, at worst, a logged conflict.
+
+The bus and the leader lock need a session-level Postgres connection: a pooler in transaction mode (PgBouncer `pool_mode = transaction`, and statement mode) is unsupported for them, because `LISTEN/NOTIFY` and session advisory locks do not survive a connection being handed to another client between transactions. Point `bus.url` (or, without one, `storage.url`) at Postgres directly or through a session-mode pooler, or use Redis for the bus.
+
+### Bus capacity and resync
+
+Each node fans bus traffic out through in-process broadcast channels of 1024 events. Besides the control events (a mock, profile or workspace changed), the same channels carry the per-request traffic: state changes for subscriptions and change feeds, and request-log notices for the console's live view. A busy data plane can therefore fill them; a receiver that falls behind skips the missed events and, rather than guess what it lost, triggers a full local `Resync`.
+
+Every `Resync`, whether from lag, a reconnect, the networked bus's safety resync (about every 5 minutes) or another node's request, rebuilds every mounted mock from the control store. Rebuilding a mock resets its in-memory rate-limit buckets (callers briefly get a full burst again) and restarts its event channels: their triggers and consumers start over, and WebSocket channel subscribers are disconnected and must reconnect. GraphQL subscriptions and SSE streams already open stay on the previous build of the mock (its contract and settings at the time) until the client reconnects. `mb_bus_events_total{type="resync"}` counts them; a steady rate means the node is lagging and should be scaled out.
+
 ### Per-mock scheduler lease
 
 Channel triggers (`every`, `cron`, `on_state_change`) run on data-plane nodes, so each mock's scheduler is guarded by its own lease in the `scheduler_leases` table (30 s): only the holder fires, and another node takes over when it expires. Consumers share the work through broker features instead: one Kafka consumer group and one AMQP queue per mock, and MQTT shared subscriptions (`$share/<client_id_prefix>/<topic>`) when the bus is shared.
