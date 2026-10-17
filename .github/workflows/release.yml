@@ -256,7 +256,7 @@ jobs:
           tags: mockingbird:scan
           cache-from: type=gha,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
       - name: Scan the image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           image-ref: ${{ needs.verify.outputs.publish == 'true' && format('{0}@{1}', needs.verify.outputs.image, steps.build.outputs.digest) || 'mockingbird:scan' }}
           severity: CRITICAL,HIGH

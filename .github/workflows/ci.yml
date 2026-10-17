@@ -174,14 +174,14 @@ jobs:
           docker run --rm mockingbird:ci --version
           docker run --rm mockingbird:ci-slim --version
       - name: Scan the full image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           image-ref: mockingbird:ci
           severity: CRITICAL,HIGH
           exit-code: 1
           ignore-unfixed: true
       - name: Scan the slim image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           image-ref: mockingbird:ci-slim
           severity: CRITICAL,HIGH
