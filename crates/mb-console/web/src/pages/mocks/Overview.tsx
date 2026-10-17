@@ -37,18 +37,19 @@ export function Overview({ ws, mock }: { ws: string; mock: string }) {
   const [chaosSavedAt, setChaosSavedAt] = useState<string>();
   if (!m.data) return m.isPending ? <p className="text-slate-700">Loading…</p> : null;
   const canEdit = me.data ? can(me.data, ws, "edit") : false;
-  // Re-seed the forms whenever the stored mock changes.
+  // Re-seed each form when the stored values it edits change, and only
+  // then: saving one form must not discard unsaved edits in the other.
   return (
     <div className="space-y-8">
       <OverviewForm
-        key={m.data.updated_at}
+        key={settingsKey(m.data)}
         ws={ws}
         mock={m.data}
         saved={savedAt === m.data.updated_at}
         onSaved={(updated) => setSavedAt(updated.updated_at)}
       />
       <ChaosLimits
-        key={`chaos-${m.data.updated_at}`}
+        key={chaosLimitsKey(m.data)}
         ws={ws}
         mock={m.data}
         canEdit={canEdit}
@@ -58,6 +59,23 @@ export function Overview({ ws, mock }: { ws: string; mock: string }) {
       />
     </div>
   );
+}
+
+/** The stored values `OverviewForm` edits, serialized. */
+function settingsKey(mock: Mock): string {
+  return JSON.stringify([
+    mock.route_prefix,
+    mock.persona ?? null,
+    mock.llm_profile ?? null,
+    mock.header_overrides,
+    mock.data_plane_auth.mode,
+    mock.data_plane_auth.header,
+  ]);
+}
+
+/** The stored values `ChaosLimits` edits, serialized. */
+function chaosLimitsKey(mock: Mock): string {
+  return `chaos-${JSON.stringify([mock.chaos ?? null, mock.limits ?? null])}`;
 }
 
 function OverviewForm({

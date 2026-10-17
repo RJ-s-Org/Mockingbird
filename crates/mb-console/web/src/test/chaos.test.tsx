@@ -266,4 +266,35 @@ describe("chaos and limits", () => {
     await waitFor(() => expect(calls.filter((c) => c.method === "PUT")).toHaveLength(2));
     expect(JSON.parse(calls.filter((c) => c.method === "PUT")[1]?.body ?? "")).not.toHaveProperty("chaos");
   });
+
+  it("saving chaos keeps unsaved settings edits", async () => {
+    const user = userEvent.setup();
+    const calls = overview({});
+    renderAt("/w/default/mocks/pets/overview");
+
+    const region = await section();
+    const persona = screen.getByLabelText("Persona");
+    await user.type(persona, "A grumpy pet shop");
+    await user.type(field(region, "Error rate (%)"), "5");
+    await user.click(within(region).getByRole("button", { name: "Save chaos and limits" }));
+
+    await within(await section()).findByText("Saved.");
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(1);
+    expect((screen.getByLabelText("Persona") as HTMLTextAreaElement).value).toBe("A grumpy pet shop");
+  });
+
+  it("saving settings keeps unsaved chaos edits", async () => {
+    const user = userEvent.setup();
+    const calls = overview({});
+    renderAt("/w/default/mocks/pets/overview");
+
+    const region = await section();
+    await user.type(field(region, "Error rate (%)"), "5");
+    await user.type(screen.getByLabelText("Persona"), "A grumpy pet shop");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(1));
+    await screen.findByText("Saved.");
+    expect(field(await section(), "Error rate (%)").value).toBe("5");
+  });
 });
