@@ -150,7 +150,9 @@ async fn control_to_bus(
         if !bus.is_local()
             && let Err(error) = bus.publish(announce).await
         {
-            tracing::warn!(%error, "cannot announce a control change on the bus");
+            // The bus remembers the failure and asks the other nodes to
+            // resync once it can publish again.
+            tracing::warn!(%error, "cannot announce a control change on the bus; the other nodes will resync once it recovers");
         }
     }
 }

@@ -5,7 +5,17 @@
 //! connection is re-established, a bus delivers [`BusEvent::Resync`] locally,
 //! because notifications sent while it was away are gone: receivers then
 //! reload everything.
+//!
+//! A connection that goes half-open (a partition, or a NAT or load balancer
+//! dropping an idle flow) never reports EOF, so a networked bus also
+//! heartbeats its subscriber connection every [`HEARTBEAT_INTERVAL`] and
+//! treats a heartbeat that fails or times out as a lost connection. As a
+//! last line of defence it delivers a local `Resync` about every
+//! [`SAFETY_RESYNC_INTERVAL`] (jittered), and after a failed publish it
+//! announces `Resync` to the other nodes once the bus works again.
 
+use std::hash::{BuildHasher, RandomState};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -16,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgListener, PgPool, PgPoolOptions};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::{CHANGE_CHANNEL_CAPACITY, StateError};
 
@@ -79,8 +90,68 @@ pub const REDIS_BUS_CHANNEL: &str = "mockingbird:bus";
 /// First reconnect delay; doubles on each failure up to [`MAX_BACKOFF`].
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// Bound on connecting and on each publish.
+/// Bound on connecting, on each publish and on each heartbeat.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often a networked bus checks its subscriber connection (`SELECT 1`
+/// on the Postgres listener, `PING` on the Redis pub/sub connection).
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// Mean interval of the local safety `Resync` (jittered by ±25 %).
+pub const SAFETY_RESYNC_INTERVAL: Duration = Duration::from_secs(300);
+
+/// How a networked bus watches its connection (tests shorten it).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct BusTiming {
+    /// First reconnect delay; doubles on each failure up to 30 s.
+    pub initial_backoff: Duration,
+    /// See [`HEARTBEAT_INTERVAL`].
+    pub heartbeat: Duration,
+    /// See [`SAFETY_RESYNC_INTERVAL`].
+    pub safety_resync: Duration,
+}
+
+impl Default for BusTiming {
+    fn default() -> Self {
+        Self {
+            initial_backoff: INITIAL_BACKOFF,
+            heartbeat: HEARTBEAT_INTERVAL,
+            safety_resync: SAFETY_RESYNC_INTERVAL,
+        }
+    }
+}
+
+impl BusTiming {
+    fn with_backoff(initial_backoff: Duration) -> Self {
+        Self {
+            initial_backoff,
+            ..Self::default()
+        }
+    }
+
+    /// A ticker for heartbeats; the first tick is one period from now.
+    fn heartbeat_timer(&self) -> Interval {
+        let mut timer = tokio::time::interval_at(Instant::now() + self.heartbeat, self.heartbeat);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        timer
+    }
+
+    /// When the next safety resync is due: the mean interval, ±25 %.
+    fn next_safety_resync(&self) -> Instant {
+        // Spread nodes apart without a random-number dependency: std's
+        // `RandomState` is randomly keyed per instance.
+        let permille = RandomState::new().hash_one(Instant::now()) % 501;
+        let base = self.safety_resync.mul_f64(0.75);
+        let spread = self.safety_resync.mul_f64(0.5 * permille as f64 / 500.0);
+        Instant::now() + base + spread
+    }
+}
+
+/// What woke a receive loop.
+enum Wake<T> {
+    Message(T),
+    Heartbeat,
+    SafetyResync,
+}
 
 const EVENTS_METRIC: &str = "mb_bus_events_total";
 const CONNECTED_METRIC: &str = "mb_bus_connected";
@@ -230,6 +301,9 @@ struct Receiver {
     node_id: String,
     tx: broadcast::Sender<BusEvent>,
     health: Arc<Mutex<Result<(), String>>>,
+    /// A publish failed: the other nodes may have missed an event, so a
+    /// `Resync` is announced at the next heartbeat that can send one.
+    resync_owed: Arc<AtomicBool>,
 }
 
 impl Receiver {
@@ -240,7 +314,37 @@ impl Receiver {
             node_id,
             tx,
             health: Arc::new(Mutex::new(Ok(()))),
+            resync_owed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn owe_resync(&self) {
+        self.resync_owed.store(true, Ordering::Relaxed);
+    }
+
+    fn resync_owed(&self) -> bool {
+        self.resync_owed.load(Ordering::Relaxed)
+    }
+
+    /// The owed `Resync` went out.
+    fn resync_announced(&self) {
+        self.resync_owed.store(false, Ordering::Relaxed);
+        tracing::info!("bus works again after a failed publish; asked the other nodes to resync");
+        count("sent", &BusEvent::Resync);
+    }
+
+    /// The `Resync` announcement for the other nodes.
+    fn resync_payload(&self) -> Result<String, String> {
+        encode(&self.node_id, BusEvent::Resync)
+            .map(|(payload, _)| payload)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The periodic safety net: reload everything even though nothing
+    /// looked lost.
+    fn safety_resync(&self) {
+        tracing::debug!("periodic bus safety resync");
+        let _ = self.tx.send(BusEvent::Resync);
     }
 
     fn health(&self) -> Result<(), String> {
@@ -329,7 +433,7 @@ pub struct PgBus {
 
 impl PgBus {
     pub async fn connect(url: &str, node_id: String) -> Result<Arc<Self>, StateError> {
-        Self::connect_with_backoff(url, node_id, INITIAL_BACKOFF).await
+        Self::connect_with_timing(url, node_id, BusTiming::default()).await
     }
 
     /// [`PgBus::connect`] with a custom first reconnect delay (tests).
@@ -338,6 +442,16 @@ impl PgBus {
         url: &str,
         node_id: String,
         initial_backoff: Duration,
+    ) -> Result<Arc<Self>, StateError> {
+        Self::connect_with_timing(url, node_id, BusTiming::with_backoff(initial_backoff)).await
+    }
+
+    /// [`PgBus::connect`] with custom timings (tests).
+    #[doc(hidden)]
+    pub async fn connect_with_timing(
+        url: &str,
+        node_id: String,
+        timing: BusTiming,
     ) -> Result<Arc<Self>, StateError> {
         let options: PgConnectOptions = url
             .parse()
@@ -349,7 +463,7 @@ impl PgBus {
             .connect_lazy_with(options.clone());
         let listener = pg_listen(&options).await.map_err(StateError::Backend)?;
         let recv = Receiver::new(node_id);
-        let task = tokio::spawn(pg_receive(recv.clone(), options, listener, initial_backoff));
+        let task = tokio::spawn(pg_receive(recv.clone(), options, listener, timing));
         Ok(Arc::new(Self { recv, pool, task }))
     }
 }
@@ -370,23 +484,66 @@ async fn pg_receive(
     recv: Receiver,
     options: PgConnectOptions,
     mut listener: PgListener,
-    initial_backoff: Duration,
+    timing: BusTiming,
 ) {
+    let mut heartbeat = timing.heartbeat_timer();
+    let safety = tokio::time::sleep_until(timing.next_safety_resync());
+    tokio::pin!(safety);
     loop {
-        let reason = match listener.try_recv().await {
-            Ok(Some(n)) => {
+        let wake = tokio::select! {
+            r = listener.try_recv() => Wake::Message(r),
+            _ = heartbeat.tick() => Wake::Heartbeat,
+            () = &mut safety => Wake::SafetyResync,
+        };
+        let reason = match wake {
+            Wake::Message(Ok(Some(n))) => {
                 recv.deliver(n.payload());
                 continue;
             }
-            Ok(None) => "postgres: listener connection lost".to_owned(),
-            Err(e) => format!("postgres: {e}"),
+            Wake::Message(Ok(None)) => "postgres: listener connection lost".to_owned(),
+            Wake::Message(Err(e)) => format!("postgres: {e}"),
+            Wake::Heartbeat => match pg_heartbeat(&recv, &mut listener).await {
+                Ok(()) => continue,
+                Err(e) => e,
+            },
+            Wake::SafetyResync => {
+                recv.safety_resync();
+                safety.as_mut().reset(timing.next_safety_resync());
+                continue;
+            }
         };
         drop(listener);
         recv.lost(reason);
         listener = recv
-            .reconnect(initial_backoff, || pg_listen(&options))
+            .reconnect(timing.initial_backoff, || pg_listen(&options))
             .await;
+        heartbeat.reset();
     }
+}
+
+/// Proves the listener connection still answers: announces an owed
+/// `Resync` when there is one, else `SELECT 1`. Notifications arriving
+/// meanwhile are buffered by the listener.
+async fn pg_heartbeat(recv: &Receiver, listener: &mut PgListener) -> Result<(), String> {
+    if recv.resync_owed() {
+        let payload = recv.resync_payload()?;
+        with_timeout(
+            "postgres heartbeat",
+            sqlx::query("SELECT pg_notify($1, $2)")
+                .bind(PG_BUS_CHANNEL)
+                .bind(payload)
+                .execute(&mut *listener),
+        )
+        .await?;
+        recv.resync_announced();
+        return Ok(());
+    }
+    with_timeout(
+        "postgres heartbeat",
+        sqlx::query("SELECT 1").execute(&mut *listener),
+    )
+    .await
+    .map(|_| ())
 }
 
 impl Drop for PgBus {
@@ -407,7 +564,10 @@ impl Bus for PgBus {
                 .execute(&self.pool),
         )
         .await
-        .map_err(|e| StateError::Backend(format!("bus: {e}")))?;
+        .map_err(|e| {
+            self.recv.owe_resync();
+            StateError::Backend(format!("bus: {e}"))
+        })?;
         count("sent", &sent);
         Ok(())
     }
@@ -428,13 +588,69 @@ impl Bus for PgBus {
 /// The bus over Redis pub/sub on [`REDIS_BUS_CHANNEL`].
 pub struct RedisBus {
     recv: Receiver,
-    con: ConnectionManager,
+    publisher: RedisPublisher,
     task: JoinHandle<()>,
+}
+
+/// The command connection publishes go out on. The connection manager only
+/// reconnects a connection that closed, not one that went half-open and
+/// times out, so a failed publish replaces it with a fresh one.
+#[derive(Clone)]
+struct RedisPublisher {
+    client: redis::Client,
+    con: Arc<Mutex<ConnectionManager>>,
+}
+
+impl RedisPublisher {
+    fn config() -> ConnectionManagerConfig {
+        ConnectionManagerConfig::new()
+            .set_connection_timeout(Some(IO_TIMEOUT))
+            .set_response_timeout(Some(IO_TIMEOUT))
+            .set_number_of_retries(2)
+    }
+
+    async fn connect(client: redis::Client) -> Result<Self, StateError> {
+        let con = client
+            .get_connection_manager_with_config(Self::config())
+            .await?;
+        Ok(Self {
+            client,
+            con: Arc::new(Mutex::new(con)),
+        })
+    }
+
+    async fn publish(&self, payload: &str) -> Result<(), String> {
+        let mut con = self
+            .con
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let published = with_timeout(
+            "redis publish",
+            redis::cmd("PUBLISH")
+                .arg(REDIS_BUS_CHANNEL)
+                .arg(payload)
+                .query_async::<i64>(&mut con),
+        )
+        .await;
+        if published.is_err() {
+            self.replace();
+        }
+        published.map(|_| ())
+    }
+
+    /// Swaps in a fresh connection (made on its first use).
+    fn replace(&self) {
+        match ConnectionManager::new_lazy_with_config(self.client.clone(), Self::config()) {
+            Ok(fresh) => *self.con.lock().unwrap_or_else(PoisonError::into_inner) = fresh,
+            Err(error) => tracing::warn!(%error, "cannot replace the bus publish connection"),
+        }
+    }
 }
 
 impl RedisBus {
     pub async fn connect(url: &str, node_id: String) -> Result<Arc<Self>, StateError> {
-        Self::connect_with_backoff(url, node_id, INITIAL_BACKOFF).await
+        Self::connect_with_timing(url, node_id, BusTiming::default()).await
     }
 
     /// [`RedisBus::connect`] with a custom first reconnect delay (tests).
@@ -444,53 +660,112 @@ impl RedisBus {
         node_id: String,
         initial_backoff: Duration,
     ) -> Result<Arc<Self>, StateError> {
+        Self::connect_with_timing(url, node_id, BusTiming::with_backoff(initial_backoff)).await
+    }
+
+    /// [`RedisBus::connect`] with custom timings (tests).
+    #[doc(hidden)]
+    pub async fn connect_with_timing(
+        url: &str,
+        node_id: String,
+        timing: BusTiming,
+    ) -> Result<Arc<Self>, StateError> {
         if !(url.starts_with("redis://") || url.starts_with("rediss://")) {
             return Err(StateError::Backend(
                 "bus: redis url must start with redis:// or rediss://".into(),
             ));
         }
         let client = redis::Client::open(url)?;
-        let config = ConnectionManagerConfig::new()
-            .set_connection_timeout(Some(IO_TIMEOUT))
-            .set_response_timeout(Some(IO_TIMEOUT))
-            .set_number_of_retries(2);
-        let con = client.get_connection_manager_with_config(config).await?;
-        let stream = redis_subscribe(&client)
+        let publisher = RedisPublisher::connect(client.clone()).await?;
+        let subscription = redis_subscribe(&client)
             .await
             .map_err(StateError::Backend)?;
         let recv = Receiver::new(node_id);
-        let task = tokio::spawn(redis_receive(recv.clone(), client, stream, initial_backoff));
-        Ok(Arc::new(Self { recv, con, task }))
+        let task = tokio::spawn(redis_receive(
+            recv.clone(),
+            client,
+            publisher.clone(),
+            subscription,
+            timing,
+        ));
+        Ok(Arc::new(Self {
+            recv,
+            publisher,
+            task,
+        }))
     }
 }
 
-async fn redis_subscribe(client: &redis::Client) -> Result<redis::aio::PubSubStream, String> {
+/// A pub/sub connection: the sink for heartbeats, the stream for messages.
+type Subscription = (redis::aio::PubSubSink, redis::aio::PubSubStream);
+
+async fn redis_subscribe(client: &redis::Client) -> Result<Subscription, String> {
     let mut pubsub = with_timeout("redis subscribe", client.get_async_pubsub()).await?;
     with_timeout("redis subscribe", pubsub.subscribe(REDIS_BUS_CHANNEL)).await?;
-    Ok(pubsub.into_on_message())
+    Ok(pubsub.split())
 }
 
 async fn redis_receive(
     recv: Receiver,
     client: redis::Client,
-    mut stream: redis::aio::PubSubStream,
-    initial_backoff: Duration,
+    publisher: RedisPublisher,
+    (mut sink, mut stream): Subscription,
+    timing: BusTiming,
 ) {
+    let mut heartbeat = timing.heartbeat_timer();
+    let safety = tokio::time::sleep_until(timing.next_safety_resync());
+    tokio::pin!(safety);
     loop {
-        match stream.next().await {
-            Some(msg) => match msg.get_payload::<String>() {
-                Ok(payload) => recv.deliver(&payload),
-                Err(e) => tracing::warn!(error = %e, "ignoring non-text bus payload"),
-            },
-            None => {
-                drop(stream);
-                recv.lost("redis: pub/sub connection lost".into());
-                stream = recv
-                    .reconnect(initial_backoff, || redis_subscribe(&client))
-                    .await;
+        let wake = tokio::select! {
+            msg = stream.next() => Wake::Message(msg),
+            _ = heartbeat.tick() => Wake::Heartbeat,
+            () = &mut safety => Wake::SafetyResync,
+        };
+        let reason = match wake {
+            Wake::Message(Some(msg)) => {
+                match msg.get_payload::<String>() {
+                    Ok(payload) => recv.deliver(&payload),
+                    Err(e) => tracing::warn!(error = %e, "ignoring non-text bus payload"),
+                }
+                continue;
             }
+            Wake::Message(None) => "redis: pub/sub connection lost".to_owned(),
+            Wake::Heartbeat => match redis_heartbeat(&recv, &mut sink, &publisher).await {
+                Ok(()) => continue,
+                Err(e) => e,
+            },
+            Wake::SafetyResync => {
+                recv.safety_resync();
+                safety.as_mut().reset(timing.next_safety_resync());
+                continue;
+            }
+        };
+        drop((sink, stream));
+        recv.lost(reason);
+        (sink, stream) = recv
+            .reconnect(timing.initial_backoff, || redis_subscribe(&client))
+            .await;
+        heartbeat.reset();
+    }
+}
+
+/// Proves the pub/sub connection still answers (`PING`), then announces an
+/// owed `Resync` over the command connection when there is one.
+async fn redis_heartbeat(
+    recv: &Receiver,
+    sink: &mut redis::aio::PubSubSink,
+    publisher: &RedisPublisher,
+) -> Result<(), String> {
+    with_timeout("redis heartbeat", sink.ping::<redis::Value>()).await?;
+    if recv.resync_owed() {
+        let payload = recv.resync_payload()?;
+        match publisher.publish(&payload).await {
+            Ok(_) => recv.resync_announced(),
+            // The subscriber is fine; try again at the next heartbeat.
+            Err(error) => tracing::warn!(%error, "cannot announce a resync on the bus yet"),
         }
     }
+    Ok(())
 }
 
 impl Drop for RedisBus {
@@ -503,12 +778,10 @@ impl Drop for RedisBus {
 impl Bus for RedisBus {
     async fn publish(&self, event: BusEvent) -> Result<(), StateError> {
         let (payload, sent) = encode(&self.recv.node_id, event)?;
-        let mut con = self.con.clone();
-        let _: i64 = redis::cmd("PUBLISH")
-            .arg(REDIS_BUS_CHANNEL)
-            .arg(payload)
-            .query_async(&mut con)
-            .await?;
+        if let Err(e) = self.publisher.publish(&payload).await {
+            self.recv.owe_resync();
+            return Err(StateError::Backend(format!("bus: {e}")));
+        }
         count("sent", &sent);
         Ok(())
     }

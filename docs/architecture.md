@@ -71,9 +71,9 @@ Nodes tell each other what changed over a bus (`bus.url`): Postgres `LISTEN/NOTI
 | `Workspace { name }` | a workspace changes | reload its mocks |
 | `State { workspace, mock, session, resource_type, id, deleted }` | a session resource changes | fire `on_state_change` triggers and SSE/subscription updates |
 | `RequestLogged { id }` | a call is recorded | the live tail looks the entry up by id |
-| `Resync` | locally after a reconnect, or instead of an event larger than 7900 bytes | reload every mock |
+| `Resync` | locally after a reconnect and every 5 minutes (±25 %) as a safety net; to the other nodes once the bus works again after a failed publish; instead of an event larger than 7900 bytes | reload every mock |
 
-A disconnected bus reconnects with a backoff from 1 s doubling to 30 s, and `/readyz` reports `degraded` with `bus: <error>` meanwhile. Because every reconnect emits `Resync`, a node never keeps serving a deleted mock for longer than one reconnect cycle. `mb_bus_connected` and `mb_bus_events_total{direction,type}` expose the bus.
+A connection that goes half-open (a partition, or conntrack or a load balancer dropping an idle flow) never reports an error by itself, so each node heartbeats its subscriber connection every 10 s (`SELECT 1` on the Postgres listener, `PING` on the Redis pub/sub connection) and treats a heartbeat that fails or takes over 5 s as a lost connection. A disconnected bus reconnects with a backoff from 1 s doubling to 30 s, and `/readyz` reports `degraded` with `bus: <error>` meanwhile. Because every reconnect emits `Resync`, a node never keeps serving a deleted mock for longer than one heartbeat timeout plus one reconnect cycle. `mb_bus_connected` and `mb_bus_events_total{direction,type}` expose the bus.
 
 ### Leader election
 
