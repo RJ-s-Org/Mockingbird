@@ -346,14 +346,14 @@ jobs:
           subject-digest: ${{ steps.manifests.outputs.slim }}
           push-to-registry: true
       - name: SBOM attestation (full)
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@v4
         with:
           subject-name: ${{ needs.verify.outputs.image }}
           subject-digest: ${{ steps.manifests.outputs.full }}
           sbom-path: mockingbird-${{ needs.verify.outputs.version }}.cdx.json
           push-to-registry: true
       - name: SBOM attestation (slim)
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@v4
         with:
           subject-name: ${{ needs.verify.outputs.image }}
           subject-digest: ${{ steps.manifests.outputs.slim }}
