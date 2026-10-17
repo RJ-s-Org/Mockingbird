@@ -50,7 +50,15 @@ jobs:
       MB_TEST_AMQP_URL: amqp://guest:guest@localhost:5672/%2f
       MB_TEST_KAFKA_URL: localhost:9092
       MB_TEST_REDIS_URL: redis://localhost:6379
+      # Every test binary with full debuginfo no longer fits on the runner's
+      # disk (rust-lld dies with a bus error while linking).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
       # The console is built first, so mb-console embeds the real build
       # instead of its placeholder page.
