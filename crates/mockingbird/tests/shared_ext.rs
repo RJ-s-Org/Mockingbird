@@ -66,11 +66,9 @@ async fn websocket_channels_and_imports_share_quota_and_usage() {
     };
     let quota = Arc::new(RecordingQuota::default());
     let usage = Arc::new(RecordingUsage::default());
-    let ext = Extensions {
-        quota: quota.clone(),
-        usage: usage.clone(),
-        ..Extensions::default()
-    };
+    let ext = Extensions::default()
+        .with_quota(quota.clone())
+        .with_usage(usage.clone());
     let app = build_app_with(&args, None, ext).await.unwrap();
     let data = serve(app.data.clone()).await;
     let admin = serve(app.admin.clone()).await;

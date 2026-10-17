@@ -1,19 +1,27 @@
 //! The request log writer: a [`RequestRecorder`] that queues each record
 //! and, off the request path, redacts it, appends it to the control store
 //! and fans it out to live subscribers (the console's request tail).
+//!
+//! With HA ([`StoreRecorder::with_bus`]), every written entry is announced
+//! on the bus by id, and entries other nodes announce are read back from
+//! the shared store and fanned out too, so a tail on any node sees every
+//! node's traffic.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
-use mb_protocols::{RequestRecord, RequestRecorder};
-use mb_store::{ControlChange, ControlStore, NewRequestLogEntry};
+use mb_protocols::{RequestKind, RequestRecord, RequestRecorder};
+use mb_state::{Bus, BusEvent};
+use mb_store::{ControlChange, ControlStore, NewRequestLogEntry, RequestLogEntry};
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast, mpsc};
 use uuid::Uuid;
+
+use crate::ha::Ha;
 
 /// Records waiting to be written; beyond this, new records are dropped.
 pub const QUEUE_CAPACITY: usize = 4096;
@@ -45,6 +53,12 @@ pub struct StoreRecorder {
     settings: Arc<ArcSwap<Settings>>,
     live: broadcast::Sender<RequestRecord>,
     dropped: AtomicU64,
+    store: Arc<dyn ControlStore>,
+    /// Ids of written entries to announce on the bus; set by
+    /// [`StoreRecorder::with_bus`].
+    announce: Arc<OnceLock<mpsc::Sender<i64>>>,
+    /// The bus announcer and receiver started by [`StoreRecorder::with_bus`].
+    bus_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl StoreRecorder {
@@ -64,12 +78,14 @@ impl StoreRecorder {
             retention,
             redact_fields,
         }));
+        let announce = Arc::new(OnceLock::new());
         let writer = Writer {
             changes: store.subscribe(),
-            store,
+            store: store.clone(),
             ids: HashMap::new(),
             settings: Arc::clone(&settings),
             live: live.clone(),
+            announce: Arc::clone(&announce),
         };
         let stop = Arc::new(Notify::new());
         let handle = tokio::spawn(writer.run(rx, Arc::clone(&stop)));
@@ -80,7 +96,39 @@ impl StoreRecorder {
             settings,
             live,
             dropped: AtomicU64::new(0),
+            store,
+            announce,
+            bus_tasks: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Shares the request log across nodes over `ha`'s bus: every entry
+    /// this recorder writes is announced as [`BusEvent::RequestLogged`]
+    /// (not on a single node's local bus), and entries other nodes
+    /// announce are read from the store and sent to [`StoreRecorder::live`]
+    /// subscribers. Only the first call has an effect.
+    pub fn with_bus(self: Arc<Self>, ha: Arc<Ha>) {
+        let bus = Arc::clone(&ha.bus);
+        if bus.is_local() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
+        if self.announce.set(tx).is_err() {
+            tracing::warn!("request log already shared over a bus");
+            return;
+        }
+        let remote = Remote {
+            store: Arc::clone(&self.store),
+            live: self.live.clone(),
+            mocks: HashMap::new(),
+        };
+        let tasks = vec![
+            tokio::spawn(announce(rx, Arc::clone(&bus))),
+            tokio::spawn(remote.run(bus.subscribe())),
+        ];
+        if let Ok(mut slot) = self.bus_tasks.lock() {
+            slot.extend(tasks);
+        }
     }
 
     /// Replaces the retention and the redacted fields; records written from
@@ -143,6 +191,117 @@ impl RequestRecorder for StoreRecorder {
     }
 }
 
+impl Drop for StoreRecorder {
+    fn drop(&mut self) {
+        if let Ok(tasks) = self.bus_tasks.lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
+        }
+    }
+}
+
+/// Announces the ids of written entries on the bus, off the writer's path
+/// (a slow bus never holds up the request log).
+async fn announce(mut ids: mpsc::Receiver<i64>, bus: Arc<dyn Bus>) {
+    while let Some(id) = ids.recv().await {
+        if let Err(error) = bus.publish(BusEvent::RequestLogged { id }).await {
+            tracing::warn!(%error, id, "cannot announce a request log entry on the bus");
+        }
+    }
+}
+
+/// Fans entries written by other nodes out to the live subscribers.
+struct Remote {
+    store: Arc<dyn ControlStore>,
+    live: broadcast::Sender<RequestRecord>,
+    /// mock id → (workspace, name), filled from `list_all_mocks` on a miss.
+    mocks: HashMap<Uuid, (String, String)>,
+}
+
+impl Remote {
+    async fn run(mut self, mut events: broadcast::Receiver<BusEvent>) {
+        loop {
+            match events.recv().await {
+                Ok(BusEvent::RequestLogged { id }) => self.relay(id).await,
+                Ok(_) => {}
+                // The live tail is best effort: skipped entries are still
+                // in the request log.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!(skipped = n, "remote request log announcements lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+
+    async fn relay(&mut self, id: i64) {
+        // Nobody tailing: skip the reads.
+        if self.live.receiver_count() == 0 {
+            return;
+        }
+        let entry = match self.store.get_request_log(id).await {
+            Ok(Some(entry)) => entry,
+            // Pruned already, or not visible yet.
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, id, "cannot read an announced request log entry");
+                return;
+            }
+        };
+        let Some((workspace, mock)) = self.mock(entry.mock_id).await else {
+            return;
+        };
+        let _ = self.live.send(from_entry(&entry, &workspace, &mock));
+    }
+
+    async fn mock(&mut self, id: Uuid) -> Option<(String, String)> {
+        if !self.mocks.contains_key(&id) {
+            match self.store.list_all_mocks().await {
+                Ok(mocks) => {
+                    self.mocks = mocks
+                        .into_iter()
+                        .map(|m| (m.id, (m.workspace, m.name)))
+                        .collect();
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "cannot list mocks for the request log");
+                    return None;
+                }
+            }
+        }
+        self.mocks.get(&id).cloned()
+    }
+}
+
+/// The live-feed record of a stored request-log entry of mock `mock` in
+/// `workspace` (already redacted and truncated when it was written).
+pub fn from_entry(e: &RequestLogEntry, workspace: &str, mock: &str) -> RequestRecord {
+    RequestRecord {
+        workspace: workspace.to_owned(),
+        mock: mock.to_owned(),
+        operation_id: e.operation_id.clone(),
+        session: e.session.clone(),
+        method: e.method.clone(),
+        path: e.path.clone(),
+        status: e.status,
+        source: e.source.clone(),
+        latency: Duration::from_millis(e.latency_ms),
+        prompt_tokens: e.prompt_tokens,
+        completion_tokens: e.completion_tokens,
+        request: e.request.clone(),
+        request_body_bytes: None,
+        response: e.response.clone(),
+        kind: match e.kind {
+            mb_store::RequestKind::Http => RequestKind::Http,
+            mb_store::RequestKind::Graphql => RequestKind::Graphql,
+            mb_store::RequestKind::Grpc => RequestKind::Grpc,
+            mb_store::RequestKind::Soap => RequestKind::Soap,
+            mb_store::RequestKind::Event => RequestKind::Event,
+        },
+    }
+}
+
 /// Request-log settings that a config reload may change.
 struct Settings {
     retention: u32,
@@ -159,6 +318,7 @@ struct Writer {
     ids: HashMap<(String, String), Uuid>,
     settings: Arc<ArcSwap<Settings>>,
     live: broadcast::Sender<RequestRecord>,
+    announce: Arc<OnceLock<mpsc::Sender<i64>>>,
 }
 
 impl Writer {
@@ -226,15 +386,23 @@ impl Writer {
             at: Utc::now(),
             kind: mb_store::RequestKind::parse(r.kind.as_str()).unwrap_or_default(),
         };
-        if let Err(error) = self
+        match self
             .store
             .append_request_log(entry, settings.retention)
             .await
         {
-            // The cached id may belong to a mock deleted since.
-            self.ids.remove(&(r.workspace.clone(), r.mock.clone()));
-            tracing::warn!(workspace = %r.workspace, mock = %r.mock, %error, "cannot write request log entry");
-            metrics::counter!("mb_request_log_errors_total", "mock" => r.mock).increment(1);
+            Ok(id) => {
+                // A full queue drops the announcement: the entry is stored.
+                if let Some(announce) = self.announce.get() {
+                    let _ = announce.try_send(id);
+                }
+            }
+            Err(error) => {
+                // The cached id may belong to a mock deleted since.
+                self.ids.remove(&(r.workspace.clone(), r.mock.clone()));
+                tracing::warn!(workspace = %r.workspace, mock = %r.mock, %error, "cannot write request log entry");
+                metrics::counter!("mb_request_log_errors_total", "mock" => r.mock).increment(1);
+            }
         }
     }
 

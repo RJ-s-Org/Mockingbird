@@ -19,7 +19,9 @@ use mb_mcm::{Binding, Effect, Operation, OperationKind, Protocol};
 use mb_state::{ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
+use tracing::Instrument;
 
+use crate::chaos::{self, CHAOS_HEADER, ChaosDecision};
 pub(crate) use crate::dp_auth::Unauthorized;
 use crate::dp_auth::{authenticate, verify_key};
 use crate::{MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime};
@@ -54,6 +56,8 @@ pub(crate) struct Overrides {
     pub latency: Option<Duration>,
     pub scenario: Option<String>,
     pub stream_items: Option<usize>,
+    /// `X-Mockingbird-Chaos: off`: no fault injection for this call.
+    pub chaos_off: bool,
 }
 
 impl Overrides {
@@ -65,6 +69,7 @@ impl Overrides {
             latency: None,
             scenario: None,
             stream_items: None,
+            chaos_off: false,
         };
         if !enabled {
             return Ok(out);
@@ -108,6 +113,12 @@ impl Overrides {
                 })?;
             out.stream_items = Some(items);
         }
+        if let Some(s) = header_text(headers, CHAOS_HEADER)? {
+            if !s.eq_ignore_ascii_case("off") {
+                return Err(r#"X-Mockingbird-Chaos must be "off""#.into());
+            }
+            out.chaos_off = true;
+        }
         Ok(out)
     }
 }
@@ -138,11 +149,25 @@ pub(crate) struct CallPlan<'a> {
     pub scenario: Option<&'a ScenarioRuntime>,
     /// Header status, else the scenario's status where `op` declares it.
     pub forced_status: Option<u16>,
-    /// Injected latency (header, else scenario), capped at 30 s.
+    /// Injected latency (header, else scenario) plus any chaos latency,
+    /// capped at 30 s.
     pub delay: Option<Duration>,
     /// Header item count, else the scenario's.
     pub stream_items: Option<usize>,
     pub tenancy: Tenancy,
+    /// The call's faults. An injected error comes with `forced_status` set
+    /// to the declared error status it uses; with `forced_status` unset,
+    /// the adapter answers its protocol-native error.
+    pub chaos: ChaosDecision,
+}
+
+impl CallPlan<'_> {
+    /// Whether the call answers an injected error that the operation
+    /// declares no status for (the protocol-native answer applies).
+    #[cfg(any(feature = "http-rest", feature = "soap"))]
+    pub(crate) fn native_chaos_error(&self) -> bool {
+        self.chaos.inject_error && self.forced_status.is_none()
+    }
 }
 
 /// The credentials a call presents beyond its headers (for gRPC: its
@@ -161,7 +186,8 @@ pub(crate) struct Presented<'a> {
     pub admitted: Option<&'a Tenancy>,
 }
 
-/// Admission for a whole request (`tenants.resolve`, then `quota.admit`)
+/// Admission for a whole request (`tenants.resolve`, then `quota.admit`,
+/// then the mock's rate limit)
 /// with operation id `operation_id`, for adapters that check the
 /// data-plane key once per request ([`check_key`]) and must admit first.
 /// `Err` carries the tenancy when it resolved.
@@ -171,21 +197,106 @@ pub(crate) async fn admit(
     operation_id: &str,
     headers: &HeaderMap,
 ) -> Result<Tenancy, (Rejection, Option<Tenancy>)> {
-    let call_info = CallInfo {
-        mock: &rt.name,
-        operation_id,
-        headers,
-    };
-    let tenancy = rt
-        .ext
-        .tenants
-        .resolve(&call_info)
-        .await
-        .map_err(|r| (r, None))?;
-    match rt.ext.quota.admit(&tenancy, &call_info).await {
-        Ok(()) => Ok(tenancy),
-        Err(r) => Err((r, Some(tenancy))),
+    async {
+        let call_info = CallInfo::new(&rt.name, operation_id, headers);
+        let tenancy = rt
+            .ext
+            .tenants
+            .resolve(&call_info)
+            .await
+            .map_err(|r| (r, None))?;
+        if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+            return Err((r, Some(tenancy)));
+        }
+        match rate_limit(rt) {
+            Ok(()) => Ok(tenancy),
+            Err(r) => Err((r, Some(tenancy))),
+        }
     }
+    .instrument(tracing::info_span!("mb.admission"))
+    .await
+}
+
+/// The mock's rate limit (spec §7, step 2, after the quota): `Err` with
+/// the `429` rejection (and its `Retry-After`) when the bucket is empty.
+pub(crate) fn rate_limit(rt: &MockRuntime) -> Result<(), Rejection> {
+    let Some(limiter) = &rt.limits.rate else {
+        return Ok(());
+    };
+    limiter.try_acquire().map_err(|retry_after| {
+        metrics::counter!(crate::limits::RATE_LIMITED_METRIC, "mock" => rt.name.clone())
+            .increment(1);
+        Rejection::new(
+            429,
+            "Too Many Requests",
+            format!(
+                "mock {} allows {} requests/s (burst {})",
+                rt.name,
+                limiter.requests_per_second(),
+                limiter.burst()
+            ),
+        )
+        .with_retry_after(retry_after)
+    })
+}
+
+/// Admission of one more inbound message of a streaming call already
+/// admitted with `tenancy` (gRPC client and bidi streams): `quota.admit`,
+/// then the mock's rate limit, as for a new call.
+#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+pub(crate) async fn admit_item(
+    rt: &MockRuntime,
+    tenancy: &Tenancy,
+    operation_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), Rejection> {
+    let call_info = CallInfo::new(&rt.name, operation_id, headers);
+    rt.ext.quota.admit(tenancy, &call_info).await?;
+    rate_limit(rt)
+}
+
+/// One usage event for a single engine call of a streaming call (a gRPC
+/// bidi reply); the call's own [`report`] is then sent with
+/// [`report_unmetered`], so nothing is counted twice.
+#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+pub(crate) fn meter(
+    rt: &MockRuntime,
+    tenancy: Tenancy,
+    operation_id: &str,
+    source: Source,
+    latency: Duration,
+    usage: Usage,
+) {
+    let mut event = UsageEvent::new(tenancy, rt.name.clone(), operation_id);
+    event.status = 200;
+    event.source = source.as_str().to_string();
+    event.latency = latency;
+    event.prompt_tokens = usage.prompt_tokens;
+    event.completion_tokens = usage.completion_tokens;
+    rt.ext.usage.record(&event);
+}
+
+/// The answer to a rate-limited call of `op` when the contract declares a
+/// `429` response: the engine's fallback for that variant (never an LLM
+/// call). `None` when the operation declares no `429`.
+#[cfg_attr(not(any(feature = "http-rest", feature = "soap")), allow(dead_code))]
+pub(crate) fn declared_rate_limited(rt: &MockRuntime, op: &Operation) -> Option<GeneratedResponse> {
+    let variant = op
+        .outputs
+        .iter()
+        .find(|o| o.status == mb_mcm::StatusSelector::Code(429))?;
+    let ctx = GenerationContext {
+        forced_status: Some(429),
+        ..GenerationContext::default()
+    };
+    Some(rt.engine.fallback(
+        &rt.bundle,
+        op,
+        variant,
+        429,
+        &OperationCall::default(),
+        &ctx,
+    ))
 }
 
 /// The data-plane key check of `api_key` mode for a whole request, for
@@ -217,6 +328,8 @@ pub(crate) fn public_query(rt: &MockRuntime, pairs: &[(String, String)]) -> Vec<
 pub(crate) enum PlanError {
     /// Tenancy resolution or the quota refused the call.
     Rejected(Rejection),
+    /// The mock's rate limit refused the call (`429`, with `Retry-After`).
+    RateLimited(Rejection),
     /// Data-plane auth refused the call (`401`).
     Unauthorized(Unauthorized),
     /// An override header is unusable; carries the problem detail.
@@ -247,51 +360,23 @@ impl PlanFailure {
     }
 }
 
-/// Admission (`tenants.resolve`, then `quota.admit`, unless
-/// [`Presented::admitted`]), then data-plane auth
-/// (spec §11.2), then override headers, then the scenario. Header status and latency beat the
-/// scenario's; a scenario status applies only where `op` declares it.
-/// Records the session on the current span.
+/// Admission (`tenants.resolve`, then `quota.admit`, then the mock's rate
+/// limit, unless [`Presented::admitted`]), then data-plane auth
+/// (spec §11.2), then override headers, then the scenario, then chaos.
+/// Header status and latency beat the scenario's; a scenario status
+/// applies only where `op` declares it. Chaos comes from the applying
+/// scenario, else the mock, unless `X-Mockingbird-Chaos: off`; it injects
+/// no error when a status is already forced. Records the session on the
+/// current span. Admission and auth run in an `mb.admission` span.
 pub(crate) async fn plan<'a>(
     rt: &'a MockRuntime,
     op: &'a Operation,
     headers: &HeaderMap,
     presented: Presented<'_>,
 ) -> Result<CallPlan<'a>, PlanFailure> {
-    let call_info = CallInfo {
-        mock: &rt.name,
-        operation_id: &op.id,
-        headers,
-    };
-    let tenancy = match presented.admitted {
-        Some(t) => t.clone(),
-        None => {
-            let tenancy = match rt.ext.tenants.resolve(&call_info).await {
-                Ok(t) => t,
-                Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
-            };
-            if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
-                return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
-            }
-            tenancy
-        }
-    };
-    let auth = authenticate(
-        rt,
-        &op.id,
-        &op.security,
-        headers,
-        presented.query,
-        presented.key_verified,
-    )
-    .await;
-    if let Err(unauthorized) = auth {
-        return Err(PlanFailure::new(
-            PlanError::Unauthorized(unauthorized),
-            Some(tenancy),
-        ));
-    }
-
+    let tenancy = admit_and_authenticate(rt, op, headers, presented)
+        .instrument(tracing::info_span!("mb.admission"))
+        .await?;
     let overrides = match Overrides::parse(headers, rt.header_overrides) {
         Ok(o) => o,
         Err(detail) => {
@@ -320,14 +405,21 @@ pub(crate) async fn plan<'a>(
     let scenario_status = scenario
         .and_then(|s| s.status)
         .filter(|code| op.output_for_status(*code).is_some());
-    let forced_status = overrides.status.or(scenario_status);
-    let delay = overrides
+    let mut forced_status = overrides.status.or(scenario_status);
+    let mut delay = overrides
         .latency
         .or_else(|| scenario.and_then(|s| s.latency))
         .map(|d| d.min(MAX_LATENCY));
     let stream_items = overrides
         .stream_items
         .or_else(|| scenario.and_then(|s| s.stream_items));
+    let chaos = decide_chaos(rt, op, scenario, &overrides, forced_status, stream_items);
+    if chaos.inject_error {
+        forced_status = chaos::error_status(op);
+    }
+    if !chaos.extra_latency.is_zero() {
+        delay = Some((delay.unwrap_or_default() + chaos.extra_latency).min(MAX_LATENCY));
+    }
     Ok(CallPlan {
         op,
         session: SessionKey {
@@ -340,7 +432,86 @@ pub(crate) async fn plan<'a>(
         delay,
         stream_items,
         tenancy,
+        chaos,
     })
+}
+
+/// The admission and data-plane auth of [`plan`].
+async fn admit_and_authenticate(
+    rt: &MockRuntime,
+    op: &Operation,
+    headers: &HeaderMap,
+    presented: Presented<'_>,
+) -> Result<Tenancy, PlanFailure> {
+    let call_info = CallInfo::new(&rt.name, &op.id, headers);
+    let tenancy = match presented.admitted {
+        Some(t) => t.clone(),
+        None => {
+            let tenancy = match rt.ext.tenants.resolve(&call_info).await {
+                Ok(t) => t,
+                Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), None)),
+            };
+            if let Err(r) = rt.ext.quota.admit(&tenancy, &call_info).await {
+                return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy)));
+            }
+            if let Err(r) = rate_limit(rt) {
+                return Err(PlanFailure::new(PlanError::RateLimited(r), Some(tenancy)));
+            }
+            tenancy
+        }
+    };
+    let auth = authenticate(
+        rt,
+        &op.id,
+        &op.security,
+        headers,
+        presented.query,
+        presented.key_verified,
+    )
+    .await;
+    if let Err(unauthorized) = auth {
+        return Err(PlanFailure::new(
+            PlanError::Unauthorized(unauthorized),
+            Some(tenancy),
+        ));
+    }
+    Ok(tenancy)
+}
+
+/// The call's faults, from the applying scenario's chaos, else the mock's;
+/// none with `X-Mockingbird-Chaos: off`. No error is injected over a
+/// status already forced. Counts the error and latency faults.
+fn decide_chaos(
+    rt: &MockRuntime,
+    op: &Operation,
+    scenario: Option<&ScenarioRuntime>,
+    overrides: &Overrides,
+    forced_status: Option<u16>,
+    stream_items: Option<usize>,
+) -> ChaosDecision {
+    if overrides.chaos_off {
+        return ChaosDecision::default();
+    }
+    let Some(source) = scenario
+        .and_then(|s| s.chaos.as_ref())
+        .or(rt.chaos.as_ref())
+    else {
+        return ChaosDecision::default();
+    };
+    let streaming = op.kind.streams_response();
+    let limits = &rt.engine.config().stream;
+    let planned_items = stream_items
+        .unwrap_or(limits.default_items)
+        .clamp(1, limits.max_items.max(1));
+    let mut decision = source.decide(streaming, planned_items);
+    decision.inject_error &= forced_status.is_none();
+    if decision.inject_error {
+        chaos::count(&rt.name, "error");
+    }
+    if !decision.extra_latency.is_zero() {
+        chaos::count(&rt.name, "latency");
+    }
+    decision
 }
 
 /// The id of the resource this operation reads, updates or deletes: the
@@ -413,7 +584,9 @@ pub(crate) async fn generate_once(
     let mut state = StateAccess::new(rt);
     let resource_type = op.resource_type.as_deref();
     let target_id = target_id(op, call);
-    let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call).await;
+    let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call)
+        .instrument(state_span())
+        .await;
 
     let ctx = GenerationContext {
         related: &related,
@@ -423,22 +596,31 @@ pub(crate) async fn generate_once(
     };
     let generated = rt.engine.generate(&rt.bundle, op, call, ctx).await?;
 
-    if (200..300).contains(&generated.status)
-        && let Some(t) = resource_type
-    {
-        write_state(
-            &mut state,
-            session,
-            op,
-            t,
-            target_id,
-            &generated,
-            call.body.as_ref(),
-        )
-        .await;
+    async {
+        if (200..300).contains(&generated.status)
+            && let Some(t) = resource_type
+        {
+            write_state(
+                &mut state,
+                session,
+                op,
+                t,
+                target_id,
+                &generated,
+                call.body.as_ref(),
+            )
+            .await;
+        }
+        state.touch(session).await;
     }
-    state.touch(session).await;
+    .instrument(state_span())
+    .await;
     Ok(generated)
+}
+
+/// The span of a call's state reads, or of its writes.
+fn state_span() -> tracing::Span {
+    tracing::info_span!("mb.state")
 }
 
 /// Reads the target and related resources like [`generate_once`], keeps
@@ -454,9 +636,14 @@ pub(crate) async fn open_stream(
     let op = plan.op;
     let mut state = StateAccess::new(rt);
     let target_id = target_id(op, &call);
-    let (target, related) =
-        read_context(&mut state, &plan.session, op, target_id.as_deref(), &call).await;
-    state.touch(&plan.session).await;
+    let (target, related) = async {
+        let context =
+            read_context(&mut state, &plan.session, op, target_id.as_deref(), &call).await;
+        state.touch(&plan.session).await;
+        context
+    }
+    .instrument(state_span())
+    .await;
     let ctx = StreamContext {
         related,
         target,
@@ -556,31 +743,44 @@ pub(crate) struct Report {
 /// Report a served call to the usage sink and the request recorder. Calls
 /// that never reached admission are still attributed to a tenant.
 pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
+    report_with(rt, headers, r, true).await;
+}
+
+/// [`report`] to the request recorder only: the call's usage was already
+/// recorded item by item (see [`meter`]).
+#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+pub(crate) async fn report_unmetered(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
+    report_with(rt, headers, r, false).await;
+}
+
+async fn report_with(rt: &MockRuntime, headers: &HeaderMap, mut r: Report, metered: bool) {
+    if !metered {
+        record(rt, r);
+        return;
+    }
     let operation_id = r.operation_id.clone().unwrap_or_default();
-    let tenancy = match (r.tenancy, r.admission_ran) {
+    let tenancy = match (r.tenancy.take(), r.admission_ran) {
         (Some(t), _) => Some(t),
         (None, true) => None,
         (None, false) => {
-            let call_info = CallInfo {
-                mock: &rt.name,
-                operation_id: &operation_id,
-                headers,
-            };
+            let call_info = CallInfo::new(&rt.name, &operation_id, headers);
             rt.ext.tenants.resolve(&call_info).await.ok()
         }
     };
     if let Some(tenancy) = tenancy {
-        rt.ext.usage.record(&UsageEvent {
-            tenancy,
-            mock: rt.name.clone(),
-            operation_id,
-            status: r.status,
-            source: r.source.map_or(NO_SOURCE, Source::as_str).to_string(),
-            latency: r.latency,
-            prompt_tokens: r.usage.prompt_tokens,
-            completion_tokens: r.usage.completion_tokens,
-        });
+        let mut event = UsageEvent::new(tenancy, rt.name.clone(), operation_id);
+        event.status = r.status;
+        event.source = r.source.map_or(NO_SOURCE, Source::as_str).to_string();
+        event.latency = r.latency;
+        event.prompt_tokens = r.usage.prompt_tokens;
+        event.completion_tokens = r.usage.completion_tokens;
+        rt.ext.usage.record(&event);
     }
+    record(rt, r);
+}
+
+/// Hands one call to the request recorder, when one is set.
+fn record(rt: &MockRuntime, r: Report) {
     if let Some(recorder) = &rt.recorder {
         recorder.record(RequestRecord {
             workspace: rt.workspace.clone(),

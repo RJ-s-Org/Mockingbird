@@ -4,7 +4,7 @@
 //! Every published mock shares one [`GrpcServer`] (an h2c listener), which
 //! routes each call by its `/<service>/<method>` path and also answers
 //! `grpc.health.v1.Health` and server reflection (v1 and v1alpha). A call
-//! runs through the shared [`call`](crate::call) pipeline; see
+//! runs through the shared `call` pipeline; see
 //! [`GrpcMock`] for how each call kind maps onto the engine.
 
 mod codec;

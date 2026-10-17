@@ -467,7 +467,9 @@ async fn oversized_message_rejected() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.code(), Code::OutOfRange, "{err:?}");
+    // Over the request size cap (the 1 MiB default here): gRPC servers
+    // answer RESOURCE_EXHAUSTED (tonic itself says OUT_OF_RANGE).
+    assert_eq!(err.code(), Code::ResourceExhausted, "{err:?}");
 }
 
 #[tokio::test]
@@ -664,4 +666,243 @@ async fn publish_rejects_duplicate_services() {
         GrpcMock::new(Arc::new(runtime("x", Arc::new(no_payload), None))),
         Err(GrpcError::MissingDescriptors)
     ));
+}
+
+/// Counts usage events.
+#[derive(Default)]
+struct Usage(Mutex<Vec<mb_ext::UsageEvent>>);
+
+impl mb_ext::UsageSink for Usage {
+    fn record(&self, event: &mb_ext::UsageEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+impl Usage {
+    /// The events seen once no more arrive for 100 ms (reports of a
+    /// finished stream are sent from a spawned task).
+    async fn settled(&self) -> Vec<mb_ext::UsageEvent> {
+        let mut seen = usize::MAX;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = self.0.lock().unwrap().len();
+            if now == seen {
+                return self.0.lock().unwrap().clone();
+            }
+            seen = now;
+        }
+    }
+}
+
+/// Admits the first `allow` calls, then refuses with 403 `quota spent`;
+/// counts every admission.
+struct CountingQuota {
+    allow: usize,
+    admitted: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingQuota {
+    fn new(allow: usize) -> Arc<Self> {
+        Arc::new(Self {
+            allow,
+            admitted: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn count(&self) -> usize {
+        self.admitted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl mb_ext::QuotaGuard for CountingQuota {
+    async fn admit(
+        &self,
+        _t: &mb_ext::Tenancy,
+        _call: &mb_ext::CallInfo<'_>,
+    ) -> Result<(), mb_ext::Rejection> {
+        let n = self
+            .admitted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.allow {
+            Ok(())
+        } else {
+            Err(mb_ext::Rejection::new(403, "Forbidden", "quota spent"))
+        }
+    }
+}
+
+/// A route-guide runtime metering into `usage` and admitting with `quota`.
+fn metered(usage: &Arc<Usage>, quota: &Arc<CountingQuota>) -> (Arc<Bundle>, MockRuntime) {
+    let bundle = route_guide();
+    let mut rt = runtime("routes", Arc::clone(&bundle), None);
+    rt.ext = std::mem::take(&mut rt.ext)
+        .with_usage(Arc::clone(usage) as Arc<dyn mb_ext::UsageSink>)
+        .with_quota(Arc::clone(quota) as Arc<dyn mb_ext::QuotaGuard>);
+    (bundle, rt)
+}
+
+/// Opens a `RouteChat` stream; returns the sender and the replies.
+async fn route_chat(
+    client: &mut Client,
+) -> (
+    tokio::sync::mpsc::Sender<DynamicMessage>,
+    tonic::Streaming<DynamicMessage>,
+) {
+    client.ready().await;
+    let (tx, rx) = tokio::sync::mpsc::channel::<DynamicMessage>(4);
+    let codec = client.codec("routeguide.RouteNote", "routeguide.RouteNote");
+    let replies = client
+        .grpc
+        .streaming(
+            request(tokio_stream::wrappers::ReceiverStream::new(rx), &[]),
+            PathAndQuery::from_static("/routeguide.RouteGuide/RouteChat"),
+            codec,
+        )
+        .await
+        .unwrap()
+        .into_inner();
+    (tx, replies)
+}
+
+fn note(client: &Client, i: i32) -> DynamicMessage {
+    client.msg(
+        "routeguide.RouteNote",
+        json!({"location": {"latitude": i, "longitude": 1}, "message": format!("note-{i}")}),
+    )
+}
+
+#[tokio::test]
+async fn bidi_stream_meters_each_item() {
+    let usage = Arc::new(Usage::default());
+    let quota = CountingQuota::new(usize::MAX);
+    let (bundle, rt) = metered(&usage, &quota);
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    let (tx, mut replies) = route_chat(&mut client).await;
+    for i in 0..4 {
+        tx.send(note(&client, i)).await.unwrap();
+        replies.message().await.unwrap().unwrap();
+    }
+    drop(tx);
+    assert!(replies.message().await.unwrap().is_none());
+    let events = usage.settled().await;
+    assert_eq!(events.len(), 4, "{events:?}");
+    for e in &events {
+        assert_eq!(e.operation_id, "RouteGuide.RouteChat");
+        assert_eq!(e.status, 200);
+        assert_eq!(e.source, "fallback");
+    }
+    // One admission per inbound message.
+    assert_eq!(quota.count(), 4);
+}
+
+#[tokio::test]
+async fn bidi_stream_meters_each_items_tokens() {
+    let bundle = route_guide();
+    let reply = |i: usize| json!({"location": {"latitude": i + 1, "longitude": 5}, "message": format!("reply-{i}")});
+    let streams = (0..3)
+        .map(|i| Ok(vec![Ok::<_, LlmError>(format!("{}\n", reply(i)))]))
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(vec![]).with_streams(streams));
+    let usage = Arc::new(Usage::default());
+    let mut rt = runtime("routes", Arc::clone(&bundle), Some(provider));
+    rt.ext =
+        std::mem::take(&mut rt.ext).with_usage(Arc::clone(&usage) as Arc<dyn mb_ext::UsageSink>);
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    let (tx, mut replies) = route_chat(&mut client).await;
+    for i in 0..3 {
+        tx.send(note(&client, i)).await.unwrap();
+        replies.message().await.unwrap().unwrap();
+    }
+    drop(tx);
+    assert!(replies.message().await.unwrap().is_none());
+    let events = usage.settled().await;
+    assert_eq!(events.len(), 3, "{events:?}");
+    for e in &events {
+        assert_eq!(e.source, "llm", "{e:?}");
+        // Each reply is its own one-item engine stream: its prompt and text.
+        assert!(e.prompt_tokens > 0, "{e:?}");
+        assert!(e.completion_tokens > 0, "{e:?}");
+    }
+}
+
+#[tokio::test]
+async fn client_stream_admits_each_item() {
+    let usage = Arc::new(Usage::default());
+    let quota = CountingQuota::new(usize::MAX);
+    let (bundle, rt) = metered(&usage, &quota);
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    let points = |client: &Client| -> Vec<DynamicMessage> {
+        (0..3)
+            .map(|i| client.msg("routeguide.Point", json!({"latitude": i, "longitude": i})))
+            .collect()
+    };
+    client.ready().await;
+    let codec = client.codec("routeguide.Point", "routeguide.RouteSummary");
+    client
+        .grpc
+        .client_streaming(
+            request(futures::stream::iter(points(&client)), &[]),
+            PathAndQuery::from_static("/routeguide.RouteGuide/RecordRoute"),
+            codec,
+        )
+        .await
+        .unwrap();
+    assert_eq!(quota.count(), 3);
+    // One engine call, one usage event.
+    assert_eq!(usage.settled().await.len(), 1);
+
+    // The mock's rate limit applies to each message too: a burst of 2
+    // admits the call (its first message) and one more.
+    let usage = Arc::new(Usage::default());
+    let quota = CountingQuota::new(usize::MAX);
+    let (bundle, mut rt) = metered(&usage, &quota);
+    rt.limits.rate = Some(Arc::new(mb_protocols::RateLimiter::new(0.0, 2)));
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    client.ready().await;
+    let codec = client.codec("routeguide.Point", "routeguide.RouteSummary");
+    let err = client
+        .grpc
+        .client_streaming(
+            request(futures::stream::iter(points(&client)), &[]),
+            PathAndQuery::from_static("/routeguide.RouteGuide/RecordRoute"),
+            codec,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::ResourceExhausted, "{err:?}");
+    assert!(err.message().contains("requests/s"), "{err:?}");
+}
+
+#[tokio::test]
+async fn bidi_quota_refusal_ends_stream_resource_exhausted() {
+    let usage = Arc::new(Usage::default());
+    let records = Arc::new(Records::default());
+    // The call (its first message) and the second message are admitted.
+    let quota = CountingQuota::new(2);
+    let (bundle, mut rt) = metered(&usage, &quota);
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn RequestRecorder>);
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    let (tx, mut replies) = route_chat(&mut client).await;
+    for i in 0..2 {
+        tx.send(note(&client, i)).await.unwrap();
+        replies.message().await.unwrap().unwrap();
+    }
+    tx.send(note(&client, 2)).await.unwrap();
+    let err = replies.message().await.unwrap_err();
+    assert_eq!(err.code(), Code::ResourceExhausted, "{err:?}");
+    assert_eq!(err.message(), "quota spent");
+    drop(tx);
+    // The two items sent were metered; the refused one was not.
+    let events = usage.settled().await;
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(events.iter().all(|e| e.status == 200));
+    let recs = records.0.lock().unwrap().clone();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].status, 403);
 }

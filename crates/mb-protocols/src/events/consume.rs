@@ -54,16 +54,19 @@ pub(crate) async fn run_consumer(inner: Arc<ChannelInner>, channel: Channel, bro
         .map(|c| c.client_id_prefix.as_str())
         .unwrap_or_default();
     let group = consumer_group(prefix, &inner.rt.workspace, &inner.rt.name);
+    let shared = inner.deps.shared_subscriptions;
     let mut backoff = BACKOFF_START;
     loop {
         let subscribed = match brokers.client(&broker).await {
             Ok(client) => {
-                match tokio::time::timeout(
-                    SUBSCRIBE_TIMEOUT,
-                    client.subscribe(&channel.binding, &group),
-                )
-                .await
-                {
+                let subscribe = async {
+                    if shared {
+                        client.subscribe_shared(&channel.binding, &group).await
+                    } else {
+                        client.subscribe(&channel.binding, &group).await
+                    }
+                };
+                match tokio::time::timeout(SUBSCRIBE_TIMEOUT, subscribe).await {
                     Ok(result) => result,
                     Err(_) => Err(BrokerError::Subscribe(format!(
                         "timed out after {}s",
@@ -331,11 +334,7 @@ impl ChannelInner {
         // A client's reply is generated on its behalf: each one is admitted
         // like a call, against the tenancy resolved at the upgrade.
         if let Some(client) = client {
-            let call_info = mb_ext::CallInfo {
-                mock: &self.rt.name,
-                operation_id: &target.id,
-                headers: &client.headers,
-            };
+            let call_info = mb_ext::CallInfo::new(&self.rt.name, &target.id, &client.headers);
             if let Err(r) = self.rt.ext.quota.admit(&client.tenancy, &call_info).await {
                 return Some(format!("rejected: {} {}", r.status, r.detail));
             }

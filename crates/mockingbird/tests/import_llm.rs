@@ -33,6 +33,11 @@ fn deps(store: Arc<dyn ControlStore>, offline: bool, default_profile: Option<&st
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
+        http: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     }
 }
 
@@ -68,6 +73,8 @@ async fn mock(
                 llm_profile: llm_profile.map(str::to_string),
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )

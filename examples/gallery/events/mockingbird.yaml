@@ -1,0 +1,21 @@
+# Events: AsyncAPI order events on an in-process broker, and a WebSocket chat.
+# Run from the repository root:
+#   mockingbird serve -c examples/gallery/events/mockingbird.yaml --offline
+# then try:
+#   mockingbird channels list order-events
+#   mockingbird channels publish order-events orderCreated --count 3
+#   websocat ws://localhost:8080/chat/chat
+brokers:
+  local:
+    kind: memory        # in-process; nothing leaves Mockingbird
+mocks:
+  order-events:
+    contract: ../../../fixtures/asyncapi/orders-amqp-2.6.yaml
+    broker: local
+    channels:
+      orderCreated:
+        triggers:
+          - every: 30s
+  chat:
+    contract: ../../../fixtures/asyncapi/chat-ws-2.6.yaml
+    route_prefix: /chat

@@ -1,0 +1,27 @@
+{{- /*
+One PodDisruptionBudget per Deployment. A component with a single,
+non-autoscaled replica gets none: minAvailable 1 would block every drain.
+*/ -}}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $components := list (dict "name" "all" "spec" .Values.allInOne "autoscaled" false) -}}
+{{- if eq .Values.mode "split" }}
+{{- $components = list (dict "name" "control" "spec" .Values.control "autoscaled" false) (dict "name" "data" "spec" .Values.data "autoscaled" .Values.data.autoscaling.enabled) -}}
+{{- end }}
+{{- range $components }}
+{{- if include "mockingbird.pdbFits" (dict "spec" .spec "autoscaled" .autoscaled) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mockingbird.fullname" $ }}-{{ .name }}
+  labels:
+    {{- include "mockingbird.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .name }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "mockingbird.componentSelectorLabels" (dict "root" $ "component" .name) | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

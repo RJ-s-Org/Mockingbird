@@ -1,0 +1,3 @@
+{{- if eq .Values.mode "split" -}}
+{{ include "mockingbird.deployment" (dict "root" . "role" "data" "component" "data" "spec" .Values.data "replicas" (not .Values.data.autoscaling.enabled)) }}
+{{- end }}

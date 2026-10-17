@@ -5,19 +5,23 @@
 //! the resources of its type upserted in the same session, each projected
 //! like a query result. It runs until the client completes it or
 //! disconnects, or the process shuts down, and is reported once, when its
-//! stream is dropped.
+//! stream is dropped. A subscription chaos drops ends after its planned
+//! number of generated items with an `error` message (code `UNAVAILABLE`)
+//! for its id.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use async_graphql::Data;
 use async_graphql::dynamic::{
     FieldValue, ResolverContext, Schema, SubscriptionField, SubscriptionFieldFuture,
 };
 use async_graphql::http::{WebSocket, WebSocketProtocols, WsMessage};
 use async_graphql::parser::types::{FieldDefinition, Type};
+use async_graphql::{Data, ErrorExtensions};
 use axum::extract::WebSocketUpgrade;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use axum::response::Response;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, PollNext};
@@ -29,8 +33,7 @@ use tokio::time::Instant;
 use tracing::field::Empty;
 use tracing::{Instrument, Span};
 
-use super::MAX_BODY_BYTES;
-use super::resolve::{Failure, Shapes, forced_message, project};
+use super::resolve::{Failure, HttpCall, Shapes, forced_message, project};
 use super::schema::{input_value, type_ref};
 use crate::call::{
     self, CallPlan, DEFAULT_SESSION, Presented, Report, forwarded_headers, recorded_headers,
@@ -58,11 +61,28 @@ struct WsCall {
     key_verified: bool,
 }
 
+/// The call of a query or mutation root field sent over this connection,
+/// with the connection's credentials and override headers; an error when
+/// the field is not run over a subscription WebSocket.
+pub(crate) fn http_call(ctx: &ResolverContext<'_>) -> async_graphql::Result<HttpCall> {
+    let conn = ctx.data::<Arc<WsCall>>()?;
+    let variables = serde_json::to_value(&ctx.ctx.query_env.variables).unwrap_or(Value::Null);
+    Ok(HttpCall::websocket(
+        conn.headers.clone(),
+        conn.auth_headers.clone(),
+        conn.query.clone(),
+        conn.key_verified,
+        variables,
+    ))
+}
+
 /// `connection_init` payload members that carry a data-plane key, besides
 /// the mock's key header.
 const PAYLOAD_KEY_MEMBERS: [&str; 2] = ["api_key", "apiKey"];
 /// Close code for a connection refused by data-plane auth.
 const CLOSE_UNAUTHORIZED: u16 = 4401;
+/// Close code for a connection that sent no `connection_init` in time.
+const CLOSE_INIT_TIMEOUT: u16 = 4408;
 
 /// Upgrades a `GET` at the GraphQL path to a subscription channel. The
 /// override headers are `headers` (the upgrade request's), overlaid by
@@ -75,13 +95,32 @@ const CLOSE_UNAUTHORIZED: u16 = 4401;
 /// name, `api_key` or `apiKey`); without a valid key the connection is
 /// refused with a `connection_error` (`graphql-ws`) or close code 4401
 /// (`graphql-transport-ws`). Refusals are reported as `401` calls.
+///
+/// Once `graphql_max_connections_per_mock` connections are open
+/// (`connections` counts them), the upgrade is refused with a `503`
+/// problem and `Retry-After: 1`, reported as a call. A connection that
+/// sends no `connection_init` within `graphql_connection_init_timeout` is
+/// closed with code 4408, freeing its slot.
 pub(crate) async fn upgrade(
     schema: Schema,
     rt: &Arc<MockRuntime>,
+    connections: Arc<AtomicUsize>,
     upgrade: WebSocketUpgrade,
     headers: HeaderMap,
     query: Vec<(String, String)>,
 ) -> Response {
+    let Some(slot) =
+        ConnectionSlot::acquire(connections, rt.protocols.graphql_max_connections_per_mock)
+    else {
+        let mut resp = super::problem(
+            503,
+            "Service Unavailable",
+            "too many GraphQL WebSocket connections",
+        );
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        return super::refused(rt, &Method::GET, &headers, resp, None).await;
+    };
     let mut key_verified = false;
     if rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey
         && crate::dp_auth::presented_key(rt, &headers, &query).is_some()
@@ -98,15 +137,33 @@ pub(crate) async fn upgrade(
             }
         }
     }
-    let cfg = ChannelConfig {
-        subprotocols: SUBPROTOCOLS.to_vec(),
-        keepalive: rt.protocols.ws_keepalive,
-        max_message_bytes: MAX_BODY_BYTES,
-    };
+    let cfg = ChannelConfig::for_mock(rt, SUBPROTOCOLS.to_vec());
     let rt = Arc::clone(rt);
-    serve_channel(upgrade, cfg, move |io| {
-        run(schema, io, rt, headers, query, key_verified)
+    serve_channel(upgrade, cfg, move |io| async move {
+        // Held for as long as the connection is open.
+        let _slot = slot;
+        run(schema, io, rt, headers, query, key_verified).await;
     })
+}
+
+/// One open connection of a mock, counted until dropped.
+struct ConnectionSlot(Arc<AtomicUsize>);
+
+impl ConnectionSlot {
+    /// A slot, unless `max` connections are already open.
+    fn acquire(open: Arc<AtomicUsize>, max: usize) -> Option<Self> {
+        open.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < max).then_some(n + 1)
+        })
+        .ok()?;
+        Some(Self(open))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Reports a connection refused by data-plane auth as a `401` call.
@@ -145,6 +202,7 @@ async fn run(
     key_verified: bool,
 ) {
     // Without a negotiated subprotocol, speak the current one.
+    let init_timeout = rt.protocols.graphql_connection_init_timeout;
     let protocol = io
         .protocol
         .as_deref()
@@ -152,8 +210,20 @@ async fn run(
         .unwrap_or(WebSocketProtocols::GraphQLWS);
     let refused = Arc::new(AtomicBool::new(false));
     let refused_init = Arc::clone(&refused);
-    let messages = WebSocket::new(schema, io.incoming, protocol).on_connection_init(
-        move |payload| async move {
+    let initialised = Arc::new(AtomicBool::new(false));
+    let initialised_init = Arc::clone(&initialised);
+    let active = Arc::new(Mutex::new(HashSet::new()));
+    let incoming = capped(
+        io.incoming,
+        Arc::clone(&rt),
+        headers.clone(),
+        protocol,
+        Arc::clone(&active),
+        io.outgoing.clone(),
+    );
+    let messages =
+        WebSocket::new(schema, incoming, protocol).on_connection_init(move |payload| async move {
+            initialised_init.store(true, Ordering::Relaxed);
             let (auth_headers, headers) = overlay(&rt, headers, &payload);
             let api_key = rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey;
             if api_key
@@ -172,12 +242,52 @@ async fn run(
                 key_verified: api_key,
             }));
             Ok(data)
-        },
-    );
+        });
     futures::pin_mut!(messages);
-    while let Some(message) = messages.next().await {
+    // A connection that never sends `connection_init` would hold its slot
+    // (counted against `graphql_max_connections_per_mock`) for as long as
+    // the client likes: close it once the init timeout passes.
+    let init_deadline = tokio::time::sleep(init_timeout);
+    futures::pin_mut!(init_deadline);
+    // Operations chaos dropped: their `complete` is not sent.
+    let mut dropped = HashSet::new();
+    loop {
+        let message = tokio::select! {
+            message = messages.next() => message,
+            () = &mut init_deadline, if !initialised.load(Ordering::Relaxed) => {
+                let close = Outbound::Close {
+                    code: CLOSE_INIT_TIMEOUT,
+                    reason: "Connection initialisation timeout".into(),
+                };
+                let _ = io.outgoing.send(close).await;
+                break;
+            }
+        };
+        let Some(message) = message else { break };
         let (out, last) = match message {
-            WsMessage::Text(text) => (Outbound::Text(text), false),
+            WsMessage::Text(text) => {
+                let text = match dropped_error(&text, protocol) {
+                    Some((id, error)) => {
+                        dropped.insert(id);
+                        error
+                    }
+                    None => text,
+                };
+                let op = operation_message(&text);
+                if let Some((ty, id)) = &op
+                    && ty == "complete"
+                    && dropped.remove(id)
+                {
+                    continue;
+                }
+                // A finished operation frees its slot.
+                if let Some((ty, id)) = op
+                    && matches!(ty.as_str(), "complete" | "error")
+                {
+                    lock(&active).remove(&id);
+                }
+                (Outbound::Text(text), false)
+            }
             // `graphql-transport-ws` answers a refused `connection_init`
             // with a close frame: make it say why.
             WsMessage::Close(_, _) if refused.load(Ordering::Relaxed) => (
@@ -193,6 +303,169 @@ async fn run(
             break;
         }
     }
+}
+
+/// A `next` (`data`) message carrying the error of a subscription chaos
+/// dropped, rewritten as an `error` message for its id; with the id.
+fn dropped_error(text: &str, protocol: WebSocketProtocols) -> Option<(String, String)> {
+    // Most messages are not: skip parsing them.
+    if !text.contains(r#""chaos":"drop""#) {
+        return None;
+    }
+    let msg: Value = serde_json::from_str(text).ok()?;
+    if !matches!(msg.get("type")?.as_str()?, "next" | "data") {
+        return None;
+    }
+    let id = msg.get("id")?.as_str()?.to_string();
+    let errors = msg.get("payload")?.get("errors")?.as_array()?;
+    let error = errors
+        .iter()
+        .find(|e| e["extensions"]["chaos"] == "drop")?
+        .clone();
+    let payload = match protocol {
+        WebSocketProtocols::GraphQLWS => json!([error]),
+        _ => error,
+    };
+    let frame = json!({"type": "error", "id": id, "payload": payload});
+    Some((id, frame.to_string()))
+}
+
+/// The open operations of one connection, by id.
+type Active = Arc<Mutex<HashSet<String>>>;
+
+fn lock(active: &Active) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    active.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `type` and `id` of a protocol message, when it has both.
+fn operation_message(text: &str) -> Option<(String, String)> {
+    let msg: Value = serde_json::from_str(text).ok()?;
+    let ty = msg.get("type")?.as_str()?.to_string();
+    let id = msg.get("id")?.as_str()?.to_string();
+    Some((ty, id))
+}
+
+/// The client's messages, with operations past the connection's
+/// `graphql_max_subscriptions_per_connection` open ones refused: such a
+/// `subscribe` (`start`) is answered with an `error` message for its id,
+/// reported as a `429` call and not handed to the executor; the
+/// connection stays open. `complete` (`stop`) frees a slot, as does the
+/// server completing or failing an operation.
+fn capped(
+    incoming: BoxStream<'static, String>,
+    rt: Arc<MockRuntime>,
+    headers: HeaderMap,
+    protocol: WebSocketProtocols,
+    active: Active,
+    outgoing: tokio::sync::mpsc::Sender<Outbound>,
+) -> BoxStream<'static, String> {
+    let max = rt.protocols.graphql_max_subscriptions_per_connection;
+    incoming
+        .filter_map(move |text| {
+            let (rt, headers, active, outgoing) = (
+                Arc::clone(&rt),
+                headers.clone(),
+                Arc::clone(&active),
+                outgoing.clone(),
+            );
+            async move {
+                let Some((ty, id)) = operation_message(&text) else {
+                    return Some(text);
+                };
+                match ty.as_str() {
+                    "subscribe" | "start" => {
+                        // Bounded before async-graphql validates it, as over HTTP.
+                        if let Some(oversize) = subscribe_oversize(&text, &rt) {
+                            let (message, code) = oversize.describe();
+                            let error = json!({"message": message, "extensions": {"code": code}});
+                            let _ = outgoing
+                                .send(Outbound::Text(error_frame(protocol, &id, error)))
+                                .await;
+                            report_refused(&rt, &headers, 400, &message, code).await;
+                            return None;
+                        }
+                        let admitted = {
+                            let mut open = lock(&active);
+                            let admitted = open.contains(&id) || open.len() < max;
+                            if admitted {
+                                open.insert(id.clone());
+                            }
+                            admitted
+                        };
+                        if admitted {
+                            return Some(text);
+                        }
+                        let message =
+                            format!("too many subscriptions on this connection (maximum {max})");
+                        let error = json!({"message": message});
+                        let _ = outgoing
+                            .send(Outbound::Text(error_frame(protocol, &id, error)))
+                            .await;
+                        report_refused(&rt, &headers, 429, &message, "RATE_LIMITED").await;
+                        None
+                    }
+                    "complete" | "stop" => {
+                        lock(&active).remove(&id);
+                        Some(text)
+                    }
+                    _ => Some(text),
+                }
+            }
+        })
+        .boxed()
+}
+
+/// The `error` message for operation `id` carrying `error`.
+fn error_frame(protocol: WebSocketProtocols, id: &str, error: Value) -> String {
+    let payload = match protocol {
+        WebSocketProtocols::GraphQLWS => json!([error]),
+        _ => error,
+    };
+    json!({"type": "error", "id": id, "payload": payload}).to_string()
+}
+
+/// Why the operation of a `subscribe` (`start`) message is too large to
+/// hand to the executor (see [`super::oversize`]).
+fn subscribe_oversize(text: &str, rt: &MockRuntime) -> Option<super::Oversize> {
+    let msg: Value = serde_json::from_str(text).ok()?;
+    let payload = msg.get("payload")?;
+    let query = payload.get("query")?.as_str()?;
+    let operation = payload.get("operationName").and_then(Value::as_str);
+    super::oversize(query, operation, rt.protocols.graphql_max_root_fields)
+}
+
+/// Reports an operation refused before it ran (by the per-connection cap,
+/// `429`, or for its size, `400`) as a call.
+async fn report_refused(
+    rt: &MockRuntime,
+    headers: &HeaderMap,
+    status: u16,
+    message: &str,
+    code: &str,
+) {
+    let report = Report {
+        operation_id: None,
+        session: DEFAULT_SESSION.into(),
+        method: "GET".into(),
+        path: rt.protocols.graphql_path.clone(),
+        status,
+        source: None,
+        usage: Default::default(),
+        latency: Default::default(),
+        tenancy: None,
+        admission_ran: false,
+        request: if rt.recorder.is_some() {
+            json!({"headers": recorded_headers(rt, headers)})
+        } else {
+            Value::Null
+        },
+        request_body_bytes: None,
+        response: rt
+            .recorder
+            .is_some()
+            .then(|| json!({"message": message, "extensions": {"code": code}})),
+    };
+    call::report(rt, headers, report).await;
 }
 
 /// `headers` with each string member of `payload` set as a header (names
@@ -373,8 +646,14 @@ async fn open(
         }
     };
 
-    if let Some(status) = plan.forced_status.filter(|s| !(200..300).contains(s)) {
-        let failure = Failure::new(status, forced_message(status));
+    let refused = if plan.chaos.inject_error {
+        Some(Failure::chaos(plan.forced_status))
+    } else {
+        plan.forced_status
+            .filter(|s| !(200..300).contains(s))
+            .map(|status| Failure::new(status, forced_message(status)))
+    };
+    if let Some(failure) = refused {
         report.fail(&failure);
         let error = failure.error;
         return Ok(stream::once(async move {
@@ -409,8 +688,12 @@ async fn open(
         report,
         ty,
         shapes,
+        dropped: false,
     };
     Ok(stream::unfold(state, |mut st| async move {
+        if st.dropped {
+            return None;
+        }
         let span = st.report.span.clone();
         let piece = st.pieces.next().instrument(span).await?;
         let out = st.render(piece);
@@ -427,10 +710,13 @@ enum Piece {
     Changed(Value),
     /// The engine stream could not be opened.
     Failed(String),
+    /// Chaos drops the subscription here.
+    Dropped,
 }
 
 /// The engine's items for this call, opened when first polled (after any
-/// latency); generation runs only while the subscription polls it.
+/// latency), followed by [`Piece::Dropped`] after `plan.chaos.drop_after`
+/// items; generation runs only while the subscription polls it.
 fn generated(
     rt: Arc<MockRuntime>,
     plan: &CallPlan<'_>,
@@ -441,7 +727,8 @@ fn generated(
     let scenario = plan.scenario.cloned();
     let stream_items = plan.stream_items;
     let tenancy = plan.tenancy.clone();
-    stream::once(async move {
+    let drop_after = plan.chaos.drop_after;
+    let items = stream::once(async move {
         let plan = CallPlan {
             op: &op,
             session,
@@ -450,6 +737,7 @@ fn generated(
             delay: None,
             stream_items,
             tenancy,
+            chaos: Default::default(),
         };
         match call::open_stream(&rt, &plan, call, Vec::new()).await {
             Ok(items) => items.map(Piece::Item).boxed(),
@@ -459,8 +747,11 @@ fn generated(
             }
         }
     })
-    .flatten()
-    .boxed()
+    .flatten();
+    match drop_after {
+        Some(n) => items.take(n).chain(stream::iter([Piece::Dropped])).boxed(),
+        None => items.boxed(),
+    }
 }
 
 /// A running subscription: what is left to send and what to report.
@@ -470,6 +761,8 @@ struct Subscription {
     /// The field's type, to project each item.
     ty: Type,
     shapes: Arc<Shapes>,
+    /// Chaos dropped the subscription: nothing more is sent.
+    dropped: bool,
 }
 
 impl Subscription {
@@ -485,6 +778,14 @@ impl Subscription {
             Piece::Changed(value) => value,
             Piece::Failed(detail) => {
                 let failure = Failure::new(500, detail);
+                self.report.fail(&failure);
+                return Err(failure.error);
+            }
+            Piece::Dropped => {
+                self.dropped = true;
+                crate::chaos::count(&self.report.rt.name, "drop");
+                let mut failure = Failure::unavailable(crate::chaos::STREAM_DROPPED);
+                failure.error = failure.error.extend_with(|_, e| e.set("chaos", "drop"));
                 self.report.fail(&failure);
                 return Err(failure.error);
             }

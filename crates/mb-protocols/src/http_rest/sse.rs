@@ -4,9 +4,10 @@
 //! The engine's stream items come first; resources of the operation's type
 //! upserted in the same session are interleaved as they arrive. The stream
 //! stays open until the client disconnects or the process shuts down, and the call is reported once,
-//! when the response body is dropped.
+//! when the response body is dropped. A stream chaos drops ends with a
+//! body error after its planned number of generated items, which aborts
+//! the connection without a final event.
 
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
@@ -39,6 +40,8 @@ enum Piece {
     Changed(Value),
     /// The engine stream could not be opened.
     Failed(String),
+    /// Chaos drops the stream here.
+    Dropped,
 }
 
 /// A `200 text/event-stream` response streaming `plan.op`'s items, with a
@@ -101,19 +104,29 @@ pub(crate) fn sse_response(
         pieces,
         event,
         report,
+        dropped: false,
     };
     let events = stream::unfold(body, |mut body| async move {
+        if body.dropped {
+            return None;
+        }
         let span = body.report.span.clone();
         let piece = body.pieces.next().instrument(span).await?;
+        if let Piece::Dropped = piece {
+            // Let the server flush what was sent (at least the response
+            // head) before the error aborts the connection.
+            tokio::task::yield_now().await;
+        }
         let event = body.render(piece);
-        Some((Ok::<_, Infallible>(event), body))
+        Some((event, body))
     });
     Sse::new(events).keep_alive(keepalive).into_response()
 }
 
 /// The engine's items for this call, opened lazily when first polled
-/// (after any latency). The stream reads state and generates only while
-/// the response body polls it.
+/// (after any latency), followed by [`Piece::Dropped`] after
+/// `plan.chaos.drop_after` items. The stream reads state and generates
+/// only while the response body polls it.
 fn generated(
     rt: Arc<MockRuntime>,
     plan: &CallPlan<'_>,
@@ -124,7 +137,8 @@ fn generated(
     let scenario = plan.scenario.cloned();
     let stream_items = plan.stream_items;
     let tenancy = plan.tenancy.clone();
-    stream::once(async move {
+    let drop_after = plan.chaos.drop_after;
+    let items = stream::once(async move {
         let plan = CallPlan {
             op: &op,
             session,
@@ -133,6 +147,7 @@ fn generated(
             delay: None,
             stream_items,
             tenancy,
+            chaos: Default::default(),
         };
         match call::open_stream(&rt, &plan, call, Vec::new()).await {
             Ok(items) => items.map(Piece::Item).boxed(),
@@ -142,8 +157,11 @@ fn generated(
             }
         }
     })
-    .flatten()
-    .boxed()
+    .flatten();
+    match drop_after {
+        Some(n) => items.take(n).chain(stream::iter([Piece::Dropped])).boxed(),
+        None => items.boxed(),
+    }
 }
 
 /// The response body's state: what is left to send and what to report.
@@ -152,12 +170,14 @@ struct Body {
     /// The `event:` name of every item.
     event: String,
     report: ReportOnDrop,
+    /// Chaos dropped the stream: nothing more is sent.
+    dropped: bool,
 }
 
 impl Body {
     /// An SSE event for `piece`: `event`, the 1-based `id` and the item as
-    /// compact JSON `data`.
-    fn render(&mut self, piece: Piece) -> Event {
+    /// compact JSON `data`; an error ending the body for a chaos drop.
+    fn render(&mut self, piece: Piece) -> Result<Event, std::io::Error> {
         let data = match piece {
             Piece::Item(item) => {
                 self.report.source = Some(match self.report.source {
@@ -169,14 +189,19 @@ impl Body {
             Piece::Changed(value) => value,
             Piece::Failed(detail) => {
                 let problem = json!({"title": "Generation failed", "detail": detail});
-                return Event::default().event("error").data(problem.to_string());
+                return Ok(Event::default().event("error").data(problem.to_string()));
+            }
+            Piece::Dropped => {
+                self.dropped = true;
+                crate::chaos::count(&self.report.rt.name, "drop");
+                return Err(std::io::Error::other(crate::chaos::STREAM_DROPPED));
             }
         };
         self.report.items += 1;
-        Event::default()
+        Ok(Event::default()
             .event(&self.event)
             .id(self.report.items.to_string())
-            .data(data.to_string())
+            .data(data.to_string()))
     }
 }
 

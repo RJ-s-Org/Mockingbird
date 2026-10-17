@@ -9,9 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+pub mod bus;
+pub mod leader;
 pub mod memory;
+pub mod redis;
 pub mod sql;
 
+pub use self::redis::RedisStateStore;
+pub use bus::{Bus, BusEnvelope, BusEvent, LocalBus, MemoryBusHub, PgBus, RedisBus};
+pub use leader::{LeaderBackend, Leadership};
 pub use memory::MemoryStore;
 pub use sql::SqlStateStore;
 
@@ -54,12 +60,24 @@ pub enum ChangeKind {
     Deleted,
 }
 
+/// Where a [`StateChanged`] was made: on this node, or on another node and
+/// relayed over the cross-node bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ChangeOrigin {
+    #[default]
+    Local,
+    Remote,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateChanged {
     pub session: SessionKey,
     pub resource_type: String,
     pub id: String,
     pub kind: ChangeKind,
+    /// Stores publish [`ChangeOrigin::Local`]; a bus-aware wrapper marks
+    /// changes relayed from other nodes [`ChangeOrigin::Remote`].
+    pub origin: ChangeOrigin,
 }
 
 /// Session-scoped resource store.
@@ -102,6 +120,12 @@ pub trait StateStore: Send + Sync {
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError>;
     /// Live sessions of a mock, most recently touched first.
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError>;
+    /// How many live sessions a mock has (the `mb_state_sessions` gauge):
+    /// always the length of [`StateStore::sessions`]. Backends may count
+    /// without listing.
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        Ok(self.sessions(workspace, mock).await?.len())
+    }
     /// All resources of a session, oldest first (so [`StateStore::seed`]
     /// restores the same recency order).
     async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError>;
@@ -113,11 +137,14 @@ pub trait StateStore: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<StateChanged>;
 }
 
-/// Opens a state store: `memory` gives a [`MemoryStore`]; `sqlite:…` and
-/// `postgres://…` give a [`SqlStateStore`].
+/// Opens a state store: `memory` gives a [`MemoryStore`]; `redis://…` and
+/// `rediss://…` give a [`RedisStateStore`]; `sqlite:…` and `postgres://…`
+/// give a [`SqlStateStore`].
 pub async fn connect(url: &str, ttl: Duration) -> Result<Arc<dyn StateStore>, StateError> {
     if url == "memory" {
         Ok(Arc::new(MemoryStore::new(ttl)))
+    } else if url.starts_with("redis://") || url.starts_with("rediss://") {
+        Ok(Arc::new(RedisStateStore::connect(url, ttl).await?))
     } else {
         Ok(Arc::new(SqlStateStore::connect(url, ttl).await?))
     }

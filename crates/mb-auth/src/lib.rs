@@ -22,7 +22,7 @@ pub use apikey::{
 };
 pub use authenticator::{Authenticate, Authenticator, BearerVerifier, LocalAuth};
 pub use error::AuthError;
-pub use http::{HttpError, http_client, send};
+pub use http::{HttpError, http_client, http_client_with, send};
 pub use jwt::{ALLOWED_ALGS, JwtVerifier};
 pub use mapping::RoleMapping;
 pub use oidc::{

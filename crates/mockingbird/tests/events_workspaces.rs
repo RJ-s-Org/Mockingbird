@@ -93,6 +93,8 @@ async fn setup() -> Setup {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig {
                     mode: DataPlaneAuthMode::ApiKey,
                     ..DataPlaneAuthConfig::default()
@@ -133,6 +135,11 @@ async fn setup() -> Setup {
         protocols: mb_protocols::ProtocolSettings::default(),
         stream: mb_engine::StreamConfig::default(),
         events: EventDeps::default(),
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
+        http: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
@@ -326,6 +333,8 @@ async fn orders_mock(store: &Arc<dyn ControlStore>, ws: &str, prefix: &str) -> M
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
             },
         )
@@ -419,6 +428,11 @@ async fn twins() -> Twins {
             brokers: brokers.clone(),
             ..EventDeps::default()
         },
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
+        http: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();

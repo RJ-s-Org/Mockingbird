@@ -1,16 +1,17 @@
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
 use mb_engine::ndjson::LineSplitter;
 use mb_engine::{
-    Engine, EngineConfig, EngineError, OperationCall, ScenarioSpec, SchemaValidator, Source,
-    StreamContext, StreamItem,
+    Engine, EngineConfig, EngineError, EngineGuards, OperationCall, ScenarioSpec, SchemaValidator,
+    Source, StreamContext, StreamItem, TokenBudget,
 };
 use mb_import::compile;
-use mb_llm::{LlmError, Provider, ResponseFormat, Role, ScriptedProvider};
+use mb_llm::{LlmError, Provider, ResponseFormat, Role, ScriptedProvider, Usage};
 use mb_mcm::{Bundle, Operation, OperationKind};
 use proptest::prelude::*;
 use serde_json::json;
@@ -132,27 +133,75 @@ async fn stream_yields_n_llm_items() {
     ])]));
     let engine = engine_with(&provider, EngineConfig::default());
     let items = collect(&engine, &bundle, StreamContext::default(), Some(3)).await;
+    let got: Vec<(serde_json::Value, Source)> = items
+        .iter()
+        .map(|i: &StreamItem| (i.value.clone(), i.source))
+        .collect();
     assert_eq!(
-        items,
+        got,
         vec![
-            StreamItem {
-                value: json!({"id": "a", "n": 1}),
-                source: Source::Llm
-            },
-            StreamItem {
-                value: json!({"id": "b", "n": 2}),
-                source: Source::Llm
-            },
-            StreamItem {
-                value: json!({"id": "c", "n": 3}),
-                source: Source::Llm
-            },
+            (json!({"id": "a", "n": 1}), Source::Llm),
+            (json!({"id": "b", "n": 2}), Source::Llm),
+            (json!({"id": "c", "n": 3}), Source::Llm),
         ]
     );
     let requests = provider.stream_requests();
     assert_eq!(requests.len(), 1);
     assert!(matches!(requests[0].response_format, ResponseFormat::Text));
     assert!(provider.requests().is_empty());
+}
+
+#[derive(Default)]
+struct SpentBudget(AtomicU64);
+
+impl TokenBudget for SpentBudget {
+    fn exhausted(&self) -> bool {
+        false
+    }
+
+    fn spend(&self, tokens: u64) {
+        self.0.fetch_add(tokens, Ordering::SeqCst);
+    }
+}
+
+fn total(usage: Usage) -> u64 {
+    u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens)
+}
+
+#[tokio::test]
+async fn stream_items_carry_their_usage() {
+    let bundle = stream_bundle();
+    let provider = Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![
+        Ok("{\"id\":\"a\",\"n\":1}\n".into()),
+        Ok("{\"id\":\"b\",\"n\":2}\n".into()),
+        Ok("{\"id\":\"c\",\"n\":3}".into()),
+    ])]));
+    let budget = Arc::new(SpentBudget::default());
+    let dyn_provider: Arc<dyn Provider> = provider.clone();
+    let engine = Arc::new(
+        Engine::new(Some(dyn_provider), EngineConfig::default()).with_guards(EngineGuards {
+            budget: Some(Arc::clone(&budget) as Arc<dyn TokenBudget>),
+            ..EngineGuards::default()
+        }),
+    );
+    let items = collect(&engine, &bundle, StreamContext::default(), Some(3)).await;
+    assert_eq!(items.len(), 3);
+    // The prompt counts toward the first item; each item its own text.
+    assert!(items[0].usage.prompt_tokens > 0, "{:?}", items[0].usage);
+    for item in &items {
+        assert!(item.usage.completion_tokens > 0, "{:?}", item.usage);
+    }
+    assert!(items[1..].iter().all(|i| i.usage.prompt_tokens == 0));
+    // Every byte read was attributed: the items sum to the budget charge.
+    let attributed: u64 = items.iter().map(|i| total(i.usage)).sum();
+    assert_eq!(attributed, budget.0.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn faker_stream_items_cost_nothing() {
+    let bundle = stream_bundle();
+    let items = collect(&offline(), &bundle, StreamContext::default(), Some(3)).await;
+    assert!(items.iter().all(|i| i.usage == Usage::default()));
 }
 
 #[tokio::test]

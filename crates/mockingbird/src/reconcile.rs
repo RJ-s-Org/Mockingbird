@@ -2,6 +2,8 @@
 //! mocks, contracts, scenarios, channel settings and event settings are
 //! created, updated or deleted to match the file, and the workspaces they
 //! name are created. API-owned resources and workspaces are never deleted.
+//! A file mock's `chaos` and `limits` (and its scenarios' `chaos`) replace
+//! whatever the API set, like every other file-managed field.
 //!
 //! Mocks and profiles are identified by `(workspace, name)`; reports label
 //! them with [`mock_label`] (`name` in `default`, else `workspace/name`).
@@ -491,6 +493,8 @@ async fn apply_mock(
                         llm_profile: p.mock.llm_profile.clone(),
                         header_overrides: p.mock.header_overrides,
                         source: ResourceSource::File,
+                        chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
+                        limits: p.mock.limits.to_store(),
                         data_plane_auth: p.mock.data_plane_auth.clone(),
                     },
                 )
@@ -506,6 +510,8 @@ async fn apply_mock(
                 llm_profile: p.mock.llm_profile.clone(),
                 header_overrides: p.mock.header_overrides,
                 data_plane_auth: p.mock.data_plane_auth.clone(),
+                chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
+                limits: p.mock.limits.to_store(),
                 ..current.clone()
             };
             if wanted != *current {
@@ -577,6 +583,7 @@ async fn apply_mock(
                     "stream_item_interval",
                     s.stream_item_interval,
                 )?,
+                chaos: s.chaos.as_ref().map(|c| c.to_store()),
             },
             source: ResourceSource::File,
         };

@@ -123,6 +123,7 @@ impl Inner {
             resource_type: resource_type.to_string(),
             id: id.to_string(),
             kind,
+            origin: crate::ChangeOrigin::Local,
         });
     }
 }
@@ -233,6 +234,19 @@ impl StateStore for MemoryStore {
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch_existing(s);
         Ok(())
+    }
+
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        let now = Instant::now();
+        Ok(self
+            .inner
+            .sessions
+            .iter()
+            .filter(|e| {
+                let k = e.key();
+                k.workspace == workspace && k.mock == mock && !self.inner.expired(e.value(), now)
+            })
+            .count())
     }
 
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {

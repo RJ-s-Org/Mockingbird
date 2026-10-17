@@ -54,6 +54,11 @@ fn deps(store: Arc<dyn ControlStore>, recorder: Option<Arc<dyn RequestRecorder>>
         offline: true,
         default_profile: None.into(),
         events: mb_protocols::events::EventDeps::default(),
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
+        http: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     }
 }
 
@@ -76,6 +81,8 @@ async fn mock_in(
                 llm_profile: profile.map(str::to_string),
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig {
                     mode: auth,
                     ..DataPlaneAuthConfig::default()
@@ -494,7 +501,12 @@ async fn workspace_force_delete_unmounts() {
     .await;
     let deps = deps(store.clone(), None);
     let (registry, base) = served(&deps).await;
-    let _watcher = registry.spawn_watcher(deps);
+    let ha = mockingbird::ha::Ha::start_with_bus(
+        mb_state::LocalBus::new("test".into()),
+        deps.store.clone(),
+    )
+    .await;
+    let _watcher = registry.spawn_watcher(deps, ha.changes());
     assert_eq!(status_of(&base, "/b/orders").await, 200);
 
     assert!(store.delete_workspace(TEAM_A, true).await.unwrap());

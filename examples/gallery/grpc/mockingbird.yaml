@@ -1,0 +1,21 @@
+# gRPC: the RouteGuide service, covering all four call kinds, with reflection.
+# Run from the repository root:
+#   mockingbird serve -c examples/gallery/grpc/mockingbird.yaml --offline
+# then try:
+#   grpcurl -plaintext 127.0.0.1:50051 list
+#   grpcurl -plaintext -d '{"lo":{"latitude":1,"longitude":1},"hi":{"latitude":5,"longitude":5}}' \
+#     127.0.0.1:50051 routeguide.RouteGuide/ListFeatures
+server:
+  grpc_port: 50051
+mocks:
+  routeguide:
+    contract: ../../../fixtures/proto/route_guide.proto
+    persona: Named landmarks in the Pacific Northwest.
+    scenarios:
+      firehose:
+        stream_items: 20
+        stream_item_interval: 200ms
+protocols:
+  stream:
+    default_items: 5
+    max_items: 50

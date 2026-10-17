@@ -3,7 +3,8 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::{
-    Capabilities, ChatRequest, ChatResponse, LlmError, Provider, ResponseFormat, TextStream, Usage,
+    Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, Provider, ResponseFormat,
+    TextStream, Usage,
 };
 
 #[derive(Clone, Debug)]
@@ -12,6 +13,8 @@ pub struct OpenAiConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub json_schema: bool,
+    /// Extra CA roots and the proxy (`outbound:`).
+    pub http: HttpOptions,
 }
 
 pub struct OpenAiCompatible {
@@ -21,9 +24,7 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     pub fn new(config: OpenAiConfig) -> Result<Self, LlmError> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| LlmError::Transport(e.to_string()))?;
+        let client = crate::http_client(&config.http, None)?;
         Ok(Self { client, config })
     }
 
@@ -145,7 +146,10 @@ impl Provider for OpenAiCompatible {
         }
     }
 
+    /// Records the model as `llm.model` on the current span (the engine's
+    /// `mb.llm` span).
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        tracing::Span::current().record("llm.model", self.config.model.as_str());
         match tokio::time::timeout(req.timeout, self.send(&req)).await {
             Ok(r) => r,
             Err(_) => Err(LlmError::Timeout),
@@ -155,6 +159,7 @@ impl Provider for OpenAiCompatible {
     /// `req.timeout` bounds only the arrival of the response head (and of an
     /// error body); the deltas then arrive as fast as the server sends them.
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        tracing::Span::current().record("llm.model", self.config.model.as_str());
         let resp = match tokio::time::timeout(req.timeout, self.open_stream(&req)).await {
             Ok(r) => r?,
             Err(_) => return Err(LlmError::Timeout),

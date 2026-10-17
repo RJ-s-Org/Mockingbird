@@ -3,14 +3,18 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use axum::Router;
 use clap::{Parser, Subcommand};
 use mb_admin::channels::SharedChannelControl;
+use mb_engine::GenerationLimiter;
+use mb_engine::pii::Scrubber;
 use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_protocols::events::{Brokers, EventDeps};
+use mb_state::{Bus, LeaderBackend, Leadership, StateStore};
 use mb_store::ControlStore;
 
 use crate::client::ClientCommand;
@@ -18,19 +22,24 @@ use crate::dp_keys::StoreDataPlaneKeys;
 use crate::events::{RegistryChannels, StoreLease};
 use crate::file_config::{
     self, AuthConfig, AuthMode, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile,
+    Role,
 };
+use crate::ha::Ha;
 use crate::host_guard::HostPolicy;
 use crate::import_llm::RuntimeLlm;
-use crate::maintenance::Maintenance;
+use crate::maintenance::{LeaderJobs, LeaderWork, Maintenance, StateGauge};
 use crate::ops::{self, OpsState};
 use crate::recorder::StoreRecorder;
 use crate::registry::{MockRegistry, mock_label};
-use crate::runtime::{DefaultProfile, RuntimeDeps};
-use crate::watch::{self, WatchGuard};
+use crate::runtime::{DefaultProfile, RuntimeDeps, ServeMode};
+use crate::watch;
 use crate::{reconcile, telemetry};
 
 /// Health check path; reserved so it cannot collide with contract paths.
 pub const HEALTH_PATH: &str = "/__mockingbird/healthz";
+
+/// The leader lock control nodes contend for.
+pub const LEADER_LOCK: &str = "control";
 
 #[derive(Parser, Debug)]
 #[command(name = "mockingbird", version, about = "LLM-backed mock endpoints")]
@@ -47,8 +56,28 @@ pub struct Cli {
     /// API.
     #[arg(long, global = true, env = "MB_ADMIN_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
+    /// Workspace the client subcommands act on.
+    #[arg(
+        long,
+        global = true,
+        env = "MB_WORKSPACE",
+        default_value = mb_store::DEFAULT_WORKSPACE,
+        value_parser = parse_workspace
+    )]
+    pub workspace: String,
     #[command(subcommand)]
     pub cmd: Command,
+}
+
+/// A `--workspace` (`MB_WORKSPACE`) value: a valid workspace name, so an
+/// empty or malformed one is a usage error rather than a 404.
+fn parse_workspace(name: &str) -> Result<String, String> {
+    mb_store::validate_workspace_name(name)
+        .map(|()| name.to_string())
+        .map_err(|e| match e {
+            mb_store::StoreError::Invalid(detail) => detail,
+            other => other.to_string(),
+        })
 }
 
 #[derive(Subcommand, Debug)]
@@ -63,6 +92,8 @@ pub enum Command {
     Client(ClientCommand),
 }
 
+// The doc comments are clap help text, not Markdown.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ServeArgs {
     /// Config file (`mockingbird.yaml`); without it the contracts are served
@@ -94,6 +125,10 @@ pub struct ServeArgs {
     /// LLM timeout of the default profile [default: 3s].
     #[arg(long)]
     pub llm_timeout: Option<humantime::Duration>,
+    /// Which planes this node serves [default: all]; `control` and `data`
+    /// need shared Postgres (and Postgres or Redis state) stores.
+    #[arg(long, value_enum)]
+    pub role: Option<file_config::Role>,
     /// Reconcile again whenever the config file or a contract changes.
     #[arg(long, requires = "config")]
     pub watch: bool,
@@ -143,27 +178,52 @@ pub struct App {
     pub registry: Arc<MockRegistry>,
     /// The effective configuration (file < env < flags).
     pub config: FileConfig,
-    /// Present with `--watch`; dropping it stops watching.
-    pub watch: Option<WatchGuard>,
+    /// Which planes this node serves.
+    pub role: Role,
+    /// This node's claim on the [`LEADER_LOCK`]; a `data` node is never
+    /// the leader.
+    pub leadership: Arc<Leadership>,
+    /// The leader-only work (reconcile on gaining leadership, `--watch`,
+    /// [`Maintenance`]); `None` on a `data` node. Dropping it stops it.
+    pub leader_work: Option<LeaderWork>,
+    /// Refreshes the `mb_state_sessions` gauge on a node that serves the
+    /// data plane (leader or not); `None` on a `control` node. Dropping it
+    /// stops it.
+    pub state_gauge: Option<StateGauge>,
+    /// How many times this node reconciled the configuration into the
+    /// control store (tests).
+    #[doc(hidden)]
+    pub reconciles: Arc<AtomicU64>,
     /// The request log writer.
     pub recorder: Arc<StoreRecorder>,
     /// The configured message brokers (the `brokers:` section).
     pub brokers: Arc<Brokers>,
-    /// The session sweeper and audit retention; dropping it stops them.
-    pub maintenance: Maintenance,
-    /// The import worker pool; dropping it stops the workers.
-    pub import_workers: mb_admin::ImportWorkers,
+    /// The import worker pool (not on a `data` node); dropping it stops
+    /// the workers.
+    pub import_workers: Option<mb_admin::ImportWorkers>,
+    /// The cross-node bus and its bridges.
+    pub ha: Arc<Ha>,
+    /// The state store the mocks and the Admin API use, its change feed
+    /// shared across nodes (see [`Ha::shared_state`]).
+    pub state: Arc<dyn StateStore>,
+    /// With `server.tls`: the certificates every listener serves, reloaded
+    /// when the files change (see [`crate::tls::spawn_reloader`]).
+    pub tls: Option<axum_server::tls_rustls::RustlsConfig>,
+    /// Stops the certificate reloader when the app is dropped.
+    pub tls_reloader: Option<crate::tls::ReloaderGuard>,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
 pub const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl App {
-    /// Graceful shutdown: stops watching the config file, flushes the
-    /// brokers' queued messages and writes the queued request-log entries
-    /// (each waiting at most [`SHUTDOWN_DRAIN_TIMEOUT`], concurrently).
+    /// Graceful shutdown: stops the leader-only work (watching the config
+    /// file, maintenance), flushes the brokers' queued messages and writes
+    /// the queued request-log entries (each waiting at most
+    /// [`SHUTDOWN_DRAIN_TIMEOUT`], concurrently).
     pub async fn shutdown(self) {
-        drop(self.watch);
+        drop(self.leader_work);
+        drop(self.tls_reloader);
         tokio::join!(
             self.brokers.shutdown(SHUTDOWN_DRAIN_TIMEOUT),
             self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT)
@@ -246,6 +306,9 @@ pub fn apply_flags(cfg: &mut FileConfig, args: &ServeArgs) {
     if args.insecure_no_auth {
         cfg.server.insecure_no_auth = true;
     }
+    if let Some(role) = args.role {
+        cfg.server.role = role;
+    }
     if let Some(url) = &args.storage_url {
         cfg.storage.url = url.clone();
     }
@@ -283,6 +346,7 @@ pub fn resolve_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<
     apply_flags(&mut cfg, args);
     cfg.validate_ranges().map_err(|e| anyhow!(e))?;
     cfg.auth.validate().map_err(|e| anyhow!(e))?;
+    crate::tls::check_external_url(&cfg).map_err(|e| anyhow!(e))?;
     Ok(cfg)
 }
 
@@ -348,21 +412,74 @@ pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<
 
 /// Opens the stores, sets up Admin API authentication (`auth.mode`; in
 /// `oidc` mode a failed provider discovery is an error) and the audit log,
-/// reconciles the configuration into the control store, mounts the mocks,
-/// starts the [`Maintenance`] jobs and builds both routers (the admin one
-/// serving the console as its fallback behind [`mb_admin::console_gate`],
-/// and behind the host guard, see [`HostPolicy`]); with `--watch`, starts
-/// watching the config file. `llm: None` (or `--offline`) means faker only
-/// in zero-config mode; `llm.api_key`, when set, is what the reference
-/// `env:MB_LLM_API_KEY` resolves to.
+/// joins leader election for [`LEADER_LOCK`] (see [`Ha::leader_backend`]),
+/// mounts the mocks and builds the routers (the admin one serving the
+/// console as its fallback behind [`mb_admin::console_gate`], and behind
+/// the host guard, see [`HostPolicy`]). The leader reconciles the
+/// configuration into the control store before the mocks are mounted; on
+/// every node but a `data` one, [`LeaderWork`] then runs the leader-only
+/// work (the [`Maintenance`] jobs and, with `--watch`, watching the config
+/// file) while this node leads. `server.role` decides the rest: a `data`
+/// node serves only the ops endpoints on its admin port, authenticates
+/// API keys only and runs no import workers; a `control` node builds its
+/// mocks for manual publish only ([`ServeMode::ControlOnly`]). `llm: None`
+/// (or `--offline`) means faker only in zero-config mode; `llm.api_key`,
+/// when set, is what the reference `env:MB_LLM_API_KEY` resolves to.
 ///
 /// Must be called inside a Tokio runtime.
 pub async fn build_app_with(
     args: &ServeArgs,
     llm: Option<LlmEnv>,
+    ext: Extensions,
+) -> anyhow::Result<App> {
+    build_app_on(args, llm, ext, None, None).await
+}
+
+/// [`build_app_with`] on the given cross-node bus instead of the one the
+/// configuration names; the node id is the bus's (tests join several nodes
+/// to one [`mb_state::MemoryBusHub`]).
+#[doc(hidden)]
+pub async fn build_app_with_bus(
+    args: &ServeArgs,
+    llm: Option<LlmEnv>,
+    ext: Extensions,
+    bus: Arc<dyn Bus>,
+) -> anyhow::Result<App> {
+    build_app_on(args, llm, ext, Some(bus), None).await
+}
+
+/// [`build_app_with_bus`] with leadership from `leader` instead of
+/// [`Ha::leader_backend`] (tests flip a [`LeaderBackend::Manual`]).
+#[doc(hidden)]
+pub async fn build_app_with_leader(
+    args: &ServeArgs,
+    llm: Option<LlmEnv>,
+    ext: Extensions,
+    bus: Arc<dyn Bus>,
+    leader: LeaderBackend,
+) -> anyhow::Result<App> {
+    build_app_on(args, llm, ext, Some(bus), Some(leader)).await
+}
+
+async fn build_app_on(
+    args: &ServeArgs,
+    llm: Option<LlmEnv>,
     mut ext: Extensions,
+    bus: Option<Arc<dyn Bus>>,
+    leader: Option<LeaderBackend>,
 ) -> anyhow::Result<App> {
     let cfg = resolve_config(args, llm.as_ref())?;
+    let role = cfg.server.role;
+    if role == Role::Data && args.watch {
+        bail!("{WATCH_ON_DATA_NODE}");
+    }
+    // The certificate files and the CA bundle are read before anything is
+    // opened, so a bad file fails startup at once.
+    let tls = match &cfg.server.tls {
+        Some(tls) => Some((tls.clone(), crate::tls::load_rustls(tls).await?)),
+        None => None,
+    };
+    let http = crate::tls::outbound_options(&cfg.outbound)?;
     if let Some(key) = llm.as_ref().and_then(|l| l.api_key.clone()) {
         ext.secrets = Arc::new(EnvKeyOverlay {
             key,
@@ -378,23 +495,72 @@ pub async fn build_app_with(
         .await
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| "opening the state store")?;
+    // One id names this node on the bus and as the scheduler lease holder.
+    let ha = match bus {
+        Some(bus) => Ha::start_with_bus(bus, store.clone()).await,
+        None => Ha::start(&cfg, store.clone(), uuid::Uuid::new_v4().to_string())
+            .await
+            .context("connecting the cross-node bus")?,
+    };
+    let state = ha.shared_state(state);
 
     let broker_configs = file_config::broker_configs(&cfg).context("applying the configuration")?;
     // Before anything is applied, so a bad auth setup changes nothing.
-    let (auth, web_auth) = admin_auth(&cfg.auth, &store, &ext).await?;
-    let audit = mb_admin::Auditor::new(store.clone(), audit_webhook(&cfg, &ext).await?);
+    let (auth, web_auth) = match role {
+        // Data nodes take API keys only: no console login, no OIDC discovery.
+        Role::Data => data_node_auth(&cfg.auth, &store),
+        Role::All | Role::Control => admin_auth(&cfg.auth, &store, &ext, &http).await?,
+    };
+    let audit_sink = match role {
+        Role::Data => None,
+        Role::All | Role::Control => audit_webhook(&cfg, &ext, &http).await?,
+    };
+    let audit = mb_admin::Auditor::new(store.clone(), audit_sink);
 
-    let report = reconcile::reconcile(store.as_ref(), state.as_ref(), &cfg)
-        .await
-        .context("applying the configuration")?;
-    tracing::debug!(?report, "configuration applied");
+    // A data node never leads: it never reconciles.
+    let backend = match (role, leader) {
+        (Role::Data, _) => LeaderBackend::Manual(tokio::sync::watch::channel(false).1),
+        (_, Some(leader)) => leader,
+        (_, None) => Ha::leader_backend(&cfg),
+    };
+    let leadership = Arc::new(
+        Leadership::start(backend, LEADER_LOCK, ha.node_id.clone())
+            .await
+            .map_err(|e| anyhow!("{e}"))
+            .context("starting leader election")?,
+    );
+    let reconciles = Arc::new(AtomicU64::new(0));
+    // The leader reconciles before the registry loads; the others serve
+    // what the leader stored.
+    let reconciled = leadership.is_leader();
+    if reconciled {
+        reconciles.fetch_add(1, Ordering::SeqCst);
+        let report = reconcile::reconcile(store.as_ref(), state.as_ref(), &cfg)
+            .await
+            .context("applying the configuration")?;
+        tracing::debug!(?report, "configuration applied");
+    } else {
+        tracing::info!(
+            role = role.as_str(),
+            "not the leader; serving the configuration the leader applies"
+        );
+    }
 
     let recorder = StoreRecorder::new(
         store.clone(),
         cfg.observability.request_log_retention,
         cfg.observability.redact_fields.clone(),
     );
-    let (protocols, stream) = cfg.protocols.settings();
+    recorder.clone().with_bus(ha.clone());
+    let (protocols, stream) = cfg.protocol_settings();
+    let scrubber = match cfg.scrubber_config() {
+        Some(pii) => Some(Arc::new(
+            Scrubber::new(&pii)
+                .map_err(|e| anyhow!("{e}"))
+                .context("building the PII scrubber")?,
+        )),
+        None => None,
+    };
     let deps = RuntimeDeps {
         store: store.clone(),
         state: state.clone(),
@@ -410,13 +576,24 @@ pub async fn build_app_with(
             lease: Arc::new(StoreLease {
                 store: store.clone(),
             }),
-            holder: uuid::Uuid::new_v4().to_string(),
+            holder: ha.node_id.clone(),
+            shared_subscriptions: !ha.bus.is_local(),
+        },
+        limiter: GenerationLimiter::new(cfg.limits.max_concurrent_generations),
+        scrubber,
+        limits: cfg.limits.clone(),
+        http: http.clone(),
+        mode: match role {
+            Role::Control => ServeMode::ControlOnly,
+            Role::All | Role::Data => ServeMode::Full,
         },
     };
     let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();
+    // Subscribe before the first load, so no change after it is missed.
+    let changes = ha.changes();
     registry.reload_all(&deps).await?;
-    registry.spawn_watcher(deps.clone());
+    registry.spawn_watcher(deps.clone(), changes);
     for (workspace, name, prefix) in registry.mounted() {
         let name = mock_label(&workspace, &name);
         tracing::info!(
@@ -454,12 +631,7 @@ pub async fn build_app_with(
         )
         .merge(registry.router());
 
-    let maintenance = Maintenance::start(
-        store.clone(),
-        web_auth.as_ref().map(|w| &w.sessions),
-        cfg.audit.retention_days,
-    );
-
+    let sessions = web_auth.as_ref().map(|w| w.sessions.clone());
     let prometheus = telemetry::install_prometheus()?;
     let admin_state = mb_admin::AdminState {
         api_secret_refs: Arc::new(cfg.server.api_secret_refs.clone()),
@@ -476,46 +648,61 @@ pub async fn build_app_with(
             import_profile: cfg.import.llm_profile.clone(),
         }),
         imports: mb_admin::Imports {
-            settings: cfg.import.settings().map_err(|e| anyhow!(e))?,
+            settings: {
+                let mut settings = cfg.import.settings().map_err(|e| anyhow!(e))?;
+                // CA bundle only: the SSRF-guarded fetch never uses a proxy.
+                settings.fetch.extra_roots_pem = http.extra_roots_pem.clone();
+                settings
+            },
             ..Default::default()
         },
         ..mb_admin::AdminState::new(store.clone(), state.clone())
     };
-    let import_workers = mb_admin::spawn_import_workers(&admin_state);
+    let import_workers = (role != Role::Data).then(|| mb_admin::spawn_import_workers(&admin_state));
     let metrics_gate = (!cfg.auth.public_metrics).then(|| admin_state.clone());
     let hooks_auth = admin_state.clone();
     // In `oidc` mode only authenticated callers see why `/readyz` is not ready.
     let readyz_auth = (cfg.auth.mode == AuthMode::Oidc).then(|| admin_state.auth.clone());
-    let console = mb_console::router().layer(axum::middleware::from_fn_with_state(
-        admin_state.clone(),
-        mb_admin::console_gate,
-    ));
-    let mut admin = mb_admin::router(admin_state)
-        .merge(ops::router_with_metrics_gate(
-            OpsState {
-                store: store.clone(),
-                state: state.clone(),
-                registry: registry.clone(),
-                prometheus,
-                readyz_auth,
-            },
-            metrics_gate,
-        ))
-        .layer(axum::Extension::<SharedChannelControl>(Arc::new(
-            RegistryChannels {
-                registry: registry.clone(),
-                brokers: brokers.clone(),
-            },
-        )));
-    if let Some(routes) = ext.admin_hooks.routes() {
-        // Extension routes get the same authentication as the Admin API.
-        admin = admin.merge(routes.layer(axum::middleware::from_fn_with_state(
-            hooks_auth,
-            mb_admin::authenticate,
-        )));
-    }
-    // Any other path is the console, behind the same credentials as the API.
-    admin = admin.fallback_service(console);
+    let ops = ops::router_with_metrics_gate(
+        OpsState {
+            store: store.clone(),
+            state: state.clone(),
+            registry: registry.clone(),
+            prometheus,
+            readyz_auth,
+            bus: Some(ha.bus.clone()),
+            role,
+            leader: leadership.watch(),
+        },
+        metrics_gate,
+    );
+    let mut admin = match role {
+        // A data node's admin port serves the ops endpoints only.
+        Role::Data => ops,
+        Role::All | Role::Control => {
+            let console = mb_console::router().layer(axum::middleware::from_fn_with_state(
+                admin_state.clone(),
+                mb_admin::console_gate,
+            ));
+            let mut admin = mb_admin::router(admin_state)
+                .merge(ops)
+                .layer(axum::Extension::<SharedChannelControl>(Arc::new(
+                    RegistryChannels {
+                        registry: registry.clone(),
+                        brokers: brokers.clone(),
+                    },
+                )));
+            if let Some(routes) = ext.admin_hooks.routes() {
+                // Extension routes get the same authentication as the Admin API.
+                admin = admin.merge(routes.layer(axum::middleware::from_fn_with_state(
+                    hooks_auth,
+                    mb_admin::authenticate,
+                )));
+            }
+            // Any other path is the console, behind the same credentials as the API.
+            admin.fallback_service(console)
+        }
+    };
     if let Some(policy) = host_policy(&cfg)? {
         admin = admin.layer(axum::middleware::from_fn_with_state(
             policy,
@@ -523,41 +710,153 @@ pub async fn build_app_with(
         ));
     }
 
-    let watch = match (&args.config, args.watch) {
-        (Some(path), true) => {
+    let leader_work = match role {
+        Role::Data => None,
+        Role::All | Role::Control => {
             let flags = args.clone();
             let initial_brokers = broker_configs.clone();
             let prepare: watch::Prepare = Arc::new(move |cfg: &mut FileConfig| {
                 file_config::apply_env(cfg)?;
                 apply_flags(cfg, &flags);
+                cfg.validate_ranges().map_err(|e| anyhow!(e))?;
                 // Brokers are connected at startup only: a reload that
                 // changes them is rejected as a whole.
                 ensure_brokers_unchanged(&initial_brokers, cfg)
             });
             let applied = applied_hook(registry.clone(), deps, recorder.clone());
-            Some(watch::spawn_with_hook(
-                path.clone(),
-                store.clone(),
-                state.clone(),
-                prepare,
-                Some(applied),
-            )?)
+            let jobs = LeaderJobs {
+                reconcile: reconcile_once(ReconcileCtx {
+                    config_path: args.config.clone(),
+                    startup: cfg.clone(),
+                    prepare: prepare.clone(),
+                    applied: applied.clone(),
+                    store: store.clone(),
+                    state: state.clone(),
+                    count: reconciles.clone(),
+                }),
+                watch: match (&args.config, args.watch) {
+                    (Some(path), true) => {
+                        let path = path.clone();
+                        let (store, state) = (store.clone(), state.clone());
+                        let start: crate::maintenance::StartWatch = Arc::new(move || {
+                            watch::spawn_with_hook(
+                                path.clone(),
+                                store.clone(),
+                                state.clone(),
+                                prepare.clone(),
+                                Some(applied.clone()),
+                            )
+                        });
+                        Some(start)
+                    }
+                    _ => None,
+                },
+                maintenance: {
+                    let store = store.clone();
+                    let retention_days = cfg.audit.retention_days;
+                    Arc::new(move || {
+                        Maintenance::start(store.clone(), sessions.as_ref(), retention_days)
+                    })
+                },
+            };
+            Some(LeaderWork::spawn(leadership.watch(), reconciled, jobs))
         }
-        _ => None,
     };
 
+    let state_gauge = match role {
+        Role::Control => None,
+        Role::All | Role::Data => Some(StateGauge::spawn(state.clone(), registry.clone())),
+    };
+
+    let (tls, tls_reloader) = match tls {
+        Some((files, rustls)) => {
+            let reloader = crate::tls::spawn_reloader(files, rustls.clone());
+            (Some(rustls), Some(crate::tls::ReloaderGuard(reloader)))
+        }
+        None => (None, None),
+    };
     Ok(App {
         data,
         admin,
         grpc: grpc.router(),
         registry,
         config: cfg,
-        watch,
+        role,
+        leadership,
+        leader_work,
+        state_gauge,
+        reconciles,
         recorder,
         brokers,
-        maintenance,
         import_workers,
+        ha,
+        state,
+        tls,
+        tls_reloader,
     })
+}
+
+/// Why `--watch` is refused on a `data` node.
+pub const WATCH_ON_DATA_NODE: &str = "--watch cannot be used with role data: data nodes never apply the config file (run --watch on a control node)";
+
+/// What a leader reconciles with.
+struct ReconcileCtx {
+    /// The config file, re-read on every reconcile; `None` in zero-config
+    /// mode, which reconciles `startup`.
+    config_path: Option<PathBuf>,
+    startup: FileConfig,
+    prepare: watch::Prepare,
+    applied: watch::Applied,
+    store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
+    count: Arc<AtomicU64>,
+}
+
+/// Reconciles the current configuration (the config file read afresh, as
+/// the previous leader's `--watch` may have applied changes since startup)
+/// into the store, then applies its out-of-store settings.
+fn reconcile_once(ctx: ReconcileCtx) -> crate::maintenance::ReconcileOnce {
+    let ctx = Arc::new(ctx);
+    Arc::new(move || {
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            ctx.count.fetch_add(1, Ordering::SeqCst);
+            let cfg = match &ctx.config_path {
+                Some(path) => {
+                    let mut cfg = file_config::load(path)?;
+                    (ctx.prepare)(&mut cfg)?;
+                    cfg
+                }
+                None => ctx.startup.clone(),
+            };
+            let report = reconcile::reconcile(ctx.store.as_ref(), ctx.state.as_ref(), &cfg)
+                .await
+                .context("applying the configuration")?;
+            tracing::debug!(?report, "configuration applied");
+            (ctx.applied)(cfg).await;
+            Ok(())
+        })
+    })
+}
+
+/// A `data` node's authenticator: `none` mode is [`mb_auth::LocalAuth`];
+/// otherwise API keys only (no console sessions, no OIDC bearer tokens, so
+/// no provider discovery).
+fn data_node_auth(
+    auth: &AuthConfig,
+    store: &Arc<dyn ControlStore>,
+) -> (Arc<dyn mb_auth::Authenticate>, Option<mb_admin::WebAuth>) {
+    match auth.mode {
+        AuthMode::None => (Arc::new(mb_auth::LocalAuth), None),
+        AuthMode::Oidc => (
+            Arc::new(mb_auth::Authenticator {
+                api_keys: mb_auth::ApiKeys::new(store.clone()),
+                sessions: None,
+                bearer: None,
+            }),
+            None,
+        ),
+    }
 }
 
 /// The Admin API's authenticator and, in `oidc` mode, the browser login.
@@ -571,6 +870,7 @@ async fn admin_auth(
     auth: &AuthConfig,
     store: &Arc<dyn ControlStore>,
     ext: &Extensions,
+    http: &mb_llm::HttpOptions,
 ) -> anyhow::Result<(Arc<dyn mb_auth::Authenticate>, Option<mb_admin::WebAuth>)> {
     let oidc = match (auth.mode, &auth.oidc) {
         (AuthMode::None, _) => return Ok((Arc::new(mb_auth::LocalAuth), None)),
@@ -600,7 +900,10 @@ async fn admin_auth(
             sysadmin_subjects: auth.sysadmin_subjects.clone(),
         },
     };
-    let client = mb_auth::OidcClient::discover(settings, mb_auth::http_client())
+    let http = mb_auth::http_client_with(http)
+        .map_err(|e| anyhow!("{e}"))
+        .context("building the OIDC HTTP client from the outbound settings")?;
+    let client = mb_auth::OidcClient::discover(settings, http)
         .await
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("cannot set up OIDC with issuer {}", oidc.issuer))?;
@@ -625,6 +928,7 @@ async fn admin_auth(
 async fn audit_webhook(
     cfg: &FileConfig,
     ext: &Extensions,
+    http: &mb_llm::HttpOptions,
 ) -> anyhow::Result<Option<mb_admin::WebhookSink>> {
     let Some(url) = &cfg.audit.webhook_url else {
         return Ok(None);
@@ -642,7 +946,9 @@ async fn audit_webhook(
     Ok(Some(mb_admin::WebhookSink::spawn(
         url.clone(),
         secret,
-        reqwest::Client::new(),
+        mb_admin::WebhookSink::client(http)
+            .map_err(|e| anyhow!("{e}"))
+            .context("building the audit webhook client")?,
     )))
 }
 

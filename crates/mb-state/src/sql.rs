@@ -155,7 +155,7 @@ impl SqlStateStore {
             Pool::Pg(connect_postgres(url).await?)
         } else {
             return Err(StateError::Backend(format!(
-                "unsupported state url scheme (expected memory, sqlite: or postgres://): {}",
+                "unsupported state url scheme (expected memory, sqlite:, postgres://, redis:// or rediss://): {}",
                 url.split(':').next().unwrap_or_default()
             )));
         };
@@ -194,6 +194,7 @@ impl SqlStateStore {
             resource_type: resource_type.to_string(),
             id: id.to_string(),
             kind,
+            origin: crate::ChangeOrigin::Local,
         });
     }
 }
@@ -425,6 +426,21 @@ impl StateStore for SqlStateStore {
 
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch_existing(s).await.map(|_| ())
+    }
+
+    async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
+        let cutoff = self.inner.cutoff(now_ms());
+        let n: i64 = on_pool!(&self.inner.pool, |p| sqlx::query_scalar(
+            "SELECT COUNT(*) FROM state_sessions \
+             WHERE workspace = $1 AND mock = $2 AND last_touched > $3"
+        )
+        .bind(workspace)
+        .bind(mock)
+        .bind(cutoff)
+        .fetch_one(p)
+        .await?);
+        usize::try_from(n)
+            .map_err(|_| StateError::Backend(format!("session count {n} is out of range")))
     }
 
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {

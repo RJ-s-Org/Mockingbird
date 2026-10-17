@@ -1,11 +1,13 @@
 [package]
 name = "mb-ext"
-version.workspace = true
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Extension traits (and self-hosted defaults) that mockingbird-cloud builds against"
+keywords = ["mock", "api", "extension"]
+categories = ["development-tools::testing"]
 
 [lints]
 workspace = true
@@ -15,10 +17,16 @@ async-trait.workspace = true
 axum.workspace = true
 http.workspace = true
 metrics.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
 
 [dev-dependencies]
 metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "test-util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wiremock.workspace = true

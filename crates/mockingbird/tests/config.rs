@@ -601,6 +601,8 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )
@@ -789,6 +791,8 @@ async fn reconcile_rejects_grpc_service_clashes() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )
@@ -1557,6 +1561,8 @@ async fn reconcile_same_name_two_workspaces() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
             },
         )
@@ -1633,6 +1639,8 @@ async fn reconcile_prefix_collision_across_workspaces_errors() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
             },
         )
@@ -1939,7 +1947,7 @@ async fn scenario_stream_settings_reach_runtime() {
     ws.write(
         r#"
 protocols:
-  sse: {keepalive: 300ms}
+  sse: {keepalive: 1s}
 mocks:
   events:
     contract: events.yaml
@@ -2396,4 +2404,584 @@ async fn api_put_on_file_channel_409() {
         .await
         .unwrap();
     assert_eq!(events, json!({"broker": "mem", "source": "file"}));
+}
+
+// ---- P7 config surface ----
+
+/// The validation error of `yaml`, as `load` reports it.
+fn load_err(ws: &Workspace, yaml: &str) -> String {
+    ws.write(yaml);
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    format!("{err:#}")
+}
+
+#[test]
+fn p7_sections_default() {
+    use mb_engine::pii::BuiltinPattern;
+    use mockingbird::file_config::{BusTarget, Role};
+
+    let ws = Workspace::new();
+    let cfg = ws.load("mocks:\n  orders:\n    contract: orders.yaml\n    scenarios: {s: {}}\n");
+    assert_eq!(cfg.server.role, Role::All);
+    assert!(!cfg.server.trust_forwarded_headers);
+    assert_eq!(cfg.server.tls, None);
+    assert_eq!(cfg.outbound.ca_file, None);
+    assert_eq!(cfg.outbound.proxy, None);
+    assert!(cfg.outbound.no_proxy.is_empty());
+    assert_eq!(cfg.bus.url, None);
+    assert_eq!(cfg.bus_target(), BusTarget::Local);
+    assert_eq!(cfg.limits.max_concurrent_generations, 64);
+    assert_eq!(cfg.limits.max_request_bytes, 1_048_576);
+    assert_eq!(cfg.limits.max_response_bytes, 1_048_576);
+    assert!(!cfg.pii.enabled);
+    assert_eq!(cfg.pii.patterns, BuiltinPattern::ALL);
+    assert!(cfg.pii.custom.is_empty());
+    assert_eq!(cfg.scrubber_config(), None);
+    assert_eq!(cfg.protocols.graphql.max_root_fields, 20);
+    assert_eq!(cfg.protocols.graphql.max_subscriptions_per_connection, 16);
+    assert_eq!(cfg.protocols.graphql.max_connections_per_mock, 1000);
+    assert_eq!(
+        cfg.protocols.graphql.connection_init_timeout,
+        Duration::from_secs(5)
+    );
+    let m = &cfg.mocks["orders"];
+    assert_eq!(m.chaos, None);
+    assert_eq!(m.limits, file_config::FileMockLimits::default());
+    assert_eq!(m.limits.to_store(), mb_store::MockLimits::default());
+    assert_eq!(m.scenarios["s"].chaos, None);
+
+    let (settings, _) = cfg.protocol_settings();
+    assert_eq!(settings.graphql_max_root_fields, 20);
+    assert_eq!(settings.graphql_max_subscriptions_per_connection, 16);
+    assert_eq!(settings.graphql_max_connections_per_mock, 1000);
+    assert_eq!(
+        settings.graphql_connection_init_timeout,
+        Duration::from_secs(5)
+    );
+    assert!(!settings.trust_forwarded_headers);
+    assert!(!settings.tls_terminated);
+    let d = mb_protocols::ProtocolSettings::default();
+    assert_eq!(
+        (
+            d.graphql_max_root_fields,
+            d.graphql_max_subscriptions_per_connection,
+            d.graphql_max_connections_per_mock,
+            d.trust_forwarded_headers,
+            d.tls_terminated
+        ),
+        (20, 16, 1000, false, false)
+    );
+
+    let cfg = ws.load(
+        r#"
+server:
+  trust_forwarded_headers: true
+  tls: {cert_file: /etc/mb/cert.pem, key_file: /etc/mb/key.pem}
+outbound:
+  ca_file: /etc/mb/ca.pem
+  proxy: http://proxy.internal:3128
+  no_proxy: [localhost, .internal]
+limits: {max_concurrent_generations: 8, max_request_bytes: 2048, max_response_bytes: 4096}
+pii:
+  enabled: true
+  patterns: [email, ipv4]
+  custom: [{name: order_ref, regex: "ORD-[0-9]{6}", replacement: "ORD-######"}]
+protocols:
+  graphql: {max_root_fields: 5, max_subscriptions_per_connection: 2, max_connections_per_mock: 10, connection_init_timeout: 2s}
+"#,
+    );
+    let tls = cfg.server.tls.as_ref().unwrap();
+    assert_eq!(tls.cert_file, PathBuf::from("/etc/mb/cert.pem"));
+    assert_eq!(tls.key_file, PathBuf::from("/etc/mb/key.pem"));
+    assert_eq!(cfg.outbound.ca_file, Some(PathBuf::from("/etc/mb/ca.pem")));
+    assert_eq!(
+        cfg.outbound.proxy.as_deref(),
+        Some("http://proxy.internal:3128")
+    );
+    assert_eq!(cfg.outbound.no_proxy, ["localhost", ".internal"]);
+    assert_eq!(cfg.limits.max_concurrent_generations, 8);
+    assert_eq!(cfg.limits.max_request_bytes, 2048);
+    assert_eq!(cfg.limits.max_response_bytes, 4096);
+    let scrubber = cfg.scrubber_config().unwrap();
+    assert_eq!(
+        scrubber.builtins,
+        [BuiltinPattern::Email, BuiltinPattern::Ipv4]
+    );
+    assert_eq!(scrubber.custom[0].name, "order_ref");
+    let (settings, _) = cfg.protocol_settings();
+    assert_eq!(settings.graphql_max_root_fields, 5);
+    assert_eq!(settings.graphql_max_subscriptions_per_connection, 2);
+    assert_eq!(settings.graphql_max_connections_per_mock, 10);
+    assert_eq!(
+        settings.graphql_connection_init_timeout,
+        Duration::from_secs(2)
+    );
+    assert!(settings.trust_forwarded_headers);
+    assert!(settings.tls_terminated);
+}
+
+#[test]
+fn role_flag_env_file_precedence() {
+    use mockingbird::file_config::Role;
+
+    let ws = Workspace::new();
+    ws.write(
+        "server:\n  role: data\nstorage:\n  url: postgres://db/mb\n  state_url: redis://cache:6379\n",
+    );
+    let mut cfg = file_config::load(&ws.config_path()).unwrap();
+    assert_eq!(cfg.server.role, Role::Data);
+
+    file_config::apply_env_from(&mut cfg, |k| (k == "MB_ROLE").then(|| "control".into())).unwrap();
+    assert_eq!(cfg.server.role, Role::Control);
+
+    let args = ServeArgs {
+        role: Some(Role::All),
+        ..oidc_args(&ws)
+    };
+    apply_flags(&mut cfg, &args);
+    assert_eq!(cfg.server.role, Role::All);
+
+    // Through resolve_config: the flag wins over the file.
+    let resolved = resolve_config(&args, None).unwrap();
+    assert_eq!(resolved.server.role, Role::All);
+    let resolved = resolve_config(&oidc_args(&ws), None).unwrap();
+    assert_eq!(resolved.server.role, Role::Data);
+
+    let err = file_config::apply_env_from(&mut cfg, |k| (k == "MB_ROLE").then(|| "edge".into()))
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("MB_ROLE"), "{err:#}");
+
+    // MB_STATE_URL and MB_BUS_URL.
+    file_config::apply_env_from(&mut cfg, |k| match k {
+        "MB_STATE_URL" => Some("rediss://cache:6380".into()),
+        "MB_BUS_URL" => Some("local".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(
+        cfg.storage.state_url.as_deref(),
+        Some("rediss://cache:6380")
+    );
+    assert_eq!(cfg.bus.url.as_deref(), Some("local"));
+
+    // The CLI parses --role.
+    use clap::Parser;
+    let cli = mockingbird::config::Cli::try_parse_from([
+        "mockingbird",
+        "serve",
+        "-c",
+        "x.yaml",
+        "--role",
+        "control",
+    ])
+    .unwrap();
+    match cli.cmd {
+        mockingbird::config::Command::Serve(args) => assert_eq!(args.role, Some(Role::Control)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn split_roles_require_shared_stores() {
+    let ws = Workspace::new();
+    for role in ["data", "control"] {
+        // SQLite control store.
+        let msg = load_resolve_err(&ws, &format!("server:\n  role: {role}\n"));
+        assert!(
+            msg.contains(&format!("server.role {role}")) && msg.contains("storage.url"),
+            "{msg}"
+        );
+        assert!(msg.contains("single-node"), "{msg}");
+        // In-process state.
+        let msg = load_resolve_err(
+            &ws,
+            &format!(
+                "server:\n  role: {role}\nstorage:\n  url: postgres://db/mb\n  state_url: memory\n"
+            ),
+        );
+        assert!(
+            msg.contains(&format!("server.role {role}")) && msg.contains("storage.state_url"),
+            "{msg}"
+        );
+        // An in-process bus: the other nodes would never hear of changes,
+        // and every control node would lead.
+        let msg = load_resolve_err(
+            &ws,
+            &format!(
+                "server:\n  role: {role}\nstorage:\n  url: postgres://db/mb\nbus:\n  url: local\n"
+            ),
+        );
+        assert!(
+            msg.contains(&format!("server.role {role}")) && msg.contains("bus.url local"),
+            "{msg}"
+        );
+    }
+    // Postgres with the default state store (the same URL), or Redis state, pass.
+    for yaml in [
+        "server:\n  role: data\nstorage:\n  url: postgres://db/mb\n",
+        "server:\n  role: data\nstorage:\n  url: postgresql://db/mb\n  state_url: rediss://c:6380\n",
+        "server:\n  role: all\n",
+    ] {
+        ws.write(yaml);
+        resolve_config(&oidc_args(&ws), None).unwrap_or_else(|e| panic!("{yaml}: {e:#}"));
+    }
+}
+
+/// The error `resolve_config` gives for `yaml` (the file, env and flags
+/// combined).
+fn load_resolve_err(ws: &Workspace, yaml: &str) -> String {
+    ws.write(yaml);
+    let err = resolve_config(&oidc_args(ws), None).unwrap_err();
+    format!("{err:#}")
+}
+
+#[test]
+fn bus_target_resolution() {
+    use mockingbird::file_config::BusTarget;
+
+    let mut cfg = FileConfig::default();
+    cfg.bus.url = Some("local".into());
+    cfg.storage.url = "postgres://db/mb".into();
+    assert_eq!(cfg.bus_target(), BusTarget::Local);
+    cfg.bus.url = Some("redis://cache:6379".into());
+    assert_eq!(
+        cfg.bus_target(),
+        BusTarget::Redis("redis://cache:6379".into())
+    );
+    cfg.bus.url = Some("rediss://cache:6380".into());
+    assert_eq!(
+        cfg.bus_target(),
+        BusTarget::Redis("rediss://cache:6380".into())
+    );
+    cfg.bus.url = Some("postgres://bus/mb".into());
+    assert_eq!(
+        cfg.bus_target(),
+        BusTarget::Postgres("postgres://bus/mb".into())
+    );
+    cfg.bus.url = Some("postgresql://bus/mb".into());
+    assert_eq!(
+        cfg.bus_target(),
+        BusTarget::Postgres("postgresql://bus/mb".into())
+    );
+    // Unset: the control store when it is Postgres, else in-process.
+    cfg.bus.url = None;
+    assert_eq!(
+        cfg.bus_target(),
+        BusTarget::Postgres("postgres://db/mb".into())
+    );
+    cfg.storage.url = "sqlite::memory:".into();
+    assert_eq!(cfg.bus_target(), BusTarget::Local);
+
+    // Any other scheme is rejected.
+    let ws = Workspace::new();
+    let msg = load_err(&ws, "bus:\n  url: amqp://rabbit\n");
+    assert!(msg.contains("bus.url"), "{msg}");
+}
+
+#[test]
+fn limits_ranges_named() {
+    let ws = Workspace::new();
+    let msg = load_err(&ws, "limits:\n  max_concurrent_generations: 0\n");
+    assert!(
+        msg.contains("limits.max_concurrent_generations 0 must be between 1 and 4096"),
+        "{msg}"
+    );
+    for (yaml, key) in [
+        (
+            "limits:\n  max_concurrent_generations: 4097\n",
+            "limits.max_concurrent_generations",
+        ),
+        (
+            "limits:\n  max_request_bytes: 1023\n",
+            "limits.max_request_bytes",
+        ),
+        (
+            "limits:\n  max_request_bytes: 67108865\n",
+            "limits.max_request_bytes",
+        ),
+        (
+            "limits:\n  max_response_bytes: 16777217\n",
+            "limits.max_response_bytes",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    limits: {rate_limit: {requests_per_second: 0, burst: 1}}\n",
+            "mocks.orders.limits.rate_limit.requests_per_second",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    limits: {rate_limit: {requests_per_second: 5, burst: 0}}\n",
+            "mocks.orders.limits.rate_limit.burst",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    limits: {daily_token_budget: 0}\n",
+            "mocks.orders.limits.daily_token_budget",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    limits: {max_response_bytes: 100}\n",
+            "mocks.orders.limits.max_response_bytes",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    chaos: {error_rate: 1.5}\n",
+            "mocks.orders.chaos.error_rate must be between 0 and 1",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    chaos: {drop_stream_rate: -0.1}\n",
+            "mocks.orders.chaos.drop_stream_rate",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    chaos: {latency_jitter: {min: 2s, max: 1s}}\n",
+            "mocks.orders.chaos.latency_jitter",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    chaos: {latency_jitter: {min: 0s, max: 31s}}\n",
+            "mocks.orders.chaos.latency_jitter.max",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    scenarios: {flaky: {chaos: {error_rate: 2}}}\n",
+            "mocks.orders.scenarios.flaky.chaos.error_rate",
+        ),
+    ] {
+        let msg = load_err(&ws, yaml);
+        assert!(msg.contains(key), "{yaml}: {msg}");
+    }
+    ws.write(
+        "limits: {max_concurrent_generations: 4096, max_request_bytes: 67108864, max_response_bytes: 1024}\n",
+    );
+    file_config::load(&ws.config_path()).unwrap();
+}
+
+#[test]
+fn protocols_validation() {
+    let ws = Workspace::new();
+    for (yaml, key) in [
+        (
+            "protocols:\n  sse: {keepalive: 500ms}\n",
+            "protocols.sse.keepalive must be at least 1s",
+        ),
+        (
+            "protocols:\n  graphql: {path: graphql}\n",
+            "protocols.graphql.path must start with '/'",
+        ),
+        (
+            "protocols:\n  grpc: {max_message_bytes: 100}\n",
+            "protocols.grpc.max_message_bytes",
+        ),
+        (
+            "protocols:\n  stream: {item_interval: 31s}\n",
+            "protocols.stream.item_interval",
+        ),
+        (
+            "mocks:\n  orders:\n    contract: orders.yaml\n    scenarios: {slow: {stream_item_interval: 31s}}\n",
+            "mocks.orders.scenarios.slow.stream_item_interval",
+        ),
+        (
+            "protocols:\n  graphql: {max_root_fields: 0}\n",
+            "protocols.graphql.max_root_fields",
+        ),
+        (
+            "protocols:\n  graphql: {max_root_fields: 1001}\n",
+            "protocols.graphql.max_root_fields",
+        ),
+        (
+            "protocols:\n  graphql: {max_subscriptions_per_connection: 0}\n",
+            "protocols.graphql.max_subscriptions_per_connection",
+        ),
+        (
+            "protocols:\n  graphql: {max_connections_per_mock: 100001}\n",
+            "protocols.graphql.max_connections_per_mock",
+        ),
+        (
+            "protocols:\n  graphql: {connection_init_timeout: 11s}\n",
+            "protocols.graphql.connection_init_timeout",
+        ),
+        (
+            "protocols:\n  graphql: {connection_init_timeout: 500ms}\n",
+            "protocols.graphql.connection_init_timeout",
+        ),
+        ("outbound:\n  proxy: ftp://proxy\n", "outbound.proxy"),
+        ("outbound:\n  proxy: not a url\n", "outbound.proxy"),
+    ] {
+        let msg = load_err(&ws, yaml);
+        assert!(msg.contains(key), "{yaml}: {msg}");
+    }
+    ws.write("protocols:\n  stream: {item_interval: 30s}\n  sse: {keepalive: 1s}\noutbound:\n  proxy: https://proxy:3128\n");
+    file_config::load(&ws.config_path()).unwrap();
+}
+
+const CHAOS_LIMITS: &str = r#"
+mocks:
+  orders:
+    contract: orders.yaml
+    chaos:
+      error_rate: 0.25
+      latency_jitter: {min: 10ms, max: 250ms}
+      drop_stream_rate: 0.5
+    limits:
+      rate_limit: {requests_per_second: 5, burst: 10}
+      daily_token_budget: 100000
+      max_request_bytes: 2048
+      max_response_bytes: 4096
+    scenarios:
+      flaky:
+        chaos: {error_rate: 1}
+"#;
+
+#[tokio::test]
+async fn mock_chaos_and_limits_reconciled() {
+    let ws = Workspace::new();
+    ws.write(CHAOS_LIMITS);
+    let app = start(config_args(&ws, false)).await;
+    let r = reqwest::get(format!("{}/api/v1/mocks/orders", app.admin))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let mock: Value = r.json().await.unwrap();
+    assert_eq!(
+        mock["chaos"],
+        json!({
+            "error_rate": 0.25,
+            "latency_jitter": {"min_ms": 10, "max_ms": 250},
+            "drop_stream_rate": 0.5
+        }),
+        "{mock}"
+    );
+    assert_eq!(
+        mock["limits"],
+        json!({
+            "rate_limit": {"requests_per_second": 5.0, "burst": 10},
+            "daily_token_budget": 100000,
+            "max_request_bytes": 2048,
+            "max_response_bytes": 4096
+        }),
+        "{mock}"
+    );
+
+    // File-declared values replace what the API set; removing them clears.
+    let store = store().await;
+    let cfg = ws.load(CHAOS_LIMITS);
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mut m = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.chaos.as_ref().map(|c| c.error_rate), Some(0.25));
+    m.chaos = None;
+    m.limits = mb_store::MockLimits::default();
+    store.update_mock(&m).await.unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["orders"]);
+    let m = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        m.chaos,
+        cfg.mocks["orders"].chaos.as_ref().map(|c| c.to_store())
+    );
+    assert_eq!(m.limits.daily_token_budget, Some(100_000));
+    // Unchanged: nothing to do.
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(report.is_empty(), "{report:?}");
+
+    let cfg = ws.load("mocks:\n  orders:\n    contract: orders.yaml\n");
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let m = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.chaos, None);
+    assert_eq!(m.limits, mb_store::MockLimits::default());
+}
+
+#[tokio::test]
+async fn scenario_chaos_reconciled() {
+    let ws = Workspace::new();
+    let cfg = ws.load(CHAOS_LIMITS);
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let m = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let scenarios = store.list_scenarios(m.id).await.unwrap();
+    let flaky = scenarios.iter().find(|s| s.name == "flaky").unwrap();
+    assert_eq!(
+        flaky.rules.chaos,
+        Some(mb_store::ChaosSettings {
+            error_rate: 1.0,
+            latency_jitter: None,
+            drop_stream_rate: 0.0
+        })
+    );
+}
+
+#[test]
+fn pii_custom_invalid_regex_rejected() {
+    let ws = Workspace::new();
+    let msg = load_err(
+        &ws,
+        "pii:\n  enabled: true\n  custom: [{name: bad, regex: \"(unclosed\", replacement: x}]\n",
+    );
+    assert!(msg.contains("pii.custom[0]"), "{msg}");
+    let msg = load_err(
+        &ws,
+        "pii:\n  custom: [{name: Bad-Name, regex: x, replacement: y}]\n",
+    );
+    assert!(msg.contains("pii.custom[0]"), "{msg}");
+    let msg = load_err(&ws, "pii:\n  patterns: [email, passport]\n");
+    assert!(msg.contains("passport"), "{msg}");
+}
+
+#[test]
+fn tls_requires_both_files() {
+    let ws = Workspace::new();
+    for yaml in [
+        "server:\n  tls: {cert_file: /etc/mb/cert.pem}\n",
+        "server:\n  tls: {key_file: /etc/mb/key.pem}\n",
+        "server:\n  tls: {}\n",
+    ] {
+        let msg = load_err(&ws, yaml);
+        assert!(msg.contains("server.tls"), "{yaml}: {msg}");
+        assert!(
+            msg.contains("cert_file") && msg.contains("key_file"),
+            "{msg}"
+        );
+    }
+}
+
+#[test]
+fn unknown_p7_key_rejected() {
+    let ws = Workspace::new();
+    for yaml in [
+        "server:\n  rol: data\n",
+        "server:\n  role: edge\n",
+        "server:\n  tls: {cert: x, key_file: y}\n",
+        "outbound:\n  proxies: [x]\n",
+        "bus:\n  uri: local\n",
+        "limits:\n  max_generations: 3\n",
+        "pii:\n  enable: true\n",
+        "pii:\n  custom: [{name: a, regex: b, replacement: c, flags: i}]\n",
+        "protocols:\n  graphql: {max_roots: 3}\n",
+        "mocks:\n  orders: {contract: orders.yaml, chaos: {error: 0.1}}\n",
+        "mocks:\n  orders: {contract: orders.yaml, chaos: {latency_jitter: {min: 1s, max: 2s, avg: 1s}}}\n",
+        "mocks:\n  orders: {contract: orders.yaml, limits: {rate: 3}}\n",
+        "mocks:\n  orders: {contract: orders.yaml, limits: {rate_limit: {rps: 3, burst: 1}}}\n",
+        "mocks:\n  orders: {contract: orders.yaml, scenarios: {s: {chaos: {errors: 1}}}}\n",
+    ] {
+        ws.write(yaml);
+        assert!(file_config::load(&ws.config_path()).is_err(), "{yaml}");
+    }
 }

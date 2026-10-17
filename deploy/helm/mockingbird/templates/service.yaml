@@ -1,0 +1,27 @@
+{{- /* The mocks: HTTP, gRPC, and the admin port for /metrics. */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mockingbird.fullname" . }}
+  labels:
+    {{- include "mockingbird.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ include "mockingbird.dataComponent" . }}
+    mockingbird.io/metrics: "true"
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "mockingbird.componentSelectorLabels" (dict "root" . "component" (include "mockingbird.dataComponent" .)) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.ports.http }}
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.service.ports.grpc }}
+      targetPort: grpc
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+    - name: admin
+      port: {{ .Values.service.ports.admin }}
+      targetPort: admin
+      protocol: TCP

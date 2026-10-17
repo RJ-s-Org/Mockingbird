@@ -158,6 +158,23 @@ impl ControlStore for StubControl {
     ) -> Result<Vec<RequestLogEntry>, StoreError> {
         self.inner.list_request_log(mock_id, f).await
     }
+    async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError> {
+        self.inner.get_request_log(id).await
+    }
+    async fn add_token_usage(
+        &self,
+        mock_id: Uuid,
+        day: chrono::NaiveDate,
+        tokens: u64,
+    ) -> Result<u64, StoreError> {
+        self.inner.add_token_usage(mock_id, day, tokens).await
+    }
+    async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError> {
+        self.inner.token_usage(mock_id, day).await
+    }
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError> {
+        self.inner.prune_token_usage(before).await
+    }
     async fn list_channel_settings(
         &self,
         mock_id: Uuid,
@@ -420,6 +437,8 @@ async fn orders_mock(store: &Arc<dyn ControlStore>) -> Mock {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )
@@ -462,6 +481,11 @@ fn deps(
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
+        limiter: mb_engine::GenerationLimiter::new(64),
+        scrubber: None,
+        limits: Default::default(),
+        http: Default::default(),
+        mode: mockingbird::runtime::ServeMode::Full,
     }
 }
 
@@ -483,6 +507,9 @@ fn ops_state(
         registry,
         prometheus: telemetry::install_prometheus().unwrap(),
         readyz_auth: None,
+        bus: None,
+        role: mockingbird::file_config::Role::All,
+        leader: tokio::sync::watch::channel(true).1,
     }
 }
 
@@ -913,6 +940,7 @@ async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
     let store: Arc<dyn ControlStore> = stub.clone();
     let base = serve(ops::router(OpsState {
         readyz_auth: Some(Arc::new(OnlyOk)),
+        bus: None,
         ..ops_state(store, failing_state(), MockRegistry::new())
     }))
     .await;
@@ -932,7 +960,10 @@ async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
     for anonymous in [None, Some("Bearer wrong")] {
         assert_eq!(
             readyz(anonymous).await,
-            (200, json!({"status": "degraded"}))
+            (
+                200,
+                json!({"status": "degraded", "role": "all", "leader": true})
+            )
         );
     }
     let (status, body) = readyz(Some("Bearer ok")).await;
@@ -945,7 +976,13 @@ async fn readyz_reasons_only_for_authenticated_callers_when_auth_is_on() {
 
     // Unavailable: the control store is down too.
     stub.ping_fails.store(true, Ordering::Relaxed);
-    assert_eq!(readyz(None).await, (503, json!({"status": "unavailable"})));
+    assert_eq!(
+        readyz(None).await,
+        (
+            503,
+            json!({"status": "unavailable", "role": "all", "leader": true})
+        )
+    );
     let (status, body) = readyz(Some("Bearer ok")).await;
     assert_eq!(status, 503);
     assert!(!body["reasons"].as_array().unwrap().is_empty(), "{body}");
@@ -993,6 +1030,9 @@ async fn metrics_exposes_request_counters() {
         registry,
         prometheus,
         readyz_auth: None,
+        bus: None,
+        role: mockingbird::file_config::Role::All,
+        leader: tokio::sync::watch::channel(true).1,
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();

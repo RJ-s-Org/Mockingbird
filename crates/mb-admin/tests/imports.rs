@@ -689,6 +689,8 @@ async fn file_mock_import_409() {
                 llm_profile: None,
                 header_overrides: true,
                 source: ResourceSource::File,
+                chaos: None,
+                limits: Default::default(),
                 data_plane_auth: Default::default(),
             },
         )

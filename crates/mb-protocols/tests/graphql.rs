@@ -288,7 +288,10 @@ async fn forced_status_maps_to_error_code() {
 #[tokio::test]
 async fn query_depth_and_complexity_limits() {
     let provider = scripted(vec![]);
-    let base = serve(runtime(Some(provider.clone()))).await;
+    let mut rt = runtime(Some(provider.clone()));
+    // The root-field cap would refuse the wide query first.
+    rt.protocols.graphql_max_root_fields = 1000;
+    let base = serve(rt).await;
 
     // viewer, then 16 more levels: 17 deep.
     let deep = format!(
@@ -490,4 +493,559 @@ async fn missing_sdl_is_an_error() {
         graphql::try_router(Arc::new(rt)),
         Err(graphql::GraphqlError::MissingSdl)
     ));
+}
+
+impl Records {
+    /// Waits up to 2 s for at least `n` records and returns them all.
+    async fn wait(&self, n: usize) -> Vec<RequestRecord> {
+        for _ in 0..100 {
+            let got = self.0.lock().unwrap().clone();
+            if got.len() >= n {
+                return got;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// `{ a0: viewer { login } … }` with `n` aliases.
+fn aliased_viewers(n: usize) -> String {
+    let fields: Vec<String> = (0..n)
+        .map(|i| format!("a{i}: viewer {{ login }}"))
+        .collect();
+    format!("{{ {} }}", fields.join(" "))
+}
+
+#[tokio::test]
+async fn root_field_cap_rejects_before_engine() {
+    let provider = scripted((0..21).map(|i| user(&format!("u{i}"))).collect());
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(Some(provider.clone()));
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+
+    let r = query(&base, &aliased_viewers(21)).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body,
+        json!({"errors": [{
+            "message": "too many root fields: 21 (maximum 20)",
+            "extensions": {"code": "TOO_MANY_ROOT_FIELDS"},
+        }]})
+    );
+    assert!(provider.requests().is_empty());
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0].status, 400);
+    assert_eq!(recs[0].path, "/graphql");
+
+    // At the cap, every field runs.
+    let r = query(&base, &aliased_viewers(20)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert_eq!(provider.requests().len(), 20);
+}
+
+#[tokio::test]
+async fn fragment_spread_counts_toward_cap() {
+    let mut rt = runtime(None);
+    rt.protocols.graphql_max_root_fields = 2;
+    let base = serve(rt).await;
+
+    let spread = "query { ...Two c: viewer { login } } \
+                  fragment Two on Query { a: viewer { login } b: viewer { login } }";
+    let r = query(&base, spread).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body["errors"][0]["message"],
+        "too many root fields: 3 (maximum 2)"
+    );
+    assert_eq!(
+        r.body["errors"][0]["extensions"]["code"],
+        "TOO_MANY_ROOT_FIELDS"
+    );
+
+    let inline = "{ ... on Query { a: viewer { login } b: viewer { login } } c: viewer { login } }";
+    let r = query(&base, inline).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body["errors"][0]["message"],
+        "too many root fields: 3 (maximum 2)"
+    );
+
+    // Only the selected operation counts.
+    let named = json!({
+        "query": "query Small { viewer { login } } query Big { a: viewer { login } b: viewer { login } c: viewer { login } }",
+        "operationName": "Small",
+    });
+    let r = post(&base, named, &[]).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body["data"]["viewer"]["login"].is_string(), "{}", r.body);
+}
+
+/// A fragment chain `n` levels deep where each fragment spreads the next
+/// one twice (2^n leaves), on `on`; `leaf` is the last fragment's body and
+/// `root` wraps the first spread.
+fn fragment_bomb(n: usize, on: &str, root: &str, leaf: &str) -> String {
+    let mut doc = root.replace("{spread}", "...F0");
+    for i in 0..n {
+        doc.push_str(&format!(
+            " fragment F{i} on {on} {{ ...F{next} ...F{next} }}",
+            next = i + 1
+        ));
+    }
+    doc.push_str(&format!(" fragment F{n} on {on} {{ {leaf} }}"));
+    doc
+}
+
+/// Serves a fresh mock on its own two-worker runtime and posts `q` from
+/// another thread, giving up after one second. Plain threads and channels
+/// keep the clock honest even when every worker is stuck in the request;
+/// a stuck server thread is abandoned rather than joined.
+fn answer_within_a_second(q: String) -> Option<Answer> {
+    let (base_tx, base_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let workers = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        workers.block_on(async move {
+            let base = serve(runtime(Some(scripted(vec![])))).await;
+            base_tx.send(base).unwrap();
+            std::future::pending::<()>().await;
+        });
+    });
+    let base = base_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let client = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = answer_tx.send(client.block_on(query(&base, &q)));
+    });
+    answer_rx.recv_timeout(Duration::from_secs(1)).ok()
+}
+
+#[test]
+fn root_fragment_bomb_answers_within_a_second() {
+    // 32 levels: 2^32 root fields once expanded, about 1.2 KB of query.
+    let q = fragment_bomb(32, "Query", "query { {spread} }", "viewer { login }");
+    let r = answer_within_a_second(q).expect("no answer within 1 s");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body["errors"][0]["extensions"]["code"], "QUERY_TOO_LARGE",
+        "{}",
+        r.body
+    );
+}
+
+#[test]
+fn nested_fragment_bomb_answers_within_a_second() {
+    // One root field; the bomb sits under it, where the root-field cap
+    // does not look. 28 levels stays inside async-graphql's recursion
+    // limit (32), which would otherwise refuse it first.
+    let q = fragment_bomb(28, "User", "query { viewer { {spread} } }", "login");
+    let r = answer_within_a_second(q).expect("no answer within 1 s");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body,
+        json!({"errors": [{
+            "message": "query too large: more than 10000 selections once fragments are expanded",
+            "extensions": {"code": "QUERY_TOO_LARGE"},
+        }]})
+    );
+}
+
+/// A linear fragment chain `n` links long, each fragment spreading the
+/// next once (`n + 1` fragments, nested `n + 1` deep), in compact syntax
+/// with base-36 names so 30,000 links stay under the 1 MiB body limit.
+fn fragment_chain(n: usize, root: &str) -> String {
+    fn name(mut i: usize) -> String {
+        let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut out = Vec::new();
+        loop {
+            out.push(digits[i % 36]);
+            i /= 36;
+            if i == 0 {
+                break;
+            }
+        }
+        out.reverse();
+        format!("F{}", String::from_utf8(out).unwrap())
+    }
+    let mut doc = root.replace("{spread}", &format!("...{}", name(0)));
+    for i in 0..n {
+        doc.push_str(&format!(
+            "fragment {} on User{{...{}}}",
+            name(i),
+            name(i + 1)
+        ));
+    }
+    doc.push_str(&format!("fragment {} on User{{login}}", name(n)));
+    doc
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_fragment_chain_is_refused_without_overflowing_the_stack() {
+    // 30,000 links: one stack frame pair per link would overflow a 2 MiB
+    // Tokio worker stack and abort the process (before auth runs).
+    let q = fragment_chain(30_000, "query{viewer{{spread}}}");
+    assert!(q.len() < 1 << 20, "{} bytes", q.len());
+    let base = serve(runtime(Some(scripted(vec![user("octo")])))).await;
+    let r = query(&base, &q).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body["errors"][0]["extensions"]["code"], "QUERY_TOO_LARGE",
+        "{}",
+        r.body
+    );
+}
+
+#[tokio::test]
+async fn short_fragment_chain_still_runs() {
+    let provider = scripted(vec![user("octo")]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let q = fragment_chain(20, "query{viewer{{spread}}}");
+    let r = query(&base, &q).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert!(r.body["data"]["viewer"]["login"].is_string(), "{}", r.body);
+}
+
+#[tokio::test]
+async fn shared_fragments_below_the_size_bound_still_run() {
+    // Eight levels: 256 `login` selections, well inside the bound.
+    let provider = scripted(vec![user("octo")]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let q = fragment_bomb(8, "User", "query { viewer { {spread} } }", "login");
+    let r = query(&base, &q).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert!(r.body["data"]["viewer"]["login"].is_string(), "{}", r.body);
+}
+
+// ------------------------------------------------------- WebSocket caps
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+const SUBSCRIPTION: &str = r#"subscription { issueAdded(repositoryId: "r-1") { id title } }"#;
+
+fn ws_request(
+    base: &str,
+    protocol: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("{}/graphql", base.replacen("http://", "ws://", 1));
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert("sec-websocket-protocol", protocol.parse().unwrap());
+    req
+}
+
+async fn ws_send(ws: &mut Ws, msg: Value) {
+    use futures::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::text(
+        msg.to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+/// The next text message as JSON, skipping pings and pongs.
+async fn ws_recv(ws: &mut Ws) -> Value {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out")
+            .unwrap()
+            .unwrap();
+        match msg {
+            Message::Text(t) => return serde_json::from_str(t.as_str()).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// The next message of `ty` for operation `id`, skipping the others.
+async fn ws_recv_for(ws: &mut Ws, ty: &str, id: &str) -> Value {
+    loop {
+        let msg = ws_recv(ws).await;
+        if msg["type"] == ty && msg["id"] == id {
+            return msg;
+        }
+    }
+}
+
+/// An initialised connection speaking `protocol`.
+async fn ws_init(base: &str, protocol: &str) -> Ws {
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_request(base, protocol))
+        .await
+        .unwrap();
+    ws_send(
+        &mut ws,
+        json!({"type": "connection_init", "payload": {"x-mockingbird-stream-items": "1"}}),
+    )
+    .await;
+    assert_eq!(ws_recv(&mut ws).await["type"], "connection_ack");
+    ws
+}
+
+#[tokio::test]
+async fn subscription_cap_per_connection() {
+    // (subprotocol, subscribe type, stop type, item type)
+    let protocols = [
+        ("graphql-transport-ws", "subscribe", "complete", "next"),
+        ("graphql-ws", "start", "stop", "data"),
+    ];
+    for (protocol, subscribe, stop, item) in protocols {
+        let records = Arc::new(Records::default());
+        let mut rt = runtime(None);
+        rt.protocols.graphql_max_subscriptions_per_connection = 2;
+        rt.recorder = Some(records.clone());
+        let base = serve(rt).await;
+        let mut ws = ws_init(&base, protocol).await;
+        let start =
+            |id: &str| json!({"type": subscribe, "id": id, "payload": {"query": SUBSCRIPTION}});
+        for id in ["1", "2"] {
+            ws_send(&mut ws, start(id)).await;
+            ws_recv_for(&mut ws, item, id).await;
+        }
+        ws_send(&mut ws, start("3")).await;
+        let refused = ws_recv_for(&mut ws, "error", "3").await;
+        let message = match protocol {
+            "graphql-transport-ws" => &refused["payload"][0]["message"],
+            _ => &refused["payload"]["message"],
+        };
+        assert_eq!(
+            message, "too many subscriptions on this connection (maximum 2)",
+            "{protocol}: {refused}"
+        );
+        // The connection stays open: stopping one makes room for another.
+        ws_send(&mut ws, json!({"type": stop, "id": "1"})).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        ws_send(&mut ws, start("4")).await;
+        ws_recv_for(&mut ws, item, "4").await;
+        let recs = records.wait(2).await;
+        assert!(
+            recs.iter()
+                .any(|r| r.status == 429 && r.operation_id.is_none()),
+            "{protocol}: {recs:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_fragment_bomb_refused_before_validation() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let mut ws = ws_init(&base, "graphql-transport-ws").await;
+    let bomb = fragment_bomb(
+        28,
+        "Issue",
+        r#"subscription { issueAdded(repositoryId: "r-1") { {spread} } }"#,
+        "id",
+    );
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "1", "payload": {"query": bomb}}),
+    )
+    .await;
+    let refused = ws_recv_for(&mut ws, "error", "1").await;
+    assert_eq!(
+        refused["payload"][0]["extensions"]["code"], "QUERY_TOO_LARGE",
+        "{refused}"
+    );
+    // The connection stays usable.
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "2", "payload": {"query": SUBSCRIPTION}}),
+    )
+    .await;
+    ws_recv_for(&mut ws, "next", "2").await;
+    let recs = records.wait(1).await;
+    assert!(recs.iter().any(|r| r.status == 400), "{recs:?}");
+}
+
+#[tokio::test]
+async fn connection_cap_per_mock_503() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.protocols.graphql_max_connections_per_mock = 2;
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let first = ws_init(&base, "graphql-transport-ws").await;
+    let _second = ws_init(&base, "graphql-transport-ws").await;
+
+    let err = tokio_tungstenite::connect_async(ws_request(&base, "graphql-transport-ws"))
+        .await
+        .unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = err else {
+        panic!("expected an HTTP refusal, got {err:?}");
+    };
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(resp.headers()["retry-after"], "1");
+    assert_eq!(resp.headers()["content-type"], "application/problem+json");
+    let body: Value = serde_json::from_slice(resp.body().as_deref().unwrap()).unwrap();
+    assert_eq!(body["detail"], "too many GraphQL WebSocket connections");
+    let recs = records.wait(1).await;
+    assert!(recs.iter().any(|r| r.status == 503), "{recs:?}");
+
+    // Closing a connection releases its slot.
+    drop(first);
+    let mut reopened = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if let Ok((ws, _)) =
+            tokio_tungstenite::connect_async(ws_request(&base, "graphql-transport-ws")).await
+        {
+            reopened = Some(ws);
+            break;
+        }
+    }
+    assert!(reopened.is_some(), "the slot was not released");
+}
+
+/// The GitHub bundle with every operation requiring a bearer token.
+fn bearer_github() -> Arc<Bundle> {
+    let mut bundle = (*github()).clone();
+    for op in &mut bundle.operations {
+        op.security = vec![mb_mcm::SecurityRequirement {
+            schemes: vec![mb_mcm::SecurityScheme::Bearer],
+        }];
+    }
+    Arc::new(bundle)
+}
+
+#[tokio::test]
+async fn rejections_are_recorded() {
+    use mb_protocols::{DataPlaneAuth, DataPlaneAuthMode};
+    let client = reqwest::Client::new();
+    let recorded = || {
+        let records = Arc::new(Records::default());
+        let mut rt = runtime(None);
+        rt.recorder = Some(records.clone());
+        (records, rt)
+    };
+
+    // 400: an unparseable body.
+    let (records, rt) = recorded();
+    let base = serve(rt).await;
+    let r = answer(
+        client
+            .post(format!("{base}/graphql"))
+            .header("content-type", "application/json")
+            .body("not json")
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, 400);
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "400: {recs:?}");
+    assert_eq!(recs[0].status, 400);
+
+    // 405: an unsupported method, and a mutation over GET.
+    let (records, rt) = recorded();
+    let base = serve(rt).await;
+    let r = answer(client.put(format!("{base}/graphql")).send().await.unwrap()).await;
+    assert_eq!(r.status, 405);
+    let url = get_url(&base, &[("query", "mutation { a }")]);
+    let r = answer(client.get(url).send().await.unwrap()).await;
+    assert_eq!(r.status, 405);
+    let recs = records.wait(2).await;
+    assert_eq!(recs.len(), 2, "405: {recs:?}");
+    assert!(recs.iter().all(|r| r.status == 405), "{recs:?}");
+
+    // 413: an oversized body.
+    let (records, rt) = recorded();
+    let base = serve(rt).await;
+    let big =
+        json!({"query": "{ viewer { login } }", "variables": {"pad": "x".repeat(1024 * 1024)}});
+    assert_eq!(post(&base, big, &[]).await.status, 413);
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "413: {recs:?}");
+    assert_eq!(recs[0].status, 413);
+
+    // 401, api_key mode over HTTP: no key.
+    let (records, mut rt) = recorded();
+    rt.set_data_plane_auth(DataPlaneAuth {
+        mode: DataPlaneAuthMode::ApiKey,
+        header: "x-api-key".into(),
+    });
+    let base = serve(rt).await;
+    assert_eq!(query(&base, "{ viewer { login } }").await.status, 401);
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "401 api_key: {recs:?}");
+    assert_eq!(recs[0].status, 401);
+
+    // 401, passthrough mode over HTTP: no bearer token.
+    let records = Arc::new(Records::default());
+    let mut rt = MockRuntime::new(
+        "github",
+        bearer_github(),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.recorder = Some(records.clone());
+    rt.set_data_plane_auth(DataPlaneAuth {
+        mode: DataPlaneAuthMode::PassthroughValidate,
+        header: "x-api-key".into(),
+    });
+    let base = serve(rt).await;
+    let r = query(&base, "{ viewer { login } }").await;
+    assert_eq!(
+        r.body["errors"][0]["extensions"]["code"], "UNAUTHENTICATED",
+        "{}",
+        r.body
+    );
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "401 passthrough: {recs:?}");
+    assert_eq!(recs[0].status, 401);
+
+    // 401 over WebSocket: `connection_init` without a key.
+    let (records, mut rt) = recorded();
+    rt.set_data_plane_auth(DataPlaneAuth {
+        mode: DataPlaneAuthMode::ApiKey,
+        header: "x-api-key".into(),
+    });
+    let base = serve(rt).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_request(&base, "graphql-ws"))
+        .await
+        .unwrap();
+    ws_send(&mut ws, json!({"type": "connection_init", "payload": {}})).await;
+    assert_eq!(ws_recv(&mut ws).await["type"], "connection_error");
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "401 ws: {recs:?}");
+    assert_eq!(recs[0].status, 401);
+}
+
+#[tokio::test]
+async fn unknown_path_is_reported_at_the_requested_path() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let r = answer(
+        reqwest::Client::new()
+            .get(format!("{base}/other/path"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, 404);
+    let recs = records.wait(1).await;
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0].status, 404);
+    assert_eq!(recs[0].path, "/other/path");
 }

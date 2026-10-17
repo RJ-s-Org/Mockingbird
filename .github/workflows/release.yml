@@ -1,0 +1,464 @@
+name: Release
+
+# A `v*` tag publishes a release: signed multi-arch images (full and slim),
+# binaries for five targets, a CycloneDX SBOM, SLSA build provenance, the Helm
+# chart (once it exists), the `mb-ext` crate and the GitHub release.
+#
+# A manual run is a dry run by default: everything is built, scanned and
+# packaged, but nothing is pushed, signed, attested or published.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check everything, but push and publish nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      publish: ${{ steps.version.outputs.publish }}
+      image: ${{ steps.version.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the release version
+        id: version
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            tag=$REF_NAME
+          elif [ "$DRY_RUN" = true ]; then
+            # A dry run from a branch checks the workspace version.
+            tag="v$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)"
+          else
+            echo "::error::a release that publishes must run from a v* tag"
+            exit 1
+          fi
+          version=${tag#v}
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          if [ "$DRY_RUN" = true ]; then publish=false; else publish=true; fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+            echo "image=ghcr.io/${OWNER,,}/mockingbird"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $tag (prerelease: $prerelease, publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check the tag against the workspace, chart and changelog
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: scripts/check-version.sh "$TAG"
+
+  console:
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mb-console/web/package-lock.json
+      - run: npm --prefix crates/mb-console/web ci && npm --prefix crates/mb-console/web run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-dist
+          path: crates/mb-console/dist
+          if-no-files-found: error
+
+  binaries:
+    needs: [verify, console]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04
+            zigbuild: true
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            zigbuild: false
+          # macos-13 (the last Intel image) was retired 2025-12-04. Apple
+          # Silicon runners cross-build x86_64 natively through Xcode.
+          - target: x86_64-apple-darwin
+            runner: macos-15
+            zigbuild: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            zigbuild: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # The binary embeds the console build instead of its placeholder page.
+      - uses: actions/download-artifact@v4
+        with:
+          name: console-dist
+          path: crates/mb-console/dist
+      - name: Install the toolchain (rust-toolchain.toml) and the target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2
+      - if: matrix.zigbuild
+        run: cargo install cargo-zigbuild --version '~0.20' --locked
+      # Default features (mqtt, amqp). Kafka ships only in the full image.
+      - name: Build (cargo zigbuild)
+        if: matrix.zigbuild
+        run: cargo zigbuild --release --locked -p mockingbird --target "$TARGET"
+      - name: Build (cargo build)
+        if: ${{ !matrix.zigbuild }}
+        run: cargo build --release --locked -p mockingbird --target "$TARGET"
+      - name: Package
+        run: |
+          name="mockingbird-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          exe=mockingbird
+          case "$TARGET" in *windows*) exe=mockingbird.exe ;; esac
+          cp "target/$TARGET/release/$exe" LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md "dist/$name/"
+          cd dist
+          case "$TARGET" in
+            *windows*) archive="$name.zip"; 7z a -tzip "$archive" "$name" > /dev/null ;;
+            *) archive="$name.tar.gz"; tar -czf "$archive" "$name" ;;
+          esac
+          rm -rf "$name"
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          cat "$archive.sha256"
+      - if: needs.verify.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  sbom:
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Write the CycloneDX SBOM
+        run: |
+          cargo cyclonedx --format json --spec-version 1.5 --all-features --target all
+          # cargo-cyclonedx writes one BOM per package, next to its manifest.
+          bom=$(find crates/mockingbird -maxdepth 1 -name '*.cdx.json' | head -n 1)
+          if [ -z "$bom" ]; then
+            echo "::error::cargo cyclonedx wrote no BOM for crates/mockingbird"
+            exit 1
+          fi
+          cp "$bom" "mockingbird-$VERSION.cdx.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: mockingbird-${{ needs.verify.outputs.version }}.cdx.json
+          if-no-files-found: error
+
+  images:
+    needs: verify
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+        flavor: [full, slim]
+    env:
+      IMAGE: ${{ needs.verify.outputs.image }}
+      PUBLISH: ${{ needs.verify.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - if: needs.verify.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            FEATURES=${{ matrix.flavor == 'slim' && '--no-default-features' || '--features full' }}
+            VERSION=${{ needs.verify.outputs.version }}
+            REVISION=${{ github.sha }}
+          outputs: type=image,name=${{ needs.verify.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ needs.verify.outputs.publish }}
+          cache-from: type=gha,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
+      # A dry run pushes nothing, so the scan reads the image from the local
+      # daemon instead (the build above is cached).
+      - name: Load the image for scanning (dry run)
+        if: needs.verify.outputs.publish != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            FEATURES=${{ matrix.flavor == 'slim' && '--no-default-features' || '--features full' }}
+            VERSION=${{ needs.verify.outputs.version }}
+            REVISION=${{ github.sha }}
+          load: true
+          tags: mockingbird:scan
+          cache-from: type=gha,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          version: v0.75.0
+          image-ref: ${{ needs.verify.outputs.publish == 'true' && format('{0}@{1}', needs.verify.outputs.image, steps.build.outputs.digest) || 'mockingbird:scan' }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.flavor }}-${{ matrix.platform.arch }}
+          path: digests/*
+          if-no-files-found: error
+
+  manifest:
+    needs: [verify, images, sbom]
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ${{ needs.verify.outputs.image }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-full-*
+          path: digests/full
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-slim-*
+          path: digests/slim
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the multi-arch manifests
+        id: manifests
+        run: |
+          for flavor in full slim; do
+            suffix=""
+            [ "$flavor" = slim ] && suffix="-slim"
+            tags=(-t "$IMAGE:$VERSION$suffix")
+            # `latest` only for a final release (no `-` in the tag).
+            [ "$PRERELEASE" = false ] && tags+=(-t "$IMAGE:latest$suffix")
+            sources=()
+            for digest in digests/$flavor/*; do
+              sources+=("$IMAGE@sha256:$(basename "$digest")")
+            done
+            docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+            digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION$suffix" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "$flavor=$digest" >> "$GITHUB_OUTPUT"
+          done
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the manifests (keyless)
+        env:
+          FULL: ${{ steps.manifests.outputs.full }}
+          SLIM: ${{ steps.manifests.outputs.slim }}
+        run: |
+          cosign sign --yes "$IMAGE@$FULL"
+          cosign sign --yes "$IMAGE@$SLIM"
+      - name: Build provenance (full)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ needs.verify.outputs.image }}
+          subject-digest: ${{ steps.manifests.outputs.full }}
+          push-to-registry: true
+      - name: Build provenance (slim)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ needs.verify.outputs.image }}
+          subject-digest: ${{ steps.manifests.outputs.slim }}
+          push-to-registry: true
+      - name: SBOM attestation (full)
+        uses: actions/attest-sbom@v3
+        with:
+          subject-name: ${{ needs.verify.outputs.image }}
+          subject-digest: ${{ steps.manifests.outputs.full }}
+          sbom-path: mockingbird-${{ needs.verify.outputs.version }}.cdx.json
+          push-to-registry: true
+      - name: SBOM attestation (slim)
+        uses: actions/attest-sbom@v3
+        with:
+          subject-name: ${{ needs.verify.outputs.image }}
+          subject-digest: ${{ steps.manifests.outputs.slim }}
+          sbom-path: mockingbird-${{ needs.verify.outputs.version }}.cdx.json
+          push-to-registry: true
+
+  chart:
+    needs: [verify, manifest]
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for the chart
+        id: chart
+        run: |
+          if [ -d deploy/helm/mockingbird ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::deploy/helm/mockingbird does not exist; no chart is published"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.chart.outputs.exists == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - if: steps.chart.outputs.exists == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.chart.outputs.exists == 'true'
+        uses: sigstore/cosign-installer@v3
+      - name: Package, push and sign the chart
+        if: steps.chart.outputs.exists == 'true'
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          registry="ghcr.io/${OWNER,,}/charts"
+          printf '%s' "$TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          helm package deploy/helm/mockingbird --destination chart-dist
+          output=$(helm push chart-dist/mockingbird-*.tgz "oci://$registry" 2>&1)
+          echo "$output"
+          digest=$(printf '%s\n' "$output" | sed -n 's/^Digest: *//p')
+          if [ -z "$digest" ]; then
+            echo "::error::helm push printed no digest"
+            exit 1
+          fi
+          cosign sign --yes "$registry/mockingbird@$digest"
+
+  release:
+    needs: [verify, binaries, sbom, manifest, chart]
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: dist
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          (cd dist && cat *.sha256 > SHA256SUMS)
+          flags=()
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$TAG" --verify-tag --title "$TAG" "${flags[@]}" \
+            --notes-file <(scripts/changelog-section.sh "$VERSION") \
+            dist/*.tar.gz dist/*.zip dist/*.sha256 dist/SHA256SUMS "dist/mockingbird-$VERSION.cdx.json"
+
+  publish-crate:
+    needs: [verify, release]
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - name: Publish mb-ext unless this version is on crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "mb-ext") | .version')
+          # Outside the workspace, `cargo info` asks crates.io rather than
+          # describing the local package.
+          if (cd "$RUNNER_TEMP" && cargo info "mb-ext@$version" --registry crates-io > /dev/null 2>&1); then
+            echo "::notice::mb-ext $version is already on crates.io; skipping"
+            exit 0
+          fi
+          cargo publish -p mb-ext --locked

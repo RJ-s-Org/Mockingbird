@@ -314,12 +314,8 @@ impl QuotaGuard for Budget {
     async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
         let left = self.0.load(Ordering::SeqCst);
         if left == 0 {
-            return Err(Rejection {
-                status: 429,
-                title: "Too Many Requests".into(),
-                detail: "quota exhausted".into(),
-                retry_after: Some(Duration::from_secs(3)),
-            });
+            return Err(Rejection::new(429, "Too Many Requests", "quota exhausted")
+                .with_retry_after(Duration::from_secs(3)));
         }
         self.0.store(left - 1, Ordering::SeqCst);
         Ok(())
@@ -337,10 +333,7 @@ impl TenantResolver for HeaderTenant {
             .get("x-tenant")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("anonymous");
-        Ok(Tenancy {
-            tenant: tenant.to_string(),
-            workspace: "default".into(),
-        })
+        Ok(Tenancy::new(tenant, "default"))
     }
 }
 

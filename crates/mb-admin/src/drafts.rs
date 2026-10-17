@@ -497,11 +497,7 @@ pub async fn preview(
         })?;
     // Admitted and reported like a data-plane call of the operation.
     let tenancy = crate::tenancy(&access.ws);
-    let call_info = CallInfo {
-        mock: &mock,
-        operation_id: &op.id,
-        headers: &headers,
-    };
+    let call_info = CallInfo::new(&mock, &op.id, &headers);
     st.ext
         .quota
         .admit(&tenancy, &call_info)
@@ -530,16 +526,13 @@ pub async fn preview(
             }
             EngineError::Schema(_) => internal(e.to_string()),
         })?;
-    st.ext.usage.record(&UsageEvent {
-        tenancy,
-        mock: mock.clone(),
-        operation_id: op.id.clone(),
-        status: generated.status,
-        source: generated.source.as_str().to_string(),
-        latency: started.elapsed(),
-        prompt_tokens: generated.usage.prompt_tokens,
-        completion_tokens: generated.usage.completion_tokens,
-    });
+    let mut event = UsageEvent::new(tenancy, mock.clone(), op.id.clone());
+    event.status = generated.status;
+    event.source = generated.source.as_str().to_string();
+    event.latency = started.elapsed();
+    event.prompt_tokens = generated.usage.prompt_tokens;
+    event.completion_tokens = generated.usage.completion_tokens;
+    st.ext.usage.record(&event);
     Ok(Json(PreviewResponse {
         status: generated.status,
         content_type: generated.content_type,

@@ -6,6 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
+use futures::StreamExt;
 use mb_engine::{
     EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator, Source,
 };
@@ -26,6 +27,7 @@ use crate::call::{
 };
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
 
@@ -140,12 +142,17 @@ impl CallLog {
 
     fn rejected(&mut self, r: Rejection) -> Response {
         let mut resp = self.problem(r.status, &r.title, r.detail);
-        if let Some(after) = r.retry_after {
-            let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from(secs));
-        }
+        set_retry_after(&mut resp, r.retry_after);
         resp
+    }
+}
+
+/// `Retry-After` in whole seconds, rounded up.
+fn set_retry_after(resp: &mut Response, after: Option<Duration>) {
+    if let Some(after) = after {
+        let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
     }
 }
 
@@ -159,7 +166,7 @@ pub(crate) async fn handle(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    raw_body: Bytes,
+    body: Body,
 ) -> Response {
     let rt = &st.rt;
     let span = tracing::info_span!(
@@ -172,9 +179,32 @@ pub(crate) async fn handle(
     );
     let started = Instant::now();
     let mut log = CallLog::new(rt.recorder.is_some());
-    let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
-        .instrument(span.clone())
-        .await;
+    let (resp, raw_body) = match read_body(&headers, body, rt.limits.max_request_bytes).await {
+        Ok(raw_body) => {
+            let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
+                .instrument(span.clone())
+                .await;
+            (resp, raw_body)
+        }
+        Err(error) => {
+            let found = to_http_method(&method).and_then(|m| st.routes.find(m, uri.path()));
+            if let Some((op_id, _)) = found {
+                span.record("operation", op_id.as_str());
+                log.operation_id = Some(op_id);
+            }
+            let resp = match error {
+                BodyError::TooLarge(limit) => log.problem(
+                    413,
+                    "Payload Too Large",
+                    format!("request bodies are limited to {limit} bytes"),
+                ),
+                BodyError::Unreadable(detail) => {
+                    log.problem(400, "Invalid request", format!("body: {detail}"))
+                }
+            };
+            (resp, Bytes::new())
+        }
+    };
     let status = resp.status().as_u16();
     span.record("status", status);
     if log.streaming {
@@ -194,6 +224,35 @@ pub(crate) async fn handle(
     resp
 }
 
+/// Why a request body was not read.
+enum BodyError {
+    /// Larger than the cap (in bytes).
+    TooLarge(usize),
+    Unreadable(String),
+}
+
+/// The body, unless its `Content-Length` or its collected length exceeds
+/// `limit` bytes, or it cannot be read.
+async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Bytes, BodyError> {
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > limit) {
+        return Err(BodyError::TooLarge(limit));
+    }
+    let mut stream = body.into_data_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| BodyError::Unreadable(e.to_string()))?;
+        if buf.len() + chunk.len() > limit {
+            return Err(BodyError::TooLarge(limit));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
+}
+
 async fn serve(
     st: &RestState,
     method: &Method,
@@ -205,7 +264,8 @@ async fn serve(
     let rt = &st.rt;
     let path = uri.path();
 
-    // 1. Route.
+    // 1. Route, then 2. decode and validate, in the `mb.decode` span.
+    let decode = tracing::info_span!("mb.decode").entered();
     let found = to_http_method(method).and_then(|m| st.routes.find(m, path));
     let Some((op_id, raw_params)) = found else {
         return unrouted(&st.routes, method, path, log);
@@ -272,6 +332,7 @@ async fn serve(
     if !errors.is_empty() {
         return invalid_input(rt, op, &errors, log);
     }
+    drop(decode);
 
     // 3. Admission, data-plane auth, overrides and scenario.
     log.admitted_or_rejected = true;
@@ -293,6 +354,14 @@ async fn serve(
             }
             return match error {
                 PlanError::Rejected(r) => log.rejected(r),
+                PlanError::RateLimited(r) => match call::declared_rate_limited(rt, op) {
+                    Some(generated) => {
+                        let mut resp = log.generated(generated);
+                        set_retry_after(&mut resp, r.retry_after);
+                        resp
+                    }
+                    None => log.rejected(r),
+                },
                 PlanError::Unauthorized(u) => {
                     let mut resp = log.problem(401, "Unauthorized", u.detail);
                     if let Ok(v) = HeaderValue::from_str(&u.challenge) {
@@ -319,6 +388,14 @@ async fn serve(
         headers: forwarded_headers(rt, headers),
         body,
     };
+
+    // An injected error the contract declares no status for: 503.
+    if plan.native_chaos_error() {
+        log.delay = plan.delay;
+        let mut resp = log.problem(503, "Service Unavailable", crate::chaos::CHAOS_ERROR_DETAIL);
+        mark_chaos(&mut resp);
+        return resp;
+    }
 
     // A stream, unless a non-2xx status is forced: that is answered once.
     if op.kind == OperationKind::StreamServer
@@ -353,7 +430,17 @@ async fn serve(
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
-    log.generated(generated)
+    let mut resp = tracing::info_span!("mb.encode").in_scope(|| log.generated(generated));
+    if plan.chaos.inject_error {
+        mark_chaos(&mut resp);
+    }
+    resp
+}
+
+/// Marks a response as an error injected by chaos.
+fn mark_chaos(resp: &mut Response) {
+    resp.headers_mut()
+        .insert(CHAOS_HEADER, HeaderValue::from_static("error"));
 }
 
 /// The event stream answering a `StreamServer` call.

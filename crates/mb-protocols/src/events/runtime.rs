@@ -46,6 +46,10 @@ pub struct EventDeps {
     pub lease: Arc<dyn LeaseProvider>,
     /// This replica's scheduler-lease holder id.
     pub holder: String,
+    /// Several nodes consume the same channels (a cross-node bus is
+    /// configured): MQTT consumers then use shared subscriptions, so each
+    /// message reaches one node.
+    pub shared_subscriptions: bool,
 }
 
 impl Default for EventDeps {
@@ -55,9 +59,25 @@ impl Default for EventDeps {
             brokers: Brokers::empty(),
             lease: Arc::new(AlwaysLeader),
             holder: uuid::Uuid::new_v4().to_string(),
+            shared_subscriptions: false,
         }
     }
 }
+
+/// What a channel runtime runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ChannelMode {
+    /// Consumers, triggers, WebSocket routes and manual publish.
+    #[default]
+    Full,
+    /// Manual publish on broker channels only (a `control` node): no
+    /// consumers, no triggers and no WebSocket routes.
+    PublishOnly,
+}
+
+/// Why a `control` node refuses a manual publish on a WebSocket channel.
+pub const WS_PUBLISH_ON_DATA_NODES: &str =
+    "WebSocket channels are served by data nodes; publish from a data node or run role all";
 
 /// The event settings of one mock.
 #[derive(Clone, Debug, Default)]
@@ -69,6 +89,8 @@ pub struct EventSetup {
     pub channels: HashMap<String, ChannelSetup>,
     /// The scheduler lease key of the mock.
     pub lease_key: String,
+    /// What the runtime runs.
+    pub mode: ChannelMode,
 }
 
 impl EventSetup {
@@ -494,9 +516,17 @@ impl ChannelRuntime {
     /// Resolve the broker, open the hub of every WebSocket channel, start
     /// a consumer for every enabled, active broker channel the mock
     /// consumes and the triggers of every enabled, active channel it
-    /// publishes. Must run inside a Tokio runtime.
+    /// publishes. In [`ChannelMode::PublishOnly`] only the broker is
+    /// resolved: nothing is started. Must run inside a Tokio runtime.
     pub fn start(rt: Arc<MockRuntime>, deps: EventDeps, setup: EventSetup) -> Arc<Self> {
+        let publish_only = setup.mode == ChannelMode::PublishOnly;
         let inner = Arc::new(ChannelInner::new(rt, deps, setup));
+        if publish_only {
+            return Arc::new(Self {
+                inner,
+                tasks: Mutex::new(JoinSet::new()),
+            });
+        }
         for channel in &inner.rt.bundle().channels {
             if let ChannelBinding::WebSocket { path } = &channel.binding {
                 inner.hub.open(path);
@@ -527,8 +557,12 @@ impl ChannelRuntime {
     }
 
     /// The routes of the mock's enabled WebSocket channels; `None` when it
-    /// has none. Dropping the runtime closes every socket they opened.
+    /// has none, or in [`ChannelMode::PublishOnly`]. Dropping the runtime
+    /// closes every socket they opened.
     pub fn ws_router(&self) -> Option<axum::Router> {
+        if self.inner.setup.mode == ChannelMode::PublishOnly {
+            return None;
+        }
         super::ws::router(&self.inner)
     }
 
@@ -548,6 +582,9 @@ impl ChannelRuntime {
         };
         if ch.direction == Direction::Subscribe {
             return Err(PublishError::NotPublishable(channel.to_string()).into());
+        }
+        if inner.setup.mode == ChannelMode::PublishOnly && is_websocket(&ch.binding) {
+            return Err(PublishError::NotPublishable(WS_PUBLISH_ON_DATA_NODES.to_string()).into());
         }
         if !inner.enabled(ch) {
             return Err(PublishError::Disabled(channel.to_string()).into());

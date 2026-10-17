@@ -427,3 +427,40 @@ fn openapi_documents_the_stream() {
         true
     );
 }
+
+#[tokio::test]
+async fn live_stream_filters_kind() {
+    let h = harness(Some(16)).await;
+    let mut body = h
+        .get("viewer", &format!("{STREAM}?kind=event"))
+        .await
+        .into_body();
+    h.send(record(
+        "default",
+        "orders",
+        "listOrders",
+        "http-call",
+        "llm",
+    ));
+    h.send(RequestRecord {
+        kind: RequestKind::Event,
+        method: "PUBLISH".into(),
+        ..record("default", "orders", "orderCreated", "event-call", "faker")
+    });
+    let events = read_events(&mut body, 1).await;
+    let d = &events[0].data;
+    assert_eq!(d["kind"], "event");
+    assert_eq!(d["session"], "event-call");
+    assert_eq!(d["method"], "PUBLISH");
+}
+
+#[tokio::test]
+async fn live_stream_unknown_kind_400() {
+    let h = harness(Some(16)).await;
+    let resp = h.get("viewer", &format!("{STREAM}?kind=nope")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.headers()[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+}

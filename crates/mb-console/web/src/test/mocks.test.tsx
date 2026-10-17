@@ -97,7 +97,8 @@ describe("mocks", () => {
     });
     renderAt("/w/default/mocks/files/overview");
 
-    await screen.findByText("Managed by config file");
+    // Shown for the settings and again for the chaos and limits section.
+    expect(await screen.findAllByText("Managed by config file")).toHaveLength(2);
     for (const label of ["Route prefix", "Persona", "LLM profile", "Header overrides", "Data-plane auth", "Key header"]) {
       expect(isDisabled(screen.getByLabelText(label)), label).toBe(true);
     }

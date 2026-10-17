@@ -1,0 +1,4 @@
+{{- /* gRPC mocks (h2c) to the data service. */ -}}
+{{- if .Values.grpcIngress.enabled }}
+{{ include "mockingbird.ingress" (dict "root" . "values" .Values.grpcIngress "suffix" "-grpc" "service" (include "mockingbird.fullname" .) "port" "grpc") }}
+{{- end }}

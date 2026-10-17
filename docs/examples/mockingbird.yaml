@@ -12,11 +12,46 @@ server:
   # through the Admin API (globs, * = any characters). Anything else is a 422.
   # Profiles declared in this file are not restricted. Read at startup.
   api_secret_refs: ["env:MB_LLM_*", "env:*_API_KEY"]
+  # role: all                       # all | control (Admin API, console, reconcile) | data (mocks only);
+  #                                 # MB_ROLE / --role. control and data need a postgres:// storage.url
+  #                                 # and a postgres:// or redis(s):// state store (never SQLite or memory)
+  # trust_forwarded_headers: false  # trust X-Forwarded-* (only behind a proxy that sets them)
+  # tls:                            # terminate TLS here; both files or neither, readable PEM at startup
+  #   cert_file: /etc/mockingbird/tls/cert.pem
+  #   key_file: /etc/mockingbird/tls/key.pem
 
 storage:
   url: "sqlite::memory:"   # sqlite::memory:, sqlite://<path> or postgres://…; MB_STORAGE_URL / --storage-url
-  state_url: memory        # session state; omitted = same as url; "memory" = in-process
+  state_url: memory        # session state; omitted = same as url; "memory" = in-process;
+                           # also postgres://… or redis:// / rediss://…; MB_STATE_URL
   session_ttl: 24h
+
+# Cross-node change bus (control → data nodes). MB_BUS_URL.
+# bus:
+#   url: redis://redis:6379   # redis://, rediss://, postgres://… or local (in-process);
+#                             # omitted = Postgres LISTEN/NOTIFY when storage.url is Postgres, else local
+
+# Outbound HTTP: LLM providers, the audit webhook, OIDC discovery.
+# outbound:
+#   ca_file: /etc/ssl/corp-ca.pem       # PEM bundle trusted in addition to the default roots
+#   proxy: http://proxy.internal:3128   # http:// or https:// URL
+#   no_proxy: [localhost, .internal]    # hosts, or domain suffixes, reached directly
+
+# Global admission limits.
+# limits:
+#   max_concurrent_generations: 64   # LLM generations at once, all mocks (1-4096); more fall back to the faker
+#   max_request_bytes: 1048576       # larger requests are 413 (1024-67108864)
+#   max_response_bytes: 1048576      # larger generated responses fall back (1024-16777216)
+
+# Output PII scrubber: replaces personal-data look-alikes in generated
+# responses with synthetic values of the same shape.
+# pii:
+#   enabled: false
+#   patterns: [email, phone, credit_card, us_ssn, iban, ipv4]   # default: all six
+#   custom:                                                     # at most 32
+#     - name: order_ref              # [a-z0-9_]{1,32}
+#       regex: "ORD-[0-9]{6}"
+#       replacement: "ORD-######"    # # = random digit, ? = random lowercase letter, else literal
 
 auth:
   mode: none               # none (every admin request is a local sysadmin) | oidc
@@ -75,14 +110,18 @@ protocols:
     introspection: true
     max_depth: 15
     max_complexity: 1000
+    # max_root_fields: 20                     # root fields per operation (1-1000)
+    # max_subscriptions_per_connection: 16    # per WebSocket connection (1-1000)
+    # max_connections_per_mock: 1000          # WebSocket connections per mock (1-100000)
+    # connection_init_timeout: 5s             # close sockets with no connection_init (1s-10s)
   stream:                   # streamed responses: SSE, GraphQL subscriptions, gRPC streams
     default_items: 5        # items when the request asks for no count (X-Mockingbird-Stream-Items)
     max_items: 50
-    item_interval: 0s       # pause between items
+    item_interval: 0s       # pause between items (at most 30s)
   sse:
-    keepalive: 15s          # interval between keepalive comments
+    keepalive: 15s          # interval between keepalive comments (at least 1s)
   grpc:
-    max_message_bytes: 4194304   # largest message decoded or encoded
+    max_message_bytes: 4194304   # largest message decoded or encoded (at least 1024)
 
 # Message brokers the AsyncAPI mocks' channels publish to and consume from.
 # Read at startup. kind: kafka | amqp | mqtt | memory (in-process, for tests).
@@ -124,6 +163,15 @@ mocks:
     data_plane_auth:
       mode: none                                       # none | api_key | passthrough_validate
       header: x-api-key                                # where api_key mode reads the key (or ?api_key=)
+    # chaos:                                           # fault injection; omitted = none
+    #   error_rate: 0.1                                # 0-1: share of calls answering an injected error
+    #   latency_jitter: {min: 50ms, max: 500ms}        # random added latency; min <= max <= 30s
+    #   drop_stream_rate: 0.05                         # 0-1: share of streamed responses cut short
+    # limits:                                          # omitted fields use the global limits (or none)
+    #   rate_limit: {requests_per_second: 50, burst: 100}   # 429 with Retry-After beyond it
+    #   daily_token_budget: 1000000                    # LLM tokens per UTC day, all replicas; then the faker
+    #   max_request_bytes: 65536                       # overrides limits.max_request_bytes
+    #   max_response_bytes: 262144                     # overrides limits.max_response_bytes
     scenarios:
       out-of-stock:
         instructions: Every product is out of stock.
@@ -134,12 +182,13 @@ mocks:
         operations: [createOrder]
       slow:
         latency: 2s
+        # chaos: {error_rate: 0.5}                     # replaces the mock's chaos while the scenario applies
   events:
     contract: ../../fixtures/openapi/events-3.1.yaml   # GET /ticks streams server-sent events
     scenarios:
       trickle:
         stream_items: 3              # items per streamed response
-        stream_item_interval: 500ms  # pause between streamed items
+        stream_item_interval: 500ms  # pause between streamed items (at most 30s)
   order-events:
     contract: ../../fixtures/asyncapi/orders-amqp-2.6.yaml   # AsyncAPI: event channels
     broker: local                    # a brokers: entry; default: picked automatically

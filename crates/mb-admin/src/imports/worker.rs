@@ -136,16 +136,13 @@ impl Provider for MeteredProvider {
         let started = Instant::now();
         let result = self.inner.complete(req).await;
         let usage = result.as_ref().map(|r| r.usage).unwrap_or_default();
-        self.usage.record(&UsageEvent {
-            tenancy: self.tenancy.clone(),
-            mock: self.mock.clone(),
-            operation_id: IMPORT_OPERATION.to_string(),
-            status: if result.is_ok() { 200 } else { 502 },
-            source: IMPORT_OPERATION.to_string(),
-            latency: started.elapsed(),
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-        });
+        let mut event = UsageEvent::new(self.tenancy.clone(), self.mock.clone(), IMPORT_OPERATION);
+        event.status = if result.is_ok() { 200 } else { 502 };
+        event.source = IMPORT_OPERATION.to_string();
+        event.latency = started.elapsed();
+        event.prompt_tokens = usage.prompt_tokens;
+        event.completion_tokens = usage.completion_tokens;
+        self.usage.record(&event);
         metrics::counter!("mb_import_tokens_total").increment(
             u64::from(usage.prompt_tokens).saturating_add(u64::from(usage.completion_tokens)),
         );

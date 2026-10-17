@@ -10,11 +10,18 @@ use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, Usage};
 use mb_mcm::{Bundle, Effect, Operation, OperationKind, OutputVariant, StatusSelector};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
+use tokio::time::Instant;
+use tracing::Instrument;
+use tracing::field::Empty;
+
+use crate::guards::Checked;
 
 pub mod extract;
 pub mod faker;
+pub mod guards;
 pub mod message;
 pub mod ndjson;
+pub mod pii;
 pub mod prompt;
 pub mod scenario;
 pub mod stream;
@@ -22,6 +29,7 @@ pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker};
+pub use guards::{EngineGuards, GenerationLimiter, TokenBudget};
 pub use message::{GeneratedMessage, MessageContext};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
@@ -161,6 +169,10 @@ pub struct StreamContext {
 pub struct StreamItem {
     pub value: Value,
     pub source: Source,
+    /// Tokens attributed to this item: its share of the provider stream's
+    /// estimate (see [`Engine::generate_stream`]) plus any repair call; zero
+    /// for a faker item that read nothing from the provider.
+    pub usage: Usage,
 }
 
 /// Faker attempts (cycling through top-level `oneOf`/`anyOf` branches and
@@ -188,6 +200,7 @@ pub struct Engine {
     config: EngineConfig,
     /// Keyed by (`<source digest>/<operation id>`, status).
     validators: DashMap<(String, u16), Arc<SchemaValidator>>,
+    guards: EngineGuards,
 }
 
 impl Engine {
@@ -196,6 +209,7 @@ impl Engine {
             provider,
             config,
             validators: DashMap::new(),
+            guards: EngineGuards::default(),
         }
     }
 
@@ -255,15 +269,17 @@ impl Engine {
         let mut response = match &self.provider {
             None => self.fake_response(bundle, variant, status, schema, Some(&validator)),
             Some(provider) => {
-                let messages = build_messages(
-                    bundle,
-                    op,
-                    status,
-                    schema,
-                    call,
-                    &ctx,
-                    self.config.persona.as_deref(),
-                );
+                let messages = tracing::info_span!("mb.prompt").in_scope(|| {
+                    build_messages(
+                        bundle,
+                        op,
+                        status,
+                        schema,
+                        call,
+                        &ctx,
+                        self.config.persona.as_deref(),
+                    )
+                });
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
                     schema: bundle.with_reachable_defs(schema),
@@ -386,9 +402,15 @@ impl Engine {
         Ok(v)
     }
 
-    /// Ask the LLM, repairing once. `Err` carries the reason to fall back.
-    /// Every completed call's tokens are added to `usage`, including calls
-    /// whose output is ultimately discarded.
+    /// Ask the LLM, repairing once, under the guards: the budget and a
+    /// generation permit (held for both calls) are checked first, waiting
+    /// at most the call timeout. `Err` carries the reason to fall back.
+    /// Every completed call's tokens are added to `usage` and charged to the
+    /// budget, including calls whose output is ultimately discarded.
+    ///
+    /// Each provider call runs in an `mb.llm` span, the first output's check
+    /// in `mb.validate`, and the repair (only when a repair call is made)
+    /// in `mb.repair`.
     async fn generate_with_llm(
         &self,
         provider: &dyn Provider,
@@ -397,31 +419,51 @@ impl Engine {
         format: &ResponseFormat,
         usage: &mut Usage,
     ) -> Result<(Value, Source), String> {
-        let first = self.complete(provider, &messages, format, usage).await?;
-        let errors = match check(validator, &first) {
-            Ok(value) => return Ok((value, Source::Llm)),
-            Err(errors) => errors,
+        // A fallback chain gets every hop's timeout, not just the first's.
+        let limit = provider.total_timeout(self.config.timeout);
+        let deadline = Instant::now() + limit;
+        let _permit = self.admit(deadline).await?;
+        let first = self
+            .complete(provider, &messages, format, usage, deadline)
+            .await?;
+        let checked =
+            tracing::info_span!("mb.validate").in_scope(|| self.check_output(validator, &first));
+        let errors = match checked {
+            Checked::Valid(value) => return Ok((value, Source::Llm)),
+            Checked::Rejected(reason) => return Err(reason),
+            Checked::Invalid(errors) => errors,
         };
-
-        messages.push(ChatMessage {
-            role: Role::Assistant,
-            content: first,
-        });
-        let list: String = errors.iter().map(|e| format!("- {e}\n")).collect();
-        messages.push(ChatMessage {
-            role: Role::User,
-            content: format!(
-                "The JSON above is invalid against the schema. Errors:\n{list}Return only corrected JSON."
-            ),
-        });
-        let second = self.complete(provider, &messages, format, usage).await?;
-        match check(validator, &second) {
-            Ok(value) => Ok((value, Source::Repaired)),
-            Err(errors) => Err(format!(
-                "repaired output still invalid: {}",
-                errors.join("; ")
-            )),
+        if self.budget_exhausted() {
+            return Err("token budget exhausted".into());
         }
+        async {
+            messages.push(ChatMessage {
+                role: Role::Assistant,
+                content: first,
+            });
+            let list: String = errors.iter().map(|e| format!("- {e}\n")).collect();
+            messages.push(ChatMessage {
+                role: Role::User,
+                content: format!(
+                    "The JSON above is invalid against the schema. Errors:\n{list}Return only corrected JSON."
+                ),
+            });
+            let second = self
+                .complete(provider, &messages, format, usage, Instant::now() + limit)
+                .await?;
+            let checked = tracing::info_span!("mb.validate")
+                .in_scope(|| self.check_output(validator, &second));
+            match checked {
+                Checked::Valid(value) => Ok((value, Source::Repaired)),
+                Checked::Rejected(reason) => Err(reason),
+                Checked::Invalid(errors) => Err(format!(
+                    "repaired output still invalid: {}",
+                    errors.join("; ")
+                )),
+            }
+        }
+        .instrument(tracing::info_span!("mb.repair"))
+        .await
     }
 
     async fn complete(
@@ -430,6 +472,7 @@ impl Engine {
         messages: &[ChatMessage],
         format: &ResponseFormat,
         usage: &mut Usage,
+        deadline: Instant,
     ) -> Result<String, String> {
         let request = ChatRequest {
             messages: messages.to_vec(),
@@ -438,11 +481,13 @@ impl Engine {
             max_tokens: self.config.max_tokens,
             timeout: self.config.timeout,
         };
-        // A fallback chain gets every hop's timeout, not just the first's.
-        let limit = provider.total_timeout(self.config.timeout);
-        match tokio::time::timeout(limit, provider.complete(request)).await {
+        let span = llm_span();
+        let call = provider.complete(request).instrument(span.clone());
+        match tokio::time::timeout_at(deadline, call).await {
             Ok(Ok(response)) => {
+                record_usage(&span, response.usage);
                 *usage = *usage + response.usage;
+                self.spend(response.usage);
                 Ok(response.content)
             }
             Ok(Err(e)) => Err(e.to_string()),
@@ -451,19 +496,30 @@ impl Engine {
     }
 }
 
+/// The span of one provider call. The provider records `llm.model` on it
+/// (the current span while it runs); the caller records the tokens with
+/// [`record_usage`].
+pub(crate) fn llm_span() -> tracing::Span {
+    tracing::info_span!(
+        "mb.llm",
+        llm.model = Empty,
+        llm.tokens.prompt = Empty,
+        llm.tokens.completion = Empty,
+    )
+}
+
+/// Records a provider call's tokens on its [`llm_span`].
+pub(crate) fn record_usage(span: &tracing::Span, usage: Usage) {
+    span.record("llm.tokens.prompt", usage.prompt_tokens);
+    span.record("llm.tokens.completion", usage.completion_tokens);
+}
+
 /// The status a success variant is served with.
 fn success_status(status: StatusSelector) -> u16 {
     match status {
         StatusSelector::Code(c) => c,
         StatusSelector::Default => 200,
     }
-}
-
-/// Extract and validate LLM output.
-pub(crate) fn check(validator: &SchemaValidator, text: &str) -> Result<Value, Vec<String>> {
-    let value = extract_json(text).ok_or_else(|| vec!["output is not valid JSON".to_string()])?;
-    validator.validate(&value)?;
-    Ok(value)
 }
 
 /// A `response_format` name matching `^[a-zA-Z0-9_-]{1,64}$`.

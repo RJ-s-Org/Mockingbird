@@ -1,7 +1,7 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
 //! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
-//! `grpc`, `soap`, `websocket`, `events`); all of them share the [`call`] pipeline.
+//! `grpc`, `soap`, `websocket`, `events`); all of them share the `call` pipeline.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,7 @@ use mb_state::StateStore;
     allow(dead_code)
 )]
 mod call;
+pub mod chaos;
 #[cfg_attr(
     not(any(
         feature = "http-rest",
@@ -42,16 +43,19 @@ pub mod graphql;
 pub mod grpc;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
+pub mod limits;
 mod record;
 #[cfg(feature = "soap")]
 pub mod soap;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
+pub use chaos::{CHAOS_HEADER, ChaosDecision, ChaosRuntime, ChaosSpec};
 use dp_auth::CredentialNames;
 pub use dp_auth::{
     API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
 };
+pub use limits::{RateLimiter, RuntimeLimits};
 pub use record::{RequestKind, RequestRecord, RequestRecorder};
 
 /// Request header capping how many items a streamed response carries
@@ -78,6 +82,20 @@ pub struct ProtocolSettings {
     pub ws_keepalive: Duration,
     /// Largest gRPC message decoded or encoded.
     pub grpc_max_message_bytes: usize,
+    /// Most root fields one GraphQL operation may select.
+    pub graphql_max_root_fields: usize,
+    /// Most concurrent subscriptions on one GraphQL WebSocket connection.
+    pub graphql_max_subscriptions_per_connection: usize,
+    /// Most concurrent GraphQL WebSocket connections to one mock.
+    pub graphql_max_connections_per_mock: usize,
+    /// How long a GraphQL WebSocket connection may stay open without a
+    /// `connection_init` before it is closed (4408) and its slot freed.
+    pub graphql_connection_init_timeout: Duration,
+    /// Whether `X-Forwarded-*` request headers are trusted (behind a
+    /// reverse proxy).
+    pub trust_forwarded_headers: bool,
+    /// Whether Mockingbird itself terminates TLS on the data plane.
+    pub tls_terminated: bool,
 }
 
 impl Default for ProtocolSettings {
@@ -90,6 +108,12 @@ impl Default for ProtocolSettings {
             sse_keepalive: Duration::from_secs(15),
             ws_keepalive: Duration::from_secs(30),
             grpc_max_message_bytes: 4 * 1024 * 1024,
+            graphql_max_root_fields: 20,
+            graphql_max_subscriptions_per_connection: 16,
+            graphql_max_connections_per_mock: 1000,
+            graphql_connection_init_timeout: Duration::from_secs(5),
+            trust_forwarded_headers: false,
+            tls_terminated: false,
         }
     }
 }
@@ -111,6 +135,8 @@ pub struct ScenarioRuntime {
     pub stream_items: Option<usize>,
     /// Pause between streamed items, overriding the engine's default.
     pub stream_item_interval: Option<Duration>,
+    /// Replaces the mock's chaos while the scenario applies.
+    pub chaos: Option<Arc<ChaosRuntime>>,
 }
 
 impl ScenarioRuntime {
@@ -223,6 +249,11 @@ pub struct MockRuntime {
     pub data_plane_keys: Option<Arc<dyn DataPlaneKeys>>,
     /// Protocol knobs (GraphQL limits, keepalives, gRPC message size).
     pub protocols: ProtocolSettings,
+    /// The mock's rate limit and request size cap.
+    pub limits: RuntimeLimits,
+    /// Fault injection; `None` injects nothing. A scenario's own chaos
+    /// replaces it while the scenario applies.
+    pub chaos: Option<Arc<ChaosRuntime>>,
     /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
     /// process begins to shut down. Never fires by default.
     pub shutdown: Shutdown,
@@ -261,7 +292,8 @@ impl Shutdown {
 impl MockRuntime {
     /// A runtime in workspace `default` with header overrides enabled, no
     /// scenarios, the self-hosted extensions, no recorder, no data-plane
-    /// auth and default protocol settings.
+    /// auth, default protocol settings, default limits (no rate limit,
+    /// 1 MiB requests) and no chaos.
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
@@ -284,6 +316,8 @@ impl MockRuntime {
             data_plane_auth,
             data_plane_keys: None,
             protocols: ProtocolSettings::default(),
+            limits: RuntimeLimits::default(),
+            chaos: None,
             shutdown: Shutdown::default(),
             credential_names,
         }

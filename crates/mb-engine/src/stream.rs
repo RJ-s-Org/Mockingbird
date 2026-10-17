@@ -10,17 +10,19 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, TextStream};
+use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, TextStream, Usage};
 use mb_mcm::{Bundle, Operation};
 use serde_json::Value;
 use tokio::time::Instant;
+use tracing::Instrument;
 
+use crate::guards::{Checked, GenerationPermit};
 use crate::ndjson::LineSplitter;
 use crate::prompt::{self, build_stream_messages};
 use crate::validate::SchemaValidator;
 use crate::{
-    Engine, EngineError, OperationCall, Source, StreamContext, StreamItem, apply_set, check,
-    format_name, success_status,
+    Engine, EngineError, OperationCall, Source, StreamContext, StreamItem, apply_set, format_name,
+    llm_span, record_usage, success_status,
 };
 
 impl Engine {
@@ -56,15 +58,17 @@ impl Engine {
         let (upstream, repair_system) = match &self.provider {
             None => (Upstream::Closed, None),
             Some(_) => {
-                let messages = build_stream_messages(
-                    &bundle,
-                    op,
-                    &schema,
-                    items,
-                    &call,
-                    &ctx,
-                    self.config.persona.as_deref(),
-                );
+                let messages = tracing::info_span!("mb.prompt").in_scope(|| {
+                    build_stream_messages(
+                        &bundle,
+                        op,
+                        &schema,
+                        items,
+                        &call,
+                        &ctx,
+                        self.config.persona.as_deref(),
+                    )
+                });
                 let system = messages.first().cloned();
                 let request = self.chat_request(messages, ResponseFormat::Text);
                 (Upstream::Pending(request), system)
@@ -85,6 +89,11 @@ impl Engine {
             upstream,
             repair_system,
             lines: VecDeque::new(),
+            permit: None,
+            prompt_bytes: 0,
+            completion_bytes: 0,
+            attributed: Usage::default(),
+            repair_usage: Usage::default(),
         };
         Ok(futures::stream::unfold(state, |mut state| async move {
             let item = state.next_item().await?;
@@ -110,9 +119,45 @@ enum Upstream {
     Open {
         stream: TextStream,
         splitter: LineSplitter,
+        meter: StreamMeter,
     },
     /// Offline, finished, failed or timed out: only the faker remains.
     Closed,
+}
+
+/// Charges an open provider stream to the token budget when it closes
+/// (ends, fails, times out, is released or dropped). `TextStream` carries
+/// no usage, so tokens are estimated as `ceil(bytes / 4)` of the prompt and
+/// of the text received.
+struct StreamMeter {
+    engine: Arc<Engine>,
+    prompt_bytes: usize,
+    completion_bytes: usize,
+    /// The provider call's `mb.llm` span: open until the stream closes,
+    /// when the estimate is recorded on it.
+    span: tracing::Span,
+}
+
+impl Drop for StreamMeter {
+    fn drop(&mut self) {
+        let usage = estimate_usage(self.prompt_bytes, self.completion_bytes);
+        record_usage(&self.span, usage);
+        self.engine.spend(usage);
+    }
+}
+
+/// The estimated tokens of a provider stream: `ceil(bytes / 4)` of the
+/// prompt, and of the prompt plus the text received for the total (the sum
+/// is rounded, not each half).
+fn estimate_usage(prompt_bytes: usize, completion_bytes: usize) -> Usage {
+    let estimate = |bytes: usize| u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX);
+    let prompt_tokens = estimate(prompt_bytes);
+    let completion_tokens =
+        estimate(prompt_bytes.saturating_add(completion_bytes)).saturating_sub(prompt_tokens);
+    Usage {
+        prompt_tokens,
+        completion_tokens,
+    }
 }
 
 struct StreamState {
@@ -132,11 +177,23 @@ struct StreamState {
     repair_system: Option<ChatMessage>,
     /// Complete lines received but not yet consumed.
     lines: VecDeque<String>,
+    /// The generation permit, held from opening the provider stream until
+    /// it has no more candidates (or this stream is done or dropped).
+    permit: Option<GenerationPermit>,
+    /// Bytes of the provider stream's prompt and of the text received so
+    /// far (mirrors its [`StreamMeter`], which outlives no item).
+    prompt_bytes: usize,
+    completion_bytes: usize,
+    /// The stream estimate already attributed to emitted items.
+    attributed: Usage,
+    /// Repair-call tokens not yet attributed to an item.
+    repair_usage: Usage,
 }
 
 impl StreamState {
     async fn next_item(&mut self) -> Option<StreamItem> {
         if self.emitted >= self.items {
+            self.release();
             return None;
         }
         if self.emitted > 0 && !self.interval.is_zero() {
@@ -147,10 +204,31 @@ impl StreamState {
             _ => (self.fake(), Source::Fallback),
         };
         self.emitted += 1;
+        let usage = self.take_usage();
         Some(StreamItem {
             value: self.apply_scenario(value),
             source,
+            usage,
         })
+    }
+
+    /// The tokens spent since the previous item: the growth of the provider
+    /// stream's estimate (the prompt counts toward the first item that reads
+    /// it) plus any repair call. Summed over every item, this is what the
+    /// stream charges to the token budget, less text received after the last
+    /// item.
+    fn take_usage(&mut self) -> Usage {
+        let total = estimate_usage(self.prompt_bytes, self.completion_bytes);
+        let stream = Usage {
+            prompt_tokens: total
+                .prompt_tokens
+                .saturating_sub(self.attributed.prompt_tokens),
+            completion_tokens: total
+                .completion_tokens
+                .saturating_sub(self.attributed.completion_tokens),
+        };
+        self.attributed = total;
+        stream + std::mem::take(&mut self.repair_usage)
     }
 
     /// The next candidate line from the provider, or `None` once it has
@@ -172,13 +250,34 @@ impl StreamState {
                 }
             }
             match std::mem::replace(&mut self.upstream, Upstream::Closed) {
-                Upstream::Closed => return None,
+                Upstream::Closed => {
+                    self.permit = None;
+                    return None;
+                }
                 Upstream::Pending(request) => {
-                    match tokio::time::timeout_at(deadline, provider.stream(request)).await {
+                    match self.engine.admit(deadline).await {
+                        Ok(permit) => self.permit = permit,
+                        Err(reason) => {
+                            self.give_up(&reason);
+                            continue;
+                        }
+                    }
+                    let prompt_bytes = request.messages.iter().map(|m| m.content.len()).sum();
+                    // One span for the whole provider stream, never one per item.
+                    let span = llm_span();
+                    let open = provider.stream(request).instrument(span.clone());
+                    match tokio::time::timeout_at(deadline, open).await {
                         Ok(Ok(stream)) => {
+                            self.prompt_bytes = prompt_bytes;
                             self.upstream = Upstream::Open {
                                 stream,
                                 splitter: LineSplitter::new(),
+                                meter: StreamMeter {
+                                    engine: Arc::clone(&self.engine),
+                                    prompt_bytes,
+                                    completion_bytes: 0,
+                                    span,
+                                },
                             };
                         }
                         Ok(Err(e)) => self.give_up(&e.to_string()),
@@ -188,10 +287,17 @@ impl StreamState {
                 Upstream::Open {
                     mut stream,
                     mut splitter,
+                    mut meter,
                 } => match tokio::time::timeout_at(deadline, stream.next()).await {
                     Ok(Some(Ok(delta))) => {
+                        meter.completion_bytes += delta.len();
+                        self.completion_bytes += delta.len();
                         self.lines.extend(splitter.push(&delta));
-                        self.upstream = Upstream::Open { stream, splitter };
+                        self.upstream = Upstream::Open {
+                            stream,
+                            splitter,
+                            meter,
+                        };
                     }
                     Ok(None) => self.lines.extend(splitter.finish()),
                     Ok(Some(Err(e))) => self.give_up(&e.to_string()),
@@ -199,6 +305,13 @@ impl StreamState {
                 },
             }
         }
+    }
+
+    /// Close the provider stream and release the generation permit.
+    fn release(&mut self) {
+        self.upstream = Upstream::Closed;
+        self.lines.clear();
+        self.permit = None;
     }
 
     fn give_up(&mut self, reason: &str) {
@@ -213,9 +326,13 @@ impl StreamState {
     /// A candidate line as an item: valid → `Llm`; otherwise one repair
     /// call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
-        let errors = match check(&self.validator, line) {
-            Ok(value) => return (value, Source::Llm),
-            Err(errors) => errors,
+        let errors = match self.engine.check_output(&self.validator, line) {
+            Checked::Valid(value) => return (value, Source::Llm),
+            Checked::Rejected(reason) => {
+                tracing::warn!(operation = %self.op_id, %reason, "stream item fell back to faker");
+                return (self.fake(), Source::Fallback);
+            }
+            Checked::Invalid(errors) => errors,
         };
         match self.repair(provider, line, &errors).await {
             Ok(value) => (value, Source::Repaired),
@@ -229,6 +346,21 @@ impl StreamState {
     /// `&mut self`, not `&self`: the state holds a `!Sync` provider stream,
     /// and the returned stream must stay `Send`.
     async fn repair(
+        &mut self,
+        provider: &dyn Provider,
+        line: &str,
+        errors: &[String],
+    ) -> Result<Value, String> {
+        if self.engine.budget_exhausted() {
+            return Err("token budget exhausted".into());
+        }
+        self.repair_call(provider, line, errors)
+            .instrument(tracing::info_span!("mb.repair"))
+            .await
+    }
+
+    /// The repair call of [`StreamState::repair`], in its `mb.repair` span.
+    async fn repair_call(
         &mut self,
         provider: &dyn Provider,
         line: &str,
@@ -253,12 +385,23 @@ impl StreamState {
         };
         let request = engine.chat_request(messages, format);
         let limit = provider.total_timeout(engine.config.timeout);
-        let text = match tokio::time::timeout(limit, provider.complete(request)).await {
-            Ok(Ok(response)) => response.content,
+        let span = llm_span();
+        let call = provider.complete(request).instrument(span.clone());
+        let text = match tokio::time::timeout(limit, call).await {
+            Ok(Ok(response)) => {
+                record_usage(&span, response.usage);
+                engine.spend(response.usage);
+                self.repair_usage = self.repair_usage + response.usage;
+                response.content
+            }
             Ok(Err(e)) => return Err(e.to_string()),
             Err(_) => return Err("LLM repair timed out".into()),
         };
-        check(&self.validator, &text).map_err(|errors| errors.join("; "))
+        match engine.check_output(&self.validator, &text) {
+            Checked::Valid(value) => Ok(value),
+            Checked::Rejected(reason) => Err(reason),
+            Checked::Invalid(errors) => Err(errors.join("; ")),
+        }
     }
 
     fn fake(&self) -> Value {

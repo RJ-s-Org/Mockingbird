@@ -3,8 +3,8 @@
 //!
 //! A `POST` is dispatched by its action (`SOAPAction` for 1.1, the
 //! `action` content-type parameter for 1.2), else by the QName of the
-//! Body's first child, decoded to JSON (see [`xml_json`]), validated and
-//! run through the shared [`call`](crate::call) pipeline. Responses use
+//! Body's first child, decoded to JSON (see `xml_json`), validated and
+//! run through the shared `call` pipeline. Responses use
 //! the request's SOAP version; every failure is a SOAP Fault. `GET ?wsdl`
 //! serves the stored WSDL with its addresses pointing at this mock.
 
@@ -18,7 +18,8 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use mb_engine::{EngineError, OperationCall, SchemaValidator, Source};
+use mb_engine::{EngineError, GeneratedResponse, OperationCall, SchemaValidator, Source};
+use mb_ext::Rejection;
 use mb_mcm::{Binding, Operation, ProtocolPayload, StatusSelector};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -39,9 +40,8 @@ use envelope::{Element, Version};
 pub use xml_json::envelope_body_to_json;
 pub(crate) use xml_json::json_to_xml;
 
-/// The largest request body accepted.
-const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const SOAP_ACTION_HEADER: &str = "soapaction";
 const PROBLEM_JSON: &str = "application/problem+json";
 /// The request record's body when the envelope could not be decoded.
@@ -180,12 +180,7 @@ async fn handle(State(st): State<Arc<SoapState>>, req: Request) -> Response {
                 .extensions
                 .get::<MountPrefix>()
                 .map_or("", |p| p.0.as_str());
-            let host = parts
-                .headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("localhost");
-            serve_wsdl(&st, &format!("http://{host}{prefix}"))
+            serve_wsdl(&st, &wsdl_base(&st.rt, &parts.headers, prefix))
         }
         _ => {
             let mut resp = problem(
@@ -201,6 +196,89 @@ async fn handle(State(st): State<Arc<SoapState>>, req: Request) -> Response {
             resp
         }
     }
+}
+
+/// The base URL the `?wsdl` addresses point at: scheme, host and mount
+/// prefix.
+///
+/// The scheme is `https` when Mockingbird terminates TLS; else, when
+/// forwarded headers are trusted, the first `X-Forwarded-Proto` value or
+/// the first RFC 7239 `Forwarded: proto=`; else `http`. The host is, when
+/// forwarded headers are trusted, the first `X-Forwarded-Host` value or
+/// the first `Forwarded: host=`; else `Host`. Unusable values (a scheme
+/// other than `http`/`https`, a host with `/`, whitespace or other
+/// characters a host cannot carry) are ignored.
+fn wsdl_base(rt: &MockRuntime, headers: &HeaderMap, prefix: &str) -> String {
+    let trusted = rt.protocols.trust_forwarded_headers;
+    let scheme = if rt.protocols.tls_terminated {
+        "https".to_string()
+    } else {
+        trusted
+            .then(|| {
+                forwarded_value(headers, "x-forwarded-proto")
+                    .or_else(|| first_forwarded(headers, "proto"))
+            })
+            .flatten()
+            .map(|p| p.to_ascii_lowercase())
+            .filter(|p| p == "http" || p == "https")
+            .unwrap_or_else(|| "http".into())
+    };
+    let forwarded_host = trusted
+        .then(|| {
+            forwarded_value(headers, "x-forwarded-host")
+                .or_else(|| first_forwarded(headers, "host"))
+        })
+        .flatten()
+        .filter(|h| is_host(h));
+    let host = forwarded_host
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+                .filter(|h| is_host(h))
+        })
+        .unwrap_or_else(|| "localhost".into());
+    format!("{scheme}://{host}{prefix}")
+}
+
+/// The first comma-separated value of header `name` (`X-Forwarded-*`),
+/// trimmed; `None` when absent or empty.
+fn forwarded_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?;
+    let first = value.split(',').next()?.trim();
+    (!first.is_empty()).then(|| first.to_string())
+}
+
+/// Parameter `param` (`proto` or `host`) of the first element of the RFC
+/// 7239 `Forwarded` header that sets it, unquoted.
+fn first_forwarded(headers: &HeaderMap, param: &str) -> Option<String> {
+    let value = headers.get(header::FORWARDED)?.to_str().ok()?;
+    value
+        .split(',')
+        .flat_map(|element| element.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            if !name.trim().eq_ignore_ascii_case(param) {
+                return None;
+            }
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            (!value.is_empty()).then(|| value.to_string())
+        })
+}
+
+/// Whether `host` can stand as a URL authority: a hostname or IP literal
+/// with an optional port, and nothing else (no `/`, whitespace, `@`, …).
+fn is_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && host.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+        })
 }
 
 fn is_wsdl_query(query: Option<&str>) -> bool {
@@ -236,6 +314,8 @@ struct Answer {
     retry_after: Option<Duration>,
     /// The `WWW-Authenticate` challenge of a data-plane auth failure.
     www_authenticate: Option<String>,
+    /// The answer is an error injected by chaos.
+    chaos: bool,
 }
 
 impl Answer {
@@ -258,6 +338,7 @@ impl Answer {
             record: json!({ "fault": { "client": client, "message": message } }),
             retry_after: None,
             www_authenticate: None,
+            chaos: false,
         }
     }
 
@@ -334,6 +415,9 @@ async fn serve_call(
     if let Some(source) = answer.source {
         h.insert(SOURCE_HEADER, HeaderValue::from_static(source.as_str()));
     }
+    if answer.chaos {
+        h.insert(CHAOS_HEADER, HeaderValue::from_static("error"));
+    }
     if let Some(after) = answer.retry_after {
         let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
         h.insert(header::RETRY_AFTER, HeaderValue::from(secs));
@@ -367,11 +451,13 @@ async fn answer(
         )
         .with_http(415);
     };
-    let bytes = match read_body(headers, body).await {
+    let bytes = match read_body(headers, body, rt.limits.max_request_bytes).await {
         Ok(b) => b,
-        Err(fault) => return fault(version),
+        Err(error) => return error.fault(version),
     };
     report.request_body_bytes = Some(bytes.len());
+    // Parse, dispatch and validate in the `mb.decode` span.
+    let decode = tracing::info_span!("mb.decode").entered();
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Answer::fault(version, 400, "the request body is not UTF-8");
     };
@@ -402,6 +488,7 @@ async fn answer(
             format!("invalid request: {}", errors.join("; ")),
         );
     }
+    drop(decode);
 
     report.admission_ran = true;
     // SOAP credentials travel in HTTP headers only.
@@ -416,6 +503,11 @@ async fn answer(
             if let Some(s) = session {
                 report.session = s;
             }
+            if let PlanError::RateLimited(r) = &error
+                && let Some(generated) = call::declared_rate_limited(rt, op)
+            {
+                return rate_limited_fault(rt, op, version, r, generated);
+            }
             return plan_fault(version, error, &rt.name);
         }
     };
@@ -429,12 +521,24 @@ async fn answer(
         body: input,
         ..Default::default()
     };
+    if plan.native_chaos_error() {
+        let message = format!("Service Unavailable ({})", crate::chaos::CHAOS_ERROR_DETAIL);
+        let mut answer = Answer::fault(version, 503, message).with_http(503);
+        answer.chaos = true;
+        return answer;
+    }
+    let chaos = plan.chaos.inject_error;
     match plan.forced_status.filter(|s| !(200..300).contains(s)) {
-        Some(status) => forced_fault(st, op, plan, &call, version, status, report).await,
+        Some(status) => {
+            let mut answer = forced_fault(st, op, plan, &call, version, status, report).await;
+            answer.chaos = chaos;
+            answer
+        }
         None => match call::generate_once(rt, &plan, &call).await {
             Ok(generated) => {
                 report.usage = generated.usage;
                 let body = generated.body.unwrap_or(Value::Null);
+                let encode = tracing::info_span!("mb.encode").entered();
                 let schema = op
                     .output_for_status(generated.status)
                     .and_then(|o| o.schema.as_ref())
@@ -443,16 +547,19 @@ async fn answer(
                     Some(schema) => json_to_xml(&body, &schema),
                     None => Err(format!("operation {} declares no output schema", op.id)),
                 };
+                let xml = xml.map(|xml| envelope::envelope(version, &xml));
+                drop(encode);
                 match xml {
                     Ok(xml) => Answer {
                         http: generated.status,
                         status: generated.status,
                         version,
-                        xml: envelope::envelope(version, &xml),
+                        xml,
                         source: Some(generated.source),
                         record: body,
                         retry_after: None,
                         www_authenticate: None,
+                        chaos: false,
                     },
                     Err(e) => Answer::fault(version, 500, e),
                 }
@@ -522,7 +629,7 @@ fn engine_fault(version: Version, op: &Operation, e: EngineError) -> Answer {
 
 fn plan_fault(version: Version, error: PlanError, mock: &str) -> Answer {
     match error {
-        PlanError::Rejected(r) => {
+        PlanError::Rejected(r) | PlanError::RateLimited(r) => {
             let mut answer = Answer::fault(version, r.status, r.detail);
             answer.retry_after = r.retry_after;
             answer
@@ -539,6 +646,31 @@ fn plan_fault(version: Version, error: PlanError, mock: &str) -> Answer {
             format!("mock {mock} has no scenario {name:?}"),
         ),
     }
+}
+
+/// A rate-limited call of an operation declaring a `429` response: a
+/// Fault (HTTP 429, with `Retry-After`) whose detail is the engine's
+/// fallback for that response.
+fn rate_limited_fault(
+    rt: &MockRuntime,
+    op: &Operation,
+    version: Version,
+    rejection: &Rejection,
+    generated: GeneratedResponse,
+) -> Answer {
+    let body = generated.body.unwrap_or(Value::Null);
+    let detail = op
+        .output_for_status(429)
+        .and_then(|o| o.schema.as_ref())
+        .and_then(|schema| json_to_xml(&body, &rt.bundle.with_reachable_defs(schema)).ok());
+    let mut answer = Answer::fault(version, 429, rejection.detail.as_str()).with_http(429);
+    answer.xml = envelope::fault(version, true, &rejection.detail, detail.as_deref());
+    answer.source = Some(generated.source);
+    answer.retry_after = rejection.retry_after;
+    if let Some(fault) = answer.record.get_mut("fault") {
+        fault["detail"] = body;
+    }
+    answer
 }
 
 fn forced_message(status: u16) -> String {
@@ -607,33 +739,44 @@ fn version_and_action(headers: &HeaderMap) -> Option<(Version, Option<String>)> 
     }
 }
 
-/// The body, unless it exceeds [`MAX_BODY_BYTES`] (413) or cannot be read
-/// (400). The error builds the fault in the request's version.
-async fn read_body(headers: &HeaderMap, body: Body) -> Result<Vec<u8>, fn(Version) -> Answer> {
-    fn too_large(version: Version) -> Answer {
-        Answer::fault(
-            version,
-            413,
-            format!("SOAP request bodies are limited to {MAX_BODY_BYTES} bytes"),
-        )
-        .with_http(413)
+/// Why a request body was not read.
+enum BodyError {
+    /// Larger than the cap (in bytes).
+    TooLarge(usize),
+    Unreadable,
+}
+
+impl BodyError {
+    /// The fault answering it, in the request's version: a `413` Fault with
+    /// HTTP 413, or a `400` Fault.
+    fn fault(self, version: Version) -> Answer {
+        match self {
+            Self::TooLarge(limit) => Answer::fault(
+                version,
+                413,
+                format!("SOAP request bodies are limited to {limit} bytes"),
+            )
+            .with_http(413),
+            Self::Unreadable => Answer::fault(version, 400, "the request body could not be read"),
+        }
     }
-    fn unreadable(version: Version) -> Answer {
-        Answer::fault(version, 400, "the request body could not be read")
-    }
+}
+
+/// The body, unless it exceeds `limit` bytes or cannot be read.
+async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Vec<u8>, BodyError> {
     let declared = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|n| n > MAX_BODY_BYTES) {
-        return Err(too_large);
+    if declared.is_some_and(|n| n > limit) {
+        return Err(BodyError::TooLarge(limit));
     }
     let mut stream = body.into_data_stream();
     let mut buf = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| unreadable as fn(Version) -> Answer)?;
-        if buf.len() + chunk.len() > MAX_BODY_BYTES {
-            return Err(too_large);
+        let chunk = chunk.map_err(|_| BodyError::Unreadable)?;
+        if buf.len() + chunk.len() > limit {
+            return Err(BodyError::TooLarge(limit));
         }
         buf.extend_from_slice(&chunk);
     }

@@ -44,6 +44,24 @@ impl Failure {
         Self::new(http, format!("forced by x-mockingbird-status: {http}"))
     }
 
+    /// An error injected by chaos: the code of the declared `status`, else
+    /// `UNAVAILABLE` (503), with the metadata `x-mockingbird-chaos: error`.
+    pub(crate) fn chaos(status: Option<u16>) -> Self {
+        let mut failure = Self::new(status.unwrap_or(503), crate::chaos::CHAOS_ERROR_DETAIL);
+        failure.status.metadata_mut().insert(
+            crate::CHAOS_HEADER,
+            tonic::metadata::AsciiMetadataValue::from_static("error"),
+        );
+        failure
+    }
+
+    /// A stream chaos dropped (counted as a `drop` of `rt`'s mock):
+    /// `UNAVAILABLE`, reported as a 503.
+    pub(crate) fn dropped(rt: &crate::MockRuntime) -> Self {
+        crate::chaos::count(&rt.name, "drop");
+        Self::new(503, crate::chaos::STREAM_DROPPED)
+    }
+
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new(500, message)
     }
@@ -51,7 +69,7 @@ impl Failure {
     /// A failed [`crate::call::plan`] of mock `mock`.
     pub(crate) fn plan(error: PlanError, mock: &str) -> Self {
         match error {
-            PlanError::Rejected(r) => Self::new(r.status, r.detail),
+            PlanError::Rejected(r) | PlanError::RateLimited(r) => Self::new(r.status, r.detail),
             PlanError::Unauthorized(u) => Self::new(401, u.detail),
             PlanError::BadOverride(detail) => Self::new(400, detail),
             PlanError::UnknownScenario(name) => {
@@ -61,8 +79,23 @@ impl Failure {
     }
 
     /// A status tonic produced while reading the request (an undecodable
-    /// or oversized message, a broken stream), reported as a 400.
+    /// or oversized message, a broken stream), reported as a 400; an
+    /// oversized message is `RESOURCE_EXHAUSTED`, reported as a 413.
     pub(crate) fn request(status: Status) -> Self {
-        Self { http: 400, status }
+        match oversized(&status) {
+            Some(status) => Self { http: 413, status },
+            None => Self { http: 400, status },
+        }
     }
+}
+
+/// tonic answers a message over the decoding limit with `OUT_OF_RANGE`;
+/// gRPC's own servers (and Mockingbird) use `RESOURCE_EXHAUSTED`. The
+/// replacement status, when `status` is that refusal.
+pub(crate) fn oversized(status: &Status) -> Option<Status> {
+    (status.code() == Code::OutOfRange
+        && status
+            .message()
+            .contains("decoded message length too large"))
+    .then(|| Status::resource_exhausted(status.message()))
 }

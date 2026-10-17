@@ -199,6 +199,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -633,6 +639,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "hyper 1.12.0",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -991,7 +1019,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
+ "futures-core",
  "memchr",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1948,6 +1980,16 @@ checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
  "num",
  "num-bigint",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -3354,6 +3396,7 @@ dependencies = [
  "chrono",
  "http 1.5.0",
  "jsonwebtoken",
+ "mb-llm",
  "mb-store",
  "openidconnect",
  "rand 0.10.3",
@@ -3384,6 +3427,7 @@ dependencies = [
 name = "mb-engine"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "chrono",
  "dashmap",
@@ -3394,8 +3438,11 @@ dependencies = [
  "mb-llm",
  "mb-mcm",
  "mb-state",
+ "metrics 0.24.6",
  "proptest",
  "rand 0.10.3",
+ "regex",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -3404,17 +3451,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "mb-ext"
+name = "mb-evals"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "axum 0.8.9",
+ "chrono",
+ "clap",
+ "humantime",
+ "mb-engine",
+ "mb-import",
+ "mb-llm",
+ "mb-mcm",
+ "mockingbird",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mb-ext"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
  "http 1.5.0",
  "metrics 0.24.6",
  "metrics-util 0.20.4",
+ "reqwest",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -3509,6 +3585,7 @@ dependencies = [
  "prost-reflect",
  "prost-types",
  "quick-xml",
+ "rand 0.10.3",
  "rdkafka",
  "reqwest",
  "rumqttc",
@@ -3525,6 +3602,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3535,8 +3613,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "futures",
+ "metrics 0.24.6",
+ "redis",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
@@ -3755,6 +3837,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "axum 0.8.9",
+ "axum-server",
  "base64 0.23.1",
  "chrono",
  "clap",
@@ -3781,21 +3864,40 @@ dependencies = [
  "opentelemetry_sdk",
  "predicates",
  "prost-reflect",
+ "redis",
  "reqwest",
+ "rustls",
  "serde",
  "serde-saphyr",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tonic",
+ "tonic-health",
  "tower",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "mockingbird-custom-ext-example"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "clap",
+ "dashmap",
+ "mb-ext",
+ "mockingbird",
+ "reqwest",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -5169,6 +5271,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5b98ae99461e02895c3a96a25dbe4d852a3d5e5b815d31d5d9e4b5344d99e9"
+dependencies = [
+ "arc-swap",
+ "arcstr",
+ "async-lock",
+ "backon",
+ "bytes",
+ "cfg-if",
+ "combine",
+ "futures-channel",
+ "futures-util",
+ "itoa",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustls",
+ "rustls-native-certs",
+ "ryu",
+ "sha1_smol",
+ "socket2 0.6.5",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "url",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5479,6 +5611,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -5912,6 +6045,12 @@ dependencies = [
  "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -6781,6 +6920,7 @@ dependencies = [
  "socket2 0.6.5",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
@@ -7705,6 +7845,12 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yaml-rust2"

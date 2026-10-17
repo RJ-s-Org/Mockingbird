@@ -1,0 +1,33 @@
+# Chaos: injected errors, latency jitter, dropped streams and per-mock limits.
+# Run from the repository root:
+#   mockingbird serve -c examples/gallery/chaos/mockingbird.yaml --offline
+# then try (repeat a few times; about one call in five fails):
+#   curl -i localhost:8080/orders/orders
+#   curl -i localhost:8080/orders/orders -H 'X-Mockingbird-Chaos: off'       # bypass chaos
+#   curl -i localhost:8080/orders/orders -H 'X-Mockingbird-Scenario: outage' # every call fails
+#   curl -N localhost:8080/ticks/ticks                                       # streams cut short
+mocks:
+  orders:
+    contract: ../../../fixtures/openapi/orders-3.0.yaml
+    route_prefix: /orders
+    chaos:
+      error_rate: 0.2              # 20% of calls answer with the contract's error shape
+      latency_jitter:              # uniformly random added latency
+        min: 50ms
+        max: 400ms
+    limits:
+      rate_limit:                  # beyond this the mock answers 429 with Retry-After
+        requests_per_second: 5
+        burst: 10
+    scenarios:
+      outage:
+        chaos:                     # replaces the mock's chaos while the scenario applies
+          error_rate: 1
+      calm:
+        chaos:
+          error_rate: 0
+  ticks:
+    contract: ../../../fixtures/openapi/events-3.1.yaml   # GET /ticks streams server-sent events
+    route_prefix: /ticks
+    chaos:
+      drop_stream_rate: 0.5        # half the streamed responses end early

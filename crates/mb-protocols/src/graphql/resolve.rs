@@ -41,9 +41,20 @@ pub(crate) enum Shape {
 pub(crate) type Shapes = HashMap<String, Shape>;
 
 /// One HTTP request being executed, shared by its root resolvers through
-/// the request data.
+/// the request data; or one query or mutation root field sent over a
+/// subscription WebSocket (see [`super::subscription::http_call`]).
 pub(crate) struct HttpCall {
+    /// The headers forwarded, recorded and reported.
     headers: HeaderMap,
+    /// The headers the call is admitted and authenticated with, when they
+    /// differ from `headers` (a WebSocket's `connection_init` credentials).
+    auth_headers: Option<HeaderMap>,
+    /// The raw query pairs (a WebSocket upgrade URL's), which may carry a
+    /// key; empty over HTTP.
+    query: Vec<(String, String)>,
+    /// The data-plane key was already checked: once for the whole HTTP
+    /// request, or once for the WebSocket connection in `api_key` mode.
+    key_verified: bool,
     /// `POST` or `GET`.
     method: String,
     /// The request's variables, for the request record.
@@ -75,10 +86,31 @@ impl HttpCall {
     ) -> Self {
         Self {
             headers,
+            auth_headers: None,
+            query: Vec::new(),
+            key_verified: true,
             method,
             variables,
             admitted,
             collected: Mutex::new(Collected::default()),
+        }
+    }
+
+    /// A call over a WebSocket: admitted per root field (no whole-request
+    /// admission), authenticated with `auth_headers` and `query` unless
+    /// the connection's key was `key_verified`.
+    pub(crate) fn websocket(
+        headers: HeaderMap,
+        auth_headers: HeaderMap,
+        query: Vec<(String, String)>,
+        key_verified: bool,
+        variables: Value,
+    ) -> Self {
+        Self {
+            auth_headers: Some(auth_headers),
+            query,
+            key_verified,
+            ..Self::new(headers, "GET".into(), variables, None)
         }
     }
 
@@ -123,13 +155,38 @@ impl Failure {
     /// The field error for a failed [`call::plan`] of mock `mock`.
     pub(crate) fn plan(error: PlanError, mock: &str) -> Self {
         match error {
-            PlanError::Rejected(r) => Self::rejected(r),
+            PlanError::Rejected(r) | PlanError::RateLimited(r) => Self::rejected(r),
             PlanError::Unauthorized(u) => Self::new(401, u.detail),
             PlanError::BadOverride(detail) => Self::new(400, detail),
             PlanError::UnknownScenario(name) => {
                 Self::new(400, format!("mock {mock} has no scenario {name:?}"))
             }
         }
+    }
+
+    /// The field error of an error injected by chaos: the declared
+    /// `status` when the operation has one, else `UNAVAILABLE` (503).
+    /// Carries `extensions.chaos = "error"`.
+    pub(crate) fn chaos(status: Option<u16>) -> Self {
+        let detail = crate::chaos::CHAOS_ERROR_DETAIL;
+        let mut failure = match status {
+            Some(status) => {
+                let reason = canonical_reason(status).unwrap_or("Error");
+                Self::new(status, format!("{reason} ({detail})"))
+            }
+            None => Self::unavailable(format!("Service Unavailable ({detail})")),
+        };
+        failure.error = failure.error.extend_with(|_, e| e.set("chaos", "error"));
+        failure
+    }
+
+    /// An `UNAVAILABLE` field error (HTTP 503).
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        let error = Error::new(message).extend_with(|_, e| {
+            e.set("code", "UNAVAILABLE");
+            e.set("status", 503);
+        });
+        Self { status: 503, error }
     }
 
     fn rejected(r: Rejection) -> Self {
@@ -152,14 +209,13 @@ pub(crate) async fn root(
     shapes: &Shapes,
     ctx: &ResolverContext<'_>,
 ) -> async_graphql::Result<Option<FieldValue<'static>>> {
-    let http = ctx.data::<Arc<HttpCall>>()?;
+    // Over a subscription WebSocket there is no HTTP request: the field
+    // is its own call, which sleeps its own injected latency.
+    let (http, websocket) = match ctx.data_opt::<Arc<HttpCall>>() {
+        Some(http) => (Arc::clone(http), false),
+        None => (Arc::new(super::subscription::http_call(ctx)?), true),
+    };
     let key = ctx.ctx.item.node.response_key().node.to_string();
-    let args: Map<String, Value> = ctx
-        .args
-        .as_index_map()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.clone().into_json().unwrap_or(Value::Null)))
-        .collect();
     let span = tracing::info_span!(
         "mock.request",
         mock = %rt.name,
@@ -168,9 +224,24 @@ pub(crate) async fn root(
         status = Empty,
         source = Empty,
     );
-    let result = generate(rt, op_id, http, key, args).instrument(span).await;
+    let args: Map<String, Value> = span.in_scope(|| {
+        tracing::info_span!("mb.decode").in_scope(|| {
+            ctx.args
+                .as_index_map()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone().into_json().unwrap_or(Value::Null)))
+                .collect()
+        })
+    });
+    let result = generate(rt, op_id, &http, key, args)
+        .instrument(span.clone())
+        .await;
+    if websocket && let Some(delay) = http.collected().delay {
+        tokio::time::sleep(delay).await;
+    }
     match result {
-        Ok(body) => Ok(project(body, ty, shapes)),
+        Ok(body) => Ok(span
+            .in_scope(|| tracing::info_span!("mb.encode").in_scope(|| project(body, ty, shapes)))),
         // A nullable field answers null and reports the error at its path;
         // the dynamic executor would otherwise drop the field from `data`
         // and the error's path.
@@ -219,14 +290,15 @@ async fn generate(
     };
     let mut delay = None;
 
-    // The data-plane key was checked once for the whole HTTP request (after
-    // admitting it, in `api_key` mode).
+    // Over HTTP the data-plane key was checked once for the whole request
+    // (after admitting it, in `api_key` mode).
     let presented = Presented {
-        query: &[],
-        key_verified: true,
+        query: &http.query,
+        key_verified: http.key_verified,
         admitted: http.admitted.as_ref(),
     };
-    let outcome = match call::plan(rt, op, &http.headers, presented).await {
+    let auth_headers = http.auth_headers.as_ref().unwrap_or(&http.headers);
+    let outcome = match call::plan(rt, op, auth_headers, presented).await {
         Err(PlanFailure {
             error,
             tenancy,
@@ -243,6 +315,7 @@ async fn generate(
             report.session = plan.session.session.clone();
             delay = plan.delay;
             match plan.forced_status.filter(|s| !(200..300).contains(s)) {
+                _ if plan.chaos.inject_error => Err(Failure::chaos(plan.forced_status)),
                 Some(status) => Err(Failure::new(status, forced_message(status))),
                 None => {
                     let call = OperationCall {
@@ -297,13 +370,16 @@ async fn generate(
 }
 
 pub(crate) fn forced_message(status: u16) -> String {
-    match StatusCode::from_u16(status)
-        .ok()
-        .and_then(|c| c.canonical_reason())
-    {
+    match canonical_reason(status) {
         Some(reason) => format!("{reason} (forced status {status})"),
         None => format!("forced status {status}"),
     }
+}
+
+fn canonical_reason(status: u16) -> Option<&'static str> {
+    StatusCode::from_u16(status)
+        .ok()
+        .and_then(|c| c.canonical_reason())
 }
 
 /// Resolves a nested field: the parent object's member `name`, missing

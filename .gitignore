@@ -29,3 +29,6 @@ crates/mb-console/web/node_modules/
 crates/mb-console/web/openapi.json
 crates/mb-console/web/test-results/
 crates/mb-console/web/playwright-report/
+
+# scripts/check-helm.sh downloads helm and kubeconform here
+.tools/

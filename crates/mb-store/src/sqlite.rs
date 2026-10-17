@@ -22,8 +22,8 @@ use crate::{
     NewMock, NewRequestLogEntry, PruneCounter, RequestKind, RequestLogEntry, RequestLogFilter,
     ResourceSource, STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace,
     lease_times, missing_workspace, not_a_draft, now, queued_progress, require_draft_status,
-    sha256_hex, validate_header_name, validate_mock_name, validate_route_prefix,
-    validate_workspace_name,
+    sha256_hex, validate_header_name, validate_mock_name, validate_mock_settings,
+    validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -31,7 +31,7 @@ use crate::{
 const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 
 const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
-     data_plane_auth, created_at, updated_at";
+     data_plane_auth, created_at, updated_at, chaos, limits";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
      draft_meta";
@@ -244,6 +244,8 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
     let id: String = row.try_get("id")?;
     let source: String = row.try_get("source")?;
     let data_plane_auth: String = row.try_get("data_plane_auth")?;
+    let chaos: Option<String> = row.try_get("chaos")?;
+    let limits: String = row.try_get("limits")?;
     Ok(Mock {
         id: parse_uuid(&id)?,
         workspace: row.try_get("workspace")?,
@@ -254,6 +256,8 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
         header_overrides: row.try_get("header_overrides")?,
         source: ResourceSource::parse(&source)?,
         data_plane_auth: serde_json::from_str(&data_plane_auth)?,
+        chaos: chaos.map(|c| serde_json::from_str(&c)).transpose()?,
+        limits: serde_json::from_str(&limits)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -604,7 +608,10 @@ impl ControlStore for SqliteControlStore {
         let route_prefix = m.route_prefix.unwrap_or_else(|| format!("/{}", m.name));
         validate_route_prefix(&route_prefix)?;
         validate_header_name(&m.data_plane_auth.header)?;
+        validate_mock_settings(m.chaos.as_ref(), &m.limits)?;
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
+        let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
+        let limits = serde_json::to_string(&m.limits)?;
         let at = now();
         let mock = Mock {
             id: Uuid::new_v4(),
@@ -616,13 +623,16 @@ impl ControlStore for SqliteControlStore {
             header_overrides: m.header_overrides,
             source: m.source,
             data_plane_auth: m.data_plane_auth,
+            chaos: m.chaos,
+            limits: m.limits,
             created_at: at,
             updated_at: at,
         };
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_workspace(&mut tx, ws).await?;
-        let sql =
-            format!("INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        let sql = format!(
+            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(mock.id.to_string())
             .bind(&mock.workspace)
@@ -635,6 +645,8 @@ impl ControlStore for SqliteControlStore {
             .bind(data_plane_auth)
             .bind(mock.created_at)
             .bind(mock.updated_at)
+            .bind(chaos)
+            .bind(limits)
             .execute(&mut *tx)
             .await
             .map_err(|e| match StoreError::from(e) {
@@ -652,7 +664,10 @@ impl ControlStore for SqliteControlStore {
         validate_mock_name(&m.name)?;
         validate_route_prefix(&m.route_prefix)?;
         validate_header_name(&m.data_plane_auth.header)?;
+        validate_mock_settings(m.chaos.as_ref(), &m.limits)?;
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
+        let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
+        let limits = serde_json::to_string(&m.limits)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks WHERE id = ?");
         let existing = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -672,7 +687,7 @@ impl ControlStore for SqliteControlStore {
         };
         sqlx::query(
             "UPDATE mocks SET name = ?, route_prefix = ?, persona = ?, llm_profile = ?, header_overrides = ?, \
-             source = ?, data_plane_auth = ?, updated_at = ? WHERE id = ?",
+             source = ?, data_plane_auth = ?, chaos = ?, limits = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&updated.name)
         .bind(&updated.route_prefix)
@@ -681,6 +696,8 @@ impl ControlStore for SqliteControlStore {
         .bind(updated.header_overrides)
         .bind(updated.source.as_str())
         .bind(data_plane_auth)
+        .bind(chaos)
+        .bind(limits)
         .bind(updated.updated_at)
         .bind(updated.id.to_string())
         .execute(&mut *tx)
@@ -825,6 +842,9 @@ impl ControlStore for SqliteControlStore {
     }
 
     async fn put_scenario(&self, s: &Scenario) -> Result<(), StoreError> {
+        if let Some(chaos) = &s.rules.chaos {
+            chaos.validate().map_err(StoreError::Invalid)?;
+        }
         let (ws, name) = self.require_mock_key(s.mock_id).await?;
         sqlx::query(
             "INSERT INTO scenarios (mock_id, name, instructions, rules, source) VALUES (?, ?, ?, ?, ?) \
@@ -1003,6 +1023,55 @@ impl ControlStore for SqliteControlStore {
             .iter()
             .map(log_from_row)
             .collect()
+    }
+
+    async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError> {
+        let sql = format!("SELECT {LOG_COLUMNS} FROM request_log WHERE id = ?");
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(log_from_row)
+            .transpose()
+    }
+
+    async fn add_token_usage(
+        &self,
+        mock_id: Uuid,
+        day: chrono::NaiveDate,
+        tokens: u64,
+    ) -> Result<u64, StoreError> {
+        let total: i64 = sqlx::query_scalar(
+            "INSERT INTO token_usage (mock_id, day, tokens) VALUES (?, ?, ?) \
+             ON CONFLICT (mock_id, day) DO UPDATE SET tokens = token_usage.tokens + excluded.tokens \
+             RETURNING tokens",
+        )
+        .bind(mock_id.to_string())
+        .bind(day.to_string())
+        .bind(to_i64(tokens, "tokens")?)
+        .fetch_one(&self.pool)
+        .await?;
+        from_i64(total, "tokens")
+    }
+
+    async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError> {
+        let total: Option<i64> =
+            sqlx::query_scalar("SELECT tokens FROM token_usage WHERE mock_id = ? AND day = ?")
+                .bind(mock_id.to_string())
+                .bind(day.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        total.map_or(Ok(0), |t| from_i64(t, "tokens"))
+    }
+
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError> {
+        // `day` is ISO 8601 text, which sorts as the date does.
+        Ok(sqlx::query("DELETE FROM token_usage WHERE day < ?")
+            .bind(before.to_string())
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
     }
 
     async fn list_channel_settings(

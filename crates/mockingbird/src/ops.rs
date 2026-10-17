@@ -10,11 +10,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use mb_admin::AdminState;
 use mb_auth::Authenticate;
-use mb_state::StateStore;
+use mb_state::{Bus, StateStore};
 use mb_store::ControlStore;
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::json;
+use tokio::sync::watch;
 
+use crate::file_config::Role;
 use crate::registry::MockRegistry;
 
 /// What the ops endpoints inspect.
@@ -28,6 +30,15 @@ pub struct OpsState {
     /// none`); otherwise only callers it authenticates do, and anyone
     /// else gets just `{"status": ...}`.
     pub readyz_auth: Option<Arc<dyn Authenticate>>,
+    /// The cross-node bus, whose health `/readyz` reports; `None` without
+    /// one.
+    pub bus: Option<Arc<dyn Bus>>,
+    /// This node's role, which `/readyz` reports.
+    pub role: Role,
+    /// Whether this node is the leader (see
+    /// [`Leadership::watch`](mb_state::leader::Leadership::watch)), which
+    /// `/readyz` reports.
+    pub leader: watch::Receiver<bool>,
 }
 
 /// - `/healthz`: liveness, always `200 {"status":"ok"}`.
@@ -36,8 +47,11 @@ pub struct OpsState {
 ///   mock failed to rebuild (`mock <label>: <error>`, labelled by
 ///   [`mock_label`](crate::registry::mock_label); it keeps serving its
 ///   previous version), a mock's channels are not all working (`mock
-///   <label>: <reason>`, e.g. an unreachable broker) or a mounted mock is
-///   serving statelessly; else `200 ready`. Each store ping is bounded by
+///   <label>: <reason>`, e.g. an unreachable broker), a mounted mock is
+///   serving statelessly or a mock's daily token budget is exhausted
+///   (`mock <label>: daily token budget exhausted`), or the cross-node bus
+///   is disconnected (`bus: <reason>`); else `200 ready`. The body always
+///   carries the node's `role` and whether it is the `leader`. Each store ping is bounded by
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
@@ -94,12 +108,16 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
             if let Err(error) = state {
                 reasons.push(format!("state store unreachable: {error}"));
             }
+            if let Some(Err(reason)) = st.bus.as_ref().map(|bus| bus.health()) {
+                reasons.push(format!("bus: {reason}"));
+            }
             for (mock, error) in st.registry.failed_mocks() {
                 reasons.push(format!("mock {mock}: {error}"));
             }
             for (mock, reason) in st.registry.event_issues() {
                 reasons.push(format!("mock {mock}: {reason}"));
             }
+            reasons.extend(st.registry.budget_issues());
             for mock in st.registry.degraded_mocks() {
                 reasons.push(format!(
                     "mock {mock}: state store failing, serving statelessly"
@@ -123,11 +141,11 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
             None => true,
             Some(auth) => matches!(auth.authenticate(&headers).await, Ok(Some(_))),
         };
-    let body = if show_reasons {
-        json!({"status": status, "reasons": reasons})
-    } else {
-        json!({"status": status})
-    };
+    let leader = *st.leader.borrow();
+    let mut body = json!({"status": status, "role": st.role.as_str(), "leader": leader});
+    if show_reasons {
+        body["reasons"] = json!(reasons);
+    }
     (code, axum::Json(body)).into_response()
 }
 

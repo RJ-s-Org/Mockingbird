@@ -71,7 +71,7 @@ test("profiles, data-plane keys, audit and status", async ({ page, request }) =>
   await expect(page.getByRole("status")).toContainText("Uploaded version 1 (active");
   await page.getByRole("navigation", { name: "Mock" }).getByRole("link", { name: "Overview" }).click();
   await page.getByLabel("Data-plane auth").selectOption("api_key");
-  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Saved.");
 
   // 4. Without a key 401; with the token 200.

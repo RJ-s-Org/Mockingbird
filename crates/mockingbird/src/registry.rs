@@ -14,15 +14,17 @@ use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
 use mb_mcm::{Channel, ChannelBinding, Direction, Protocol};
-use mb_protocols::events::{ChannelRuntime, ChannelSetup, EventSetup};
+use mb_protocols::events::{ChannelMode, ChannelRuntime, ChannelSetup, EventSetup};
 use mb_protocols::grpc::{GrpcError, GrpcMock, GrpcServer};
 use mb_protocols::http_rest::{self, problem};
 use mb_protocols::{MountPrefix, StateHealth, graphql, soap};
-use mb_store::{ControlChange, ControlStore, DEFAULT_WORKSPACE, Mock};
+use mb_store::{ControlChange, DEFAULT_WORKSPACE, Mock};
 use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
-use crate::runtime::{RuntimeDeps, build_runtime};
+use crate::budget::StoreTokenBudget;
+use crate::ha::HubEvent;
+use crate::runtime::{RuntimeDeps, ServeMode, build_runtime_with_budget};
 
 /// How a mock is named in logs and `/readyz`: `name` in the default
 /// workspace, `workspace/name` elsewhere.
@@ -50,6 +52,8 @@ struct Mounted {
     events: Option<Arc<ChannelRuntime>>,
     /// The contract's channels, for the startup log.
     channels: Vec<Channel>,
+    /// The mock's daily token budget, when it has one.
+    budget: Option<Arc<StoreTokenBudget>>,
 }
 
 /// How a mounted mock is reached.
@@ -267,20 +271,25 @@ impl MockRegistry {
         self.publish(next).await;
     }
 
-    /// Applies control-plane changes as they are published: a mock change
-    /// (in any workspace) reloads that mock; a workspace or profile change,
-    /// or missed changes, reload all.
-    pub fn spawn_watcher(self: &Arc<Self>, deps: RuntimeDeps) -> tokio::task::JoinHandle<()> {
-        let mut changes = deps.store.subscribe();
+    /// Applies control-plane changes as the HA hub delivers them (see
+    /// [`Ha::changes`](crate::ha::Ha::changes)): a mock change (in any
+    /// workspace, from any node) reloads that mock; a workspace or profile
+    /// change, a resync request, or missed changes, reload all.
+    pub fn spawn_watcher(
+        self: &Arc<Self>,
+        deps: RuntimeDeps,
+        mut changes: broadcast::Receiver<HubEvent>,
+    ) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(self);
         tokio::spawn(async move {
             loop {
                 match changes.recv().await {
-                    Ok(ControlChange::Mock { workspace, name }) => {
+                    Ok(HubEvent::Change(ControlChange::Mock { workspace, name })) => {
                         registry.reload_mock(&deps, &workspace, &name).await;
                     }
-                    Ok(ControlChange::Workspace { .. })
-                    | Ok(ControlChange::Profile { .. })
+                    Ok(HubEvent::Change(ControlChange::Workspace { .. }))
+                    | Ok(HubEvent::Change(ControlChange::Profile { .. }))
+                    | Ok(HubEvent::Resync)
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         if let Err(error) = registry.reload_all(&deps).await {
                             tracing::error!(%error, "cannot reload mocks");
@@ -313,6 +322,15 @@ impl MockRegistry {
                 m.prefix()
                     .map(|p| (m.workspace.clone(), m.name.clone(), p.to_owned()))
             })
+            .collect()
+    }
+
+    /// `(workspace, name)` of every mounted mock, gRPC mocks included.
+    pub fn mounted_mocks(&self) -> Vec<(String, String)> {
+        self.mounted
+            .load()
+            .iter()
+            .map(|m| (m.workspace.clone(), m.name.clone()))
             .collect()
     }
 
@@ -408,6 +426,21 @@ impl MockRegistry {
             .collect();
         labels.sort();
         labels
+    }
+
+    /// One `/readyz` reason per mounted mock whose daily token budget is
+    /// exhausted (it is served by the faker until UTC midnight), sorted:
+    /// `mock <label>: daily token budget exhausted`.
+    pub fn budget_issues(&self) -> Vec<String> {
+        let mut issues: Vec<String> = self
+            .mounted
+            .load()
+            .iter()
+            .filter(|m| m.budget.as_ref().is_some_and(|b| b.is_exhausted()))
+            .map(|m| format!("mock {}: daily token budget exhausted", m.label()))
+            .collect();
+        issues.sort();
+        issues
     }
 
     /// Installs `next` as the mounted set and publishes its gRPC mocks.
@@ -555,8 +588,8 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
 /// contract; `Err` (logged) when it cannot be built.
 async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted>, String> {
     let label = mock_label(&mock.workspace, &mock.name);
-    let runtime = match build_runtime(deps, mock).await {
-        Ok(Some(rt)) => rt,
+    let (runtime, budget) = match build_runtime_with_budget(deps, mock).await {
+        Ok(Some(built)) => built,
         Ok(None) => return Ok(None),
         Err(error) => {
             let error = format!("{error:#}");
@@ -571,7 +604,7 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
     let events = if channels.is_empty() {
         None
     } else {
-        let setup = event_setup(deps.store.as_ref(), mock, &channels)
+        let setup = event_setup(deps, mock, &channels)
             .await
             .map_err(|error| {
                 let error = format!("{error:#}");
@@ -615,6 +648,7 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
             state_health,
             events,
             channels,
+            budget,
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
@@ -625,13 +659,14 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
 
 /// The stored event settings of `mock`: its broker and, by channel id,
 /// each stored channel's `enabled` and triggers (the contract's when the
-/// stored row keeps them).
+/// stored row keeps them), in the channel mode `deps.mode` calls for.
 async fn event_setup(
-    store: &dyn ControlStore,
+    deps: &RuntimeDeps,
     mock: &Mock,
     channels: &[Channel],
 ) -> anyhow::Result<EventSetup> {
     use anyhow::Context as _;
+    let store = deps.store.as_ref();
     let broker = store
         .get_event_settings(mock.id)
         .await
@@ -662,6 +697,10 @@ async fn event_setup(
         broker,
         channels,
         lease_key: mock.id.to_string(),
+        mode: match deps.mode {
+            ServeMode::Full => ChannelMode::Full,
+            ServeMode::ControlOnly => ChannelMode::PublishOnly,
+        },
     })
 }
 

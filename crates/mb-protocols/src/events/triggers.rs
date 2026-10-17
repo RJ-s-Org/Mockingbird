@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mb_mcm::{Channel, ChannelBinding, Direction, StateChangeKind, Trigger};
-use mb_state::{ChangeKind, StateChanged, StoredResource};
+use mb_state::{ChangeKind, ChangeOrigin, StateChanged, StoredResource};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
@@ -222,7 +222,8 @@ fn kind_matches(want: StateChangeKind, got: ChangeKind) -> bool {
 }
 
 /// Fan the mock's state changes out to the matching triggers. Runs on
-/// every replica, leader or not.
+/// every replica, leader or not; changes made on another replica
+/// ([`ChangeOrigin::Remote`]) fire WebSocket channels only.
 async fn run_state_changes(
     inner: Arc<ChannelInner>,
     mut changes: broadcast::Receiver<StateChanged>,
@@ -262,9 +263,16 @@ async fn run_state_changes(
             Some(received) => received + 1,
             None => 0,
         };
+        // A change relayed from another node fires broker channels on that
+        // node only: the broker reaches every consumer from there. A
+        // WebSocket channel reaches only this node's clients, so it fires
+        // here too.
         let matching: Vec<&Channel> = triggers
             .iter()
             .filter(|(_, ty, kind)| *ty == change.resource_type && kind_matches(*kind, change.kind))
+            .filter(|(channel, _, _)| {
+                change.origin == ChangeOrigin::Local || !leader_gated(channel)
+            })
             .map(|(channel, _, _)| channel)
             .collect();
         if matching.is_empty() {

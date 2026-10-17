@@ -11,6 +11,7 @@ use crate::ExtError;
 /// Resolves a secret reference (e.g. `env:NAME`) to its value.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
+    /// The secret value `reference` points to.
     async fn resolve(&self, reference: &str) -> Result<String, ExtError>;
 }
 

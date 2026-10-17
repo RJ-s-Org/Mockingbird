@@ -1,5 +1,10 @@
 //! Admin API client subcommands: `mocks`, `import`, `sessions`,
-//! `export-fixtures`, `seed-fixtures`, `channels` and `brokers`.
+//! `export-fixtures`, `seed-fixtures`, `channels`, `scenarios`, `profiles`
+//! and `brokers`.
+//!
+//! Every mock- and workspace-scoped call goes to
+//! `/api/v1/workspaces/<ws>/…` of the `--workspace` (`MB_WORKSPACE`)
+//! workspace; `brokers list` stays global.
 //!
 //! Successful responses with a body are returned as JSON for the caller to
 //! print on stdout; a non-2xx response becomes [`ClientError::Api`], whose
@@ -36,11 +41,54 @@ pub enum ClientCommand {
     /// List, inspect, configure and publish on a mock's event channels.
     #[command(subcommand)]
     Channels(ChannelsCommand),
+    /// List, inspect, write and delete a mock's scenarios.
+    #[command(subcommand)]
+    Scenarios(ScenariosCommand),
+    /// List, inspect, write and delete the workspace's LLM profiles.
+    #[command(subcommand)]
+    Profiles(ProfilesCommand),
     /// List the configured message brokers.
     #[command(subcommand)]
     Brokers(BrokersCommand),
 }
 
+#[derive(Subcommand, Debug)]
+pub enum ScenariosCommand {
+    /// List a mock's scenarios.
+    List { mock: String },
+    /// Show one scenario.
+    Get { mock: String, name: String },
+    /// Create or replace a scenario (`source = api`).
+    Put {
+        mock: String,
+        name: String,
+        /// The scenario as JSON (`-` reads stdin); absent fields are cleared.
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Delete a scenario.
+    Delete { mock: String, name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfilesCommand {
+    /// List the workspace's LLM profiles.
+    List,
+    /// Show one LLM profile.
+    Get { name: String },
+    /// Create or replace an LLM profile (`source = api`).
+    Put {
+        name: String,
+        /// The profile as JSON (`-` reads stdin).
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Delete an LLM profile.
+    Delete { name: String },
+}
+
+// The doc comments are clap help text, not Markdown.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum ChannelsCommand {
     /// List a mock's channels with their effective settings.
@@ -83,6 +131,8 @@ pub enum BrokersCommand {
     List,
 }
 
+// The doc comments are clap help text, not Markdown.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum MocksCommand {
     /// List every mock.
@@ -180,15 +230,17 @@ impl From<reqwest::Error> for ClientError {
     }
 }
 
-/// Runs `cmd` against the Admin API at `admin_url`, sending
-/// `Authorization: Bearer <token>` when `token` is set. Returns the JSON to
-/// print, or `None` when the API answered without a body.
+/// Runs `cmd` against workspace `workspace` of the Admin API at
+/// `admin_url`, sending `Authorization: Bearer <token>` when `token` is
+/// set. Returns the JSON to print, or `None` when the API answered without
+/// a body.
 pub async fn run(
     admin_url: &str,
     token: Option<&str>,
+    workspace: &str,
     cmd: ClientCommand,
 ) -> Result<Option<Value>, ClientError> {
-    let api = AdminClient::new(admin_url, token)?;
+    let api = AdminClient::new(admin_url, token, workspace)?;
     match cmd {
         ClientCommand::Mocks(MocksCommand::List) => api.send(Method::GET, &["mocks"], None).await,
         ClientCommand::Mocks(MocksCommand::Get { name }) => {
@@ -234,13 +286,13 @@ pub async fn run(
                 .await
         }
         ClientCommand::Channels(cmd) => channels(&api, cmd).await,
+        ClientCommand::Scenarios(cmd) => scenarios(&api, cmd).await,
+        ClientCommand::Profiles(cmd) => profiles(&api, cmd).await,
         ClientCommand::Brokers(BrokersCommand::List) => {
-            api.send(Method::GET, &["brokers"], None).await
+            api.request(Method::GET, api.url(&["brokers"]), None).await
         }
         ClientCommand::SeedFixtures(SeedArgs { target, file }) => {
-            let text = read(&file)?;
-            let fixtures: Value = serde_json::from_slice(&text)
-                .with_context(|| format!("{} is not JSON", file.display()))?;
+            let fixtures = read_json(&file)?;
             api.send(
                 Method::PUT,
                 &["mocks", &target.mock, "sessions", &target.session],
@@ -257,6 +309,67 @@ const ACTIVATE_NEEDS_APPROVE: &str =
 
 /// How often a draft import's job is polled.
 const IMPORT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn scenarios(api: &AdminClient, cmd: ScenariosCommand) -> Result<Option<Value>, ClientError> {
+    match cmd {
+        ScenariosCommand::List { mock } => {
+            api.send(Method::GET, &["mocks", &mock, "scenarios"], None)
+                .await
+        }
+        // There is no single-scenario GET: pick it out of the list.
+        ScenariosCommand::Get { mock, name } => {
+            let list = api
+                .send(Method::GET, &["mocks", &mock, "scenarios"], None)
+                .await?;
+            list.as_ref()
+                .and_then(Value::as_array)
+                .and_then(|all| {
+                    all.iter()
+                        .find(|s| s.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                })
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    ClientError::Usage(format!("scenario {name} not found in mock {mock}"))
+                })
+        }
+        ScenariosCommand::Put { mock, name, file } => {
+            let body = read_json(&file)?;
+            api.send(
+                Method::PUT,
+                &["mocks", &mock, "scenarios", &name],
+                Some(Body::Json(body)),
+            )
+            .await
+        }
+        ScenariosCommand::Delete { mock, name } => {
+            api.send(Method::DELETE, &["mocks", &mock, "scenarios", &name], None)
+                .await
+        }
+    }
+}
+
+async fn profiles(api: &AdminClient, cmd: ProfilesCommand) -> Result<Option<Value>, ClientError> {
+    match cmd {
+        ProfilesCommand::List => api.send(Method::GET, &["llm-profiles"], None).await,
+        ProfilesCommand::Get { name } => {
+            api.send(Method::GET, &["llm-profiles", &name], None).await
+        }
+        ProfilesCommand::Put { name, file } => {
+            let body = read_json(&file)?;
+            api.send(
+                Method::PUT,
+                &["llm-profiles", &name],
+                Some(Body::Json(body)),
+            )
+            .await
+        }
+        ProfilesCommand::Delete { name } => {
+            api.send(Method::DELETE, &["llm-profiles", &name], None)
+                .await
+        }
+    }
+}
 
 async fn channels(api: &AdminClient, cmd: ChannelsCommand) -> Result<Option<Value>, ClientError> {
     match cmd {
@@ -430,7 +543,7 @@ async fn upload_contract(
     let source =
         mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
     ensure_mock(api, &args.mock).await?;
-    let mut url = api.url(&["mocks", &args.mock, "contracts"]);
+    let mut url = api.ws_url(&["mocks", &args.mock, "contracts"]);
     if args.activate {
         url.set_query(Some("activate=true"));
     }
@@ -664,6 +777,19 @@ fn read(path: &Path) -> anyhow::Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))
 }
 
+/// Reads a JSON document from `path`, or from stdin when `path` is `-`.
+fn read_json(path: &Path) -> anyhow::Result<Value> {
+    let (text, label) = if path == Path::new("-") {
+        let mut text = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut text)
+            .context("cannot read stdin")?;
+        (text, "stdin".to_string())
+    } else {
+        (read(path)?, path.display().to_string())
+    };
+    serde_json::from_slice(&text).with_context(|| format!("{label} is not JSON"))
+}
+
 enum Body {
     Json(Value),
     Bytes {
@@ -676,10 +802,11 @@ struct AdminClient {
     base: Url,
     http: reqwest::Client,
     token: Option<String>,
+    workspace: String,
 }
 
 impl AdminClient {
-    fn new(admin_url: &str, token: Option<&str>) -> anyhow::Result<Self> {
+    fn new(admin_url: &str, token: Option<&str>, workspace: &str) -> anyhow::Result<Self> {
         let base =
             Url::parse(admin_url).with_context(|| format!("invalid admin URL {admin_url:?}"))?;
         if base.cannot_be_a_base() {
@@ -689,6 +816,7 @@ impl AdminClient {
             base,
             http: reqwest::Client::new(),
             token: token.filter(|t| !t.is_empty()).map(str::to_string),
+            workspace: workspace.to_string(),
         })
     }
 
@@ -703,13 +831,24 @@ impl AdminClient {
         url
     }
 
+    /// `<base>/api/v1/workspaces/<ws>/<segments…>`, each segment
+    /// percent-encoded.
+    fn ws_url(&self, segments: &[&str]) -> Url {
+        let mut url = self.url(&["workspaces", &self.workspace]);
+        if let Ok(mut path) = url.path_segments_mut() {
+            path.extend(segments);
+        }
+        url
+    }
+
+    /// Sends a workspace-scoped request to [`Self::ws_url`].
     async fn send(
         &self,
         method: Method,
         segments: &[&str],
         body: Option<Body>,
     ) -> Result<Option<Value>, ClientError> {
-        self.request(method, self.url(segments), body).await
+        self.request(method, self.ws_url(segments), body).await
     }
 
     async fn request(

@@ -7,11 +7,12 @@ use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
 use mb_mcm::Bundle;
 use mb_mcm::Trigger;
 use mb_store::{
-    AdminSession, ApiKey, AuditFilter, ChannelSettings, ContractStatus, ControlChange,
-    ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode, ImportJobStatus,
-    ImportOutcome, ImportProgress, LlmProfile, Mock, MockEventSettings, NewAuditEvent,
-    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, RETENTION_PRUNE_INTERVAL,
-    RequestKind, RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError,
+    AdminSession, ApiKey, AuditFilter, ChannelSettings, ChaosSettings, ContractStatus,
+    ControlChange, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
+    ImportJobStatus, ImportOutcome, ImportProgress, LatencyJitter, LlmProfile, Mock,
+    MockEventSettings, MockLimits, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
+    NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter,
+    ResourceSource, Scenario, ScenarioRules, StoreError,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -68,6 +69,13 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     scheduler_lease_exclusive(&store).await;
     delete_mock_cascades_event_tables(&store).await;
     request_log_kind_filter(&store).await;
+    mock_chaos_and_limits_round_trip(&store).await;
+    invalid_chaos_rejected(&store).await;
+    scenario_chaos_round_trip(&store).await;
+    token_usage_accumulates_per_day(&store).await;
+    token_usage_cascades_with_mock(&store).await;
+    token_usage_pruned_before_day(&store).await;
+    get_request_log_by_id(&store).await;
 }
 
 fn new_mock(name: &str) -> NewMock {
@@ -79,6 +87,8 @@ fn new_mock(name: &str) -> NewMock {
         header_overrides: false,
         source: ResourceSource::Api,
         data_plane_auth: Default::default(),
+        chaos: None,
+        limits: MockLimits::default(),
     }
 }
 
@@ -470,6 +480,7 @@ async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
             operations: vec!["listOrders".into()],
             stream_items: Some(3),
             stream_item_interval_ms: Some(250),
+            chaos: None,
         },
         source: ResourceSource::File,
     };
@@ -2728,4 +2739,238 @@ async fn request_log_kind_filter(store: &Arc<dyn ControlStore>) {
         .await
         .expect("all");
     assert_eq!(all.len(), 3);
+}
+
+fn chaos(error_rate: f64) -> ChaosSettings {
+    ChaosSettings {
+        error_rate,
+        latency_jitter: Some(LatencyJitter {
+            min_ms: 10,
+            max_ms: 250,
+        }),
+        drop_stream_rate: 0.25,
+    }
+}
+
+async fn mock_chaos_and_limits_round_trip(store: &Arc<dyn ControlStore>) {
+    let mut nm = new_mock("chaos-limits");
+    nm.chaos = Some(chaos(0.5));
+    nm.limits = MockLimits {
+        rate_limit: Some(RateLimit {
+            requests_per_second: 2.5,
+            burst: 5,
+        }),
+        daily_token_budget: Some(10_000),
+        max_request_bytes: Some(4096),
+        max_response_bytes: None,
+    };
+    let created = store
+        .create_mock(DEFAULT_WORKSPACE, nm.clone())
+        .await
+        .expect("create");
+    assert_eq!(created.chaos, nm.chaos);
+    assert_eq!(created.limits, nm.limits);
+    let got = store
+        .get_mock(DEFAULT_WORKSPACE, "chaos-limits")
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(got, created);
+
+    let mut changed = got.clone();
+    changed.chaos = None;
+    changed.limits = MockLimits {
+        rate_limit: None,
+        daily_token_budget: None,
+        max_request_bytes: None,
+        max_response_bytes: Some(2048),
+    };
+    let updated = store.update_mock(&changed).await.expect("update");
+    assert_eq!(updated.chaos, None);
+    assert_eq!(updated.limits, changed.limits);
+    let got = store
+        .get_mock(DEFAULT_WORKSPACE, "chaos-limits")
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(got, updated);
+    assert!(
+        store
+            .list_all_mocks()
+            .await
+            .expect("list")
+            .contains(&updated)
+    );
+
+    // A mock without either reads back with no chaos and empty limits.
+    let plain = create(store, "chaos-plain").await;
+    let got = store
+        .get_mock(DEFAULT_WORKSPACE, "chaos-plain")
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(got, plain);
+    assert_eq!(got.chaos, None);
+    assert_eq!(got.limits, MockLimits::default());
+}
+
+async fn invalid_chaos_rejected(store: &Arc<dyn ControlStore>) {
+    let mut nm = new_mock("bad-chaos");
+    nm.chaos = Some(chaos(1.5));
+    let err = store
+        .create_mock(DEFAULT_WORKSPACE, nm)
+        .await
+        .expect_err("invalid chaos");
+    assert!(
+        matches!(&err, StoreError::Invalid(m) if m.contains("chaos.error_rate")),
+        "{err:?}"
+    );
+    assert_eq!(
+        store
+            .get_mock(DEFAULT_WORKSPACE, "bad-chaos")
+            .await
+            .expect("get"),
+        None
+    );
+
+    let mut nm = new_mock("bad-limits");
+    nm.limits.rate_limit = Some(RateLimit {
+        requests_per_second: 1.0,
+        burst: 0,
+    });
+    assert!(matches!(
+        store.create_mock(DEFAULT_WORKSPACE, nm).await,
+        Err(StoreError::Invalid(_))
+    ));
+
+    let mut m = create(store, "bad-chaos-update").await;
+    m.chaos = Some(chaos(-0.1));
+    assert!(matches!(
+        store.update_mock(&m).await,
+        Err(StoreError::Invalid(_))
+    ));
+    m.chaos = None;
+    m.limits.max_request_bytes = Some(10);
+    assert!(matches!(
+        store.update_mock(&m).await,
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+async fn scenario_chaos_round_trip(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "scenario-chaos").await;
+    let mut s = Scenario {
+        mock_id: mock.id,
+        name: "flaky".into(),
+        instructions: None,
+        rules: ScenarioRules {
+            chaos: Some(chaos(0.75)),
+            ..ScenarioRules::default()
+        },
+        source: ResourceSource::Api,
+    };
+    store.put_scenario(&s).await.expect("put");
+    assert_eq!(
+        store.list_scenarios(mock.id).await.expect("list"),
+        vec![s.clone()]
+    );
+    s.rules.chaos = None;
+    store.put_scenario(&s).await.expect("clear");
+    assert_eq!(
+        store.list_scenarios(mock.id).await.expect("list"),
+        vec![s.clone()]
+    );
+    s.rules.chaos = Some(chaos(2.0));
+    assert!(matches!(
+        store.put_scenario(&s).await,
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+async fn token_usage_pruned_before_day(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "tokens-pruned").await;
+    // Long past, so rows other checks wrote are not affected.
+    let old = chrono::NaiveDate::from_ymd_opt(2001, 1, 30).expect("date");
+    let older = chrono::NaiveDate::from_ymd_opt(2000, 12, 31).expect("date");
+    let kept = chrono::NaiveDate::from_ymd_opt(2001, 2, 1).expect("date");
+    for day in [older, old, kept] {
+        store.add_token_usage(mock.id, day, 10).await.expect("add");
+    }
+    let cutoff = chrono::NaiveDate::from_ymd_opt(2001, 2, 1).expect("date");
+    assert_eq!(store.prune_token_usage(cutoff).await.expect("prune"), 2);
+    assert_eq!(store.token_usage(mock.id, older).await.expect("usage"), 0);
+    assert_eq!(store.token_usage(mock.id, old).await.expect("usage"), 0);
+    assert_eq!(store.token_usage(mock.id, kept).await.expect("usage"), 10);
+    assert_eq!(store.prune_token_usage(cutoff).await.expect("prune"), 0);
+}
+
+async fn token_usage_accumulates_per_day(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "tokens").await;
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 18).expect("date");
+    let next = day.succ_opt().expect("next day");
+    assert_eq!(store.token_usage(mock.id, day).await.expect("usage"), 0);
+    assert_eq!(
+        store.add_token_usage(mock.id, day, 100).await.expect("add"),
+        100
+    );
+    assert_eq!(
+        store.add_token_usage(mock.id, day, 50).await.expect("add"),
+        150
+    );
+    assert_eq!(store.token_usage(mock.id, day).await.expect("usage"), 150);
+    assert_eq!(store.token_usage(mock.id, next).await.expect("usage"), 0);
+    assert_eq!(
+        store.add_token_usage(mock.id, next, 7).await.expect("add"),
+        7
+    );
+    assert_eq!(store.token_usage(mock.id, day).await.expect("usage"), 150);
+
+    // Another mock's usage is separate.
+    let other = create(store, "tokens-other").await;
+    assert_eq!(store.token_usage(other.id, day).await.expect("usage"), 0);
+}
+
+async fn token_usage_cascades_with_mock(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "tokens-cascade").await;
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 18).expect("date");
+    store.add_token_usage(mock.id, day, 42).await.expect("add");
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "tokens-cascade")
+            .await
+            .expect("delete")
+    );
+    assert_eq!(store.token_usage(mock.id, day).await.expect("usage"), 0);
+}
+
+async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "log-by-id").await;
+    let mut entry = log_entry(mock.id, "s1", "getOrder", "llm");
+    entry.at = micros_now();
+    entry.kind = RequestKind::Grpc;
+    let id = store
+        .append_request_log(entry.clone(), 1000)
+        .await
+        .expect("append");
+    let got = store
+        .get_request_log(id)
+        .await
+        .expect("get")
+        .expect("entry exists");
+    assert_eq!(got.id, id);
+    let listed = store
+        .list_request_log(mock.id, &RequestLogFilter::default())
+        .await
+        .expect("list");
+    assert_eq!(listed, vec![got.clone()]);
+    assert_eq!(got.mock_id, entry.mock_id);
+    assert_eq!(got.operation_id, entry.operation_id);
+    assert_eq!(got.request, entry.request);
+    assert_eq!(got.response, entry.response);
+    assert_eq!(got.at, entry.at);
+    assert_eq!(got.kind, RequestKind::Grpc);
+    assert_eq!(
+        store.get_request_log(id + 1_000_000).await.expect("get"),
+        None
+    );
 }

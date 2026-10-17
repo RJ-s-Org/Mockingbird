@@ -72,9 +72,11 @@ pub trait ControlStore: Send + Sync {
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError>;
     async fn get_mock(&self, ws: &str, name: &str) -> Result<Option<Mock>, StoreError>;
     /// `Conflict` if the name already exists in the workspace, `NotFound` if
-    /// the workspace does not exist.
+    /// the workspace does not exist, `Invalid` when `chaos` or `limits` is
+    /// out of range.
     async fn create_mock(&self, ws: &str, m: NewMock) -> Result<Mock, StoreError>;
-    /// Updates the mock with `m.id`, bumping `updated_at`.
+    /// Updates the mock with `m.id`, bumping `updated_at`. `Invalid` when
+    /// `chaos` or `limits` is out of range.
     async fn update_mock(&self, m: &Mock) -> Result<Mock, StoreError>;
     /// Deletes the mock with its versions, scenarios and request log.
     async fn delete_mock(&self, ws: &str, name: &str) -> Result<bool, StoreError>;
@@ -103,7 +105,8 @@ pub trait ControlStore: Send + Sync {
     ) -> Result<ContractVersion, StoreError>;
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError>;
     async fn list_scenarios(&self, mock_id: Uuid) -> Result<Vec<Scenario>, StoreError>;
-    /// Upserts by `(mock_id, name)`.
+    /// Upserts by `(mock_id, name)`. `Invalid` when `rules.chaos` is out of
+    /// range.
     async fn put_scenario(&self, s: &Scenario) -> Result<(), StoreError>;
     async fn delete_scenario(&self, mock_id: Uuid, name: &str) -> Result<bool, StoreError>;
     async fn list_profiles(&self, ws: &str) -> Result<Vec<LlmProfile>, StoreError>;
@@ -126,6 +129,20 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError>;
+    /// The entry with `id`, of any mock.
+    async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError>;
+    /// Adds `tokens` to the mock's usage for `day` (UTC) and returns the new total.
+    async fn add_token_usage(
+        &self,
+        mock_id: Uuid,
+        day: chrono::NaiveDate,
+        tokens: u64,
+    ) -> Result<u64, StoreError>;
+    /// The mock's usage for `day` (UTC); 0 when nothing was recorded.
+    async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError>;
+    /// Deletes every mock's usage of the days before `before` (UTC);
+    /// returns how many rows were deleted.
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError>;
     /// Sorted by `channel_id`.
     async fn list_channel_settings(
         &self,
@@ -347,6 +364,17 @@ pub fn validate_header_name(name: &str) -> Result<(), StoreError> {
     }
 }
 
+/// `Invalid` when a mock's chaos or limits are out of range.
+pub(crate) fn validate_mock_settings(
+    chaos: Option<&ChaosSettings>,
+    limits: &MockLimits,
+) -> Result<(), StoreError> {
+    if let Some(c) = chaos {
+        c.validate().map_err(StoreError::Invalid)?;
+    }
+    limits.validate().map_err(StoreError::Invalid)
+}
+
 /// Error for a write into a workspace that does not exist.
 pub(crate) fn missing_workspace(name: &str) -> StoreError {
     StoreError::NotFound(format!("workspace {name:?}"))
@@ -523,6 +551,134 @@ mod tests {
                 matches!(validate_route_prefix(bad), Err(StoreError::Invalid(_))),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn chaos_ranges() {
+        let ok = ChaosSettings {
+            error_rate: 1.0,
+            latency_jitter: Some(LatencyJitter {
+                min_ms: 30_000,
+                max_ms: 30_000,
+            }),
+            drop_stream_rate: 0.0,
+        };
+        assert_eq!(ok.validate(), Ok(()));
+        assert!(!ok.is_noop());
+        assert!(ChaosSettings::default().is_noop());
+        let zero_jitter = ChaosSettings {
+            latency_jitter: Some(LatencyJitter::default()),
+            ..ChaosSettings::default()
+        };
+        assert!(zero_jitter.is_noop());
+        let cases = [
+            (
+                ChaosSettings {
+                    error_rate: 1.5,
+                    ..ChaosSettings::default()
+                },
+                "chaos.error_rate must be between 0 and 1",
+            ),
+            (
+                ChaosSettings {
+                    error_rate: f64::NAN,
+                    ..ChaosSettings::default()
+                },
+                "chaos.error_rate",
+            ),
+            (
+                ChaosSettings {
+                    drop_stream_rate: -0.1,
+                    ..ChaosSettings::default()
+                },
+                "chaos.drop_stream_rate",
+            ),
+            (
+                ChaosSettings {
+                    latency_jitter: Some(LatencyJitter {
+                        min_ms: 5,
+                        max_ms: 4,
+                    }),
+                    ..ChaosSettings::default()
+                },
+                "chaos.latency_jitter.min_ms",
+            ),
+            (
+                ChaosSettings {
+                    latency_jitter: Some(LatencyJitter {
+                        min_ms: 0,
+                        max_ms: 30_001,
+                    }),
+                    ..ChaosSettings::default()
+                },
+                "chaos.latency_jitter.max_ms",
+            ),
+        ];
+        for (c, msg) in cases {
+            let err = c.validate().expect_err(msg);
+            assert!(err.contains(msg), "{err}");
+        }
+    }
+
+    #[test]
+    fn limit_ranges() {
+        let ok = MockLimits {
+            rate_limit: Some(RateLimit {
+                requests_per_second: 100_000.0,
+                burst: 100_000,
+            }),
+            daily_token_budget: Some(1),
+            max_request_bytes: Some(67_108_864),
+            max_response_bytes: Some(1024),
+        };
+        assert_eq!(ok.validate(), Ok(()));
+        assert_eq!(MockLimits::default().validate(), Ok(()));
+        let rate = |rps: f64, burst: u32| MockLimits {
+            rate_limit: Some(RateLimit {
+                requests_per_second: rps,
+                burst,
+            }),
+            ..MockLimits::default()
+        };
+        let cases = [
+            (rate(0.0, 1), "limits.rate_limit.requests_per_second"),
+            (rate(f64::NAN, 1), "limits.rate_limit.requests_per_second"),
+            (rate(100_000.1, 1), "limits.rate_limit.requests_per_second"),
+            (rate(1.0, 0), "limits.rate_limit.burst"),
+            (rate(1.0, 100_001), "limits.rate_limit.burst"),
+            (
+                MockLimits {
+                    daily_token_budget: Some(0),
+                    ..MockLimits::default()
+                },
+                "limits.daily_token_budget",
+            ),
+            (
+                MockLimits {
+                    max_request_bytes: Some(1023),
+                    ..MockLimits::default()
+                },
+                "limits.max_request_bytes",
+            ),
+            (
+                MockLimits {
+                    max_request_bytes: Some(67_108_865),
+                    ..MockLimits::default()
+                },
+                "limits.max_request_bytes",
+            ),
+            (
+                MockLimits {
+                    max_response_bytes: Some(16_777_217),
+                    ..MockLimits::default()
+                },
+                "limits.max_response_bytes",
+            ),
+        ];
+        for (l, msg) in cases {
+            let err = l.validate().expect_err(msg);
+            assert!(err.contains(msg), "{err}");
         }
     }
 

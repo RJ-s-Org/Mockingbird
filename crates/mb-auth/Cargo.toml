@@ -19,6 +19,7 @@ base64.workspace = true
 chrono.workspace = true
 http.workspace = true
 jsonwebtoken.workspace = true
+mb-llm.workspace = true
 mb-store.workspace = true
 openidconnect.workspace = true
 rand.workspace = true

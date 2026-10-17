@@ -3,6 +3,7 @@ import { useActiveOperations, usePutScenario, type PutScenario, type Scenario } 
 import { inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { ChaosFields, chaosDraft, chaosErrors, chaosFromDraft, hasErrors } from "./ChaosLimits";
 
 /** The `set` field's text parsed: an object, `null` when blank, or an error message. */
 export function parseSet(text: string): { value: Record<string, unknown> | null } | { error: string } {
@@ -47,6 +48,7 @@ export function ScenarioEditor({
   const [latency, setLatency] = useState(scenario?.latency_ms == null ? "" : String(scenario.latency_ms));
   const [setText, setSetText] = useState(scenario?.set == null ? "" : JSON.stringify(scenario.set, null, 2));
   const [operations, setOperations] = useState<string[]>(scenario?.operations ?? []);
+  const [chaos, setChaos] = useState(() => chaosDraft(scenario?.chaos));
 
   const reason =
     scenario?.source === "file"
@@ -56,13 +58,15 @@ export function ScenarioEditor({
         : "Read-only: editing a scenario needs the editor role.";
   const parsed = parseSet(setText);
   const setError = "error" in parsed ? parsed.error : undefined;
+  const chaosErr = chaosErrors(chaos);
+  const invalid = setError !== undefined || hasErrors(chaosErr);
   // Keep selections the active contract no longer has, so saving shows the server's verdict.
   const options = [...contractOperations, ...operations.filter((op) => !contractOperations.includes(op))];
   const title = scenario ? `Scenario ${scenario.name}` : "New scenario";
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if ("error" in parsed) return;
+    if ("error" in parsed || invalid) return;
     const body: PutScenario = {
       instructions: instructions.trim() === "" ? null : instructions,
       status: optionalNumber(status),
@@ -70,6 +74,9 @@ export function ScenarioEditor({
       set: parsed.value as PutScenario["set"],
       operations,
     };
+    // An empty override is left out, which removes the scenario's chaos.
+    const override = chaosFromDraft(chaos);
+    if (override) body.chaos = override;
     put.mutate({ name, body }, { onSuccess: onClose });
   };
 
@@ -190,10 +197,17 @@ export function ScenarioEditor({
                 : "Operations of the active contract; none selected means all."}
             </p>
           </div>
+          <fieldset className="space-y-2 rounded-md border border-slate-200 p-3">
+            <legend className="px-1 text-sm font-medium">Chaos override</legend>
+            <p className="text-xs text-slate-600">
+              Replaces the mock&apos;s chaos while the scenario applies; leave empty to use the mock&apos;s.
+            </p>
+            <ChaosFields idPrefix="scenario-chaos" draft={chaos} errors={chaosErr} onChange={setChaos} />
+          </fieldset>
         </fieldset>
         <ProblemAlert error={put.error} />
         {reason === undefined ? (
-          <button type="submit" className={primaryButton} disabled={setError !== undefined || put.isPending}>
+          <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
             Save
           </button>
         ) : null}

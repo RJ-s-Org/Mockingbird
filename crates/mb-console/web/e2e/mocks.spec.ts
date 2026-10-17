@@ -59,9 +59,13 @@ test("create a mock, upload, activate and roll back contract versions", async ({
 
   // The mock declared in the config file is read-only.
   await page.goto("/w/default/mocks/files/overview");
-  await expect(page.getByText("Managed by config file")).toBeVisible();
+  // One notice for the settings form, one for the chaos and limits editor.
+  const notices = page.getByText("Managed by config file");
+  await expect(notices).toHaveCount(2);
+  for (const notice of await notices.all()) await expect(notice).toBeVisible();
   await expect(page.getByLabel("Persona")).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save chaos and limits" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Delete mock" })).toBeDisabled();
   await expectAccessible(page);
 

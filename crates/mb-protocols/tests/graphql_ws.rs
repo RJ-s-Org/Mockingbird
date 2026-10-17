@@ -346,3 +346,101 @@ async fn shutdown_completes_open_subscriptions() {
     stop.send_replace(true);
     assert_eq!(recv(&mut ws).await, json!({"type": "complete", "id": "1"}));
 }
+
+/// Waits for at least `n` reported calls; returns them.
+async fn reported(records: &Records, n: usize) -> Vec<RequestRecord> {
+    for _ in 0..100 {
+        if records.0.lock().unwrap().len() >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    records.0.lock().unwrap().drain(..).collect()
+}
+
+#[tokio::test]
+async fn query_and_mutation_over_websocket_run_like_http() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let addr = serve(rt).await;
+    let mut ws = init(&addr, json!({})).await;
+    let cases = [
+        (
+            "1",
+            r#"{ issue(id: "i-1") { id title } }"#,
+            "issue",
+            "Query.issue",
+        ),
+        (
+            "2",
+            r#"mutation { createIssue(input: {repositoryId: "r-1", title: "t"}) { id title } }"#,
+            "createIssue",
+            "Mutation.createIssue",
+        ),
+    ];
+    for (id, query, field, operation) in cases {
+        send(
+            &mut ws,
+            json!({"type": "subscribe", "id": id, "payload": {"query": query}}),
+        )
+        .await;
+        let next = recv(&mut ws).await;
+        assert_eq!(next["type"], "next", "{next}");
+        assert_eq!(next["id"], id, "{next}");
+        assert!(next["payload"].get("errors").is_none(), "{next}");
+        let keys: Vec<&str> = next["payload"]["data"][field]
+            .as_object()
+            .unwrap_or_else(|| panic!("{next}"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["id", "title"], "{next}");
+        assert_eq!(recv(&mut ws).await, json!({"type": "complete", "id": id}));
+        let calls = reported(&records, 1).await;
+        assert_eq!(calls.len(), 1, "{operation}");
+        assert_eq!(calls[0].operation_id.as_deref(), Some(operation));
+        assert_eq!(calls[0].status, 200);
+        assert_eq!(calls[0].method, "GET");
+    }
+}
+
+#[tokio::test]
+async fn connection_without_init_is_closed_and_frees_its_slot() {
+    let mut rt = runtime(None);
+    rt.protocols.graphql_max_connections_per_mock = 1;
+    rt.protocols.graphql_connection_init_timeout = Duration::from_millis(200);
+    let addr = serve(rt).await;
+    let mut idle = connect(&addr, "graphql-transport-ws").await;
+    let close = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(3), idle.next())
+            .await
+            .expect("not closed")
+            .unwrap()
+            .unwrap();
+        match msg {
+            Message::Close(frame) => break frame.unwrap(),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(u16::from(close.code), 4408);
+    drop(idle);
+    // The slot is free again: a new connection is accepted and initialised.
+    let mut ok = false;
+    for _ in 0..50 {
+        let mut req = format!("ws://{addr}/graphql")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            "graphql-transport-ws".parse().unwrap(),
+        );
+        if tokio_tungstenite::connect_async(req).await.is_ok() {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ok, "slot not released");
+}

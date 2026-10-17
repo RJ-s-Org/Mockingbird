@@ -1,0 +1,70 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security issues go through **Report a vulnerability** on the Security tab, not here.
+        Remove secrets (API keys, passwords, tokens) from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `mockingbird --version`, or the image tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run Mockingbird?
+      options:
+        - Binary
+        - Docker image (full)
+        - Docker image (slim)
+        - Docker Compose
+        - Helm chart
+        - Built from source
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - REST / SSE
+        - GraphQL
+        - gRPC
+        - SOAP
+        - Events (Kafka, AMQP, MQTT, WebSocket)
+        - Import
+        - Generation / LLM
+        - Admin API / CLI
+        - Console
+        - Auth
+        - Storage / state / HA
+        - Deployment
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: A minimal contract and `mockingbird.yaml`, and the requests that show the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines (`RUST_LOG=debug` helps) and the `/readyz` output.
+      render: text

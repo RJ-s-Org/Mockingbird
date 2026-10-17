@@ -16,10 +16,13 @@ dashmap.workspace = true
 futures.workspace = true
 json-patch.workspace = true
 jsonschema.workspace = true
+metrics.workspace = true
 mb-llm.workspace = true
 mb-mcm.workspace = true
 mb-state.workspace = true
 rand.workspace = true
+regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -27,6 +30,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
 proptest.workspace = true

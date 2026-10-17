@@ -2,6 +2,23 @@
 
 A mock-endpoint platform: import an API contract and get a running mock that answers with schema-valid, LLM-generated responses.
 
+It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AMQP, MQTT) from their contracts, keeps per-session state, and runs as one binary or as a highly available control and data plane on Kubernetes.
+
+## Documentation
+
+| Guide | What it covers |
+| --- | --- |
+| [Architecture](docs/architecture.md) | Crates, roles, the request flow, HA (bus, leader election) and state backends |
+| [Configuration reference](docs/configuration.md) | Every `mockingbird.yaml` key, with its default, range, environment variable and flag |
+| [Running locally](docs/deploy/local.md) | The binary, `serve`, offline mode and TLS |
+| [Docker Compose](docs/deploy/compose.md) | The Compose stack and its `ha`, `kafka`, `amqp` and `mqtt` profiles |
+| [Kubernetes](docs/deploy/kubernetes.md) | The Helm chart, external stores, OIDC, ingress, secrets and verifying releases |
+| [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |
+| [Upgrading](docs/upgrading.md) | Upgrade notes, migrations and the `mb-ext` 1.0 changes |
+| [Performance](docs/performance.md) | The offline bench: method, numbers and how to rerun it |
+| [Extensions](crates/mb-ext/README.md) | The `mb-ext` extension API and its stability policy |
+| [Examples](examples/gallery/README.md) | Ready-to-serve configurations for every protocol and for chaos |
+
 ## Quickstart
 
 Install from a checkout:
@@ -54,56 +71,26 @@ Mockingbird listens on three ports: the data plane (REST, SSE, GraphQL and SOAP 
 For anything beyond a quick look, declare the server, storage, LLM profiles and mocks in `mockingbird.yaml`:
 
 ```yaml
-server:
-  port: 8080
-  admin_port: 9090
-  grpc_port: 50051
 storage:
   url: sqlite://./mockingbird.db      # or sqlite::memory: (default), postgres://…
-  session_ttl: 24h
 llm:
   default_profile: deepseek
   profiles:
     deepseek:
       base_url: https://api.deepseek.com
       model: deepseek-chat
-      api_key: env:DEEPSEEK_API_KEY   # a secret reference: env:NAME or file:/path
-      timeout: 3s
-      fallback: local
-    local:
-      base_url: http://localhost:11434/v1
-      model: llama3.1
-observability:
-  request_log_retention: 1000
+      api_key: env:DEEPSEEK_API_KEY   # a secret reference: env:NAME, file:/path or vault:…
 mocks:
   orders:
     contract: ./orders.yaml           # relative to this file
-    route_prefix: /orders             # default: /<name>
     persona: Terse, realistic retail data.
     scenarios:
       out-of-stock:
         status: 409
         instructions: Explain that the item is out of stock.
-      slow:
-        latency: 2s
-      firehose:
-        stream_items: 20              # items per streamed response
-        stream_item_interval: 500ms   # pause between streamed items
-protocols:                            # every key is optional; these are the defaults
-  graphql:
-    path: /graphql                    # below each GraphQL mock's route prefix
-    introspection: true
-    max_depth: 15
-    max_complexity: 1000
-  stream:
-    default_items: 5                  # items per streamed response
-    max_items: 50                     # upper bound, whatever a request asks for
-    item_interval: 0s                 # pause before every item but the first
-  sse:
-    keepalive: 15s                    # interval between keepalive comments
-  grpc:
-    max_message_bytes: 4194304        # 4 MiB, decoding and encoding
 ```
+
+The [configuration reference](docs/configuration.md) lists every key; [`docs/examples/mockingbird.yaml`](docs/examples/mockingbird.yaml) is a commented starting point and [`docs/examples/mockingbird.full.yaml`](docs/examples/mockingbird.full.yaml) sets every key.
 
 ```sh
 mockingbird serve -c mockingbird.yaml          # reconcile once at startup
@@ -520,20 +507,7 @@ Imports and draft previews go through the same extension points as data-plane ca
 
 ### Configuration
 
-```yaml
-import:
-  workers: 2                 # import worker tasks, 1..=16
-  max_tokens: 200000         # LLM token budget per job, at least 1000
-  llm_profile: importer      # optional; default: the mock's own profile
-  max_active_jobs_per_mock: 10  # queued plus running jobs per mock, at least 1
-  url_allowlist:             # private hosts URL imports may reach (default: none)
-    - docs.internal          # an exact host name
-    - "*.corp.example"       # any subdomain of corp.example
-    - 10.20.0.0/16           # a CIDR range
-    - 192.168.1.15           # a single address
-```
-
-`import.llm_profile` is looked up in the mock's workspace first, then in `default`. The `import:` section is read at startup.
+The `import:` section (workers, the per-job token budget, the extraction profile, the private-URL allowlist and the per-mock job limit) is described in the [configuration reference](docs/configuration.md#import). It is read at startup.
 
 ### URL fetching
 
@@ -606,22 +580,13 @@ The admin port serves a web console at `/` (for example http://127.0.0.1:9090): 
 auth:
   mode: oidc
   external_url: https://mockingbird.example.com   # where browsers reach the admin port
-  session_ttl: 12h                                 # absolute console session lifetime (max 30d)
-  sysadmin_subjects: ["3f2c…"]                     # OIDC `sub` values that are always sysadmin
-  public_metrics: true                             # serve /metrics without credentials
   oidc:
     issuer: https://auth.example.com/auth/v1/      # exactly the discovery `issuer` (Rauthy's ends in /)
     client_id: mockingbird
-    client_secret: env:MB_OIDC_CLIENT_SECRET       # env:NAME or file:/path
-    scopes: [openid, profile, email, groups]       # default
-    roles_claim: groups                            # default
-    group_prefix: mb                               # default
-    audience: mockingbird                          # `aud` of bearer JWTs; default: client_id
-audit:
-  retention_days: 365                              # 1..=3650
-  webhook_url: https://hooks.example.com/mockingbird
-  webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET
+    client_secret: env:MB_OIDC_CLIENT_SECRET       # a secret reference
 ```
+
+Every `auth`, `auth.oidc` and `audit` key is in the [configuration reference](docs/configuration.md#auth).
 
 Register `<external_url>/auth/callback` as the client's redirect URI and `<external_url>/` as its post-logout redirect URI. `/healthz`, `/readyz`, `/auth/login`, `/auth/callback` and `/api/openapi.json` are always public, and `/metrics` is too unless `public_metrics: false`. An unauthenticated API call gets a `401` problem; a browser opening a console page is redirected to the login.
 
@@ -694,7 +659,7 @@ def verify(secret: bytes, body: bytes, header: str) -> bool:
 docker compose -f deploy/compose/docker-compose.yml up
 ```
 
-Open http://localhost:9090 and log in as `demo@localhost.test` / `Demo-Passw0rd-123!` (a sysadmin and an admin of `default`). The data plane is on http://localhost:8080. **The stack's secrets are published dev values: use it only on your own machine.** See [deploy/compose/README.md](deploy/compose/README.md) for details and manual setup steps.
+Open http://localhost:9090 and log in as `demo@localhost.test` / `Demo-Passw0rd-123!`. **The stack's secrets are published dev values: use it only on your own machine.** See [Docker Compose](docs/deploy/compose.md) for the HA and broker profiles.
 
 ### Console development
 
@@ -716,23 +681,18 @@ On the admin port:
 | Path | Meaning |
 | --- | --- |
 | `/healthz` | Liveness: the process is up. |
-| `/readyz` | Readiness: 503 `unavailable` when the control store is unreachable; otherwise 200 with `ready`, or `degraded` plus reasons when the state store is failing and mocks serve statelessly, or a mock failed to rebuild and serves its previous version. Each store ping is bounded to 2 s. In `auth.mode: oidc` the reasons are shown only to callers with valid credentials; anyone else gets just the status. |
-| `/metrics` | Prometheus metrics: requests, latency, LLM tokens and outcomes, request-log drops. |
+| `/readyz` | Readiness, with the node's `role` and whether it is the `leader`: 503 `unavailable` when the control store is unreachable; otherwise 200 with `ready`, or `degraded` plus `reasons` (state store or bus failing, a mock that failed to rebuild, a broker down, a daily token budget spent). In `auth.mode: oidc` the reasons are shown only to callers with valid credentials. |
+| `/metrics` | Prometheus metrics. |
 
-The data plane keeps `/__mockingbird/healthz`. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces over OTLP (HTTP/protobuf).
+The data plane keeps `/__mockingbird/healthz`. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces over OTLP (HTTP/protobuf). The [runbook](docs/operations/runbook.md) explains each `/readyz` reason and the metrics to alert on.
 
-## Postgres
+## Production
 
-SQLite is the default (in memory, or `sqlite://<path>`, created if missing). For shared or long-lived deployments point storage at Postgres; migrations run at startup under an advisory lock:
+- **Storage.** SQLite is the default (in memory, or `sqlite://<path>`). For shared or long-lived deployments use Postgres (`--storage-url postgres://…` or `MB_STORAGE_URL`); migrations run at startup under an advisory lock. Session state uses the same database unless `storage.state_url` names another (`memory`, Postgres or Redis).
+- **High availability.** `--role control` and `--role data` split the Admin API and console from the mocks, over a Postgres or Redis bus with leader election. See [architecture](docs/architecture.md#high-availability) and [Kubernetes](docs/deploy/kubernetes.md).
+- **Hardening.** Global and per-mock limits (concurrency, request and response size, rate limit, daily token budget), per-mock chaos, the output PII scrubber, TLS termination and outbound CA and proxy settings are all in the [configuration reference](docs/configuration.md).
 
-```sh
-mockingbird serve -c mockingbird.yaml --storage-url postgres://mb:secret@db:5432/mockingbird
-# or MB_STORAGE_URL=postgres://…
-```
-
-Session state uses the same database unless `storage.state_url` says otherwise (`memory` keeps it in process).
-
-To run the Postgres-gated tests against a throwaway local server: `scripts/test-postgres.sh`. Otherwise they read `MB_TEST_POSTGRES_URL` and skip when it is unset.
+To run the Postgres-gated tests against a throwaway local server: `scripts/test-postgres.sh`; the Redis-gated ones: `scripts/test-redis.sh`. Otherwise they read `MB_TEST_POSTGRES_URL` and `MB_TEST_REDIS_URL` and skip when unset.
 
 ## Docker
 
@@ -741,7 +701,7 @@ docker build -t mockingbird .
 docker run --rm mockingbird --version
 ```
 
-This builds the full image (Kafka, AMQP and MQTT); `--build-arg FEATURES=--no-default-features` builds the slim one (see [Images](#images)).
+This builds the full image (Kafka, AMQP and MQTT); `--build-arg FEATURES=--no-default-features` builds the slim one (see [Images](#images)). Release images are published as `ghcr.io/rjs-git/mockingbird:<version>` (and `-slim`), signed with cosign; see [verifying releases](docs/deploy/kubernetes.md#verifying-images-and-binaries).
 
 The image builds the console too and exposes ports 8080 (data plane), 9090 (Admin API, console and ops) and 50051 (gRPC). It runs as a non-root user and, like the binary, binds loopback unless told otherwise. With `auth.mode: none`, binding all interfaces needs `--insecure-no-auth`; only do this on a trusted network (or use `oidc`, as in the [Compose stack](deploy/compose/README.md)):
 
@@ -751,50 +711,9 @@ docker run --rm -p 8080:8080 -p 9090:9090 -p 50051:50051 \
   mockingbird serve --host 0.0.0.0 --insecure-no-auth --offline /work/orders.yaml
 ```
 
-With a config file, mount it and its contracts and pass `-c`; use Postgres (`MB_STORAGE_URL`) to keep state across container restarts.
-
 ## Reference
 
-### Flags
-
-`mockingbird serve`:
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `-c, --config` | none | Config file; without it the contracts given are served zero-config. |
-| `--watch` | off | Reconcile again when the config file or a contract changes (needs `-c`). |
-| `--host` | `127.0.0.1` | Bind address of all ports. A non-loopback host requires `--insecure-no-auth`. |
-| `--port` | `8080` | Data-plane port. |
-| `--admin-port` | `9090` | Admin API and ops port. |
-| `--grpc-port` | `50051` | gRPC port (h2c), shared by every gRPC mock. |
-| `--storage-url` | `sqlite::memory:` | Control-plane storage. |
-| `--insecure-no-auth` | off | Permit a non-loopback bind with `auth.mode: none`. |
-| `--offline` | off | Faker only; no LLM calls. |
-| `--llm-timeout` | `3s` | LLM timeout of the default profile before falling back. |
-
-### Environment
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `MB_HOST`, `MB_PORT`, `MB_ADMIN_PORT`, `MB_GRPC_PORT`, `MB_STORAGE_URL` | see flags | Same as the flags; flags win. |
-| `MB_ADMIN_URL` | `http://127.0.0.1:9090` | Admin API used by the CLI client. |
-| `MB_ADMIN_TOKEN` | none | API key the CLI client sends (`--token`). |
-| `MB_LLM_API_KEY` | none | API key of the default profile. Required unless `--offline`; local endpoints such as Ollama accept any dummy value. |
-| `MB_LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible base URL. |
-| `MB_LLM_MODEL` | `deepseek-chat` | Model name. |
-| `MB_LLM_JSON_SCHEMA` | `false` | `true` to request JSON Schema mode instead of JSON mode. |
-| `RUST_LOG` | `info` | Log filter. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Enables OTLP trace export. |
-
-### Config keys: `import`
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `import.workers` | `2` | Import worker tasks, 1 to 16. |
-| `import.max_tokens` | `200000` | LLM token budget of one import job, at least 1000. |
-| `import.llm_profile` | none | LLM profile for extraction instead of the mock's own (mock's workspace first, then `default`). |
-| `import.max_active_jobs_per_mock` | `10` | Most queued plus running import jobs one mock may have; another `POST …/imports` is answered `429`. At least 1. |
-| `import.url_allowlist` | `[]` | Host names, `*.suffix` host suffixes, addresses and CIDR ranges that URL imports may reach although they are private. |
+`mockingbird serve --help` lists the flags, and the [configuration reference](docs/configuration.md#environment-variables-and-flags) maps every flag and `MB_*` variable to its key. The CLI client reads `MB_ADMIN_URL` (default `http://127.0.0.1:9090`), `MB_ADMIN_TOKEN` and `MB_WORKSPACE`.
 
 ## License
 

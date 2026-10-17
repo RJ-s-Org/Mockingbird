@@ -1,0 +1,21 @@
+# GraphQL: the Star Wars schema, with queries, mutations and subscriptions.
+# Run from the repository root:
+#   mockingbird serve -c examples/gallery/graphql/mockingbird.yaml --offline
+# then try:
+#   curl -s localhost:8080/starwars/graphql -H 'content-type: application/json' \
+#     -d '{"query":"{ hero { name } }"}'
+mocks:
+  starwars:
+    contract: ../../../fixtures/graphql/starwars.graphql
+    route_prefix: /starwars
+    persona: Characters and droids from the original trilogy.
+    scenarios:
+      missing-hero:
+        status: 404
+        operations: [Query.hero]
+protocols:
+  graphql:
+    path: /graphql
+    introspection: true
+    max_depth: 15
+    max_complexity: 1000

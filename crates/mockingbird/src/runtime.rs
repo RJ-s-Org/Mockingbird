@@ -7,20 +7,26 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwapOption;
-use mb_engine::{Engine, EngineConfig, ScenarioSpec, StreamConfig};
+use mb_engine::pii::Scrubber;
+use mb_engine::{
+    Engine, EngineConfig, EngineGuards, GenerationLimiter, ScenarioSpec, StreamConfig, TokenBudget,
+};
 use mb_ext::{Extensions, Tenancy};
 use mb_import::smart::ExtractLlm;
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
 use mb_protocols::events::EventDeps;
 use mb_protocols::{
-    DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, ProtocolSettings,
-    RequestRecorder, ScenarioRuntime, Shutdown,
+    ChaosRuntime, ChaosSpec, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime,
+    ProtocolSettings, RateLimiter, RequestRecorder, RuntimeLimits, ScenarioRuntime, Shutdown,
 };
 use mb_state::StateStore;
 use mb_store::{
-    ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode as StoredAuthMode,
-    LlmProfile, Mock, Scenario,
+    ChaosSettings, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig,
+    DataPlaneAuthMode as StoredAuthMode, LlmProfile, Mock, Scenario,
 };
+
+use crate::budget::StoreTokenBudget;
+use crate::file_config::LimitsConfig;
 
 /// Fallback hops followed from a mock's profile before the chain is rejected.
 pub const MAX_FALLBACK_DEPTH: usize = 3;
@@ -34,6 +40,17 @@ static STOP: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
 /// is asked to stop.
 pub fn stop_open_streams() {
     STOP.send_replace(true);
+}
+
+/// What the mock runtimes of a node run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServeMode {
+    /// Everything (roles `all` and `data`).
+    Full,
+    /// Role `control`: the runtimes are built for manual publish only;
+    /// their channel runtimes are
+    /// [`PublishOnly`](mb_protocols::events::ChannelMode::PublishOnly).
+    ControlOnly,
 }
 
 /// Everything shared by the runtimes of all mocks.
@@ -57,6 +74,18 @@ pub struct RuntimeDeps {
     pub stream: StreamConfig,
     /// Brokers and the scheduler lease every channel runtime uses.
     pub events: EventDeps,
+    /// Bounds the LLM generations in flight across every mock
+    /// (`limits.max_concurrent_generations`).
+    pub limiter: Arc<GenerationLimiter>,
+    /// Scrubs PII from LLM output (`pii:`); `None` when disabled.
+    pub scrubber: Option<Arc<Scrubber>>,
+    /// The global `limits:`, for mocks that set none of their own.
+    pub limits: LimitsConfig,
+    /// Extra CA roots and the proxy of every LLM provider client
+    /// (`outbound:`).
+    pub http: mb_llm::HttpOptions,
+    /// What the runtimes run (see [`ServeMode`]).
+    pub mode: ServeMode,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so
@@ -99,10 +128,68 @@ pub const IMPORT_MIN_MAX_TOKENS: u32 = 8192;
 const IMPORT_MAX_TEMPERATURE: f32 = 0.2;
 
 /// The engine generating `mock`'s responses: its persona, the stream
-/// settings and, unless offline or no profile applies, the provider chain
-/// of its profile with the head profile's timeout, temperature and token
-/// limit.
+/// settings, its guards (see [`engine_guards`]) and, unless offline or no
+/// profile applies, the provider chain of its profile with the head
+/// profile's timeout, temperature and token limit.
 pub async fn build_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
+    Ok(build_engine_with_budget(deps, mock).await?.0)
+}
+
+/// [`build_engine`], also returning the mock's token budget (when it has
+/// one), for `/readyz`.
+async fn build_engine_with_budget(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+) -> anyhow::Result<(Engine, Option<Arc<StoreTokenBudget>>)> {
+    let engine = build_bare_engine(deps, mock).await?;
+    let (guards, budget) = engine_guards(deps, mock);
+    Ok((engine.with_guards(guards), budget))
+}
+
+/// The guards of `mock`'s engine: the shared generation limiter and PII
+/// scrubber, a [`StoreTokenBudget`] when the mock has a
+/// `daily_token_budget`, and the mock's response size cap, else the
+/// global one. Also returns the budget.
+pub fn engine_guards(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+) -> (EngineGuards, Option<Arc<StoreTokenBudget>>) {
+    let budget = mock
+        .limits
+        .daily_token_budget
+        .map(|limit| StoreTokenBudget::spawn(Arc::clone(&deps.store), mock, limit));
+    let max_response_bytes = mock
+        .limits
+        .max_response_bytes
+        .unwrap_or(deps.limits.max_response_bytes);
+    let guards = EngineGuards {
+        limiter: Some(Arc::clone(&deps.limiter)),
+        budget: budget.clone().map(|b| b as Arc<dyn TokenBudget>),
+        scrubber: deps.scrubber.clone(),
+        max_response_bytes: Some(usize::try_from(max_response_bytes).unwrap_or(usize::MAX)),
+    };
+    (guards, budget)
+}
+
+/// `mock`'s rate limit and request size cap (its own, else the global
+/// `limits.max_request_bytes`).
+pub fn runtime_limits(deps: &RuntimeDeps, mock: &Mock) -> RuntimeLimits {
+    let max_request_bytes = mock
+        .limits
+        .max_request_bytes
+        .unwrap_or(deps.limits.max_request_bytes);
+    RuntimeLimits {
+        rate: mock
+            .limits
+            .rate_limit
+            .as_ref()
+            .map(|r| Arc::new(RateLimiter::new(r.requests_per_second, r.burst))),
+        max_request_bytes: usize::try_from(max_request_bytes).unwrap_or(usize::MAX),
+    }
+}
+
+/// The engine without guards.
+async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
     let mut config = EngineConfig {
         persona: mock.persona.clone(),
         stream: deps.stream.clone(),
@@ -194,6 +281,17 @@ fn import_hop(profile: &LlmProfile) -> HopSettings {
 
 /// The runtime serving `mock`'s active contract, or `None` when it has none.
 pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<MockRuntime>> {
+    Ok(build_runtime_with_budget(deps, mock)
+        .await?
+        .map(|(rt, _)| rt))
+}
+
+/// [`build_runtime`], also returning the mock's token budget (when it has
+/// one), which lives as long as the runtime's engine.
+pub async fn build_runtime_with_budget(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+) -> anyhow::Result<Option<(MockRuntime, Option<Arc<StoreTokenBudget>>)>> {
     let Some(contract) = deps
         .store
         .active_contract(mock.id)
@@ -203,7 +301,7 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
         return Ok(None);
     };
 
-    let engine = build_engine(deps, mock).await?;
+    let (engine, budget) = build_engine_with_budget(deps, mock).await?;
 
     let scenarios = deps
         .store
@@ -228,8 +326,14 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
     rt.ext = deps.ext.clone();
     rt.recorder = deps.recorder.clone();
     rt.protocols = deps.protocols.clone();
+    rt.limits = runtime_limits(deps, mock);
+    rt.chaos = mock
+        .chaos
+        .as_ref()
+        .filter(|c| !c.is_noop())
+        .map(chaos_runtime);
     rt.shutdown = Shutdown::new(STOP.subscribe());
-    Ok(Some(rt))
+    Ok(Some((rt, budget)))
 }
 
 /// The runtime form of a mock's stored data-plane auth settings.
@@ -348,10 +452,7 @@ fn choose_profile(
     mock: &Mock,
     configured: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
-    let tenancy = Tenancy {
-        tenant: "default".into(),
-        workspace: mock.workspace.clone(),
-    };
+    let tenancy = Tenancy::new("default", mock.workspace.clone());
     deps.ext
         .providers
         .choose(&tenancy, &mock.name, configured)
@@ -394,6 +495,7 @@ async fn openai_provider(
         api_key,
         model: profile.model.clone(),
         json_schema: profile.json_schema,
+        http: deps.http.clone(),
     })
     .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?;
     Ok(Arc::new(provider))
@@ -407,6 +509,23 @@ fn chain_names(chain: &[LlmProfile]) -> String {
         .join(" -> ")
 }
 
+/// The runtime form of stored chaos settings, seeded from `MB_CHAOS_SEED`
+/// when it is set.
+pub fn chaos_runtime(settings: &ChaosSettings) -> Arc<ChaosRuntime> {
+    let spec = ChaosSpec {
+        error_rate: settings.error_rate,
+        latency_jitter: settings.latency_jitter.as_ref().map(|j| {
+            (
+                Duration::from_millis(j.min_ms),
+                Duration::from_millis(j.max_ms),
+            )
+        }),
+        drop_stream_rate: settings.drop_stream_rate,
+    };
+    Arc::new(ChaosRuntime::new(spec, ChaosRuntime::seed_from_env()))
+}
+
+/// A scenario's chaos replaces the mock's even when it injects nothing.
 fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
     ScenarioRuntime {
         spec: ScenarioSpec {
@@ -419,5 +538,6 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         operations: s.rules.operations,
         stream_items: s.rules.stream_items.and_then(|n| usize::try_from(n).ok()),
         stream_item_interval: s.rules.stream_item_interval_ms.map(Duration::from_millis),
+        chaos: s.rules.chaos.as_ref().map(chaos_runtime),
     }
 }

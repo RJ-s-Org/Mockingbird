@@ -6,6 +6,8 @@ use crate::{Rejection, Tenancy};
 /// Chooses the LLM profile a call may use, given the mock's configured one.
 /// `Ok(None)` means "no LLM profile" (the engine falls back accordingly).
 pub trait ProviderPolicy: Send + Sync {
+    /// The profile to use for a call on `mock` whose configured profile is
+    /// `configured`, or a rejection.
     fn choose(
         &self,
         t: &Tenancy,

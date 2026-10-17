@@ -36,11 +36,29 @@ jobs:
         image: apache/kafka:3.9.1
         ports:
           - 9092:9092
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       MB_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
       MB_TEST_AMQP_URL: amqp://guest:guest@localhost:5672/%2f
       MB_TEST_KAFKA_URL: localhost:9092
+      MB_TEST_REDIS_URL: redis://localhost:6379
+      # Every test binary with full debuginfo no longer fits on the runner's
+      # disk (rust-lld dies with a bus error while linking).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
       # The console is built first, so mb-console embeds the real build
       # instead of its placeholder page.
@@ -60,6 +78,10 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      - name: Test the custom extension example
+        run: cargo test -p mockingbird-custom-ext-example
+      - name: Build the API docs
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
       - name: Check the slim binary
         run: cargo check -p mockingbird --no-default-features
 
@@ -159,6 +181,73 @@ jobs:
         run: |
           docker run --rm mockingbird:ci --version
           docker run --rm mockingbird:ci-slim --version
+      - name: Scan the full image
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          version: v0.75.0
+          image-ref: mockingbird:ci
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+      - name: Scan the slim image
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          version: v0.75.0
+          image-ref: mockingbird:ci-slim
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+
+  # Lints and renders the Helm chart and validates it with kubeconform.
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-helm.sh
+
+  # The mb-ext public API against the last release tag.
+  semver:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned: a new release can change which lints fail. Bump it here; the
+      # cache key follows.
+      CARGO_SEMVER_CHECKS_VERSION: 0.51.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The baseline is the last `v*` tag, so the history is needed.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache cargo-semver-checks
+        id: semver-checks
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-semver-checks
+          key: cargo-semver-checks-${{ env.CARGO_SEMVER_CHECKS_VERSION }}-${{ runner.os }}-rust-1.97
+      - name: Install cargo-semver-checks
+        if: steps.semver-checks.outputs.cache-hit != 'true'
+        run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
+      - run: scripts/semver-check.sh
+
+  # The minimum supported Rust version, built with its own toolchain. Kept
+  # separate from `check` so a rust-toolchain.toml bump cannot hide an MSRV
+  # regression: `rust-version` in Cargo.toml is the source of truth.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      - run: cargo +1.97 check --workspace --all-features --locked
 
   e2e:
     runs-on: ubuntu-latest
@@ -184,16 +273,53 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-          npx playwright test -c playwright.rauthy.config.ts
+          npx playwright test -c playwright.rauthy.config.ts e2e-rauthy/
+      - name: Compose e2e flow
+        working-directory: crates/mb-console/web
+        run: npx playwright test -c playwright.rauthy.config.ts e2e-compose/flow.spec.ts
+      - name: Start the HA profile (control and data node over Postgres and Redis)
+        run: docker compose -f deploy/compose/docker-compose.yml --profile ha up -d --wait --wait-timeout 300 --build
+      - name: HA path
+        run: |
+          set -euo pipefail
+          control=http://localhost:19090
+          data=http://localhost:18080
+          # The control node's Admin API may still be starting.
+          for _ in $(seq 1 60); do
+            if curl -fsS "$control/readyz" >/dev/null; then break; fi
+            sleep 2
+          done
+          # 1. Create a mock through the control node's admin port.
+          curl -fsS -X POST "$control/api/v1/mocks" \
+            -H 'content-type: application/json' -d '{"name":"ha"}'
+          curl -fsS -X POST "$control/api/v1/mocks/ha/contracts" \
+            -H 'content-type: application/yaml' \
+            --data-binary @fixtures/openapi/orders-3.0.yaml
+          # 2. The data node serves it within 30 s.
+          served=0
+          for _ in $(seq 1 30); do
+            if curl -fsS "$data/ha/orders/o1" >/dev/null; then served=1; break; fi
+            sleep 1
+          done
+          if [ "$served" -ne 1 ]; then
+            echo "the data node did not serve the mock within 30 s" >&2
+            exit 1
+          fi
+          # 3. With the control node stopped, the data node still serves.
+          docker compose -f deploy/compose/docker-compose.yml --profile ha stop mockingbird-control
+          curl -fsS "$data/ha/orders/o1"
       - name: Compose logs
         if: failure()
         run: |
-          docker compose -f deploy/compose/docker-compose.yml ps -a
-          for service in rauthy rauthy-bootstrap mockingbird postgres; do
+          docker compose -f deploy/compose/docker-compose.yml --profile ha ps -a
+          for service in rauthy rauthy-bootstrap mockingbird postgres mockingbird-control mockingbird-data postgres-ha redis; do
             echo "::group::$service logs"
-            docker compose -f deploy/compose/docker-compose.yml logs --no-color --timestamps "$service"
+            docker compose -f deploy/compose/docker-compose.yml --profile ha logs --no-color --timestamps "$service"
             echo "::endgroup::"
           done
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml --profile ha down -v
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
