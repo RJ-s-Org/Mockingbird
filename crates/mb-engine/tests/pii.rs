@@ -209,6 +209,7 @@ fn replaces_public_ipv4() {
 fn leaves_uuids_dates_and_order_numbers() {
     let s = all();
     let input = "id 3f2b8c1e-9a4d-4f6b-8c2e-1d3a5b7c9e0f on 2026-10-14 order ORD-1234567890 \
+                 order ORD-4111111111111111 invoice INV.4111111111111111 \
                  version v1.2.3.4 ref 4155552671 uuid 12345678-1234-1234-1234-123456789012";
     let (out, counts) = s.scrub_str(input);
     assert_eq!(out, input);

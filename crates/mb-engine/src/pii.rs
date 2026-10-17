@@ -331,13 +331,14 @@ fn copy_span(
 }
 
 /// True when `next` (and the char after it) show the candidate continues a
-/// longer token: an alphanumeric neighbour, or one of `seps` followed by a
-/// digit.
+/// longer token: an alphanumeric neighbour, or one of `seps` with an
+/// alphanumeric beyond it (so `ORD-4111111111111111` and
+/// `INV.4111111111111111` are identifiers, not cards).
 fn continues(mut chars: impl Iterator<Item = char>, seps: &[char]) -> bool {
     match chars.next() {
         None => false,
         Some(c) if c.is_alphanumeric() || c == '_' => true,
-        Some(c) if seps.contains(&c) => chars.next().is_some_and(|d| d.is_ascii_digit()),
+        Some(c) if seps.contains(&c) => chars.next().is_some_and(char::is_alphanumeric),
         Some(_) => false,
     }
 }
