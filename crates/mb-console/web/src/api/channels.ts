@@ -72,7 +72,9 @@ export function fromMcmTrigger(v: unknown): TriggerDraft | null {
 export function triggerError(t: TriggerDraft): string | undefined {
   switch (t.kind) {
     case "schedule":
-      return Number.isFinite(t.every_ms) && t.every_ms >= MIN_SCHEDULE_MS ? undefined : `at least ${MIN_SCHEDULE_MS} ms`;
+      if (!Number.isFinite(t.every_ms) || t.every_ms < MIN_SCHEDULE_MS) return `at least ${MIN_SCHEDULE_MS} ms`;
+      // The API takes whole milliseconds and refuses a fraction.
+      return Number.isInteger(t.every_ms) ? undefined : `a whole number of ms, at least ${MIN_SCHEDULE_MS}`;
     case "cron":
       return t.expr.trim() === "" ? "a cron expression is required" : undefined;
     case "on_state_change":

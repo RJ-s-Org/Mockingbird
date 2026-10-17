@@ -243,6 +243,12 @@ describe("channels", () => {
     expect(within(first).getByText("at least 100 ms")).toBeTruthy();
     expect((within(editor).getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
 
+    // The API takes whole milliseconds only.
+    await user.clear(every);
+    await user.type(every, "150.5");
+    expect(within(first).getByText("a whole number of ms, at least 100")).toBeTruthy();
+    expect((within(editor).getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+
     // A cron trigger needs an expression.
     const cron = within(editor).getByRole("group", { name: "Trigger 2" });
     await user.clear(within(cron).getByLabelText("Cron expression"));

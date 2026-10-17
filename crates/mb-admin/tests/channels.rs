@@ -423,6 +423,26 @@ async fn put_runaway_schedule_422() {
 }
 
 #[tokio::test]
+async fn put_non_integer_schedule_422() {
+    let h = harness(true).await;
+    h.orders().await;
+    for every in [json!(1500.5), json!(1500.0), json!("1500"), json!(-1)] {
+        let p = h
+            .send(
+                Method::PUT,
+                "/api/v1/mocks/orders/channels/orderCreated",
+                Some(json!({ "triggers": [{ "schedule": { "every_ms": every } }] })),
+            )
+            .await
+            .problem(StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            p["detail"].as_str().unwrap().contains("triggers[0]"),
+            "{every}: {p}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn put_triggers_on_subscribe_channel_422() {
     let h = harness(true).await;
     h.orders().await;

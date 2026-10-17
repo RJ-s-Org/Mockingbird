@@ -201,9 +201,11 @@ pub struct PatchMock {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<ChaosSchema>)]
     pub chaos: Option<Option<ChaosSettings>>,
-    /// Replaces the whole object.
+    /// Replaces the whole object: a `null` member clears that limit, and
+    /// `null` clears them all.
+    #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<MockLimitsSchema>)]
-    pub limits: Option<MockLimits>,
+    pub limits: Option<Option<MockLimits>>,
 }
 
 /// Distinguishes an explicit `null` (`Some(None)`) from an absent field (`None`).
@@ -381,7 +383,7 @@ pub async fn patch(
         m.chaos = chaos;
     }
     if let Some(limits) = body.limits {
-        m.limits = limits;
+        m.limits = limits.unwrap_or_default();
     }
     let updated = view(&st, st.store.update_mock(&m).await?).await?;
     access

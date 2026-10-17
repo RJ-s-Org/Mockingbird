@@ -251,3 +251,34 @@ async fn file_managed_mock_rejects_chaos_patch() {
     assert_eq!(status, StatusCode::CONFLICT, "{problem}");
     assert_eq!(problem["title"], "Managed by config file", "{problem}");
 }
+
+#[tokio::test]
+async fn patch_limits_null_clears() {
+    let h = harness().await;
+    h.create("orders").await;
+    let (status, view) = h.patch("orders", json!({ "limits": limits_json() })).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+
+    // As the console sends cleared fields: each one `null`.
+    let cleared = json!({ "limits": {
+        "rate_limit": null,
+        "daily_token_budget": null,
+        "max_request_bytes": 4096,
+        "max_response_bytes": null,
+    } });
+    let (status, view) = h.patch("orders", cleared).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["limits"], json!({ "max_request_bytes": 4096 }));
+
+    // `limits: null` clears every limit.
+    let (status, view) = h.patch("orders", json!({ "limits": null })).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["limits"], json!({}));
+    let stored = h
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.limits, MockLimits::default());
+}
