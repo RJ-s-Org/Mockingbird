@@ -206,6 +206,10 @@ jobs:
   # The mb-ext public API against the last release tag.
   semver:
     runs-on: ubuntu-latest
+    env:
+      # Pinned: a new release can change which lints fail. Bump it here; the
+      # cache key follows.
+      CARGO_SEMVER_CHECKS_VERSION: 0.51.0
     steps:
       - uses: actions/checkout@v4
         with:
@@ -220,10 +224,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-semver-checks
-          key: cargo-semver-checks-${{ runner.os }}-rust-1.97
+          key: cargo-semver-checks-${{ env.CARGO_SEMVER_CHECKS_VERSION }}-${{ runner.os }}-rust-1.97
       - name: Install cargo-semver-checks
         if: steps.semver-checks.outputs.cache-hit != 'true'
-        run: cargo install cargo-semver-checks --locked
+        run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
       - run: scripts/semver-check.sh
 
   # The minimum supported Rust version, built with its own toolchain. Kept
