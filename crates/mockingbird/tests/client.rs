@@ -246,6 +246,29 @@ fn version_flag() {
     );
 }
 
+#[test]
+fn empty_or_invalid_workspace_is_a_usage_error() {
+    // Nothing listens here: the arguments must be refused before any request.
+    let admin = ["--admin-url", "http://127.0.0.1:9"];
+    let cases: [(&[&str], Option<&str>); 3] = [
+        (&["--workspace", "", "mocks", "list"], None),
+        (&["--workspace", "Bad_Name", "mocks", "list"], None),
+        (&["mocks", "list"], Some("")),
+    ];
+    for (args, env) in cases {
+        let mut cmd = Command::cargo_bin("mockingbird").unwrap();
+        cmd.env_remove("MB_WORKSPACE").args(admin).args(args);
+        if let Some(value) = env {
+            cmd.env("MB_WORKSPACE", value);
+        }
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?} {env:?}: {stderr}");
+        assert!(stderr.contains("--workspace"), "{stderr}");
+        assert!(stderr.contains("workspace name"), "{stderr}");
+    }
+}
+
 fn repo_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

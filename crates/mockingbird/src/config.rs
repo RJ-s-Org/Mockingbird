@@ -61,11 +61,23 @@ pub struct Cli {
         long,
         global = true,
         env = "MB_WORKSPACE",
-        default_value = mb_store::DEFAULT_WORKSPACE
+        default_value = mb_store::DEFAULT_WORKSPACE,
+        value_parser = parse_workspace
     )]
     pub workspace: String,
     #[command(subcommand)]
     pub cmd: Command,
+}
+
+/// A `--workspace` (`MB_WORKSPACE`) value: a valid workspace name, so an
+/// empty or malformed one is a usage error rather than a 404.
+fn parse_workspace(name: &str) -> Result<String, String> {
+    mb_store::validate_workspace_name(name)
+        .map(|()| name.to_string())
+        .map_err(|e| match e {
+            mb_store::StoreError::Invalid(detail) => detail,
+            other => other.to_string(),
+        })
 }
 
 #[derive(Subcommand, Debug)]
