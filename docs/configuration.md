@@ -248,7 +248,7 @@ Admission limits of one mock. Unset fields use the global [`limits`](#limits), o
 | `mocks.<name>.limits.rate_limit` | section | unset | | | Token bucket, per mock on each node. Over the limit, calls are answered 429 with `Retry-After` (in the contract's 429 shape when it declares one). |
 | `mocks.<name>.limits.rate_limit.requests_per_second` | number | | (0, 100000] | | Refill rate. |
 | `mocks.<name>.limits.rate_limit.burst` | integer | | 1..=100000 | | Bucket size. |
-| `mocks.<name>.limits.daily_token_budget` | integer | unset | At least 1 | | LLM tokens per UTC day across every replica (flushed to the store every 5 s). Once spent, calls are served by the faker and `/readyz` reports it. |
+| `mocks.<name>.limits.daily_token_budget` | integer | unset | At least 1 | | LLM tokens per UTC day across every replica (flushed to the store every 5 s; the leader prunes usage older than 90 days daily). Once spent, calls are served by the faker and `/readyz` reports it. |
 | `mocks.<name>.limits.max_request_bytes` | integer (bytes) | `limits.max_request_bytes` | 1024..=67108864 | | Overrides the global value for this mock. |
 | `mocks.<name>.limits.max_response_bytes` | integer (bytes) | `limits.max_response_bytes` | 1024..=16777216 | | Overrides the global value for this mock. |
 

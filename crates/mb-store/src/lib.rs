@@ -140,6 +140,9 @@ pub trait ControlStore: Send + Sync {
     ) -> Result<u64, StoreError>;
     /// The mock's usage for `day` (UTC); 0 when nothing was recorded.
     async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError>;
+    /// Deletes every mock's usage of the days before `before` (UTC);
+    /// returns how many rows were deleted.
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError>;
     /// Sorted by `channel_id`.
     async fn list_channel_settings(
         &self,

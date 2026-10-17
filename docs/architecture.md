@@ -31,7 +31,7 @@ A node runs one role (`server.role`, `MB_ROLE` or `--role`):
 | Data listener and gRPC listener | yes | not bound | yes |
 | Admin port | Admin API, console, ops | Admin API, console, ops | ops only (`/healthz`, `/readyz`, `/metrics`) |
 | Reconcile, `--watch` | leader only | leader only | never; `--watch` is a usage error |
-| Maintenance (session expiry, audit retention) | leader only | leader only | no |
+| Maintenance (session expiry, audit and token-usage retention) | leader only | leader only | no |
 | Smart import workers | yes | yes | no |
 | Mock runtimes | full | built for manual publish only; channel runtimes start no consumers, triggers or WebSocket routes | full |
 
@@ -49,7 +49,7 @@ A typical HA layout is two `control` replicas (one leader at a time) and an auto
 4. **State lookup** (`mb.state`). The session (`X-Mockingbird-Session`, cookie or gRPC metadata; `default` otherwise) and related resources. When the state store fails, the mock serves statelessly and `/readyz` reports `degraded`.
 5. **Prompt** (`mb.prompt`) and **generate** (`mb.llm`), inside the engine guards:
    - the global generation semaphore (`limits.max_concurrent_generations`, `mb_generation_in_flight`); a call that waits longer than its LLM timeout falls back (`mb_generation_queue_timeouts_total`);
-   - the mock's daily token budget (`mb_token_budget_used`, `mb_token_budget_exhausted_total`), shared across replicas through the `token_usage` table and flushed every 5 s;
+   - the mock's daily token budget (`mb_token_budget_used`, `mb_token_budget_exhausted_total`), shared across replicas through the `token_usage` table and flushed every 5 s (the leader deletes rows older than 90 days, daily);
    - the response size cap (`limits.max_response_bytes`).
    A refused guard never errors: the faker answers.
 6. **Validate → repair → fallback** (`mb.validate`, `mb.repair`). One repair call with the validation errors; then the faker. The response carries `X-Mockingbird-Source: llm | repaired | fallback`.
@@ -77,7 +77,7 @@ A connection that goes half-open (a partition, or conntrack or a load balancer d
 
 ### Leader election
 
-Work that must run once per cluster is leader-gated: the startup reconcile of `mockingbird.yaml`, `--watch`, and maintenance (session expiry, audit retention). The leader holds the lock `control`:
+Work that must run once per cluster is leader-gated: the startup reconcile of `mockingbird.yaml`, `--watch`, and maintenance (session expiry, audit and token-usage retention). The leader holds the lock `control`:
 
 - with Postgres, a session advisory lock whose key is the first 8 bytes (big-endian `i64`) of sha256(`"mockingbird:control"`);
 - with Redis, the key `mockingbird:leader:control`, a lease of 15 s renewed every 5 s;

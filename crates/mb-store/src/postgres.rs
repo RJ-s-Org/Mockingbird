@@ -1101,6 +1101,14 @@ impl ControlStore for PgStore {
         total.map_or(Ok(0), |t| from_i64(t, "tokens"))
     }
 
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError> {
+        Ok(sqlx::query("DELETE FROM token_usage WHERE day < $1")
+            .bind(before)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
     async fn list_channel_settings(
         &self,
         mock_id: Uuid,

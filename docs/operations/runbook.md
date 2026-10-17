@@ -28,7 +28,7 @@ Useful queries assume the default Prometheus naming; `X-Mockingbird-Source` is t
 
 **Meaning:** the mock spent its LLM tokens for the current UTC day, across every replica. Its calls are served by the faker until 00:00 UTC.
 
-**Action:** if expected, nothing. Otherwise find the caller in the request log (`GET /api/v1/mocks/<mock>/requests`), add a rate limit, or raise the budget (the Admin API's mock `limits`, or `mocks.<name>.limits.daily_token_budget`). The change applies at once; usage already counted stays.
+**Action:** if expected, nothing. Otherwise find the caller in the request log (`GET /api/v1/mocks/<mock>/requests`), add a rate limit, or raise the budget (the Admin API's mock `limits`, or `mocks.<name>.limits.daily_token_budget`). The change applies at once; usage already counted stays. Per-day usage is kept 90 days (pruned daily by the leader), so the `token_usage` table stays small.
 
 ## Rate limiting
 
@@ -58,7 +58,7 @@ Useful queries assume the default Prometheus naming; `X-Mockingbird-Source` is t
 
 **Signal:** `mb_leader` (1 on the leader). Alert when `sum(mb_leader)` across control nodes is 0 for more than a minute, or above 1 at all. `/readyz` shows `"leader": true|false`.
 
-**Meaning:** one control (or `all`) node holds the `control` lock and runs the reconcile, `--watch` and maintenance (session expiry, audit retention). A leader that loses its store connection stops that work within 5 s; another node takes over within 15 s (the Redis lease TTL; with Postgres, as soon as the advisory lock's session ends).
+**Meaning:** one control (or `all`) node holds the `control` lock and runs the reconcile, `--watch` and maintenance (session expiry, audit and token-usage retention). A leader that loses its store connection stops that work within 5 s; another node takes over within 15 s (the Redis lease TTL; with Postgres, as soon as the advisory lock's session ends).
 
 **Action:** a short gap is normal during deployments. If no node leads, check the control nodes' connectivity to the lock's backend (Postgres for a Postgres or local bus, Redis for a Redis bus). Leaderless periods only delay reconcile and maintenance; the data plane is unaffected.
 

@@ -74,6 +74,7 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     scenario_chaos_round_trip(&store).await;
     token_usage_accumulates_per_day(&store).await;
     token_usage_cascades_with_mock(&store).await;
+    token_usage_pruned_before_day(&store).await;
     get_request_log_by_id(&store).await;
 }
 
@@ -2884,6 +2885,23 @@ async fn scenario_chaos_round_trip(store: &Arc<dyn ControlStore>) {
         store.put_scenario(&s).await,
         Err(StoreError::Invalid(_))
     ));
+}
+
+async fn token_usage_pruned_before_day(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "tokens-pruned").await;
+    // Long past, so rows other checks wrote are not affected.
+    let old = chrono::NaiveDate::from_ymd_opt(2001, 1, 30).expect("date");
+    let older = chrono::NaiveDate::from_ymd_opt(2000, 12, 31).expect("date");
+    let kept = chrono::NaiveDate::from_ymd_opt(2001, 2, 1).expect("date");
+    for day in [older, old, kept] {
+        store.add_token_usage(mock.id, day, 10).await.expect("add");
+    }
+    let cutoff = chrono::NaiveDate::from_ymd_opt(2001, 2, 1).expect("date");
+    assert_eq!(store.prune_token_usage(cutoff).await.expect("prune"), 2);
+    assert_eq!(store.token_usage(mock.id, older).await.expect("usage"), 0);
+    assert_eq!(store.token_usage(mock.id, old).await.expect("usage"), 0);
+    assert_eq!(store.token_usage(mock.id, kept).await.expect("usage"), 10);
+    assert_eq!(store.prune_token_usage(cutoff).await.expect("prune"), 0);
 }
 
 async fn token_usage_accumulates_per_day(store: &Arc<dyn ControlStore>) {

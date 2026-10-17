@@ -90,6 +90,10 @@ fn set_state_gauges(counts: Vec<(String, usize)>, previous: BTreeSet<String>) ->
     now
 }
 
+/// Days of per-mock token usage kept (today's counts the daily budget; the
+/// rest is history). Older rows are deleted by [`Maintenance`].
+pub const TOKEN_USAGE_RETENTION_DAYS: u64 = 90;
+
 /// The running maintenance jobs; dropping it stops them.
 pub struct Maintenance {
     _handles: Vec<JoinHandle<()>>,
@@ -97,21 +101,48 @@ pub struct Maintenance {
 
 impl Maintenance {
     /// Starts the hourly sweep of expired admin sessions (when `sessions`
-    /// is set, i.e. in `auth.mode: oidc`) and the daily pruning of audit
-    /// events older than `retention_days`. Must be called inside a Tokio
-    /// runtime.
+    /// is set, i.e. in `auth.mode: oidc`), the daily pruning of audit
+    /// events older than `retention_days` and the daily pruning of token
+    /// usage older than [`TOKEN_USAGE_RETENTION_DAYS`]. Must be called
+    /// inside a Tokio runtime.
     pub fn start(
         store: Arc<dyn ControlStore>,
         sessions: Option<&SessionManager>,
         retention_days: u32,
     ) -> Self {
-        let mut handles = Vec::with_capacity(2);
+        let mut handles = Vec::with_capacity(3);
         if let Some(sessions) = sessions {
             handles.push(sessions.spawn_sweeper());
         }
-        handles.push(mb_admin::spawn_retention(store, retention_days));
+        handles.push(mb_admin::spawn_retention(store.clone(), retention_days));
+        handles.push(spawn_token_usage_retention(store));
         Self { _handles: handles }
     }
+}
+
+/// How often [`spawn_token_usage_retention`] runs.
+const TOKEN_USAGE_PRUNE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Deletes token usage of days more than [`TOKEN_USAGE_RETENTION_DAYS`]
+/// before today (UTC) now, then every 24 hours.
+fn spawn_token_usage_retention(store: Arc<dyn ControlStore>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(TOKEN_USAGE_PRUNE_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let today = chrono::Utc::now().date_naive();
+            let Some(cutoff) =
+                today.checked_sub_days(chrono::Days::new(TOKEN_USAGE_RETENTION_DAYS))
+            else {
+                continue;
+            };
+            match store.prune_token_usage(cutoff).await {
+                Ok(n) => tracing::debug!(pruned = n, %cutoff, "token usage retention ran"),
+                Err(e) => tracing::warn!(error = %e, "token usage retention failed"),
+            }
+        }
+    })
 }
 
 impl Drop for Maintenance {
@@ -256,6 +287,49 @@ mod tests {
                 ("empty".to_string(), 0),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn maintenance_prunes_old_token_usage() {
+        let store = mb_store::connect("sqlite::memory:").await.expect("store");
+        let mock = store
+            .create_mock(
+                mb_store::DEFAULT_WORKSPACE,
+                mb_store::NewMock {
+                    name: "tokens".into(),
+                    route_prefix: None,
+                    persona: None,
+                    llm_profile: None,
+                    header_overrides: false,
+                    source: mb_store::ResourceSource::Api,
+                    data_plane_auth: Default::default(),
+                    chaos: None,
+                    limits: Default::default(),
+                },
+            )
+            .await
+            .expect("mock");
+        let today = chrono::Utc::now().date_naive();
+        let expired = today - chrono::Days::new(TOKEN_USAGE_RETENTION_DAYS + 1);
+        let last_kept = today - chrono::Days::new(TOKEN_USAGE_RETENTION_DAYS);
+        for day in [expired, last_kept, today] {
+            store.add_token_usage(mock.id, day, 5).await.expect("add");
+        }
+        let _jobs = Maintenance::start(store.clone(), None, 365);
+        let mut pruned = false;
+        for _ in 0..100 {
+            if store.token_usage(mock.id, expired).await.expect("usage") == 0 {
+                pruned = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(pruned, "usage older than the retention is pruned");
+        assert_eq!(
+            store.token_usage(mock.id, last_kept).await.expect("usage"),
+            5
+        );
+        assert_eq!(store.token_usage(mock.id, today).await.expect("usage"), 5);
     }
 
     #[test]

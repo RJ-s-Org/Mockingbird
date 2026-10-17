@@ -1065,6 +1065,15 @@ impl ControlStore for SqliteControlStore {
         total.map_or(Ok(0), |t| from_i64(t, "tokens"))
     }
 
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError> {
+        // `day` is ISO 8601 text, which sorts as the date does.
+        Ok(sqlx::query("DELETE FROM token_usage WHERE day < ?")
+            .bind(before.to_string())
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
     async fn list_channel_settings(
         &self,
         mock_id: Uuid,

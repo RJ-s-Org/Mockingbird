@@ -172,6 +172,9 @@ impl ControlStore for StubControl {
     async fn token_usage(&self, mock_id: Uuid, day: chrono::NaiveDate) -> Result<u64, StoreError> {
         self.inner.token_usage(mock_id, day).await
     }
+    async fn prune_token_usage(&self, before: chrono::NaiveDate) -> Result<u64, StoreError> {
+        self.inner.prune_token_usage(before).await
+    }
     async fn list_channel_settings(
         &self,
         mock_id: Uuid,
