@@ -164,6 +164,7 @@ pub(crate) struct CallPlan<'a> {
 impl CallPlan<'_> {
     /// Whether the call answers an injected error that the operation
     /// declares no status for (the protocol-native answer applies).
+    #[cfg(any(feature = "http-rest", feature = "soap"))]
     pub(crate) fn native_chaos_error(&self) -> bool {
         self.chaos.inject_error && self.forced_status.is_none()
     }
