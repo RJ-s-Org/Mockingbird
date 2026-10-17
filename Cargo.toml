@@ -68,7 +68,7 @@ rumqttc = { version = "0.25.1", default-features = false }
 lapin = "4.12.2"
 rdkafka = { version = "0.39.0", default-features = false, features = ["cmake-build", "tokio", "libz-static", "ssl"] }
 notify = "8"
-notify-debouncer-full = "0.6"
+notify-debouncer-full = "0.7"
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 subtle = "2"
 hmac = "0.12"
