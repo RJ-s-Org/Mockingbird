@@ -8,9 +8,11 @@
 //! answered `200 {errors}`; only transport-level failures (unknown path,
 //! wrong method, oversized or unparseable body) are problem documents.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use async_graphql::Name;
 use async_graphql::Request;
 use async_graphql::parser::types::{
     DocumentOperations, ExecutableDocument, OperationType, Selection, SelectionSet,
@@ -157,12 +159,17 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             return refused(rt, &method, &headers, resp, None).await;
         }
     };
-    // Each root field is one engine call: cap them before anything runs.
-    let max = rt.protocols.graphql_max_root_fields;
-    if let Some(count) = root_field_count(&request).filter(|n| *n > max) {
+    // Each root field is one engine call, and validation walks the document
+    // with every fragment spread expanded: bound both before anything runs.
+    if let Some(oversize) = oversize(
+        &request.query,
+        request.operation_name.as_deref(),
+        rt.protocols.graphql_max_root_fields,
+    ) {
+        let (message, code) = oversize.describe();
         let body = json!({"errors": [{
-            "message": format!("too many root fields: {count} (maximum {max})"),
-            "extensions": {"code": "TOO_MANY_ROOT_FIELDS"},
+            "message": message,
+            "extensions": {"code": code},
         }]});
         let mut resp = (StatusCode::BAD_REQUEST, body.to_string()).into_response();
         resp.headers_mut().insert(
@@ -390,53 +397,151 @@ fn is_mutation(request: &Request) -> bool {
     selected.is_some_and(|op| op.node.ty == OperationType::Mutation)
 }
 
-/// How many root fields the operation `request` selects, with fragment
-/// spreads and inline fragments on the root type expanded. `None` when the
-/// query does not parse or selects no operation (the executor reports
-/// that).
-fn root_field_count(request: &Request) -> Option<usize> {
-    let doc = async_graphql::parser::parse_query(&request.query).ok()?;
-    let selected = match (&doc.operations, request.operation_name.as_deref()) {
+/// Most selections (fields, inline fragments and fragment spreads) a
+/// document may expand to once every fragment spread is replaced by its
+/// fragment. Validation and execution walk the expanded document, so a
+/// kilobyte of fragments that each spread the next one twice would cost
+/// minutes of CPU. Ten times the default complexity limit, which refuses
+/// any query this large anyway.
+pub(crate) const MAX_EXPANDED_SELECTIONS: usize = 10_000;
+
+/// Why a document is refused before it is validated or run.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Oversize {
+    /// The selected operation has more root fields than allowed (`count`,
+    /// `max`).
+    RootFields { count: usize, max: usize },
+    /// The document expands to more than [`MAX_EXPANDED_SELECTIONS`].
+    Selections,
+}
+
+impl Oversize {
+    /// The GraphQL error message and `extensions.code`.
+    pub(crate) fn describe(&self) -> (String, &'static str) {
+        match self {
+            Oversize::RootFields { count, max } => (
+                format!("too many root fields: {count} (maximum {max})"),
+                "TOO_MANY_ROOT_FIELDS",
+            ),
+            Oversize::Selections => (
+                format!(
+                    "query too large: more than {MAX_EXPANDED_SELECTIONS} selections once fragments are expanded"
+                ),
+                "QUERY_TOO_LARGE",
+            ),
+        }
+    }
+}
+
+/// Whether `query` is too large to validate or run: the whole document
+/// (every operation and fragment, as validation visits them) expanding to
+/// more than [`MAX_EXPANDED_SELECTIONS`], or the operation it selects
+/// having more than `max_root_fields` root fields (fragment spreads and
+/// inline fragments on the root type expanded). Linear in the document:
+/// each fragment's expansion is counted once and memoized, counts
+/// saturate, and counting stops once over the bound. `None` when it is
+/// within bounds, or does not parse or select an operation (the executor
+/// reports those).
+pub(crate) fn oversize(
+    query: &str,
+    operation_name: Option<&str>,
+    max_root_fields: usize,
+) -> Option<Oversize> {
+    let doc = async_graphql::parser::parse_query(query).ok()?;
+    let mut expander = Expander {
+        doc: &doc,
+        memo: HashMap::new(),
+        visiting: Vec::new(),
+    };
+    let mut total = 0usize;
+    for (_, op) in doc.operations.iter() {
+        let size = expander.set(&op.node.selection_set.node);
+        total = total.saturating_add(size.selections);
+        if total > MAX_EXPANDED_SELECTIONS {
+            return Some(Oversize::Selections);
+        }
+    }
+    for name in doc.fragments.keys() {
+        total = total.saturating_add(expander.fragment(name).selections);
+        if total > MAX_EXPANDED_SELECTIONS {
+            return Some(Oversize::Selections);
+        }
+    }
+    let selected = match (&doc.operations, operation_name) {
         (DocumentOperations::Single(op), _) => op,
         (DocumentOperations::Multiple(ops), Some(name)) => ops.get(name)?,
         (DocumentOperations::Multiple(ops), None) if ops.len() == 1 => ops.values().next()?,
         (DocumentOperations::Multiple(_), None) => return None,
     };
-    let mut visiting = Vec::new();
-    Some(count_fields(
-        &doc,
-        &selected.node.selection_set.node,
-        &mut visiting,
-    ))
+    let count = expander.set(&selected.node.selection_set.node).fields;
+    (count > max_root_fields).then_some(Oversize::RootFields {
+        count,
+        max: max_root_fields,
+    })
 }
 
-/// The fields of `set`, expanding fragments; a fragment already being
-/// expanded (a cycle, which validation rejects) counts nothing.
-fn count_fields<'d>(
+/// The expanded size of a selection set.
+#[derive(Clone, Copy, Default)]
+struct Size {
+    /// Fields directly in the set, through inline fragments and spreads.
+    fields: usize,
+    /// Every selection at any depth.
+    selections: usize,
+}
+
+/// Expands selection sets, counting each fragment once.
+struct Expander<'d> {
     doc: &'d ExecutableDocument,
-    set: &'d SelectionSet,
-    visiting: &mut Vec<&'d str>,
-) -> usize {
-    set.items
-        .iter()
-        .map(|item| match &item.node {
-            Selection::Field(_) => 1,
-            Selection::InlineFragment(f) => count_fields(doc, &f.node.selection_set.node, visiting),
-            Selection::FragmentSpread(spread) => {
-                let name = spread.node.fragment_name.node.as_str();
-                if visiting.contains(&name) {
-                    return 0;
-                }
-                let Some(fragment) = doc.fragments.get(&spread.node.fragment_name.node) else {
-                    return 0;
-                };
-                visiting.push(name);
-                let n = count_fields(doc, &fragment.node.selection_set.node, visiting);
-                visiting.pop();
-                n
+    memo: HashMap<&'d str, Size>,
+    /// Fragments being expanded: a spread of one of them is a cycle (which
+    /// validation rejects) and counts nothing.
+    visiting: Vec<&'d str>,
+}
+
+impl<'d> Expander<'d> {
+    /// The size of `set`; stops early (still over the bound) once it has
+    /// more than [`MAX_EXPANDED_SELECTIONS`] selections.
+    fn set(&mut self, set: &'d SelectionSet) -> Size {
+        let mut size = Size::default();
+        for item in &set.items {
+            let inner = match &item.node {
+                Selection::Field(field) => Size {
+                    fields: 1,
+                    selections: self.set(&field.node.selection_set.node).selections,
+                },
+                Selection::InlineFragment(f) => self.set(&f.node.selection_set.node),
+                Selection::FragmentSpread(spread) => self.fragment(&spread.node.fragment_name.node),
+            };
+            size.fields = size.fields.saturating_add(inner.fields);
+            size.selections = size
+                .selections
+                .saturating_add(inner.selections)
+                .saturating_add(1);
+            if size.selections > MAX_EXPANDED_SELECTIONS {
+                break;
             }
-        })
-        .sum()
+        }
+        size
+    }
+
+    /// The size of fragment `name`'s selection set, memoized.
+    fn fragment(&mut self, name: &'d Name) -> Size {
+        let key = name.as_str();
+        if let Some(size) = self.memo.get(key) {
+            return *size;
+        }
+        if self.visiting.contains(&key) {
+            return Size::default();
+        }
+        let Some(fragment) = self.doc.fragments.get(name) else {
+            return Size::default();
+        };
+        self.visiting.push(key);
+        let size = self.set(&fragment.node.selection_set.node);
+        self.visiting.pop();
+        self.memo.insert(key, size);
+        size
+    }
 }
 
 /// An RFC 9457 `application/problem+json` response.

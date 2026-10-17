@@ -334,6 +334,16 @@ fn capped(
                 };
                 match ty.as_str() {
                     "subscribe" | "start" => {
+                        // Bounded before async-graphql validates it, as over HTTP.
+                        if let Some(oversize) = subscribe_oversize(&text, &rt) {
+                            let (message, code) = oversize.describe();
+                            let error = json!({"message": message, "extensions": {"code": code}});
+                            let _ = outgoing
+                                .send(Outbound::Text(error_frame(protocol, &id, error)))
+                                .await;
+                            report_refused(&rt, &headers, 400, &message, code).await;
+                            return None;
+                        }
                         let admitted = {
                             let mut open = lock(&active);
                             let admitted = open.contains(&id) || open.len() < max;
@@ -348,13 +358,10 @@ fn capped(
                         let message =
                             format!("too many subscriptions on this connection (maximum {max})");
                         let error = json!({"message": message});
-                        let payload = match protocol {
-                            WebSocketProtocols::GraphQLWS => json!([error]),
-                            _ => error,
-                        };
-                        let frame = json!({"type": "error", "id": id, "payload": payload});
-                        let _ = outgoing.send(Outbound::Text(frame.to_string())).await;
-                        report_too_many(&rt, &headers, &message).await;
+                        let _ = outgoing
+                            .send(Outbound::Text(error_frame(protocol, &id, error)))
+                            .await;
+                        report_refused(&rt, &headers, 429, &message, "RATE_LIMITED").await;
                         None
                     }
                     "complete" | "stop" => {
@@ -368,15 +375,40 @@ fn capped(
         .boxed()
 }
 
-/// Reports a subscription refused by the per-connection cap as a `429`
-/// call.
-async fn report_too_many(rt: &MockRuntime, headers: &HeaderMap, message: &str) {
+/// The `error` message for operation `id` carrying `error`.
+fn error_frame(protocol: WebSocketProtocols, id: &str, error: Value) -> String {
+    let payload = match protocol {
+        WebSocketProtocols::GraphQLWS => json!([error]),
+        _ => error,
+    };
+    json!({"type": "error", "id": id, "payload": payload}).to_string()
+}
+
+/// Why the operation of a `subscribe` (`start`) message is too large to
+/// hand to the executor (see [`super::oversize`]).
+fn subscribe_oversize(text: &str, rt: &MockRuntime) -> Option<super::Oversize> {
+    let msg: Value = serde_json::from_str(text).ok()?;
+    let payload = msg.get("payload")?;
+    let query = payload.get("query")?.as_str()?;
+    let operation = payload.get("operationName").and_then(Value::as_str);
+    super::oversize(query, operation, rt.protocols.graphql_max_root_fields)
+}
+
+/// Reports an operation refused before it ran (by the per-connection cap,
+/// `429`, or for its size, `400`) as a call.
+async fn report_refused(
+    rt: &MockRuntime,
+    headers: &HeaderMap,
+    status: u16,
+    message: &str,
+    code: &str,
+) {
     let report = Report {
         operation_id: None,
         session: DEFAULT_SESSION.into(),
         method: "GET".into(),
         path: rt.protocols.graphql_path.clone(),
-        status: 429,
+        status,
         source: None,
         usage: Default::default(),
         latency: Default::default(),
@@ -391,7 +423,7 @@ async fn report_too_many(rt: &MockRuntime, headers: &HeaderMap, message: &str) {
         response: rt
             .recorder
             .is_some()
-            .then(|| json!({"message": message, "extensions": {"code": "RATE_LIMITED"}})),
+            .then(|| json!({"message": message, "extensions": {"code": code}})),
     };
     call::report(rt, headers, report).await;
 }

@@ -584,6 +584,93 @@ async fn fragment_spread_counts_toward_cap() {
     assert!(r.body["data"]["viewer"]["login"].is_string(), "{}", r.body);
 }
 
+/// A fragment chain `n` levels deep where each fragment spreads the next
+/// one twice (2^n leaves), on `on`; `leaf` is the last fragment's body and
+/// `root` wraps the first spread.
+fn fragment_bomb(n: usize, on: &str, root: &str, leaf: &str) -> String {
+    let mut doc = root.replace("{spread}", "...F0");
+    for i in 0..n {
+        doc.push_str(&format!(
+            " fragment F{i} on {on} {{ ...F{next} ...F{next} }}",
+            next = i + 1
+        ));
+    }
+    doc.push_str(&format!(" fragment F{n} on {on} {{ {leaf} }}"));
+    doc
+}
+
+/// Serves a fresh mock on its own two-worker runtime and posts `q` from
+/// another thread, giving up after one second. Plain threads and channels
+/// keep the clock honest even when every worker is stuck in the request;
+/// a stuck server thread is abandoned rather than joined.
+fn answer_within_a_second(q: String) -> Option<Answer> {
+    let (base_tx, base_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let workers = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        workers.block_on(async move {
+            let base = serve(runtime(Some(scripted(vec![])))).await;
+            base_tx.send(base).unwrap();
+            std::future::pending::<()>().await;
+        });
+    });
+    let base = base_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let client = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = answer_tx.send(client.block_on(query(&base, &q)));
+    });
+    answer_rx.recv_timeout(Duration::from_secs(1)).ok()
+}
+
+#[test]
+fn root_fragment_bomb_answers_within_a_second() {
+    // 32 levels: 2^32 root fields once expanded, about 1.2 KB of query.
+    let q = fragment_bomb(32, "Query", "query { {spread} }", "viewer { login }");
+    let r = answer_within_a_second(q).expect("no answer within 1 s");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body["errors"][0]["extensions"]["code"], "QUERY_TOO_LARGE",
+        "{}",
+        r.body
+    );
+}
+
+#[test]
+fn nested_fragment_bomb_answers_within_a_second() {
+    // One root field; the bomb sits under it, where the root-field cap
+    // does not look. 28 levels stays inside async-graphql's recursion
+    // limit (32), which would otherwise refuse it first.
+    let q = fragment_bomb(28, "User", "query { viewer { {spread} } }", "login");
+    let r = answer_within_a_second(q).expect("no answer within 1 s");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body,
+        json!({"errors": [{
+            "message": "query too large: more than 10000 selections once fragments are expanded",
+            "extensions": {"code": "QUERY_TOO_LARGE"},
+        }]})
+    );
+}
+
+#[tokio::test]
+async fn shared_fragments_below_the_size_bound_still_run() {
+    // Eight levels: 256 `login` selections, well inside the bound.
+    let provider = scripted(vec![user("octo")]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let q = fragment_bomb(8, "User", "query { viewer { {spread} } }", "login");
+    let r = query(&base, &q).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert!(r.body["data"]["viewer"]["login"].is_string(), "{}", r.body);
+}
+
 // ------------------------------------------------------- WebSocket caps
 
 type Ws =
@@ -696,6 +783,40 @@ async fn subscription_cap_per_connection() {
             "{protocol}: {recs:?}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_fragment_bomb_refused_before_validation() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let mut ws = ws_init(&base, "graphql-transport-ws").await;
+    let bomb = fragment_bomb(
+        28,
+        "Issue",
+        r#"subscription { issueAdded(repositoryId: "r-1") { {spread} } }"#,
+        "id",
+    );
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "1", "payload": {"query": bomb}}),
+    )
+    .await;
+    let refused = ws_recv_for(&mut ws, "error", "1").await;
+    assert_eq!(
+        refused["payload"][0]["extensions"]["code"], "QUERY_TOO_LARGE",
+        "{refused}"
+    );
+    // The connection stays usable.
+    ws_send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "2", "payload": {"query": SUBSCRIPTION}}),
+    )
+    .await;
+    ws_recv_for(&mut ws, "next", "2").await;
+    let recs = records.wait(1).await;
+    assert!(recs.iter().any(|r| r.status == 400), "{recs:?}");
 }
 
 #[tokio::test]
