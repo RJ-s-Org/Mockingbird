@@ -1,0 +1,53 @@
+# Performance
+
+Mockingbird's throughput is bounded by the LLM provider: a generated response takes as long as the provider takes (seconds, typically), and `limits.max_concurrent_generations` caps how many run at once. What Mockingbird itself adds is measured with the **offline bench**: the same server stack, with the schema faker answering instead of an LLM, so the numbers show the cost of decoding, admission, state, validation, encoding and the request log.
+
+## Method
+
+`mb-evals bench` (in [`crates/mb-evals`](../crates/mb-evals)) builds the real server stack in process for one contract with `--offline` semantics, binds it on loopback, and drives it with `reqwest`:
+
+- the contract is `fixtures/openapi/orders-3.1.yaml` by default;
+- requests round-robin over the contract's non-streaming `GET` and `POST` operations, with every path parameter set to `1` and faker-built request bodies;
+- `--concurrency` workers (default 32) send back to back for `--duration` (default 10 s);
+- the request log recorder is on, as in production;
+- latency is measured per request on the client; p50, p95 and p99 are nearest-rank percentiles; errors are transport failures and 5xx answers.
+
+The result is printed and written as JSON (`BenchReport`).
+
+## Results
+
+| Field | Value |
+| --- | --- |
+| Machine | 4 vCPU (Intel Xeon, 2.8 GHz) Linux sandbox, client and server on the same machine |
+| Build | `--release` |
+| Contract | `fixtures/openapi/orders-3.1.yaml` |
+| Concurrency | 32 |
+| Duration | 10.02 s |
+| Requests | 8 952 (0 errors) |
+| Throughput | 893.2 req/s |
+| p50 | 33.40 ms |
+| p95 | 53.33 ms |
+| p99 | 58.27 ms |
+
+These are a baseline for spotting regressions, not a capacity promise: the client shares the CPUs with the server, and the in-memory SQLite store and request log run in the same process. On dedicated hardware with Postgres, scale out data nodes for more throughput (they share nothing but the stores).
+
+## Rerunning
+
+```sh
+cargo run --release -p mb-evals -- bench --duration 10s --out target/bench.json
+```
+
+Options:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--contract` | `fixtures/openapi/orders-3.1.yaml` | Contract to serve. |
+| `--duration` | `10s` | How long to send. |
+| `--concurrency` | `32` | Concurrent client workers. |
+| `--out` | `bench.json` | Where the JSON report goes. |
+
+Compare runs on the same machine only, with nothing else busy. When you change the request path, run the bench before and after and quote both numbers in the pull request.
+
+## LLM quality
+
+`mb-evals run` measures the generation pipeline against a real provider (schema-valid, repair and fallback rates, and p95 latency per contract). It runs nightly in CI (`.github/workflows/evals.yml`) and fails when a rate crosses its threshold; see `mb-evals run --help`.

@@ -20,7 +20,7 @@ use mb_store::{
     ChaosSettings, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode, LatencyJitter,
     MockLimits, RateLimit,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Name of the profile the `MB_LLM_*` variables configure.
@@ -35,7 +35,7 @@ pub const DEFAULT_LLM_BASE_URL: &str = "https://api.deepseek.com";
 /// Default `MB_LLM_MODEL`.
 pub const DEFAULT_LLM_MODEL: &str = "deepseek-chat";
 
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileConfig {
     pub server: ServerConfig,
@@ -62,7 +62,7 @@ pub struct FileConfig {
 }
 
 /// Which planes a node serves (`server.role`, `MB_ROLE`, `--role`).
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     /// Control and data plane in one process.
@@ -100,7 +100,7 @@ impl std::str::FromStr for Role {
 }
 
 /// `server.tls`: Mockingbird terminates TLS itself. Both files or none.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct TlsConfig {
     /// PEM certificate chain.
@@ -110,7 +110,7 @@ pub struct TlsConfig {
 }
 
 /// The `outbound:` section.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct OutboundConfig {
     /// PEM bundle trusted in addition to the default roots.
@@ -122,7 +122,7 @@ pub struct OutboundConfig {
 }
 
 /// The `bus:` section.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct BusConfig {
     /// `redis://`, `rediss://`, `postgres://` or `local`; unset follows
@@ -142,7 +142,7 @@ pub enum BusTarget {
 }
 
 /// The `limits:` section: global admission limits.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsConfig {
     /// LLM generations running at once, across every mock.
@@ -164,7 +164,7 @@ impl Default for LimitsConfig {
 }
 
 /// The `import:` section.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ImportConfig {
     /// Import worker tasks, 1..=16.
@@ -194,14 +194,17 @@ impl Default for ImportConfig {
 }
 
 /// The `pii:` section: the output PII scrubber.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct PiiConfig {
     pub enabled: bool,
     /// Builtin patterns to replace.
     pub patterns: Vec<BuiltinPattern>,
     /// Extra patterns `{name, regex, replacement}`.
-    #[serde(deserialize_with = "strict_custom_patterns")]
+    #[serde(
+        deserialize_with = "strict_custom_patterns",
+        serialize_with = "serialize_custom_patterns"
+    )]
     pub custom: Vec<CustomPattern>,
 }
 
@@ -234,6 +237,24 @@ fn strict_custom_patterns<'de, D: serde::Deserializer<'de>>(
             replacement: s.replacement,
         })
         .collect())
+}
+
+/// [`CustomPattern`]s as `{name, regex, replacement}` maps.
+fn serialize_custom_patterns<S: serde::Serializer>(
+    patterns: &[CustomPattern],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Out<'a> {
+        name: &'a str,
+        regex: &'a str,
+        replacement: &'a str,
+    }
+    s.collect_seq(patterns.iter().map(|p| Out {
+        name: &p.name,
+        regex: &p.regex,
+        replacement: &p.replacement,
+    }))
 }
 
 /// Accepted `import.workers`.
@@ -276,7 +297,7 @@ impl ImportConfig {
 }
 
 /// How the Admin API authenticates callers.
-#[derive(Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// Every admin request is the local sysadmin.
@@ -286,7 +307,7 @@ pub enum AuthMode {
     Oidc,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AuthConfig {
     pub mode: AuthMode,
@@ -369,7 +390,7 @@ impl AuthConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OidcConfig {
     pub issuer: String,
@@ -407,7 +428,7 @@ impl OidcConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AuditConfig {
     /// Audit events older than this are pruned daily.
@@ -432,7 +453,7 @@ fn default_ws() -> String {
     DEFAULT_WORKSPACE.to_string()
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerConfig {
     pub host: IpAddr,
@@ -507,7 +528,7 @@ impl ServerConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageConfig {
     /// Control-plane store: `sqlite::memory:`, `sqlite://<path>` or `postgres://…`.
@@ -535,7 +556,7 @@ impl StorageConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LlmConfig {
     /// Profile for mocks that name none.
@@ -543,7 +564,7 @@ pub struct LlmConfig {
     pub profiles: BTreeMap<String, FileProfile>,
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileProfile {
     /// The workspace the profile belongs to (created if missing).
@@ -596,7 +617,7 @@ impl FileProfile {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ObservabilityConfig {
     /// Request-log entries kept per mock.
@@ -626,7 +647,7 @@ impl Default for ObservabilityConfig {
 }
 
 /// The `protocols:` section: knobs shared by every mock's adapter.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ProtocolsConfig {
     pub graphql: GraphqlConfig,
@@ -659,7 +680,7 @@ impl ProtocolsConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct GraphqlConfig {
     /// Endpoint path below each GraphQL mock's route prefix.
@@ -690,7 +711,7 @@ impl Default for GraphqlConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct StreamFileConfig {
     /// Items per streamed response when the request asks for no count.
@@ -712,7 +733,7 @@ impl Default for StreamFileConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct SseConfig {
     /// Interval between keepalive comments.
@@ -728,7 +749,7 @@ impl Default for SseConfig {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct GrpcConfig {
     /// Largest gRPC message decoded or encoded.
@@ -744,7 +765,7 @@ impl Default for GrpcConfig {
 }
 
 /// One `brokers:` entry: a connection to a message broker.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileBroker {
     /// `kafka`, `amqp`, `mqtt` or `memory`.
@@ -775,7 +796,7 @@ fn default_client_id_prefix() -> String {
 }
 
 /// SASL credentials of a broker.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileSasl {
     pub mechanism: String,
@@ -872,7 +893,7 @@ fn has_password(url: &str) -> bool {
         .is_some_and(|(userinfo, _)| userinfo.contains(':'))
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileMock {
     /// The workspace the mock belongs to (created if missing).
@@ -909,7 +930,7 @@ pub struct FileMock {
 }
 
 /// A mock's (or scenario's) `chaos:`.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileChaos {
     /// Probability (0–1) that a call answers with an injected error.
@@ -920,7 +941,7 @@ pub struct FileChaos {
     pub drop_stream_rate: f64,
 }
 
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileJitter {
     #[serde(with = "humantime_serde")]
@@ -971,7 +992,7 @@ fn millis(d: Duration) -> u64 {
 }
 
 /// A mock's `limits.rate_limit`.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileRateLimit {
     pub requests_per_second: f64,
@@ -979,7 +1000,7 @@ pub struct FileRateLimit {
 }
 
 /// A mock's `limits:`.
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileMockLimits {
     pub rate_limit: Option<FileRateLimit>,
@@ -1059,7 +1080,7 @@ fn default_true() -> bool {
 }
 
 /// A `channels:` entry of a mock: overrides of one event channel.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileChannel {
     #[serde(default = "default_true")]
@@ -1070,7 +1091,7 @@ pub struct FileChannel {
 }
 
 /// A channel trigger as written in the config file.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FileTrigger {
     /// `- every: 10s`
@@ -1105,7 +1126,7 @@ impl FileTrigger {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileScenario {
     pub instructions: Option<String>,

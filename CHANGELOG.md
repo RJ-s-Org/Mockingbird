@@ -18,7 +18,20 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - P4 Protocols: GraphQL (including subscriptions), gRPC (all four call kinds, with reflection), SOAP 1.1/1.2 from WSDL, server-sent events and WebSocket.
 - P5 Events: the AsyncAPI 2.x/3.0 compiler, Kafka, AMQP and MQTT producers and consumers, WebSocket channels, schedule, cron, state-change and manual triggers, and the channel Admin API and CLI.
 - P6 Smart import: draft contracts from documentation (Markdown, HTML, PDF, plain text or a URL, extracted by an LLM within a per-job token budget) and, deterministically, from HAR recordings and Postman collections; SSRF-guarded URL fetching; the import job and draft Admin API (review, edit, preview, approve) with quota admission and usage reporting; the console's Import tab and draft review page; and `mockingbird import <FILE|URL>`.
-- P7 Enterprise hardening: the `control`/`data` role split with a Postgres or Redis bus and leader election, the Redis state backend, per-mock chaos and limits, the PII scrubber, TLS termination and outbound CA/proxy settings, the Helm chart, signed releases with SBOM and provenance, nightly LLM evals, `mb-ext` 1.0, and the community files and example gallery.
+- P7 Enterprise hardening and readiness:
+  - **High availability:** `--role all|control|data` (`server.role`, `MB_ROLE`); a cross-node change bus over Postgres `LISTEN/NOTIFY` or Redis pub/sub (`bus.url`, `MB_BUS_URL`) carrying ids only, with `Resync` on reconnect; leader election (Postgres advisory lock or Redis lease) gating reconcile, `--watch` and maintenance; `/readyz` reports `role` and `leader`.
+  - **Redis session state** (`storage.state_url: redis://…`, `rediss://`).
+  - **Limits:** a global generation semaphore, request and response size caps (`limits:`), and per-mock rate limits and daily token budgets shared across replicas (migration `0300_hardening`: `mocks.limits`, `token_usage`).
+  - **Chaos:** per-mock and per-scenario error injection in the contract's error shape, latency jitter and dropped streams (`mocks.chaos`), bypassed by `X-Mockingbird-Chaos: off`.
+  - **PII scrubber** for generated output (`pii:`), with six builtin patterns and custom ones.
+  - **TLS termination** with certificate reload (`server.tls`), outbound CA bundle and proxy settings (`outbound:`), and `server.trust_forwarded_headers`.
+  - **Protocol caps:** GraphQL root-field, subscription and connection limits; per-item metering of client and bidi gRPC streams; logged rejections; `?wsdl` addresses behind a proxy.
+  - **Observability:** per-stage trace spans (`mb.decode` … `mb.encode`) and the metrics `mb_generation_in_flight`, `mb_generation_queue_timeouts_total`, `mb_token_budget_*`, `mb_rate_limited_total`, `mb_pii_replacements_total`, `mb_chaos_injected_total`, `mb_bus_*`, `mb_leader` and `mb_state_sessions`.
+  - **Delivery:** the Helm chart (all-in-one or split, HPA, PDB, NetworkPolicy, ServiceMonitor), Compose profiles `ha`, `kafka`, `amqp` and `mqtt`, and a release pipeline with multi-arch images (full and slim) signed with cosign, CycloneDX SBOM, SLSA provenance and binaries for five targets.
+  - **`mb-ext` 1.0:** a frozen, documented API with constructors, builders and `#[non_exhaustive]` core types, `vault:` secret references, a worked extension example (`examples/custom-ext`) and a semver gate.
+  - **Console and CLI:** the Channels tab, the chaos and limits editor, and `--workspace`, `scenarios` and `profiles` in the CLI.
+  - **Quality:** nightly LLM evals and an offline throughput bench (`mb-evals`), image scanning, a cross-node HA test and a Compose end-to-end flow in CI.
+  - **Documents:** community files, the example gallery, and the operator docs in `docs/` (architecture, configuration reference, deployment guides, runbook, upgrade notes, performance).
 
 [Unreleased]: https://github.com/rjs-git/mockingbird/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/rjs-git/mockingbird/releases/tag/v0.1.0

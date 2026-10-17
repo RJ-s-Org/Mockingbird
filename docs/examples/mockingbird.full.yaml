@@ -1,0 +1,189 @@
+# Mockingbird configuration with every key set. This file is a reference,
+# not a recommendation: it turns on OIDC, TLS, Redis, Vault-free secret
+# references, chaos and limits all at once. docs/configuration.md describes
+# each key; crates/mockingbird/tests/docs_reference.rs checks that this file
+# loads and that every key it sets is documented there.
+#
+# Precedence: this file < MB_* environment variables < command-line flags.
+# Contract paths are relative to this file.
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  admin_port: 9090
+  grpc_port: 50051
+  insecure_no_auth: false
+  api_secret_refs: ["env:MB_LLM_*", "env:*_API_KEY", "vault:secret/mockingbird/*"]
+  role: all
+  trust_forwarded_headers: true
+  tls:
+    cert_file: /etc/mockingbird/tls/tls.crt
+    key_file: /etc/mockingbird/tls/tls.key
+
+storage:
+  url: sqlite:///var/lib/mockingbird/mockingbird.db
+  state_url: redis://redis:6379/0
+  session_ttl: 24h
+
+bus:
+  url: redis://redis:6379/0
+
+outbound:
+  ca_file: /etc/ssl/corp-ca.pem
+  proxy: http://proxy.internal:3128
+  no_proxy: [localhost, 127.0.0.1, .internal]
+
+limits:
+  max_concurrent_generations: 64
+  max_request_bytes: 1048576
+  max_response_bytes: 1048576
+
+pii:
+  enabled: true
+  patterns: [email, phone, credit_card, us_ssn, iban, ipv4]
+  custom:
+    - name: order_ref
+      regex: "ORD-[0-9]{6}"
+      replacement: "ORD-######"
+
+import:
+  workers: 2
+  max_tokens: 200000
+  llm_profile: deepseek
+  url_allowlist: [docs.internal, "*.corp.example", 10.20.0.0/16]
+  max_active_jobs_per_mock: 10
+
+auth:
+  mode: oidc
+  external_url: https://mockingbird.example.com
+  session_ttl: 12h
+  sysadmin_subjects: ["3f2a9c1e-0000-4000-8000-000000000001"]
+  public_metrics: false
+  oidc:
+    issuer: https://auth.example.com/auth/v1/
+    client_id: mockingbird
+    client_secret: env:MB_OIDC_CLIENT_SECRET
+    scopes: [openid, profile, email, groups]
+    roles_claim: groups
+    group_prefix: mb
+    audience: mockingbird
+
+audit:
+  retention_days: 365
+  webhook_url: https://audit.example.com/mockingbird
+  webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET
+
+llm:
+  default_profile: deepseek
+  profiles:
+    deepseek:
+      workspace: default
+      base_url: https://api.deepseek.com
+      model: deepseek-chat
+      api_key: env:DEEPSEEK_API_KEY
+      json_schema: false
+      timeout: 3s
+      temperature: 0.7
+      max_tokens: 2048
+      fallback: local
+    local:
+      workspace: default
+      base_url: http://127.0.0.1:11434/v1
+      model: llama3.2
+      api_key: env:OLLAMA_API_KEY
+      json_schema: true
+      timeout: 10s
+      temperature: 0.2
+      max_tokens: 1024
+      fallback: deepseek
+
+observability:
+  request_log_retention: 1000
+  redact_fields: [password, token, secret, authorization, apiKey, api_key]
+
+protocols:
+  graphql:
+    path: /graphql
+    introspection: true
+    max_depth: 15
+    max_complexity: 1000
+    max_root_fields: 20
+    max_subscriptions_per_connection: 16
+    max_connections_per_mock: 1000
+  stream:
+    default_items: 5
+    max_items: 50
+    item_interval: 0s
+  sse:
+    keepalive: 15s
+  grpc:
+    max_message_bytes: 4194304
+
+brokers:
+  kafka:
+    kind: kafka
+    bootstrap_servers: kafka-1:9092,kafka-2:9092
+    tls: true
+    ca_file: /etc/ssl/kafka-ca.pem
+    sasl:
+      mechanism: SCRAM-SHA-512
+      username: mockingbird
+      password: env:KAFKA_PASSWORD
+    client_id_prefix: mockingbird
+  rabbit:
+    kind: amqp
+    url: amqp://mockingbird@rabbitmq:5672/%2f
+    tls: false
+    sasl: {mechanism: PLAIN, username: mockingbird, password: env:RABBIT_PASSWORD}
+    client_id_prefix: mockingbird
+
+mocks:
+  orders:
+    workspace: default
+    contract: ../../fixtures/openapi/orders-3.0.yaml
+    route_prefix: /orders-api
+    persona: A small online shop selling hiking gear.
+    llm_profile: deepseek
+    header_overrides: true
+    data_plane_auth:
+      mode: api_key
+      header: x-api-key
+    chaos:
+      error_rate: 0.05
+      latency_jitter: {min: 50ms, max: 500ms}
+      drop_stream_rate: 0.01
+    limits:
+      rate_limit: {requests_per_second: 50, burst: 100}
+      daily_token_budget: 1000000
+      max_request_bytes: 65536
+      max_response_bytes: 262144
+    scenarios:
+      out-of-stock:
+        instructions: Every product is out of stock.
+        status: 409
+        latency: 250ms
+        set:
+          status: pending
+        operations: [createOrder]
+        stream_items: 3
+        stream_item_interval: 500ms
+        chaos:
+          error_rate: 0.5
+          latency_jitter: {min: 0s, max: 2s}
+          drop_stream_rate: 0.0
+  order-events:
+    workspace: default
+    contract: ../../fixtures/asyncapi/orders-amqp-2.6.yaml
+    broker: rabbit
+    channels:
+      orderCreated:
+        enabled: true
+        triggers:
+          - every: 30s
+          - cron: "0 9 * * 1-5"
+          - on_state_change:
+              resource_type: orders
+              kind: upserted
+          - manual
+      orderCancelled:
+        enabled: false
