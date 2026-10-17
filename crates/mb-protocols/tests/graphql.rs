@@ -659,6 +659,62 @@ fn nested_fragment_bomb_answers_within_a_second() {
     );
 }
 
+/// A linear fragment chain `n` links long, each fragment spreading the
+/// next once (`n + 1` fragments, nested `n + 1` deep), in compact syntax
+/// with base-36 names so 30,000 links stay under the 1 MiB body limit.
+fn fragment_chain(n: usize, root: &str) -> String {
+    fn name(mut i: usize) -> String {
+        let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut out = Vec::new();
+        loop {
+            out.push(digits[i % 36]);
+            i /= 36;
+            if i == 0 {
+                break;
+            }
+        }
+        out.reverse();
+        format!("F{}", String::from_utf8(out).unwrap())
+    }
+    let mut doc = root.replace("{spread}", &format!("...{}", name(0)));
+    for i in 0..n {
+        doc.push_str(&format!(
+            "fragment {} on User{{...{}}}",
+            name(i),
+            name(i + 1)
+        ));
+    }
+    doc.push_str(&format!("fragment {} on User{{login}}", name(n)));
+    doc
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_fragment_chain_is_refused_without_overflowing_the_stack() {
+    // 30,000 links: one stack frame pair per link would overflow a 2 MiB
+    // Tokio worker stack and abort the process (before auth runs).
+    let q = fragment_chain(30_000, "query{viewer{{spread}}}");
+    assert!(q.len() < 1 << 20, "{} bytes", q.len());
+    let base = serve(runtime(Some(scripted(vec![user("octo")])))).await;
+    let r = query(&base, &q).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(
+        r.body["errors"][0]["extensions"]["code"], "QUERY_TOO_LARGE",
+        "{}",
+        r.body
+    );
+}
+
+#[tokio::test]
+async fn short_fragment_chain_still_runs() {
+    let provider = scripted(vec![user("octo")]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let q = fragment_chain(20, "query{viewer{{spread}}}");
+    let r = query(&base, &q).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert!(r.body["data"]["viewer"]["login"].is_string(), "{}", r.body);
+}
+
 #[tokio::test]
 async fn shared_fragments_below_the_size_bound_still_run() {
     // Eight levels: 256 `login` selections, well inside the bound.

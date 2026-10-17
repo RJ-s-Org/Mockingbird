@@ -405,6 +405,14 @@ fn is_mutation(request: &Request) -> bool {
 /// any query this large anyway.
 pub(crate) const MAX_EXPANDED_SELECTIONS: usize = 10_000;
 
+/// Deepest selection-set nesting a document may reach once every fragment
+/// spread is replaced by its fragment. The size pre-pass recurses once per
+/// level, before auth, so a long chain of fragments each spreading the
+/// next would otherwise overflow a worker's stack and abort the process.
+/// Twice async-graphql's own recursion limit (32), which refuses any
+/// document this deep anyway.
+pub(crate) const MAX_EXPANDED_DEPTH: usize = 64;
+
 /// Why a document is refused before it is validated or run.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Oversize {
@@ -413,6 +421,8 @@ pub(crate) enum Oversize {
     RootFields { count: usize, max: usize },
     /// The document expands to more than [`MAX_EXPANDED_SELECTIONS`].
     Selections,
+    /// The document nests deeper than [`MAX_EXPANDED_DEPTH`] once expanded.
+    Depth,
 }
 
 impl Oversize {
@@ -429,17 +439,25 @@ impl Oversize {
                 ),
                 "QUERY_TOO_LARGE",
             ),
+            Oversize::Depth => (
+                format!(
+                    "query too large: nested more than {MAX_EXPANDED_DEPTH} levels deep once fragments are expanded"
+                ),
+                "QUERY_TOO_LARGE",
+            ),
         }
     }
 }
 
 /// Whether `query` is too large to validate or run: the whole document
 /// (every operation and fragment, as validation visits them) expanding to
-/// more than [`MAX_EXPANDED_SELECTIONS`], or the operation it selects
-/// having more than `max_root_fields` root fields (fragment spreads and
-/// inline fragments on the root type expanded). Linear in the document:
-/// each fragment's expansion is counted once and memoized, counts
-/// saturate, and counting stops once over the bound. `None` when it is
+/// more than [`MAX_EXPANDED_SELECTIONS`] or nesting deeper than
+/// [`MAX_EXPANDED_DEPTH`], or the operation it selects having more than
+/// `max_root_fields` root fields (fragment spreads and inline fragments on
+/// the root type expanded). Linear in the document: each fragment's
+/// expansion is counted once and memoized, counts saturate, and counting
+/// stops once over a bound; recursion never goes deeper than
+/// [`MAX_EXPANDED_DEPTH`] levels. `None` when it is
 /// within bounds, or does not parse or select an operation (the executor
 /// reports those).
 pub(crate) fn oversize(
@@ -452,17 +470,25 @@ pub(crate) fn oversize(
         doc: &doc,
         memo: HashMap::new(),
         visiting: Vec::new(),
+        depth: 0,
     };
     let mut total = 0usize;
     for (_, op) in doc.operations.iter() {
         let size = expander.set(&op.node.selection_set.node);
+        if size.depth > MAX_EXPANDED_DEPTH {
+            return Some(Oversize::Depth);
+        }
         total = total.saturating_add(size.selections);
         if total > MAX_EXPANDED_SELECTIONS {
             return Some(Oversize::Selections);
         }
     }
     for name in doc.fragments.keys() {
-        total = total.saturating_add(expander.fragment(name).selections);
+        let size = expander.fragment(name);
+        if size.depth > MAX_EXPANDED_DEPTH {
+            return Some(Oversize::Depth);
+        }
+        total = total.saturating_add(size.selections);
         if total > MAX_EXPANDED_SELECTIONS {
             return Some(Oversize::Selections);
         }
@@ -487,6 +513,11 @@ struct Size {
     fields: usize,
     /// Every selection at any depth.
     selections: usize,
+    /// Selection sets nested in one another, counting this one (and the
+    /// sets of inline fragments and spread fragments, as the walk recurses
+    /// into each); past [`MAX_EXPANDED_DEPTH`] it is only known to be over
+    /// the bound.
+    depth: usize,
 }
 
 /// Expands selection sets, counting each fragment once.
@@ -496,19 +527,43 @@ struct Expander<'d> {
     /// Fragments being expanded: a spread of one of them is a cycle (which
     /// validation rejects) and counts nothing.
     visiting: Vec<&'d str>,
+    /// Selection sets being expanded (the recursion depth).
+    depth: usize,
 }
 
 impl<'d> Expander<'d> {
     /// The size of `set`; stops early (still over the bound) once it has
-    /// more than [`MAX_EXPANDED_SELECTIONS`] selections.
+    /// more than [`MAX_EXPANDED_SELECTIONS`] selections or nests deeper
+    /// than [`MAX_EXPANDED_DEPTH`], without recursing past that depth.
     fn set(&mut self, set: &'d SelectionSet) -> Size {
-        let mut size = Size::default();
+        if self.depth >= MAX_EXPANDED_DEPTH {
+            return Size {
+                depth: MAX_EXPANDED_DEPTH + 1,
+                ..Size::default()
+            };
+        }
+        self.depth += 1;
+        let size = self.items(set);
+        self.depth -= 1;
+        size
+    }
+
+    /// [`Self::set`] once the depth is checked.
+    fn items(&mut self, set: &'d SelectionSet) -> Size {
+        let mut size = Size {
+            depth: 1,
+            ..Size::default()
+        };
         for item in &set.items {
             let inner = match &item.node {
-                Selection::Field(field) => Size {
-                    fields: 1,
-                    selections: self.set(&field.node.selection_set.node).selections,
-                },
+                Selection::Field(field) => {
+                    let sub = self.set(&field.node.selection_set.node);
+                    Size {
+                        fields: 1,
+                        selections: sub.selections,
+                        depth: sub.depth,
+                    }
+                }
                 Selection::InlineFragment(f) => self.set(&f.node.selection_set.node),
                 Selection::FragmentSpread(spread) => self.fragment(&spread.node.fragment_name.node),
             };
@@ -517,7 +572,8 @@ impl<'d> Expander<'d> {
                 .selections
                 .saturating_add(inner.selections)
                 .saturating_add(1);
-            if size.selections > MAX_EXPANDED_SELECTIONS {
+            size.depth = size.depth.max(inner.depth.saturating_add(1));
+            if size.selections > MAX_EXPANDED_SELECTIONS || size.depth > MAX_EXPANDED_DEPTH {
                 break;
             }
         }
@@ -581,6 +637,54 @@ mod tests {
         ];
         for (status, code) in cases {
             assert_eq!(error_code(status), code, "status {status}");
+        }
+    }
+
+    /// A linear chain of `n + 1` fragments on `User`, each spreading the
+    /// next, listed first to last or (`reversed`) last to first.
+    fn chain(n: usize, reversed: bool) -> Vec<String> {
+        let mut fragments: Vec<String> = (0..n)
+            .map(|i| format!("fragment F{i} on User {{ ...F{} }}", i + 1))
+            .collect();
+        fragments.push(format!("fragment F{n} on User {{ login }}"));
+        if reversed {
+            fragments.reverse();
+        }
+        fragments
+    }
+
+    /// `oversize` on a thread with a Tokio worker's 2 MiB stack.
+    fn oversize_on_small_stack(query: String) -> Option<Oversize> {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || oversize(&query, None, 10))
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn long_fragment_chains_are_refused_without_overflowing_the_stack() {
+        // Spread from the operation, first fragment first.
+        let used = format!(
+            "{{ viewer {{ ...F0 }} }} {}",
+            chain(30_000, false).join(" ")
+        );
+        // Unused, last fragment first: each one's expansion is memoized
+        // before the next one up the chain spreads it, so the chain's
+        // depth must be remembered with its size.
+        let unused = format!("{{ viewer {{ login }} }} {}", chain(30_000, true).join(" "));
+        for query in [used, unused] {
+            let refused = oversize_on_small_stack(query).expect("refused");
+            assert_eq!(refused.describe().1, "QUERY_TOO_LARGE");
+        }
+    }
+
+    #[test]
+    fn short_fragment_chains_are_within_bounds() {
+        for reversed in [false, true] {
+            let query = format!("{{ viewer {{ ...F0 }} }} {}", chain(20, reversed).join(" "));
+            assert_eq!(oversize_on_small_stack(query), None);
         }
     }
 
