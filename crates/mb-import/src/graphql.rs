@@ -360,16 +360,58 @@ fn def_ref(name: &str) -> Value {
 
 fn type_schema(ty: &Type) -> Value {
     let inner = match &ty.base {
-        BaseType::Named(n) => match n.as_str() {
-            "Int" => json!({"type": "integer", "minimum": i32::MIN, "maximum": i32::MAX}),
-            "Float" => json!({"type": "number"}),
-            "String" | "ID" => json!({"type": "string"}),
-            "Boolean" => json!({"type": "boolean"}),
-            other => def_ref(other),
-        },
+        BaseType::Named(n) => named_schema(n),
         BaseType::List(item) => json!({"type": "array", "items": type_schema(item)}),
     };
-    if ty.nullable {
+    nullable(inner, ty.nullable)
+}
+
+/// The schema of a field's value in a response. Like [`type_schema`], except
+/// that list items which the GraphQL adapter cannot serve as null (items of
+/// enum, object, interface, union or list type: async-graphql's dynamic
+/// schema rejects a null there, e.g. "invalid item for enum") are required,
+/// so the faker never generates such a null and validation repairs one.
+fn output_type_schema(schema: &Schema, ty: &Type) -> Value {
+    let inner = match &ty.base {
+        BaseType::Named(n) => named_schema(n),
+        BaseType::List(item) if item.nullable && !null_item_servable(schema, item) => {
+            let required = Type {
+                base: item.base.clone(),
+                nullable: false,
+            };
+            json!({"type": "array", "items": output_type_schema(schema, &required)})
+        }
+        BaseType::List(item) => {
+            json!({"type": "array", "items": output_type_schema(schema, item)})
+        }
+    };
+    nullable(inner, ty.nullable)
+}
+
+/// Whether a null list item of type `item` can be served: only scalars.
+fn null_item_servable(schema: &Schema, item: &Type) -> bool {
+    match &item.base {
+        BaseType::Named(n) => match schema.types.get(n.as_str()) {
+            Some(def) => matches!(def.kind, Kind::Scalar),
+            // Built-in scalars are not in `types`.
+            None => true,
+        },
+        BaseType::List(_) => false,
+    }
+}
+
+fn named_schema(name: &str) -> Value {
+    match name {
+        "Int" => json!({"type": "integer", "minimum": i32::MIN, "maximum": i32::MAX}),
+        "Float" => json!({"type": "number"}),
+        "String" | "ID" => json!({"type": "string"}),
+        "Boolean" => json!({"type": "boolean"}),
+        other => def_ref(other),
+    }
+}
+
+fn nullable(inner: Value, nullable: bool) -> Value {
+    if nullable {
         json!({"anyOf": [inner, {"type": "null"}]})
     } else {
         inner
@@ -414,7 +456,7 @@ fn input_values_schema(values: &[InputValue]) -> (Map<String, Value>, bool) {
     (object_schema(properties, required), any_required)
 }
 
-fn fields_schema(fields: &[Field], typename: Option<&str>) -> Map<String, Value> {
+fn fields_schema(schema: &Schema, fields: &[Field], typename: Option<&str>) -> Map<String, Value> {
     let mut properties = Map::new();
     let mut required = Vec::new();
     if let Some(name) = typename {
@@ -424,7 +466,7 @@ fn fields_schema(fields: &[Field], typename: Option<&str>) -> Map<String, Value>
     for f in fields {
         properties.insert(
             f.name.clone(),
-            with_description(type_schema(&f.ty), f.description.as_deref()),
+            with_description(output_type_schema(schema, &f.ty), f.description.as_deref()),
         );
         if !f.ty.nullable {
             required.push(json!(f.name));
@@ -449,7 +491,7 @@ fn def_schema(schema: &Schema, name: &str, def: &TypeDef) -> Value {
         Kind::Scalar => {
             return json!({ "description": format!("GraphQL scalar {name}") });
         }
-        Kind::Object { fields, .. } => fields_schema(fields, Some(name)),
+        Kind::Object { fields, .. } => fields_schema(schema, fields, Some(name)),
         Kind::Interface { fields, .. } => {
             let implementors: Vec<&str> = schema
                 .types
@@ -461,7 +503,7 @@ fn def_schema(schema: &Schema, name: &str, def: &TypeDef) -> Value {
                 .collect();
             if implementors.is_empty() {
                 // No concrete type to pick from: describe the shared fields.
-                fields_schema(fields, None)
+                fields_schema(schema, fields, None)
             } else {
                 one_of(implementors)
             }
@@ -547,7 +589,7 @@ fn operation(
         outputs: vec![OutputVariant {
             status: StatusSelector::Code(200),
             content_type: Some("application/json".into()),
-            schema: Some(type_schema(&f.ty)),
+            schema: Some(output_type_schema(schema, &f.ty)),
         }],
         resource_type,
         identity,

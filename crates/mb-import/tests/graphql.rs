@@ -379,3 +379,45 @@ fn sniff_detects_sdl_and_introspection() {
         Err(ImportError::Unsupported(_) | ImportError::Parse(_))
     ));
 }
+
+/// A null item of a list of enums, objects or lists cannot be served by the
+/// GraphQL adapter, so output schemas require those items; scalar items and
+/// input values keep GraphQL's nullability.
+#[test]
+fn output_list_items_that_cannot_be_null_are_required() {
+    let sdl = br#"
+      enum Color { RED GREEN }
+      type Thing { c: [Color]!, cc: [[Color]], t: [Thing], s: [String]! }
+      type Query { things(colors: [Color]): [Thing] }
+    "#;
+    let b = compile(sdl).unwrap();
+    let nil = json!({"type": "null"});
+    let color = json!({"$ref": "#/$defs/Color"});
+    let thing = &b.defs["Thing"]["properties"];
+    assert_eq!(thing["c"], json!({"type": "array", "items": color}));
+    assert_eq!(
+        thing["cc"],
+        json!({"anyOf": [
+            {"type": "array", "items": {"type": "array", "items": color}},
+            nil
+        ]})
+    );
+    assert_eq!(
+        thing["t"],
+        json!({"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/Thing"}}, nil]})
+    );
+    assert_eq!(
+        thing["s"],
+        json!({"type": "array", "items": {"anyOf": [{"type": "string"}, nil]}})
+    );
+    let op = b.operation("Query.things").unwrap();
+    assert_eq!(
+        op.outputs[0].schema,
+        Some(json!({"anyOf": [{"type": "array", "items": {"$ref": "#/$defs/Thing"}}, nil]}))
+    );
+    // Input: a null item is a valid argument.
+    assert_eq!(
+        op.input.body.as_ref().unwrap()["properties"]["colors"],
+        json!({"anyOf": [{"type": "array", "items": {"anyOf": [color, nil]}}, nil]})
+    );
+}
