@@ -35,8 +35,11 @@ const MAX_LATENCY: Duration = Duration::from_secs(30);
 const MAX_SESSION_LEN: usize = 128;
 const MAX_STREAM_ITEMS: usize = 10_000;
 const LIST_CONTEXT_LIMIT: usize = 20;
-/// Usage-event source for responses that were not generated (problems).
-const NO_SOURCE: &str = "none";
+/// Usage-event source (the `source` label of `mb_requests_total`) for calls
+/// answered without generating a body: refused (auth, quota, rate limit,
+/// invalid request or override, unknown scenario) or answered natively (a
+/// forced or injected error the contract declares no response for).
+const NOT_GENERATED_SOURCE: &str = "not_generated";
 
 /// Headers never forwarded to the engine or recorded (they may carry
 /// credentials).
@@ -773,7 +776,10 @@ async fn report_with(rt: &MockRuntime, headers: &HeaderMap, mut r: Report, meter
     if let Some(tenancy) = tenancy {
         let mut event = UsageEvent::new(tenancy, rt.name.clone(), operation_id);
         event.status = r.status;
-        event.source = r.source.map_or(NO_SOURCE, Source::as_str).to_string();
+        event.source = r
+            .source
+            .map_or(NOT_GENERATED_SOURCE, Source::as_str)
+            .to_string();
         event.latency = r.latency;
         event.prompt_tokens = r.usage.prompt_tokens;
         event.completion_tokens = r.usage.completion_tokens;

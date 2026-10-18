@@ -699,6 +699,8 @@ async fn graphql_http_401_is_reported_and_requests_are_admitted_once() {
     let events = usage.0.lock().unwrap().clone();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, 401);
+    // Refused before generation: counted under source `not_generated`.
+    assert_eq!(events[0].source, "not_generated");
 
     // Two root fields in one admitted request: admitted once, two calls.
     let resp = app
