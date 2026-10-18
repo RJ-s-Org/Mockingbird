@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { subscribeRequests, type LiveRequestView } from "../../api/sse";
+import { olderThan, recentRequests, subscribeRequests, type LiveRequestView } from "../../api/sse";
 import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { Direction } from "./Direction";
 import { TableScroll } from "../../components/DataTable";
@@ -23,8 +23,30 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
   const pausedRef = useRef(false);
   const nextKey = useRef(0);
 
+  const [history, setHistory] = useState<"loading" | "loaded">("loading");
+  const feed = `${ws}/${mock}`;
+  const [shownFeed, setShownFeed] = useState(feed);
+  if (shownFeed !== feed) {
+    setShownFeed(feed);
+    setRows([]);
+    setHistory("loading");
+  }
+
   useEffect(() => {
-    return subscribeRequests(
+    // Recent events first, then the live tail on top.
+    let cancelled = false;
+    recentRequests(ws, mock, { kind: "event" }).then((recent) => {
+      if (cancelled) return;
+      setRows((current) => {
+        const older = olderThan(
+          current.map((r) => r.record),
+          recent,
+        ).map((record, i) => ({ key: -1 - i, record }));
+        return [...current, ...older].slice(0, MAX_EVENTS);
+      });
+      setHistory("loaded");
+    });
+    const close = subscribeRequests(
       ws,
       mock,
       { kind: "event" },
@@ -44,6 +66,10 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
       },
       () => setInterrupted(true),
     );
+    return () => {
+      cancelled = true;
+      close();
+    };
   }, [ws, mock]);
 
   const togglePause = () => {
@@ -60,6 +86,11 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
           {paused ? "Resume" : "Pause"}
         </button>
       </div>
+      {history === "loaded" && rows.length > 0 ? (
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          Showing the latest recorded events, then new ones as they arrive.
+        </p>
+      ) : null}
       <div aria-live="polite" className="space-y-1 text-sm">
         {paused ? (
           <p className="text-slate-700 dark:text-slate-300">
@@ -83,7 +114,9 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
-                  Waiting for events…
+                  {history === "loading"
+                    ? "Loading recent events…"
+                    : "No events recorded yet. New ones appear here as they are published or received."}
                 </td>
               </tr>
             ) : (

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useActiveOperations } from "../../api/queries";
-import { subscribeRequests, type LiveFilters, type LiveRequestView } from "../../api/sse";
+import { olderThan, recentRequests, subscribeRequests, type LiveFilters, type LiveRequestView } from "../../api/sse";
 import { inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { RequestDrawer } from "./RequestDrawer";
 import { TableScroll } from "../../components/DataTable";
@@ -45,9 +45,31 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
   const pausedRef = useRef(false);
   const nextKey = useRef(0);
 
+  const [history, setHistory] = useState<"loading" | "loaded">("loading");
   const { operation, session, source } = filters;
+  // Each filter starts over: recent matching calls, then the live tail on top.
+  const feed = JSON.stringify([ws, mock, operation, session, source]);
+  const [shownFeed, setShownFeed] = useState(feed);
+  if (shownFeed !== feed) {
+    setShownFeed(feed);
+    setRows([]);
+    setHistory("loading");
+  }
+
   useEffect(() => {
-    return subscribeRequests(
+    let cancelled = false;
+    recentRequests(ws, mock, { operation, session, source }).then((recent) => {
+      if (cancelled) return;
+      setRows((current) => {
+        const older = olderThan(
+          current.map((r) => r.record),
+          recent,
+        ).map((record, i) => ({ key: -1 - i, record }));
+        return [...current, ...older].slice(0, MAX_ROWS);
+      });
+      setHistory("loaded");
+    });
+    const close = subscribeRequests(
       ws,
       mock,
       { operation, session, source },
@@ -67,6 +89,10 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
       },
       () => setInterrupted(true),
     );
+    return () => {
+      cancelled = true;
+      close();
+    };
   }, [ws, mock, operation, session, source]);
 
   const togglePause = () => {
@@ -132,6 +158,11 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
           {paused ? "Resume" : "Pause"}
         </button>
       </div>
+      {history === "loaded" && rows.length > 0 ? (
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          Showing the latest recorded requests, then new ones as they arrive.
+        </p>
+      ) : null}
       <div aria-live="polite" className="space-y-2 text-sm">
         {paused ? (
           <p className="text-slate-700 dark:text-slate-300">
@@ -167,7 +198,9 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={7} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
-                  Waiting for requests…
+                  {history === "loading"
+                    ? "Loading recent requests…"
+                    : "No requests recorded yet. New ones appear here as they are served."}
                 </td>
               </tr>
             ) : (

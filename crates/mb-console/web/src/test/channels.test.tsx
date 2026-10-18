@@ -390,6 +390,36 @@ describe("channels", () => {
     expect(JSON.parse(calls.filter((c) => c.method === "PUT")[1]?.body ?? "")).toEqual({ broker: null });
   });
 
+  it("event feed opens with the latest recorded events", async () => {
+    const calls = serve({
+      ...routes(),
+      [`GET ${MOCK}/requests`]: [
+        {
+          id: 9,
+          at: "2026-10-16T09:00:00Z",
+          operation_id: "orderCreated",
+          session: "s",
+          method: "PUBLISH",
+          path: "shop.orders",
+          status: 200,
+          source: "llm",
+          latency_ms: 1,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          request: {},
+          response: null,
+          kind: "event",
+        },
+      ],
+    });
+    await openTab();
+    const feed = screen.getByRole("table", { name: "Event feed" });
+    expect(await within(feed).findByText("orderCreated")).toBeTruthy();
+    const q = new URLSearchParams(calls.find((c) => c.path === `${MOCK}/requests`)?.search);
+    expect(q.get("kind")).toBe("event");
+    expect(screen.getByText(/Showing the latest recorded events, then new ones as they arrive/)).toBeTruthy();
+  });
+
   it("event feed shows streamed event records", async () => {
     const user = userEvent.setup();
     serve(routes());

@@ -116,6 +116,58 @@ beforeEach(() => {
 });
 
 describe("live requests", () => {
+  it("opens with the latest recorded requests, then streams new ones on top without duplicates", async () => {
+    /** A live record as the request log returns it: an id, no workspace or mock. */
+    const asLogged = (r: Record<string, unknown>, id: number, at: string) => {
+      const entry: Record<string, unknown> = { id, ...r, at, kind: "http" };
+      delete entry.workspace;
+      delete entry.mock;
+      return entry;
+    };
+    const logged = (id: number, path: string, at: string) => asLogged(record({ path }), id, at);
+    let release: (r: Response) => void = () => {};
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${MOCK}`]: mockView("pets", { active_version: 1 }),
+      [`GET ${MOCK}/contracts/1`]: contract,
+      [`GET ${MOCK}/requests`]: () => new Promise<Response>((resolve) => (release = resolve)),
+    });
+    renderAt("/w/default/mocks/pets/requests");
+    const table = await screen.findByRole("table", { name: "Live requests" });
+    await waitFor(() => expect(FakeEventSource.open().length).toBe(1));
+    expect(screen.getByText("Loading recent requests…")).toBeTruthy();
+    await waitFor(() => expect(calls.some((c) => c.path === `${MOCK}/requests`)).toBe(true));
+    expect(new URLSearchParams(calls.find((c) => c.path === `${MOCK}/requests`)?.search).get("limit")).toBe("50");
+
+    // A call served while the history loads arrives on the stream and is also in the log.
+    const live = record({ path: "/pets/orders/live", kind: "http" });
+    push("request", live);
+    const history = [
+      asLogged(live, 3, "2026-10-16T09:59:59Z"),
+      logged(2, "/pets/orders/older", "2026-10-16T09:59:00Z"),
+      logged(1, "/pets/orders/oldest", "2026-10-16T09:58:00Z"),
+    ];
+    await act(async () => release(new Response(JSON.stringify(history), { headers: { "Content-Type": "application/json" } })));
+    await waitFor(() => expect(bodyRows(table).length).toBe(3));
+    const paths = bodyRows(table).map((r) => r.querySelectorAll("td")[2]?.textContent);
+    expect(paths).toEqual(["/pets/orders/live", "/pets/orders/older", "/pets/orders/oldest"]);
+    expect(screen.getByText(/Showing the latest recorded requests, then new ones as they arrive/)).toBeTruthy();
+
+    push("request", record({ path: "/pets/orders/newest" }));
+    expect(bodyRows(table)[0]?.textContent).toContain("/pets/orders/newest");
+  });
+
+  it("with no recorded requests the empty feed says new ones will appear", async () => {
+    serve({
+      ...shell(localMe),
+      [`GET ${MOCK}`]: mockView("pets", { active_version: 1 }),
+      [`GET ${MOCK}/contracts/1`]: contract,
+      [`GET ${MOCK}/requests`]: [],
+    });
+    renderAt("/w/default/mocks/pets/requests");
+    expect(await screen.findByText("No requests recorded yet. New ones appear here as they are served.")).toBeTruthy();
+  });
+
   it("live table prepends events and caps at 500", async () => {
     const table = await open();
     expect(FakeEventSource.current().url).toBe(`${MOCK}/requests/stream`);
