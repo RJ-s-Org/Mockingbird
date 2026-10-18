@@ -130,7 +130,7 @@ test("channels tab publishes on a websocket channel", async ({ page, request }) 
   await expectAccessible(page);
   await dialog.getByRole("button", { name: "Close" }).click();
   const published = feed.getByRole("row").filter({ hasText: "chatMessage" });
-  await expect(published.getByRole("cell", { name: "PUBLISH", exact: true })).toBeVisible({ timeout: 5_000 });
+  await expect(published.getByRole("cell", { name: "Mock sends", exact: true })).toBeVisible({ timeout: 5_000 });
   await expectAccessible(page);
   expect(consoleErrors).toEqual([]);
 });

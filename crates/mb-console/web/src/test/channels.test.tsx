@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fromMcmTrigger, toMcmTrigger, type TriggerDraft } from "../api/channels";
+import { directionLabel, fromMcmTrigger, toMcmTrigger, triggerError, type TriggerDraft } from "../api/channels";
 import { json, localMe, mockView, problem, renderAt, serve, shell, viewerMe, type Answer } from "./harness";
 
 const MOCK = "/api/v1/workspaces/default/mocks/shop";
@@ -125,7 +125,7 @@ describe("channels", () => {
 
     const created = row(table, "orderCreated");
     expect(within(created).getByText("orderCreated title")).toBeTruthy();
-    expect(within(created).getByText("publish")).toBeTruthy();
+    expect(within(created).getByText("Mock sends").getAttribute("title")).toMatch(/AsyncAPI 2 subscribe operation/);
     expect(within(created).getByText("kafka")).toBeTruthy();
     expect(within(created).getByText("shop.orderCreated")).toBeTruthy();
     expect(within(created).getByText("every 5s")).toBeTruthy();
@@ -136,7 +136,7 @@ describe("channels", () => {
     expect(within(row(table, "orderShipped")).getByText("on order upserted")).toBeTruthy();
 
     const payment = row(table, "paymentReceived");
-    expect(within(payment).getByText("subscribe")).toBeTruthy();
+    expect(within(payment).getByText("Mock receives")).toBeTruthy();
     expect(within(payment).getByText("3 received")).toBeTruthy();
     // Triggers and manual publishing apply to publish channels only.
     expect(within(payment).queryByRole("button", { name: /Edit triggers/ })).toBeNull();
@@ -211,6 +211,11 @@ describe("channels", () => {
     await user.click(within(second).getByRole("button", { name: "Remove trigger 2" }));
     await user.click(within(editor).getByRole("button", { name: "Add trigger" }));
     const added = within(editor).getByRole("group", { name: "Trigger 2" });
+    // A new trigger starts as Manual, and the editor says what that means.
+    const kind = within(added).getByLabelText<HTMLSelectElement>("Kind");
+    expect(kind.value).toBe("manual");
+    expect(kind.getAttribute("aria-describedby")).toBeTruthy();
+    expect(within(added).getByText(/Publishes only when someone clicks Publish now/)).toBeTruthy();
     await user.selectOptions(within(added).getByLabelText("Kind"), "on_state_change");
     await user.type(within(added).getByLabelText("Resource type"), "order");
     await user.selectOptions(within(added).getByLabelText("Change"), "deleted");
@@ -240,19 +245,19 @@ describe("channels", () => {
     const every = within(first).getByLabelText("Every (ms)");
     await user.clear(every);
     await user.type(every, "50");
-    expect(within(first).getByText("at least 100 ms")).toBeTruthy();
+    expect(within(first).getByText("The interval must be at least 100 ms.")).toBeTruthy();
     expect((within(editor).getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
 
     // The API takes whole milliseconds only.
     await user.clear(every);
     await user.type(every, "150.5");
-    expect(within(first).getByText("a whole number of ms, at least 100")).toBeTruthy();
+    expect(within(first).getByText("The interval must be a whole number of ms, at least 100.")).toBeTruthy();
     expect((within(editor).getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
 
     // A cron trigger needs an expression.
     const cron = within(editor).getByRole("group", { name: "Trigger 2" });
     await user.clear(within(cron).getByLabelText("Cron expression"));
-    expect(within(cron).getByText("a cron expression is required")).toBeTruthy();
+    expect(within(cron).getByText("A cron expression is required.")).toBeTruthy();
 
     // Valid again: the server's 422 is shown.
     await user.clear(every);
@@ -417,8 +422,8 @@ describe("channels", () => {
     expect(rows.length).toBe(2);
     // Newest first.
     expect(within(rows[0] as HTMLElement).getByText("channel2")).toBeTruthy();
-    expect(within(rows[0] as HTMLElement).getByText("RECEIVE")).toBeTruthy();
-    expect(within(rows[1] as HTMLElement).getByText("PUBLISH")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText("Mock receives")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("Mock sends")).toBeTruthy();
     expect(within(rows[1] as HTMLElement).getByText("llm")).toBeTruthy();
     expect(within(rows[1] as HTMLElement).getByText("200")).toBeTruthy();
 
@@ -463,5 +468,26 @@ describe("channels", () => {
     renderAt("/w/default/mocks/shop/channels");
     expect(await screen.findByText("This mock's active contract declares no channels.")).toBeTruthy();
     expect(screen.queryByRole("table", { name: "Channels" })).toBeNull();
+  });
+});
+
+describe("channel copy", () => {
+  it("labels directions from the mock's point of view, consistently", () => {
+    expect(directionLabel("publish").label).toBe("Mock sends");
+    expect(directionLabel("PUBLISH").label).toBe("Mock sends");
+    expect(directionLabel("subscribe").label).toBe("Mock receives");
+    expect(directionLabel("RECEIVE").label).toBe("Mock receives");
+    expect(directionLabel("other").label).toBe("other");
+  });
+
+  it("trigger errors are sentences", () => {
+    for (const draft of [
+      { kind: "schedule", every_ms: 5 },
+      { kind: "schedule", every_ms: 150.5 },
+      { kind: "cron", expr: " " },
+      { kind: "on_state_change", resource_type: "", change: "any" },
+    ] as const) {
+      expect(triggerError(draft)).toMatch(/^[A-Z].*\.$/);
+    }
   });
 });

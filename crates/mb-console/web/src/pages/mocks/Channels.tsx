@@ -16,6 +16,7 @@ import { inputClass, secondaryButton } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { ChannelTriggersEditor } from "./ChannelTriggersEditor";
+import { Direction } from "./Direction";
 import { EventFeed } from "./EventFeed";
 import { PublishDialog } from "./PublishDialog";
 
@@ -141,7 +142,7 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
         </div>
       ),
     }),
-    col.accessor("direction", { header: "Direction" }),
+    col.accessor("direction", { header: "Direction", cell: (info) => <Direction value={info.getValue()} /> }),
     col.accessor("protocol", { header: "Protocol" }),
     col.accessor("address", { header: "Address", cell: (info) => <code className="break-all">{info.getValue()}</code> }),
     col.accessor("enabled", {

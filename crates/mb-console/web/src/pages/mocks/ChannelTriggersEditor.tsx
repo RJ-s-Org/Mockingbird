@@ -1,5 +1,6 @@
 import { useRef, useState, type FormEvent } from "react";
 import {
+  TRIGGER_KIND_HINTS,
   fromMcmTrigger,
   toMcmTrigger,
   triggerError,
@@ -70,6 +71,7 @@ function TriggerFields({
             id={id("kind")}
             className={inputClass}
             value={draft.kind}
+            aria-describedby={id("kind-hint")}
             onChange={(e) => onChange(blank(e.target.value as TriggerDraft["kind"]))}
           >
             {KINDS.map((k) => (
@@ -152,6 +154,9 @@ function TriggerFields({
           Remove
         </button>
       </div>
+      <p id={id("kind-hint")} className="text-xs text-slate-600">
+        {TRIGGER_KIND_HINTS[draft.kind]}
+      </p>
       {error ? (
         <p id={errorId} className="text-sm text-red-800">
           {error}

@@ -72,15 +72,51 @@ export function fromMcmTrigger(v: unknown): TriggerDraft | null {
 export function triggerError(t: TriggerDraft): string | undefined {
   switch (t.kind) {
     case "schedule":
-      if (!Number.isFinite(t.every_ms) || t.every_ms < MIN_SCHEDULE_MS) return `at least ${MIN_SCHEDULE_MS} ms`;
+      if (!Number.isFinite(t.every_ms) || t.every_ms < MIN_SCHEDULE_MS) {
+        return `The interval must be at least ${MIN_SCHEDULE_MS} ms.`;
+      }
       // The API takes whole milliseconds and refuses a fraction.
-      return Number.isInteger(t.every_ms) ? undefined : `a whole number of ms, at least ${MIN_SCHEDULE_MS}`;
+      return Number.isInteger(t.every_ms)
+        ? undefined
+        : `The interval must be a whole number of ms, at least ${MIN_SCHEDULE_MS}.`;
     case "cron":
-      return t.expr.trim() === "" ? "a cron expression is required" : undefined;
+      return t.expr.trim() === "" ? "A cron expression is required." : undefined;
     case "on_state_change":
-      return t.resource_type.trim() === "" ? "a resource type is required" : undefined;
+      return t.resource_type.trim() === "" ? "A resource type is required." : undefined;
     case "manual":
       return undefined;
+  }
+}
+
+/** What a trigger kind does, shown under the editor's Kind choice. */
+export const TRIGGER_KIND_HINTS: Record<TriggerDraft["kind"], string> = {
+  manual: "Publishes only when someone clicks Publish now (or calls the publish API).",
+  schedule: "Publishes a message at a fixed interval.",
+  cron: "Publishes on a cron schedule, e.g. */5 * * * * for every five minutes.",
+  on_state_change: "Publishes when a stored resource of this type changes.",
+};
+
+/**
+ * A channel's direction (`publish` / `subscribe`) or an event record's method
+ * (`PUBLISH` / `RECEIVE`), from the mock's point of view, with a tooltip that
+ * maps it to both AsyncAPI versions' terms. The server has already turned an
+ * AsyncAPI 2 `subscribe` operation (what clients subscribe to) into `publish`.
+ */
+export function directionLabel(direction: string): { label: string; hint: string } {
+  switch (direction.toLowerCase()) {
+    case "publish":
+      return {
+        label: "Mock sends",
+        hint: "The mock publishes messages on this channel for clients to receive (an AsyncAPI 2 subscribe operation, an AsyncAPI 3 send operation).",
+      };
+    case "subscribe":
+    case "receive":
+      return {
+        label: "Mock receives",
+        hint: "The mock consumes messages that clients publish on this channel (an AsyncAPI 2 publish operation, an AsyncAPI 3 receive operation).",
+      };
+    default:
+      return { label: direction, hint: direction };
   }
 }
 

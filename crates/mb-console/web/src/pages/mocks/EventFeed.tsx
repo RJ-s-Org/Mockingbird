@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { subscribeRequests, type LiveRequestView } from "../../api/sse";
 import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
+import { Direction } from "./Direction";
 import { tableScroll } from "../../components/DataTable";
 
 /** The feed keeps at most this many rows, newest first. */
@@ -95,7 +96,7 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
                     <code>{record.operation_id ?? "—"}</code>
                   </td>
                   <td className={cell}>
-                    <code>{record.method}</code>
+                    <Direction value={record.method} />
                   </td>
                   <td className={cell}>{record.status}</td>
                   <td className={cell}>{record.source ?? "—"}</td>
