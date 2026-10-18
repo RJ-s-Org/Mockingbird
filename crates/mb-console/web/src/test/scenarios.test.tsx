@@ -133,6 +133,8 @@ describe("scenarios", () => {
     expect(alert.textContent).toContain("Scenario status not declared");
     expect(alert.textContent).toContain("declare a 409 response, or use a status it declares (201, 400) or a 5xx");
     expect(screen.getByRole("dialog", { name: "New scenario" })).toBeTruthy();
+    // The error is below a long form: it takes focus so it is scrolled into view and announced.
+    await waitFor(() => expect(document.activeElement).toBe(alert));
   });
 
   it("scenario operations come from active contract", async () => {

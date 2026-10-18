@@ -317,11 +317,16 @@ function SchemaField({
 /** A failed save; a 422 lists each problem as `pointer: message`. */
 function SaveError({ error }: { error: unknown }) {
   const problems = error instanceof ApiError ? (error.problem?.errors ?? []) : [];
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ block: "nearest" });
+    ref.current?.focus({ preventScroll: true });
+  }, [error]);
   if (!error) return null;
-  if (problems.length === 0) return <ProblemAlert error={error} />;
+  if (problems.length === 0) return <ProblemAlert error={error} focus />;
   const problem = (error as ApiError).problem;
   return (
-    <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
+    <div ref={ref} role="alert" tabIndex={-1} className="focus:outline-none rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
       <p className="font-semibold">{problem?.title || "The draft was not saved"}</p>
       {problem?.detail ? <p className="mt-1">{problem.detail}</p> : null}
       <ul role="list" aria-label="Problems" className="mt-2 list-disc space-y-1 pl-5">

@@ -115,7 +115,7 @@ function NewWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCre
             onChange={(e) => setDisplayName(e.target.value)}
           />
         </div>
-        <ProblemAlert error={create.error} />
+        <ProblemAlert error={create.error} focus />
         <div className="flex justify-end gap-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel

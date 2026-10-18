@@ -179,7 +179,7 @@ export function ProfileEditor({
             ))}
           </select>
         </div>
-        <ProblemAlert error={put.error} />
+        <ProblemAlert error={put.error} focus />
         <div className="flex justify-end gap-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel

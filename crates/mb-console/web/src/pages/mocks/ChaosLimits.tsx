@@ -359,7 +359,7 @@ export function ChaosLimits({
           </div>
           <p className="text-xs text-slate-600 dark:text-slate-400">Blank limits fall back to the server&apos;s global limits.</p>
         </fieldset>
-        <ProblemAlert error={patch.error} />
+        <ProblemAlert error={patch.error} focus />
         {canEdit ? (
           <button
             type="submit"

@@ -210,7 +210,7 @@ function OverviewForm({
           </div>
         </div>
       </fieldset>
-      <ProblemAlert error={patch.error ?? remove.error} />
+      <ProblemAlert error={patch.error ?? remove.error} focus />
       {canEdit ? (
         <div className="flex justify-between gap-2">
           <button type="submit" className={primaryButton} disabled={reason !== undefined || !dirty || patch.isPending}>

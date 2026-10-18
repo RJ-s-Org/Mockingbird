@@ -107,7 +107,7 @@ export function PublishDialog({
             </p>
           )}
         </div>
-        <ProblemAlert error={publish.error} />
+        <ProblemAlert error={publish.error} focus />
         {publish.data ? (
           <div aria-live="polite" className="space-y-2">
             <h3 className="text-sm font-semibold">{`Published ${publish.data.messages.length} message(s)`}</h3>

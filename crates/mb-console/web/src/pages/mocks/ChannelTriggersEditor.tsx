@@ -243,7 +243,7 @@ function TriggersForm({
           </button>
         </div>
       )}
-      <ProblemAlert error={put.error} />
+      <ProblemAlert error={put.error} focus />
       <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
         Save
       </button>

@@ -203,7 +203,7 @@ export function ScenarioEditor({
             <ChaosFields idPrefix="scenario-chaos" draft={chaos} errors={chaosErr} onChange={setChaos} />
           </fieldset>
         </fieldset>
-        <ProblemAlert error={put.error} />
+        <ProblemAlert error={put.error} focus />
         {reason === undefined ? (
           <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
             Save

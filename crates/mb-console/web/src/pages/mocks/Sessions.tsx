@@ -252,7 +252,7 @@ function SeedForm({ ws, mock }: { ws: string; mock: string }) {
           {seeded}
         </p>
       ) : null}
-      <ProblemAlert error={seed.error} />
+      <ProblemAlert error={seed.error} focus />
     </form>
   );
 }

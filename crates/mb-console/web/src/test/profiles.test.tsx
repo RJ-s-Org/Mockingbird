@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { json, localMe, problem, renderAt, serve, shell, viewerMe } from "./harness";
@@ -109,6 +109,7 @@ describe("llm profiles", () => {
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
     const alert = await within(dialog).findByRole("alert");
     expect(alert.textContent).toContain("secret_ref env:OTHER is not allowed by server.api_secret_refs");
+    await waitFor(() => expect(document.activeElement).toBe(alert));
   });
 
   it("closing the editor gives focus back to the Edit button", async () => {
