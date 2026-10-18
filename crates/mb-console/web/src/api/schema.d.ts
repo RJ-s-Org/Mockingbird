@@ -2035,7 +2035,7 @@ export interface operations {
                     "application/json": components["schemas"]["MockView"];
                 };
             };
-            /** @description The mock already exists, or another mock has its route prefix */
+            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4203,7 +4203,7 @@ export interface operations {
                     "application/json": components["schemas"]["MockView"];
                 };
             };
-            /** @description The mock already exists, or another mock has its route prefix */
+            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix */
             409: {
                 headers: {
                     [name: string]: unknown;

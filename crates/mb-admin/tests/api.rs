@@ -366,6 +366,32 @@ async fn mock_lifecycle() {
 }
 
 #[tokio::test]
+async fn duplicate_mock_name_is_reported_before_the_prefix() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    // Same name, default prefix (`/orders`, also taken): the name wins.
+    let p = h
+        .json(Method::POST, "/api/v1/mocks", json!({ "name": "orders" }))
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    assert_eq!(p["title"], "Mock already exists", "{p}");
+    assert_eq!(
+        p["detail"], "a mock named \"orders\" already exists in workspace \"default\"",
+        "{p}"
+    );
+    // Same name with a free prefix: still the name.
+    let p = h
+        .json(
+            Method::POST,
+            "/api/v1/mocks",
+            json!({ "name": "orders", "route_prefix": "/elsewhere" }),
+        )
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    assert_eq!(p["title"], "Mock already exists", "{p}");
+}
+
+#[tokio::test]
 async fn route_prefix_collisions_conflict() {
     let h = harness().await;
     h.create_mock("orders").await;

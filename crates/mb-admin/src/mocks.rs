@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_store::{
-    ChaosSettings, DataPlaneAuthConfig, Mock, MockLimits, NewMock, ResourceSource,
+    ChaosSettings, DataPlaneAuthConfig, Mock, MockLimits, NewMock, ResourceSource, StoreError,
     validate_route_prefix,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -219,6 +219,17 @@ where
 
 /// A 409 problem when a mock other than `except` (workspace, name), in any
 /// workspace, already serves `prefix`: route prefixes are global.
+/// Title of the 409 for a mock name already taken in the workspace.
+const MOCK_EXISTS: &str = "Mock already exists";
+
+fn mock_exists(ws: &str, name: &str) -> Problem {
+    Problem::titled(
+        StatusCode::CONFLICT,
+        MOCK_EXISTS,
+        format!("a mock named {name:?} already exists in workspace {ws:?}"),
+    )
+}
+
 async fn ensure_prefix_free(
     st: &AdminState,
     prefix: &str,
@@ -268,7 +279,7 @@ pub async fn list(
     request_body = CreateMock,
     responses(
         (status = 201, body = MockView),
-        (status = 409, description = "The mock already exists, or another mock has its route prefix", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The mock already exists (title \"Mock already exists\"), or another mock has its route prefix", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid name, route prefix, chaos or limits", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -278,11 +289,17 @@ pub async fn create(
     Json(body): Json<CreateMock>,
 ) -> ApiResult<impl IntoResponse> {
     access.require(Permission::Edit)?;
+    // The name first: a duplicate's default prefix `/<name>` is taken too,
+    // and the name is the conflict the caller needs to hear about.
+    if st.store.get_mock(&access.ws, &body.name).await?.is_some() {
+        return Err(mock_exists(&access.ws, &body.name));
+    }
     let prefix = body
         .route_prefix
         .clone()
         .unwrap_or_else(|| format!("/{}", body.name));
     ensure_prefix_free(&st, &prefix, None).await?;
+    let name = body.name.clone();
     let created = st
         .store
         .create_mock(
@@ -299,7 +316,12 @@ pub async fn create(
                 limits: body.limits,
             },
         )
-        .await?;
+        .await
+        .map_err(|e| match e {
+            // Created concurrently since the check above.
+            StoreError::Conflict(_) => mock_exists(&access.ws, &name),
+            e => e.into(),
+        })?;
     let view = MockView::new(created, None);
     access
         .audit(
