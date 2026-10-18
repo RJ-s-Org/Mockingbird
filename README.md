@@ -177,6 +177,8 @@ SSE streams and GraphQL subscriptions stay open after the generated items: they 
 
 The override headers work on every protocol: gRPC reads them as lowercased metadata (`x-mockingbird-session`, `x-mockingbird-status`, …), and GraphQL reads them from the HTTP request (or from the `connection_init` payload of a subscription). A forced status is reported natively.
 
+REST answers a forced status with the operation's declared response for it (or its `default` response). A 5xx the operation does not declare is answered as a plain `application/problem+json` document with that status, since any API can fail that way; any other undeclared status is a `400 Undeclared status override`, and a value that is not a status code from 100 to 599 is a `400 Invalid override`.
+
 gRPC answers with the status code standing for the HTTP status:
 
 | HTTP status | gRPC status |

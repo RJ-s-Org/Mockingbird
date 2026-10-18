@@ -694,3 +694,113 @@ async fn event_stream_without_sse_feature_is_not_implemented() {
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     assert_eq!(body_json(resp).await["title"], "Streaming not enabled");
 }
+
+const SERVER_ERRORS_CONTRACT: &str = r##"
+openapi: 3.0.3
+info: {title: Outage API, version: "1"}
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {type: string}}
+        "500":
+          description: broken
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties: {error: {type: string}}
+        "503":
+          description: down
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [retryIn]
+                properties: {retryIn: {type: integer}}
+"##;
+
+fn server_errors() -> Harness {
+    let bundle = Arc::new(compile(SERVER_ERRORS_CONTRACT.as_bytes()).unwrap());
+    let mut rt = MockRuntime::new(
+        "outage",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.header_overrides = true;
+    let rt = Arc::new(rt);
+    Harness {
+        router: http_rest::router(Arc::clone(&rt)),
+        rt,
+        provider: None,
+    }
+}
+
+fn with_status(uri: &str, status: &str) -> Request<Body> {
+    Request::get(uri)
+        .header("x-mockingbird-status", status)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn forced_declared_server_errors_use_their_variants() {
+    let h = server_errors();
+    let resp = send(&h, with_status("/things", "500")).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(header_str(&resp, "content-type"), "application/json");
+    assert!(body_json(resp).await["error"].is_string());
+
+    let resp = send(&h, with_status("/things", "503")).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header_str(&resp, "content-type"), "application/json");
+    assert!(body_json(resp).await["retryIn"].is_i64());
+}
+
+#[tokio::test]
+async fn forced_undeclared_server_errors_are_native_problems() {
+    // getOrder declares only 200 and 404: an undeclared 5xx is answered
+    // as a plain problem with that status, like the other protocols do.
+    let h = offline();
+    for (code, title) in [
+        ("500", "Internal Server Error"),
+        ("503", "Service Unavailable"),
+    ] {
+        let resp = send(&h, with_status("/orders/o1", code)).await;
+        assert_eq!(resp.status().as_str(), code);
+        assert_eq!(
+            header_str(&resp, "content-type"),
+            "application/problem+json"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["title"], title);
+        assert_eq!(body["status"], code.parse::<u16>().unwrap());
+    }
+}
+
+#[tokio::test]
+async fn forced_status_undeclared_client_error_and_invalid_value_are_400() {
+    let h = offline();
+    // createOrder declares no 404 and no default variant.
+    let req = Request::post("/orders")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-mockingbird-status", "404")
+        .body(Body::from(r#"{"customerId":"c1","total":10}"#))
+        .unwrap();
+    let resp = send(&h, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(resp).await["title"], "Undeclared status override");
+
+    for bad in ["600", "5xx", "99"] {
+        let resp = send(&h, with_status("/orders/o1", bad)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(body_json(resp).await["title"], "Invalid override");
+    }
+}
