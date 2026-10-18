@@ -97,6 +97,15 @@ test("profiles, data-plane keys, audit and status", async ({ page, request }) =>
     await expect(audit.getByRole("cell", { name: action, exact: true }).first()).toBeVisible();
   }
   await expect(page.getByRole("link", { name: "Export JSONL" })).toHaveAttribute("download", "");
+  // Times stay on one line, with the ISO time as a tooltip.
+  const firstTime = audit.locator("time").first();
+  await expect(firstTime).toHaveAttribute("title", /^\d{4}-\d{2}-\d{2}T/);
+  const timeBox = await firstTime.boundingBox();
+  expect(timeBox?.height ?? 0).toBeLessThan(30);
+  // An event's changes open in a full-width row under it.
+  const updated = audit.getByRole("row").filter({ has: page.getByRole("cell", { name: "mock.update", exact: true }) });
+  await updated.first().getByRole("button", { name: /^Show changes of mock\.update/ }).click();
+  await expect(updated.first().locator("xpath=following-sibling::tr[1]").getByRole("region", { name: "After" })).toBeVisible();
   await expectAccessible(page);
 
   // 7. Status.

@@ -1,11 +1,10 @@
-import { useState, type FormEvent } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, type FormEvent } from "react";
 import { auditExportUrl, useAudit, useGlobalAudit, type AuditEvent, type AuditFilters } from "../api/queries";
 import { useMe } from "../auth/me";
 import { inputClass, primaryButton, secondaryButton } from "../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../components/DataTable";
 import { ProblemAlert } from "../components/ProblemAlert";
 import { linkClass } from "./mocks/MocksList";
-import { DateTime } from "./ApiKeys";
 
 const col = columnHelper<AuditEvent>();
 
@@ -13,28 +12,59 @@ function pretty(v: unknown): string {
   return v == null ? "—" : JSON.stringify(v, null, 2);
 }
 
-/** An event's before and after views, side by side. */
+/** An event's before and after views: side by side on wide screens, wrapping long lines. */
 function Changes({ event }: { event: AuditEvent }) {
-  if (event.before == null && event.after == null) return <>—</>;
-  const pane = "max-h-80 overflow-auto rounded-md border border-slate-300 bg-slate-50 p-2 font-mono text-xs";
+  const pane =
+    "max-h-80 overflow-auto rounded-md border border-slate-300 bg-white p-2 font-mono text-xs whitespace-pre-wrap break-all";
   return (
-    <details>
-      <summary className="cursor-pointer text-indigo-700 underline">Changes</summary>
-      <div className="mt-2 grid min-w-[32rem] grid-cols-2 gap-2">
-        <div>
-          <p className="mb-1 text-xs font-semibold">Before</p>
-          <pre role="region" aria-label="Before" tabIndex={0} className={pane}>
-            {pretty(event.before)}
-          </pre>
-        </div>
-        <div>
-          <p className="mb-1 text-xs font-semibold">After</p>
-          <pre role="region" aria-label="After" tabIndex={0} className={pane}>
-            {pretty(event.after)}
-          </pre>
-        </div>
+    <div className="grid min-w-0 grid-cols-1 gap-2 md:grid-cols-2">
+      <div className="min-w-0">
+        <p className="mb-1 text-xs font-semibold">Before</p>
+        <pre role="region" aria-label="Before" tabIndex={0} className={pane}>
+          {pretty(event.before)}
+        </pre>
       </div>
-    </details>
+      <div className="min-w-0">
+        <p className="mb-1 text-xs font-semibold">After</p>
+        <pre role="region" aria-label="After" tabIndex={0} className={pane}>
+          {pretty(event.after)}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+/** Which events have their changes shown, for the toggles inside the table. */
+const Expansion = createContext<{ open: ReadonlySet<number>; toggle: (id: number) => void }>({
+  open: new Set(),
+  toggle: () => {},
+});
+
+/** Shows or hides an event's changes (in a full-width row under it). */
+function ChangesToggle({ event }: { event: AuditEvent }) {
+  const expansion = useContext(Expansion);
+  if (event.before == null && event.after == null) return <>—</>;
+  const open = expansion.open.has(event.id);
+  const onToggle = () => expansion.toggle(event.id);
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-label={`${open ? "Hide" : "Show"} changes of ${event.action} on ${event.target}`}
+      className="text-sm whitespace-nowrap text-indigo-700 underline hover:text-indigo-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
+      onClick={onToggle}
+    >
+      {open ? "Hide changes" : "Changes"}
+    </button>
+  );
+}
+
+/** An event's time on one line; the tooltip carries the full ISO timestamp. */
+function EventTime({ at }: { at: string }) {
+  return (
+    <time dateTime={at} title={at} className="whitespace-nowrap">
+      {new Date(at).toLocaleString()}
+    </time>
   );
 }
 
@@ -51,29 +81,49 @@ export function Audit({ ws }: { ws: string }) {
   const everywhere = useGlobalAudit(filters, allWorkspaces);
   const audit = allWorkspaces ? everywhere : local;
   const events = audit.data?.pages.flat() ?? [];
+  const [open, setOpen] = useState<ReadonlySet<number>>(new Set());
+  const toggle = useCallback(
+    (id: number) =>
+      setOpen((current) => {
+        const next = new Set(current);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      }),
+    [],
+  );
+  const expansion = useMemo(() => ({ open, toggle }), [open, toggle]);
 
   const apply = (e: FormEvent) => {
     e.preventDefault();
     setFilters({ action: action.trim(), actor: actor.trim() });
   };
 
-  const columns = [
-    col.accessor("at", { header: "Time", cell: (info) => <DateTime value={info.getValue()} /> }),
-    ...(allWorkspaces
-      ? [col.accessor("workspace", { header: "Workspace", cell: (info) => info.getValue() ?? "—" })]
-      : []),
-    col.accessor("actor_subject", {
-      header: "Actor",
-      cell: (info) => (
-        <>
-          <span>{info.getValue()}</span> <span className="text-slate-600">({info.row.original.actor_kind})</span>
-        </>
-      ),
-    }),
-    col.accessor("action", { header: "Action", cell: (info) => <code>{info.getValue()}</code> }),
-    col.accessor("target", { header: "Target", cell: (info) => <code>{info.getValue()}</code> }),
-    col.display({ id: "changes", header: "Changes", cell: ({ row }) => <Changes event={row.original} /> }),
-  ];
+  // Stable columns: a cell renders as a component, so new columns would remount the
+  // Changes toggles (losing keyboard focus); the open set reaches them by context.
+  const columns = useMemo(
+    () => [
+      col.accessor("at", { header: "Time", cell: (info) => <EventTime at={info.getValue()} /> }),
+      ...(allWorkspaces
+        ? [col.accessor("workspace", { header: "Workspace", cell: (info) => info.getValue() ?? "—" })]
+        : []),
+      col.accessor("actor_subject", {
+        header: "Actor",
+        cell: (info) => (
+          <>
+            <span>{info.getValue()}</span> <span className="text-slate-600">({info.row.original.actor_kind})</span>
+          </>
+        ),
+      }),
+      col.accessor("action", { header: "Action", cell: (info) => <code>{info.getValue()}</code> }),
+      col.accessor("target", { header: "Target", cell: (info) => <code>{info.getValue()}</code> }),
+      col.display({
+        id: "changes",
+        header: "Changes",
+        cell: ({ row }) => <ChangesToggle event={row.original} />,
+      }),
+    ],
+    [allWorkspaces],
+  );
 
   return (
     <section className="space-y-4">
@@ -121,21 +171,36 @@ export function Audit({ ws }: { ws: string }) {
       </form>
       {audit.error ? <ProblemAlert error={audit.error} /> : null}
       {audit.data ? (
-        <div className="overflow-x-auto">
-          <DataTable caption="Audit events" columns={columns} data={events} empty="No audit events." />
-        </div>
+        <Expansion.Provider value={expansion}>
+          <DataTable
+            caption="Audit events"
+            columns={columns}
+            data={events}
+            empty="No audit events."
+            expanded={(event) => (open.has(event.id) ? <Changes event={event} /> : null)}
+          />
+        </Expansion.Provider>
       ) : audit.isPending ? (
         <p className="text-slate-700">Loading…</p>
       ) : null}
-      {audit.hasNextPage ? (
-        <button
-          type="button"
-          className={secondaryButton}
-          disabled={audit.isFetchingNextPage}
-          onClick={() => void audit.fetchNextPage()}
-        >
-          Load more
-        </button>
+      {audit.data && events.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-sm text-slate-700" aria-live="polite">
+            {audit.hasNextPage
+              ? `Showing the latest ${events.length} events.`
+              : `Showing all ${events.length} ${events.length === 1 ? "event" : "events"}.`}
+          </p>
+          {audit.hasNextPage ? (
+            <button
+              type="button"
+              className={secondaryButton}
+              disabled={audit.isFetchingNextPage}
+              onClick={() => void audit.fetchNextPage()}
+            >
+              {audit.isFetchingNextPage ? "Loading…" : "Load more"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
