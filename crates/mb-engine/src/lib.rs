@@ -557,8 +557,10 @@ fn finish(
 
 /// For a 2xx object body, apply the scenario's `set` merge patch, re-apply
 /// the request body (create/update) and the identity so they still win, and
-/// validate. Stored state is not re-applied: `set` beats the target. An invalid
-/// result is discarded and the pre-patch body kept.
+/// validate. Stored state is not re-applied: `set` beats the target. The body
+/// of the scenario's own forced status (an error variant) is patched too, but
+/// never reflects the request. An invalid result is discarded and the
+/// pre-patch body kept.
 fn apply_scenario(
     validator: &SchemaValidator,
     op: &Operation,
@@ -572,7 +574,8 @@ fn apply_scenario(
     let Some(set) = &scenario.set else {
         return response;
     };
-    if !(200..300).contains(&response.status) {
+    let success = (200..300).contains(&response.status);
+    if !success && scenario.status != Some(response.status) {
         return response;
     }
     let Some(body @ Value::Object(_)) = &response.body else {
@@ -582,7 +585,11 @@ fn apply_scenario(
         body: Some(apply_set(body, set)),
         ..response.clone()
     };
-    let patched = reassert_request(validator, op, call, patched);
+    let patched = if success {
+        reassert_request(validator, op, call, patched)
+    } else {
+        patched
+    };
     match patched.body.as_ref().map(|b| validator.validate(b)) {
         Some(Ok(())) => patched,
         Some(Err(errors)) => {

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useDraft, usePreview, useApproveDraft, type DraftOperation, type DraftView } from "../../api/imports";
 import { useActivate } from "../../api/queries";
@@ -34,7 +34,7 @@ export function DraftReview({ ws, mock, version }: { ws: string; mock: string; v
   const canEdit = me.data ? can(me.data, ws, "edit") : false;
 
   if (!draft.data) {
-    return draft.error ? <ProblemAlert error={draft.error} /> : <p className="text-slate-700">Loading…</p>;
+    return draft.error ? <ProblemAlert error={draft.error} /> : <p className="text-slate-700 dark:text-slate-300">Loading…</p>;
   }
   return <Review ws={ws} mock={mock} version={version} view={draft.data} canEdit={canEdit} />;
 }
@@ -65,6 +65,9 @@ function Review({
   const isDraft = view.status === "draft";
   const { meta } = view;
   const source = meta.source_name ?? meta.source_url ?? "—";
+  // HAR, Postman and other deterministic imports read no chunks and spend no tokens.
+  const deterministic =
+    meta.chunk_count === 0 && meta.usage.prompt_tokens === 0 && meta.usage.completion_tokens === 0;
 
   const startPreview = (op: DraftOperation) => {
     setPreviewing(op);
@@ -84,7 +87,7 @@ function Review({
       header: "Edited",
       cell: (info) =>
         info.getValue() ? (
-          <span className="rounded border border-indigo-700 bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-900">
+          <span className="rounded border border-indigo-700 dark:border-indigo-400 bg-indigo-50 dark:bg-indigo-950 px-1.5 py-0.5 text-xs font-medium text-indigo-900 dark:text-indigo-200">
             edited
           </span>
         ) : null,
@@ -103,7 +106,7 @@ function Review({
               const op = row.original;
               const target = targetOf(op);
               return (
-                <div className="flex flex-wrap gap-2">
+                <div className="flex gap-2">
                   <button
                     type="button"
                     className={secondaryButton}
@@ -143,10 +146,19 @@ function Review({
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
           <dt className="font-medium">Source</dt>
           <dd className="break-all">{`${meta.source_kind} · ${source}`}</dd>
-          <dt className="font-medium">Chunks</dt>
-          <dd>{`${meta.chunks_processed} of ${meta.chunk_count} chunks processed`}</dd>
-          <dt className="font-medium">Tokens</dt>
-          <dd>{`${meta.usage.prompt_tokens} prompt + ${meta.usage.completion_tokens} completion tokens`}</dd>
+          {deterministic ? (
+            <>
+              <dt className="font-medium">Generation</dt>
+              <dd>Deterministic import (no LLM used)</dd>
+            </>
+          ) : (
+            <>
+              <dt className="font-medium">Chunks</dt>
+              <dd>{`${meta.chunks_processed} of ${meta.chunk_count} chunks processed`}</dd>
+              <dt className="font-medium">Tokens</dt>
+              <dd>{`${meta.usage.prompt_tokens} prompt + ${meta.usage.completion_tokens} completion tokens`}</dd>
+            </>
+          )}
         </dl>
         {meta.warnings.length > 0 ? (
           <div className="space-y-1">
@@ -154,7 +166,7 @@ function Review({
             <ul
               role="list"
               aria-label="Warnings"
-              className="list-disc space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 pl-8 text-sm text-amber-950"
+              className="list-disc space-y-1 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 pl-8 text-sm text-amber-950 dark:text-amber-200"
             >
               {meta.warnings.map((w, i) => (
                 <li key={i}>
@@ -181,35 +193,43 @@ function Review({
       />
       <ProblemAlert error={approve.error ?? activate.error} />
 
+      {/* The editor and the preview open inline, right under their operation's row. */}
       <DataTable
         caption="Draft operations"
         columns={columns}
         data={view.operations}
         empty="The draft has no operations."
+        expanded={(op) => {
+          const edit = editing !== undefined && isDraft && canEdit && targetOf(editing) === targetOf(op);
+          const show = previewing !== undefined && canEdit && previewing.id === op.id;
+          if (!edit && !show) return null;
+          return (
+            <div className="space-y-3 pt-1">
+              {edit ? (
+                <OperationEditor
+                  key={targetOf(editing)}
+                  ws={ws}
+                  mock={mock}
+                  version={version}
+                  document={document}
+                  operation={editing}
+                  onClose={() => setEditing(undefined)}
+                  onDirtyChange={setDirty}
+                />
+              ) : null}
+              {show ? (
+                <PreviewPanel
+                  key={previewing.id}
+                  op={previewing}
+                  document={document}
+                  preview={preview}
+                  onClose={() => setPreviewing(undefined)}
+                />
+              ) : null}
+            </div>
+          );
+        }}
       />
-
-      {editing && isDraft && canEdit ? (
-        <OperationEditor
-          key={targetOf(editing)}
-          ws={ws}
-          mock={mock}
-          version={version}
-          document={document}
-          operation={editing}
-          onClose={() => setEditing(undefined)}
-          onDirtyChange={setDirty}
-        />
-      ) : null}
-
-      {previewing && canEdit ? (
-        <PreviewPanel
-          key={previewing.id}
-          op={previewing}
-          document={document}
-          preview={preview}
-          onClose={() => setPreviewing(undefined)}
-        />
-      ) : null}
 
       {confirmApprove ? (
         <ConfirmDialog
@@ -279,7 +299,7 @@ function Approval({
             Approve
           </button>
           {dirty ? (
-            <p id={hintId} className="text-sm text-slate-700">
+            <p id={hintId} className="text-sm text-slate-700 dark:text-slate-300">
               Save or cancel the open edit before approving.
             </p>
           ) : null}
@@ -299,12 +319,12 @@ function Approval({
 function Provenance({ op }: { op: DraftOperation }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  if (op.provenance.length === 0) return <span className="text-slate-600">—</span>;
+  if (op.provenance.length === 0) return <span className="text-slate-600 dark:text-slate-400">—</span>;
   return (
     <div className="space-y-2">
       <button
         type="button"
-        className="text-sm text-indigo-700 underline focus-visible:outline-2 focus-visible:outline-indigo-700"
+        className="text-sm text-indigo-700 dark:text-indigo-300 underline focus-visible:outline-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
         aria-expanded={open}
         aria-controls={id}
         aria-label={`Show provenance of ${targetOf(op)}`}
@@ -315,10 +335,10 @@ function Provenance({ op }: { op: DraftOperation }) {
       <ul id={id} role="list" hidden={!open} className="space-y-2">
         {op.provenance.map((p, i) => (
           <li key={i} className="space-y-1">
-            <blockquote className="border-l-4 border-slate-300 pl-3 text-sm whitespace-pre-wrap text-slate-800">
+            <blockquote className="border-l-4 border-slate-300 dark:border-slate-700 pl-3 text-sm whitespace-pre-wrap text-slate-800 dark:text-slate-200">
               {p.excerpt}
             </blockquote>
-            <p className="text-xs text-slate-700">
+            <p className="text-xs text-slate-700 dark:text-slate-300">
               <cite>{p.location}</cite>
               {p.chunk != null ? <span>{` (chunk ${p.chunk})`}</span> : null}
             </p>
@@ -343,6 +363,10 @@ function PreviewPanel({
 }) {
   const [status, setStatus] = useState("");
   const selectId = useId();
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, []);
   let statuses: string[] = [];
   try {
     statuses = readOperation(document, op).responses.map((r) => r.status);
@@ -354,8 +378,9 @@ function PreviewPanel({
   const result = preview.data;
   return (
     <section
+      ref={ref}
       aria-label={`Preview of ${targetOf(op)}`}
-      className="space-y-3 rounded-md border border-slate-300 bg-white p-4"
+      className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
     >
       <h3 className="text-base font-semibold">{`Preview of ${targetOf(op)}`}</h3>
       <div className="flex flex-wrap items-end gap-3">
@@ -379,7 +404,7 @@ function PreviewPanel({
           Close preview
         </button>
       </div>
-      {preview.isPending ? <p className="text-sm text-slate-700">Generating…</p> : null}
+      {preview.isPending ? <p className="text-sm text-slate-700 dark:text-slate-300">Generating…</p> : null}
       <ProblemAlert error={preview.error} />
       {result && !preview.isPending ? (
         <div className="space-y-2">
@@ -387,7 +412,7 @@ function PreviewPanel({
           <pre
             aria-label="Preview body"
             tabIndex={0}
-            className="max-h-96 overflow-auto rounded-md bg-slate-100 p-3 text-xs text-slate-900"
+            className="max-h-96 overflow-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-xs text-slate-900 dark:text-slate-100"
           >
             {JSON.stringify(result.body, null, 2)}
           </pre>

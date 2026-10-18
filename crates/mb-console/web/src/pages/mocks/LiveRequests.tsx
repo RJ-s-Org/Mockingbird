@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useActiveOperations } from "../../api/queries";
-import { subscribeRequests, type LiveFilters, type LiveRequestView } from "../../api/sse";
+import { olderThan, recentRequests, subscribeRequests, type LiveFilters, type LiveRequestView } from "../../api/sse";
 import { inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { RequestDrawer } from "./RequestDrawer";
+import { TableScroll } from "../../components/DataTable";
 
 /** The table keeps at most this many rows, newest first. */
 export const MAX_ROWS = 500;
@@ -16,7 +17,7 @@ interface Row {
 
 const cell = "px-3 py-2 align-top";
 const rowButton =
-  "rounded-sm text-left font-medium text-indigo-800 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700";
+  "rounded-sm text-left font-medium text-indigo-800 dark:text-indigo-300 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
 
 /** Moves focus between the row buttons of `tbody` with the arrow keys. */
 function onArrowKeys(e: KeyboardEvent<HTMLTableSectionElement>) {
@@ -44,9 +45,31 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
   const pausedRef = useRef(false);
   const nextKey = useRef(0);
 
+  const [history, setHistory] = useState<"loading" | "loaded">("loading");
   const { operation, session, source } = filters;
+  // Each filter starts over: recent matching calls, then the live tail on top.
+  const feed = JSON.stringify([ws, mock, operation, session, source]);
+  const [shownFeed, setShownFeed] = useState(feed);
+  if (shownFeed !== feed) {
+    setShownFeed(feed);
+    setRows([]);
+    setHistory("loading");
+  }
+
   useEffect(() => {
-    return subscribeRequests(
+    let cancelled = false;
+    recentRequests(ws, mock, { operation, session, source }).then((recent) => {
+      if (cancelled) return;
+      setRows((current) => {
+        const older = olderThan(
+          current.map((r) => r.record),
+          recent,
+        ).map((record, i) => ({ key: -1 - i, record }));
+        return [...current, ...older].slice(0, MAX_ROWS);
+      });
+      setHistory("loaded");
+    });
+    const close = subscribeRequests(
       ws,
       mock,
       { operation, session, source },
@@ -66,6 +89,10 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
       },
       () => setInterrupted(true),
     );
+    return () => {
+      cancelled = true;
+      close();
+    };
   }, [ws, mock, operation, session, source]);
 
   const togglePause = () => {
@@ -131,18 +158,23 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
           {paused ? "Resume" : "Pause"}
         </button>
       </div>
+      {history === "loaded" && rows.length > 0 ? (
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          Showing the latest recorded requests, then new ones as they arrive.
+        </p>
+      ) : null}
       <div aria-live="polite" className="space-y-2 text-sm">
         {paused ? (
-          <p className="text-slate-700">
+          <p className="text-slate-700 dark:text-slate-300">
             {missed} {missed === 1 ? "request" : "requests"} arrived while paused.
           </p>
         ) : null}
-        {interrupted ? <p className="text-amber-900">The live feed connection was interrupted.</p> : null}
+        {interrupted ? <p className="text-amber-900 dark:text-amber-200">The live feed connection was interrupted.</p> : null}
       </div>
       {dropped !== undefined ? (
         <div
           role="status"
-          className="flex items-center justify-between gap-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+          className="flex items-center justify-between gap-4 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200"
         >
           <span>{dropped} requests were dropped</span>
           <button type="button" className={secondaryButton} onClick={() => setDropped(undefined)}>
@@ -150,65 +182,69 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
           </button>
         </div>
       ) : null}
-      <table className="w-full border-collapse text-left text-sm">
-        <caption className="sr-only">Live requests</caption>
-        <thead className="border-b border-slate-300 text-slate-700">
-          <tr>
-            {["Time", "Method", "Path", "Status", "Source", "Latency", "Session"].map((h) => (
-              <th key={h} scope="col" className="px-3 py-2 font-semibold">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody onKeyDown={onArrowKeys}>
-          {rows.length === 0 ? (
+      <TableScroll>
+        <table className="w-full border-collapse text-left text-sm">
+          <caption className="sr-only">Live requests</caption>
+          <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
             <tr>
-              <td colSpan={7} className="px-3 py-6 text-center text-slate-600">
-                Waiting for requests…
-              </td>
+              {["Time", "Method", "Path", "Status", "Source", "Latency", "Session"].map((h) => (
+                <th key={h} scope="col" className="px-3 py-2 font-semibold">
+                  {h}
+                </th>
+              ))}
             </tr>
-          ) : (
-            rows.map(({ key, record }) => {
-              const time = new Date(record.at).toLocaleTimeString();
-              return (
-                <tr
-                  key={key}
-                  className="cursor-pointer border-b border-slate-200 hover:bg-slate-100"
-                  onClick={() => setSelected(record)}
-                >
-                  <td className={cell}>
-                    <button
-                      type="button"
-                      data-row
-                      className={rowButton}
-                      aria-label={`Open ${record.method} ${record.path} at ${time}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelected(record);
-                      }}
-                    >
-                      <time dateTime={record.at}>{time}</time>
-                    </button>
-                  </td>
-                  <td className={cell}>
-                    <code>{record.method}</code>
-                  </td>
-                  <td className={cell}>
-                    <code className="break-all">{record.path}</code>
-                  </td>
-                  <td className={cell}>{record.status}</td>
-                  <td className={cell}>{record.source ?? "—"}</td>
-                  <td className={cell}>{`${record.latency_ms} ms`}</td>
-                  <td className={cell}>
-                    <code>{record.session}</code>
-                  </td>
-                </tr>
-              );
-            })
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody onKeyDown={onArrowKeys}>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
+                  {history === "loading"
+                    ? "Loading recent requests…"
+                    : "No requests recorded yet. New ones appear here as they are served."}
+                </td>
+              </tr>
+            ) : (
+              rows.map(({ key, record }) => {
+                const time = new Date(record.at).toLocaleTimeString();
+                return (
+                  <tr
+                    key={key}
+                    className="cursor-pointer border-b border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setSelected(record)}
+                  >
+                    <td className={cell}>
+                      <button
+                        type="button"
+                        data-row
+                        className={rowButton}
+                        aria-label={`Open ${record.method} ${record.path} at ${time}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelected(record);
+                        }}
+                      >
+                        <time dateTime={record.at}>{time}</time>
+                      </button>
+                    </td>
+                    <td className={cell}>
+                      <code>{record.method}</code>
+                    </td>
+                    <td className={cell}>
+                      <code className="break-all">{record.path}</code>
+                    </td>
+                    <td className={cell}>{record.status}</td>
+                    <td className={cell}>{record.source ?? "—"}</td>
+                    <td className={cell}>{`${record.latency_ms} ms`}</td>
+                    <td className={cell}>
+                      <code>{record.session}</code>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </TableScroll>
       {selected ? <RequestDrawer record={selected} onClose={() => setSelected(undefined)} /> : null}
     </div>
   );

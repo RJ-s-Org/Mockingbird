@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createAppRouter } from "../router";
 
@@ -90,5 +90,50 @@ describe("shell", () => {
     const router = renderAt("/");
     await screen.findByLabelText("Workspace");
     expect(router.state.location.pathname).toBe("/w/team/mocks");
+  });
+
+  it("an unknown workspace shows a not-found state without workspace actions", async () => {
+    serve({
+      "/api/v1/me": { subject: "local", display_name: "Local", kind: "local", sysadmin: true, workspaces: [] },
+      "/api/v1/workspaces": workspaces,
+      "/api/v1/workspaces/nowhere/mocks": [],
+    });
+    window.localStorage.setItem("mb.lastWorkspace", "team");
+    renderAt("/w/nowhere/mocks");
+
+    expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
+    const back = screen.getByRole("link", { name: "Go to the Default workspace" });
+    expect(back.getAttribute("href")).toBe("/w/default/mocks");
+    // No workspace-scoped actions or navigation.
+    expect(screen.queryByRole("button", { name: "New mock" })).toBeNull();
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).queryByRole("link", { name: "Mocks" })).toBeNull();
+    expect(within(nav).getByRole("link", { name: "Status" })).toBeTruthy();
+    // The switcher names the missing workspace instead of showing another one.
+    const switcher = screen.getByLabelText("Workspace") as HTMLSelectElement;
+    expect(switcher.value).toBe("nowhere");
+    expect(switcher.selectedOptions[0]?.textContent).toBe("nowhere (not found)");
+    // An unknown workspace is never remembered.
+    expect(window.localStorage.getItem("mb.lastWorkspace")).toBe("team");
+  });
+
+  it("on the not-found page only a sysadmin is offered New workspace", async () => {
+    const me = (sysadmin: boolean) => ({
+      subject: sysadmin ? "root" : "vera",
+      display_name: sysadmin ? "Root" : "Vera",
+      kind: "user",
+      sysadmin,
+      workspaces: [{ name: "default", role: "editor" }],
+    });
+    serve({ "/api/v1/me": me(true), "/api/v1/workspaces": workspaces, "/api/v1/workspaces/nowhere/mocks": [] });
+    renderAt("/w/nowhere/mocks");
+    expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New workspace" })).toBeTruthy();
+    cleanup();
+
+    serve({ "/api/v1/me": me(false), "/api/v1/workspaces": workspaces.slice(0, 1) });
+    renderAt("/w/nowhere/mocks");
+    expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "New workspace" })).toBeNull();
   });
 });

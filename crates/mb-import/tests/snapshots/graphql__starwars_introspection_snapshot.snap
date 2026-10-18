@@ -1,6 +1,5 @@
 ---
 source: crates/mb-import/tests/graphql.rs
-assertion_line: 30
 expression: b
 ---
 id: the-star-wars-api
@@ -201,16 +200,12 @@ defs:
       appearsIn:
         description: Which movies they appear in.
         items:
-          anyOf:
-            - $ref: "#/$defs/Episode"
-            - type: "null"
+          $ref: "#/$defs/Episode"
         type: array
       friends:
         anyOf:
           - items:
-              anyOf:
-                - $ref: "#/$defs/Character"
-                - type: "null"
+              $ref: "#/$defs/Character"
             type: array
           - type: "null"
         description: "The friends of the droid, or an empty list if they have none."
@@ -247,16 +242,12 @@ defs:
       appearsIn:
         description: Which movies they appear in.
         items:
-          anyOf:
-            - $ref: "#/$defs/Episode"
-            - type: "null"
+          $ref: "#/$defs/Episode"
         type: array
       friends:
         anyOf:
           - items:
-              anyOf:
-                - $ref: "#/$defs/Character"
-                - type: "null"
+              $ref: "#/$defs/Character"
             type: array
           - type: "null"
         description: "The friends of the human, or an empty list if they have none."

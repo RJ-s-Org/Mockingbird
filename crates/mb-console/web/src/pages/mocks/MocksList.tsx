@@ -10,7 +10,7 @@ import { SourceBadge } from "../../components/SourceBadge";
 import { CreateMockDialog } from "./CreateMockDialog";
 
 export const linkClass =
-  "font-medium text-indigo-700 underline hover:text-indigo-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700";
+  "font-medium text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
 
 const col = columnHelper<Mock>();
 
@@ -61,7 +61,7 @@ export function MocksList({ ws }: { ws: string }) {
       {mocks.data ? (
         <DataTable caption="Mocks" columns={columns} data={mocks.data} empty="No mocks yet." />
       ) : mocks.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {creating ? (
         <CreateMockDialog

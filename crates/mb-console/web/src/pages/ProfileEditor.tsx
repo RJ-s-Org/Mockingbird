@@ -4,6 +4,12 @@ import { inputClass, primaryButton, secondaryButton } from "../components/Confir
 import { Drawer } from "../components/Drawer";
 import { ProblemAlert } from "../components/ProblemAlert";
 
+/**
+ * What the server's default `server.api_secret_refs` policy accepts from the
+ * API (the schema's `env:NAME or file:/path` is the syntax, not the policy).
+ */
+export const SECRET_REF_HINT = "Use env:MB_LLM_<NAME> or env:<NAME>_API_KEY. The key itself is never stored.";
+
 /** A labelled text or number field of the profile form. */
 function Field({
   id,
@@ -18,7 +24,7 @@ function Field({
       </label>
       <input id={id} className={inputClass} aria-describedby={hint ? `${id}-hint` : undefined} {...input} />
       {hint ? (
-        <p id={`${id}-hint`} className="text-xs text-slate-600">
+        <p id={`${id}-hint`} className="text-xs text-slate-600 dark:text-slate-400">
           {hint}
         </p>
       ) : null}
@@ -109,7 +115,7 @@ export function ProfileEditor({
           onChange={(e) => setSecretRef(e.target.value)}
           placeholder="env:MB_LLM_API_KEY"
           autoComplete="off"
-          hint="env:NAME or file:/path — the key itself is never stored"
+          hint={SECRET_REF_HINT}
         />
         <div className="flex items-center gap-2">
           <input
@@ -173,7 +179,7 @@ export function ProfileEditor({
             ))}
           </select>
         </div>
-        <ProblemAlert error={put.error} />
+        <ProblemAlert error={put.error} focus />
         <div className="flex justify-end gap-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel

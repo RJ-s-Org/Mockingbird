@@ -138,7 +138,7 @@ describe("openapi", () => {
     }
     const bad = parseSchemaText("{oops");
     expect(bad.schema).toBeNull();
-    expect(bad.error).toMatch(/^Not valid JSON/);
+    expect(bad.error).toMatch(/^The schema is not valid JSON/);
   });
 
   it("inputs are not mutated", () => {

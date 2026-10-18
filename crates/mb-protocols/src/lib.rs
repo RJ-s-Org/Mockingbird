@@ -124,7 +124,7 @@ pub struct ScenarioRuntime {
     /// Instructions and `set` patch handed to the engine.
     pub spec: ScenarioSpec,
     /// Status to answer with unless `X-Mockingbird-Status` overrides it;
-    /// ignored for operations that do not declare it.
+    /// ignored for operations that do not declare it, unless it is a 5xx.
     pub status: Option<u16>,
     /// Delay before responding unless `X-Mockingbird-Latency` overrides it.
     pub latency: Option<Duration>,

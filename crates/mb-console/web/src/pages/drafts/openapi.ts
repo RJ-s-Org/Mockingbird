@@ -1,7 +1,10 @@
+
 /**
  * Pure helpers that read and edit one operation of an OpenAPI 3.x document.
  * None of them mutates its input: edits return a changed deep copy.
  */
+
+import { parseJson } from "../../lib/json";
 
 export type OpenApiDoc = Record<string, unknown>;
 
@@ -173,12 +176,9 @@ export function removeOperation(doc: OpenApiDoc, ref: OperationRef): OpenApiDoc 
 /** Parses an editor's schema text: empty means no schema; anything but a JSON object is an error. */
 export function parseSchemaText(text: string): { schema: object | null; error?: string } {
   if (text.trim() === "") return { schema: null };
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (e) {
-    return { schema: null, error: `Not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  const parsed = parseJson("The schema", text);
+  if ("error" in parsed) return { schema: null, error: parsed.error };
+  const value = parsed.value;
   if (!isObject(value)) return { schema: null, error: "A schema must be a JSON object." };
   return { schema: value };
 }

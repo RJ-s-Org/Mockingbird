@@ -83,7 +83,7 @@ export function Scenarios({ ws, mock }: { ws: string; mock: string }) {
       {scenarios.data ? (
         <DataTable caption="Scenarios" columns={columns} data={scenarios.data} empty="No scenarios yet." />
       ) : scenarios.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {editing?.kind === "new" ? (
         <ScenarioEditor ws={ws} mock={mock} canEdit={canEdit} onClose={() => setEditing(undefined)} />

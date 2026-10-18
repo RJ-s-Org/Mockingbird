@@ -10,8 +10,8 @@ mocks:
     route_prefix: /starwars
     persona: Characters and droids from the original trilogy.
     scenarios:
-      missing-hero:
-        status: 404
+      missing-hero:                  # GraphQL fields declare only 200: shape the data instead
+        instructions: No hero is on record; answer hero with null.
         operations: [Query.hero]
 protocols:
   graphql:

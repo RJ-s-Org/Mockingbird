@@ -18,20 +18,20 @@ export function RequestDrawer({ record, onClose }: { record: LiveRequestView; on
         <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
           {facts.map(([term, value]) => (
             <div key={term} className="contents">
-              <dt className="font-medium text-slate-700">{term}</dt>
+              <dt className="font-medium text-slate-700 dark:text-slate-300">{term}</dt>
               <dd className="break-all">{value}</dd>
             </div>
           ))}
         </dl>
         <section className="space-y-2">
           <h3 className="font-semibold">Request</h3>
-          <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 p-3 text-xs text-slate-900">
+          <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-xs text-slate-900 dark:text-slate-100">
             {JSON.stringify(record.request, null, 2)}
           </pre>
         </section>
         <section className="space-y-2">
           <h3 className="font-semibold">Response</h3>
-          <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 p-3 text-xs text-slate-900">
+          <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-xs text-slate-900 dark:text-slate-100">
             {JSON.stringify(record.response ?? null, null, 2)}
           </pre>
         </section>

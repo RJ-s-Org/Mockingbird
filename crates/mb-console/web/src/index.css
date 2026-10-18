@@ -1,8 +1,47 @@
 @import "tailwindcss";
 
+/*
+ * Dark mode: `dark:` variants apply under `html.dark`, which `lib/theme.ts`
+ * sets from the saved choice or, by default, from `prefers-color-scheme`.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  :root.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+  }
+
   :focus-visible {
     outline: 2px solid var(--color-indigo-700);
     outline-offset: 2px;
+  }
+
+  .dark :focus-visible {
+    outline-color: var(--color-indigo-400);
+  }
+
+  /*
+   * Selected options of a list box (a <select multiple>). The browser's own
+   * colours turn grey when the list loses focus, which in dark mode barely
+   * stands out from the rest; the gradient makes Chromium paint ours.
+   */
+  select[multiple] option:checked {
+    background-color: var(--color-indigo-600);
+    background-image: linear-gradient(var(--color-indigo-600), var(--color-indigo-600));
+    color: var(--color-white);
+  }
+
+  .dark select[multiple] option:checked {
+    background-color: var(--color-indigo-300);
+    background-image: linear-gradient(var(--color-indigo-300), var(--color-indigo-300));
+    color: var(--color-slate-950);
   }
 }

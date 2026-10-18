@@ -72,6 +72,7 @@ async fn scenario_instructions_in_user_message_only() {
         name: "shipped".into(),
         instructions: Some("The order has already shipped.".into()),
         set: None,
+        status: None,
     };
 
     let plain = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
@@ -110,6 +111,7 @@ async fn scenario_set_applied_and_validated() {
         name: "shipped".into(),
         instructions: None,
         set: Some(json!({"status": "shipped"})),
+        status: None,
     };
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
     let out = engine_with(provider)
@@ -141,6 +143,7 @@ async fn scenario_set_wins_over_stored_target() {
         name: "shipped".into(),
         instructions: None,
         set: Some(json!({"status": "shipped", "id": "other"})),
+        status: None,
     };
     let target = stored_order();
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
@@ -172,6 +175,7 @@ async fn scenario_set_on_update_beats_target_but_not_request_body() {
         name: "shipped".into(),
         instructions: None,
         set: Some(json!({"status": "shipped", "customerId": "c-set", "total": 99})),
+        status: None,
     };
     let target = stored_order();
     let mut update = call();
@@ -207,6 +211,7 @@ async fn scenario_set_applies_to_faker_output() {
         name: "shipped".into(),
         instructions: None,
         set: Some(json!({"status": "shipped"})),
+        status: None,
     };
     let out = Engine::new(None, EngineConfig::default())
         .generate(&bundle, op, &call(), ctx(Some(&scenario)))
@@ -224,6 +229,7 @@ async fn invalid_scenario_set_is_ignored() {
         name: "broken".into(),
         instructions: None,
         set: Some(json!({"total": "NaN-string"})),
+        status: None,
     };
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
     let out = engine_with(provider)

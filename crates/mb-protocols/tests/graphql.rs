@@ -1049,3 +1049,70 @@ async fn unknown_path_is_reported_at_the_requested_path() {
     assert_eq!(recs[0].status, 404);
     assert_eq!(recs[0].path, "/other/path");
 }
+
+fn starwars_runtime(provider: Option<Arc<ScriptedProvider>>) -> MockRuntime {
+    let path = format!(
+        "{}/../../fixtures/graphql/starwars.graphql",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bundle = Arc::new(compile(&std::fs::read(path).unwrap()).unwrap());
+    let dyn_provider = provider.map(|p| p as Arc<dyn Provider>);
+    MockRuntime::new(
+        "starwars",
+        bundle,
+        Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    )
+}
+
+const EPISODES: [&str; 3] = ["NEWHOPE", "EMPIRE", "JEDI"];
+
+fn assert_episodes(body: &Value) {
+    assert!(body.get("errors").is_none(), "{body}");
+    let items = body["data"]["hero"]["appearsIn"].as_array().unwrap();
+    for item in items {
+        assert!(
+            item.is_null() || EPISODES.contains(&item.as_str().unwrap_or_default()),
+            "{body}"
+        );
+    }
+}
+
+/// `appearsIn: [Episode]!`: faker items are always Episode values (or null).
+#[tokio::test]
+async fn list_of_enums_from_the_faker_is_valid() {
+    let base = serve(starwars_runtime(None)).await;
+    for _ in 0..40 {
+        let a = query(&base, "{ hero { name appearsIn } }").await;
+        assert_eq!(a.status, 200);
+        assert_episodes(&a.body);
+    }
+}
+
+/// An LLM answer with invalid enum items is repaired or replaced by the
+/// faker, never served.
+#[tokio::test]
+async fn list_of_enums_from_the_llm_is_repaired() {
+    let bad = json!({"__typename": "Human", "id": "1000", "name": "Luke",
+                     "appearsIn": ["A New Hope", "empire", 4], "friends": []});
+    let provider = scripted(vec![bad.clone(), bad]);
+    let base = serve(starwars_runtime(Some(provider))).await;
+    let a = query(&base, "{ hero { name appearsIn } }").await;
+    assert_eq!(a.status, 200);
+    assert_episodes(&a.body);
+}
+
+/// A null item in `[Episode]!` cannot be served as an enum item, so it is
+/// treated as invalid output: never passed through.
+#[tokio::test]
+async fn list_of_enums_with_null_item_is_never_served() {
+    let with_null = json!({"__typename": "Human", "id": "1000", "name": "Luke",
+                           "appearsIn": ["NEWHOPE", null], "friends": []});
+    let provider = scripted(vec![with_null.clone(), with_null]);
+    let base = serve(starwars_runtime(Some(provider))).await;
+    let a = query(&base, "{ hero { name appearsIn } }").await;
+    assert_eq!(a.status, 200);
+    assert_episodes(&a.body);
+    let items = a.body["data"]["hero"]["appearsIn"].as_array().unwrap();
+    assert!(items.iter().all(Value::is_string), "{}", a.body);
+}

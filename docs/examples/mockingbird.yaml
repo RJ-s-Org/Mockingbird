@@ -175,10 +175,10 @@ mocks:
     scenarios:
       out-of-stock:
         instructions: Every product is out of stock.
-        status: 409
+        status: 400                                    # declared by an operation listed (any if none), or a 5xx
         latency: 250ms
-        set:
-          status: pending
+        set:                                           # forced into the body of that status too
+          message: Out of stock
         operations: [createOrder]
       slow:
         latency: 2s

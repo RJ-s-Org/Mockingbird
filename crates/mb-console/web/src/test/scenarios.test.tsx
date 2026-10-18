@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { json, localMe, mockView, renderAt, serve, shell, viewerMe } from "./harness";
+import { json, localMe, mockView, problem, renderAt, serve, shell, viewerMe } from "./harness";
 
 const MOCK = "/api/v1/workspaces/default/mocks/pets";
 
@@ -110,6 +110,31 @@ describe("scenarios", () => {
       operations: [],
     });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "New scenario" })).toBeNull());
+  });
+
+  it("scenario editor shows an undeclared status 422 and stays open", async () => {
+    const user = userEvent.setup();
+    const detail =
+      "status 409 is not declared by operation createOrder of the active contract, so the scenario could never " +
+      "answer it; declare a 409 response, or use a status it declares (201, 400) or a 5xx";
+    serve({
+      ...routes([]),
+      [`PUT ${MOCK}/scenarios/out-of-stock`]: () => problem(422, "Scenario status not declared", detail),
+    });
+    renderAt("/w/default/mocks/pets/scenarios");
+
+    await user.click(await screen.findByRole("button", { name: "New scenario" }));
+    const editor = await screen.findByRole("dialog", { name: "New scenario" });
+    await user.type(within(editor).getByLabelText("Name"), "out-of-stock");
+    await user.type(within(editor).getByLabelText("Status"), "409");
+    await user.click(within(editor).getByRole("button", { name: "Save" }));
+
+    const alert = await within(editor).findByRole("alert");
+    expect(alert.textContent).toContain("Scenario status not declared");
+    expect(alert.textContent).toContain("declare a 409 response, or use a status it declares (201, 400) or a 5xx");
+    expect(screen.getByRole("dialog", { name: "New scenario" })).toBeTruthy();
+    // The error is below a long form: it takes focus so it is scrolled into view and announced.
+    await waitFor(() => expect(document.activeElement).toBe(alert));
   });
 
   it("scenario operations come from active contract", async () => {

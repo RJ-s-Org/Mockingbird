@@ -78,6 +78,7 @@ fn shipped(operations: &[&str]) -> ScenarioRuntime {
             name: "shipped".into(),
             instructions: Some("Every order has already shipped.".into()),
             set: Some(json!({"status": "shipped"})),
+            status: None,
         },
         status: None,
         latency: None,

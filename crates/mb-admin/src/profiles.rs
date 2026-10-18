@@ -73,7 +73,11 @@ pub struct PutProfile {
     /// OpenAI-compatible base URL.
     pub base_url: String,
     pub model: String,
-    /// `env:NAME` or `file:/path`.
+    /// A secret reference, never a raw key. Through the API it must match
+    /// the server's `server.api_secret_refs` globs; by default
+    /// env:MB_LLM_* or env:*_API_KEY (* matches any characters). Other
+    /// `env:` names and `file:` paths are rejected unless the server allows
+    /// them.
     pub secret_ref: Option<String>,
     /// Use the provider's `json_schema` response format.
     #[serde(default)]
@@ -103,37 +107,73 @@ fn default_max_tokens() -> u32 {
     2048
 }
 
-/// `env:NAME` or `file:/path` with a non-empty remainder. The rejection
-/// never echoes the value, which may be a pasted secret.
-fn validate_secret_ref(r: &str) -> ApiResult<()> {
-    let rest = r.strip_prefix("env:").or_else(|| r.strip_prefix("file:"));
-    match rest {
-        Some(rest) if !rest.trim().is_empty() => Ok(()),
-        _ => Err(Problem::unprocessable(
-            "secret_ref must be `env:NAME` or `file:/path`",
-        )),
+/// The secret reference forms `globs` (`server.api_secret_refs`) accept,
+/// as shown in rejections and the console: for the defaults,
+/// "env:MB_LLM_* or env:*_API_KEY (* matches any characters)".
+pub fn accepted_secret_refs(globs: &[String]) -> String {
+    let forms = match globs {
+        [] => return "none (server.api_secret_refs is empty)".into(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} or {last}", init.join(", ")),
+    };
+    if globs.iter().any(|g| g.contains('*')) {
+        format!("{forms} (* matches any characters)")
+    } else {
+        forms
     }
 }
 
+/// `env:NAME` or `file:/path` with a non-empty remainder, matching one of
+/// `allowed` (`server.api_secret_refs`). The rejection never echoes the
+/// value, which may be a pasted secret, and names the accepted forms.
+fn check_secret_ref(r: &str, allowed: &[String]) -> ApiResult<()> {
+    let rest = r.strip_prefix("env:").or_else(|| r.strip_prefix("file:"));
+    if !rest.is_some_and(|rest| !rest.trim().is_empty()) {
+        return Err(Problem::invalid(
+            "Invalid secret reference",
+            format!(
+                "secret_ref must be a secret reference, not a raw key; accepted: {}",
+                accepted_secret_refs(allowed)
+            ),
+        ));
+    }
+    if !allowed.iter().any(|g| glob_match(g, r)) {
+        return Err(Problem::invalid(
+            "Secret reference not allowed",
+            format!(
+                "secret_ref not allowed by server.api_secret_refs; accepted: {}",
+                accepted_secret_refs(allowed)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Title of the 422 for an invalid profile body.
+const INVALID_PROFILE: &str = "Invalid LLM profile";
+
 fn validate(name: &str, p: &PutProfile) -> ApiResult<()> {
     if p.base_url.trim().is_empty() || p.model.trim().is_empty() {
-        return Err(Problem::unprocessable("base_url and model are required"));
-    }
-    if let Some(r) = &p.secret_ref {
-        validate_secret_ref(r)?;
+        return Err(Problem::invalid(
+            INVALID_PROFILE,
+            "base_url and model are required",
+        ));
     }
     if !(p.temperature.is_finite() && (0.0..=2.0).contains(&p.temperature)) {
-        return Err(Problem::unprocessable(
+        return Err(Problem::invalid(
+            INVALID_PROFILE,
             "temperature must be between 0 and 2",
         ));
     }
     if p.timeout_ms == 0 || p.max_tokens == 0 {
-        return Err(Problem::unprocessable(
+        return Err(Problem::invalid(
+            INVALID_PROFILE,
             "timeout_ms and max_tokens must be positive",
         ));
     }
     if p.fallback_profile.as_deref() == Some(name) {
-        return Err(Problem::unprocessable(
+        return Err(Problem::invalid(
+            INVALID_PROFILE,
             "a profile cannot be its own fallback_profile",
         ));
     }
@@ -256,7 +296,8 @@ pub async fn put(
 ) -> ApiResult<Json<ProfileWriteResult>> {
     access.require(Permission::ManageProfiles)?;
     if !valid_identifier(&name) {
-        return Err(Problem::unprocessable(
+        return Err(Problem::invalid(
+            INVALID_PROFILE,
             "profile names are 1-128 characters of [A-Za-z0-9._-]",
         ));
     }
@@ -267,22 +308,20 @@ pub async fn put(
     if let Some(obj) = body.as_object()
         && let Some(field) = RAW_KEY_FIELDS.iter().find(|k| obj.contains_key(**k))
     {
-        return Err(Problem::unprocessable(format!(
-            "`{field}` is not accepted: raw keys are never stored; use secret_ref (`env:NAME` or `file:/path`)"
-        )));
+        return Err(Problem::invalid(
+            "Raw API key not accepted",
+            format!(
+                "`{field}` is not accepted: raw keys are never stored; use secret_ref ({})",
+                accepted_secret_refs(&st.api_secret_refs)
+            ),
+        ));
     }
-    let body: PutProfile =
-        serde_json::from_value(body).map_err(|e| Problem::unprocessable(e.to_string()))?;
+    let body: PutProfile = serde_json::from_value(body)
+        .map_err(|e| Problem::invalid(INVALID_PROFILE, e.to_string()))?;
+    if let Some(r) = &body.secret_ref {
+        check_secret_ref(r, &st.api_secret_refs)?;
+    }
     validate(&name, &body)?;
-    if let Some(r) = &body.secret_ref
-        && !st.api_secret_refs.iter().any(|g| glob_match(g, r))
-    {
-        // The ref is not echoed: it may be a pasted secret.
-        return Err(Problem::unprocessable(format!(
-            "secret_ref not allowed by server.api_secret_refs (allowed: {})",
-            st.api_secret_refs.join(", ")
-        )));
-    }
     if !access.principal.sysadmin
         && let Some(r) = &body.secret_ref
     {

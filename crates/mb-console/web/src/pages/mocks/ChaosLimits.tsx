@@ -186,7 +186,7 @@ function NumberField({
         aria-describedby={error ? `${id}-error` : undefined}
       />
       {error ? (
-        <p id={`${id}-error`} className="text-sm text-red-800">
+        <p id={`${id}-error`} className="text-sm text-red-800 dark:text-red-300">
           {error}
         </p>
       ) : null}
@@ -288,18 +288,18 @@ export function ChaosLimits({
   };
 
   return (
-    <section aria-labelledby="chaos-limits-heading" className="max-w-2xl space-y-4 border-t border-slate-200 pt-6">
+    <section aria-labelledby="chaos-limits-heading" className="max-w-2xl space-y-4 border-t border-slate-200 dark:border-slate-800 pt-6">
       <h2 id="chaos-limits-heading" className="text-lg font-semibold">
         Chaos and limits
       </h2>
-      <p className="text-xs text-slate-600">
+      <p className="text-xs text-slate-600 dark:text-slate-400">
         Callers can bypass chaos with X-Mockingbird-Chaos: off when header overrides are enabled.
       </p>
       {reason ? (
-        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{reason}</p>
+        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
       ) : null}
       {saved && !dirty ? (
-        <p role="status" className="text-sm text-green-800">
+        <p role="status" className="text-sm text-green-800 dark:text-green-300">
           Saved.
         </p>
       ) : null}
@@ -357,9 +357,9 @@ export function ChaosLimits({
               onChange={setLimit("responseKib")}
             />
           </div>
-          <p className="text-xs text-slate-600">Blank limits fall back to the server&apos;s global limits.</p>
+          <p className="text-xs text-slate-600 dark:text-slate-400">Blank limits fall back to the server&apos;s global limits.</p>
         </fieldset>
-        <ProblemAlert error={patch.error} />
+        <ProblemAlert error={patch.error} focus />
         {canEdit ? (
           <button
             type="submit"

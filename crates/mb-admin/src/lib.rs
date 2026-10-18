@@ -58,6 +58,7 @@ pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUP
 pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
+pub use scenarios::undeclared_scenario_status;
 pub use webhook::{WebhookSink, signature};
 pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
 

@@ -61,6 +61,12 @@ impl Problem {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
 
+    /// A 422 with a title naming what failed validation (rather than the
+    /// generic "Unprocessable Entity").
+    pub fn invalid(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::titled(StatusCode::UNPROCESSABLE_ENTITY, title, detail)
+    }
+
     pub fn bad_request(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, detail)
     }
@@ -161,7 +167,7 @@ impl From<StoreError> for Problem {
         match err {
             StoreError::NotFound(d) => Problem::not_found(d),
             StoreError::Conflict(d) => Problem::conflict(d),
-            StoreError::Invalid(d) => Problem::unprocessable(d),
+            StoreError::Invalid(d) => Problem::invalid("Validation failed", d),
             StoreError::Db(d) => Problem::new(StatusCode::INTERNAL_SERVER_ERROR, d),
         }
     }
@@ -194,7 +200,15 @@ impl From<StateError> for Problem {
 
 impl From<JsonRejection> for Problem {
     fn from(r: JsonRejection) -> Self {
-        Problem::new(r.status(), r.body_text())
+        match r {
+            JsonRejection::JsonDataError(_) => {
+                Problem::invalid("Invalid request body", r.body_text())
+            }
+            JsonRejection::JsonSyntaxError(_) => {
+                Problem::titled(r.status(), "Malformed JSON", r.body_text())
+            }
+            r => Problem::new(r.status(), r.body_text()),
+        }
     }
 }
 

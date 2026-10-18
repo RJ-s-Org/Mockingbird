@@ -1563,7 +1563,13 @@ export interface components {
              */
             max_tokens: number;
             model: string;
-            /** @description `env:NAME` or `file:/path`. */
+            /**
+             * @description A secret reference, never a raw key. Through the API it must match
+             *     the server's `server.api_secret_refs` globs; by default
+             *     env:MB_LLM_* or env:*_API_KEY (* matches any characters). Other
+             *     `env:` names and `file:` paths are rejected unless the server allows
+             *     them.
+             */
             secret_ref?: string | null;
             /**
              * Format: float
@@ -1591,7 +1597,9 @@ export interface components {
             set?: Record<string, never> | null;
             /**
              * Format: int32
-             * @description 100–599.
+             * @description 100–599. When the mock has an active contract, an operation the
+             *     scenario applies to must declare it, unless it is a 5xx (answered
+             *     natively where undeclared).
              */
             status?: number | null;
             /**
@@ -2033,7 +2041,7 @@ export interface operations {
                     "application/json": components["schemas"]["MockView"];
                 };
             };
-            /** @description The mock already exists, or another mock has its route prefix */
+            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3369,7 +3377,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid scenario, or operations unknown to the active contract */
+            /** @description Invalid scenario, operations unknown to the active contract, or a status none of its operations declares */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4201,7 +4209,7 @@ export interface operations {
                     "application/json": components["schemas"]["MockView"];
                 };
             };
-            /** @description The mock already exists, or another mock has its route prefix */
+            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5589,7 +5597,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid scenario, or operations unknown to the active contract */
+            /** @description Invalid scenario, operations unknown to the active contract, or a status none of its operations declares */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -86,7 +86,7 @@ mocks:
     persona: Terse, realistic retail data.
     scenarios:
       out-of-stock:
-        status: 409
+        status: 409                   # one orders.yaml declares, or a 5xx
         instructions: Explain that the item is out of stock.
 ```
 
@@ -176,6 +176,8 @@ SSE streams and GraphQL subscriptions stay open after the generated items: they 
 ### Override mapping per protocol
 
 The override headers work on every protocol: gRPC reads them as lowercased metadata (`x-mockingbird-session`, `x-mockingbird-status`, …), and GraphQL reads them from the HTTP request (or from the `connection_init` payload of a subscription). A forced status is reported natively.
+
+REST answers a forced status with the operation's declared response for it (or its `default` response). A 5xx the operation does not declare is answered as a plain `application/problem+json` document with that status, since any API can fail that way; any other undeclared status is a `400 Undeclared status override`, and a value that is not a status code from 100 to 599 is a `400 Invalid override`.
 
 gRPC answers with the status code standing for the HTTP status:
 
@@ -382,7 +384,7 @@ A scenario is a named set of overrides for a mock: extra LLM instructions, a for
 curl -i localhost:8080/orders/orders/o1 -H 'X-Mockingbird-Scenario: out-of-stock'
 ```
 
-A scenario's status applies only to operations whose contract declares that status (or a `default` response); other operations are served normally, with the scenario's other overrides. An unknown scenario name is a 400. Scenarios come from the config file or from `PUT /api/v1/mocks/{mock}/scenarios/{name}`.
+A scenario's status applies only to operations whose contract declares that status (or a `default` response), where its `set` fields are forced into that response's body too; a 5xx also applies to operations that do not declare it and is answered natively, as with `X-Mockingbird-Status`. Other operations are served normally, with the scenario's other overrides. The Admin API rejects (`422 Scenario status not declared`), and a config file may not declare, a non-5xx status that none of the scenario's operations declares in the mock's active contract, since it could never take effect. An unknown scenario name is a 400. Scenarios come from the config file or from `PUT /api/v1/mocks/{mock}/scenarios/{name}`.
 
 ## Admin API
 
@@ -412,7 +414,7 @@ Besides authentication (see [Console and auth](#console-and-auth)), the admin po
 
 - **Host check.** While the admin port is bound to a loopback address (the default), it answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (any port); in `oidc` mode it answers only to the host of `auth.external_url`. Anything else gets `421 Misdirected Request`, except the ops endpoints. This blocks DNS-rebinding attacks from web pages.
 - **Content types.** Every mutating request needs `Content-Type: application/json` (activation too, whose body is ignored), and a contract upload needs `application/json`, `application/yaml`, `application/x-yaml`, `text/yaml`, `application/vnd.oai.openapi` (`+json`/`+yaml`), `application/graphql`, `text/x-protobuf`, `application/x-protobuf`, `application/xml`, `text/xml`, `application/wsdl+xml`, `application/zip`, `application/gzip` or `application/octet-stream`; anything else is a `415`. A cross-site form or no-cors request cannot send these, so a web page cannot change mocks behind your back. The CLI client sets them for you; with curl, pass `-H 'content-type: application/json'` (or `application/yaml` for a YAML contract).
-- **Secret references.** An LLM profile created or updated through the API may only use secret references matching `server.api_secret_refs` (globs; default `["env:MB_LLM_*", "env:*_API_KEY"]`); `file:` references and other variables are rejected with `422 secret_ref not allowed by server.api_secret_refs`. Profiles in the config file are not restricted. Only a sysadmin may set or change a profile's `secret_ref`, or change the `base_url` of a profile that has one (`403` otherwise): a workspace admin can still create profiles without a secret and change a profile's other fields, but cannot point a secret at a host of their choosing. Widen the list in `mockingbird.yaml` if you need to:
+- **Secret references.** An LLM profile created or updated through the API may only use secret references matching `server.api_secret_refs` (globs; default `["env:MB_LLM_*", "env:*_API_KEY"]`); `file:` references and other variables are rejected with a `422 Secret reference not allowed` whose detail lists the accepted forms (for the defaults: `secret_ref not allowed by server.api_secret_refs; accepted: env:MB_LLM_* or env:*_API_KEY (* matches any characters)`). Profiles in the config file are not restricted. Only a sysadmin may set or change a profile's `secret_ref`, or change the `base_url` of a profile that has one (`403` otherwise): a workspace admin can still create profiles without a secret and change a profile's other fields, but cannot point a secret at a host of their choosing. Widen the list in `mockingbird.yaml` if you need to:
 
   ```yaml
   server:

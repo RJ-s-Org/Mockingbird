@@ -4,6 +4,66 @@ import type { components } from "./schema";
 /** One served call, as the live tail sends it. */
 export type LiveRequestView = components["schemas"]["LiveRequestView"];
 
+/** One recorded call, as the request log returns it. */
+export type RequestLogView = components["schemas"]["RequestLogView"];
+
+/** How many recorded calls a live feed shows when it opens. */
+export const HISTORY = 50;
+
+/**
+ * The latest `limit` recorded calls matching `filters`, newest first, shaped
+ * like live records, so a feed can show recent history before its stream
+ * delivers anything. A failed read gives no history rather than an error.
+ */
+export async function recentRequests(
+  ws: string,
+  mock: string,
+  filters: LiveFilters,
+  limit = HISTORY,
+): Promise<LiveRequestView[]> {
+  try {
+    const { data, response } = await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/requests", {
+      params: { path: { ws, mock }, query: { ...filters, limit } },
+    });
+    if (!response.ok || !Array.isArray(data)) return [];
+    return data.map((entry) => {
+      const record: Partial<RequestLogView> = { ...entry };
+      delete record.id;
+      return { ...(record as Omit<RequestLogView, "id">), workspace: ws, mock };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Whether two records describe the same served call (live records carry no id). */
+function sameCall(a: LiveRequestView, b: LiveRequestView): boolean {
+  return (
+    a.method === b.method &&
+    a.path === b.path &&
+    a.status === b.status &&
+    a.session === b.session &&
+    a.latency_ms === b.latency_ms &&
+    (a.operation_id ?? null) === (b.operation_id ?? null) &&
+    a.kind === b.kind
+  );
+}
+
+/**
+ * The `history` records older than everything already `streamed`: a call
+ * served while the history loaded is both streamed and logged, so each
+ * streamed record cancels one matching history record.
+ */
+export function olderThan(streamed: LiveRequestView[], history: LiveRequestView[]): LiveRequestView[] {
+  const pending = [...streamed];
+  return history.filter((h) => {
+    const at = pending.findIndex((s) => sameCall(s, h));
+    if (at < 0) return true;
+    pending.splice(at, 1);
+    return false;
+  });
+}
+
 /** An event of the live tail: a served call, or how many this subscriber missed. */
 export type LiveEvent = { kind: "request"; record: LiveRequestView } | { kind: "lagged"; dropped: number };
 

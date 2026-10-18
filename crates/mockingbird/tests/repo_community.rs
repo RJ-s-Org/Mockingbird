@@ -146,6 +146,7 @@ fn gallery_configs_load() {
                 m.contract.display()
             );
         }
+        assert_scenario_statuses_declared(&path);
         loaded.push(name);
     }
     loaded.sort();
@@ -153,4 +154,31 @@ fn gallery_configs_load() {
         loaded,
         ["chaos", "events", "graphql", "grpc", "rest", "soap"]
     );
+}
+
+/// Every scenario status in the config at `path` is one its operations
+/// declare (or a 5xx), as `serve` and the Admin API require.
+fn assert_scenario_statuses_declared(path: &Path) {
+    let cfg = mockingbird::file_config::load(path)
+        .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+    for (mock, m) in &cfg.mocks {
+        let source = mb_import::read_source(&m.contract).unwrap();
+        let bundle = mb_import::compile(&source)
+            .unwrap_or_else(|e| panic!("{}: {mock}: {e:#}", path.display()));
+        for (sname, sc) in &m.scenarios {
+            if let Some(status) = sc.status
+                && let Some(why) =
+                    mb_admin::undeclared_scenario_status(&bundle, &sc.operations, status)
+            {
+                panic!("{}: mock {mock}, scenario {sname}: {why}", path.display());
+            }
+        }
+    }
+}
+
+#[test]
+fn documented_example_scenarios_take_effect() {
+    for example in ["mockingbird.yaml", "mockingbird.full.yaml"] {
+        assert_scenario_statuses_declared(&repo().join("docs/examples").join(example));
+    }
 }

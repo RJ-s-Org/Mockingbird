@@ -20,7 +20,10 @@ pub struct UsageEvent {
     pub operation_id: String,
     /// Response status (HTTP status, or the protocol's equivalent).
     pub status: u16,
-    /// Where the response came from (e.g. `llm`, `faker`, `scenario`).
+    /// Where the response came from: `llm`, `repaired` or `fallback`, or
+    /// `not_generated` for a call answered without generating a body
+    /// (refused before generation, or a native error answer); `import` for
+    /// smart-import jobs.
     pub source: String,
     /// Wall-clock time spent serving the call.
     pub latency: Duration,
@@ -56,7 +59,10 @@ pub trait UsageSink: Send + Sync {
 
 /// Self-hosted default: emits through the `metrics` facade (exported as Prometheus).
 ///
-/// - `mb_requests_total{mock,operation,status,source}` counter
+/// - `mb_requests_total{mock,operation,status,source}` counter; `source` is
+///   `llm`, `repaired`, `fallback`, or `not_generated` for a call answered
+///   without generating a body (refused before generation, or a native
+///   error answer)
 /// - `mb_request_duration_seconds{mock,operation}` histogram
 /// - `mb_llm_tokens_total{mock,kind="prompt"|"completion"}` counter
 #[derive(Debug, Clone, Copy, Default)]

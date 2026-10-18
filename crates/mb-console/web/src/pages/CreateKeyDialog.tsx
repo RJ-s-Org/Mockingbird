@@ -73,21 +73,21 @@ export function CreateKeyDialog({
     return (
       <Dialog title="API key created" onClose={close}>
         <div className="space-y-4">
-          <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-900">
+          <p role="alert" className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm font-medium text-amber-900 dark:text-amber-200">
             This token will not be shown again
           </p>
-          <p className="text-sm text-slate-700">
+          <p className="text-sm text-slate-700 dark:text-slate-300">
             Key <code>{created.key.key_id}</code> ({created.key.name}). Copy the token now and store it safely.
           </p>
           <code
             data-testid="api-key-token"
-            className="block break-all rounded-md border border-slate-300 bg-slate-50 p-2 font-mono text-sm"
+            className="block break-all rounded-md border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-2 font-mono text-sm"
           >
             {created.token}
           </code>
           <div className="flex items-center justify-end gap-2">
             {copied ? (
-              <span role="status" className="text-sm text-green-800">
+              <span role="status" className="text-sm text-green-800 dark:text-green-300">
                 Copied.
               </span>
             ) : null}
@@ -155,9 +155,9 @@ export function CreateKeyDialog({
             </div>
           ))}
           {scopes.length === 0 ? (
-            <p className="text-xs text-red-800">Choose at least one scope.</p>
+            <p className="text-xs text-red-800 dark:text-red-300">Choose at least one scope.</p>
           ) : (
-            <p className="text-xs text-slate-600">admin: the Admin API. data-plane: mocks with api_key auth.</p>
+            <p className="text-xs text-slate-600 dark:text-slate-400">admin: the Admin API. data-plane: mocks with api_key auth.</p>
           )}
         </fieldset>
         <div className="space-y-1">
@@ -185,7 +185,7 @@ export function CreateKeyDialog({
             </label>
           </div>
         ) : null}
-        <ProblemAlert error={create.error} />
+        <ProblemAlert error={create.error} focus />
         <div className="flex justify-end gap-2">
           <button type="button" className={secondaryButton} onClick={close}>
             Cancel

@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { AUDIT_PAGE } from "../api/queries";
 import { json, localMe, renderAt, serve, shell, viewerMe } from "./harness";
 
 const BASE = "/api/v1/workspaces/default";
@@ -27,13 +28,36 @@ function page(top: number, count: number) {
 }
 
 describe("audit", () => {
+  it("long targets truncate with the full value in a tooltip; actions stay on one line", async () => {
+    const target = "import:petstore/2470a3fc-a213-49c7-94d3-bd438c662138";
+    serve({
+      ...shell(viewerMe),
+      [`GET ${BASE}/audit`]: () => json([event(1, { action: "import.create", target })]),
+    });
+    renderAt("/w/default/audit");
+    const table = await screen.findByRole("table", { name: "Audit events" });
+    const cell = await within(table).findByText(target);
+    expect(cell.getAttribute("title")).toBe(target);
+    expect(cell.className).toMatch(/\btruncate\b/);
+    expect(within(table).getByText("import.create").className).toMatch(/whitespace-nowrap/);
+    // The action comes right after the time, so it fits a phone screen without scrolling.
+    const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toEqual(["Time", "Action", "Actor", "Target", "Changes"]);
+    // The actor and its kind stay on one line.
+    const actor = within(table).getByText("(local)").parentElement as HTMLElement;
+    expect(actor.className).toMatch(/whitespace-nowrap/);
+    // On a phone the date and the time may sit on two lines; from sm up they share one.
+    const time = table.querySelector("time") as HTMLElement;
+    expect(time.className).toMatch(/sm:whitespace-nowrap/);
+  });
+
   it("audit filters and load more use before id", async () => {
     const user = userEvent.setup();
     const calls = serve({
       ...shell(viewerMe),
       [`GET ${BASE}/audit`]: (req: Request) => {
         const before = new URL(req.url).searchParams.get("before");
-        return json(before ? page(Number(before) - 1, 3) : page(200, 50));
+        return json(before ? page(Number(before) - 1, 3) : page(200, AUDIT_PAGE));
       },
     });
     renderAt("/w/default/audit");
@@ -53,17 +77,19 @@ describe("audit", () => {
     await user.click(await screen.findByRole("button", { name: "Load more" }));
     // The filtered list is a new table.
     const filteredTable = await screen.findByRole("table", { name: "Audit events" });
-    expect(await within(filteredTable).findByText("mock:m150")).toBeTruthy();
+    expect(await within(filteredTable).findByText(`mock:m${200 - AUDIT_PAGE}`)).toBeTruthy();
     const more = calls.filter((c) => c.path === `${BASE}/audit`).pop();
     const mq = new URLSearchParams(more?.search);
-    expect(mq.get("before")).toBe("151");
+    expect(mq.get("before")).toBe(String(201 - AUDIT_PAGE));
+    expect(mq.get("limit")).toBe(String(AUDIT_PAGE));
     expect(mq.get("action")).toBe("mock.update");
     expect(mq.get("actor")).toBe("local");
     // A short page is the last one.
     await waitFor(() => expect(screen.queryByRole("button", { name: "Load more" })).toBeNull());
+    expect(screen.getByText(`Showing all ${AUDIT_PAGE + 3} events.`)).toBeTruthy();
     // No sysadmin toggle for a viewer.
     expect(screen.queryByLabelText("All workspaces")).toBeNull();
-    // Rendering 53 rows in jsdom is slow.
+    // Rendering many rows in jsdom is slow.
   }, 20_000);
 
   it("jsonl export link carries filters", async () => {
@@ -98,10 +124,28 @@ describe("audit", () => {
     const row = (await within(table).findByText("mock:m7")).closest("tr") as HTMLElement;
     expect(within(row).getByText("mock.update")).toBeTruthy();
     expect(within(row).getByText("local")).toBeTruthy();
-    await user.click(within(row).getByText("Changes"));
-    const before = within(row).getByLabelText("Before");
-    const after = within(row).getByLabelText("After");
+    // One line, with the full ISO time as its tooltip.
+    const time = within(row).getByText((_, el) => el?.tagName === "TIME");
+    expect(time.getAttribute("title")).toBe("2026-10-16T08:00:00Z");
+    expect(time.className).toContain("whitespace-nowrap");
+
+    const toggle = within(row).getByRole("button", { name: "Show changes of mock.update on mock:m7" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await user.click(toggle);
+    // The same button stays focused, now as "Hide changes".
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.getAttribute("aria-label")).toBe("Hide changes of mock.update on mock:m7");
+    expect(document.activeElement).toBe(toggle);
+    // The changes open in a full-width row right under the event.
+    const detail = row.nextElementSibling as HTMLElement;
+    expect(detail.querySelector("td")?.getAttribute("colspan")).toBe("5");
+    const before = within(detail).getByLabelText("Before");
+    const after = within(detail).getByLabelText("After");
+    // Long lines wrap inside their pane instead of being cut off.
+    expect(after.className).toContain("whitespace-pre-wrap");
     expect(before.textContent).toContain('"persona": null');
     expect(after.textContent).toContain('"persona": "friendly"');
+    await user.click(within(row).getByRole("button", { name: "Hide changes of mock.update on mock:m7" }));
+    expect(within(table).queryByLabelText("After")).toBeNull();
   });
 });

@@ -384,8 +384,10 @@ fn allof_split_required_is_costed() {
             let start = std::time::Instant::now();
             let v = faker.fake(&schema, &mut rng);
             let elapsed = start.elapsed();
+            // Guards against exponential blowup (seconds per value), not
+            // speed: a loaded CI runner can take tens of milliseconds.
             assert!(
-                elapsed < std::time::Duration::from_millis(50),
+                elapsed < std::time::Duration::from_secs(1),
                 "depth {depth} seed {seed}: {elapsed:?}"
             );
             assert!(

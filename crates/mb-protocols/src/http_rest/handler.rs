@@ -409,6 +409,23 @@ async fn serve(
     // 4. State read, generate, state write.
     let generated = match call::generate_once(rt, &plan, &call).await {
         Ok(g) => g,
+        // An undeclared server error is answered natively, as every other
+        // protocol does: any API can fail with a 5xx whatever its contract.
+        Err(EngineError::UndeclaredStatus(code)) if (500..600).contains(&code) => {
+            log.delay = plan.delay;
+            let title = axum::http::StatusCode::from_u16(code)
+                .ok()
+                .and_then(|s| s.canonical_reason())
+                .unwrap_or("Server Error");
+            return log.problem(
+                code,
+                title,
+                format!(
+                    "operation {} declares no response for forced status {code}",
+                    op.id
+                ),
+            );
+        }
         Err(EngineError::UndeclaredStatus(code)) => {
             return log.problem(
                 400,

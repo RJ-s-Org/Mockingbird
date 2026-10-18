@@ -88,6 +88,63 @@ describe("mocks", () => {
     expect(screen.getByRole("dialog", { name: "New mock" })).toBeTruthy();
   });
 
+  it("create mock dialog shows any problem title and detail, cleared by editing", async () => {
+    const user = userEvent.setup();
+    serve({
+      ...shell(localMe),
+      [`GET ${BASE}/mocks`]: [],
+      [`GET ${BASE}/llm-profiles`]: [],
+      [`POST ${BASE}/mocks`]: () => problem(409, "Mock already exists", 'mock "pets" already exists in workspace default'),
+    });
+    renderAt("/w/default/mocks");
+
+    await user.click(await screen.findByRole("button", { name: "New mock" }));
+    const dialog = await screen.findByRole("dialog", { name: "New mock" });
+    const name = within(dialog).getByLabelText("Name");
+    await user.type(name, "pets");
+    await user.click(within(dialog).getByRole("button", { name: "Create" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("Mock already exists");
+    expect(alert.textContent).toContain('mock "pets" already exists in workspace default');
+
+    await user.type(name, "2");
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+  });
+
+  it("create mock dialog validates the name like the server", async () => {
+    const user = userEvent.setup();
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${BASE}/mocks`]: [],
+      [`GET ${BASE}/llm-profiles`]: [],
+    });
+    renderAt("/w/default/mocks");
+
+    await user.click(await screen.findByRole("button", { name: "New mock" }));
+    const dialog = await screen.findByRole("dialog", { name: "New mock" });
+    const name = within(dialog).getByLabelText("Name");
+    const prefix = within(dialog).getByLabelText("Route prefix");
+    const hint = within(dialog).getByText(/Up to 63 lowercase letters/);
+    expect(prefix.getAttribute("placeholder")).toBe("/<name>");
+
+    await user.type(name, "Bad Name");
+    expect(name.getAttribute("aria-invalid")).toBe("true");
+    expect(hint.textContent).toMatch(/^Invalid name\./);
+    // Invalid input is never echoed as the default prefix.
+    expect(prefix.getAttribute("placeholder")).toBe("/<name>");
+    expect(isDisabled(within(dialog).getByRole("button", { name: "Create" }))).toBe(true);
+
+    await user.clear(name);
+    await user.type(name, "-pets");
+    expect(name.getAttribute("aria-invalid")).toBe("true");
+    await user.clear(name);
+    await user.type(name, "good-name-1");
+    expect(name.getAttribute("aria-invalid")).toBe("false");
+    expect(prefix.getAttribute("placeholder")).toBe("/good-name-1");
+    expect(isDisabled(within(dialog).getByRole("button", { name: "Create" }))).toBe(false);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
   it("file-managed mock is read-only", async () => {
     serve({
       ...shell(localMe),

@@ -39,7 +39,7 @@ test("live requests, sessions and scenarios of a running mock", async ({ page, r
   await mockTab(page, "Live requests").click();
   expect((await stream).status()).toBe(200);
   const live = page.getByRole("table", { name: "Live requests" });
-  await expect(live.getByText("Waiting for requests…")).toBeVisible();
+  await expect(live.getByText("No requests recorded yet. New ones appear here as they are served.")).toBeVisible();
 
   // 3-4. A served call shows up within 5 s (its path without the route prefix) and opens in the drawer.
   const served = await request.post(`${DATA_PLANE}/live/orders`, {
@@ -118,7 +118,7 @@ test("channels tab publishes on a websocket channel", async ({ page, request }) 
   await expect(chat.getByRole("cell", { name: "websocket", exact: true })).toBeVisible();
   await expect(page.getByLabel("Broker").locator("option")).toHaveCount(2);
   const feed = page.getByRole("table", { name: "Event feed" });
-  await expect(feed.getByText("Waiting for events…")).toBeVisible();
+  await expect(feed.getByText("No events recorded yet. New ones appear here as they are published or received.")).toBeVisible();
   await expectAccessible(page);
 
   // 3. Publish one message now: the dialog shows it and the feed records it.
@@ -130,7 +130,7 @@ test("channels tab publishes on a websocket channel", async ({ page, request }) 
   await expectAccessible(page);
   await dialog.getByRole("button", { name: "Close" }).click();
   const published = feed.getByRole("row").filter({ hasText: "chatMessage" });
-  await expect(published.getByRole("cell", { name: "PUBLISH", exact: true })).toBeVisible({ timeout: 5_000 });
+  await expect(published.getByRole("cell", { name: "Mock sends", exact: true })).toBeVisible({ timeout: 5_000 });
   await expectAccessible(page);
   expect(consoleErrors).toEqual([]);
 });

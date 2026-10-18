@@ -366,6 +366,32 @@ async fn mock_lifecycle() {
 }
 
 #[tokio::test]
+async fn duplicate_mock_name_is_reported_before_the_prefix() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    // Same name, default prefix (`/orders`, also taken): the name wins.
+    let p = h
+        .json(Method::POST, "/api/v1/mocks", json!({ "name": "orders" }))
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    assert_eq!(p["title"], "Mock already exists", "{p}");
+    assert_eq!(
+        p["detail"], "a mock named \"orders\" already exists in workspace \"default\"",
+        "{p}"
+    );
+    // Same name with a free prefix: still the name.
+    let p = h
+        .json(
+            Method::POST,
+            "/api/v1/mocks",
+            json!({ "name": "orders", "route_prefix": "/elsewhere" }),
+        )
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    assert_eq!(p["title"], "Mock already exists", "{p}");
+}
+
+#[tokio::test]
 async fn route_prefix_collisions_conflict() {
     let h = harness().await;
     h.create_mock("orders").await;
@@ -791,6 +817,51 @@ async fn scenario_operations_are_checked_against_the_contract() {
 }
 
 #[tokio::test]
+async fn scenario_status_must_be_declared_by_its_operations() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let put = |body: Value| {
+        let h = &h;
+        async move {
+            h.json(Method::PUT, "/api/v1/mocks/orders/scenarios/s", body)
+                .await
+        }
+    };
+
+    // No contract yet: nothing to check against.
+    let r = put(json!({ "status": 409, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+
+    let r = h
+        .upload("orders", &contract_json("1.0.0"), Some(true))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    // createOrder declares only 201: a 409 could never apply.
+    let body = put(json!({ "status": 409, "operations": ["createOrder"] }))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["title"], "Scenario status not declared", "{body}");
+    assert_eq!(
+        body["detail"],
+        "status 409 is not declared by operation createOrder of the active contract, so the \
+         scenario could never answer it; declare a 409 response, or use a status it declares \
+         (201) or a 5xx",
+        "{body}"
+    );
+    // Without operations, any operation declaring it is enough.
+    let r = put(json!({ "status": 409 })).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text);
+    let r = put(json!({ "status": 201 })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let r = put(json!({ "status": 201, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    // A 5xx is answered natively where it is not declared.
+    let r = put(json!({ "status": 503, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+}
+
+#[tokio::test]
 async fn profiles_never_return_secret_values() {
     // The API never resolves a secret_ref, so no variable needs setting.
     let h = harness().await;
@@ -944,6 +1015,88 @@ async fn api_secret_refs_are_restricted() {
     )
     .await
     .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// The accepted-forms wording for the default `server.api_secret_refs`; the
+/// console shows the same text.
+const DEFAULT_SECRET_REF_FORMS: &str = "env:MB_LLM_* or env:*_API_KEY (* matches any characters)";
+
+#[tokio::test]
+async fn validation_problems_have_specific_titles() {
+    let h = harness().await;
+    let profile = |extra: Value| {
+        let mut body = json!({ "base_url": "https://x", "model": "m" });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let put = |body: Value| {
+        let h = &h;
+        async move { h.json(Method::PUT, "/api/v1/llm-profiles/p", body).await }
+    };
+
+    // A ref the policy refuses names exactly the accepted forms.
+    let r = put(profile(json!({ "secret_ref": "env:HOME" }))).await;
+    let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Secret reference not allowed", "{p}");
+    assert_eq!(
+        p["detail"],
+        format!(
+            "secret_ref not allowed by server.api_secret_refs; accepted: {DEFAULT_SECRET_REF_FORMS}"
+        ),
+        "{p}"
+    );
+
+    // Not a reference at all (a pasted key): not echoed, forms named.
+    let r = put(profile(json!({ "secret_ref": "sk-live-123" }))).await;
+    assert!(!r.text.contains("sk-live-123"), "{}", r.text);
+    let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid secret reference", "{p}");
+    assert_eq!(
+        p["detail"],
+        format!(
+            "secret_ref must be a secret reference, not a raw key; accepted: {DEFAULT_SECRET_REF_FORMS}"
+        ),
+        "{p}"
+    );
+
+    let p = put(profile(json!({ "api_key": "k" })))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Raw API key not accepted", "{p}");
+    let p = put(profile(json!({ "temperature": 5.0 })))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid LLM profile", "{p}");
+
+    // Store validation and body deserialisation.
+    let p = h
+        .json(
+            Method::POST,
+            "/api/v1/mocks",
+            json!({ "name": "no spaces" }),
+        )
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Validation failed", "{p}");
+    let p = h
+        .json(Method::POST, "/api/v1/mocks", json!({ "name": 5 }))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid request body", "{p}");
+
+    // The OpenAPI field description states the rule for the console.
+    let doc = h.get("/api/openapi.json").await.json();
+    let description =
+        doc["components"]["schemas"]["PutProfile"]["properties"]["secret_ref"]["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    assert!(
+        description.contains(DEFAULT_SECRET_REF_FORMS),
+        "{description}"
+    );
 }
 
 #[tokio::test]

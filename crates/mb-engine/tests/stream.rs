@@ -412,6 +412,7 @@ async fn scenario_set_patches_items() {
             name: "fixed".into(),
             instructions: None,
             set: Some(json!({"n": 42})),
+            status: None,
         }),
         ..StreamContext::default()
     };
@@ -423,6 +424,7 @@ async fn scenario_set_patches_items() {
             name: "invalid".into(),
             instructions: None,
             set: Some(json!({"n": "not a number"})),
+            status: None,
         }),
         ..StreamContext::default()
     };

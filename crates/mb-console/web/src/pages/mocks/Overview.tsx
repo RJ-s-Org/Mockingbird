@@ -35,7 +35,7 @@ export function Overview({ ws, mock }: { ws: string; mock: string }) {
   const me = useMe();
   const [savedAt, setSavedAt] = useState<string>();
   const [chaosSavedAt, setChaosSavedAt] = useState<string>();
-  if (!m.data) return m.isPending ? <p className="text-slate-700">Loading…</p> : null;
+  if (!m.data) return m.isPending ? <p className="text-slate-700 dark:text-slate-300">Loading…</p> : null;
   const canEdit = me.data ? can(me.data, ws, "edit") : false;
   // Re-seed each form when the stored values it edits change, and only
   // then: saving one form must not discard unsaved edits in the other.
@@ -129,10 +129,10 @@ function OverviewForm({
   return (
     <form onSubmit={submit} className="max-w-2xl space-y-4">
       {reason ? (
-        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{reason}</p>
+        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
       ) : null}
       {saved && !dirty ? (
-        <p role="status" className="text-sm text-green-800">
+        <p role="status" className="text-sm text-green-800 dark:text-green-300">
           Saved.
         </p>
       ) : null}
@@ -204,13 +204,13 @@ function OverviewForm({
               onChange={(e) => setHeader(e.target.value)}
               aria-describedby="mock-dp-header-hint"
             />
-            <p id="mock-dp-header-hint" className="text-xs text-slate-600">
+            <p id="mock-dp-header-hint" className="text-xs text-slate-600 dark:text-slate-400">
               Carries the key in api_key mode (or send <code>?api_key=</code>).
             </p>
           </div>
         </div>
       </fieldset>
-      <ProblemAlert error={patch.error ?? remove.error} />
+      <ProblemAlert error={patch.error ?? remove.error} focus />
       {canEdit ? (
         <div className="flex justify-between gap-2">
           <button type="submit" className={primaryButton} disabled={reason !== undefined || !dirty || patch.isPending}>
