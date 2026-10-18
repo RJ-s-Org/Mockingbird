@@ -2,8 +2,13 @@ import { useState, type FormEvent } from "react";
 import { useCreateMock, useProfiles, type Mock } from "../../api/queries";
 import { Dialog, inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { NAME_PATTERN, NAME_RULE, isValidName } from "../../lib/names";
 
-/** Creates a mock in `ws`; a 409 or 422 problem stays inline. */
+/**
+ * Creates a mock in `ws`. The name is checked against the server's rule as it
+ * is typed; a 409 or 422 problem from the server stays inline (its title and
+ * detail, whatever they are) until a field changes.
+ */
 export function CreateMockDialog({
   ws,
   onClose,
@@ -22,8 +27,19 @@ export function CreateMockDialog({
   // On by default, like the API's `header_overrides` and the config file.
   const [headerOverrides, setHeaderOverrides] = useState(true);
 
+  const nameValid = isValidName(name);
+  const nameInvalid = name !== "" && !nameValid;
+  /** Wraps a field's setter: editing clears a stale server error. */
+  const edit =
+    <V,>(set: (v: V) => void) =>
+    (v: V) => {
+      if (create.error) create.reset();
+      set(v);
+    };
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (!nameValid) return;
     create.mutate(
       {
         name,
@@ -47,13 +63,14 @@ export function CreateMockDialog({
             id="new-mock-name"
             className={inputClass}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => edit(setName)(e.target.value)}
             required
-            pattern="[a-z0-9][a-z0-9\-]{0,62}"
+            pattern={NAME_PATTERN}
+            aria-invalid={nameInvalid}
             aria-describedby="new-mock-name-hint"
           />
-          <p id="new-mock-name-hint" className="text-xs text-slate-600">
-            Lowercase letters, digits and dashes.
+          <p id="new-mock-name-hint" className={`text-xs ${nameInvalid ? "text-red-800" : "text-slate-600"}`}>
+            {nameInvalid ? `Invalid name. ${NAME_RULE}` : NAME_RULE}
           </p>
         </div>
         <div className="space-y-1">
@@ -64,9 +81,13 @@ export function CreateMockDialog({
             id="new-mock-prefix"
             className={inputClass}
             value={prefix}
-            placeholder={`/${name || "<name>"}`}
-            onChange={(e) => setPrefix(e.target.value)}
+            placeholder={nameValid ? `/${name}` : "/<name>"}
+            aria-describedby="new-mock-prefix-hint"
+            onChange={(e) => edit(setPrefix)(e.target.value)}
           />
+          <p id="new-mock-prefix-hint" className="text-xs text-slate-600">
+            Defaults to a slash followed by the name.
+          </p>
         </div>
         <div className="space-y-1">
           <label htmlFor="new-mock-persona" className="block text-sm font-medium">
@@ -77,16 +98,16 @@ export function CreateMockDialog({
             className={inputClass}
             rows={3}
             value={persona}
-            onChange={(e) => setPersona(e.target.value)}
+            onChange={(e) => edit(setPersona)(e.target.value)}
           />
         </div>
-        <ProfileSelect id="new-mock-profile" value={profile} onChange={setProfile} profiles={profiles.data} />
+        <ProfileSelect id="new-mock-profile" value={profile} onChange={edit(setProfile)} profiles={profiles.data} />
         <div className="flex items-center gap-2">
           <input
             id="new-mock-overrides"
             type="checkbox"
             checked={headerOverrides}
-            onChange={(e) => setHeaderOverrides(e.target.checked)}
+            onChange={(e) => edit(setHeaderOverrides)(e.target.checked)}
           />
           <label htmlFor="new-mock-overrides" className="text-sm font-medium">
             Header overrides
@@ -97,7 +118,7 @@ export function CreateMockDialog({
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className={primaryButton} disabled={create.isPending}>
+          <button type="submit" className={primaryButton} disabled={create.isPending || nameInvalid}>
             Create
           </button>
         </div>
