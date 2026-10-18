@@ -51,7 +51,7 @@ export function ImportProgress({ ws, mock, job: id }: { ws: string; mock: string
         </button>
       </div>
     ) : (
-      <p className="text-slate-700">Loading…</p>
+      <p className="text-slate-700 dark:text-slate-300">Loading…</p>
     );
   }
 
@@ -60,7 +60,7 @@ export function ImportProgress({ ws, mock, job: id }: { ws: string; mock: string
   return (
     <section
       aria-labelledby="import-progress-title"
-      className="max-w-2xl space-y-4 rounded-md border border-slate-300 bg-white p-4"
+      className="max-w-2xl space-y-4 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
     >
       <h2 id="import-progress-title" className="text-lg font-semibold">
         Import{source}
@@ -71,7 +71,7 @@ export function ImportProgress({ ws, mock, job: id }: { ws: string; mock: string
           {progress.total > 0 ? (
             <div className="flex items-center gap-3">
               <progress value={progress.done} max={progress.total} aria-label="Import progress" className="h-2 w-64" />
-              <span className="text-sm text-slate-700">
+              <span className="text-sm text-slate-700 dark:text-slate-300">
                 {progress.done} of {progress.total}
               </span>
             </div>
@@ -88,13 +88,13 @@ export function ImportProgress({ ws, mock, job: id }: { ws: string; mock: string
         </div>
       ) : null}
       {job.data.status === "done" ? (
-        <p role="status" className="text-sm text-green-800">
+        <p role="status" className="text-sm text-green-800 dark:text-green-300">
           Import finished; opening the draft…
         </p>
       ) : null}
       {job.data.status === "failed" ? (
         <div className="space-y-3">
-          <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+          <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
             <p className="font-semibold">Import failed</p>
             {job.data.error ? <p className="mt-1">{job.data.error}</p> : null}
           </div>

@@ -10,7 +10,7 @@ export function ProblemAlert({ error }: { error: unknown }) {
     detail = error.problem.detail;
   }
   return (
-    <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+    <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
       <p className="font-semibold">{title}</p>
       {detail && detail !== title ? <p className="mt-1">{detail}</p> : null}
     </div>

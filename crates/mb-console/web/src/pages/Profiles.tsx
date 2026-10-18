@@ -63,7 +63,7 @@ export function Profiles({ ws }: { ws: string }) {
                   </button>
                 </div>
               ) : (
-                <span className="text-slate-600">Managed by config file</span>
+                <span className="text-slate-600 dark:text-slate-400">Managed by config file</span>
               ),
           }),
         ]
@@ -96,15 +96,15 @@ export function Profiles({ ws }: { ws: string }) {
         ) : null}
       </div>
       {me.data && !canManage ? (
-        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
           Read-only: managing LLM profiles needs the admin role.
         </p>
       ) : null}
       {outcome ? (
-        <div role="status" className="rounded-md border border-slate-300 bg-white p-3 text-sm">
-          <p className="text-green-800">{outcome.message}</p>
+        <div role="status" className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-sm">
+          <p className="text-green-800 dark:text-green-300">{outcome.message}</p>
           {outcome.warnings.length > 0 ? (
-            <ul className="mt-2 list-disc pl-5 text-amber-900">
+            <ul className="mt-2 list-disc pl-5 text-amber-900 dark:text-amber-200">
               {outcome.warnings.map((w) => (
                 <li key={w}>{w}</li>
               ))}
@@ -116,7 +116,7 @@ export function Profiles({ ws }: { ws: string }) {
       {profiles.data ? (
         <DataTable caption="LLM profiles" columns={columns} data={profiles.data} empty="No LLM profiles yet." />
       ) : profiles.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {editing !== undefined ? (
         <ProfileEditor

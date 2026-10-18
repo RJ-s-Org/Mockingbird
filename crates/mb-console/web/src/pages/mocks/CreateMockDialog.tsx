@@ -69,7 +69,7 @@ export function CreateMockDialog({
             aria-invalid={nameInvalid}
             aria-describedby="new-mock-name-hint"
           />
-          <p id="new-mock-name-hint" className={`text-xs ${nameInvalid ? "text-red-800" : "text-slate-600"}`}>
+          <p id="new-mock-name-hint" className={`text-xs ${nameInvalid ? "text-red-800 dark:text-red-300" : "text-slate-600 dark:text-slate-400"}`}>
             {nameInvalid ? `Invalid name. ${NAME_RULE}` : NAME_RULE}
           </p>
         </div>
@@ -85,7 +85,7 @@ export function CreateMockDialog({
             aria-describedby="new-mock-prefix-hint"
             onChange={(e) => edit(setPrefix)(e.target.value)}
           />
-          <p id="new-mock-prefix-hint" className="text-xs text-slate-600">
+          <p id="new-mock-prefix-hint" className="text-xs text-slate-600 dark:text-slate-400">
             Defaults to a slash followed by the name.
           </p>
         </div>

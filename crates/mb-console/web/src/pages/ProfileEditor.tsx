@@ -24,7 +24,7 @@ function Field({
       </label>
       <input id={id} className={inputClass} aria-describedby={hint ? `${id}-hint` : undefined} {...input} />
       {hint ? (
-        <p id={`${id}-hint`} className="text-xs text-slate-600">
+        <p id={`${id}-hint`} className="text-xs text-slate-600 dark:text-slate-400">
           {hint}
         </p>
       ) : null}

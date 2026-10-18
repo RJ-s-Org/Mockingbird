@@ -60,7 +60,7 @@ function TriggerFields({
   const errorId = id("error");
   const describedBy = error ? errorId : undefined;
   return (
-    <fieldset className="space-y-3 rounded-md border border-slate-300 p-3">
+    <fieldset className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 p-3">
       <legend className="px-1 text-sm font-semibold">{`Trigger ${n}`}</legend>
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1">
@@ -154,11 +154,11 @@ function TriggerFields({
           Remove
         </button>
       </div>
-      <p id={id("kind-hint")} className="text-xs text-slate-600">
+      <p id={id("kind-hint")} className="text-xs text-slate-600 dark:text-slate-400">
         {TRIGGER_KIND_HINTS[draft.kind]}
       </p>
       {error ? (
-        <p id={errorId} className="text-sm text-red-800">
+        <p id={errorId} className="text-sm text-red-800 dark:text-red-300">
           {error}
         </p>
       ) : null}
@@ -214,16 +214,16 @@ function TriggersForm({
         Use the contract&apos;s triggers
       </label>
       {useContract ? (
-        <p className="text-sm text-slate-700">The channel publishes on the triggers its contract declares.</p>
+        <p className="text-sm text-slate-700 dark:text-slate-300">The channel publishes on the triggers its contract declares.</p>
       ) : (
         <div className="space-y-3">
           {unreadable > 0 ? (
-            <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
               {`${unreadable} trigger(s) this editor cannot show will be dropped on save.`}
             </p>
           ) : null}
           {rows.length === 0 ? (
-            <p className="text-sm text-slate-700">No triggers: the channel publishes only on demand.</p>
+            <p className="text-sm text-slate-700 dark:text-slate-300">No triggers: the channel publishes only on demand.</p>
           ) : null}
           {rows.map((row, i) => (
             <TriggerFields
@@ -271,7 +271,7 @@ export function ChannelTriggersEditor({
       ) : detail.error ? (
         <ProblemAlert error={detail.error} />
       ) : (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       )}
     </Drawer>
   );

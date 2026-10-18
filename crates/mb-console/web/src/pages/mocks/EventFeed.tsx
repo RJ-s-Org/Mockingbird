@@ -62,15 +62,15 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
       </div>
       <div aria-live="polite" className="space-y-1 text-sm">
         {paused ? (
-          <p className="text-slate-700">
+          <p className="text-slate-700 dark:text-slate-300">
             {missed} {missed === 1 ? "event" : "events"} arrived while paused.
           </p>
         ) : null}
-        {interrupted ? <p className="text-amber-900">The event feed connection was interrupted.</p> : null}
+        {interrupted ? <p className="text-amber-900 dark:text-amber-200">The event feed connection was interrupted.</p> : null}
       </div>
       <div className={tableScroll}>
         <table aria-label="Event feed" className="w-full border-collapse text-left text-sm">
-          <thead className="border-b border-slate-300 text-slate-700">
+          <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
             <tr>
               {["Time", "Channel", "Direction", "Status", "Source"].map((h) => (
                 <th key={h} scope="col" className="px-3 py-2 font-semibold">
@@ -82,13 +82,13 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-3 py-6 text-center text-slate-600">
+                <td colSpan={5} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
                   Waiting for events…
                 </td>
               </tr>
             ) : (
               rows.map(({ key, record }) => (
-                <tr key={key} className="border-b border-slate-200">
+                <tr key={key} className="border-b border-slate-200 dark:border-slate-800">
                   <td className={cell}>
                     <time dateTime={record.at}>{new Date(record.at).toLocaleTimeString()}</time>
                   </td>

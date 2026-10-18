@@ -34,7 +34,7 @@ export function OperationsTable({
       {contract.error ? <ProblemAlert error={contract.error} /> : null}
       {contract.data ? (
         <div className="space-y-3">
-          <p className="text-sm text-slate-700">
+          <p className="text-sm text-slate-700 dark:text-slate-300">
             {contract.data.title} {contract.data.api_version}
           </p>
           <DataTable
@@ -45,7 +45,7 @@ export function OperationsTable({
           />
         </div>
       ) : contract.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
     </Drawer>
   );

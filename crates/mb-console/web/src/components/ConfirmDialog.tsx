@@ -49,11 +49,11 @@ export function useFocusTrap(ref: RefObject<HTMLElement | null>, onClose: () => 
 }
 
 export const buttonClass =
-  "rounded-md px-3 py-1.5 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 disabled:opacity-60";
+  "rounded-md px-3 py-1.5 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400 disabled:opacity-60";
 export const primaryButton = `${buttonClass} bg-indigo-700 text-white hover:bg-indigo-800`;
-export const secondaryButton = `${buttonClass} border border-slate-400 bg-white text-slate-900 hover:bg-slate-100`;
+export const secondaryButton = `${buttonClass} border border-slate-400 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800`;
 export const inputClass =
-  "w-full rounded-md border border-slate-400 bg-white px-2 py-1.5 text-sm text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-indigo-700 disabled:bg-slate-100 disabled:text-slate-700";
+  "w-full rounded-md border border-slate-400 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1.5 text-sm text-slate-900 dark:text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400 disabled:bg-slate-100 dark:disabled:bg-slate-800 disabled:text-slate-700 dark:disabled:text-slate-400";
 export const dangerButton = `${buttonClass} bg-red-700 text-white hover:bg-red-800`;
 
 /** A modal dialog: traps focus, closes on Escape or a click on the backdrop. */
@@ -70,14 +70,14 @@ export function Dialog({
   const titleId = useId();
   useFocusTrap(ref, onClose);
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/50 dark:bg-black/60 p-4" onClick={onClose}>
       <div
         ref={ref}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-lg bg-white p-4 text-slate-900 shadow-xl sm:p-6"
+        className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-lg bg-white dark:bg-slate-900 p-4 text-slate-900 shadow-xl sm:p-6 dark:text-slate-100 dark:ring-1 dark:ring-slate-700"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id={titleId} className="mb-4 text-lg font-semibold">
@@ -107,7 +107,7 @@ export function ConfirmDialog({
 }) {
   return (
     <Dialog title={title} onClose={onCancel}>
-      <div className="mb-6 text-sm text-slate-700">{message}</div>
+      <div className="mb-6 text-sm text-slate-700 dark:text-slate-300">{message}</div>
       <div className="flex justify-end gap-2">
         <button type="button" className={secondaryButton} onClick={onCancel}>
           Cancel

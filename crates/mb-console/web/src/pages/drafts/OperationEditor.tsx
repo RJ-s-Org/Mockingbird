@@ -69,7 +69,7 @@ export function OperationEditor({
     initial = readOperation(document, operation);
   } catch (e) {
     return (
-      <section aria-label={title} className="space-y-3 rounded-md border border-slate-300 bg-white p-4">
+      <section aria-label={title} className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
         <ProblemAlert error={e} />
         <button type="button" className={secondaryButton} onClick={onClose}>
           Close
@@ -176,7 +176,7 @@ function EditorForm({
       aria-label={title}
       onSubmit={save}
       noValidate
-      className="space-y-4 rounded-md border border-slate-300 bg-white p-4"
+      className="space-y-4 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
     >
       <h3 className="text-base font-semibold">{title}</h3>
       <div className="grid gap-4 sm:grid-cols-[8rem_1fr]">
@@ -240,7 +240,7 @@ function EditorForm({
         />
       ))}
       {editError ? (
-        <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+        <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
           {editError}
         </div>
       ) : null}
@@ -306,7 +306,7 @@ function SchemaField({
         onChange={(e) => onChange(e.target.value)}
       />
       {error ? (
-        <p id={errorId} className="text-sm text-red-800">
+        <p id={errorId} className="text-sm text-red-800 dark:text-red-300">
           {error}
         </p>
       ) : null}
@@ -321,7 +321,7 @@ function SaveError({ error }: { error: unknown }) {
   if (problems.length === 0) return <ProblemAlert error={error} />;
   const problem = (error as ApiError).problem;
   return (
-    <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+    <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
       <p className="font-semibold">{problem?.title || "The draft was not saved"}</p>
       {problem?.detail ? <p className="mt-1">{problem.detail}</p> : null}
       <ul role="list" aria-label="Problems" className="mt-2 list-disc space-y-1 pl-5">

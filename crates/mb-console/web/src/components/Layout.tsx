@@ -2,12 +2,13 @@ import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { rememberWorkspace, useWorkspaces } from "../api/queries";
 import { useMe } from "../auth/me";
+import { useTheme, type Theme } from "../lib/theme";
 import { ProblemAlert } from "./ProblemAlert";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 const navLink =
-  "rounded-md px-3 py-1.5 text-sm font-medium whitespace-nowrap text-slate-800 hover:bg-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700";
-const activeNavLink = "bg-slate-200 text-slate-950";
+  "rounded-md px-3 py-1.5 text-sm font-medium whitespace-nowrap text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
+const activeNavLink = "bg-slate-200 dark:bg-slate-700 text-slate-950 dark:text-white";
 
 /**
  * The console frame: header (switcher, user menu), workspace navigation and the page.
@@ -28,15 +29,18 @@ export function Layout({ ws, global = false }: { ws?: string; global?: boolean }
   }, [ws, known]);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 bg-slate-900 px-4 py-3 text-white sm:px-6">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 bg-slate-900 px-4 py-3 text-white sm:px-6 dark:border-b dark:border-slate-800 dark:bg-slate-950">
         <div className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-2">
           <span className="text-lg font-semibold">Mockingbird</span>
           <WorkspaceSwitcher current={current} missing={missing} sysadmin={me.data?.sysadmin ?? false} />
         </div>
-        {me.data ? <UserMenu name={me.data.display_name} local={me.data.kind === "local"} /> : null}
+        <div className="flex flex-wrap items-center gap-3">
+          <ThemeSelect />
+          {me.data ? <UserMenu name={me.data.display_name} local={me.data.kind === "local"} /> : null}
+        </div>
       </header>
-      <nav aria-label="Main" className="flex flex-wrap gap-1 border-b border-slate-300 bg-white px-4 py-2 sm:px-6">
+      <nav aria-label="Main" className="flex flex-wrap gap-1 border-b border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 sm:px-6">
         {scoped && ws ? (
           <>
             <Link to="/w/$ws/mocks" params={{ ws }} className={navLink} activeProps={{ className: activeNavLink }}>
@@ -87,7 +91,7 @@ function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: st
       <h1 className="text-2xl font-semibold">
         Workspace not found
       </h1>
-      <p className="text-slate-700">
+      <p className="text-slate-700 dark:text-slate-300">
         There is no workspace named <code className="font-semibold break-all">{ws}</code>, or you do not have access to
         it.
       </p>
@@ -95,18 +99,40 @@ function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: st
         <Link
           to="/w/$ws/mocks"
           params={{ ws: fallback.name }}
-          className="font-medium text-indigo-700 underline hover:text-indigo-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
+          className="font-medium text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
         >
           {`Go to the ${fallback.display_name} workspace`}
         </Link>
       ) : (
         <Link
           to="/"
-          className="font-medium text-indigo-700 underline hover:text-indigo-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
+          className="font-medium text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
         >
           Back to the console
         </Link>
       )}
+    </div>
+  );
+}
+
+/** Light, dark or the system's theme; the choice is remembered in this browser. */
+function ThemeSelect() {
+  const [theme, setTheme] = useTheme();
+  return (
+    <div className="flex items-center gap-2">
+      <label htmlFor="theme-select" className="sr-only">
+        Theme
+      </label>
+      <select
+        id="theme-select"
+        className="rounded-md border border-slate-500 bg-slate-800 px-2 py-1 text-sm text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+        value={theme}
+        onChange={(e) => setTheme(e.target.value as Theme)}
+      >
+        <option value="system">System theme</option>
+        <option value="light">Light theme</option>
+        <option value="dark">Dark theme</option>
+      </select>
     </div>
   );
 }

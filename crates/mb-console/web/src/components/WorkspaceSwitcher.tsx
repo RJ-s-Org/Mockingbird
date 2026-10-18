@@ -100,7 +100,7 @@ function NewWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCre
             pattern="[a-z0-9][a-z0-9\-]{0,62}"
             aria-describedby="new-workspace-name-hint"
           />
-          <p id="new-workspace-name-hint" className="text-xs text-slate-600">
+          <p id="new-workspace-name-hint" className="text-xs text-slate-600 dark:text-slate-400">
             Lowercase letters, digits and dashes.
           </p>
         </div>

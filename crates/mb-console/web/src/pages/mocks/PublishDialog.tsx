@@ -22,7 +22,7 @@ export function parseContext(text: string): { value: Record<string, unknown> | u
 /** Where a published message came from: `llm`, `repaired` or `fallback`. */
 function GenerationBadge({ source }: { source: string }) {
   const style =
-    source === "fallback" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-300 bg-slate-50 text-slate-800";
+    source === "fallback" ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200" : "border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200";
   return (
     <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${style}`}>
       {source}
@@ -79,7 +79,7 @@ export function PublishDialog({
             onChange={(e) => setCount(e.target.value)}
           />
           {countError ? (
-            <p id="publish-count-error" className="text-sm text-red-800">
+            <p id="publish-count-error" className="text-sm text-red-800 dark:text-red-300">
               {countError}
             </p>
           ) : null}
@@ -98,11 +98,11 @@ export function PublishDialog({
             onChange={(e) => setContextText(e.target.value)}
           />
           {contextError ? (
-            <p id="publish-context-error" className="text-sm text-red-800">
+            <p id="publish-context-error" className="text-sm text-red-800 dark:text-red-300">
               {contextError}
             </p>
           ) : (
-            <p id="publish-context-hint" className="text-xs text-slate-600">
+            <p id="publish-context-hint" className="text-xs text-slate-600 dark:text-slate-400">
               Optional; handed to the message prompt.
             </p>
           )}
@@ -113,7 +113,7 @@ export function PublishDialog({
             <h3 className="text-sm font-semibold">{`Published ${publish.data.messages.length} message(s)`}</h3>
             <ol className="max-h-80 space-y-3 overflow-y-auto">
               {publish.data.messages.map((m, i) => (
-                <li key={i} className="space-y-1 rounded-md border border-slate-200 p-2 text-sm">
+                <li key={i} className="space-y-1 rounded-md border border-slate-200 dark:border-slate-800 p-2 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
                     <code className="break-all">{m.address}</code>
                     {m.key ? (
@@ -126,7 +126,7 @@ export function PublishDialog({
                   <pre
                     aria-label="Published payload"
                     tabIndex={0}
-                    className="overflow-x-auto rounded bg-slate-100 p-2 text-xs"
+                    className="overflow-x-auto rounded bg-slate-100 dark:bg-slate-800 p-2 text-xs"
                   >
                     {JSON.stringify(m.payload, null, 2)}
                   </pre>

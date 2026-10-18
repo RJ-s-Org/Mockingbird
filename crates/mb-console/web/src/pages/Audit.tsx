@@ -15,7 +15,7 @@ function pretty(v: unknown): string {
 /** An event's before and after views: side by side on wide screens, wrapping long lines. */
 function Changes({ event }: { event: AuditEvent }) {
   const pane =
-    "max-h-80 overflow-auto rounded-md border border-slate-300 bg-white p-2 font-mono text-xs whitespace-pre-wrap break-all";
+    "max-h-80 overflow-auto rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-2 font-mono text-xs whitespace-pre-wrap break-all";
   return (
     <div className="grid min-w-0 grid-cols-1 gap-2 md:grid-cols-2">
       <div className="min-w-0">
@@ -51,7 +51,7 @@ function ChangesToggle({ event }: { event: AuditEvent }) {
       type="button"
       aria-expanded={open}
       aria-label={`${open ? "Hide" : "Show"} changes of ${event.action} on ${event.target}`}
-      className="text-sm whitespace-nowrap text-indigo-700 underline hover:text-indigo-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
+      className="text-sm whitespace-nowrap text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
       onClick={onToggle}
     >
       {open ? "Hide changes" : "Changes"}
@@ -110,7 +110,7 @@ export function Audit({ ws }: { ws: string }) {
         header: "Actor",
         cell: (info) => (
           <>
-            <span>{info.getValue()}</span> <span className="text-slate-600">({info.row.original.actor_kind})</span>
+            <span>{info.getValue()}</span> <span className="text-slate-600 dark:text-slate-400">({info.row.original.actor_kind})</span>
           </>
         ),
       }),
@@ -181,11 +181,11 @@ export function Audit({ ws }: { ws: string }) {
           />
         </Expansion.Provider>
       ) : audit.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {audit.data && events.length > 0 ? (
         <div className="flex flex-wrap items-center gap-3">
-          <p className="text-sm text-slate-700" aria-live="polite">
+          <p className="text-sm text-slate-700 dark:text-slate-300" aria-live="polite">
             {audit.hasNextPage
               ? `Showing the latest ${events.length} events.`
               : `Showing all ${events.length} ${events.length === 1 ? "event" : "events"}.`}

@@ -17,7 +17,7 @@ interface Row {
 
 const cell = "px-3 py-2 align-top";
 const rowButton =
-  "rounded-sm text-left font-medium text-indigo-800 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700";
+  "rounded-sm text-left font-medium text-indigo-800 dark:text-indigo-300 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
 
 /** Moves focus between the row buttons of `tbody` with the arrow keys. */
 function onArrowKeys(e: KeyboardEvent<HTMLTableSectionElement>) {
@@ -134,16 +134,16 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
       </div>
       <div aria-live="polite" className="space-y-2 text-sm">
         {paused ? (
-          <p className="text-slate-700">
+          <p className="text-slate-700 dark:text-slate-300">
             {missed} {missed === 1 ? "request" : "requests"} arrived while paused.
           </p>
         ) : null}
-        {interrupted ? <p className="text-amber-900">The live feed connection was interrupted.</p> : null}
+        {interrupted ? <p className="text-amber-900 dark:text-amber-200">The live feed connection was interrupted.</p> : null}
       </div>
       {dropped !== undefined ? (
         <div
           role="status"
-          className="flex items-center justify-between gap-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+          className="flex items-center justify-between gap-4 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200"
         >
           <span>{dropped} requests were dropped</span>
           <button type="button" className={secondaryButton} onClick={() => setDropped(undefined)}>
@@ -154,7 +154,7 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
       <div className={tableScroll}>
         <table className="w-full border-collapse text-left text-sm">
           <caption className="sr-only">Live requests</caption>
-          <thead className="border-b border-slate-300 text-slate-700">
+          <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
             <tr>
               {["Time", "Method", "Path", "Status", "Source", "Latency", "Session"].map((h) => (
                 <th key={h} scope="col" className="px-3 py-2 font-semibold">
@@ -166,7 +166,7 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
           <tbody onKeyDown={onArrowKeys}>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-slate-600">
+                <td colSpan={7} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
                   Waiting for requests…
                 </td>
               </tr>
@@ -176,7 +176,7 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
                 return (
                   <tr
                     key={key}
-                    className="cursor-pointer border-b border-slate-200 hover:bg-slate-100"
+                    className="cursor-pointer border-b border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800"
                     onClick={() => setSelected(record)}
                   >
                     <td className={cell}>

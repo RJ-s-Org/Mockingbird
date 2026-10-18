@@ -74,14 +74,14 @@ export function ImportWizard({ ws, mock }: { ws: string; mock: string }) {
   };
 
   return (
-    <form onSubmit={submit} className="max-w-2xl space-y-4 rounded-md border border-slate-300 bg-white p-4">
+    <form onSubmit={submit} className="max-w-2xl space-y-4 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
       <h2 className="text-lg font-semibold">Import API documentation</h2>
-      <p className="text-sm text-slate-700">
+      <p className="text-sm text-slate-700 dark:text-slate-300">
         Turns Markdown, HTML or PDF documentation, a HAR recording or a Postman collection into a draft contract version
         to review before approval.
       </p>
       {reason ? (
-        <p id="import-read-only" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <p id="import-read-only" className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
           {reason}
         </p>
       ) : null}
@@ -120,7 +120,7 @@ export function ImportWizard({ ws, mock }: { ws: string; mock: string }) {
               onChange={(e) => setFile(e.target.files?.[0])}
               aria-describedby="import-file-hint"
             />
-            <p id="import-file-hint" className="text-xs text-slate-600">
+            <p id="import-file-hint" className="text-xs text-slate-600 dark:text-slate-400">
               Markdown, HTML, PDF, plain text, a HAR recording or a Postman collection; at most 20 MiB.
             </p>
           </div>

@@ -110,7 +110,7 @@ export function Sessions({ ws, mock }: { ws: string; mock: string }) {
       {sessions.data ? (
         <DataTable caption="Sessions" columns={columns} data={sessions.data} empty="No sessions yet." />
       ) : sessions.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {inspecting !== undefined ? (
         <SessionDrawer ws={ws} mock={mock} session={inspecting} onClose={() => setInspecting(undefined)} />
@@ -146,11 +146,11 @@ function SessionDrawer({
     <Drawer title={`Session ${session}`} onClose={onClose}>
       <ProblemAlert error={exported.error} />
       {exported.data ? (
-        <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 p-3 text-xs text-slate-900">
+        <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-xs text-slate-900 dark:text-slate-100">
           {JSON.stringify(exported.data, null, 2)}
         </pre>
       ) : exported.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
     </Drawer>
   );
@@ -200,7 +200,7 @@ function SeedForm({ ws, mock }: { ws: string; mock: string }) {
   return (
     <form
       onSubmit={(e) => void submit(e)}
-      className="space-y-3 rounded-md border border-slate-300 bg-white p-4"
+      className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
     >
       <h2 className="text-lg font-semibold">Seed a session</h2>
       <div className="flex flex-wrap items-end gap-4">
@@ -234,7 +234,7 @@ function SeedForm({ ws, mock }: { ws: string; mock: string }) {
             aria-invalid={error !== undefined}
             aria-describedby={error ? "seed-error" : "seed-file-hint"}
           />
-          <p id="seed-file-hint" className="text-xs text-slate-600">
+          <p id="seed-file-hint" className="text-xs text-slate-600 dark:text-slate-400">
             A JSON array of resources, as Export saves it. Replaces the session&apos;s contents.
           </p>
         </div>
@@ -243,12 +243,12 @@ function SeedForm({ ws, mock }: { ws: string; mock: string }) {
         </button>
       </div>
       {error ? (
-        <p id="seed-error" className="text-sm text-red-800">
+        <p id="seed-error" className="text-sm text-red-800 dark:text-red-300">
           {error}
         </p>
       ) : null}
       {seeded && !seed.isPending ? (
-        <p role="status" className="text-sm text-green-800">
+        <p role="status" className="text-sm text-green-800 dark:text-green-300">
           {seeded}
         </p>
       ) : null}

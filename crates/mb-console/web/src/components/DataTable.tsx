@@ -39,7 +39,7 @@ export function DataTable<T extends RowData>({
     <div className={tableScroll}>
       <table className="w-full border-collapse text-left text-sm">
         <caption className="sr-only">{caption}</caption>
-        <thead className="border-b border-slate-300 text-slate-700">
+        <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
           {table.getHeaderGroups().map((group) => (
             <tr key={group.id}>
               {group.headers.map((header) => (
@@ -53,7 +53,7 @@ export function DataTable<T extends RowData>({
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={columns.length} className="px-3 py-6 text-center text-slate-600">
+              <td colSpan={columns.length} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
                 {empty}
               </td>
             </tr>
@@ -66,8 +66,8 @@ export function DataTable<T extends RowData>({
                   <tr
                     className={
                       open
-                        ? "bg-slate-100/70"
-                        : "border-b border-slate-200"
+                        ? "bg-slate-100/70 dark:bg-slate-800/60"
+                        : "border-b border-slate-200 dark:border-slate-800"
                     }
                   >
                     {row.getAllCells().map((cell) => (
@@ -77,7 +77,7 @@ export function DataTable<T extends RowData>({
                     ))}
                   </tr>
                   {open ? (
-                    <tr className="border-b border-slate-200 bg-slate-100/70">
+                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-800/60">
                       <td colSpan={columns.length} className="px-3 pb-4">
                         {detail}
                       </td>

@@ -48,8 +48,8 @@ function Switch({
       title={title}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 border-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 disabled:opacity-60 ${
-        checked ? "bg-indigo-700" : "bg-slate-400"
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 border-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400 disabled:opacity-60 ${
+        checked ? "bg-indigo-700" : "bg-slate-400 dark:bg-slate-600"
       }`}
     >
       <span
@@ -64,7 +64,7 @@ function Switch({
 
 /** Published/received counters and the last error, labelled in text (not only colour). */
 function Activity({ activity }: { activity: ChannelActivity | null | undefined }) {
-  if (!activity) return <span className="text-slate-600">Not running</span>;
+  if (!activity) return <span className="text-slate-600 dark:text-slate-400">Not running</span>;
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap gap-x-3">
@@ -72,7 +72,7 @@ function Activity({ activity }: { activity: ChannelActivity | null | undefined }
         <span>{`${activity.received} received`}</span>
       </div>
       {activity.last_error ? (
-        <p className="text-red-800">
+        <p className="text-red-800 dark:text-red-300">
           <span className="font-semibold">Last error:</span> <span>{activity.last_error}</span>
         </p>
       ) : null}
@@ -138,7 +138,7 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
       cell: ({ row }) => (
         <div>
           <code className="font-semibold">{row.original.id}</code>
-          {row.original.title ? <p className="text-slate-700">{row.original.title}</p> : null}
+          {row.original.title ? <p className="text-slate-700 dark:text-slate-300">{row.original.title}</p> : null}
         </div>
       ),
     }),
@@ -168,7 +168,7 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
       header: "Triggers",
       cell: (info) => {
         const triggers = info.getValue();
-        if (triggers.length === 0) return <span className="text-slate-600">none</span>;
+        if (triggers.length === 0) return <span className="text-slate-600 dark:text-slate-400">none</span>;
         return (
           <ul className="space-y-0.5">
             {triggers.map((t, i) => (
@@ -217,18 +217,18 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
   return (
     <div className="space-y-6">
       {readOnly ? (
-        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{readOnly}</p>
+        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{readOnly}</p>
       ) : null}
       <BrokerSelector ws={ws} mock={mock} readOnly={readOnly} />
       <ProblemAlert error={channels.error ?? put.error} />
       {channels.data ? (
         channels.data.length === 0 ? (
-          <p className="text-slate-700">This mock&apos;s active contract declares no channels.</p>
+          <p className="text-slate-700 dark:text-slate-300">This mock&apos;s active contract declares no channels.</p>
         ) : (
           <DataTable caption="Channels" columns={columns} data={channels.data} />
         )
       ) : channels.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       <EventFeed ws={ws} mock={mock} />
       {editing ? (
