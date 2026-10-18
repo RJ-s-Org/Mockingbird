@@ -1,11 +1,26 @@
 import { useMetricsSummary, useReadiness } from "../api/queries";
 import { ProblemAlert } from "../components/ProblemAlert";
+import { sourceLabel } from "../lib/sources";
 import { tableScroll } from "../components/DataTable";
 
 const STATUS_STYLE: Record<string, string> = {
   ready: "border-green-300 bg-green-50 text-green-900",
   degraded: "border-amber-300 bg-amber-50 text-amber-900",
 };
+
+/** A source's human label; the tooltip explains it and names the raw value. */
+function SourceName({ source }: { source: string }) {
+  const { label, hint } = sourceLabel(source);
+  if (label === source) return <>{source}</>;
+  return (
+    <span
+      title={`${hint} (source "${source}")`}
+      className="cursor-help underline decoration-slate-400 decoration-dotted underline-offset-2"
+    >
+      {label}
+    </span>
+  );
+}
 
 function formatCount(n: number): string {
   return String(Math.round(n * 1000) / 1000);
@@ -84,7 +99,7 @@ export function Status() {
                     Object.entries(summary.bySource).map(([source, n]) => (
                       <tr key={source} className="border-b border-slate-200">
                         <th scope="row" className="px-3 py-2 font-normal">
-                          {source}
+                          <SourceName source={source} />
                         </th>
                         <td className="px-3 py-2">{formatCount(n)}</td>
                       </tr>
