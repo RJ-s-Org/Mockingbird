@@ -15,6 +15,9 @@ use crate::mocks::{ChaosSchema, MockPath};
 use crate::problem::{ApiResult, Json, Path, Problem};
 use crate::{AdminState, Source, ensure_api_managed, valid_identifier};
 
+/// Title of the 422 for an invalid scenario body.
+const INVALID_SCENARIO: &str = "Invalid scenario";
+
 /// Longest accepted `stream_item_interval_ms` (30 s).
 const MAX_STREAM_ITEM_INTERVAL_MS: u64 = 30_000;
 
@@ -210,7 +213,8 @@ pub async fn put(
     access.require(Permission::Edit)?;
     let m = st.mock(&access.ws, &mock).await?;
     if !valid_identifier(&name) {
-        return Err(Problem::unprocessable(
+        return Err(Problem::invalid(
+            INVALID_SCENARIO,
             "scenario names are 1-128 characters of [A-Za-z0-9._-]",
         ));
     }
@@ -219,13 +223,17 @@ pub async fn put(
         ensure_api_managed(&existing.source, format_args!("scenario {name:?}"))?;
     }
     if body.status.is_some_and(|s| !(100..=599).contains(&s)) {
-        return Err(Problem::unprocessable("status must be between 100 and 599"));
+        return Err(Problem::invalid(
+            INVALID_SCENARIO,
+            "status must be between 100 and 599",
+        ));
     }
     if body
         .stream_items
         .is_some_and(|n| !(1..=10_000).contains(&n))
     {
-        return Err(Problem::unprocessable(
+        return Err(Problem::invalid(
+            INVALID_SCENARIO,
             "stream_items must be between 1 and 10000",
         ));
     }
@@ -233,12 +241,16 @@ pub async fn put(
         .stream_item_interval_ms
         .is_some_and(|ms| ms > MAX_STREAM_ITEM_INTERVAL_MS)
     {
-        return Err(Problem::unprocessable(format!(
-            "stream_item_interval_ms must be at most {MAX_STREAM_ITEM_INTERVAL_MS} (30 s)"
-        )));
+        return Err(Problem::invalid(
+            INVALID_SCENARIO,
+            format!("stream_item_interval_ms must be at most {MAX_STREAM_ITEM_INTERVAL_MS} (30 s)"),
+        ));
     }
     if body.set.as_ref().is_some_and(|s| !s.is_object()) {
-        return Err(Problem::unprocessable("set must be a JSON object"));
+        return Err(Problem::invalid(
+            INVALID_SCENARIO,
+            "set must be a JSON object",
+        ));
     }
     if let Some(chaos) = &body.chaos {
         chaos.validate().map_err(Problem::unprocessable)?;
@@ -254,9 +266,10 @@ pub async fn put(
         if !unknown.is_empty() {
             unknown.sort_unstable();
             unknown.dedup();
-            return Err(Problem::unprocessable(format!(
-                "the active contract of mock {mock:?} has no operations {unknown:?}"
-            )));
+            return Err(Problem::invalid(
+                INVALID_SCENARIO,
+                format!("the active contract of mock {mock:?} has no operations {unknown:?}"),
+            ));
         }
         if let Some(status) = body.status {
             check_status_declared(&contract.bundle, &body.operations, status)?;

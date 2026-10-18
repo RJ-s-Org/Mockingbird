@@ -1017,6 +1017,88 @@ async fn api_secret_refs_are_restricted() {
     .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// The accepted-forms wording for the default `server.api_secret_refs`; the
+/// console shows the same text.
+const DEFAULT_SECRET_REF_FORMS: &str = "env:MB_LLM_* or env:*_API_KEY (* matches any characters)";
+
+#[tokio::test]
+async fn validation_problems_have_specific_titles() {
+    let h = harness().await;
+    let profile = |extra: Value| {
+        let mut body = json!({ "base_url": "https://x", "model": "m" });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let put = |body: Value| {
+        let h = &h;
+        async move { h.json(Method::PUT, "/api/v1/llm-profiles/p", body).await }
+    };
+
+    // A ref the policy refuses names exactly the accepted forms.
+    let r = put(profile(json!({ "secret_ref": "env:HOME" }))).await;
+    let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Secret reference not allowed", "{p}");
+    assert_eq!(
+        p["detail"],
+        format!(
+            "secret_ref not allowed by server.api_secret_refs; accepted: {DEFAULT_SECRET_REF_FORMS}"
+        ),
+        "{p}"
+    );
+
+    // Not a reference at all (a pasted key): not echoed, forms named.
+    let r = put(profile(json!({ "secret_ref": "sk-live-123" }))).await;
+    assert!(!r.text.contains("sk-live-123"), "{}", r.text);
+    let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid secret reference", "{p}");
+    assert_eq!(
+        p["detail"],
+        format!(
+            "secret_ref must be a secret reference, not a raw key; accepted: {DEFAULT_SECRET_REF_FORMS}"
+        ),
+        "{p}"
+    );
+
+    let p = put(profile(json!({ "api_key": "k" })))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Raw API key not accepted", "{p}");
+    let p = put(profile(json!({ "temperature": 5.0 })))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid LLM profile", "{p}");
+
+    // Store validation and body deserialisation.
+    let p = h
+        .json(
+            Method::POST,
+            "/api/v1/mocks",
+            json!({ "name": "no spaces" }),
+        )
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Validation failed", "{p}");
+    let p = h
+        .json(Method::POST, "/api/v1/mocks", json!({ "name": 5 }))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Invalid request body", "{p}");
+
+    // The OpenAPI field description states the rule for the console.
+    let doc = h.get("/api/openapi.json").await.json();
+    let description =
+        doc["components"]["schemas"]["PutProfile"]["properties"]["secret_ref"]["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    assert!(
+        description.contains(DEFAULT_SECRET_REF_FORMS),
+        "{description}"
+    );
+}
+
 #[tokio::test]
 async fn mutations_require_non_simple_content_types() {
     let h = harness().await;
