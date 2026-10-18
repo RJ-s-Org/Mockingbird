@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createAppRouter } from "../router";
 
@@ -115,5 +115,25 @@ describe("shell", () => {
     expect(switcher.selectedOptions[0]?.textContent).toBe("nowhere (not found)");
     // An unknown workspace is never remembered.
     expect(window.localStorage.getItem("mb.lastWorkspace")).toBe("team");
+  });
+
+  it("on the not-found page only a sysadmin is offered New workspace", async () => {
+    const me = (sysadmin: boolean) => ({
+      subject: sysadmin ? "root" : "vera",
+      display_name: sysadmin ? "Root" : "Vera",
+      kind: "user",
+      sysadmin,
+      workspaces: [{ name: "default", role: "editor" }],
+    });
+    serve({ "/api/v1/me": me(true), "/api/v1/workspaces": workspaces, "/api/v1/workspaces/nowhere/mocks": [] });
+    renderAt("/w/nowhere/mocks");
+    expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New workspace" })).toBeTruthy();
+    cleanup();
+
+    serve({ "/api/v1/me": me(false), "/api/v1/workspaces": workspaces.slice(0, 1) });
+    renderAt("/w/nowhere/mocks");
+    expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "New workspace" })).toBeNull();
   });
 });
