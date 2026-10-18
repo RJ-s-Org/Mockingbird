@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useDraft, usePreview, useApproveDraft, type DraftOperation, type DraftView } from "../../api/imports";
 import { useActivate } from "../../api/queries";
@@ -65,6 +65,9 @@ function Review({
   const isDraft = view.status === "draft";
   const { meta } = view;
   const source = meta.source_name ?? meta.source_url ?? "—";
+  // HAR, Postman and other deterministic imports read no chunks and spend no tokens.
+  const deterministic =
+    meta.chunk_count === 0 && meta.usage.prompt_tokens === 0 && meta.usage.completion_tokens === 0;
 
   const startPreview = (op: DraftOperation) => {
     setPreviewing(op);
@@ -143,10 +146,19 @@ function Review({
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
           <dt className="font-medium">Source</dt>
           <dd className="break-all">{`${meta.source_kind} · ${source}`}</dd>
-          <dt className="font-medium">Chunks</dt>
-          <dd>{`${meta.chunks_processed} of ${meta.chunk_count} chunks processed`}</dd>
-          <dt className="font-medium">Tokens</dt>
-          <dd>{`${meta.usage.prompt_tokens} prompt + ${meta.usage.completion_tokens} completion tokens`}</dd>
+          {deterministic ? (
+            <>
+              <dt className="font-medium">Generation</dt>
+              <dd>Deterministic import (no LLM used)</dd>
+            </>
+          ) : (
+            <>
+              <dt className="font-medium">Chunks</dt>
+              <dd>{`${meta.chunks_processed} of ${meta.chunk_count} chunks processed`}</dd>
+              <dt className="font-medium">Tokens</dt>
+              <dd>{`${meta.usage.prompt_tokens} prompt + ${meta.usage.completion_tokens} completion tokens`}</dd>
+            </>
+          )}
         </dl>
         {meta.warnings.length > 0 ? (
           <div className="space-y-1">
@@ -181,35 +193,43 @@ function Review({
       />
       <ProblemAlert error={approve.error ?? activate.error} />
 
+      {/* The editor and the preview open inline, right under their operation's row. */}
       <DataTable
         caption="Draft operations"
         columns={columns}
         data={view.operations}
         empty="The draft has no operations."
+        expanded={(op) => {
+          const edit = editing !== undefined && isDraft && canEdit && targetOf(editing) === targetOf(op);
+          const show = previewing !== undefined && canEdit && previewing.id === op.id;
+          if (!edit && !show) return null;
+          return (
+            <div className="space-y-3 pt-1">
+              {edit ? (
+                <OperationEditor
+                  key={targetOf(editing)}
+                  ws={ws}
+                  mock={mock}
+                  version={version}
+                  document={document}
+                  operation={editing}
+                  onClose={() => setEditing(undefined)}
+                  onDirtyChange={setDirty}
+                />
+              ) : null}
+              {show ? (
+                <PreviewPanel
+                  key={previewing.id}
+                  op={previewing}
+                  document={document}
+                  preview={preview}
+                  onClose={() => setPreviewing(undefined)}
+                />
+              ) : null}
+            </div>
+          );
+        }}
       />
-
-      {editing && isDraft && canEdit ? (
-        <OperationEditor
-          key={targetOf(editing)}
-          ws={ws}
-          mock={mock}
-          version={version}
-          document={document}
-          operation={editing}
-          onClose={() => setEditing(undefined)}
-          onDirtyChange={setDirty}
-        />
-      ) : null}
-
-      {previewing && canEdit ? (
-        <PreviewPanel
-          key={previewing.id}
-          op={previewing}
-          document={document}
-          preview={preview}
-          onClose={() => setPreviewing(undefined)}
-        />
-      ) : null}
 
       {confirmApprove ? (
         <ConfirmDialog
@@ -343,6 +363,10 @@ function PreviewPanel({
 }) {
   const [status, setStatus] = useState("");
   const selectId = useId();
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, []);
   let statuses: string[] = [];
   try {
     statuses = readOperation(document, op).responses.map((r) => r.status);
@@ -354,6 +378,7 @@ function PreviewPanel({
   const result = preview.data;
   return (
     <section
+      ref={ref}
       aria-label={`Preview of ${targetOf(op)}`}
       className="space-y-3 rounded-md border border-slate-300 bg-white p-4"
     >

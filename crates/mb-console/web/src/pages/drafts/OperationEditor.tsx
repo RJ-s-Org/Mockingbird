@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError } from "../../api/client";
 import { usePutDraft } from "../../api/imports";
 import {
@@ -120,6 +120,14 @@ function EditorForm({
   const [editError, setEditError] = useState<string>();
   const [confirmRemove, setConfirmRemove] = useState(false);
 
+  const formRef = useRef<HTMLFormElement>(null);
+  // Opened inline under its row: bring it into view and put focus on its first field.
+  useEffect(() => {
+    const el = formRef.current;
+    el?.scrollIntoView?.({ block: "nearest" });
+    el?.querySelector<HTMLElement>("select, input, textarea")?.focus();
+  }, []);
+
   const dirty = JSON.stringify(form) !== JSON.stringify(start);
   useEffect(() => {
     onDirtyChange(dirty);
@@ -164,6 +172,7 @@ function EditorForm({
 
   return (
     <form
+      ref={formRef}
       aria-label={title}
       onSubmit={save}
       noValidate

@@ -110,6 +110,29 @@ function operationRow(target: string) {
 }
 
 describe("draft review", () => {
+  it("a deterministic import says no LLM was used instead of zero chunks and tokens", async () => {
+    const base = draft();
+    serve(
+      routes(localMe, {
+        [`GET ${DRAFT}`]: draft({
+          meta: {
+            ...base.meta,
+            source_kind: "har",
+            source_name: "pets.har",
+            chunk_count: 0,
+            chunks_processed: 0,
+            usage: { prompt_tokens: 0, completion_tokens: 0 },
+          },
+        }),
+      }),
+    );
+    renderAt(PAGE);
+
+    expect(await screen.findByText("Deterministic import (no LLM used)")).toBeTruthy();
+    expect(screen.queryByText(/chunks processed/)).toBeNull();
+    expect(screen.queryByText(/completion tokens/)).toBeNull();
+  });
+
   it("lists operations with confidence badges and provenance", async () => {
     const user = userEvent.setup();
     serve(routes());
@@ -182,6 +205,11 @@ describe("draft review", () => {
       JSON.stringify(PET, null, 2),
     );
     expect((within(editor).getByLabelText("Response 404 schema") as HTMLTextAreaElement).value).toBe("");
+    // The editor opens inline, in the row right under its operation, with focus on its first field.
+    const rows = within(screen.getByRole("table", { name: "Draft operations" })).getAllByRole("row");
+    const opIndex = rows.indexOf(operationRow("GET /pets/{petId}"));
+    expect(rows[opIndex + 1]?.contains(editor)).toBe(true);
+    expect(window.document.activeElement).toBe(within(editor).getByLabelText("Method"));
     // Approving waits for the open edit.
     const summary = within(editor).getByLabelText("Summary");
     await user.clear(summary);
