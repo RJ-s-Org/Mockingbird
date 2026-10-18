@@ -1,7 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { json, localMe, renderAt, serve, shell, viewerMe } from "./harness";
+import { json, localMe, problem, renderAt, serve, shell, viewerMe } from "./harness";
 
 const BASE = "/api/v1/workspaces/default";
 
@@ -53,7 +53,7 @@ describe("llm profiles", () => {
     expect(within(dialog).queryByLabelText(/api.?key/i)).toBeNull();
     expect(dialog.querySelector('input[type="password"]')).toBeNull();
     const secretRef = within(dialog).getByLabelText("Secret ref");
-    expect(within(dialog).getByText("env:NAME or file:/path — the key itself is never stored")).toBeTruthy();
+    expect(within(dialog).getByText("Use env:MB_LLM_<NAME> or env:<NAME>_API_KEY. The key itself is never stored.")).toBeTruthy();
     expect(secretRef.getAttribute("aria-describedby")).toBeTruthy();
 
     await user.type(within(dialog).getByLabelText("Name"), "fast");
@@ -88,6 +88,42 @@ describe("llm profiles", () => {
       fallback_profile: "boot",
     });
     expect("api_key" in body).toBe(false);
+  });
+
+  it("a refused save shows the server's problem detail", async () => {
+    const user = userEvent.setup();
+    serve({
+      ...shell(localMe),
+      [`GET ${BASE}/llm-profiles`]: [],
+      [`PUT ${BASE}/llm-profiles/local`]: () =>
+        problem(422, "Unprocessable Entity", "secret_ref env:OTHER is not allowed by server.api_secret_refs"),
+    });
+    renderAt("/w/default/llm-profiles");
+
+    await user.click(await screen.findByRole("button", { name: "New profile" }));
+    const dialog = await screen.findByRole("dialog", { name: "New profile" });
+    await user.type(within(dialog).getByLabelText("Name"), "local");
+    await user.type(within(dialog).getByLabelText("Base URL"), "http://llm.local/v1");
+    await user.type(within(dialog).getByLabelText("Model"), "m");
+    await user.type(within(dialog).getByLabelText("Secret ref"), "env:OTHER");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("secret_ref env:OTHER is not allowed by server.api_secret_refs");
+  });
+
+  it("closing the editor gives focus back to the Edit button", async () => {
+    const user = userEvent.setup();
+    serve({ ...shell(localMe), [`GET ${BASE}/llm-profiles`]: [fast, fromFile] });
+    renderAt("/w/default/llm-profiles");
+
+    const edit = await screen.findByRole("button", { name: "Edit fast" });
+    await user.click(edit);
+    await screen.findByRole("dialog", { name: "Edit profile fast" });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The button was not remounted while the drawer was open, so focus returns to it.
+    expect(edit.isConnected).toBe(true);
+    expect(document.activeElement).toBe(edit);
   });
 
   it("delete asks first and shows the warnings", async () => {

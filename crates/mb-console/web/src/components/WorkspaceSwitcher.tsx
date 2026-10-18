@@ -5,7 +5,16 @@ import { Dialog, inputClass, primaryButton, secondaryButton } from "./ConfirmDia
 import { ProblemAlert } from "./ProblemAlert";
 
 /** Picks the current workspace; a sysadmin can also create one. */
-export function WorkspaceSwitcher({ current, sysadmin }: { current?: string; sysadmin: boolean }) {
+export function WorkspaceSwitcher({
+  current,
+  missing = false,
+  sysadmin,
+}: {
+  current?: string;
+  /** `current` is not an existing workspace: it is shown as such, not as another one. */
+  missing?: boolean;
+  sysadmin: boolean;
+}) {
   const workspaces = useWorkspaces();
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
@@ -16,19 +25,24 @@ export function WorkspaceSwitcher({ current, sysadmin }: { current?: string; sys
   };
 
   return (
-    <div className="flex items-center gap-2">
-      <label htmlFor="workspace-switcher" className="text-sm font-medium text-slate-200">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <label htmlFor="workspace-switcher" className="sr-only text-sm font-medium text-slate-200 sm:not-sr-only">
         Workspace
       </label>
       <select
         id="workspace-switcher"
-        className="rounded-md border border-slate-500 bg-slate-800 px-2 py-1 text-sm text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+        className="max-w-[11rem] min-w-0 rounded-md border border-slate-500 bg-slate-800 px-2 py-1 text-sm text-white sm:max-w-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
         value={current ?? ""}
         onChange={(e) => open(e.target.value)}
         disabled={!workspaces.data}
       >
         {current === undefined ? <option value="">Choose…</option> : null}
         {!workspaces.data && current !== undefined ? <option value={current}>{current}</option> : null}
+        {workspaces.data && missing && current !== undefined ? (
+          <option value={current} disabled>
+            {`${current} (not found)`}
+          </option>
+        ) : null}
         {(workspaces.data ?? []).map((w) => (
           <option key={w.name} value={w.name}>
             {w.display_name}
@@ -38,7 +52,7 @@ export function WorkspaceSwitcher({ current, sysadmin }: { current?: string; sys
       {sysadmin ? (
         <button
           type="button"
-          className="rounded-md border border-slate-400 px-2 py-1 text-sm text-white hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+          className="rounded-md border border-slate-400 px-2 py-1 text-sm whitespace-nowrap text-white hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
           onClick={() => setCreating(true)}
         >
           New workspace
@@ -86,7 +100,7 @@ function NewWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCre
             pattern="[a-z0-9][a-z0-9\-]{0,62}"
             aria-describedby="new-workspace-name-hint"
           />
-          <p id="new-workspace-name-hint" className="text-xs text-slate-600">
+          <p id="new-workspace-name-hint" className="text-xs text-slate-600 dark:text-slate-400">
             Lowercase letters, digits and dashes.
           </p>
         </div>

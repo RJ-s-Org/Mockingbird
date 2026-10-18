@@ -4,16 +4,14 @@ import { inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { ChaosFields, chaosDraft, chaosErrors, chaosFromDraft, hasErrors } from "./ChaosLimits";
+import { parseJson } from "../../lib/json";
 
 /** The `set` field's text parsed: an object, `null` when blank, or an error message. */
 export function parseSet(text: string): { value: Record<string, unknown> | null } | { error: string } {
   if (text.trim() === "") return { value: null };
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (e) {
-    return { error: `Set is not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  const parsed = parseJson("Set", text);
+  if ("error" in parsed) return parsed;
+  const value = parsed.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { error: "Set must be a JSON object." };
   }
@@ -84,7 +82,7 @@ export function ScenarioEditor({
     <Drawer title={title} onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
         {reason ? (
-          <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{reason}</p>
+          <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
         ) : null}
         <fieldset disabled={reason !== undefined} className="space-y-4">
           <legend className="sr-only">{title}</legend>
@@ -103,7 +101,7 @@ export function ScenarioEditor({
                 onChange={(e) => setName(e.target.value)}
                 aria-describedby="scenario-name-hint"
               />
-              <p id="scenario-name-hint" className="text-xs text-slate-600">
+              <p id="scenario-name-hint" className="text-xs text-slate-600 dark:text-slate-400">
                 Letters, digits, dots, underscores and dashes; sent as <code>X-Mockingbird-Scenario</code>.
               </p>
             </div>
@@ -163,11 +161,11 @@ export function ScenarioEditor({
               aria-describedby={setError ? "scenario-set-error" : "scenario-set-hint"}
             />
             {setError ? (
-              <p id="scenario-set-error" className="text-sm text-red-800">
+              <p id="scenario-set-error" className="text-sm text-red-800 dark:text-red-300">
                 {setError}
               </p>
             ) : (
-              <p id="scenario-set-hint" className="text-xs text-slate-600">
+              <p id="scenario-set-hint" className="text-xs text-slate-600 dark:text-slate-400">
                 Fields forced into the response body, e.g. <code>{'{"status": "shipped"}'}</code>.
               </p>
             )}
@@ -191,15 +189,15 @@ export function ScenarioEditor({
                 </option>
               ))}
             </select>
-            <p id="scenario-operations-hint" className="text-xs text-slate-600">
+            <p id="scenario-operations-hint" className="text-xs text-slate-600 dark:text-slate-400">
               {contractOperations.length === 0
                 ? "No active contract: the scenario applies to every operation."
                 : "Operations of the active contract; none selected means all."}
             </p>
           </div>
-          <fieldset className="space-y-2 rounded-md border border-slate-200 p-3">
+          <fieldset className="space-y-2 rounded-md border border-slate-200 dark:border-slate-800 p-3">
             <legend className="px-1 text-sm font-medium">Chaos override</legend>
-            <p className="text-xs text-slate-600">
+            <p className="text-xs text-slate-600 dark:text-slate-400">
               Replaces the mock&apos;s chaos while the scenario applies; leave empty to use the mock&apos;s.
             </p>
             <ChaosFields idPrefix="scenario-chaos" draft={chaos} errors={chaosErr} onChange={setChaos} />

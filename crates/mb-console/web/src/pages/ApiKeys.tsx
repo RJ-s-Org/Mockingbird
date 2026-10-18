@@ -16,9 +16,9 @@ export function DateTime({ value }: { value?: string | null }) {
 }
 
 const STATUS_STYLE = {
-  active: "border-green-300 bg-green-50 text-green-900",
-  revoked: "border-slate-300 bg-slate-100 text-slate-800",
-  expired: "border-amber-300 bg-amber-50 text-amber-900",
+  active: "border-green-300 dark:border-green-800 bg-green-50 dark:bg-green-950/60 text-green-900 dark:text-green-200",
+  revoked: "border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200",
+  expired: "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200",
 };
 
 /** The API keys of a workspace (ManageApiKeys): list, create and revoke. */
@@ -31,12 +31,12 @@ export function ApiKeys({ ws }: { ws: string }) {
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<ApiKey>();
 
-  if (!me.data) return me.isPending ? <p className="text-slate-700">Loading…</p> : null;
+  if (!me.data) return me.isPending ? <p className="text-slate-700 dark:text-slate-300">Loading…</p> : null;
   if (!canManage || !role) {
     return (
       <section className="space-y-4">
         <h1 className="text-2xl font-semibold">API keys</h1>
-        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
           Forbidden (403): managing API keys needs the admin role in this workspace. Ask a workspace owner for
           access.
         </p>
@@ -94,7 +94,7 @@ export function ApiKeys({ ws }: { ws: string }) {
       {keys.data ? (
         <DataTable caption="API keys" columns={columns} data={keys.data} empty="No API keys yet." />
       ) : keys.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {creating ? (
         <CreateKeyDialog ws={ws} myRole={role} sysadmin={me.data.sysadmin} onClose={() => setCreating(false)} />

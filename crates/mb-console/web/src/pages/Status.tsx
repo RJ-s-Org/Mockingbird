@@ -1,10 +1,26 @@
 import { useMetricsSummary, useReadiness } from "../api/queries";
 import { ProblemAlert } from "../components/ProblemAlert";
+import { sourceLabel } from "../lib/sources";
+import { tableScroll } from "../components/DataTable";
 
 const STATUS_STYLE: Record<string, string> = {
-  ready: "border-green-300 bg-green-50 text-green-900",
-  degraded: "border-amber-300 bg-amber-50 text-amber-900",
+  ready: "border-green-300 dark:border-green-800 bg-green-50 dark:bg-green-950/60 text-green-900 dark:text-green-200",
+  degraded: "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200",
 };
+
+/** A source's human label; the tooltip explains it and names the raw value. */
+function SourceName({ source }: { source: string }) {
+  const { label, hint } = sourceLabel(source);
+  if (label === source) return <>{source}</>;
+  return (
+    <span
+      title={`${hint} (source "${source}")`}
+      className="cursor-help underline decoration-slate-400 dark:decoration-slate-500 decoration-dotted underline-offset-2"
+    >
+      {label}
+    </span>
+  );
+}
 
 function formatCount(n: number): string {
   return String(Math.round(n * 1000) / 1000);
@@ -27,7 +43,7 @@ export function Status() {
             <p>
               <span
                 className={`inline-flex rounded-full border px-2 py-0.5 text-sm font-medium ${
-                  STATUS_STYLE[ready.data.status] ?? "border-red-300 bg-red-50 text-red-900"
+                  STATUS_STYLE[ready.data.status] ?? "border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 text-red-900 dark:text-red-200"
                 }`}
               >
                 {ready.data.status}
@@ -42,14 +58,14 @@ export function Status() {
             ) : null}
           </>
         ) : ready.isPending ? (
-          <p className="text-slate-700">Loading…</p>
+          <p className="text-slate-700 dark:text-slate-300">Loading…</p>
         ) : null}
       </div>
       <div className="space-y-2">
         <h2 className="text-lg font-semibold">Requests</h2>
         {metrics.error ? <ProblemAlert error={metrics.error} /> : null}
         {metrics.data === "private" ? (
-          <p className="rounded-md border border-slate-300 bg-white p-3 text-sm text-slate-800">Metrics are private</p>
+          <p className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-sm text-slate-800 dark:text-slate-200">Metrics are private</p>
         ) : null}
         {summary ? (
           <>
@@ -59,40 +75,42 @@ export function Status() {
               <dt className="font-medium">Request log records dropped</dt>
               <dd data-testid="log-dropped">{formatCount(summary.logDropped)}</dd>
             </dl>
-            <table className="w-auto border-collapse text-left text-sm">
-              <caption className="sr-only">Requests by source</caption>
-              <thead className="border-b border-slate-300 text-slate-700">
-                <tr>
-                  <th scope="col" className="px-3 py-2 font-semibold">
-                    Source
-                  </th>
-                  <th scope="col" className="px-3 py-2 font-semibold">
-                    Requests
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(summary.bySource).length === 0 ? (
+            <div className={tableScroll}>
+              <table className="w-auto border-collapse text-left text-sm">
+                <caption className="sr-only">Requests by source</caption>
+                <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
                   <tr>
-                    <td colSpan={2} className="px-3 py-2 text-slate-600">
-                      No requests served yet.
-                    </td>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Source
+                    </th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Requests
+                    </th>
                   </tr>
-                ) : (
-                  Object.entries(summary.bySource).map(([source, n]) => (
-                    <tr key={source} className="border-b border-slate-200">
-                      <th scope="row" className="px-3 py-2 font-normal">
-                        {source}
-                      </th>
-                      <td className="px-3 py-2">{formatCount(n)}</td>
+                </thead>
+                <tbody>
+                  {Object.entries(summary.bySource).length === 0 ? (
+                    <tr>
+                      <td colSpan={2} className="px-3 py-2 text-slate-600 dark:text-slate-400">
+                        No requests served yet.
+                      </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    Object.entries(summary.bySource).map(([source, n]) => (
+                      <tr key={source} className="border-b border-slate-200 dark:border-slate-800">
+                        <th scope="row" className="px-3 py-2 font-normal">
+                          <SourceName source={source} />
+                        </th>
+                        <td className="px-3 py-2">{formatCount(n)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </>
         ) : metrics.isPending ? (
-          <p className="text-slate-700">Loading…</p>
+          <p className="text-slate-700 dark:text-slate-300">Loading…</p>
         ) : null}
       </div>
     </section>

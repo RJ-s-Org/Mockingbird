@@ -51,6 +51,9 @@ test("import a HAR recording, review, edit, approve and activate the draft", asy
   await expect(page).toHaveURL(/\/w\/default\/mocks\/har\/contracts\/1\/draft$/, { timeout: 30_000 });
   await expect(page.getByRole("heading", { name: "Draft v1" })).toBeVisible();
   await expect(page.getByText("Status: draft")).toBeVisible();
+  // A HAR import is deterministic: no chunk or token counters that read like an error.
+  await expect(page.getByText("Deterministic import (no LLM used)")).toBeVisible();
+  await expect(page.getByText(/chunks processed/)).toHaveCount(0);
   const pet = operationRow(page, "GET", "/api/pets/{petId}");
   await expect(pet.getByText(/^High · \d+%$/)).toBeVisible();
   await expectAccessible(page);
@@ -66,6 +69,9 @@ test("import a HAR recording, review, edit, approve and activate the draft", asy
   // 4. A summary edit is saved and marked.
   await pet.getByRole("button", { name: "Edit GET /api/pets/{petId}" }).click();
   const editor = page.getByRole("form", { name: "Edit GET /api/pets/{petId}" });
+  // It opens inline, in the row right under the operation, focused.
+  await expect(pet.locator("xpath=following-sibling::tr[1]").getByRole("form")).toBeVisible();
+  await expect(editor.getByLabel("Method")).toBeFocused();
   await editor.getByLabel("Summary").fill("Fetch a pet");
   await editor.getByRole("button", { name: "Save" }).click();
   await expect(editor).toBeHidden();

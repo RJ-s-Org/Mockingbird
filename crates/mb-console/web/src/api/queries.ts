@@ -468,8 +468,8 @@ export interface AuditFilters {
   actor?: string;
 }
 
-/** Events per audit page; a shorter page is the last one. */
-export const AUDIT_PAGE = 50;
+/** Events per audit page: short enough to scan, with "Load more" for older ones; a shorter page is the last one. */
+export const AUDIT_PAGE = 25;
 
 function auditQuery(filters: AuditFilters) {
   const q: { action?: string; actor?: string } = {};

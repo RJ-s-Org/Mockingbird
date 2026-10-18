@@ -110,6 +110,29 @@ function operationRow(target: string) {
 }
 
 describe("draft review", () => {
+  it("a deterministic import says no LLM was used instead of zero chunks and tokens", async () => {
+    const base = draft();
+    serve(
+      routes(localMe, {
+        [`GET ${DRAFT}`]: draft({
+          meta: {
+            ...base.meta,
+            source_kind: "har",
+            source_name: "pets.har",
+            chunk_count: 0,
+            chunks_processed: 0,
+            usage: { prompt_tokens: 0, completion_tokens: 0 },
+          },
+        }),
+      }),
+    );
+    renderAt(PAGE);
+
+    expect(await screen.findByText("Deterministic import (no LLM used)")).toBeTruthy();
+    expect(screen.queryByText(/chunks processed/)).toBeNull();
+    expect(screen.queryByText(/completion tokens/)).toBeNull();
+  });
+
   it("lists operations with confidence badges and provenance", async () => {
     const user = userEvent.setup();
     serve(routes());
@@ -135,6 +158,27 @@ describe("draft review", () => {
     expect(within(pet).getByText("## Get a pet")).toBeTruthy();
     // No provenance: nothing to toggle.
     expect(within(operationRow("GET /pets")).queryByRole("button", { name: /provenance/ })).toBeNull();
+  });
+
+  it("provenance stays open and the Edit button keeps focus when the page re-renders", async () => {
+    const user = userEvent.setup();
+    serve(routes());
+    renderAt(PAGE);
+
+    const toggle = await screen.findByRole("button", { name: "Show provenance of GET /pets/{petId}" });
+    await user.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    // Opening the editor re-renders the review (new column definitions).
+    const edit = screen.getByRole("button", { name: "Edit GET /pets" });
+    await user.click(edit);
+    expect(screen.getByRole("form", { name: "Edit GET /pets" })).toBeTruthy();
+    // Same elements, same state: nothing in the table was remounted.
+    expect(toggle.isConnected).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(edit.isConnected).toBe(true);
+    // Typing in the editor (which re-renders on every change) keeps the state too.
+    await user.type(within(screen.getByRole("form", { name: "Edit GET /pets" })).getByLabelText("Summary"), "!");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("shows warnings and diff summary", async () => {
@@ -182,6 +226,11 @@ describe("draft review", () => {
       JSON.stringify(PET, null, 2),
     );
     expect((within(editor).getByLabelText("Response 404 schema") as HTMLTextAreaElement).value).toBe("");
+    // The editor opens inline, in the row right under its operation, with focus on its first field.
+    const rows = within(screen.getByRole("table", { name: "Draft operations" })).getAllByRole("row");
+    const opIndex = rows.indexOf(operationRow("GET /pets/{petId}"));
+    expect(rows[opIndex + 1]?.contains(editor)).toBe(true);
+    expect(window.document.activeElement).toBe(within(editor).getByLabelText("Method"));
     // Approving waits for the open edit.
     const summary = within(editor).getByLabelText("Summary");
     await user.clear(summary);
@@ -220,7 +269,7 @@ describe("draft review", () => {
     await user.clear(response);
     await user.click(response);
     await user.paste("{nope");
-    expect(within(editor).getByText(/^Not valid JSON/)).toBeTruthy();
+    expect(within(editor).getByText(/^The schema is not valid JSON/)).toBeTruthy();
 
     await user.clear(request);
     expect(save.disabled).toBe(true);

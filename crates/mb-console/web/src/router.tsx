@@ -216,7 +216,7 @@ const statusRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/status",
   component: function StatusFrame() {
-    return <Layout ws={lastWorkspace() ?? undefined} />;
+    return <Layout ws={lastWorkspace() ?? undefined} global />;
   },
 });
 

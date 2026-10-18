@@ -100,7 +100,7 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
   return (
     <div className="space-y-6">
       {reason ? (
-        <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{reason}</p>
+        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
       ) : null}
       {reason === undefined ? <UploadForm ws={ws} mock={mock} /> : null}
       <ProblemAlert error={activate.error ?? versions.error} />
@@ -112,7 +112,7 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
           empty="No contract uploaded yet."
         />
       ) : versions.isPending ? (
-        <p className="text-slate-700">Loading…</p>
+        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
       ) : null}
       {viewing !== undefined ? (
         <OperationsTable ws={ws} mock={mock} version={viewing} onClose={() => setViewing(undefined)} />
@@ -143,7 +143,7 @@ function UploadForm({ ws, mock }: { ws: string; mock: string }) {
   };
 
   return (
-    <form onSubmit={submit} className="space-y-3 rounded-md border border-slate-300 bg-white p-4">
+    <form onSubmit={submit} className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
       <h2 className="text-lg font-semibold">Upload a contract</h2>
       <div className="flex flex-wrap items-end gap-4">
         <div className="space-y-1">
@@ -159,7 +159,7 @@ function UploadForm({ ws, mock }: { ws: string; mock: string }) {
             onChange={(e) => setFile(e.target.files?.[0])}
             aria-describedby="contract-file-hint"
           />
-          <p id="contract-file-hint" className="text-xs text-slate-600">
+          <p id="contract-file-hint" className="text-xs text-slate-600 dark:text-slate-400">
             OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL, .proto or descriptor set, WSDL, or a
             zip/tar.gz archive of several files; at most 20 MiB.
           </p>
@@ -180,7 +180,7 @@ function UploadForm({ ws, mock }: { ws: string; mock: string }) {
         </button>
       </div>
       {upload.data && !upload.isPending ? (
-        <p role="status" className="text-sm text-green-800">
+        <p role="status" className="text-sm text-green-800 dark:text-green-300">
           Uploaded version {upload.data.version} ({upload.data.status}, {upload.data.operations} operations).
         </p>
       ) : null}
