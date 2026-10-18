@@ -4,8 +4,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions, SqliteRow,
+};
+use sqlx::{ConnectOptions, QueryBuilder, Row, Sqlite, SqlitePool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -52,6 +54,13 @@ const EVENT_SETTINGS_COLUMNS: &str = "mock_id, broker, source, updated_at";
 
 pub struct SqliteControlStore {
     pool: SqlitePool,
+    /// For an in-memory database: a connection outside the pool, never used
+    /// for queries, that keeps the shared-cache database alive for the
+    /// store's whole lifetime. The pool closes a connection that a cancelled
+    /// query left unusable and opens a replacement; without this one the
+    /// last connection would close and take the database with it, and the
+    /// replacement would open a fresh, empty one.
+    _keeper: Option<std::sync::Mutex<SqliteConnection>>,
     changes: broadcast::Sender<ControlChange>,
     prune: PruneCounter,
 }
@@ -66,22 +75,28 @@ impl SqliteControlStore {
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
         let in_memory = url.contains(":memory:") || url.contains("mode=memory");
-        let pool = if in_memory {
-            // One connection that never closes, so every query sees the same
-            // in-memory database for the store's whole lifetime.
-            SqlitePoolOptions::new()
+        let (pool, keeper) = if in_memory {
+            // A named shared-cache database (sqlx names `:memory:` uniquely),
+            // held open by the keeper so pool connections may come and go.
+            let options = options.shared_cache(true);
+            let keeper = options.connect().await?;
+            // One pooled connection that never expires, so writers are
+            // serialised as before.
+            let pool = SqlitePoolOptions::new()
                 .acquire_timeout(ACQUIRE_TIMEOUT)
                 .max_connections(1)
                 .min_connections(1)
                 .idle_timeout(None)
                 .max_lifetime(None)
                 .connect_with(options)
-                .await?
+                .await?;
+            (pool, Some(std::sync::Mutex::new(keeper)))
         } else {
-            SqlitePoolOptions::new()
+            let pool = SqlitePoolOptions::new()
                 .acquire_timeout(ACQUIRE_TIMEOUT)
                 .connect_with(options.journal_mode(SqliteJournalMode::Wal))
-                .await?
+                .await?;
+            (pool, None)
         };
         let mut migrator = sqlx::migrate!("./migrations/sqlite");
         migrator.dangerous_set_table_name(MIGRATIONS_TABLE);
@@ -89,6 +104,7 @@ impl SqliteControlStore {
         let (changes, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         Ok(Self {
             pool,
+            _keeper: keeper,
             changes,
             prune: PruneCounter::default(),
         })

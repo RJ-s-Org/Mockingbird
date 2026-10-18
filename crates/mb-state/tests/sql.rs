@@ -111,3 +111,66 @@ async fn postgres_ttl_expiry() {
     common::conformance::ttl_expiry(store).await;
     drop_schema(&base, &schema).await;
 }
+
+/// Regression: aborting state calls mid-query must never swap the in-memory
+/// database for a fresh empty one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_memory_survives_cancelled_operations() {
+    use mb_state::{SessionKey, StoredResource};
+    let store = mb_state::connect("sqlite::memory:", LONG_TTL)
+        .await
+        .expect("connect");
+    let k = SessionKey {
+        workspace: "default".into(),
+        mock: "m".into(),
+        session: "a".into(),
+    };
+    let res = |id: String| StoredResource {
+        resource_type: "order".into(),
+        id,
+        data: serde_json::json!({"n": 1}),
+    };
+    store.upsert(&k, res("keep".into())).await.expect("upsert");
+
+    for round in 0..20u32 {
+        let mut handles = Vec::new();
+        for i in 0..32u32 {
+            let (store, k) = (store.clone(), k.clone());
+            let r = res(format!("{round}-{i}"));
+            handles.push(tokio::spawn(async move {
+                if i % 2 == 0 {
+                    let _ = store.upsert(&k, r).await;
+                } else {
+                    let _ = store.list(&k, "order", 50).await;
+                }
+            }));
+        }
+        tokio::time::sleep(Duration::from_micros(200 * u64::from(round % 5))).await;
+        for h in &handles {
+            h.abort();
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+        for i in 0..8u32 {
+            let _ = tokio::time::timeout(
+                Duration::from_micros(50),
+                store.upsert(&k, res(format!("t-{round}-{i}"))),
+            )
+            .await;
+        }
+    }
+
+    let kept = store
+        .get(&k, "order", "keep")
+        .await
+        .expect("schema still exists");
+    assert!(
+        kept.is_some(),
+        "data written before the cancellations survives"
+    );
+    store
+        .upsert(&k, res("after".into()))
+        .await
+        .expect("write after cancellations");
+}

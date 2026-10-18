@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::types::Json;
-use sqlx::{PgPool, Row, SqlitePool};
+use sqlx::{ConnectOptions, PgPool, Row, SqlitePool};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -90,6 +90,18 @@ macro_rules! resource_from_row {
 struct Inner {
     pool: Pool,
     ttl_ms: i64,
+    /// See [`Keeper`].
+    _keeper: Option<Keeper>,
+}
+
+/// For an in-memory SQLite database: a connection outside the pool, never
+/// used for queries, that keeps the shared-cache database alive for the
+/// store's whole lifetime. The pool closes a connection that a cancelled
+/// query left unusable and opens a replacement; without this one the last
+/// connection would close and take the database with it, and the
+/// replacement would open a fresh, empty one.
+struct Keeper {
+    _conn: std::sync::Mutex<SqliteConnection>,
 }
 
 fn now_ms() -> i64 {
@@ -149,17 +161,18 @@ impl SqlStateStore {
     /// `postgres://…`, runs migrations, and sweeps expired sessions every
     /// 60 s while the store lives.
     pub async fn connect(url: &str, ttl: Duration) -> Result<Self, StateError> {
-        let pool = if url.starts_with("sqlite:") {
-            Pool::Sqlite(connect_sqlite(url).await?)
+        let (pool, keeper) = if url.starts_with("sqlite:") {
+            let (pool, keeper) = connect_sqlite(url).await?;
+            (Pool::Sqlite(pool), keeper)
         } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-            Pool::Pg(connect_postgres(url).await?)
+            (Pool::Pg(connect_postgres(url).await?), None)
         } else {
             return Err(StateError::Backend(format!(
                 "unsupported state url scheme (expected memory, sqlite:, postgres://, redis:// or rediss://): {}",
                 url.split(':').next().unwrap_or_default()
             )));
         };
-        Ok(Self::from_pool(pool, ttl))
+        Ok(Self::from_pool(pool, keeper, ttl))
     }
 
     /// A Postgres store whose pool connects on first use and which runs no
@@ -176,12 +189,16 @@ impl SqlStateStore {
         let pool = PgPoolOptions::new()
             .acquire_timeout(ACQUIRE_TIMEOUT)
             .connect_lazy_with(options);
-        Ok(Self::from_pool(Pool::Pg(pool), ttl))
+        Ok(Self::from_pool(Pool::Pg(pool), None, ttl))
     }
 
-    fn from_pool(pool: Pool, ttl: Duration) -> Self {
+    fn from_pool(pool: Pool, keeper: Option<Keeper>, ttl: Duration) -> Self {
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
-        let inner = Arc::new(Inner { pool, ttl_ms });
+        let inner = Arc::new(Inner {
+            pool,
+            ttl_ms,
+            _keeper: keeper,
+        });
         spawn_sweeper(Arc::downgrade(&inner));
         let (tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         Self { inner, tx }
@@ -199,34 +216,42 @@ impl SqlStateStore {
     }
 }
 
-async fn connect_sqlite(url: &str) -> Result<SqlitePool, StateError> {
+async fn connect_sqlite(url: &str) -> Result<(SqlitePool, Option<Keeper>), StateError> {
     let options = SqliteConnectOptions::from_str(url)
         .map_err(|e| StateError::Backend(format!("sqlite url: {e}")))?
         .create_if_missing(true)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
     let in_memory = url.contains(":memory:") || url.contains("mode=memory");
-    let pool = if in_memory {
-        // One connection that never closes, so every query sees the same
-        // in-memory database for the store's whole lifetime.
-        SqlitePoolOptions::new()
+    let (pool, keeper) = if in_memory {
+        // A named shared-cache database (sqlx names `:memory:` uniquely),
+        // held open by the keeper so pool connections may come and go.
+        let options = options.shared_cache(true);
+        let keeper = Keeper {
+            _conn: std::sync::Mutex::new(options.connect().await?),
+        };
+        // One pooled connection that never expires, so writers are
+        // serialised as before.
+        let pool = SqlitePoolOptions::new()
             .acquire_timeout(ACQUIRE_TIMEOUT)
             .max_connections(1)
             .min_connections(1)
             .idle_timeout(None)
             .max_lifetime(None)
             .connect_with(options)
-            .await?
+            .await?;
+        (pool, Some(keeper))
     } else {
-        SqlitePoolOptions::new()
+        let pool = SqlitePoolOptions::new()
             .acquire_timeout(ACQUIRE_TIMEOUT)
             .connect_with(options.journal_mode(SqliteJournalMode::Wal))
-            .await?
+            .await?;
+        (pool, None)
     };
     let mut migrator = sqlx::migrate!("./migrations/sqlite");
     migrator.dangerous_set_table_name(MIGRATIONS_TABLE);
     migrator.run(&pool).await?;
-    Ok(pool)
+    Ok((pool, keeper))
 }
 
 async fn connect_postgres(url: &str) -> Result<PgPool, StateError> {
