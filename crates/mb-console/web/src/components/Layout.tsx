@@ -83,8 +83,8 @@ function pickFallback(workspaces: { name: string; display_name: string }[]) {
 /** Shown instead of any workspace page when the workspace does not exist (or is not visible). */
 function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: string; display_name: string } }) {
   return (
-    <section aria-labelledby="ws-not-found" className="mx-auto max-w-xl space-y-3 py-10">
-      <h1 id="ws-not-found" className="text-2xl font-semibold">
+    <div className="mx-auto max-w-xl space-y-3 py-10">
+      <h1 className="text-2xl font-semibold">
         Workspace not found
       </h1>
       <p className="text-slate-700">
@@ -107,7 +107,7 @@ function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: st
           Back to the console
         </Link>
       )}
-    </section>
+    </div>
   );
 }
 
