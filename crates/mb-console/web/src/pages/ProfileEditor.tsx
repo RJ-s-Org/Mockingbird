@@ -4,6 +4,12 @@ import { inputClass, primaryButton, secondaryButton } from "../components/Confir
 import { Drawer } from "../components/Drawer";
 import { ProblemAlert } from "../components/ProblemAlert";
 
+/**
+ * What the server's default `server.api_secret_refs` policy accepts from the
+ * API (the schema's `env:NAME or file:/path` is the syntax, not the policy).
+ */
+export const SECRET_REF_HINT = "Use env:MB_LLM_<NAME> or env:<NAME>_API_KEY. The key itself is never stored.";
+
 /** A labelled text or number field of the profile form. */
 function Field({
   id,
@@ -109,7 +115,7 @@ export function ProfileEditor({
           onChange={(e) => setSecretRef(e.target.value)}
           placeholder="env:MB_LLM_API_KEY"
           autoComplete="off"
-          hint="env:NAME or file:/path — the key itself is never stored"
+          hint={SECRET_REF_HINT}
         />
         <div className="flex items-center gap-2">
           <input
