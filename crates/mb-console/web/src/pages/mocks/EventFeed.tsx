@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { subscribeRequests, type LiveRequestView } from "../../api/sse";
 import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { Direction } from "./Direction";
-import { tableScroll } from "../../components/DataTable";
+import { TableScroll } from "../../components/DataTable";
 
 /** The feed keeps at most this many rows, newest first. */
 export const MAX_EVENTS = 200;
@@ -68,7 +68,7 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
         ) : null}
         {interrupted ? <p className="text-amber-900 dark:text-amber-200">The event feed connection was interrupted.</p> : null}
       </div>
-      <div className={tableScroll}>
+      <TableScroll>
         <table aria-label="Event feed" className="w-full border-collapse text-left text-sm">
           <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
             <tr>
@@ -105,7 +105,7 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
             )}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </section>
   );
 }

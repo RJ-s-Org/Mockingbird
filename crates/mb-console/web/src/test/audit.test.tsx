@@ -28,6 +28,20 @@ function page(top: number, count: number) {
 }
 
 describe("audit", () => {
+  it("long targets truncate with the full value in a tooltip; actions stay on one line", async () => {
+    const target = "import:petstore/2470a3fc-a213-49c7-94d3-bd438c662138";
+    serve({
+      ...shell(viewerMe),
+      [`GET ${BASE}/audit`]: () => json([event(1, { action: "import.create", target })]),
+    });
+    renderAt("/w/default/audit");
+    const table = await screen.findByRole("table", { name: "Audit events" });
+    const cell = await within(table).findByText(target);
+    expect(cell.getAttribute("title")).toBe(target);
+    expect(cell.className).toMatch(/\btruncate\b/);
+    expect(within(table).getByText("import.create").className).toMatch(/whitespace-nowrap/);
+  });
+
   it("audit filters and load more use before id", async () => {
     const user = userEvent.setup();
     const calls = serve({

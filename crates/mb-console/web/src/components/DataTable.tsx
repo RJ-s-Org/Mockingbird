@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createColumnHelper, tableFeatures, useTable, type ColumnDef, type RowData } from "@tanstack/react-table";
 
 /** The table features every console table uses (core only). */
@@ -24,8 +24,61 @@ function render(def: unknown, context: unknown, fallback: () => ReactNode): Reac
   return def === undefined ? fallback() : (def as ReactNode);
 }
 
-/** The classes of a table's horizontal scroll container (tables scroll, never the page). */
-export const tableScroll = "max-w-full overflow-x-auto";
+type Overflow = "none" | "left" | "right" | "both";
+
+/**
+ * A table's horizontal scroll container (tables scroll, never the page).
+ * When its content is wider than it, the clipped edges fade and, while more
+ * lies to the right, a hint says the table scrolls; it is then focusable so
+ * keyboard users can scroll it.
+ */
+export function TableScroll({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState<Overflow>("none");
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const hidden = el.scrollWidth - el.clientWidth;
+    const left = el.scrollLeft > 1;
+    const right = hidden - el.scrollLeft > 1;
+    setOverflow(left && right ? "both" : left ? "left" : right ? "right" : "none");
+  }, []);
+  useLayoutEffect(() => {
+    measure();
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    if (el.firstElementChild) observer.observe(el.firstElementChild);
+    return () => observer.disconnect();
+  }, [measure]);
+  const fadeLeft = overflow === "left" || overflow === "both";
+  const fadeRight = overflow === "right" || overflow === "both";
+  const fade = "pointer-events-none absolute inset-y-0 w-8 from-slate-50 dark:from-slate-950 to-transparent";
+  return (
+    <div className="relative max-w-full">
+      {fadeRight ? (
+        <p aria-hidden="true" className="mb-1 text-right text-xs text-slate-600 dark:text-slate-400">
+          Scroll sideways for more →
+        </p>
+      ) : null}
+      <div className="relative">
+        <div
+          ref={ref}
+          data-testid="table-scroll"
+          data-overflow={overflow}
+          tabIndex={overflow === "none" ? undefined : 0}
+          onScroll={measure}
+          className="max-w-full overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+        >
+          {children}
+        </div>
+        {fadeLeft ? <div aria-hidden="true" className={`${fade} left-0 bg-gradient-to-r`} /> : null}
+        {fadeRight ? <div aria-hidden="true" className={`${fade} right-0 bg-gradient-to-l`} /> : null}
+      </div>
+    </div>
+  );
+}
 
 /**
  * A plain accessible table of `data`; `empty` is shown when there are no rows.
@@ -50,7 +103,7 @@ export function DataTable<T extends RowData>({
   const table = useTable({ features, columns, data });
   const rows = table.getRowModel().rows;
   return (
-    <div className={tableScroll}>
+    <TableScroll>
       <table className="w-full border-collapse text-left text-sm">
         <caption className="sr-only">{caption}</caption>
         <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
@@ -108,6 +161,6 @@ export function DataTable<T extends RowData>({
           )}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }

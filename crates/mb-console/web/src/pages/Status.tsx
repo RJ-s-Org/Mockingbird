@@ -1,7 +1,7 @@
 import { useMetricsSummary, useReadiness } from "../api/queries";
 import { ProblemAlert } from "../components/ProblemAlert";
 import { sourceLabel } from "../lib/sources";
-import { tableScroll } from "../components/DataTable";
+import { TableScroll } from "../components/DataTable";
 
 const STATUS_STYLE: Record<string, string> = {
   ready: "border-green-300 dark:border-green-800 bg-green-50 dark:bg-green-950/60 text-green-900 dark:text-green-200",
@@ -75,7 +75,7 @@ export function Status() {
               <dt className="font-medium">Request log records dropped</dt>
               <dd data-testid="log-dropped">{formatCount(summary.logDropped)}</dd>
             </dl>
-            <div className={tableScroll}>
+            <TableScroll>
               <table className="w-auto border-collapse text-left text-sm">
                 <caption className="sr-only">Requests by source</caption>
                 <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
@@ -107,7 +107,7 @@ export function Status() {
                   )}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
           </>
         ) : metrics.isPending ? (
           <p className="text-slate-700 dark:text-slate-300">Loading…</p>

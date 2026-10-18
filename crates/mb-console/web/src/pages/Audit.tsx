@@ -110,12 +110,24 @@ export function Audit({ ws }: { ws: string }) {
         header: "Actor",
         cell: (info) => (
           <>
-            <span>{info.getValue()}</span> <span className="text-slate-600 dark:text-slate-400">({info.row.original.actor_kind})</span>
+            <span className="whitespace-nowrap">{info.getValue()}</span>{" "}
+            <span className="whitespace-nowrap text-slate-600 dark:text-slate-400">({info.row.original.actor_kind})</span>
           </>
         ),
       }),
-      col.accessor("action", { header: "Action", cell: (info) => <code>{info.getValue()}</code> }),
-      col.accessor("target", { header: "Target", cell: (info) => <code>{info.getValue()}</code> }),
+      col.accessor("action", {
+        header: "Action",
+        cell: (info) => <code className="whitespace-nowrap">{info.getValue()}</code>,
+      }),
+      // Long targets (import job ids) are cut short on one line; the tooltip has them whole.
+      col.accessor("target", {
+        header: "Target",
+        cell: (info) => (
+          <code title={info.getValue()} className="block max-w-[14rem] truncate sm:max-w-[24rem]">
+            {info.getValue()}
+          </code>
+        ),
+      }),
       col.display({
         id: "changes",
         header: "Changes",

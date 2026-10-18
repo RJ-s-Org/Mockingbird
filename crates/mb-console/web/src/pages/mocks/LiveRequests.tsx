@@ -3,7 +3,7 @@ import { useActiveOperations } from "../../api/queries";
 import { subscribeRequests, type LiveFilters, type LiveRequestView } from "../../api/sse";
 import { inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { RequestDrawer } from "./RequestDrawer";
-import { tableScroll } from "../../components/DataTable";
+import { TableScroll } from "../../components/DataTable";
 
 /** The table keeps at most this many rows, newest first. */
 export const MAX_ROWS = 500;
@@ -151,7 +151,7 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
           </button>
         </div>
       ) : null}
-      <div className={tableScroll}>
+      <TableScroll>
         <table className="w-full border-collapse text-left text-sm">
           <caption className="sr-only">Live requests</caption>
           <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
@@ -211,7 +211,7 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
             )}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       {selected ? <RequestDrawer record={selected} onClose={() => setSelected(undefined)} /> : null}
     </div>
   );
