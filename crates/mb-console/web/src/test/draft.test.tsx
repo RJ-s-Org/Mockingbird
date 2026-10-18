@@ -160,6 +160,27 @@ describe("draft review", () => {
     expect(within(operationRow("GET /pets")).queryByRole("button", { name: /provenance/ })).toBeNull();
   });
 
+  it("provenance stays open and the Edit button keeps focus when the page re-renders", async () => {
+    const user = userEvent.setup();
+    serve(routes());
+    renderAt(PAGE);
+
+    const toggle = await screen.findByRole("button", { name: "Show provenance of GET /pets/{petId}" });
+    await user.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    // Opening the editor re-renders the review (new column definitions).
+    const edit = screen.getByRole("button", { name: "Edit GET /pets" });
+    await user.click(edit);
+    expect(screen.getByRole("form", { name: "Edit GET /pets" })).toBeTruthy();
+    // Same elements, same state: nothing in the table was remounted.
+    expect(toggle.isConnected).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(edit.isConnected).toBe(true);
+    // Typing in the editor (which re-renders on every change) keeps the state too.
+    await user.type(within(screen.getByRole("form", { name: "Edit GET /pets" })).getByLabelText("Summary"), "!");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("shows warnings and diff summary", async () => {
     serve(routes());
     renderAt(PAGE);

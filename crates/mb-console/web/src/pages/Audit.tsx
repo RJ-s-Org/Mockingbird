@@ -98,8 +98,8 @@ export function Audit({ ws }: { ws: string }) {
     setFilters({ action: action.trim(), actor: actor.trim() });
   };
 
-  // Stable columns: a cell renders as a component, so new columns would remount the
-  // Changes toggles (losing keyboard focus); the open set reaches them by context.
+  // The columns only change with the workspace scope; which events are open reaches
+  // the Changes toggles by context, so opening one re-renders only the toggles.
   const columns = useMemo(
     () => [
       col.accessor("at", { header: "Time", cell: (info) => <EventTime at={info.getValue()} /> }),

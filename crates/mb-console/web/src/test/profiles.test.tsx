@@ -111,6 +111,21 @@ describe("llm profiles", () => {
     expect(alert.textContent).toContain("secret_ref env:OTHER is not allowed by server.api_secret_refs");
   });
 
+  it("closing the editor gives focus back to the Edit button", async () => {
+    const user = userEvent.setup();
+    serve({ ...shell(localMe), [`GET ${BASE}/llm-profiles`]: [fast, fromFile] });
+    renderAt("/w/default/llm-profiles");
+
+    const edit = await screen.findByRole("button", { name: "Edit fast" });
+    await user.click(edit);
+    await screen.findByRole("dialog", { name: "Edit profile fast" });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The button was not remounted while the drawer was open, so focus returns to it.
+    expect(edit.isConnected).toBe(true);
+    expect(document.activeElement).toBe(edit);
+  });
+
   it("delete asks first and shows the warnings", async () => {
     const user = userEvent.setup();
     const calls = serve({

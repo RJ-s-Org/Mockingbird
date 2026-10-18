@@ -10,6 +10,20 @@ export function columnHelper<T extends RowData>() {
   return createColumnHelper<Features, T>();
 }
 
+/**
+ * Renders a column's `header` or `cell` definition: a plain value as is, a
+ * function by calling it. TanStack's `FlexRender` would instead mount the
+ * function as a component, and since pages rebuild their column definitions
+ * on every render, each render would then remount every cell: local state
+ * (an open toggle) reset and a focused button lost focus. Called this way,
+ * the elements a cell returns keep their identity across renders, so cell
+ * renderers must not call hooks: put stateful UI in a component they return.
+ */
+function render(def: unknown, context: unknown, fallback: () => ReactNode): ReactNode {
+  if (typeof def === "function") return (def as (c: unknown) => ReactNode)(context);
+  return def === undefined ? fallback() : (def as ReactNode);
+}
+
 /** The classes of a table's horizontal scroll container (tables scroll, never the page). */
 export const tableScroll = "max-w-full overflow-x-auto";
 
@@ -44,7 +58,9 @@ export function DataTable<T extends RowData>({
             <tr key={group.id}>
               {group.headers.map((header) => (
                 <th key={header.id} scope="col" className="px-3 py-2 font-semibold">
-                  {header.isPlaceholder ? null : <table.FlexRender header={header} />}
+                  {header.isPlaceholder
+                    ? null
+                    : render(header.column.columnDef.header, header.getContext(), () => header.column.id)}
                 </th>
               ))}
             </tr>
@@ -72,7 +88,10 @@ export function DataTable<T extends RowData>({
                   >
                     {row.getAllCells().map((cell) => (
                       <td key={cell.id} className="px-3 py-2 align-top">
-                        <table.FlexRender cell={cell} />
+                        {render(cell.column.columnDef.cell, cell.getContext(), () => {
+                          const v = cell.getValue();
+                          return v == null ? null : String(v);
+                        })}
                       </td>
                     ))}
                   </tr>
