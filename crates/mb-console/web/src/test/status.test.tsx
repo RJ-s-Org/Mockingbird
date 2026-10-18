@@ -1,5 +1,6 @@
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { sourceRows } from "../api/queries";
 import { sourceLabel } from "../lib/sources";
 import { json, localMe, renderAt, serve, shell } from "./harness";
 
@@ -42,6 +43,29 @@ describe("status", () => {
     expect(within(none).getByText(/^Not generated/).getAttribute("title")).toMatch(/rejected by validation/);
     expect(screen.getByTestId("requests-total").textContent).toBe("14.5");
     expect(screen.getByTestId("log-dropped").textContent).toBe("7");
+  });
+
+  it("source rows are sorted by count, then name, whatever the metrics order", async () => {
+    expect(sourceRows({ llm: 3, fallback: 81, not_generated: 10, error: 3 })).toEqual([
+      ["fallback", 81],
+      ["not_generated", 10],
+      ["error", 3],
+      ["llm", 3],
+    ]);
+    serve({
+      ...shell(localMe),
+      "GET /readyz": () => json({ status: "ready" }),
+      "GET /metrics": () =>
+        text(
+          'mb_requests_total{source="not_generated"} 10\nmb_requests_total{source="fallback"} 81\nmb_requests_total{source="llm"} 81\n',
+        ),
+    });
+    renderAt("/status");
+    const summary = await screen.findByRole("table", { name: "Requests by source" });
+    const names = within(summary)
+      .getAllByRole("rowheader")
+      .map((h) => h.textContent);
+    expect(names).toEqual(["Fallback", "LLM", "Not generated (rejected or failed before generation)"]);
   });
 
   it("an unavailable server shows its reasons", async () => {

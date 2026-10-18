@@ -586,6 +586,11 @@ export function parseMetricsSummary(text: string): MetricsSummary {
   return summary;
 }
 
+/** `bySource` as rows, most requests first, ties by source name, so the order is stable. */
+export function sourceRows(bySource: Record<string, number>): [string, number][] {
+  return Object.entries(bySource).sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0));
+}
+
 /** `/metrics` summarised, or `"private"` when it needs credentials (401/403). */
 export function useMetricsSummary() {
   return useQuery({
