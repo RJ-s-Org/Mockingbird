@@ -71,7 +71,7 @@ type FileChannelSettings = (bool, Option<Vec<Trigger>>);
 /// The whole config is validated first (workspace names, names, route
 /// prefixes and gRPC services across every workspace, data-plane auth
 /// headers, profile references, secret references, contracts, scenario
-/// operations, brokers, channel ids and triggers, and clashes with
+/// operations and statuses, brokers, channel ids and triggers, and clashes with
 /// API-owned resources, route prefixes and active gRPC services included);
 /// any error
 /// returns `Err` with nothing applied.
@@ -363,6 +363,12 @@ async fn validate<'a>(
                 bail!(
                     "mock {label:?}, scenario {sname:?}: operation {op:?} is not in the contract"
                 );
+            }
+            if let Some(status) = s.status
+                && let Some(why) =
+                    mb_admin::undeclared_scenario_status(&bundle, &s.operations, status)
+            {
+                bail!("mock {label:?}, scenario {sname:?}: {why}");
             }
             if let Some(items) = s.stream_items
                 && !(1..=10_000).contains(&items)

@@ -102,8 +102,28 @@ pub struct PutScenario {
 /// (any 5xx is answered natively), so a status none of them declares could
 /// never take effect: reject it rather than store a silent no-op.
 fn check_status_declared(bundle: &Bundle, operations: &[String], status: u16) -> ApiResult<()> {
+    match undeclared_scenario_status(bundle, operations, status) {
+        None => Ok(()),
+        Some(detail) => Err(Problem::titled(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Scenario status not declared",
+            detail,
+        )),
+    }
+}
+
+/// Why a scenario forcing `status` on `operations` (all operations when
+/// empty) could never take effect in `bundle`, or `None` when it can: a
+/// non-5xx status applies only where one of the operations declares it (or a
+/// `default` response). Shared by the Admin API (a 422) and config-file
+/// validation, so both refuse the same scenarios with the same words.
+pub fn undeclared_scenario_status(
+    bundle: &Bundle,
+    operations: &[String],
+    status: u16,
+) -> Option<String> {
     if (500..600).contains(&status) {
-        return Ok(());
+        return None;
     }
     let ops: Vec<&Operation> = if operations.is_empty() {
         bundle.operations.iter().collect()
@@ -114,7 +134,7 @@ fn check_status_declared(bundle: &Bundle, operations: &[String], status: u16) ->
             .collect()
     };
     if ops.iter().any(|op| op.output_for_status(status).is_some()) {
-        return Ok(());
+        return None;
     }
     let mut declared: Vec<u16> = ops
         .iter()
@@ -137,13 +157,9 @@ fn check_status_declared(bundle: &Bundle, operations: &[String], status: u16) ->
         let codes: Vec<String> = declared.iter().map(u16::to_string).collect();
         format!("a status it declares ({}) or a 5xx", codes.join(", "))
     };
-    Err(Problem::titled(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "Scenario status not declared",
-        format!(
-            "status {status} is not declared by {whom}, so the scenario could never answer it; \
-             declare a {status} response, or use {alternatives}"
-        ),
+    Some(format!(
+        "status {status} is not declared by {whom}, so the scenario could never answer it; \
+         declare a {status} response, or use {alternatives}"
     ))
 }
 

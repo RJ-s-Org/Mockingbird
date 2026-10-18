@@ -86,7 +86,7 @@ mocks:
     persona: Terse, realistic retail data.
     scenarios:
       out-of-stock:
-        status: 409
+        status: 409                   # one orders.yaml declares, or a 5xx
         instructions: Explain that the item is out of stock.
 ```
 
@@ -384,7 +384,7 @@ A scenario is a named set of overrides for a mock: extra LLM instructions, a for
 curl -i localhost:8080/orders/orders/o1 -H 'X-Mockingbird-Scenario: out-of-stock'
 ```
 
-A scenario's status applies only to operations whose contract declares that status (or a `default` response), where its `set` fields are forced into that response's body too; a 5xx also applies to operations that do not declare it and is answered natively, as with `X-Mockingbird-Status`. Other operations are served normally, with the scenario's other overrides. The Admin API rejects (`422 Scenario status not declared`) a non-5xx status that none of the scenario's operations declares in the mock's active contract, since it could never take effect. An unknown scenario name is a 400. Scenarios come from the config file or from `PUT /api/v1/mocks/{mock}/scenarios/{name}`.
+A scenario's status applies only to operations whose contract declares that status (or a `default` response), where its `set` fields are forced into that response's body too; a 5xx also applies to operations that do not declare it and is answered natively, as with `X-Mockingbird-Status`. Other operations are served normally, with the scenario's other overrides. The Admin API rejects (`422 Scenario status not declared`), and a config file may not declare, a non-5xx status that none of the scenario's operations declares in the mock's active contract, since it could never take effect. An unknown scenario name is a 400. Scenarios come from the config file or from `PUT /api/v1/mocks/{mock}/scenarios/{name}`.
 
 ## Admin API
 

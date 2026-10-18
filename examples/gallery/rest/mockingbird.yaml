@@ -4,6 +4,8 @@
 # then try:
 #   curl -i localhost:8080/orders/orders -H 'content-type: application/json' -d '{"customerId":"c1","total":10}'
 #   curl -i localhost:8080/orders/orders -H 'X-Mockingbird-Scenario: slow'
+#   curl -i localhost:8080/orders/orders -H 'content-type: application/json' -H 'X-Mockingbird-Scenario: out-of-stock' \
+#     -d '{"customerId":"c1","total":10}'
 mocks:
   orders:
     contract: ../../../fixtures/openapi/orders-3.0.yaml
@@ -11,7 +13,7 @@ mocks:
     persona: Terse, realistic retail data for a European web shop.
     scenarios:
       out-of-stock:
-        status: 409
+        status: 400                  # createOrder declares 201 and 400
         instructions: Explain that the item is out of stock.
         operations: [createOrder]
       slow:

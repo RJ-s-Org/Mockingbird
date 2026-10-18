@@ -161,10 +161,10 @@ mocks:
     scenarios:
       out-of-stock:
         instructions: Every product is out of stock.
-        status: 409
+        status: 400
         latency: 250ms
         set:
-          status: pending
+          message: Out of stock
         operations: [createOrder]
         stream_items: 3
         stream_item_interval: 500ms

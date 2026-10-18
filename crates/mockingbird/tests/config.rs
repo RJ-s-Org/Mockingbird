@@ -82,9 +82,9 @@ mocks:
     scenarios:
       out-of-stock:
         instructions: Everything is out of stock.
-        status: 409
+        status: 400
         latency: 250ms
-        set: {status: pending}
+        set: {message: Out of stock}
         operations: [createOrder]
 "#;
 
@@ -162,9 +162,9 @@ fn loads_full_example_config() {
     assert_eq!(m.llm_profile.as_deref(), Some("deepseek"));
     assert!(m.header_overrides);
     let s = &m.scenarios["out-of-stock"];
-    assert_eq!(s.status, Some(409));
+    assert_eq!(s.status, Some(400));
     assert_eq!(s.latency, Some(Duration::from_millis(250)));
-    assert_eq!(s.set, Some(json!({"status": "pending"})));
+    assert_eq!(s.set, Some(json!({"message": "Out of stock"})));
     assert_eq!(s.operations, ["createOrder"]);
     assert_eq!(
         m.scenarios["slow"].latency,
@@ -537,7 +537,7 @@ async fn reconcile_creates_and_activates() {
     let s = &scenarios[0];
     assert_eq!(s.name, "out-of-stock");
     assert_eq!(s.source, ResourceSource::File);
-    assert_eq!(s.rules.status, Some(409));
+    assert_eq!(s.rules.status, Some(400));
     assert_eq!(s.rules.latency_ms, Some(250));
     assert_eq!(s.rules.operations, ["createOrder"]);
 
@@ -875,6 +875,53 @@ mocks:
 }
 
 #[tokio::test]
+async fn scenario_status_must_be_declared_like_the_admin_api() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let scenario = |rules: &str| {
+        format!("mocks:\n  orders:\n    contract: orders.yaml\n    scenarios:\n      s: {rules}\n")
+    };
+
+    // createOrder declares 201 and 400: a 409 could never apply.
+    let err = reconcile(
+        store.as_ref(),
+        no_state().as_ref(),
+        &ws.load(&scenario("{status: 409, operations: [createOrder]}")),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        format!("{err:#}"),
+        "mock \"orders\", scenario \"s\": status 409 is not declared by operation \
+         createOrder of the active contract, so the scenario could never answer it; declare a \
+         409 response, or use a status it declares (201, 400) or a 5xx"
+    );
+    // Without operations, no operation declares 409 either.
+    reconcile(
+        store.as_ref(),
+        no_state().as_ref(),
+        &ws.load(&scenario("{status: 409}")),
+    )
+    .await
+    .unwrap_err();
+
+    // A declared status, one declared by any operation, or a 5xx is fine.
+    for rules in [
+        "{status: 400, operations: [createOrder]}",
+        "{status: 404}",
+        "{status: 503, operations: [createOrder]}",
+    ] {
+        reconcile(
+            store.as_ref(),
+            no_state().as_ref(),
+            &ws.load(&scenario(rules)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{rules}: {e:#}"));
+    }
+}
+
+#[tokio::test]
 async fn invalid_config_applies_nothing() {
     let ws = Workspace::new();
     std::fs::write(
@@ -887,6 +934,8 @@ async fn invalid_config_applies_nothing() {
     let invalid = [
         // An unknown operation in a scenario; the other mock is valid.
         "mocks:\n  orders: {contract: orders.yaml}\n  billing:\n    contract: billing.yaml\n    scenarios:\n      s: {operations: [noSuchOp]}\n",
+        // A scenario status its operation does not declare.
+        "mocks:\n  orders:\n    contract: orders.yaml\n    scenarios:\n      s: {status: 409, operations: [createOrder]}\n",
         // A missing profile.
         "mocks:\n  orders: {contract: orders.yaml, llm_profile: nope}\n",
         // A missing default profile and fallback.
