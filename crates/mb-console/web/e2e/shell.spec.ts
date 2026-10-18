@@ -15,3 +15,13 @@ test("the shell opens the default workspace and is accessible", async ({ page })
   const blocking = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
   expect(blocking, JSON.stringify(blocking, null, 2)).toEqual([]);
 });
+
+test("an unknown workspace shows a not-found state", async ({ page }) => {
+  await page.goto("/w/nowhere/mocks");
+  await expect(page.getByRole("heading", { name: "Workspace not found" })).toBeVisible();
+  await expect(page.getByLabel("Workspace")).toHaveValue("nowhere");
+  await expect(page.getByRole("button", { name: "New mock" })).toHaveCount(0);
+  await page.getByRole("link", { name: /Go to the .* workspace/ }).click();
+  await expect(page).toHaveURL(/\/w\/default\/mocks$/);
+  await expect(page.getByRole("button", { name: "New mock" })).toBeVisible();
+});

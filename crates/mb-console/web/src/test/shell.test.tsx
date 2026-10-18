@@ -91,4 +91,29 @@ describe("shell", () => {
     await screen.findByLabelText("Workspace");
     expect(router.state.location.pathname).toBe("/w/team/mocks");
   });
+
+  it("an unknown workspace shows a not-found state without workspace actions", async () => {
+    serve({
+      "/api/v1/me": { subject: "local", display_name: "Local", kind: "local", sysadmin: true, workspaces: [] },
+      "/api/v1/workspaces": workspaces,
+      "/api/v1/workspaces/nowhere/mocks": [],
+    });
+    window.localStorage.setItem("mb.lastWorkspace", "team");
+    renderAt("/w/nowhere/mocks");
+
+    expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
+    const back = screen.getByRole("link", { name: "Go to the Default workspace" });
+    expect(back.getAttribute("href")).toBe("/w/default/mocks");
+    // No workspace-scoped actions or navigation.
+    expect(screen.queryByRole("button", { name: "New mock" })).toBeNull();
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).queryByRole("link", { name: "Mocks" })).toBeNull();
+    expect(within(nav).getByRole("link", { name: "Status" })).toBeTruthy();
+    // The switcher names the missing workspace instead of showing another one.
+    const switcher = screen.getByLabelText("Workspace") as HTMLSelectElement;
+    expect(switcher.value).toBe("nowhere");
+    expect(switcher.selectedOptions[0]?.textContent).toBe("nowhere (not found)");
+    // An unknown workspace is never remembered.
+    expect(window.localStorage.getItem("mb.lastWorkspace")).toBe("team");
+  });
 });
