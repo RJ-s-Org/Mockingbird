@@ -27,4 +27,21 @@
   .dark :focus-visible {
     outline-color: var(--color-indigo-400);
   }
+
+  /*
+   * Selected options of a list box (a <select multiple>). The browser's own
+   * colours turn grey when the list loses focus, which in dark mode barely
+   * stands out from the rest; the gradient makes Chromium paint ours.
+   */
+  select[multiple] option:checked {
+    background-color: var(--color-indigo-600);
+    background-image: linear-gradient(var(--color-indigo-600), var(--color-indigo-600));
+    color: var(--color-white);
+  }
+
+  .dark select[multiple] option:checked {
+    background-color: var(--color-indigo-300);
+    background-image: linear-gradient(var(--color-indigo-300), var(--color-indigo-300));
+    color: var(--color-slate-950);
+  }
 }
