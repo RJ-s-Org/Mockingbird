@@ -59,11 +59,16 @@ function ChangesToggle({ event }: { event: AuditEvent }) {
   );
 }
 
-/** An event's time on one line; the tooltip carries the full ISO timestamp. */
+/**
+ * An event's time: one line from `sm` up, the date over the time on a phone;
+ * the tooltip carries the full ISO timestamp.
+ */
 function EventTime({ at }: { at: string }) {
+  const when = new Date(at);
   return (
-    <time dateTime={at} title={at} className="whitespace-nowrap">
-      {new Date(at).toLocaleString()}
+    <time dateTime={at} title={at} className="sm:whitespace-nowrap">
+      <span className="whitespace-nowrap">{when.toLocaleDateString()},</span>{" "}
+      <span className="whitespace-nowrap">{when.toLocaleTimeString()}</span>
     </time>
   );
 }
@@ -106,18 +111,17 @@ export function Audit({ ws }: { ws: string }) {
       ...(allWorkspaces
         ? [col.accessor("workspace", { header: "Workspace", cell: (info) => info.getValue() ?? "—" })]
         : []),
-      col.accessor("actor_subject", {
-        header: "Actor",
-        cell: (info) => (
-          <>
-            <span className="whitespace-nowrap">{info.getValue()}</span>{" "}
-            <span className="whitespace-nowrap text-slate-600 dark:text-slate-400">({info.row.original.actor_kind})</span>
-          </>
-        ),
-      }),
       col.accessor("action", {
         header: "Action",
         cell: (info) => <code className="whitespace-nowrap">{info.getValue()}</code>,
+      }),
+      col.accessor("actor_subject", {
+        header: "Actor",
+        cell: (info) => (
+          <span className="whitespace-nowrap">
+            {info.getValue()} <span className="text-slate-600 dark:text-slate-400">({info.row.original.actor_kind})</span>
+          </span>
+        ),
       }),
       // Long targets (import job ids) are cut short on one line; the tooltip has them whole.
       col.accessor("target", {

@@ -40,6 +40,15 @@ describe("audit", () => {
     expect(cell.getAttribute("title")).toBe(target);
     expect(cell.className).toMatch(/\btruncate\b/);
     expect(within(table).getByText("import.create").className).toMatch(/whitespace-nowrap/);
+    // The action comes right after the time, so it fits a phone screen without scrolling.
+    const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toEqual(["Time", "Action", "Actor", "Target", "Changes"]);
+    // The actor and its kind stay on one line.
+    const actor = within(table).getByText("(local)").parentElement as HTMLElement;
+    expect(actor.className).toMatch(/whitespace-nowrap/);
+    // On a phone the date and the time may sit on two lines; from sm up they share one.
+    const time = table.querySelector("time") as HTMLElement;
+    expect(time.className).toMatch(/sm:whitespace-nowrap/);
   });
 
   it("audit filters and load more use before id", async () => {
