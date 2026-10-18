@@ -421,8 +421,7 @@ async fn serve(
                 code,
                 title,
                 format!(
-                    "forced by X-Mockingbird-Status; operation {} declares no response for \
-                     status {code}",
+                    "operation {} declares no response for forced status {code}",
                     op.id
                 ),
             );

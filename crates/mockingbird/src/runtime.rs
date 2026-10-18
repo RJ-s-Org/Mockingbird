@@ -532,6 +532,7 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
             name: s.name,
             instructions: s.instructions,
             set: s.rules.set,
+            status: s.rules.status,
         },
         status: s.rules.status,
         latency: s.rules.latency_ms.map(Duration::from_millis),

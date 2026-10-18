@@ -147,7 +147,8 @@ pub(crate) struct CallPlan<'a> {
     pub session: SessionKey,
     /// The selected scenario, when it applies to `op`.
     pub scenario: Option<&'a ScenarioRuntime>,
-    /// Header status, else the scenario's status where `op` declares it.
+    /// Header status, else the scenario's status where `op` declares it
+    /// (or any 5xx).
     pub forced_status: Option<u16>,
     /// Injected latency (header, else scenario) plus any chaos latency,
     /// capped at 30 s.
@@ -364,7 +365,7 @@ impl PlanFailure {
 /// limit, unless [`Presented::admitted`]), then data-plane auth
 /// (spec §11.2), then override headers, then the scenario, then chaos.
 /// Header status and latency beat the scenario's; a scenario status
-/// applies only where `op` declares it. Chaos comes from the applying
+/// applies only where `op` declares it, or when it is a 5xx. Chaos comes from the applying
 /// scenario, else the mock, unless `X-Mockingbird-Chaos: off`; it injects
 /// no error when a status is already forced. Records the session on the
 /// current span. Admission and auth run in an `mb.admission` span.
@@ -400,11 +401,13 @@ pub(crate) async fn plan<'a>(
             Some(s) => s.applies_to(&op.id).then_some(s),
         },
     };
-    // A scenario's status applies only where the contract declares it; the
-    // header override is used as given (an undeclared one is a 400).
+    // A scenario's status applies where the contract declares it, and as a
+    // 5xx anywhere (answered natively, like an undeclared header 5xx); the
+    // header override is used as given (each adapter answers an undeclared
+    // one).
     let scenario_status = scenario
         .and_then(|s| s.status)
-        .filter(|code| op.output_for_status(*code).is_some());
+        .filter(|code| (500..600).contains(code) || op.output_for_status(*code).is_some());
     let mut forced_status = overrides.status.or(scenario_status);
     let mut delay = overrides
         .latency
@@ -1291,6 +1294,7 @@ paths:
                 name: "two".into(),
                 instructions: None,
                 set: Some(json!({"n": 42})),
+                status: None,
             },
             stream_items: Some(2),
             stream_item_interval: Some(Duration::from_millis(1)),

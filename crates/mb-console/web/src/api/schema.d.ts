@@ -1591,7 +1591,9 @@ export interface components {
             set?: Record<string, never> | null;
             /**
              * Format: int32
-             * @description 100–599.
+             * @description 100–599. When the mock has an active contract, an operation the
+             *     scenario applies to must declare it, unless it is a 5xx (answered
+             *     natively where undeclared).
              */
             status?: number | null;
             /**
@@ -3369,7 +3371,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid scenario, or operations unknown to the active contract */
+            /** @description Invalid scenario, operations unknown to the active contract, or a status none of its operations declares */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -5589,7 +5591,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid scenario, or operations unknown to the active contract */
+            /** @description Invalid scenario, operations unknown to the active contract, or a status none of its operations declares */
             422: {
                 headers: {
                     [name: string]: unknown;

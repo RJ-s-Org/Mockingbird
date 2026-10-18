@@ -791,6 +791,51 @@ async fn scenario_operations_are_checked_against_the_contract() {
 }
 
 #[tokio::test]
+async fn scenario_status_must_be_declared_by_its_operations() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let put = |body: Value| {
+        let h = &h;
+        async move {
+            h.json(Method::PUT, "/api/v1/mocks/orders/scenarios/s", body)
+                .await
+        }
+    };
+
+    // No contract yet: nothing to check against.
+    let r = put(json!({ "status": 409, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+
+    let r = h
+        .upload("orders", &contract_json("1.0.0"), Some(true))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    // createOrder declares only 201: a 409 could never apply.
+    let body = put(json!({ "status": 409, "operations": ["createOrder"] }))
+        .await
+        .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["title"], "Scenario status not declared", "{body}");
+    assert_eq!(
+        body["detail"],
+        "status 409 is not declared by operation createOrder of the active contract, so the \
+         scenario could never answer it; declare a 409 response, or use a status it declares \
+         (201) or a 5xx",
+        "{body}"
+    );
+    // Without operations, any operation declaring it is enough.
+    let r = put(json!({ "status": 409 })).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.text);
+    let r = put(json!({ "status": 201 })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let r = put(json!({ "status": 201, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    // A 5xx is answered natively where it is not declared.
+    let r = put(json!({ "status": 503, "operations": ["createOrder"] })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+}
+
+#[tokio::test]
 async fn profiles_never_return_secret_values() {
     // The API never resolves a secret_ref, so no variable needs setting.
     let h = harness().await;
