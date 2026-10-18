@@ -20,6 +20,7 @@ import {
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { parseJson } from "../../lib/json";
 
 const col = columnHelper<SessionInfo>();
 
@@ -157,12 +158,9 @@ function SessionDrawer({
 
 /** The file's resources, or why they cannot be seeded. */
 function parseResources(text: string): { resources: StoredResource[] } | { error: string } {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (e) {
-    return { error: `The file is not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  const parsed = parseJson("The file", text);
+  if ("error" in parsed) return parsed;
+  const value = parsed.value;
   if (!Array.isArray(value)) return { error: "The file must contain a JSON array of resources." };
   return { resources: value as StoredResource[] };
 }

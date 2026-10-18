@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { usePublish } from "../../api/channels";
 import { Dialog, inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { parseJson } from "../../lib/json";
 
 /** The most messages one manual publish may generate. */
 export const MAX_PUBLISH = 100;
@@ -9,12 +10,9 @@ export const MAX_PUBLISH = 100;
 /** The context field's text: an object, `undefined` when blank, or an error message. */
 export function parseContext(text: string): { value: Record<string, unknown> | undefined } | { error: string } {
   if (text.trim() === "") return { value: undefined };
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (e) {
-    return { error: `Context is not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  const parsed = parseJson("Context", text);
+  if ("error" in parsed) return parsed;
+  const value = parsed.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { error: "Context must be a JSON object." };
   }

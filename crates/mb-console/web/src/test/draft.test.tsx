@@ -220,7 +220,7 @@ describe("draft review", () => {
     await user.clear(response);
     await user.click(response);
     await user.paste("{nope");
-    expect(within(editor).getByText(/^Not valid JSON/)).toBeTruthy();
+    expect(within(editor).getByText(/^The schema is not valid JSON/)).toBeTruthy();
 
     await user.clear(request);
     expect(save.disabled).toBe(true);

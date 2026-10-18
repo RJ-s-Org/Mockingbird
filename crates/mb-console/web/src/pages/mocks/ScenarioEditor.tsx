@@ -4,16 +4,14 @@ import { inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { ChaosFields, chaosDraft, chaosErrors, chaosFromDraft, hasErrors } from "./ChaosLimits";
+import { parseJson } from "../../lib/json";
 
 /** The `set` field's text parsed: an object, `null` when blank, or an error message. */
 export function parseSet(text: string): { value: Record<string, unknown> | null } | { error: string } {
   if (text.trim() === "") return { value: null };
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (e) {
-    return { error: `Set is not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  const parsed = parseJson("Set", text);
+  if ("error" in parsed) return parsed;
+  const value = parsed.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { error: "Set must be a JSON object." };
   }

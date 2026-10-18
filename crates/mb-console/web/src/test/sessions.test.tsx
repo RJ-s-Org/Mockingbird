@@ -61,7 +61,11 @@ describe("sessions", () => {
     const file = screen.getByLabelText("Resources file");
     await user.upload(file, new File(["[{not json"], "bad.json", { type: "application/json" }));
     await user.click(screen.getByRole("button", { name: "Seed" }));
-    expect((await screen.findByText(/not valid JSON/)).id).toBe("seed-error");
+    const seedError = await screen.findByText(/not valid JSON/);
+    expect(seedError.id).toBe("seed-error");
+    // A friendly message, never the parser's raw text.
+    expect(seedError.textContent).toMatch(/^The file is not valid JSON( \(line \d+, column \d+\))?\.$/);
+    expect(seedError.textContent).not.toContain("Unexpected token");
     await user.upload(file, new File(['{"id":"o1"}'], "object.json", { type: "application/json" }));
     await user.click(screen.getByRole("button", { name: "Seed" }));
     await screen.findByText("The file must contain a JSON array of resources.");
