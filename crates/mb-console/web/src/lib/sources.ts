@@ -18,9 +18,9 @@ const SOURCES: Record<string, SourceLabel> = {
     label: "Fallback",
     hint: "Generated without the LLM from the schema (offline, or the LLM failed or was over budget).",
   },
-  // The server's `none`, and names it may use for it instead.
-  none: NOT_GENERATED,
+  // The server's `not_generated`, and the names older servers used for it.
   not_generated: NOT_GENERATED,
+  none: NOT_GENERATED,
   rejected: NOT_GENERATED,
 };
 

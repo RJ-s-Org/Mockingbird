@@ -9,7 +9,7 @@ mb_requests_total{mock="orders",operation="listOrders",status="200",source="llm"
 mb_requests_total{mock="orders",operation="getOrder",status="200",source="fallback"} 2
 mb_requests_total{mock="pets",operation="listPets",status="200",source="llm"} 4
 mb_requests_total{mock="pets",operation="x",status="500",source="error"} 1.5e0
-mb_requests_total{mock="pets",operation="y",status="422",source="none"} 4
+mb_requests_total{mock="pets",operation="y",status="422",source="not_generated"} 4
 mb_request_log_dropped_total{mock="orders"} 2
 mb_request_log_dropped_total{mock="pets"} 5
 mb_requests_total_other 99
@@ -36,7 +36,7 @@ describe("status", () => {
     expect(within(row("Fallback")).getByText("2")).toBeTruthy();
     // An unknown source is shown as is.
     expect(within(row("error")).getByText("1.5")).toBeTruthy();
-    // "none" gets a human label and an explaining tooltip.
+    // "not_generated" gets a human label and an explaining tooltip.
     const none = row("Not generated (rejected or failed before generation)");
     expect(within(none).getByText("4")).toBeTruthy();
     expect(within(none).getByText(/^Not generated/).getAttribute("title")).toMatch(/rejected by validation/);
