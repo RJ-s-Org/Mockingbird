@@ -1,3 +1,4 @@
+import { Fragment, type ReactNode } from "react";
 import { createColumnHelper, tableFeatures, useTable, type ColumnDef, type RowData } from "@tanstack/react-table";
 
 /** The table features every console table uses (core only). */
@@ -9,54 +10,85 @@ export function columnHelper<T extends RowData>() {
   return createColumnHelper<Features, T>();
 }
 
-/** A plain accessible table of `data`; `empty` is shown when there are no rows. */
+/** The classes of a table's horizontal scroll container (tables scroll, never the page). */
+export const tableScroll = "max-w-full overflow-x-auto";
+
+/**
+ * A plain accessible table of `data`; `empty` is shown when there are no rows.
+ * `expanded` may return content shown in a full-width row right under a row
+ * (an inline editor, a detail pane); `null` keeps the row collapsed.
+ * The table scrolls horizontally inside its own container on narrow screens.
+ */
 export function DataTable<T extends RowData>({
   caption,
   columns,
   data,
   empty = "Nothing here yet.",
+  expanded,
 }: {
   caption: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   columns: ColumnDef<Features, T, any>[];
   data: T[];
   empty?: string;
+  expanded?: (row: T) => ReactNode;
 }) {
   const table = useTable({ features, columns, data });
   const rows = table.getRowModel().rows;
   return (
-    <table className="w-full border-collapse text-left text-sm">
-      <caption className="sr-only">{caption}</caption>
-      <thead className="border-b border-slate-300 text-slate-700">
-        {table.getHeaderGroups().map((group) => (
-          <tr key={group.id}>
-            {group.headers.map((header) => (
-              <th key={header.id} scope="col" className="px-3 py-2 font-semibold">
-                {header.isPlaceholder ? null : <table.FlexRender header={header} />}
-              </th>
-            ))}
-          </tr>
-        ))}
-      </thead>
-      <tbody>
-        {rows.length === 0 ? (
-          <tr>
-            <td colSpan={columns.length} className="px-3 py-6 text-center text-slate-600">
-              {empty}
-            </td>
-          </tr>
-        ) : (
-          rows.map((row) => (
-            <tr key={row.id} className="border-b border-slate-200">
-              {row.getAllCells().map((cell) => (
-                <td key={cell.id} className="px-3 py-2 align-top">
-                  <table.FlexRender cell={cell} />
-                </td>
+    <div className={tableScroll}>
+      <table className="w-full border-collapse text-left text-sm">
+        <caption className="sr-only">{caption}</caption>
+        <thead className="border-b border-slate-300 text-slate-700">
+          {table.getHeaderGroups().map((group) => (
+            <tr key={group.id}>
+              {group.headers.map((header) => (
+                <th key={header.id} scope="col" className="px-3 py-2 font-semibold">
+                  {header.isPlaceholder ? null : <table.FlexRender header={header} />}
+                </th>
               ))}
             </tr>
-          ))
-        )}
-      </tbody>
-    </table>
+          ))}
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length} className="px-3 py-6 text-center text-slate-600">
+                {empty}
+              </td>
+            </tr>
+          ) : (
+            rows.map((row) => {
+              const detail = expanded?.(row.original);
+              const open = detail !== undefined && detail !== null && detail !== false;
+              return (
+                <Fragment key={row.id}>
+                  <tr
+                    className={
+                      open
+                        ? "bg-slate-100/70"
+                        : "border-b border-slate-200"
+                    }
+                  >
+                    {row.getAllCells().map((cell) => (
+                      <td key={cell.id} className="px-3 py-2 align-top">
+                        <table.FlexRender cell={cell} />
+                      </td>
+                    ))}
+                  </tr>
+                  {open ? (
+                    <tr className="border-b border-slate-200 bg-slate-100/70">
+                      <td colSpan={columns.length} className="px-3 pb-4">
+                        {detail}
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }

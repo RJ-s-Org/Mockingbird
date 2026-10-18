@@ -77,7 +77,7 @@ export function Dialog({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-full max-w-md rounded-lg bg-white p-6 text-slate-900 shadow-xl"
+        className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-lg bg-white p-4 text-slate-900 shadow-xl sm:p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id={titleId} className="mb-4 text-lg font-semibold">

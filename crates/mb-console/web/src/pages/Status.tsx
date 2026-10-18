@@ -1,5 +1,6 @@
 import { useMetricsSummary, useReadiness } from "../api/queries";
 import { ProblemAlert } from "../components/ProblemAlert";
+import { tableScroll } from "../components/DataTable";
 
 const STATUS_STYLE: Record<string, string> = {
   ready: "border-green-300 bg-green-50 text-green-900",
@@ -59,37 +60,39 @@ export function Status() {
               <dt className="font-medium">Request log records dropped</dt>
               <dd data-testid="log-dropped">{formatCount(summary.logDropped)}</dd>
             </dl>
-            <table className="w-auto border-collapse text-left text-sm">
-              <caption className="sr-only">Requests by source</caption>
-              <thead className="border-b border-slate-300 text-slate-700">
-                <tr>
-                  <th scope="col" className="px-3 py-2 font-semibold">
-                    Source
-                  </th>
-                  <th scope="col" className="px-3 py-2 font-semibold">
-                    Requests
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(summary.bySource).length === 0 ? (
+            <div className={tableScroll}>
+              <table className="w-auto border-collapse text-left text-sm">
+                <caption className="sr-only">Requests by source</caption>
+                <thead className="border-b border-slate-300 text-slate-700">
                   <tr>
-                    <td colSpan={2} className="px-3 py-2 text-slate-600">
-                      No requests served yet.
-                    </td>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Source
+                    </th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Requests
+                    </th>
                   </tr>
-                ) : (
-                  Object.entries(summary.bySource).map(([source, n]) => (
-                    <tr key={source} className="border-b border-slate-200">
-                      <th scope="row" className="px-3 py-2 font-normal">
-                        {source}
-                      </th>
-                      <td className="px-3 py-2">{formatCount(n)}</td>
+                </thead>
+                <tbody>
+                  {Object.entries(summary.bySource).length === 0 ? (
+                    <tr>
+                      <td colSpan={2} className="px-3 py-2 text-slate-600">
+                        No requests served yet.
+                      </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    Object.entries(summary.bySource).map(([source, n]) => (
+                      <tr key={source} className="border-b border-slate-200">
+                        <th scope="row" className="px-3 py-2 font-normal">
+                          {source}
+                        </th>
+                        <td className="px-3 py-2">{formatCount(n)}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </>
         ) : metrics.isPending ? (
           <p className="text-slate-700">Loading…</p>

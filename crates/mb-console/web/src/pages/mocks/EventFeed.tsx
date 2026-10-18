@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { subscribeRequests, type LiveRequestView } from "../../api/sse";
 import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
+import { tableScroll } from "../../components/DataTable";
 
 /** The feed keeps at most this many rows, newest first. */
 export const MAX_EVENTS = 200;
@@ -66,42 +67,44 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
         ) : null}
         {interrupted ? <p className="text-amber-900">The event feed connection was interrupted.</p> : null}
       </div>
-      <table aria-label="Event feed" className="w-full border-collapse text-left text-sm">
-        <thead className="border-b border-slate-300 text-slate-700">
-          <tr>
-            {["Time", "Channel", "Direction", "Status", "Source"].map((h) => (
-              <th key={h} scope="col" className="px-3 py-2 font-semibold">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
+      <div className={tableScroll}>
+        <table aria-label="Event feed" className="w-full border-collapse text-left text-sm">
+          <thead className="border-b border-slate-300 text-slate-700">
             <tr>
-              <td colSpan={5} className="px-3 py-6 text-center text-slate-600">
-                Waiting for events…
-              </td>
+              {["Time", "Channel", "Direction", "Status", "Source"].map((h) => (
+                <th key={h} scope="col" className="px-3 py-2 font-semibold">
+                  {h}
+                </th>
+              ))}
             </tr>
-          ) : (
-            rows.map(({ key, record }) => (
-              <tr key={key} className="border-b border-slate-200">
-                <td className={cell}>
-                  <time dateTime={record.at}>{new Date(record.at).toLocaleTimeString()}</time>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-3 py-6 text-center text-slate-600">
+                  Waiting for events…
                 </td>
-                <td className={cell}>
-                  <code>{record.operation_id ?? "—"}</code>
-                </td>
-                <td className={cell}>
-                  <code>{record.method}</code>
-                </td>
-                <td className={cell}>{record.status}</td>
-                <td className={cell}>{record.source ?? "—"}</td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ) : (
+              rows.map(({ key, record }) => (
+                <tr key={key} className="border-b border-slate-200">
+                  <td className={cell}>
+                    <time dateTime={record.at}>{new Date(record.at).toLocaleTimeString()}</time>
+                  </td>
+                  <td className={cell}>
+                    <code>{record.operation_id ?? "—"}</code>
+                  </td>
+                  <td className={cell}>
+                    <code>{record.method}</code>
+                  </td>
+                  <td className={cell}>{record.status}</td>
+                  <td className={cell}>{record.source ?? "—"}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

@@ -4,7 +4,7 @@ import { ProblemAlert } from "../../components/ProblemAlert";
 import { SourceBadge } from "../../components/SourceBadge";
 
 const tabClass =
-  "-mb-px border-b-2 border-transparent px-3 py-2 text-sm font-medium text-slate-700 hover:text-slate-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700";
+  "shrink-0 border-b-2 border-transparent px-3 py-2 text-sm font-medium whitespace-nowrap text-slate-700 hover:text-slate-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700";
 const activeTab = "border-indigo-700 text-slate-950";
 
 const TABS = [
@@ -23,7 +23,7 @@ export function MockLayout({ ws, mock }: { ws: string; mock: string }) {
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-semibold">{mock}</h1>
+        <h1 className="text-2xl font-semibold break-all">{mock}</h1>
         {m.data ? (
           <>
             <SourceBadge source={m.data.source} />
@@ -33,7 +33,8 @@ export function MockLayout({ ws, mock }: { ws: string; mock: string }) {
           </>
         ) : null}
       </div>
-      <nav aria-label="Mock" className="flex flex-wrap gap-1 border-b border-slate-300">
+      {/* One row that scrolls sideways on narrow screens; the inset shadow is the baseline under the tabs. */}
+      <nav aria-label="Mock" className="flex gap-1 overflow-x-auto shadow-[inset_0_-1px_0_var(--color-slate-300)]">
         {TABS.map((t) => (
           <Link key={t.to} to={t.to} params={{ ws, mock }} className={tabClass} activeProps={{ className: activeTab }}>
             {t.label}
