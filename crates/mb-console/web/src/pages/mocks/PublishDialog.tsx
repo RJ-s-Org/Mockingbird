@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { usePublish } from "../../api/channels";
-import { Dialog, inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
+import { Dialog } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { parseJson } from "../../lib/json";
+import { ResponseSource } from "../../components/http";
+import { Field, inputClass, preClass, primaryButton, secondaryButton } from "../../components/ui";
 
 /** The most messages one manual publish may generate. */
 export const MAX_PUBLISH = 100;
@@ -17,17 +19,6 @@ export function parseContext(text: string): { value: Record<string, unknown> | u
     return { error: "Context must be a JSON object." };
   }
   return { value: value as Record<string, unknown> };
-}
-
-/** Where a published message came from: `llm`, `repaired` or `fallback`. */
-function GenerationBadge({ source }: { source: string }) {
-  const style =
-    source === "fallback" ? "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200" : "border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200";
-  return (
-    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${style}`}>
-      {source}
-    </span>
-  );
 }
 
 /** Publishes messages on a channel now and shows what was published. */
@@ -61,12 +52,9 @@ export function PublishDialog({
   };
 
   return (
-    <Dialog title={`Publish on ${channel}`} onClose={onClose}>
-      <form onSubmit={submit} className="space-y-4">
-        <div className="space-y-1">
-          <label htmlFor="publish-count" className="block text-sm font-medium">
-            Count
-          </label>
+    <Dialog title={`Publish on ${channel}`} onClose={onClose} wide>
+      <form onSubmit={submit} className="space-y-5">
+        <Field id="publish-count" label="Count" error={countError} className="sm:max-w-40">
           <input
             id="publish-count"
             type="number"
@@ -78,16 +66,13 @@ export function PublishDialog({
             aria-describedby={countError ? "publish-count-error" : undefined}
             onChange={(e) => setCount(e.target.value)}
           />
-          {countError ? (
-            <p id="publish-count-error" className="text-sm text-red-800 dark:text-red-300">
-              {countError}
-            </p>
-          ) : null}
-        </div>
-        <div className="space-y-1">
-          <label htmlFor="publish-context" className="block text-sm font-medium">
-            Context (JSON object)
-          </label>
+        </Field>
+        <Field
+          id="publish-context"
+          label="Context (JSON object)"
+          error={contextError}
+          hint="Optional; handed to the message prompt."
+        >
           <textarea
             id="publish-context"
             className={`${inputClass} font-mono`}
@@ -97,36 +82,27 @@ export function PublishDialog({
             aria-describedby={contextError ? "publish-context-error" : "publish-context-hint"}
             onChange={(e) => setContextText(e.target.value)}
           />
-          {contextError ? (
-            <p id="publish-context-error" className="text-sm text-red-800 dark:text-red-300">
-              {contextError}
-            </p>
-          ) : (
-            <p id="publish-context-hint" className="text-xs text-slate-600 dark:text-slate-400">
-              Optional; handed to the message prompt.
-            </p>
-          )}
-        </div>
+        </Field>
         <ProblemAlert error={publish.error} focus />
         {publish.data ? (
           <div aria-live="polite" className="space-y-2">
             <h3 className="text-sm font-semibold">{`Published ${publish.data.messages.length} message(s)`}</h3>
             <ol className="max-h-80 space-y-3 overflow-y-auto">
               {publish.data.messages.map((m, i) => (
-                <li key={i} className="space-y-1 rounded-md border border-slate-200 dark:border-slate-800 p-2 text-sm">
+                <li key={i} className="space-y-2 rounded-md border border-line bg-surface p-3 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <code className="break-all">{m.address}</code>
+                    <code className="font-medium break-all">{m.address}</code>
                     {m.key ? (
-                      <span>
+                      <span className="text-fg-muted">
                         key <code>{m.key}</code>
                       </span>
                     ) : null}
-                    <GenerationBadge source={m.source} />
+                    <ResponseSource source={m.source} />
                   </div>
                   <pre
                     aria-label="Published payload"
                     tabIndex={0}
-                    className="overflow-x-auto rounded bg-slate-100 dark:bg-slate-800 p-2 text-xs"
+                    className={preClass}
                   >
                     {JSON.stringify(m.payload, null, 2)}
                   </pre>
@@ -135,7 +111,7 @@ export function PublishDialog({
             </ol>
           </div>
         ) : null}
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Close
           </button>

@@ -3,14 +3,11 @@ import { useState } from "react";
 import { useMocks, type Mock } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import { primaryButton } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { SourceBadge } from "../../components/SourceBadge";
 import { CreateMockDialog } from "./CreateMockDialog";
-
-export const linkClass =
-  "font-medium text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
+import { Badge, Loading, PageHeader, linkClass, primaryButton } from "../../components/ui";
 
 const col = columnHelper<Mock>();
 
@@ -35,33 +32,48 @@ export function MocksList({ ws }: { ws: string }) {
         </Link>
       ),
     }),
-    col.accessor("route_prefix", { header: "Prefix", cell: (info) => <code>{info.getValue()}</code> }),
+    col.accessor("route_prefix", {
+      header: "Prefix",
+      cell: (info) => <code className="text-fg-muted">{info.getValue()}</code>,
+    }),
     col.accessor("active_version", {
       header: "Active version",
       cell: (info) => {
         const v = info.getValue();
-        return v == null ? "—" : `v${v}`;
+        return v == null ? <span className="text-fg-muted">—</span> : <Badge tone="ok">{`v${v}`}</Badge>;
       },
     }),
     col.accessor("source", { header: "Source", cell: (info) => <SourceBadge source={info.getValue()} /> }),
-    col.accessor((m) => m.data_plane_auth.mode, { id: "auth", header: "Data-plane auth" }),
+    col.accessor((m) => m.data_plane_auth.mode, {
+      id: "auth",
+      header: "Data-plane auth",
+      cell: (info) => <code className="text-fg-muted">{info.getValue()}</code>,
+    }),
   ];
 
   return (
-    <section className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Mocks</h1>
-        {canEdit ? (
-          <button type="button" className={primaryButton} onClick={() => setCreating(true)}>
-            New mock
-          </button>
-        ) : null}
-      </div>
+    <section className="space-y-6">
+      <PageHeader
+        title="Mocks"
+        description="Each mock serves an API contract with schema-valid responses."
+        actions={
+          canEdit ? (
+            <button type="button" className={primaryButton} onClick={() => setCreating(true)}>
+              New mock
+            </button>
+          ) : null
+        }
+      />
       {mocks.error ? <ProblemAlert error={mocks.error} /> : null}
       {mocks.data ? (
-        <DataTable caption="Mocks" columns={columns} data={mocks.data} empty="No mocks yet." />
+        <DataTable
+          caption="Mocks"
+          columns={columns}
+          data={mocks.data}
+          empty={canEdit ? "No mocks yet. Create one to serve a contract." : "No mocks yet."}
+        />
       ) : mocks.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       {creating ? (
         <CreateMockDialog

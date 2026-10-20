@@ -10,9 +10,19 @@ import {
   type StateChange,
   type TriggerDraft,
 } from "../../api/channels";
-import { inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import {
+  Loading,
+  Notice,
+  errorTextClass,
+  ghostButton,
+  hintClass,
+  inputClass,
+  labelClass,
+  primaryButton,
+  secondaryButton,
+} from "../../components/ui";
 
 const KINDS: { value: TriggerDraft["kind"]; label: string }[] = [
   { value: "schedule", label: "Schedule" },
@@ -60,11 +70,11 @@ function TriggerFields({
   const errorId = id("error");
   const describedBy = error ? errorId : undefined;
   return (
-    <fieldset className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 p-3">
-      <legend className="px-1 text-sm font-semibold">{`Trigger ${n}`}</legend>
+    <fieldset className="space-y-3 rounded-lg border border-line bg-surface-2/40 p-4">
+      <legend className="px-1.5 text-sm font-semibold">{`Trigger ${n}`}</legend>
       <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1">
-          <label htmlFor={id("kind")} className="block text-sm font-medium">
+        <div className="space-y-1.5">
+          <label htmlFor={id("kind")} className={labelClass}>
             Kind
           </label>
           <select
@@ -82,8 +92,8 @@ function TriggerFields({
           </select>
         </div>
         {draft.kind === "schedule" ? (
-          <div className="space-y-1">
-            <label htmlFor={id("every")} className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor={id("every")} className={labelClass}>
               Every (ms)
             </label>
             <input
@@ -95,14 +105,17 @@ function TriggerFields({
               aria-invalid={error !== undefined}
               aria-describedby={describedBy}
               onChange={(e) =>
-                onChange({ kind: "schedule", every_ms: e.target.value === "" ? NaN : Number(e.target.value) })
+                onChange({
+                  kind: "schedule",
+                  every_ms: e.target.value === "" ? NaN : Number(e.target.value),
+                })
               }
             />
           </div>
         ) : null}
         {draft.kind === "cron" ? (
-          <div className="min-w-48 flex-1 space-y-1">
-            <label htmlFor={id("cron")} className="block text-sm font-medium">
+          <div className="min-w-48 flex-1 space-y-1.5">
+            <label htmlFor={id("cron")} className={labelClass}>
               Cron expression
             </label>
             <input
@@ -118,8 +131,8 @@ function TriggerFields({
         ) : null}
         {draft.kind === "on_state_change" ? (
           <>
-            <div className="space-y-1">
-              <label htmlFor={id("resource")} className="block text-sm font-medium">
+            <div className="space-y-1.5">
+              <label htmlFor={id("resource")} className={labelClass}>
                 Resource type
               </label>
               <input
@@ -131,8 +144,8 @@ function TriggerFields({
                 onChange={(e) => onChange({ ...draft, resource_type: e.target.value })}
               />
             </div>
-            <div className="space-y-1">
-              <label htmlFor={id("change")} className="block text-sm font-medium">
+            <div className="space-y-1.5">
+              <label htmlFor={id("change")} className={labelClass}>
                 Change
               </label>
               <select
@@ -150,15 +163,20 @@ function TriggerFields({
             </div>
           </>
         ) : null}
-        <button type="button" className={secondaryButton} aria-label={`Remove trigger ${n}`} onClick={onRemove}>
+        <button
+          type="button"
+          className={`${ghostButton} ml-auto`}
+          aria-label={`Remove trigger ${n}`}
+          onClick={onRemove}
+        >
           Remove
         </button>
       </div>
-      <p id={id("kind-hint")} className="text-xs text-slate-600 dark:text-slate-400">
+      <p id={id("kind-hint")} className={hintClass}>
         {TRIGGER_KIND_HINTS[draft.kind]}
       </p>
       {error ? (
-        <p id={errorId} className="text-sm text-red-800 dark:text-red-300">
+        <p id={errorId} className={errorTextClass}>
           {error}
         </p>
       ) : null}
@@ -208,22 +226,25 @@ function TriggersForm({
   };
 
   return (
-    <form onSubmit={submit} className="space-y-4">
-      <label className="flex items-center gap-2 text-sm font-medium">
-        <input type="checkbox" checked={useContract} onChange={(e) => setUseContract(e.target.checked)} />
+    <form onSubmit={submit} className="space-y-5">
+      <label className="flex items-center gap-2.5 text-sm font-medium">
+        <input
+          type="checkbox"
+          className="size-4 shrink-0 rounded border-line-strong"
+          checked={useContract}
+          onChange={(e) => setUseContract(e.target.checked)}
+        />
         Use the contract&apos;s triggers
       </label>
       {useContract ? (
-        <p className="text-sm text-slate-700 dark:text-slate-300">The channel publishes on the triggers its contract declares.</p>
+        <p className="text-sm text-fg-muted">The channel publishes on the triggers its contract declares.</p>
       ) : (
         <div className="space-y-3">
           {unreadable > 0 ? (
-            <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
-              {`${unreadable} trigger(s) this editor cannot show will be dropped on save.`}
-            </p>
+            <Notice tone="warn">{`${unreadable} trigger(s) this editor cannot show will be dropped on save.`}</Notice>
           ) : null}
           {rows.length === 0 ? (
-            <p className="text-sm text-slate-700 dark:text-slate-300">No triggers: the channel publishes only on demand.</p>
+            <p className="text-sm text-fg-muted">No triggers: the channel publishes only on demand.</p>
           ) : null}
           {rows.map((row, i) => (
             <TriggerFields
@@ -234,19 +255,17 @@ function TriggersForm({
               onRemove={() => setRows((rs) => rs.filter((r) => r.key !== row.key))}
             />
           ))}
-          <button
-            type="button"
-            className={secondaryButton}
-            onClick={addRow}
-          >
+          <button type="button" className={secondaryButton} onClick={addRow}>
             Add trigger
           </button>
         </div>
       )}
       <ProblemAlert error={put.error} focus />
-      <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
-        Save
-      </button>
+      <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+        <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
+          Save
+        </button>
+      </div>
     </form>
   );
 }
@@ -271,7 +290,7 @@ export function ChannelTriggersEditor({
       ) : detail.error ? (
         <ProblemAlert error={detail.error} />
       ) : (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       )}
     </Drawer>
   );

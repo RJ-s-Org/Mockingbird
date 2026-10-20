@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useCreateApiKey, type CreateApiKey, type CreatedApiKey, type KeyScope, type Role } from "../api/queries";
-import { Dialog, inputClass, primaryButton, secondaryButton } from "../components/ConfirmDialog";
+import { Dialog } from "../components/ConfirmDialog";
 import { ProblemAlert } from "../components/ProblemAlert";
+import { Checkbox, Field, Notice, hintClass, inputClass, primaryButton, secondaryButton } from "../components/ui";
 
 const ROLES: Role[] = ["viewer", "editor", "admin", "owner"];
 const SCOPES: KeyScope[] = ["admin", "data-plane"];
@@ -73,21 +74,21 @@ export function CreateKeyDialog({
     return (
       <Dialog title="API key created" onClose={close}>
         <div className="space-y-4">
-          <p role="alert" className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm font-medium text-amber-900 dark:text-amber-200">
+          <Notice tone="warn" role="alert" className="font-medium">
             This token will not be shown again
-          </p>
-          <p className="text-sm text-slate-700 dark:text-slate-300">
+          </Notice>
+          <p className="text-sm text-fg-muted">
             Key <code>{created.key.key_id}</code> ({created.key.name}). Copy the token now and store it safely.
           </p>
           <code
             data-testid="api-key-token"
-            className="block break-all rounded-md border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-2 font-mono text-sm"
+            className="block rounded-md border border-line bg-surface-2 p-3 font-mono text-sm break-all text-fg"
           >
             {created.token}
           </code>
-          <div className="flex items-center justify-end gap-2">
+          <div className="flex items-center justify-end gap-2 pt-2">
             {copied ? (
-              <span role="status" className="text-sm text-green-800 dark:text-green-300">
+              <span role="status" className="text-sm font-medium text-ok-fg">
                 Copied.
               </span>
             ) : null}
@@ -108,11 +109,8 @@ export function CreateKeyDialog({
 
   return (
     <Dialog title="New API key" onClose={close}>
-      <form onSubmit={submit} className="space-y-4">
-        <div className="space-y-1">
-          <label htmlFor="key-name" className="block text-sm font-medium">
-            Name
-          </label>
+      <form onSubmit={submit} className="space-y-5">
+        <Field id="key-name" label="Name">
           <input
             id="key-name"
             className={inputClass}
@@ -121,11 +119,8 @@ export function CreateKeyDialog({
             required
             maxLength={128}
           />
-        </div>
-        <div className="space-y-1">
-          <label htmlFor="key-role" className="block text-sm font-medium">
-            Role
-          </label>
+        </Field>
+        <Field id="key-role" label="Role">
           <select
             id="key-role"
             className={inputClass}
@@ -138,32 +133,25 @@ export function CreateKeyDialog({
               </option>
             ))}
           </select>
-        </div>
-        <fieldset className="space-y-1">
-          <legend className="text-sm font-medium">Scopes</legend>
+        </Field>
+        <fieldset className="space-y-2">
+          <legend className="mb-1.5 text-sm font-medium">Scopes</legend>
           {SCOPES.map((scope) => (
-            <div key={scope} className="flex items-center gap-2">
-              <input
-                id={`key-scope-${scope}`}
-                type="checkbox"
-                checked={scopes.includes(scope)}
-                onChange={(e) => toggleScope(scope, e.target.checked)}
-              />
-              <label htmlFor={`key-scope-${scope}`} className="text-sm">
-                {scope}
-              </label>
-            </div>
+            <Checkbox
+              key={scope}
+              id={`key-scope-${scope}`}
+              label={scope}
+              checked={scopes.includes(scope)}
+              onChange={(on) => toggleScope(scope, on)}
+            />
           ))}
           {scopes.length === 0 ? (
-            <p className="text-xs text-red-800 dark:text-red-300">Choose at least one scope.</p>
+            <p className="text-xs text-bad-fg">Choose at least one scope.</p>
           ) : (
-            <p className="text-xs text-slate-600 dark:text-slate-400">admin: the Admin API. data-plane: mocks with api_key auth.</p>
+            <p className={hintClass}>admin: the Admin API. data-plane: mocks with api_key auth.</p>
           )}
         </fieldset>
-        <div className="space-y-1">
-          <label htmlFor="key-expires" className="block text-sm font-medium">
-            Expires on (optional)
-          </label>
+        <Field id="key-expires" label="Expires on (optional)">
           <input
             id="key-expires"
             type="date"
@@ -171,22 +159,17 @@ export function CreateKeyDialog({
             value={expires}
             onChange={(e) => setExpires(e.target.value)}
           />
-        </div>
+        </Field>
         {sysadmin ? (
-          <div className="flex items-center gap-2">
-            <input
-              id="key-sysadmin"
-              type="checkbox"
-              checked={asSysadmin}
-              onChange={(e) => setAsSysadmin(e.target.checked)}
-            />
-            <label htmlFor="key-sysadmin" className="text-sm font-medium">
-              Sysadmin key (acts as a sysadmin in every workspace)
-            </label>
-          </div>
+          <Checkbox
+            id="key-sysadmin"
+            label="Sysadmin key (acts as a sysadmin in every workspace)"
+            checked={asSysadmin}
+            onChange={setAsSysadmin}
+          />
         ) : null}
         <ProblemAlert error={create.error} focus />
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={secondaryButton} onClick={close}>
             Cancel
           </button>

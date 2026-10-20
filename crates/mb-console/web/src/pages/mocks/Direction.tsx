@@ -6,7 +6,7 @@ export function Direction({ value }: { value: string }) {
   return (
     <span
       title={hint}
-      className="cursor-help whitespace-nowrap underline decoration-slate-400 dark:decoration-slate-500 decoration-dotted underline-offset-2"
+      className="cursor-help whitespace-nowrap underline decoration-fg-muted decoration-dotted underline-offset-2"
     >
       {label}
     </span>

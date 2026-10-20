@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { useCreateMock, useProfiles, type Mock } from "../../api/queries";
-import { Dialog, inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
+import { Dialog } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { NAME_PATTERN, NAME_RULE, isValidName } from "../../lib/names";
+import { Checkbox, Field, errorTextClass, hintClass, inputClass, labelClass, primaryButton, secondaryButton } from "../../components/ui";
 
 /**
  * Creates a mock in `ws`. The name is checked against the server's rule as it
@@ -54,9 +55,9 @@ export function CreateMockDialog({
 
   return (
     <Dialog title="New mock" onClose={onClose}>
-      <form onSubmit={submit} className="space-y-4">
-        <div className="space-y-1">
-          <label htmlFor="new-mock-name" className="block text-sm font-medium">
+      <form onSubmit={submit} className="space-y-5">
+        <div className="space-y-1.5">
+          <label htmlFor="new-mock-name" className={labelClass}>
             Name
           </label>
           <input
@@ -69,14 +70,11 @@ export function CreateMockDialog({
             aria-invalid={nameInvalid}
             aria-describedby="new-mock-name-hint"
           />
-          <p id="new-mock-name-hint" className={`text-xs ${nameInvalid ? "text-red-800 dark:text-red-300" : "text-slate-600 dark:text-slate-400"}`}>
+          <p id="new-mock-name-hint" className={nameInvalid ? errorTextClass : hintClass}>
             {nameInvalid ? `Invalid name. ${NAME_RULE}` : NAME_RULE}
           </p>
         </div>
-        <div className="space-y-1">
-          <label htmlFor="new-mock-prefix" className="block text-sm font-medium">
-            Route prefix
-          </label>
+        <Field id="new-mock-prefix" label="Route prefix" hint="Defaults to a slash followed by the name.">
           <input
             id="new-mock-prefix"
             className={inputClass}
@@ -85,14 +83,8 @@ export function CreateMockDialog({
             aria-describedby="new-mock-prefix-hint"
             onChange={(e) => edit(setPrefix)(e.target.value)}
           />
-          <p id="new-mock-prefix-hint" className="text-xs text-slate-600 dark:text-slate-400">
-            Defaults to a slash followed by the name.
-          </p>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor="new-mock-persona" className="block text-sm font-medium">
-            Persona
-          </label>
+        </Field>
+        <Field id="new-mock-persona" label="Persona">
           <textarea
             id="new-mock-persona"
             className={inputClass}
@@ -100,21 +92,16 @@ export function CreateMockDialog({
             value={persona}
             onChange={(e) => edit(setPersona)(e.target.value)}
           />
-        </div>
+        </Field>
         <ProfileSelect id="new-mock-profile" value={profile} onChange={edit(setProfile)} profiles={profiles.data} />
-        <div className="flex items-center gap-2">
-          <input
-            id="new-mock-overrides"
-            type="checkbox"
-            checked={headerOverrides}
-            onChange={(e) => edit(setHeaderOverrides)(e.target.checked)}
-          />
-          <label htmlFor="new-mock-overrides" className="text-sm font-medium">
-            Header overrides
-          </label>
-        </div>
+        <Checkbox
+          id="new-mock-overrides"
+          label="Header overrides"
+          checked={headerOverrides}
+          onChange={edit(setHeaderOverrides)}
+        />
         <ProblemAlert error={create.error} focus />
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel
           </button>
@@ -143,10 +130,7 @@ export function ProfileSelect({
   const names = (profiles ?? []).map((p) => p.name);
   if (value && !names.includes(value)) names.unshift(value);
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-sm font-medium">
-        LLM profile
-      </label>
+    <Field id={id} label="LLM profile">
       <select id={id} className={inputClass} value={value} onChange={(e) => onChange(e.target.value)}>
         <option value="">None</option>
         {names.map((n) => (
@@ -155,6 +139,6 @@ export function ProfileSelect({
           </option>
         ))}
       </select>
-    </div>
+    </Field>
   );
 }

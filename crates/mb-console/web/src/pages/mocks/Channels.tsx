@@ -12,13 +12,13 @@ import {
 import { useMock } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import { inputClass, secondaryButton } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { ChannelTriggersEditor } from "./ChannelTriggersEditor";
 import { Direction } from "./Direction";
 import { EventFeed } from "./EventFeed";
 import { PublishDialog } from "./PublishDialog";
+import { Badge, Card, Loading, Notice, focusRing, inputClass, labelClass, secondaryButton } from "../../components/ui";
 
 const col = columnHelper<ChannelView>();
 
@@ -48,8 +48,8 @@ function Switch({
       title={title}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 border-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400 disabled:opacity-60 ${
-        checked ? "bg-indigo-700" : "bg-slate-400 dark:bg-slate-600"
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 border-transparent transition-colors ${focusRing} disabled:cursor-not-allowed disabled:opacity-60 ${
+        checked ? "bg-accent-solid" : "bg-line-strong"
       }`}
     >
       <span
@@ -64,15 +64,15 @@ function Switch({
 
 /** Published/received counters and the last error, labelled in text (not only colour). */
 function Activity({ activity }: { activity: ChannelActivity | null | undefined }) {
-  if (!activity) return <span className="text-slate-600 dark:text-slate-400">Not running</span>;
+  if (!activity) return <span className="text-fg-muted">Not running</span>;
   return (
     <div className="space-y-1">
-      <div className="flex flex-wrap gap-x-3">
+      <div className="flex flex-wrap gap-x-3 whitespace-nowrap tabular-nums">
         <span>{`${activity.published} published`}</span>
         <span>{`${activity.received} received`}</span>
       </div>
       {activity.last_error ? (
-        <p className="text-red-800 dark:text-red-300">
+        <p className="text-bad-fg">
           <span className="font-semibold">Last error:</span> <span>{activity.last_error}</span>
         </p>
       ) : null}
@@ -91,8 +91,8 @@ function BrokerSelector({ ws, mock, readOnly }: { ws: string; mock: string; read
   // Keep a saved broker that is no longer configured, so the selection is honest.
   const names = brokers.data?.map((b) => b.name) ?? [];
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-sm font-medium">
+    <div className="space-y-1.5">
+      <label htmlFor={id} className={labelClass}>
         Broker
       </label>
       <select
@@ -138,13 +138,22 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
       cell: ({ row }) => (
         <div>
           <code className="font-semibold">{row.original.id}</code>
-          {row.original.title ? <p className="text-slate-700 dark:text-slate-300">{row.original.title}</p> : null}
+          {row.original.title ? <p className="text-fg-muted">{row.original.title}</p> : null}
         </div>
       ),
     }),
-    col.accessor("direction", { header: "Direction", cell: (info) => <Direction value={info.getValue()} /> }),
-    col.accessor("protocol", { header: "Protocol" }),
-    col.accessor("address", { header: "Address", cell: (info) => <code className="break-all">{info.getValue()}</code> }),
+    col.accessor("direction", {
+      header: "Direction",
+      cell: (info) => <Direction value={info.getValue()} />,
+    }),
+    col.accessor("protocol", {
+      header: "Protocol",
+      cell: (info) => <Badge tone="info">{info.getValue()}</Badge>,
+    }),
+    col.accessor("address", {
+      header: "Address",
+      cell: (info) => <code className="break-all text-fg-muted">{info.getValue()}</code>,
+    }),
     col.accessor("enabled", {
       header: "Enabled",
       cell: ({ row }) => {
@@ -158,7 +167,11 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
             title={reason}
             onChange={(enabled) =>
               // Keep the channel's triggers: the contract's (null) unless overridden.
-              put.mutate({ id: c.id, enabled, triggers: c.settings_source === "contract" ? null : c.triggers })
+              put.mutate({
+                id: c.id,
+                enabled,
+                triggers: c.settings_source === "contract" ? null : c.triggers,
+              })
             }
           />
         );
@@ -168,7 +181,7 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
       header: "Triggers",
       cell: (info) => {
         const triggers = info.getValue();
-        if (triggers.length === 0) return <span className="text-slate-600 dark:text-slate-400">none</span>;
+        if (triggers.length === 0) return <span className="text-fg-muted">none</span>;
         return (
           <ul className="space-y-0.5">
             {triggers.map((t, i) => (
@@ -178,7 +191,10 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
         );
       },
     }),
-    col.accessor("activity", { header: "Activity", cell: (info) => <Activity activity={info.getValue()} /> }),
+    col.accessor("activity", {
+      header: "Activity",
+      cell: (info) => <Activity activity={info.getValue()} />,
+    }),
     col.display({
       id: "actions",
       header: "Actions",
@@ -187,7 +203,7 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
         if (c.direction !== "publish") return null;
         const reason = lockedReason(c);
         return (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-nowrap gap-2">
             <button
               type="button"
               className={secondaryButton}
@@ -216,19 +232,19 @@ export function Channels({ ws, mock }: { ws: string; mock: string }) {
 
   return (
     <div className="space-y-6">
-      {readOnly ? (
-        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{readOnly}</p>
-      ) : null}
-      <BrokerSelector ws={ws} mock={mock} readOnly={readOnly} />
+      {readOnly ? <Notice tone="warn">{readOnly}</Notice> : null}
+      <Card>
+        <BrokerSelector ws={ws} mock={mock} readOnly={readOnly} />
+      </Card>
       <ProblemAlert error={channels.error ?? put.error} />
       {channels.data ? (
         channels.data.length === 0 ? (
-          <p className="text-slate-700 dark:text-slate-300">This mock&apos;s active contract declares no channels.</p>
+          <Notice>This mock&apos;s active contract declares no channels.</Notice>
         ) : (
           <DataTable caption="Channels" columns={columns} data={channels.data} />
         )
       ) : channels.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       <EventFeed ws={ws} mock={mock} />
       {editing ? (

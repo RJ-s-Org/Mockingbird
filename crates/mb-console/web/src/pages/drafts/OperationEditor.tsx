@@ -1,13 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError } from "../../api/client";
 import { usePutDraft } from "../../api/imports";
-import {
-  ConfirmDialog,
-  dangerButton,
-  inputClass,
-  primaryButton,
-  secondaryButton,
-} from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import {
   HTTP_METHODS,
@@ -19,6 +13,7 @@ import {
   type OperationEdit,
   type OperationRef,
 } from "./openapi";
+import { Field, cardClass, dangerButton, inputClass, primaryButton, secondaryButton } from "../../components/ui";
 
 interface Form {
   method: string;
@@ -69,7 +64,7 @@ export function OperationEditor({
     initial = readOperation(document, operation);
   } catch (e) {
     return (
-      <section aria-label={title} className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
+      <section aria-label={title} className={`${cardClass} space-y-3 p-4 sm:p-5`}>
         <ProblemAlert error={e} />
         <button type="button" className={secondaryButton} onClick={onClose}>
           Close
@@ -176,14 +171,11 @@ function EditorForm({
       aria-label={title}
       onSubmit={save}
       noValidate
-      className="space-y-4 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
+      className={`${cardClass} space-y-5 p-4 sm:p-5`}
     >
       <h3 className="text-base font-semibold">{title}</h3>
-      <div className="grid gap-4 sm:grid-cols-[8rem_1fr]">
-        <div className="space-y-1">
-          <label htmlFor={`${id}-method`} className="block text-sm font-medium">
-            Method
-          </label>
+      <div className="grid gap-5 sm:grid-cols-[8rem_1fr]">
+        <Field id={`${id}-method`} label="Method">
           <select
             id={`${id}-method`}
             className={inputClass}
@@ -196,30 +188,24 @@ function EditorForm({
               </option>
             ))}
           </select>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-path`} className="block text-sm font-medium">
-            Path
-          </label>
+        </Field>
+        <Field id={`${id}-path`} label="Path">
           <input
             id={`${id}-path`}
             className={`${inputClass} font-mono`}
             value={form.path}
             onChange={(e) => update({ path: e.target.value })}
           />
-        </div>
+        </Field>
       </div>
-      <div className="space-y-1">
-        <label htmlFor={`${id}-summary`} className="block text-sm font-medium">
-          Summary
-        </label>
+      <Field id={`${id}-summary`} label="Summary">
         <input
           id={`${id}-summary`}
           className={inputClass}
           value={form.summary}
           onChange={(e) => update({ summary: e.target.value })}
         />
-      </div>
+      </Field>
       <SchemaField
         id={`${id}-request`}
         label="Request schema"
@@ -240,12 +226,12 @@ function EditorForm({
         />
       ))}
       {editError ? (
-        <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
+        <div role="alert" className="rounded-md border border-bad-line bg-bad-bg px-3 py-2.5 text-sm text-bad-fg">
           {editError}
         </div>
       ) : null}
       <SaveError error={put.error} />
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
         <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
           Save
         </button>
@@ -291,10 +277,7 @@ function SchemaField({
 }) {
   const errorId = `${id}-error`;
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-sm font-medium">
-        {label}
-      </label>
+    <Field id={id} label={label} error={error}>
       <textarea
         id={id}
         rows={6}
@@ -305,12 +288,7 @@ function SchemaField({
         aria-describedby={error ? errorId : undefined}
         onChange={(e) => onChange(e.target.value)}
       />
-      {error ? (
-        <p id={errorId} className="text-sm text-red-800 dark:text-red-300">
-          {error}
-        </p>
-      ) : null}
-    </div>
+    </Field>
   );
 }
 
@@ -326,7 +304,7 @@ function SaveError({ error }: { error: unknown }) {
   if (problems.length === 0) return <ProblemAlert error={error} focus />;
   const problem = (error as ApiError).problem;
   return (
-    <div ref={ref} role="alert" tabIndex={-1} className="focus:outline-none rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
+    <div ref={ref} role="alert" tabIndex={-1} className="rounded-md border border-bad-line bg-bad-bg px-3 py-2.5 text-sm text-bad-fg focus:outline-none">
       <p className="font-semibold">{problem?.title || "The draft was not saved"}</p>
       {problem?.detail ? <p className="mt-1">{problem.detail}</p> : null}
       <ul role="list" aria-label="Problems" className="mt-2 list-disc space-y-1 pl-5">

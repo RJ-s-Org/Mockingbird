@@ -8,6 +8,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-10-20
+
 ### Added
 
 - Agent toolkit: every capability is reachable from coding agents (see [docs/agents.md](docs/agents.md)).
@@ -16,11 +18,6 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
   - `mockingbird agent install <agent>` for Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code, Windsurf and Claude Desktop, and `agent print|skills`.
   - Five agent skills, the Claude Code / Codex / Cursor plugin and marketplaces, a Gemini CLI extension, a Kiro power, and `install.sh` / `install.ps1`.
 - LLM profiles take extra provider request headers (`llm.profiles.<name>.headers`, `headers` in the Admin API) whose values may embed `${env:NAME}` secret references, for Cloudflare AI Gateway's `cf-aig-authorization`, Azure OpenAI's `api-key` and similar. Migration `0400_profile_headers` adds the column.
-
-## [0.1.0] - Unreleased
-
-### Added
-
 - P1 Core loop: the Cargo workspace, the Mockingbird Contract Model (`mb-mcm`), the OpenAPI 3 and Swagger 2 compilers, the OpenAI-compatible `mb-llm` provider, the `mb-engine` generation pipeline (prompt, validate, repair, faker fallback), the REST adapter, in-memory session state and the `mockingbird serve <spec>` CLI.
 - P2 Platform: SQLite and Postgres storage with migrations, the control-plane entities, the Admin API, scenarios and override headers, config-as-code (`mockingbird.yaml`) with `--watch`, OpenTelemetry tracing, Prometheus metrics and the Docker image.
 - P3 Console and auth: the embedded React/TanStack console, OIDC login (Rauthy), RBAC, admin and data-plane API keys, the audit log, request log streaming and the Compose stack.
@@ -42,5 +39,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
   - **Quality:** nightly LLM evals and an offline throughput bench (`mb-evals`), image scanning, a cross-node HA test and a Compose end-to-end flow in CI.
   - **Documents:** community files, the example gallery, and the operator docs in `docs/` (architecture, configuration reference, deployment guides, runbook, upgrade notes, performance).
 
-[Unreleased]: https://github.com/rjs-git/mockingbird/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/rjs-git/mockingbird/releases/tag/v0.1.0
+### Changed
+
+- Console: a refined look in light and dark mode. Colours come from semantic tokens defined once per theme; pages share one set of buttons, fields, cards, notices and badges; the header carries the product mark (and a favicon) and stays compact on phones; forms are grouped into titled cards, with Delete mock in its own card; HTTP methods, status codes, response sources and statuses (keys, contract versions, readiness, draft confidence) are shown as colour-coded badges.
+
+[Unreleased]: https://github.com/rjs-git/mockingbird/compare/v0.1.0-rc.1...HEAD
+[0.1.0-rc.1]: https://github.com/rjs-git/mockingbird/releases/tag/v0.1.0-rc.1

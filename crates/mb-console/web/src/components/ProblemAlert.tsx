@@ -27,10 +27,15 @@ export function ProblemAlert({ error, focus = false }: { error: unknown; focus?:
       ref={ref}
       role="alert"
       tabIndex={focus ? -1 : undefined}
-      className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+      className="flex gap-2.5 rounded-md border border-bad-line bg-bad-bg px-3 py-2.5 text-sm text-bad-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-bad-solid"
     >
-      <p className="font-semibold">{title}</p>
-      {detail && detail !== title ? <p className="mt-1">{detail}</p> : null}
+      <svg aria-hidden="true" viewBox="0 0 20 20" className="mt-0.5 size-4 shrink-0 fill-current">
+        <path d="M10 1.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM9 5.5h2v6H9v-6Zm0 7.5h2v2H9v-2Z" />
+      </svg>
+      <div className="min-w-0 break-words">
+        <p className="font-semibold">{title}</p>
+        {detail && detail !== title ? <p className="mt-0.5">{detail}</p> : null}
+      </div>
     </div>
   );
 }

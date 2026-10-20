@@ -3,8 +3,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { isFinished, useCancelImport, useImportJob } from "../../api/imports";
 import { keys } from "../../api/queries";
-import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { Card, Loading, primaryButton, secondaryButton } from "../../components/ui";
 
 const PHASES: Record<string, string> = {
   queued: "Queued",
@@ -51,68 +51,69 @@ export function ImportProgress({ ws, mock, job: id }: { ws: string; mock: string
         </button>
       </div>
     ) : (
-      <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+      <Loading />
     );
   }
 
   const { progress } = job.data;
   const source = job.data.source_name ? ` of ${job.data.source_name}` : "";
   return (
-    <section
-      aria-labelledby="import-progress-title"
-      className="max-w-2xl space-y-4 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
-    >
-      <h2 id="import-progress-title" className="text-lg font-semibold">
-        Import{source}
-      </h2>
-      {!isFinished(job.data) ? (
-        <div className="space-y-2" aria-live="polite">
-          <p className="text-sm font-medium">{phaseLabel(progress.phase)}</p>
-          {progress.total > 0 ? (
-            <div className="flex items-center gap-3">
-              <progress value={progress.done} max={progress.total} aria-label="Import progress" className="h-2 w-64" />
-              <span className="text-sm text-slate-700 dark:text-slate-300">
-                {progress.done} of {progress.total}
-              </span>
-            </div>
-          ) : null}
-          <button
-            type="button"
-            className={secondaryButton}
-            disabled={cancel.isPending}
-            onClick={() => cancel.mutate(id)}
-          >
-            Cancel import
-          </button>
-          <ProblemAlert error={cancel.error} />
-        </div>
-      ) : null}
-      {job.data.status === "done" ? (
-        <p role="status" className="text-sm text-green-800 dark:text-green-300">
-          Import finished; opening the draft…
-        </p>
-      ) : null}
-      {job.data.status === "failed" ? (
-        <div className="space-y-3">
-          <div role="alert" className="rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/60 p-3 text-sm text-red-900 dark:text-red-200">
-            <p className="font-semibold">Import failed</p>
-            {job.data.error ? <p className="mt-1">{job.data.error}</p> : null}
+    <Card as="section" id="import-progress-title" title={<>Import{source}</>} className="max-w-2xl">
+      <div className="space-y-4">
+        {!isFinished(job.data) ? (
+          <div className="space-y-3" aria-live="polite">
+            <Loading label={phaseLabel(progress.phase)} />
+            {progress.total > 0 ? (
+              <div className="flex items-center gap-3">
+                <progress
+                  value={progress.done}
+                  max={progress.total}
+                  aria-label="Import progress"
+                  className="h-2 w-64 max-w-full accent-accent-solid"
+                />
+                <span className="text-sm whitespace-nowrap text-fg-muted">
+                  {progress.done} of {progress.total}
+                </span>
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className={secondaryButton}
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate(id)}
+            >
+              Cancel import
+            </button>
+            <ProblemAlert error={cancel.error} />
           </div>
-          <button type="button" className={primaryButton} onClick={startOver}>
-            Start over
-          </button>
-        </div>
-      ) : null}
-      {job.data.status === "canceled" ? (
-        <div className="space-y-3">
-          <p role="status" className="text-sm font-medium">
-            Import canceled
+        ) : null}
+        {job.data.status === "done" ? (
+          <p role="status" className="text-sm font-medium text-ok-fg">
+            Import finished; opening the draft…
           </p>
-          <button type="button" className={primaryButton} onClick={startOver}>
-            Start over
-          </button>
-        </div>
-      ) : null}
-    </section>
+        ) : null}
+        {job.data.status === "failed" ? (
+          <div className="space-y-3">
+            <div role="alert" className="rounded-md border border-bad-line bg-bad-bg px-3 py-2.5 text-sm text-bad-fg">
+              <p className="font-semibold">Import failed</p>
+              {job.data.error ? <p className="mt-1">{job.data.error}</p> : null}
+            </div>
+            <button type="button" className={primaryButton} onClick={startOver}>
+              Start over
+            </button>
+          </div>
+        ) : null}
+        {job.data.status === "canceled" ? (
+          <div className="space-y-3">
+            <p role="status" className="text-sm font-medium text-fg-muted">
+              Import canceled
+            </p>
+            <button type="button" className={primaryButton} onClick={startOver}>
+              Start over
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </Card>
   );
 }

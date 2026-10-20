@@ -1,8 +1,9 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { rememberWorkspace, useCreateWorkspace, useWorkspaces } from "../api/queries";
-import { Dialog, inputClass, primaryButton, secondaryButton } from "./ConfirmDialog";
+import { Dialog } from "./ConfirmDialog";
 import { ProblemAlert } from "./ProblemAlert";
+import { Field, focusRing, ghostButton, inputClass, primaryButton, secondaryButton } from "./ui";
 
 /** Picks the current workspace; a sysadmin can also create one. */
 export function WorkspaceSwitcher({
@@ -26,12 +27,12 @@ export function WorkspaceSwitcher({
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2">
-      <label htmlFor="workspace-switcher" className="sr-only text-sm font-medium text-slate-200 sm:not-sr-only">
+      <label htmlFor="workspace-switcher" className="sr-only text-sm text-fg-muted sm:not-sr-only">
         Workspace
       </label>
       <select
         id="workspace-switcher"
-        className="max-w-[11rem] min-w-0 rounded-md border border-slate-500 bg-slate-800 px-2 py-1 text-sm text-white sm:max-w-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+        className={`max-w-[11rem] min-w-0 rounded-md border border-line-strong bg-surface px-2 py-1 text-sm font-medium text-fg shadow-xs sm:max-w-xs ${focusRing}`}
         value={current ?? ""}
         onChange={(e) => open(e.target.value)}
         disabled={!workspaces.data}
@@ -50,11 +51,10 @@ export function WorkspaceSwitcher({
         ))}
       </select>
       {sysadmin ? (
-        <button
-          type="button"
-          className="rounded-md border border-slate-400 px-2 py-1 text-sm whitespace-nowrap text-white hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-          onClick={() => setCreating(true)}
-        >
+        <button type="button" className={`${ghostButton} px-2 py-1`} onClick={() => setCreating(true)}>
+          <svg aria-hidden="true" viewBox="0 0 16 16" className="size-3.5 fill-current">
+            <path d="M7.25 2h1.5v5.25H14v1.5H8.75V14h-1.5V8.75H2v-1.5h5.25z" />
+          </svg>
           New workspace
         </button>
       ) : null}
@@ -87,10 +87,7 @@ function NewWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCre
   return (
     <Dialog title="New workspace" onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
-        <div className="space-y-1">
-          <label htmlFor="new-workspace-name" className="block text-sm font-medium">
-            Name
-          </label>
+        <Field id="new-workspace-name" label="Name" hint="Lowercase letters, digits and dashes.">
           <input
             id="new-workspace-name"
             className={inputClass}
@@ -100,23 +97,17 @@ function NewWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCre
             pattern="[a-z0-9][a-z0-9\-]{0,62}"
             aria-describedby="new-workspace-name-hint"
           />
-          <p id="new-workspace-name-hint" className="text-xs text-slate-600 dark:text-slate-400">
-            Lowercase letters, digits and dashes.
-          </p>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor="new-workspace-display" className="block text-sm font-medium">
-            Display name
-          </label>
+        </Field>
+        <Field id="new-workspace-display" label="Display name">
           <input
             id="new-workspace-display"
             className={inputClass}
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
           />
-        </div>
+        </Field>
         <ProblemAlert error={create.error} focus />
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel
           </button>

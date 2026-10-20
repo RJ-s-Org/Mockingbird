@@ -2,6 +2,7 @@ import { useContract, type ContractDetail } from "../../api/queries";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { Badge, Loading } from "../../components/ui";
 
 type Operation = ContractDetail["operations"][number];
 
@@ -10,9 +11,9 @@ const col = columnHelper<Operation>();
 // `/pkg.Service/Method`, `Service/Port Operation`); `method` and `path` are
 // empty outside HTTP.
 const columns = [
-  col.accessor("protocol", { header: "Protocol" }),
+  col.accessor("protocol", { header: "Protocol", cell: (info) => <Badge>{info.getValue()}</Badge> }),
   col.accessor("target", { header: "Target", cell: (info) => <code className="break-all">{info.getValue()}</code> }),
-  col.accessor("id", { header: "Operation ID" }),
+  col.accessor("id", { header: "Operation ID", cell: (info) => <span className="break-all">{info.getValue()}</span> }),
   col.accessor("kind", { header: "Kind" }),
 ];
 
@@ -33,8 +34,8 @@ export function OperationsTable({
     <Drawer title={`Operations of version ${version}`} onClose={onClose}>
       {contract.error ? <ProblemAlert error={contract.error} /> : null}
       {contract.data ? (
-        <div className="space-y-3">
-          <p className="text-sm text-slate-700 dark:text-slate-300">
+        <div className="space-y-4">
+          <p className="text-sm text-fg-muted">
             {contract.data.title} {contract.data.api_version}
           </p>
           <DataTable
@@ -45,7 +46,7 @@ export function OperationsTable({
           />
         </div>
       ) : contract.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
     </Drawer>
   );
