@@ -255,8 +255,12 @@ jobs:
           load: true
           tags: mockingbird:scan
           cache-from: type=gha,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
+      # A digest pushed by this job is a single-platform index; without a
+      # platform Trivy looks for linux/amd64 in it and fails on arm64.
       - name: Scan the image
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        env:
+          TRIVY_PLATFORM: linux/${{ matrix.platform.arch }}
         with:
           version: v0.75.0
           image-ref: ${{ needs.verify.outputs.publish == 'true' && format('{0}@{1}', needs.verify.outputs.image, steps.build.outputs.digest) || 'mockingbird:scan' }}
