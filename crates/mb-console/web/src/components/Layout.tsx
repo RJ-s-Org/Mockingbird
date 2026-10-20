@@ -186,11 +186,12 @@ function UserMenu({ name, local }: { name: string; local: boolean }) {
       <span className="flex min-w-0 items-center gap-2">
         <span
           aria-hidden="true"
+          title={name}
           className="grid size-7 shrink-0 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
         >
           {initial}
         </span>
-        <span className="max-w-[7rem] truncate text-sm font-medium sm:max-w-[10rem]">{name}</span>
+        <span className="sr-only text-sm font-medium sm:not-sr-only sm:max-w-[10rem] sm:truncate">{name}</span>
       </span>
       {local ? null : (
         <button type="button" className={`${secondaryButton} py-1`} onClick={() => void signOut()}>
