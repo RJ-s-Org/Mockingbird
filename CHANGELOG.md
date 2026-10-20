@@ -41,6 +41,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Changed
 
+- The repository moved to `RJ-s-Org/Mockingbird`: images are `ghcr.io/rj-s-org/mockingbird`, the chart is `oci://ghcr.io/rj-s-org/charts/mockingbird`, and the installers download from the new repository.
 - Console: a refined look in light and dark mode. Colours come from semantic tokens defined once per theme; pages share one set of buttons, fields, cards, notices and badges; the header carries the product mark (and a favicon) and stays compact on phones; forms are grouped into titled cards, with Delete mock in its own card; HTTP methods, status codes, response sources and statuses (keys, contract versions, readiness, draft confidence) are shown as colour-coded badges.
 
 [Unreleased]: https://github.com/rj-s-org/mockingbird/compare/v0.1.0-rc.1...HEAD
