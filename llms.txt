@@ -1,0 +1,19 @@
+# Mockingbird
+
+> Mock-endpoint platform: import an API contract (OpenAPI/Swagger, GraphQL, protobuf/gRPC, WSDL/SOAP, AsyncAPI) and get a running mock that answers with schema-valid, LLM-generated responses, with per-session state, scenarios, chaos and event channels. One binary: `mockingbird`. Agents drive it through `mockingbird mcp` (MCP server) or JSON-printing CLI commands.
+
+## Agents
+
+- [Coding agents guide](docs/agents.md): install into Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code, Windsurf, ChatGPT; the MCP tool list; LLM provider presets
+- [Entry skill](plugins/mockingbird/skills/mockingbird/SKILL.md): what to use when
+- [Setup skill](plugins/mockingbird/skills/mockingbird-setup/SKILL.md): install, LLM providers (OpenRouter, Google AI Studio, Cloudflare AI Gateway, BYOK)
+- [Mock an API skill](plugins/mockingbird/skills/mockingbird-mock-api/SKILL.md): import, call, scenarios, sessions, chaos, events
+- [Self-host skill](plugins/mockingbird/skills/mockingbird-deploy/SKILL.md): background server, Docker, Compose, Helm, auth, remote MCP
+- [Testing skill](plugins/mockingbird/skills/mockingbird-testing/SKILL.md): offline mode, fixtures, CI
+
+## Docs
+
+- [README](README.md): protocols, overrides, scenarios, Admin API, smart import, auth
+- [Configuration reference](docs/configuration.md): every `mockingbird.yaml` key
+- [Running locally](docs/deploy/local.md), [Docker Compose](docs/deploy/compose.md), [Kubernetes](docs/deploy/kubernetes.md)
+- [Operations runbook](docs/operations/runbook.md)

@@ -1,0 +1,8 @@
+{
+  "name": "mockingbird",
+  "owner": { "name": "Mockingbird contributors" },
+  "metadata": { "description": "Mockingbird: mock any API from its contract, from your coding agent.", "version": "0.1.0", "pluginRoot": "plugins" },
+  "plugins": [
+    { "name": "mockingbird", "source": "mockingbird", "description": "MCP tools and skills to install Mockingbird, configure an LLM, and create, serve and self-host mock APIs." }
+  ]
+}

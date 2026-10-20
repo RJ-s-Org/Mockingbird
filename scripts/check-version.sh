@@ -9,6 +9,8 @@
 #     Cargo.toml ([workspace.package]);
 #   - deploy/helm/mockingbird/Chart.yaml has `appVersion: "<version>"`
 #     (skipped with a notice while the chart does not exist);
+#   - the agent plugin manifests (plugins/mockingbird, gemini-extension.json)
+#     have `"version": "<version>"`;
 #   - scripts/changelog-section.sh <version> finds a CHANGELOG.md section.
 # Exits 2 on bad usage.
 set -euo pipefail
@@ -48,6 +50,12 @@ if [[ -f $CHART ]]; then
 else
     echo "check-version: notice: $CHART does not exist; skipping the appVersion check" >&2
 fi
+
+for manifest in plugins/mockingbird/.claude-plugin/plugin.json plugins/mockingbird/plugin.json \
+    plugins/mockingbird/.cursor-plugin/plugin.json gemini-extension.json; do
+    grep -Eq "\"version\":[[:space:]]*\"$(printf '%s' "$VERSION" | sed 's/[.]/\\./g')\"" "$ROOT/$manifest" ||
+        fail "$manifest does not have \"version\": \"$VERSION\""
+done
 
 bash "$ROOT/scripts/changelog-section.sh" "$VERSION" >/dev/null ||
     fail "CHANGELOG.md has no section for $VERSION"

@@ -8,6 +8,15 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- Agent toolkit: every capability is reachable from coding agents (see [docs/agents.md](docs/agents.md)).
+  - `mockingbird mcp`: an MCP server (stdio, or streamable HTTP with bearer auth, origin checks, `--read-only` and host tools hidden unless `--allow-local-tools`) with 33 tools covering setup, LLM onboarding, the background server and the Admin API, plus the skills as resources and prompts.
+  - Onboarding commands that print JSON: `mockingbird init`, `mockingbird llm providers|configure|test` with presets for OpenRouter, Google AI Studio, Cloudflare AI Gateway and Workers AI, OpenAI, Anthropic, DeepSeek, Groq, Mistral, Together, Azure OpenAI, Ollama, LM Studio and any OpenAI-compatible endpoint; `mockingbird server start|stop|status|logs`; `mockingbird doctor`.
+  - `mockingbird agent install <agent>` for Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code, Windsurf and Claude Desktop, and `agent print|skills`.
+  - Five agent skills, the Claude Code / Codex / Cursor plugin and marketplaces, a Gemini CLI extension, a Kiro power, and `install.sh` / `install.ps1`.
+- LLM profiles take extra provider request headers (`llm.profiles.<name>.headers`, `headers` in the Admin API) whose values may embed `${env:NAME}` secret references, for Cloudflare AI Gateway's `cf-aig-authorization`, Azure OpenAI's `api-key` and similar. Migration `0400_profile_headers` adds the column.
+
 ## [0.1.0] - Unreleased
 
 ### Added

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Starts the Mockingbird MCP server for an agent plugin, installing
+# Mockingbird first when it is missing. Stdout is the MCP channel: every
+# other message goes to stderr.
+set -eu
+
+find_mb() {
+    if command -v mockingbird >/dev/null 2>&1; then
+        command -v mockingbird
+    elif [ -x "${MOCKINGBIRD_INSTALL_DIR:-$HOME/.mockingbird/bin}/mockingbird" ]; then
+        echo "${MOCKINGBIRD_INSTALL_DIR:-$HOME/.mockingbird/bin}/mockingbird"
+    else
+        return 1
+    fi
+}
+
+if ! mb=$(find_mb); then
+    echo "mockingbird is not installed; installing it (https://github.com/rjs-git/mockingbird)" >&2
+    sh "$(dirname "$0")/install.sh" >&2
+    mb=$(find_mb)
+fi
+exec "$mb" mcp "$@"

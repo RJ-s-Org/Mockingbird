@@ -1,0 +1,12 @@
+{
+  "name": "mockingbird",
+  "version": "0.1.0",
+  "description": "Mock any API from its contract with LLM-generated, schema-valid responses.",
+  "contextFileName": "plugins/mockingbird/skills/mockingbird/SKILL.md",
+  "mcpServers": {
+    "mockingbird": {
+      "command": "mockingbird",
+      "args": ["mcp"]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mockingbird": {
+      "command": "mockingbird",
+      "args": ["mcp"]
+    }
+  }
+}

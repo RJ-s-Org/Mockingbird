@@ -306,6 +306,7 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | `MB_STATE_URL` | | `storage.state_url` |
 | `MB_BUS_URL` | | `bus.url` |
 | `MB_LLM_BASE_URL`, `MB_LLM_MODEL`, `MB_LLM_API_KEY`, `MB_LLM_JSON_SCHEMA` | `--llm-timeout` | The `default` LLM profile. |
+| `MB_STATE_DIR` | `--state-dir` | Where `mockingbird server start` keeps the background server's pid, log and URLs (default `.mockingbird`). Not a config file key. |
 | | `--offline` | Faker only, no LLM calls. |
 | | `-c`, `--config` | The config file. |
 | | `--watch` | Reconcile again when the file or a contract changes (a usage error on `data` nodes). |

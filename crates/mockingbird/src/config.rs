@@ -88,6 +88,26 @@ pub enum Command {
     Validate { contract: PathBuf },
     /// Print the Admin API's OpenAPI document as JSON.
     Openapi,
+    /// Write a starter mockingbird.yaml: storage, an LLM profile from a
+    /// provider preset, and mocks for the given contracts.
+    Init(crate::onboard::InitArgs),
+    /// LLM provider onboarding: list presets, configure a profile, test it.
+    #[command(subcommand)]
+    Llm(crate::onboard::LlmCommand),
+    /// Run `serve` in the background: start, stop, status, logs.
+    #[command(subcommand)]
+    Server(crate::daemon::ServerCommand),
+    /// Report the installation, configuration, provider keys and server
+    /// state as JSON.
+    Doctor(crate::daemon::DoctorArgs),
+    /// Run the Model Context Protocol server that exposes Mockingbird to
+    /// coding agents (stdio by default, or streamable HTTP).
+    Mcp(crate::mcp::McpArgs),
+    /// Set Mockingbird up in a coding agent: its MCP server entry and
+    /// skills (Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code,
+    /// Windsurf, Claude Desktop).
+    #[command(subcommand)]
+    Agent(crate::agents::AgentCommand),
     #[command(flatten)]
     Client(ClientCommand),
 }
