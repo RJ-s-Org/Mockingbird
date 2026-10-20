@@ -10,9 +10,9 @@ import {
 } from "../../api/imports";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import { inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { readOnlyReason } from "./Overview";
+import { Card, hintClass, inputClass, labelClass, primaryButton } from "../../components/ui";
 
 type SourceType = ImportSource["type"];
 
@@ -74,141 +74,145 @@ export function ImportWizard({ ws, mock }: { ws: string; mock: string }) {
   };
 
   return (
-    <form onSubmit={submit} className="max-w-2xl space-y-4 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
-      <h2 className="text-lg font-semibold">Import API documentation</h2>
-      <p className="text-sm text-slate-700 dark:text-slate-300">
-        Turns Markdown, HTML or PDF documentation, a HAR recording or a Postman collection into a draft contract version
-        to review before approval.
-      </p>
-      {reason ? (
-        <p id="import-read-only" className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
-          {reason}
-        </p>
-      ) : null}
-      <fieldset className="space-y-1">
-        <legend className="text-sm font-medium">Source</legend>
-        <div className="flex flex-wrap gap-4">
-          {SOURCES.map((s) => (
-            <div key={s.value} className="flex items-center gap-2">
-              <input
-                id={`import-source-${s.value}`}
-                type="radio"
-                name="import-source"
-                value={s.value}
-                checked={source === s.value}
-                onChange={() => setSource(s.value)}
-              />
-              <label htmlFor={`import-source-${s.value}`} className="text-sm">
-                {s.label}
-              </label>
-            </div>
-          ))}
-        </div>
-      </fieldset>
+    <Card
+      className="max-w-2xl"
+      title="Import API documentation"
+      description="Turns Markdown, HTML or PDF documentation, a HAR recording or a Postman collection into a draft contract version to review before approval."
+    >
+      <form onSubmit={submit} className="space-y-5">
+        {reason ? (
+          <p id="import-read-only" className="rounded-md border border-warn-line bg-warn-bg px-3 py-2.5 text-sm text-warn-fg">
+            {reason}
+          </p>
+        ) : null}
+        <fieldset className="space-y-2">
+          <legend className={labelClass}>Source</legend>
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
+            {SOURCES.map((s) => (
+              <div key={s.value} className="flex items-center gap-2">
+                <input
+                  id={`import-source-${s.value}`}
+                  type="radio"
+                  name="import-source"
+                  value={s.value}
+                  checked={source === s.value}
+                  onChange={() => setSource(s.value)}
+                  className="size-4"
+                />
+                <label htmlFor={`import-source-${s.value}`} className="text-sm">
+                  {s.label}
+                </label>
+              </div>
+            ))}
+          </div>
+        </fieldset>
 
-      {source === "file" ? (
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="space-y-1">
-            <label htmlFor="import-file" className="block text-sm font-medium">
-              Document file
+        {source === "file" ? (
+          <div className="flex flex-wrap items-start gap-5">
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <label htmlFor="import-file" className={labelClass}>
+                Document file
+              </label>
+              <input
+                id="import-file"
+                type="file"
+                accept={IMPORT_FILE_EXTENSIONS.join(",")}
+                className="block w-full text-sm text-fg file:mr-3 file:rounded-md file:border file:border-line-strong file:bg-surface-2 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-fg hover:file:bg-surface"
+                onChange={(e) => setFile(e.target.files?.[0])}
+                aria-describedby="import-file-hint"
+              />
+              <p id="import-file-hint" className={hintClass}>
+                Markdown, HTML, PDF, plain text, a HAR recording or a Postman collection; at most 20 MiB.
+              </p>
+            </div>
+            <div className="w-full space-y-1.5 sm:w-56">
+              <label htmlFor="import-file-kind" className={labelClass}>
+                Kind
+              </label>
+              <select
+                id="import-file-kind"
+                className={inputClass}
+                value={fileKind}
+                onChange={(e) => setFileKind(e.target.value as ImportKind | "")}
+              >
+                <option value="">Detect automatically</option>
+                {FILE_KINDS.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : null}
+
+        {source === "url" ? (
+          <div className="space-y-1.5">
+            <label htmlFor="import-url" className={labelClass}>
+              Document URL
             </label>
             <input
-              id="import-file"
-              type="file"
-              accept={IMPORT_FILE_EXTENSIONS.join(",")}
-              className="text-sm"
-              onChange={(e) => setFile(e.target.files?.[0])}
-              aria-describedby="import-file-hint"
-            />
-            <p id="import-file-hint" className="text-xs text-slate-600 dark:text-slate-400">
-              Markdown, HTML, PDF, plain text, a HAR recording or a Postman collection; at most 20 MiB.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="import-file-kind" className="block text-sm font-medium">
-              Kind
-            </label>
-            <select
-              id="import-file-kind"
-              className={inputClass}
-              value={fileKind}
-              onChange={(e) => setFileKind(e.target.value as ImportKind | "")}
-            >
-              <option value="">Detect automatically</option>
-              {FILE_KINDS.map((k) => (
-                <option key={k.value} value={k.value}>
-                  {k.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      ) : null}
-
-      {source === "url" ? (
-        <div className="space-y-1">
-          <label htmlFor="import-url" className="block text-sm font-medium">
-            Document URL
-          </label>
-          <input
-            id="import-url"
-            type="url"
-            required
-            className={`${inputClass} w-full`}
-            placeholder="https://docs.example.com/api"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-          />
-        </div>
-      ) : null}
-
-      {source === "text" ? (
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <label htmlFor="import-text-kind" className="block text-sm font-medium">
-              Kind
-            </label>
-            <select
-              id="import-text-kind"
+              id="import-url"
+              type="url"
               required
-              className={inputClass}
-              value={textKind}
-              onChange={(e) => setTextKind(e.target.value as TextKind | "")}
-            >
-              <option value="">Choose a kind</option>
-              {TEXT_KINDS.map((k) => (
-                <option key={k.value} value={k.value}>
-                  {k.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="import-text" className="block text-sm font-medium">
-              Document text
-            </label>
-            <textarea
-              id="import-text"
-              required
-              rows={12}
-              className={`${inputClass} w-full font-mono`}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
+              className={`${inputClass} w-full`}
+              placeholder="https://docs.example.com/api"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
             />
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      <button
-        type="submit"
-        className={primaryButton}
-        disabled={reason !== undefined || create.isPending}
-        title={reason || undefined}
-        aria-describedby={reason ? "import-read-only" : undefined}
-      >
-        Start import
-      </button>
-      <ProblemAlert error={create.error} />
-    </form>
+        {source === "text" ? (
+          <div className="space-y-5">
+            <div className="space-y-1.5 sm:w-56">
+              <label htmlFor="import-text-kind" className={labelClass}>
+                Kind
+              </label>
+              <select
+                id="import-text-kind"
+                required
+                className={inputClass}
+                value={textKind}
+                onChange={(e) => setTextKind(e.target.value as TextKind | "")}
+              >
+                <option value="">Choose a kind</option>
+                {TEXT_KINDS.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="import-text" className={labelClass}>
+                Document text
+              </label>
+              <textarea
+                id="import-text"
+                required
+                rows={12}
+                className={`${inputClass} w-full font-mono`}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+              />
+            </div>
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+          <button
+            type="submit"
+            className={primaryButton}
+            disabled={reason !== undefined || create.isPending}
+            title={reason || undefined}
+            aria-describedby={reason ? "import-read-only" : undefined}
+          >
+            Start import
+          </button>
+        </div>
+        <ProblemAlert error={create.error} />
+      </form>
+    </Card>
   );
 }

@@ -6,6 +6,46 @@
  */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * Semantic colour tokens. Components use these (`bg-surface`, `text-fg-muted`,
+ * `border-line`, `bg-ok-bg`, …) instead of raw palette colours, so each
+ * colour is chosen once per theme: `html.dark` below redefines them.
+ * Text tokens keep at least 4.5:1 against `canvas`, `surface` and their tone
+ * background; `line-strong` (form controls) keeps 3:1 against `surface`.
+ */
+@theme {
+  --color-canvas: var(--color-slate-50);
+  --color-surface: var(--color-white);
+  --color-surface-2: var(--color-slate-100);
+  --color-line: var(--color-slate-200);
+  --color-line-strong: var(--color-slate-400);
+  --color-fg: var(--color-slate-900);
+  --color-fg-muted: var(--color-slate-600);
+  --color-accent: var(--color-indigo-700);
+  --color-accent-hover: var(--color-indigo-900);
+  --color-accent-soft: var(--color-indigo-50);
+  --color-accent-solid: var(--color-indigo-600);
+  --color-accent-solid-hover: var(--color-indigo-700);
+  --color-ring: var(--color-indigo-600);
+
+  --color-ok-bg: var(--color-emerald-50);
+  --color-ok-line: var(--color-emerald-200);
+  --color-ok-fg: var(--color-emerald-800);
+  --color-warn-bg: var(--color-amber-50);
+  --color-warn-line: var(--color-amber-300);
+  --color-warn-fg: var(--color-amber-900);
+  --color-bad-bg: var(--color-red-50);
+  --color-bad-line: var(--color-red-200);
+  --color-bad-fg: var(--color-red-800);
+  --color-bad-solid: var(--color-red-600);
+  --color-bad-solid-hover: var(--color-red-700);
+  --color-info-bg: var(--color-sky-50);
+  --color-info-line: var(--color-sky-200);
+  --color-info-fg: var(--color-sky-900);
+
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
 @layer base {
   :root {
     color-scheme: light;
@@ -13,19 +53,58 @@
 
   :root.dark {
     color-scheme: dark;
+    --color-canvas: var(--color-slate-950);
+    --color-surface: var(--color-slate-900);
+    --color-surface-2: var(--color-slate-800);
+    --color-line: var(--color-slate-800);
+    --color-line-strong: var(--color-slate-500);
+    --color-fg: var(--color-slate-100);
+    --color-fg-muted: var(--color-slate-400);
+    --color-accent: var(--color-indigo-300);
+    --color-accent-hover: var(--color-indigo-200);
+    --color-accent-soft: color-mix(in oklab, var(--color-indigo-500) 18%, transparent);
+    --color-accent-solid: var(--color-indigo-600);
+    --color-accent-solid-hover: var(--color-indigo-700);
+    --color-ring: var(--color-indigo-400);
+
+    --color-ok-bg: color-mix(in oklab, var(--color-emerald-950) 70%, var(--color-slate-900));
+    --color-ok-line: var(--color-emerald-800);
+    --color-ok-fg: var(--color-emerald-300);
+    --color-warn-bg: color-mix(in oklab, var(--color-amber-950) 70%, var(--color-slate-900));
+    --color-warn-line: var(--color-amber-700);
+    --color-warn-fg: var(--color-amber-200);
+    --color-bad-bg: color-mix(in oklab, var(--color-red-950) 70%, var(--color-slate-900));
+    --color-bad-line: var(--color-red-800);
+    --color-bad-fg: var(--color-red-300);
+    --color-bad-solid: var(--color-red-700);
+    --color-bad-solid-hover: var(--color-red-800);
+    --color-info-bg: color-mix(in oklab, var(--color-sky-950) 70%, var(--color-slate-900));
+    --color-info-line: var(--color-sky-800);
+    --color-info-fg: var(--color-sky-200);
   }
 
   body {
-    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+    @apply bg-canvas text-fg antialiased;
+  }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  code {
+    font-size: 0.875em;
   }
 
   :focus-visible {
-    outline: 2px solid var(--color-indigo-700);
+    outline: 2px solid var(--color-ring);
     outline-offset: 2px;
   }
 
-  .dark :focus-visible {
-    outline-color: var(--color-indigo-400);
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--color-accent-solid);
   }
 
   /*

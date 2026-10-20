@@ -1,9 +1,26 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useActiveOperations } from "../../api/queries";
 import { olderThan, recentRequests, subscribeRequests, type LiveFilters, type LiveRequestView } from "../../api/sse";
-import { inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { RequestDrawer } from "./RequestDrawer";
-import { TableScroll } from "../../components/DataTable";
+import {
+  TableScroll,
+  emptyCellClass,
+  tableClass,
+  tdClass,
+  thClass,
+  theadClass,
+  trClickableClass,
+} from "../../components/DataTable";
+import { Method, ResponseSource, StatusCode } from "../../components/http";
+import {
+  Notice,
+  cardClass,
+  focusRing,
+  inputClass,
+  labelClass,
+  primaryButton,
+  secondaryButton,
+} from "../../components/ui";
 
 /** The table keeps at most this many rows, newest first. */
 export const MAX_ROWS = 500;
@@ -15,9 +32,8 @@ interface Row {
   record: LiveRequestView;
 }
 
-const cell = "px-3 py-2 align-top";
-const rowButton =
-  "rounded-sm text-left font-medium text-indigo-800 dark:text-indigo-300 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
+const nowrapCell = `${tdClass} whitespace-nowrap`;
+const rowButton = `rounded-sm text-left font-medium text-accent tabular-nums underline-offset-2 hover:underline ${focusRing}`;
 
 /** Moves focus between the row buttons of `tbody` with the arrow keys. */
 function onArrowKeys(e: KeyboardEvent<HTMLTableSectionElement>) {
@@ -106,9 +122,9 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end gap-4">
-        <div className="space-y-1">
-          <label htmlFor="live-operation" className="block text-sm font-medium">
+      <div className={`${cardClass} flex flex-wrap items-end gap-4 p-4`}>
+        <div className="min-w-48 space-y-1.5">
+          <label htmlFor="live-operation" className={labelClass}>
             Operation
           </label>
           <select
@@ -125,8 +141,8 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
             ))}
           </select>
         </div>
-        <div className="space-y-1">
-          <label htmlFor="live-session" className="block text-sm font-medium">
+        <div className="min-w-40 space-y-1.5">
+          <label htmlFor="live-session" className={labelClass}>
             Session
           </label>
           <input
@@ -136,8 +152,8 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
             onChange={(e) => filter("session")(e.target.value)}
           />
         </div>
-        <div className="space-y-1">
-          <label htmlFor="live-source" className="block text-sm font-medium">
+        <div className="min-w-36 space-y-1.5">
+          <label htmlFor="live-source" className={labelClass}>
             Source
           </label>
           <select
@@ -154,41 +170,44 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
             ))}
           </select>
         </div>
-        <button type="button" className={paused ? primaryButton : secondaryButton} onClick={togglePause}>
+        <button
+          type="button"
+          className={`${paused ? primaryButton : secondaryButton} sm:ml-auto`}
+          onClick={togglePause}
+        >
+          <span
+            aria-hidden="true"
+            className={`size-2 rounded-full ${paused ? "bg-white/80" : interrupted ? "bg-warn-fg" : "bg-ok-fg"}`}
+          />
           {paused ? "Resume" : "Pause"}
         </button>
       </div>
       {history === "loaded" && rows.length > 0 ? (
-        <p className="text-sm text-slate-600 dark:text-slate-400">
-          Showing the latest recorded requests, then new ones as they arrive.
-        </p>
+        <p className="text-sm text-fg-muted">Showing the latest recorded requests, then new ones as they arrive.</p>
       ) : null}
       <div aria-live="polite" className="space-y-2 text-sm">
         {paused ? (
-          <p className="text-slate-700 dark:text-slate-300">
+          <p className="text-fg-muted">
             {missed} {missed === 1 ? "request" : "requests"} arrived while paused.
           </p>
         ) : null}
-        {interrupted ? <p className="text-amber-900 dark:text-amber-200">The live feed connection was interrupted.</p> : null}
+        {interrupted ? <p className="text-warn-fg">The live feed connection was interrupted.</p> : null}
       </div>
       {dropped !== undefined ? (
-        <div
-          role="status"
-          className="flex items-center justify-between gap-4 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200"
-        >
+        <Notice tone="warn" role="status" className="flex items-center justify-between gap-4">
           <span>{dropped} requests were dropped</span>
           <button type="button" className={secondaryButton} onClick={() => setDropped(undefined)}>
             Dismiss
           </button>
-        </div>
+        </Notice>
       ) : null}
       <TableScroll>
-        <table className="w-full border-collapse text-left text-sm">
+        <table className={tableClass}>
           <caption className="sr-only">Live requests</caption>
-          <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+          <thead className={theadClass}>
             <tr>
               {["Time", "Method", "Path", "Status", "Source", "Latency", "Session"].map((h) => (
-                <th key={h} scope="col" className="px-3 py-2 font-semibold">
+                <th key={h} scope="col" className={thClass}>
                   {h}
                 </th>
               ))}
@@ -197,7 +216,7 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
           <tbody onKeyDown={onArrowKeys}>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
+                <td colSpan={7} className={emptyCellClass}>
                   {history === "loading"
                     ? "Loading recent requests…"
                     : "No requests recorded yet. New ones appear here as they are served."}
@@ -207,12 +226,8 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
               rows.map(({ key, record }) => {
                 const time = new Date(record.at).toLocaleTimeString();
                 return (
-                  <tr
-                    key={key}
-                    className="cursor-pointer border-b border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    onClick={() => setSelected(record)}
-                  >
-                    <td className={cell}>
+                  <tr key={key} className={trClickableClass} onClick={() => setSelected(record)}>
+                    <td className={nowrapCell}>
                       <button
                         type="button"
                         data-row
@@ -226,17 +241,21 @@ export function LiveRequests({ ws, mock }: { ws: string; mock: string }) {
                         <time dateTime={record.at}>{time}</time>
                       </button>
                     </td>
-                    <td className={cell}>
-                      <code>{record.method}</code>
+                    <td className={nowrapCell}>
+                      <Method method={record.method} />
                     </td>
-                    <td className={cell}>
-                      <code className="break-all">{record.path}</code>
+                    <td className={nowrapCell}>
+                      <code>{record.path}</code>
                     </td>
-                    <td className={cell}>{record.status}</td>
-                    <td className={cell}>{record.source ?? "—"}</td>
-                    <td className={cell}>{`${record.latency_ms} ms`}</td>
-                    <td className={cell}>
-                      <code>{record.session}</code>
+                    <td className={tdClass}>
+                      <StatusCode status={record.status} />
+                    </td>
+                    <td className={tdClass}>
+                      <ResponseSource source={record.source} />
+                    </td>
+                    <td className={`${nowrapCell} tabular-nums text-fg-muted`}>{`${record.latency_ms} ms`}</td>
+                    <td className={nowrapCell}>
+                      <code className="text-fg-muted">{record.session}</code>
                     </td>
                   </tr>
                 );

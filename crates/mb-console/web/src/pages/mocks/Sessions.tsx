@@ -10,23 +10,31 @@ import {
 } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import {
-  ConfirmDialog,
-  dangerButton,
-  inputClass,
-  primaryButton,
-  secondaryButton,
-} from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { parseJson } from "../../lib/json";
+import {
+  Card,
+  Loading,
+  SavedNote,
+  errorTextClass,
+  hintClass,
+  inputClass,
+  labelClass,
+  preClass,
+  primaryButton,
+  secondaryButton,
+} from "../../components/ui";
 
 const col = columnHelper<SessionInfo>();
 
 /** Saves `value` as pretty JSON named `fileName`, through a Blob URL. */
 export function downloadJson(fileName: string, value: unknown): void {
-  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: "application/json",
+  });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -58,11 +66,21 @@ export function Sessions({ ws, mock }: { ws: string; mock: string }) {
   };
 
   const columns = [
-    col.accessor("session", { header: "Session", cell: (info) => <code>{info.getValue()}</code> }),
-    col.accessor("resources", { header: "Resources" }),
+    col.accessor("session", {
+      header: "Session",
+      cell: (info) => <code className="font-medium whitespace-nowrap">{info.getValue()}</code>,
+    }),
+    col.accessor("resources", {
+      header: "Resources",
+      cell: (info) => <span className="tabular-nums">{info.getValue()}</span>,
+    }),
     col.accessor("last_touched", {
       header: "Last touched",
-      cell: (info) => <time dateTime={info.getValue()}>{new Date(info.getValue()).toLocaleString()}</time>,
+      cell: (info) => (
+        <time dateTime={info.getValue()} className="whitespace-nowrap text-fg-muted">
+          {new Date(info.getValue()).toLocaleString()}
+        </time>
+      ),
     }),
     col.display({
       id: "actions",
@@ -70,7 +88,7 @@ export function Sessions({ ws, mock }: { ws: string; mock: string }) {
       cell: ({ row }) => {
         const s = row.original.session;
         return (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-nowrap gap-2">
             <button
               type="button"
               className={secondaryButton}
@@ -90,7 +108,7 @@ export function Sessions({ ws, mock }: { ws: string; mock: string }) {
             {canEdit ? (
               <button
                 type="button"
-                className={dangerButton}
+                className={secondaryButton}
                 aria-label={`Reset session ${s}`}
                 onClick={() => setResetting(s)}
               >
@@ -110,7 +128,7 @@ export function Sessions({ ws, mock }: { ws: string; mock: string }) {
       {sessions.data ? (
         <DataTable caption="Sessions" columns={columns} data={sessions.data} empty="No sessions yet." />
       ) : sessions.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       {inspecting !== undefined ? (
         <SessionDrawer ws={ws} mock={mock} session={inspecting} onClose={() => setInspecting(undefined)} />
@@ -121,7 +139,11 @@ export function Sessions({ ws, mock }: { ws: string; mock: string }) {
           message="Every resource stored in this session is deleted."
           confirmLabel="Reset"
           busy={reset.isPending}
-          onConfirm={() => reset.mutate(resetting, { onSettled: () => setResetting(undefined) })}
+          onConfirm={() =>
+            reset.mutate(resetting, {
+              onSettled: () => setResetting(undefined),
+            })
+          }
           onCancel={() => setResetting(undefined)}
         />
       ) : null}
@@ -146,11 +168,11 @@ function SessionDrawer({
     <Drawer title={`Session ${session}`} onClose={onClose}>
       <ProblemAlert error={exported.error} />
       {exported.data ? (
-        <pre tabIndex={0} className="overflow-x-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-xs text-slate-900 dark:text-slate-100">
+        <pre tabIndex={0} className={preClass}>
           {JSON.stringify(exported.data, null, 2)}
         </pre>
       ) : exported.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
     </Drawer>
   );
@@ -198,61 +220,57 @@ function SeedForm({ ws, mock }: { ws: string; mock: string }) {
   };
 
   return (
-    <form
-      onSubmit={(e) => void submit(e)}
-      className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
-    >
-      <h2 className="text-lg font-semibold">Seed a session</h2>
-      <div className="flex flex-wrap items-end gap-4">
-        <div className="space-y-1">
-          <label htmlFor="seed-session" className="block text-sm font-medium">
-            Session to seed
-          </label>
-          <input
-            id="seed-session"
-            className={inputClass}
-            value={session}
-            required
-            maxLength={128}
-            onChange={(e) => setSession(e.target.value)}
-          />
+    <Card title="Seed a session">
+      <form onSubmit={(e) => void submit(e)} className="space-y-4">
+        <div className="flex flex-wrap items-start gap-5">
+          <div className="min-w-48 space-y-1.5">
+            <label htmlFor="seed-session" className={labelClass}>
+              Session to seed
+            </label>
+            <input
+              id="seed-session"
+              className={inputClass}
+              value={session}
+              required
+              maxLength={128}
+              onChange={(e) => setSession(e.target.value)}
+            />
+          </div>
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <label htmlFor="seed-file" className={labelClass}>
+              Resources file
+            </label>
+            <input
+              id="seed-file"
+              ref={input}
+              type="file"
+              accept=".json,application/json"
+              className="block w-full text-sm text-fg-muted file:mr-3 file:rounded-md file:border file:border-line-strong file:bg-surface file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-fg hover:file:bg-surface-2"
+              onChange={(e) => {
+                setFile(e.target.files?.[0]);
+                setError(undefined);
+              }}
+              aria-invalid={error !== undefined}
+              aria-describedby={error ? "seed-error" : "seed-file-hint"}
+            />
+            <p id="seed-file-hint" className={hintClass}>
+              A JSON array of resources, as Export saves it. Replaces the session&apos;s contents.
+            </p>
+          </div>
         </div>
-        <div className="space-y-1">
-          <label htmlFor="seed-file" className="block text-sm font-medium">
-            Resources file
-          </label>
-          <input
-            id="seed-file"
-            ref={input}
-            type="file"
-            accept=".json,application/json"
-            className="text-sm"
-            onChange={(e) => {
-              setFile(e.target.files?.[0]);
-              setError(undefined);
-            }}
-            aria-invalid={error !== undefined}
-            aria-describedby={error ? "seed-error" : "seed-file-hint"}
-          />
-          <p id="seed-file-hint" className="text-xs text-slate-600 dark:text-slate-400">
-            A JSON array of resources, as Export saves it. Replaces the session&apos;s contents.
+        {error ? (
+          <p id="seed-error" className={errorTextClass}>
+            {error}
           </p>
+        ) : null}
+        <ProblemAlert error={seed.error} focus />
+        <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+          <button type="submit" className={primaryButton} disabled={!file || !session || seed.isPending}>
+            Seed
+          </button>
+          {seeded && !seed.isPending ? <SavedNote>{seeded}</SavedNote> : null}
         </div>
-        <button type="submit" className={primaryButton} disabled={!file || !session || seed.isPending}>
-          Seed
-        </button>
-      </div>
-      {error ? (
-        <p id="seed-error" className="text-sm text-red-800 dark:text-red-300">
-          {error}
-        </p>
-      ) : null}
-      {seeded && !seed.isPending ? (
-        <p role="status" className="text-sm text-green-800 dark:text-green-300">
-          {seeded}
-        </p>
-      ) : null}
-      <ProblemAlert error={seed.error} focus />
-    </form>
+      </form>
+    </Card>
   );
 }

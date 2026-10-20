@@ -2,11 +2,12 @@ import { useState } from "react";
 import { useDeleteProfile, useProfiles, type Profile } from "../api/queries";
 import { useMe } from "../auth/me";
 import { can } from "../auth/permissions";
-import { ConfirmDialog, primaryButton, secondaryButton } from "../components/ConfirmDialog";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../components/DataTable";
 import { ProblemAlert } from "../components/ProblemAlert";
 import { SourceBadge } from "../components/SourceBadge";
 import { ProfileEditor } from "./ProfileEditor";
+import { Loading, Notice, PageHeader, primaryButton, secondaryButton } from "../components/ui";
 
 const col = columnHelper<Profile>();
 
@@ -63,7 +64,7 @@ export function Profiles({ ws }: { ws: string }) {
                   </button>
                 </div>
               ) : (
-                <span className="text-slate-600 dark:text-slate-400">Managed by config file</span>
+                <span className="text-sm whitespace-nowrap text-fg-muted">Managed by config file</span>
               ),
           }),
         ]
@@ -79,44 +80,43 @@ export function Profiles({ ws }: { ws: string }) {
     });
 
   return (
-    <section className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">LLM profiles</h1>
-        {canManage ? (
-          <button
-            type="button"
-            className={primaryButton}
-            onClick={() => {
-              setOutcome(undefined);
-              setEditing(null);
-            }}
-          >
-            New profile
-          </button>
-        ) : null}
-      </div>
-      {me.data && !canManage ? (
-        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
-          Read-only: managing LLM profiles needs the admin role.
-        </p>
-      ) : null}
+    <section className="space-y-6">
+      <PageHeader
+        title="LLM profiles"
+        description="The model endpoints mocks use to generate responses."
+        actions={
+          canManage ? (
+            <button
+              type="button"
+              className={primaryButton}
+              onClick={() => {
+                setOutcome(undefined);
+                setEditing(null);
+              }}
+            >
+              New profile
+            </button>
+          ) : null
+        }
+      />
+      {me.data && !canManage ? <Notice tone="warn">Read-only: managing LLM profiles needs the admin role.</Notice> : null}
       {outcome ? (
-        <div role="status" className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-sm">
-          <p className="text-green-800 dark:text-green-300">{outcome.message}</p>
+        <Notice role="status">
+          <p className="font-medium text-ok-fg">{outcome.message}</p>
           {outcome.warnings.length > 0 ? (
-            <ul className="mt-2 list-disc pl-5 text-amber-900 dark:text-amber-200">
+            <ul className="mt-2 list-disc space-y-0.5 pl-5 text-warn-fg">
               {outcome.warnings.map((w) => (
                 <li key={w}>{w}</li>
               ))}
             </ul>
           ) : null}
-        </div>
+        </Notice>
       ) : null}
       {profiles.error ? <ProblemAlert error={profiles.error} /> : null}
       {profiles.data ? (
         <DataTable caption="LLM profiles" columns={columns} data={profiles.data} empty="No LLM profiles yet." />
       ) : profiles.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       {editing !== undefined ? (
         <ProfileEditor

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { usePatchMock, type ChaosSettings, type Mock, type MockLimits } from "../../api/queries";
-import { inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { ProblemAlert } from "../../components/ProblemAlert";
+import { Card, Field, Notice, SavedNote, hintClass, inputClass, primaryButton } from "../../components/ui";
 
 /** Mirrors `ChaosSettings::MAX_JITTER_MS` in mb-store. */
 const MAX_JITTER_MS = 30_000;
@@ -169,10 +169,7 @@ function NumberField({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-sm font-medium">
-        {label}
-      </label>
+    <Field id={id} label={label} error={error}>
       <input
         id={id}
         type="number"
@@ -185,12 +182,7 @@ function NumberField({
         aria-invalid={error !== undefined}
         aria-describedby={error ? `${id}-error` : undefined}
       />
-      {error ? (
-        <p id={`${id}-error`} className="text-sm text-red-800 dark:text-red-300">
-          {error}
-        </p>
-      ) : null}
-    </div>
+    </Field>
   );
 }
 
@@ -208,7 +200,7 @@ export function ChaosFields({
 }) {
   const set = (key: keyof ChaosDraft) => (value: string) => onChange({ ...draft, [key]: value });
   return (
-    <div className="grid gap-4 sm:grid-cols-2">
+    <div className="grid gap-5 sm:grid-cols-2">
       <NumberField
         id={`${idPrefix}-error-rate`}
         label="Error rate (%)"
@@ -288,88 +280,89 @@ export function ChaosLimits({
   };
 
   return (
-    <section aria-labelledby="chaos-limits-heading" className="max-w-2xl space-y-4 border-t border-slate-200 dark:border-slate-800 pt-6">
-      <h2 id="chaos-limits-heading" className="text-lg font-semibold">
-        Chaos and limits
-      </h2>
-      <p className="text-xs text-slate-600 dark:text-slate-400">
-        Callers can bypass chaos with X-Mockingbird-Chaos: off when header overrides are enabled.
-      </p>
-      {reason ? (
-        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
-      ) : null}
-      {saved && !dirty ? (
-        <p role="status" className="text-sm text-green-800 dark:text-green-300">
-          Saved.
-        </p>
-      ) : null}
-      <form onSubmit={submit} className="space-y-4">
-        <fieldset disabled={reason !== undefined} className="space-y-4">
+    <Card
+      as="section"
+      id="chaos-limits-heading"
+      title="Chaos and limits"
+      description="Callers can bypass chaos with X-Mockingbird-Chaos: off when header overrides are enabled."
+    >
+      <form onSubmit={submit} className="space-y-5">
+        {reason ? <Notice tone="warn">{reason}</Notice> : null}
+        <fieldset disabled={reason !== undefined} className="space-y-6">
           <legend className="sr-only">Chaos and limits of {mock.name}</legend>
-          <ChaosFields idPrefix="mock-chaos" draft={chaos} errors={chaosErr} onChange={setChaos} />
-          <div className="grid gap-4 sm:grid-cols-2">
-            <NumberField
-              id="mock-rate-limit"
-              label="Rate limit (requests/s)"
-              value={limits.rps}
-              error={limitsErr.rps}
-              min={0}
-              max={MAX_REQUESTS_PER_SECOND}
-              step="any"
-              onChange={setLimit("rps")}
-            />
-            <NumberField
-              id="mock-burst"
-              label="Burst"
-              value={limits.burst}
-              error={limitsErr.burst}
-              min={1}
-              max={MAX_BURST}
-              onChange={setLimit("burst")}
-            />
-            <NumberField
-              id="mock-token-budget"
-              label="Daily token budget"
-              value={limits.budget}
-              error={limitsErr.budget}
-              min={1}
-              onChange={setLimit("budget")}
-            />
-            <div className="hidden sm:block" />
-            <NumberField
-              id="mock-max-request"
-              label="Max request size (KiB)"
-              value={limits.requestKib}
-              error={limitsErr.requestKib}
-              min={1}
-              max={MAX_REQUEST_KIB}
-              step="any"
-              onChange={setLimit("requestKib")}
-            />
-            <NumberField
-              id="mock-max-response"
-              label="Max response size (KiB)"
-              value={limits.responseKib}
-              error={limitsErr.responseKib}
-              min={1}
-              max={MAX_RESPONSE_KIB}
-              step="any"
-              onChange={setLimit("responseKib")}
-            />
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-fg-muted">Chaos</h3>
+            <ChaosFields idPrefix="mock-chaos" draft={chaos} errors={chaosErr} onChange={setChaos} />
           </div>
-          <p className="text-xs text-slate-600 dark:text-slate-400">Blank limits fall back to the server&apos;s global limits.</p>
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-fg-muted">Limits</h3>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <NumberField
+                id="mock-rate-limit"
+                label="Rate limit (requests/s)"
+                value={limits.rps}
+                error={limitsErr.rps}
+                min={0}
+                max={MAX_REQUESTS_PER_SECOND}
+                step="any"
+                onChange={setLimit("rps")}
+              />
+              <NumberField
+                id="mock-burst"
+                label="Burst"
+                value={limits.burst}
+                error={limitsErr.burst}
+                min={1}
+                max={MAX_BURST}
+                onChange={setLimit("burst")}
+              />
+              <NumberField
+                id="mock-token-budget"
+                label="Daily token budget"
+                value={limits.budget}
+                error={limitsErr.budget}
+                min={1}
+                onChange={setLimit("budget")}
+              />
+              <div className="hidden sm:block" />
+              <NumberField
+                id="mock-max-request"
+                label="Max request size (KiB)"
+                value={limits.requestKib}
+                error={limitsErr.requestKib}
+                min={1}
+                max={MAX_REQUEST_KIB}
+                step="any"
+                onChange={setLimit("requestKib")}
+              />
+              <NumberField
+                id="mock-max-response"
+                label="Max response size (KiB)"
+                value={limits.responseKib}
+                error={limitsErr.responseKib}
+                min={1}
+                max={MAX_RESPONSE_KIB}
+                step="any"
+                onChange={setLimit("responseKib")}
+              />
+            </div>
+            <p className={hintClass}>Blank limits fall back to the server&apos;s global limits.</p>
+          </div>
         </fieldset>
         <ProblemAlert error={patch.error} focus />
         {canEdit ? (
-          <button
-            type="submit"
-            className={primaryButton}
-            disabled={reason !== undefined || !dirty || invalid || patch.isPending}
-          >
-            Save chaos and limits
-          </button>
+          <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+            <button
+              type="submit"
+              className={primaryButton}
+              disabled={reason !== undefined || !dirty || invalid || patch.isPending}
+            >
+              Save chaos and limits
+            </button>
+            {saved && !dirty ? <SavedNote /> : null}
+          </div>
         ) : null}
       </form>
-    </section>
+    </Card>
   );
 }

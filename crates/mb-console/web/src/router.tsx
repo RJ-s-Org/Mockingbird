@@ -37,8 +37,10 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: Outlet,
   notFoundComponent: NotFound,
   errorComponent: ({ error }) => (
-    <main className="mx-auto max-w-xl px-6 py-16">
-      <ProblemAlert error={error} />
+    <main className="flex min-h-[70vh] items-center justify-center bg-canvas px-4 py-16 text-fg">
+      <div className="w-full max-w-xl">
+        <ProblemAlert error={error} />
+      </div>
     </main>
   ),
 });
