@@ -586,6 +586,10 @@ pub struct FileProfile {
     /// Profile tried when this one's provider fails.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// Extra request headers sent to the provider. Values may embed secret
+    /// references as `${env:NAME}` or `${file:/path}`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 impl FileProfile {
@@ -613,6 +617,7 @@ impl FileProfile {
             temperature: Self::default_temperature(),
             max_tokens: Self::default_max_tokens(),
             fallback: None,
+            headers: BTreeMap::new(),
         }
     }
 }

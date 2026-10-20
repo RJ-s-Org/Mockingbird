@@ -790,6 +790,52 @@ fn read_json(path: &Path) -> anyhow::Result<Value> {
     serde_json::from_slice(&text).with_context(|| format!("{label} is not JSON"))
 }
 
+/// Sends one Admin API request: `segments` under the `workspace`
+/// workspace (`/api/v1/workspaces/<ws>/…`), or under `/api/v1/` when
+/// `workspace` is `None`, with `query` appended. Used by the MCP server.
+pub async fn api(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: Option<&str>,
+    method: Method,
+    segments: &[&str],
+    query: &[(&str, String)],
+    body: Option<Value>,
+) -> Result<Option<Value>, ClientError> {
+    let api = AdminClient::new(admin_url, token, workspace.unwrap_or_default())?;
+    let mut url = match workspace {
+        Some(_) => api.ws_url(segments),
+        None => api.url(segments),
+    };
+    if !query.is_empty() {
+        url.query_pairs_mut()
+            .extend_pairs(query.iter().map(|(k, v)| (*k, v.as_str())));
+    }
+    api.request(method, url, body.map(Body::Json)).await
+}
+
+/// Sends `method` to `<admin_url>/api/v1<path>` as given (`path` starts
+/// with `/` and may carry a query). Used by the MCP server's generic
+/// `admin_api` tool.
+pub async fn api_path(
+    admin_url: &str,
+    token: Option<&str>,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Option<Value>, ClientError> {
+    if !path.starts_with('/') || path.contains("..") {
+        return Err(ClientError::Usage(format!(
+            "path {path:?} must start with / and stay under /api/v1"
+        )));
+    }
+    let api = AdminClient::new(admin_url, token, "")?;
+    let base = api.base.as_str().trim_end_matches('/');
+    let url = Url::parse(&format!("{base}/api/v1{path}"))
+        .map_err(|e| ClientError::Usage(format!("invalid path {path:?}: {e}")))?;
+    api.request(method, url, body.map(Body::Json)).await
+}
+
 enum Body {
     Json(Value),
     Bytes {

@@ -4,11 +4,12 @@
 //! globs; profiles from the config file are not restricted.
 //!
 //! Only a sysadmin may bind a secret to an endpoint: setting or changing a
-//! profile's `secret_ref`, or changing the `base_url` of a profile that has
-//! one. Otherwise a workspace admin could send the server's own LLM key (or
-//! any other allowed secret) to a host they control.
+//! profile's `secret_ref` or a `headers` value that embeds a `${…}` secret
+//! reference, or changing the `base_url` of a profile that has either.
+//! Otherwise a workspace admin could send the server's own LLM key (or any
+//! other allowed secret) to a host they control.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -46,6 +47,9 @@ pub struct LlmProfileView {
     pub timeout_ms: u64,
     pub max_tokens: u32,
     pub fallback_profile: Option<String>,
+    /// Extra provider request headers, as stored (`${…}` references are
+    /// never resolved).
+    pub headers: BTreeMap<String, String>,
     pub source: Source,
 }
 
@@ -62,6 +66,7 @@ impl From<LlmProfile> for LlmProfileView {
             timeout_ms: p.timeout_ms,
             max_tokens: p.max_tokens,
             fallback_profile: p.fallback_profile,
+            headers: p.headers,
         }
     }
 }
@@ -93,6 +98,13 @@ pub struct PutProfile {
     pub max_tokens: u32,
     /// Profile tried when this one fails.
     pub fallback_profile: Option<String>,
+    /// Extra request headers sent to the provider, by lowercase name
+    /// (Cloudflare AI Gateway's `cf-aig-authorization`, Azure's `api-key`,
+    /// OpenRouter's `x-title`). A value may embed secret references as
+    /// `${env:NAME}`, each allowed by `server.api_secret_refs`; a header
+    /// whose name suggests a credential must use one.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 fn default_temperature() -> f32 {
@@ -177,7 +189,18 @@ fn validate(name: &str, p: &PutProfile) -> ApiResult<()> {
             "a profile cannot be its own fallback_profile",
         ));
     }
+    mb_store::validate_profile_headers(&p.headers).map_err(|e| match e {
+        mb_store::StoreError::Invalid(detail) => Problem::invalid(INVALID_PROFILE, detail),
+        other => Problem::invalid(INVALID_PROFILE, other.to_string()),
+    })?;
     Ok(())
+}
+
+/// Whether any header value embeds a `${…}` secret reference.
+fn headers_bind_secrets(headers: &BTreeMap<String, String>) -> bool {
+    headers
+        .values()
+        .any(|v| mb_store::header_secret_refs(v).is_ok_and(|refs| !refs.is_empty()))
 }
 
 /// The result of a profile write: the profile, plus warnings about mocks
@@ -322,6 +345,11 @@ pub async fn put(
         check_secret_ref(r, &st.api_secret_refs)?;
     }
     validate(&name, &body)?;
+    for value in body.headers.values() {
+        for r in mb_store::header_secret_refs(value).unwrap_or_default() {
+            check_secret_ref(r, &st.api_secret_refs)?;
+        }
+    }
     if !access.principal.sysadmin
         && let Some(r) = &body.secret_ref
     {
@@ -331,6 +359,16 @@ pub async fn put(
         if !unchanged {
             return Err(Problem::forbidden(
                 "only a sysadmin may set or change secret_ref, or change the base_url of a profile with a secret_ref",
+            ));
+        }
+    }
+    if !access.principal.sysadmin && headers_bind_secrets(&body.headers) {
+        let unchanged = existing
+            .as_ref()
+            .is_some_and(|e| e.headers == body.headers && e.base_url == body.base_url);
+        if !unchanged {
+            return Err(Problem::forbidden(
+                "only a sysadmin may set or change headers with ${…} secret references, or change the base_url of a profile with them",
             ));
         }
     }
@@ -345,6 +383,7 @@ pub async fn put(
         timeout_ms: body.timeout_ms,
         max_tokens: body.max_tokens,
         fallback_profile: body.fallback_profile,
+        headers: body.headers,
         source: ResourceSource::Api,
     };
     st.store.put_profile(&profile).await?;

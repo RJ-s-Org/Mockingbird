@@ -166,6 +166,7 @@ fn profile(ws: &str, name: &str, base_url: String) -> LlmProfile {
         timeout_ms: 3000,
         max_tokens: 512,
         fallback_profile: None,
+        headers: Default::default(),
         source: ResourceSource::Api,
     }
 }

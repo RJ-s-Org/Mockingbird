@@ -147,6 +147,8 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles.<name>.temperature` | number | `0.7` | | | Sampling temperature. |
 | `llm.profiles.<name>.max_tokens` | integer | `2048` | | | Completion token limit. |
 | `llm.profiles.<name>.fallback` | string | unset | A profile name | | Profile tried when this one's provider fails. |
+| `llm.profiles.<name>.headers` | map | `{}` | Lowercase header names; not `authorization`, `content-type`, `content-length`, `host` or `transfer-encoding` | | Extra request headers sent to the provider, such as Cloudflare AI Gateway's `cf-aig-authorization` or Azure OpenAI's `api-key`. A value may embed secret references as `${env:NAME}` or `${file:/path}` (`Bearer ${env:CF_AIG_API_KEY}`); a header whose name contains `auth`, `key`, `token`, `secret`, `password` or `cookie` must use one. Through the Admin API each reference must match `server.api_secret_refs`, and only a sysadmin may set them. |
+| `llm.profiles.<name>.headers.<name>` | string | | | | One header value. |
 
 `--offline` serves every mock with the faker and makes no LLM calls.
 
@@ -304,6 +306,7 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | `MB_STATE_URL` | | `storage.state_url` |
 | `MB_BUS_URL` | | `bus.url` |
 | `MB_LLM_BASE_URL`, `MB_LLM_MODEL`, `MB_LLM_API_KEY`, `MB_LLM_JSON_SCHEMA` | `--llm-timeout` | The `default` LLM profile. |
+| `MB_STATE_DIR` | `--state-dir` | Where `mockingbird server start` keeps the background server's pid, log and URLs (default `.mockingbird`). Not a config file key. |
 | | `--offline` | Faker only, no LLM calls. |
 | | `-c`, `--config` | The config file. |
 | | `--watch` | Reconcile again when the file or a contract changes (a usage error on `data` nodes). |

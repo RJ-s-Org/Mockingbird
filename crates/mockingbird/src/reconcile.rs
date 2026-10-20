@@ -269,6 +269,17 @@ async fn validate<'a>(
                 "LLM profile {label:?}: api_key must be a secret reference (env:NAME or file:/path), not a key"
             );
         }
+        mb_store::validate_profile_headers(&p.headers)
+            .map_err(|e| anyhow!("LLM profile {label:?}: headers: {e}"))?;
+        for value in p.headers.values() {
+            for reference in mb_store::header_secret_refs(value)? {
+                if !valid_secret_ref(reference) {
+                    bail!(
+                        "LLM profile {label:?}: headers: ${{{reference}}} must be a secret reference (env:NAME or file:/path)"
+                    );
+                }
+            }
+        }
         if let Some(fallback) = &p.fallback
             && !known_profile(&p.workspace, fallback)
         {
@@ -708,6 +719,7 @@ fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
             .map_err(|_| anyhow!("LLM profile {name:?}: timeout is too long"))?,
         max_tokens: p.max_tokens,
         fallback_profile: p.fallback.clone(),
+        headers: p.headers.clone(),
         source: ResourceSource::File,
     })
 }

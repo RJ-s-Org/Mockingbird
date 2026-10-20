@@ -49,7 +49,10 @@ const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundl
 const JOB_SELECT: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress::text AS progress, \
      result_version, error, created_by, created_at, started_at, finished_at, updated_at";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source";
+     max_tokens, fallback_profile, source, headers";
+/// [`PROFILE_COLUMNS`] with JSON read back as text.
+const PROFILE_SELECT: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
+     max_tokens, fallback_profile, source, headers::text AS headers";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 /// [`API_KEY_COLUMNS`] with JSON read back as text.
@@ -339,6 +342,7 @@ fn scenario_from_row(row: &PgRow) -> Result<Scenario, StoreError> {
 fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
     let source: String = row.try_get("source")?;
     let temperature: f64 = row.try_get("temperature")?;
+    let headers: String = row.try_get("headers")?;
     Ok(LlmProfile {
         workspace: row.try_get("workspace")?,
         name: row.try_get("name")?,
@@ -351,6 +355,7 @@ fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
         timeout_ms: from_i64(row.try_get("timeout_ms")?, "timeout_ms")?,
         max_tokens: from_i64(row.try_get("max_tokens")?, "max_tokens")?,
         fallback_profile: row.try_get("fallback_profile")?,
+        headers: serde_json::from_str(&headers)?,
         source: ResourceSource::parse(&source)?,
     })
 }
@@ -911,7 +916,7 @@ impl ControlStore for PgStore {
 
     async fn list_profiles(&self, ws: &str) -> Result<Vec<LlmProfile>, StoreError> {
         let sql = format!(
-            "SELECT {PROFILE_COLUMNS} FROM llm_profiles WHERE workspace = $1 ORDER BY name COLLATE \"C\""
+            "SELECT {PROFILE_SELECT} FROM llm_profiles WHERE workspace = $1 ORDER BY name COLLATE \"C\""
         );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(ws)
@@ -923,9 +928,8 @@ impl ControlStore for PgStore {
     }
 
     async fn get_profile(&self, ws: &str, name: &str) -> Result<Option<LlmProfile>, StoreError> {
-        let sql = format!(
-            "SELECT {PROFILE_COLUMNS} FROM llm_profiles WHERE workspace = $1 AND name = $2"
-        );
+        let sql =
+            format!("SELECT {PROFILE_SELECT} FROM llm_profiles WHERE workspace = $1 AND name = $2");
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(ws)
             .bind(name)
@@ -939,12 +943,12 @@ impl ControlStore for PgStore {
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
             "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
-             source = excluded.source"
+             source = excluded.source, headers = excluded.headers"
         );
         let mut tx = self.pool.begin().await?;
         lock_workspace(&mut tx, &p.workspace).await?;
@@ -960,6 +964,7 @@ impl ControlStore for PgStore {
             .bind(i64::from(p.max_tokens))
             .bind(&p.fallback_profile)
             .bind(p.source.as_str())
+            .bind(serde_json::to_string(&p.headers)?)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

@@ -13,6 +13,9 @@ pub struct OpenAiConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub json_schema: bool,
+    /// Extra request headers (name, value), already resolved: Cloudflare AI
+    /// Gateway's `cf-aig-authorization`, Azure's `api-key`, attribution.
+    pub headers: Vec<(String, String)>,
     /// Extra CA roots and the proxy (`outbound:`).
     pub http: HttpOptions,
 }
@@ -72,6 +75,9 @@ impl OpenAiCompatible {
         let mut builder = self.client.post(self.url()).json(body);
         if let Some(key) = &self.config.api_key {
             builder = builder.bearer_auth(key);
+        }
+        for (name, value) in &self.config.headers {
+            builder = builder.header(name, value);
         }
         builder
             .send()

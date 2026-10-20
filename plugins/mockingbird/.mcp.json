@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mockingbird": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/mockingbird-mcp",
+      "args": []
+    }
+  }
+}

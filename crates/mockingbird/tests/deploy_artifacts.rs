@@ -92,7 +92,7 @@ fn chart_app_version_matches_workspace() {
     let chart = yaml(&chart().join("Chart.yaml"));
     assert_eq!(chart["apiVersion"], "v2");
     assert_eq!(chart["name"], "mockingbird");
-    assert_eq!(chart["version"], "0.1.0");
+    assert_eq!(chart["version"], "0.1.0-rc.1");
     assert_eq!(
         chart["appVersion"].as_str(),
         Some(env!("CARGO_PKG_VERSION"))

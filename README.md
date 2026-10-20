@@ -8,6 +8,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 
 | Guide | What it covers |
 | --- | --- |
+| [Coding agents](docs/agents.md) | The MCP server, skills and plugins for Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code, Windsurf and ChatGPT; LLM provider onboarding |
 | [Architecture](docs/architecture.md) | Crates, roles, the request flow, HA (bus, leader election) and state backends |
 | [Configuration reference](docs/configuration.md) | Every `mockingbird.yaml` key, with its default, range, environment variable and flag |
 | [Running locally](docs/deploy/local.md) | The binary, `serve`, offline mode and TLS |
@@ -21,10 +22,25 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 
 ## Quickstart
 
-Install from a checkout:
+Install the release binary (macOS, Linux; on Windows use `install.ps1`, see [Coding agents](docs/agents.md#install)):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh | sh
+```
+
+or from a checkout:
 
 ```sh
 cargo install --path crates/mockingbird
+```
+
+Write a config with an LLM provider preset, then run it in the background:
+
+```sh
+mockingbird init --provider openrouter --contract orders.yaml   # or --offline; `mockingbird llm providers` lists presets
+export OPENROUTER_API_KEY=sk-or-...
+mockingbird llm test -c mockingbird.yaml --profile openrouter
+mockingbird server start -c mockingbird.yaml                     # status, logs, stop
 ```
 
 Serve a contract (OpenAPI 3.x, Swagger 2.0, GraphQL, protobuf or WSDL 1.1; see [Protocols](#protocols)) with an LLM behind it:
@@ -65,6 +81,18 @@ mockingbird validate orders.yaml
 ```
 
 Mockingbird listens on three ports: the data plane (REST, SSE, GraphQL and SOAP mocks) on `127.0.0.1:8080`, gRPC mocks on `127.0.0.1:50051` (h2c), and the Admin API plus ops endpoints on `127.0.0.1:9090`. If you did not choose an admin port (`--admin-port`, `MB_ADMIN_PORT` or `server.admin_port`) and 9090 is already taken, Mockingbird logs a warning and serves the data plane without the admin port. The gRPC port (`--grpc-port`, `MB_GRPC_PORT` or `server.grpc_port`) works the same way: when 50051 is taken, gRPC mocks are not served. A port you chose explicitly must be free.
+
+## Coding agents
+
+Mockingbird is built to be driven by coding agents. `mockingbird mcp` is an MCP server whose tools cover the whole product: install checks (`doctor`), LLM onboarding (OpenRouter, Google AI Studio, Cloudflare AI Gateway and Workers AI, the major vendors, local runtimes, or any OpenAI-compatible endpoint with your own key), the background server, and every Admin API operation. Skills tell the agent when to use them.
+
+```sh
+/plugin marketplace add rjs-git/mockingbird          # Claude Code, then /plugin install mockingbird@mockingbird
+mockingbird agent install codex                      # or cursor, gemini, kiro, vscode, windsurf, claude-desktop
+mockingbird mcp --transport http --auth-token-env MB_MCP_TOKEN   # remote agents such as ChatGPT
+```
+
+See [Coding agents](docs/agents.md) for each agent, the tool list and the security model of the HTTP transport.
 
 ## Config file
 

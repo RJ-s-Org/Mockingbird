@@ -1,0 +1,12 @@
+{
+  "name": "mockingbird",
+  "interface": { "displayName": "Mockingbird" },
+  "plugins": [
+    {
+      "name": "mockingbird",
+      "source": { "source": "local", "path": "./plugins/mockingbird" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}

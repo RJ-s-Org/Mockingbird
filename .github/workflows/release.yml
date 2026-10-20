@@ -442,9 +442,10 @@ jobs:
             --notes-file <(scripts/changelog-section.sh "$VERSION") \
             dist/*.tar.gz dist/*.zip dist/*.sha256 dist/SHA256SUMS "dist/mockingbird-$VERSION.cdx.json"
 
+  # crates.io versions cannot be deleted, so a prerelease leaves mb-ext alone.
   publish-crate:
     needs: [verify, release]
-    if: needs.verify.outputs.publish == 'true'
+    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.prerelease == 'false'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

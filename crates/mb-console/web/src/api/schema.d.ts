@@ -1337,6 +1337,13 @@ export interface components {
         LlmProfileView: {
             base_url: string;
             fallback_profile?: string | null;
+            /**
+             * @description Extra provider request headers, as stored (`${…}` references are
+             *     never resolved).
+             */
+            headers: {
+                [key: string]: string;
+            };
             json_schema: boolean;
             /** Format: int32 */
             max_tokens: number;
@@ -1555,6 +1562,16 @@ export interface components {
             base_url: string;
             /** @description Profile tried when this one fails. */
             fallback_profile?: string | null;
+            /**
+             * @description Extra request headers sent to the provider, by lowercase name
+             *     (Cloudflare AI Gateway's `cf-aig-authorization`, Azure's `api-key`,
+             *     OpenRouter's `x-title`). A value may embed secret references as
+             *     `${env:NAME}`, each allowed by `server.api_secret_refs`; a header
+             *     whose name suggests a credential must use one.
+             */
+            headers?: {
+                [key: string]: string;
+            };
             /** @description Use the provider's `json_schema` response format. */
             json_schema?: boolean;
             /**

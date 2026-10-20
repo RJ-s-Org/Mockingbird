@@ -1,5 +1,7 @@
 //! Control-plane entities persisted by a [`crate::ControlStore`].
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use mb_mcm::{Bundle, Trigger};
 use serde::{Deserialize, Serialize};
@@ -312,6 +314,11 @@ pub struct LlmProfile {
     pub timeout_ms: u64,
     pub max_tokens: u32,
     pub fallback_profile: Option<String>,
+    /// Extra request headers sent to the provider, by name. A value may
+    /// embed secret references as `${env:NAME}` (see
+    /// [`crate::header_secret_refs`]); a raw secret is never stored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     pub source: ResourceSource,
 }
 

@@ -3351,7 +3351,7 @@ checksum = "8863b587001c1b9a8a4e36008cebc6b3612cb1226fe2de94858e06092687b608"
 
 [[package]]
 name = "mb-admin"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3389,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "mb-auth"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3414,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "mb-console"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "axum 0.8.9",
  "http-body-util",
@@ -3425,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "mb-engine"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "mb-evals"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3495,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "mb-import"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-graphql-parser",
  "async-trait",
@@ -3535,7 +3535,7 @@ dependencies = [
 
 [[package]]
 name = "mb-llm"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "eventsource-stream",
@@ -3551,7 +3551,7 @@ dependencies = [
 
 [[package]]
 name = "mb-mcm"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -3560,7 +3560,7 @@ dependencies = [
 
 [[package]]
 name = "mb-protocols"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -3608,7 +3608,7 @@ dependencies = [
 
 [[package]]
 name = "mb-state"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "mb-store"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3830,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "mockingbird"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3887,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "mockingbird-custom-ext-example"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "axum 0.8.9",

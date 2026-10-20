@@ -364,6 +364,77 @@ pub fn validate_header_name(name: &str) -> Result<(), StoreError> {
     }
 }
 
+/// Header names an LLM profile may not set: the client sets them itself
+/// (`authorization` comes from the profile's `secret_ref`).
+const RESERVED_PROFILE_HEADERS: [&str; 5] = [
+    "authorization",
+    "content-type",
+    "content-length",
+    "host",
+    "transfer-encoding",
+];
+
+/// The secret references embedded in a profile header value as
+/// `${<reference>}` (`Bearer ${env:CF_AIG_TOKEN}` → `["env:CF_AIG_TOKEN"]`).
+/// `Invalid` for an unterminated or empty placeholder.
+pub fn header_secret_refs(value: &str) -> Result<Vec<&str>, StoreError> {
+    let mut refs = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or_else(|| {
+            StoreError::Invalid("header value has an unterminated ${…} placeholder".into())
+        })?;
+        let reference = &after[..end];
+        if reference.trim().is_empty() {
+            return Err(StoreError::Invalid(
+                "header value has an empty ${} placeholder".into(),
+            ));
+        }
+        refs.push(reference);
+        rest = &after[end + 1..];
+    }
+    Ok(refs)
+}
+
+/// Whether a header of this (lowercase) name likely carries a credential,
+/// so its value must come from a `${…}` secret reference.
+pub fn is_sensitive_header(name: &str) -> bool {
+    ["auth", "key", "token", "secret", "password", "cookie"]
+        .iter()
+        .any(|part| name.contains(part))
+}
+
+/// Checks an LLM profile's `headers`: lowercase HTTP token names that the
+/// client does not set itself, values without line breaks, well-formed
+/// `${…}` placeholders, and no literal value for a credential-bearing name
+/// (see [`is_sensitive_header`]).
+pub fn validate_profile_headers(
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<(), StoreError> {
+    for (name, value) in headers {
+        validate_header_name(name)?;
+        if RESERVED_PROFILE_HEADERS.contains(&name.as_str()) {
+            return Err(StoreError::Invalid(format!(
+                "header {name:?} is set by the client; use secret_ref for the provider key"
+            )));
+        }
+        if value.contains(['\r', '\n']) || value.len() > 4096 {
+            return Err(StoreError::Invalid(format!(
+                "header {name:?} must be one line of at most 4096 bytes"
+            )));
+        }
+        let refs = header_secret_refs(value)?;
+        if refs.is_empty() && is_sensitive_header(name) {
+            return Err(StoreError::Invalid(format!(
+                "header {name:?} carries a credential: write it as a secret reference, \
+                 for example \"Bearer ${{env:NAME}}\", never as a raw value"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `Invalid` when a mock's chaos or limits are out of range.
 pub(crate) fn validate_mock_settings(
     chaos: Option<&ChaosSettings>,
@@ -477,8 +548,43 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_secret_refs_parse() {
+        assert_eq!(
+            header_secret_refs("Bearer ${env:CF_AIG_API_KEY}").unwrap(),
+            ["env:CF_AIG_API_KEY"]
+        );
+        assert_eq!(
+            header_secret_refs("${env:A}:${file:/run/b}").unwrap(),
+            ["env:A", "file:/run/b"]
+        );
+        assert!(header_secret_refs("Mockingbird").unwrap().is_empty());
+        assert!(header_secret_refs("Bearer ${env:A").is_err());
+        assert!(header_secret_refs("${ }").is_err());
+    }
+
+    #[test]
+    fn profile_headers() {
+        let ok = |pairs: &[(&str, &str)]| {
+            let map = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            validate_profile_headers(&map)
+        };
+        assert!(ok(&[("cf-aig-authorization", "Bearer ${env:CF_AIG_API_KEY}")]).is_ok());
+        assert!(ok(&[("x-title", "Mockingbird"), ("http-referer", "https://x")]).is_ok());
+        // A raw credential, a reserved or uppercase name, a line break.
+        assert!(ok(&[("cf-aig-authorization", "Bearer abc123")]).is_err());
+        assert!(ok(&[("api-key", "abc123")]).is_err());
+        assert!(ok(&[("authorization", "Bearer ${env:X_API_KEY}")]).is_err());
+        assert!(ok(&[("X-Title", "Mockingbird")]).is_err());
+        assert!(ok(&[("x-title", "a\r\nb")]).is_err());
+    }
 
     #[test]
     fn mock_names() {

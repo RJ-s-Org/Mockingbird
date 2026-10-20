@@ -61,7 +61,7 @@ fn changelog_section(version: &str) -> std::process::Output {
 
 #[test]
 fn changelog_has_0_1_0_section() {
-    let out = changelog_section("0.1.0");
+    let out = changelog_section("0.1.0-rc.1");
     assert!(
         out.status.success(),
         "{}",
@@ -75,7 +75,7 @@ fn changelog_has_0_1_0_section() {
     for phase in ["P1", "P2", "P3", "P4", "P5", "P6", "P7"] {
         assert!(
             body.contains(phase),
-            "0.1.0 section does not mention {phase}"
+            "0.1.0-rc.1 section does not mention {phase}"
         );
     }
 }

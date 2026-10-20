@@ -641,6 +641,7 @@ fn api_profile(name: &str) -> LlmProfile {
         timeout_ms: 3000,
         max_tokens: 2048,
         fallback_profile: None,
+        headers: Default::default(),
         source: ResourceSource::Api,
     }
 }

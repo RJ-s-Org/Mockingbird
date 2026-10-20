@@ -291,6 +291,7 @@ fn completion() -> serde_json::Value {
 
 fn provider(base_url: String, http: HttpOptions) -> OpenAiCompatible {
     OpenAiCompatible::new(OpenAiConfig {
+        headers: Vec::new(),
         base_url,
         api_key: None,
         model: "m".into(),
