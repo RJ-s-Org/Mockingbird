@@ -4,11 +4,11 @@ import { rememberWorkspace, useWorkspaces } from "../api/queries";
 import { useMe } from "../auth/me";
 import { useTheme, type Theme } from "../lib/theme";
 import { ProblemAlert } from "./ProblemAlert";
+import { focusRing, linkClass, secondaryButton } from "./ui";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
-const navLink =
-  "rounded-md px-3 py-1.5 text-sm font-medium whitespace-nowrap text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400";
-const activeNavLink = "bg-slate-200 dark:bg-slate-700 text-slate-950 dark:text-white";
+const navLink = `shrink-0 border-b-2 border-transparent px-3 py-2.5 text-sm font-medium whitespace-nowrap text-fg-muted transition-colors hover:border-line-strong hover:text-fg focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring`;
+const activeNavLink = "border-accent-solid! text-fg";
 
 /**
  * The console frame: header (switcher, user menu), workspace navigation and the page.
@@ -29,44 +29,56 @@ export function Layout({ ws, global = false }: { ws?: string; global?: boolean }
   }, [ws, known]);
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
-      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 bg-slate-900 px-4 py-3 text-white sm:px-6 dark:border-b dark:border-slate-800 dark:bg-slate-950">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-2">
-          <span className="text-lg font-semibold">Mockingbird</span>
-          <WorkspaceSwitcher current={current} missing={missing} sysadmin={me.data?.sysadmin ?? false} />
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <ThemeSelect />
-          {me.data ? <UserMenu name={me.data.display_name} local={me.data.kind === "local"} /> : null}
+    <div className="min-h-screen bg-canvas text-fg">
+      {/* Sticky from `sm` up; on a phone the header scrolls away instead of covering the page. */}
+      <header className="border-b border-line bg-surface sm:sticky sm:top-0 sm:z-20 sm:bg-surface/95 sm:backdrop-blur sm:supports-[backdrop-filter]:bg-surface/80">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          {/* Phone: brand and account controls on one row, the switcher below; wider: all on one row. */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-2.5">
+            <Brand />
+            <span aria-hidden="true" className="hidden h-5 w-px bg-line sm:block" />
+            <div className="order-last w-full min-w-0 sm:order-none sm:w-auto">
+              <WorkspaceSwitcher current={current} missing={missing} sysadmin={me.data?.sysadmin ?? false} />
+            </div>
+            <div className="ml-auto flex min-w-0 items-center gap-2">
+              <ThemeSelect />
+              {me.data ? <UserMenu name={me.data.display_name} local={me.data.kind === "local"} /> : null}
+            </div>
+          </div>
+          <nav aria-label="Main" className="-mx-1 flex gap-1 overflow-x-auto">
+            {scoped && ws ? (
+              <>
+                <Link to="/w/$ws/mocks" params={{ ws }} className={navLink} activeProps={{ className: activeNavLink }}>
+                  Mocks
+                </Link>
+                <Link
+                  to="/w/$ws/llm-profiles"
+                  params={{ ws }}
+                  className={navLink}
+                  activeProps={{ className: activeNavLink }}
+                >
+                  LLM profiles
+                </Link>
+                <Link
+                  to="/w/$ws/api-keys"
+                  params={{ ws }}
+                  className={navLink}
+                  activeProps={{ className: activeNavLink }}
+                >
+                  API keys
+                </Link>
+                <Link to="/w/$ws/audit" params={{ ws }} className={navLink} activeProps={{ className: activeNavLink }}>
+                  Audit
+                </Link>
+              </>
+            ) : null}
+            <Link to="/status" className={navLink} activeProps={{ className: activeNavLink }}>
+              Status
+            </Link>
+          </nav>
         </div>
       </header>
-      <nav aria-label="Main" className="flex flex-wrap gap-1 border-b border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 sm:px-6">
-        {scoped && ws ? (
-          <>
-            <Link to="/w/$ws/mocks" params={{ ws }} className={navLink} activeProps={{ className: activeNavLink }}>
-              Mocks
-            </Link>
-            <Link
-              to="/w/$ws/llm-profiles"
-              params={{ ws }}
-              className={navLink}
-              activeProps={{ className: activeNavLink }}
-            >
-              LLM profiles
-            </Link>
-            <Link to="/w/$ws/api-keys" params={{ ws }} className={navLink} activeProps={{ className: activeNavLink }}>
-              API keys
-            </Link>
-            <Link to="/w/$ws/audit" params={{ ws }} className={navLink} activeProps={{ className: activeNavLink }}>
-              Audit
-            </Link>
-          </>
-        ) : null}
-        <Link to="/status" className={navLink} activeProps={{ className: activeNavLink }}>
-          Status
-        </Link>
-      </nav>
-      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
         {me.error ? (
           <ProblemAlert error={me.error} />
         ) : missing && ws ? (
@@ -79,6 +91,20 @@ export function Layout({ ws, global = false }: { ws?: string; global?: boolean }
   );
 }
 
+/** The product mark and name; leads to the remembered workspace. */
+function Brand() {
+  return (
+    <Link to="/" className={`flex items-center gap-2 rounded-md text-base font-semibold tracking-tight ${focusRing}`}>
+      <span aria-hidden="true" className="grid size-7 place-items-center rounded-md bg-accent-solid text-white shadow-sm">
+        <svg viewBox="0 0 24 24" className="size-4 fill-current">
+          <path d="M21 5.5c-1.6.2-2.9-.3-4-1.3-1.9-1.7-4.9-1.3-6.3.9L3 17.5l1.4 1.4 3.1-2.3c.3 1.7 1.3 3 2.9 3.4l-.4 2h2l.3-1.7h1.4l.3 1.7h2l-.5-2.4c2.3-1.2 3.8-3.6 3.8-6.3V9.6L22 7l-1-1.5Zm-5.5 2.2a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2Z" />
+        </svg>
+      </span>
+      Mockingbird
+    </Link>
+  );
+}
+
 /** Where "back" leads from an unknown workspace: `default` if it exists, else the first one. */
 function pickFallback(workspaces: { name: string; display_name: string }[]) {
   return workspaces.find((w) => w.name === "default") ?? workspaces[0];
@@ -87,11 +113,9 @@ function pickFallback(workspaces: { name: string; display_name: string }[]) {
 /** Shown instead of any workspace page when the workspace does not exist (or is not visible). */
 function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: string; display_name: string } }) {
   return (
-    <div className="mx-auto max-w-xl space-y-3 py-10">
-      <h1 className="text-2xl font-semibold">
-        Workspace not found
-      </h1>
-      <p className="text-slate-700 dark:text-slate-300">
+    <div className="mx-auto max-w-xl space-y-3 py-12 text-center">
+      <h1 className="text-2xl font-semibold tracking-tight">Workspace not found</h1>
+      <p className="text-fg-muted">
         There is no workspace named <code className="font-semibold break-all">{ws}</code>, or you do not have access to
         it.
       </p>
@@ -99,15 +123,12 @@ function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: st
         <Link
           to="/w/$ws/mocks"
           params={{ ws: fallback.name }}
-          className="font-medium text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
+          className={linkClass}
         >
           {`Go to the ${fallback.display_name} workspace`}
         </Link>
       ) : (
-        <Link
-          to="/"
-          className="font-medium text-indigo-700 dark:text-indigo-300 underline hover:text-indigo-900 dark:hover:text-indigo-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
-        >
+        <Link to="/" className={linkClass}>
           Back to the console
         </Link>
       )}
@@ -115,23 +136,32 @@ function WorkspaceNotFound({ ws, fallback }: { ws: string; fallback?: { name: st
   );
 }
 
+const headerControl = `rounded-md border border-line-strong bg-surface py-1 text-sm text-fg shadow-xs ${focusRing}`;
+
 /** Light, dark or the system's theme; the choice is remembered in this browser. */
 function ThemeSelect() {
   const [theme, setTheme] = useTheme();
   return (
-    <div className="flex items-center gap-2">
+    <div className="relative flex items-center">
       <label htmlFor="theme-select" className="sr-only">
         Theme
       </label>
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 20 20"
+        className="pointer-events-none absolute left-2 size-4 fill-current text-fg-muted"
+      >
+        <path d="M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 2v12a6 6 0 0 1 0-12Z" />
+      </svg>
       <select
         id="theme-select"
-        className="rounded-md border border-slate-500 bg-slate-800 px-2 py-1 text-sm text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+        className={`${headerControl} pr-2 pl-7`}
         value={theme}
         onChange={(e) => setTheme(e.target.value as Theme)}
       >
-        <option value="system">System theme</option>
-        <option value="light">Light theme</option>
-        <option value="dark">Dark theme</option>
+        <option value="system">System</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
       </select>
     </div>
   );
@@ -150,15 +180,20 @@ function UserMenu({ name, local }: { name: string; local: boolean }) {
       window.location.href = "/auth/login?return_to=/";
     }
   };
+  const initial = name.trim().charAt(0).toUpperCase() || "?";
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-sm text-slate-200">{name}</span>
-      {local ? null : (
-        <button
-          type="button"
-          className="rounded-md border border-slate-400 px-2 py-1 text-sm text-white hover:bg-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-          onClick={() => void signOut()}
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="flex min-w-0 items-center gap-2">
+        <span
+          aria-hidden="true"
+          className="grid size-7 shrink-0 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent"
         >
+          {initial}
+        </span>
+        <span className="max-w-[7rem] truncate text-sm font-medium sm:max-w-[10rem]">{name}</span>
+      </span>
+      {local ? null : (
+        <button type="button" className={`${secondaryButton} py-1`} onClick={() => void signOut()}>
           Sign out
         </button>
       )}

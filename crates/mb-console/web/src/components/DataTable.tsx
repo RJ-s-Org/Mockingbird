@@ -26,6 +26,16 @@ function render(def: unknown, context: unknown, fallback: () => ReactNode): Reac
 
 type Overflow = "none" | "left" | "right" | "both";
 
+/* The parts of a console table, shared by `DataTable` and the hand-built tables. */
+export const tableClass = "w-full border-collapse text-left text-sm";
+export const theadClass = "border-b border-line bg-surface-2/60 text-xs text-fg-muted";
+export const thClass = "px-4 py-2.5 font-semibold whitespace-nowrap";
+export const tdClass = "px-4 py-2.5 align-top";
+export const trClass = "border-b border-line last:border-b-0";
+/** A row that opens something on click. */
+export const trClickableClass = `${trClass} cursor-pointer transition-colors hover:bg-surface-2/60`;
+export const emptyCellClass = "px-4 py-10 text-center text-sm text-fg-muted";
+
 /**
  * A table's horizontal scroll container (tables scroll, never the page).
  * When its content is wider than it, the clipped edges fade and, while more
@@ -54,22 +64,22 @@ export function TableScroll({ children }: { children: ReactNode }) {
   }, [measure]);
   const fadeLeft = overflow === "left" || overflow === "both";
   const fadeRight = overflow === "right" || overflow === "both";
-  const fade = "pointer-events-none absolute inset-y-0 w-8 from-slate-50 dark:from-slate-950 to-transparent";
+  const fade = "pointer-events-none absolute inset-y-0 w-8 from-surface to-transparent";
   return (
     <div className="relative max-w-full">
       {fadeRight ? (
-        <p aria-hidden="true" className="mb-1 text-right text-xs text-slate-600 dark:text-slate-400">
+        <p aria-hidden="true" className="mb-1.5 text-right text-xs text-fg-muted">
           Scroll sideways for more →
         </p>
       ) : null}
-      <div className="relative">
+      <div className="relative overflow-hidden rounded-lg border border-line bg-surface shadow-xs">
         <div
           ref={ref}
           data-testid="table-scroll"
           data-overflow={overflow}
           tabIndex={overflow === "none" ? undefined : 0}
           onScroll={measure}
-          className="max-w-full overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+          className="max-w-full overflow-x-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         >
           {children}
         </div>
@@ -104,13 +114,13 @@ export function DataTable<T extends RowData>({
   const rows = table.getRowModel().rows;
   return (
     <TableScroll>
-      <table className="w-full border-collapse text-left text-sm">
+      <table className={tableClass}>
         <caption className="sr-only">{caption}</caption>
-        <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+        <thead className={theadClass}>
           {table.getHeaderGroups().map((group) => (
             <tr key={group.id}>
               {group.headers.map((header) => (
-                <th key={header.id} scope="col" className="px-3 py-2 font-semibold">
+                <th key={header.id} scope="col" className={thClass}>
                   {header.isPlaceholder
                     ? null
                     : render(header.column.columnDef.header, header.getContext(), () => header.column.id)}
@@ -122,7 +132,7 @@ export function DataTable<T extends RowData>({
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={columns.length} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
+              <td colSpan={columns.length} className={emptyCellClass}>
                 {empty}
               </td>
             </tr>
@@ -132,15 +142,9 @@ export function DataTable<T extends RowData>({
               const open = detail !== undefined && detail !== null && detail !== false;
               return (
                 <Fragment key={row.id}>
-                  <tr
-                    className={
-                      open
-                        ? "bg-slate-100/70 dark:bg-slate-800/60"
-                        : "border-b border-slate-200 dark:border-slate-800"
-                    }
-                  >
+                  <tr className={open ? "bg-surface-2/60" : trClass}>
                     {row.getAllCells().map((cell) => (
-                      <td key={cell.id} className="px-3 py-2 align-top">
+                      <td key={cell.id} className={tdClass}>
                         {render(cell.column.columnDef.cell, cell.getContext(), () => {
                           const v = cell.getValue();
                           return v == null ? null : String(v);
@@ -149,8 +153,8 @@ export function DataTable<T extends RowData>({
                     ))}
                   </tr>
                   {open ? (
-                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-800/60">
-                      <td colSpan={columns.length} className="px-3 pb-4">
+                    <tr className={`${trClass} bg-surface-2/60`}>
+                      <td colSpan={columns.length} className="px-4 pb-4">
                         {detail}
                       </td>
                     </tr>
