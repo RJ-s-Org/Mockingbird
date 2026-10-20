@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useDeleteScenario, useScenarios, type Scenario } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import { ConfirmDialog, dangerButton, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { SourceBadge } from "../../components/SourceBadge";
+import { StatusCode } from "../../components/http";
 import { ScenarioEditor } from "./ScenarioEditor";
+import { Loading, primaryButton, secondaryButton } from "../../components/ui";
 
 const col = columnHelper<Scenario>();
 
@@ -26,8 +28,17 @@ export function Scenarios({ ws, mock }: { ws: string; mock: string }) {
   const current = editing?.kind === "existing" ? scenarios.data?.find((s) => s.name === editing.name) : undefined;
 
   const columns = [
-    col.accessor("name", { header: "Name" }),
-    col.accessor("status", { header: "Status", cell: (info) => info.getValue() ?? "—" }),
+    col.accessor("name", {
+      header: "Name",
+      cell: (info) => <code className="font-medium">{info.getValue()}</code>,
+    }),
+    col.accessor("status", {
+      header: "Status",
+      cell: (info) => {
+        const status = info.getValue();
+        return status == null ? <span className="text-fg-muted">—</span> : <StatusCode status={status} />;
+      },
+    }),
     col.accessor("latency_ms", {
       header: "Latency",
       cell: (info) => {
@@ -39,7 +50,10 @@ export function Scenarios({ ws, mock }: { ws: string; mock: string }) {
       header: "Operations",
       cell: (info) => (info.getValue().length === 0 ? "all" : String(info.getValue().length)),
     }),
-    col.accessor("source", { header: "Source", cell: (info) => <SourceBadge source={info.getValue()} /> }),
+    col.accessor("source", {
+      header: "Source",
+      cell: (info) => <SourceBadge source={info.getValue()} />,
+    }),
     col.display({
       id: "actions",
       header: "Actions",
@@ -47,7 +61,7 @@ export function Scenarios({ ws, mock }: { ws: string; mock: string }) {
         const s = row.original;
         const verb = editable(s) ? "Edit" : "View";
         return (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-nowrap gap-2">
             <button
               type="button"
               className={secondaryButton}
@@ -59,7 +73,7 @@ export function Scenarios({ ws, mock }: { ws: string; mock: string }) {
             {editable(s) ? (
               <button
                 type="button"
-                className={dangerButton}
+                className={secondaryButton}
                 aria-label={`Delete scenario ${s.name}`}
                 onClick={() => setDeleting(s.name)}
               >
@@ -75,15 +89,17 @@ export function Scenarios({ ws, mock }: { ws: string; mock: string }) {
   return (
     <div className="space-y-4">
       {canEdit ? (
-        <button type="button" className={primaryButton} onClick={() => setEditing({ kind: "new" })}>
-          New scenario
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button type="button" className={primaryButton} onClick={() => setEditing({ kind: "new" })}>
+            New scenario
+          </button>
+        </div>
       ) : null}
       <ProblemAlert error={scenarios.error ?? remove.error} />
       {scenarios.data ? (
         <DataTable caption="Scenarios" columns={columns} data={scenarios.data} empty="No scenarios yet." />
       ) : scenarios.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       {editing?.kind === "new" ? (
         <ScenarioEditor ws={ws} mock={mock} canEdit={canEdit} onClose={() => setEditing(undefined)} />

@@ -1,10 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { useActiveOperations, usePutScenario, type PutScenario, type Scenario } from "../../api/queries";
-import { inputClass, primaryButton } from "../../components/ConfirmDialog";
 import { Drawer } from "../../components/Drawer";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { ChaosFields, chaosDraft, chaosErrors, chaosFromDraft, hasErrors } from "./ChaosLimits";
 import { parseJson } from "../../lib/json";
+import { Field, Notice, hintClass, inputClass, primaryButton } from "../../components/ui";
 
 /** The `set` field's text parsed: an object, `null` when blank, or an error message. */
 export function parseSet(text: string): { value: Record<string, unknown> | null } | { error: string } {
@@ -80,17 +80,20 @@ export function ScenarioEditor({
 
   return (
     <Drawer title={title} onClose={onClose}>
-      <form onSubmit={submit} className="space-y-4">
-        {reason ? (
-          <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
-        ) : null}
-        <fieldset disabled={reason !== undefined} className="space-y-4">
+      <form onSubmit={submit} className="space-y-5">
+        {reason ? <Notice tone="warn">{reason}</Notice> : null}
+        <fieldset disabled={reason !== undefined} className="space-y-5">
           <legend className="sr-only">{title}</legend>
           {scenario ? null : (
-            <div className="space-y-1">
-              <label htmlFor="scenario-name" className="block text-sm font-medium">
-                Name
-              </label>
+            <Field
+              id="scenario-name"
+              label="Name"
+              hint={
+                <>
+                  Letters, digits, dots, underscores and dashes; sent as <code>X-Mockingbird-Scenario</code>.
+                </>
+              }
+            >
               <input
                 id="scenario-name"
                 className={inputClass}
@@ -101,15 +104,9 @@ export function ScenarioEditor({
                 onChange={(e) => setName(e.target.value)}
                 aria-describedby="scenario-name-hint"
               />
-              <p id="scenario-name-hint" className="text-xs text-slate-600 dark:text-slate-400">
-                Letters, digits, dots, underscores and dashes; sent as <code>X-Mockingbird-Scenario</code>.
-              </p>
-            </div>
+            </Field>
           )}
-          <div className="space-y-1">
-            <label htmlFor="scenario-instructions" className="block text-sm font-medium">
-              Instructions
-            </label>
+          <Field id="scenario-instructions" label="Instructions">
             <textarea
               id="scenario-instructions"
               className={inputClass}
@@ -117,12 +114,9 @@ export function ScenarioEditor({
               value={instructions}
               onChange={(e) => setInstructions(e.target.value)}
             />
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1">
-              <label htmlFor="scenario-status" className="block text-sm font-medium">
-                Status
-              </label>
+          </Field>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <Field id="scenario-status" label="Status">
               <input
                 id="scenario-status"
                 type="number"
@@ -132,11 +126,8 @@ export function ScenarioEditor({
                 value={status}
                 onChange={(e) => setStatus(e.target.value)}
               />
-            </div>
-            <div className="space-y-1">
-              <label htmlFor="scenario-latency" className="block text-sm font-medium">
-                Latency (ms)
-              </label>
+            </Field>
+            <Field id="scenario-latency" label="Latency (ms)">
               <input
                 id="scenario-latency"
                 type="number"
@@ -145,12 +136,18 @@ export function ScenarioEditor({
                 value={latency}
                 onChange={(e) => setLatency(e.target.value)}
               />
-            </div>
+            </Field>
           </div>
-          <div className="space-y-1">
-            <label htmlFor="scenario-set" className="block text-sm font-medium">
-              Set (JSON object)
-            </label>
+          <Field
+            id="scenario-set"
+            label="Set (JSON object)"
+            error={setError}
+            hint={
+              <>
+                Fields forced into the response body, e.g. <code>{'{"status": "shipped"}'}</code>.
+              </>
+            }
+          >
             <textarea
               id="scenario-set"
               className={`${inputClass} font-mono`}
@@ -160,20 +157,16 @@ export function ScenarioEditor({
               aria-invalid={setError !== undefined}
               aria-describedby={setError ? "scenario-set-error" : "scenario-set-hint"}
             />
-            {setError ? (
-              <p id="scenario-set-error" className="text-sm text-red-800 dark:text-red-300">
-                {setError}
-              </p>
-            ) : (
-              <p id="scenario-set-hint" className="text-xs text-slate-600 dark:text-slate-400">
-                Fields forced into the response body, e.g. <code>{'{"status": "shipped"}'}</code>.
-              </p>
-            )}
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="scenario-operations" className="block text-sm font-medium">
-              Operations
-            </label>
+          </Field>
+          <Field
+            id="scenario-operations"
+            label="Operations"
+            hint={
+              contractOperations.length === 0
+                ? "No active contract: the scenario applies to every operation."
+                : "Operations of the active contract; none selected means all."
+            }
+          >
             <select
               id="scenario-operations"
               multiple
@@ -189,15 +182,10 @@ export function ScenarioEditor({
                 </option>
               ))}
             </select>
-            <p id="scenario-operations-hint" className="text-xs text-slate-600 dark:text-slate-400">
-              {contractOperations.length === 0
-                ? "No active contract: the scenario applies to every operation."
-                : "Operations of the active contract; none selected means all."}
-            </p>
-          </div>
-          <fieldset className="space-y-2 rounded-md border border-slate-200 dark:border-slate-800 p-3">
-            <legend className="px-1 text-sm font-medium">Chaos override</legend>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
+          </Field>
+          <fieldset className="space-y-3 rounded-lg border border-line bg-surface-2/40 p-4">
+            <legend className="px-1.5 text-sm font-semibold">Chaos override</legend>
+            <p className={hintClass}>
               Replaces the mock&apos;s chaos while the scenario applies; leave empty to use the mock&apos;s.
             </p>
             <ChaosFields idPrefix="scenario-chaos" draft={chaos} errors={chaosErr} onChange={setChaos} />
@@ -205,9 +193,11 @@ export function ScenarioEditor({
         </fieldset>
         <ProblemAlert error={put.error} focus />
         {reason === undefined ? (
-          <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
-            Save
-          </button>
+          <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+            <button type="submit" className={primaryButton} disabled={invalid || put.isPending}>
+              Save
+            </button>
+          </div>
         ) : null}
       </form>
     </Drawer>

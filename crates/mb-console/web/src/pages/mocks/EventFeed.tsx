@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { olderThan, recentRequests, subscribeRequests, type LiveRequestView } from "../../api/sse";
-import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { Direction } from "./Direction";
-import { TableScroll } from "../../components/DataTable";
+import {
+  TableScroll,
+  emptyCellClass,
+  tableClass,
+  tdClass,
+  thClass,
+  theadClass,
+  trClass,
+} from "../../components/DataTable";
+import { ResponseSource, StatusCode } from "../../components/http";
+import { primaryButton, secondaryButton } from "../../components/ui";
 
 /** The feed keeps at most this many rows, newest first. */
 export const MAX_EVENTS = 200;
@@ -12,7 +21,7 @@ interface Row {
   record: LiveRequestView;
 }
 
-const cell = "px-3 py-2 align-top";
+const nowrapCell = `${tdClass} whitespace-nowrap`;
 
 /** The mock's event-channel messages as they are published and received, newest first. */
 export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
@@ -81,30 +90,28 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Live events</h2>
+        <h2 className="text-base font-semibold">Live events</h2>
         <button type="button" className={paused ? primaryButton : secondaryButton} onClick={togglePause}>
           {paused ? "Resume" : "Pause"}
         </button>
       </div>
       {history === "loaded" && rows.length > 0 ? (
-        <p className="text-sm text-slate-600 dark:text-slate-400">
-          Showing the latest recorded events, then new ones as they arrive.
-        </p>
+        <p className="text-sm text-fg-muted">Showing the latest recorded events, then new ones as they arrive.</p>
       ) : null}
       <div aria-live="polite" className="space-y-1 text-sm">
         {paused ? (
-          <p className="text-slate-700 dark:text-slate-300">
+          <p className="text-fg-muted">
             {missed} {missed === 1 ? "event" : "events"} arrived while paused.
           </p>
         ) : null}
-        {interrupted ? <p className="text-amber-900 dark:text-amber-200">The event feed connection was interrupted.</p> : null}
+        {interrupted ? <p className="text-warn-fg">The event feed connection was interrupted.</p> : null}
       </div>
       <TableScroll>
-        <table aria-label="Event feed" className="w-full border-collapse text-left text-sm">
-          <thead className="border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+        <table aria-label="Event feed" className={tableClass}>
+          <thead className={theadClass}>
             <tr>
               {["Time", "Channel", "Direction", "Status", "Source"].map((h) => (
-                <th key={h} scope="col" className="px-3 py-2 font-semibold">
+                <th key={h} scope="col" className={thClass}>
                   {h}
                 </th>
               ))}
@@ -113,7 +120,7 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-3 py-6 text-center text-slate-600 dark:text-slate-400">
+                <td colSpan={5} className={emptyCellClass}>
                   {history === "loading"
                     ? "Loading recent events…"
                     : "No events recorded yet. New ones appear here as they are published or received."}
@@ -121,18 +128,22 @@ export function EventFeed({ ws, mock }: { ws: string; mock: string }) {
               </tr>
             ) : (
               rows.map(({ key, record }) => (
-                <tr key={key} className="border-b border-slate-200 dark:border-slate-800">
-                  <td className={cell}>
+                <tr key={key} className={trClass}>
+                  <td className={`${nowrapCell} tabular-nums text-fg-muted`}>
                     <time dateTime={record.at}>{new Date(record.at).toLocaleTimeString()}</time>
                   </td>
-                  <td className={cell}>
+                  <td className={nowrapCell}>
                     <code>{record.operation_id ?? "—"}</code>
                   </td>
-                  <td className={cell}>
+                  <td className={tdClass}>
                     <Direction value={record.method} />
                   </td>
-                  <td className={cell}>{record.status}</td>
-                  <td className={cell}>{record.source ?? "—"}</td>
+                  <td className={tdClass}>
+                    <StatusCode status={record.status} />
+                  </td>
+                  <td className={tdClass}>
+                    <ResponseSource source={record.source} />
+                  </td>
                 </tr>
               ))
             )}
