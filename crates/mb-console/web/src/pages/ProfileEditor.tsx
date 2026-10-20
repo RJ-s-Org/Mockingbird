@@ -1,8 +1,8 @@
 import { useState, type FormEvent, type InputHTMLAttributes } from "react";
 import { usePutProfile, type Profile, type ProfileWriteResult } from "../api/queries";
-import { inputClass, primaryButton, secondaryButton } from "../components/ConfirmDialog";
 import { Drawer } from "../components/Drawer";
 import { ProblemAlert } from "../components/ProblemAlert";
+import { Checkbox, Field as FieldShell, inputClass, primaryButton, secondaryButton } from "../components/ui";
 
 /**
  * What the server's default `server.api_secret_refs` policy accepts from the
@@ -18,17 +18,9 @@ function Field({
   ...input
 }: { id: string; label: string; hint?: string } & InputHTMLAttributes<HTMLInputElement>) {
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-sm font-medium">
-        {label}
-      </label>
+    <FieldShell id={id} label={label} hint={hint}>
       <input id={id} className={inputClass} aria-describedby={hint ? `${id}-hint` : undefined} {...input} />
-      {hint ? (
-        <p id={`${id}-hint`} className="text-xs text-slate-600 dark:text-slate-400">
-          {hint}
-        </p>
-      ) : null}
-    </div>
+    </FieldShell>
   );
 }
 
@@ -86,7 +78,7 @@ export function ProfileEditor({
 
   return (
     <Drawer title={profile ? `Edit profile ${profile.name}` : "New profile"} onClose={onClose}>
-      <form onSubmit={submit} className="space-y-4">
+      <form onSubmit={submit} className="space-y-5">
         {profile ? null : (
           <Field
             id="profile-name"
@@ -117,18 +109,13 @@ export function ProfileEditor({
           autoComplete="off"
           hint={SECRET_REF_HINT}
         />
-        <div className="flex items-center gap-2">
-          <input
-            id="profile-json-schema"
-            type="checkbox"
-            checked={jsonSchema}
-            onChange={(e) => setJsonSchema(e.target.checked)}
-          />
-          <label htmlFor="profile-json-schema" className="text-sm font-medium">
-            JSON schema responses
-          </label>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Checkbox
+          id="profile-json-schema"
+          label="JSON schema responses"
+          checked={jsonSchema}
+          onChange={setJsonSchema}
+        />
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
           <Field
             id="profile-temperature"
             label="Temperature"
@@ -161,10 +148,7 @@ export function ProfileEditor({
             required
           />
         </div>
-        <div className="space-y-1">
-          <label htmlFor="profile-fallback" className="block text-sm font-medium">
-            Fallback profile
-          </label>
+        <FieldShell id="profile-fallback" label="Fallback profile">
           <select
             id="profile-fallback"
             className={inputClass}
@@ -178,9 +162,9 @@ export function ProfileEditor({
               </option>
             ))}
           </select>
-        </div>
+        </FieldShell>
         <ProblemAlert error={put.error} focus />
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={secondaryButton} onClick={onClose}>
             Cancel
           </button>

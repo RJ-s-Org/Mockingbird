@@ -2,10 +2,11 @@ import { useState } from "react";
 import { keyStatus, useApiKeys, useRevokeApiKey, type ApiKey } from "../api/queries";
 import { useMe } from "../auth/me";
 import { can, roleIn } from "../auth/permissions";
-import { ConfirmDialog, primaryButton, secondaryButton } from "../components/ConfirmDialog";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../components/DataTable";
 import { ProblemAlert } from "../components/ProblemAlert";
 import { CreateKeyDialog } from "./CreateKeyDialog";
+import { Badge, Loading, Notice, PageHeader, primaryButton, secondaryButton, type Tone } from "../components/ui";
 
 const col = columnHelper<ApiKey>();
 
@@ -15,10 +16,10 @@ export function DateTime({ value }: { value?: string | null }) {
   return <time dateTime={value}>{new Date(value).toLocaleString()}</time>;
 }
 
-const STATUS_STYLE = {
-  active: "border-green-300 dark:border-green-800 bg-green-50 dark:bg-green-950/60 text-green-900 dark:text-green-200",
-  revoked: "border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200",
-  expired: "border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200",
+const STATUS_TONE: Record<ReturnType<typeof keyStatus>, Tone> = {
+  active: "ok",
+  revoked: "neutral",
+  expired: "warn",
 };
 
 /** The API keys of a workspace (ManageApiKeys): list, create and revoke. */
@@ -31,22 +32,25 @@ export function ApiKeys({ ws }: { ws: string }) {
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<ApiKey>();
 
-  if (!me.data) return me.isPending ? <p className="text-slate-700 dark:text-slate-300">Loading…</p> : null;
+  if (!me.data) return me.isPending ? <Loading /> : null;
   if (!canManage || !role) {
     return (
-      <section className="space-y-4">
-        <h1 className="text-2xl font-semibold">API keys</h1>
-        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">
+      <section className="space-y-6">
+        <PageHeader title="API keys" />
+        <Notice tone="warn">
           Forbidden (403): managing API keys needs the admin role in this workspace. Ask a workspace owner for
           access.
-        </p>
+        </Notice>
       </section>
     );
   }
 
   const columns = [
     col.accessor("name", { header: "Name" }),
-    col.accessor("key_id", { header: "Key id", cell: (info) => <code>{info.getValue()}</code> }),
+    col.accessor("key_id", {
+      header: "Key id",
+      cell: (info) => <code className="whitespace-nowrap">{info.getValue()}</code>,
+    }),
     col.accessor("role", {
       header: "Role",
       cell: (info) => (info.row.original.sysadmin ? `${info.getValue()} (sysadmin)` : info.getValue()),
@@ -59,11 +63,7 @@ export function ApiKeys({ ws }: { ws: string }) {
     col.accessor((k) => keyStatus(k), {
       id: "status",
       header: "Status",
-      cell: (info) => (
-        <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${STATUS_STYLE[info.getValue()]}`}>
-          {info.getValue()}
-        </span>
-      ),
+      cell: (info) => <Badge tone={STATUS_TONE[info.getValue()]}>{info.getValue()}</Badge>,
     }),
     col.display({
       id: "actions",
@@ -83,18 +83,21 @@ export function ApiKeys({ ws }: { ws: string }) {
   ];
 
   return (
-    <section className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">API keys</h1>
-        <button type="button" className={primaryButton} onClick={() => setCreating(true)}>
-          New API key
-        </button>
-      </div>
+    <section className="space-y-6">
+      <PageHeader
+        title="API keys"
+        description="Tokens for the Admin API and for mocks that require an API key."
+        actions={
+          <button type="button" className={primaryButton} onClick={() => setCreating(true)}>
+            New API key
+          </button>
+        }
+      />
       {keys.error ? <ProblemAlert error={keys.error} /> : null}
       {keys.data ? (
         <DataTable caption="API keys" columns={columns} data={keys.data} empty="No API keys yet." />
       ) : keys.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       {creating ? (
         <CreateKeyDialog ws={ws} myRole={role} sysadmin={me.data.sysadmin} onClose={() => setCreating(false)} />
