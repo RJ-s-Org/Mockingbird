@@ -38,7 +38,7 @@ of `mb-ext` are out of scope.
 Release container images are signed keylessly with [cosign](https://github.com/sigstore/cosign)
 from the release workflow, and carry a CycloneDX SBOM and SLSA build provenance as
 attestations. Verify an image before running it (`<owner>` is the GitHub owner of the
-repository the image comes from, `rjs-git` for the official images, and `<v>` the
+repository the image comes from, `rj-s-org` for the official images, and `<v>` the
 release version):
 
 ```sh

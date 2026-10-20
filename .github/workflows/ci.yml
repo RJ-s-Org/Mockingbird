@@ -2,14 +2,21 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same PR or branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
     services:
       postgres:
         image: postgres:16
@@ -88,7 +95,7 @@ jobs:
   # Each mb-protocols feature (and none) must build on its own, warnings
   # included (P4 Global Constraints; P5 adds the event features).
   protocol-features:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,7 +124,7 @@ jobs:
           fi
 
   console:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: crates/mb-console/web
@@ -148,40 +155,38 @@ jobs:
           if-no-files-found: ignore
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # The full and slim images build in parallel; each has its own cache scope.
   image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: full
+            features: --features full
+          - variant: slim
+            features: --no-default-features
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build the full image
+      - name: Build the ${{ matrix.variant }} image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           load: true
+          build-args: FEATURES=${{ matrix.features }}
           tags: mockingbird:ci
-          cache-from: type=gha,scope=full
-          cache-to: type=gha,mode=max,scope=full
-      - name: Build the slim image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          load: true
-          build-args: FEATURES=--no-default-features
-          tags: mockingbird:ci-slim
-          cache-from: type=gha,scope=slim
-          cache-to: type=gha,mode=max,scope=slim
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
       - name: Smoke test
-        run: |
-          docker run --rm mockingbird:ci --version
-          docker run --rm mockingbird:ci-slim --version
-      - name: Scan the full image
+        run: docker run --rm mockingbird:ci --version
+      - name: Scan the ${{ matrix.variant }} image
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           version: v0.75.0
@@ -189,25 +194,17 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 1
           ignore-unfixed: true
-      - name: Scan the slim image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          version: v0.75.0
-          image-ref: mockingbird:ci-slim
-          severity: CRITICAL,HIGH
-          exit-code: 1
-          ignore-unfixed: true
 
   # Lints and renders the Helm chart and validates it with kubeconform.
   helm:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - run: scripts/check-helm.sh
 
   # The mb-ext public API against the last release tag.
   semver:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
       # Pinned: a new release can change which lints fail. Bump it here; the
       # cache key follows.
@@ -236,7 +233,7 @@ jobs:
   # separate from `check` so a rust-toolchain.toml bump cannot hide an MSRV
   # regression: `rust-version` in Cargo.toml is the source of truth.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -250,11 +247,22 @@ jobs:
       - run: cargo +1.97 check --workspace --all-features --locked
 
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      # Builds the image the Compose services use (mockingbird:local) from the
+      # `image` job's cache, so Compose does not compile it from scratch.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the Mockingbird image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: mockingbird:local
+          cache-from: type=gha,scope=full
       - name: Start the Compose stack (Postgres, Rauthy, Mockingbird)
-        run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait --wait-timeout 300
+        run: docker compose -f deploy/compose/docker-compose.yml up -d --wait --wait-timeout 300
       - name: Wait for Mockingbird
         run: |
           for _ in $(seq 1 90); do
@@ -278,7 +286,7 @@ jobs:
         working-directory: crates/mb-console/web
         run: npx playwright test -c playwright.rauthy.config.ts e2e-compose/flow.spec.ts
       - name: Start the HA profile (control and data node over Postgres and Redis)
-        run: docker compose -f deploy/compose/docker-compose.yml --profile ha up -d --wait --wait-timeout 300 --build
+        run: docker compose -f deploy/compose/docker-compose.yml --profile ha up -d --wait --wait-timeout 300
       - name: HA path
         run: |
           set -euo pipefail

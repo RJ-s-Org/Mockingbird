@@ -304,7 +304,16 @@ fn ci_gates_present() {
         .iter()
         .filter(|(id, step)| id == "image" && uses(step).starts_with("aquasecurity/trivy-action@"))
         .collect();
-    assert_eq!(trivy.len(), 2, "the image job scans both images");
+    assert_eq!(trivy.len(), 1, "the image job scans the image it built");
+    let variants: BTreeSet<String> = jobs(&doc)["image"]["strategy"]["matrix"]["include"]
+        .as_array()
+        .map(|rows| rows.iter().map(|row| scalar(&row["variant"])).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        variants,
+        BTreeSet::from(["full".to_owned(), "slim".to_owned()]),
+        "the image job builds and scans both images"
+    );
     for (_, step) in trivy {
         assert_eq!(scalar(&step["with"]["severity"]), "CRITICAL,HIGH");
         assert_eq!(scalar(&step["with"]["exit-code"]), "1");

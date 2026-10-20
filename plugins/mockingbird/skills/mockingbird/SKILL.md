@@ -19,7 +19,7 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 ## Fast path (no questions needed)
 
 ```sh
-command -v mockingbird || curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh | sh
+command -v mockingbird || curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh
 mockingbird init --offline --contract ./openapi.yaml          # or --provider openrouter (see mockingbird-setup)
 mockingbird server start -c mockingbird.yaml                  # background; prints URLs as JSON
 curl -s localhost:8080/<mock>/<path>                           # the mock, mounted at /<file stem>

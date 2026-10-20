@@ -13,8 +13,8 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 ## Onboarding
 
 1. Install the binary if `mockingbird --version` fails:
-   - macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh | sh` (installs to `~/.mockingbird/bin`; add it to `PATH`)
-   - Windows: `irm https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.ps1 | iex`
+   - macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh` (installs to `~/.mockingbird/bin`; add it to `PATH`)
+   - Windows: `irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex`
 2. Optional, for the full guides as steering files: `mockingbird agent install kiro`.
 3. Run the `doctor` tool.
 
@@ -28,7 +28,7 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 
 **Shape behaviour.** `put_scenario` (forced status, latency, fields, instructions; selected with the `X-Mockingbird-Scenario` header), `update_mock` (persona, LLM profile, chaos, limits), `seed_session` / `export_session` / `reset_session` (fixtures and state), `list_requests` (what clients sent).
 
-**Self-host.** Docker (`ghcr.io/rjs-git/mockingbird`), the Compose stack in `deploy/compose`, or the Helm chart `oci://ghcr.io/rjs-git/charts/mockingbird`; turn on OIDC auth before sharing an endpoint.
+**Self-host.** Docker (`ghcr.io/rj-s-org/mockingbird`), the Compose stack in `deploy/compose`, or the Helm chart `oci://ghcr.io/rj-s-org/charts/mockingbird`; turn on OIDC auth before sharing an endpoint.
 
 ## Troubleshooting
 

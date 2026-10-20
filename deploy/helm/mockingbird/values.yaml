@@ -1,7 +1,7 @@
 # Default values for the Mockingbird chart. See README.md for the reference.
 
 image:
-  repository: ghcr.io/rjs-git/mockingbird
+  repository: ghcr.io/rj-s-org/mockingbird
   # Defaults to the chart's appVersion.
   tag: ""
   # full: every protocol and broker client; slim: no broker clients (the tag

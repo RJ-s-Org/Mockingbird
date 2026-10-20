@@ -1,6 +1,6 @@
 # Installs the mockingbird binary (Windows).
 #
-#   irm https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex
 #
 # Environment:
 #   MOCKINGBIRD_VERSION      release tag to install (default: the latest release)
@@ -10,7 +10,7 @@
 # adds the directory to the user PATH. Falls back to `cargo install` when no
 # release fits and cargo is available.
 $ErrorActionPreference = 'Stop'
-$Repo = 'rjs-git/mockingbird'
+$Repo = 'rj-s-org/mockingbird'
 $InstallDir = if ($env:MOCKINGBIRD_INSTALL_DIR) { $env:MOCKINGBIRD_INSTALL_DIR } else { Join-Path $HOME '.mockingbird\bin' }
 $Target = 'x86_64-pc-windows-msvc'
 

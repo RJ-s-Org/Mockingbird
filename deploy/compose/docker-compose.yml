@@ -95,6 +95,7 @@ services:
 
   mockingbird:
     build: ../..
+    image: mockingbird:local
     network_mode: "service:rauthy"
     depends_on:
       postgres:
@@ -138,6 +139,7 @@ services:
 
   mockingbird-control:
     build: ../..
+    image: mockingbird:local
     profiles: [ha]
     depends_on:
       postgres-ha:
@@ -152,6 +154,7 @@ services:
 
   mockingbird-data:
     build: ../..
+    image: mockingbird:local
     profiles: [ha]
     depends_on:
       postgres-ha:

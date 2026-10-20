@@ -10,10 +10,10 @@ Every Mockingbird capability is available to coding agents: installing it, conne
 
 | Agent | Install |
 | --- | --- |
-| Claude Code | `/plugin marketplace add rjs-git/mockingbird`, then `/plugin install mockingbird@mockingbird`. The plugin installs the binary on first use. |
-| Codex (CLI and app) | `codex plugin marketplace add rjs-git/mockingbird`, then install **Mockingbird** from the plugin browser. Or: `mockingbird agent install codex`. |
+| Claude Code | `/plugin marketplace add rj-s-org/mockingbird`, then `/plugin install mockingbird@mockingbird`. The plugin installs the binary on first use. |
+| Codex (CLI and app) | `codex plugin marketplace add rj-s-org/mockingbird`, then install **Mockingbird** from the plugin browser. Or: `mockingbird agent install codex`. |
 | Cursor | `mockingbird agent install cursor` (project) or `--scope user`. The repository is also a Cursor plugin marketplace (`.cursor-plugin/marketplace.json`). |
-| Gemini CLI | `gemini extensions install https://github.com/rjs-git/mockingbird`, or `mockingbird agent install gemini`. |
+| Gemini CLI | `gemini extensions install https://github.com/rj-s-org/mockingbird`, or `mockingbird agent install gemini`. |
 | Kiro | `mockingbird agent install kiro` (MCP entry in `.kiro/settings/mcp.json`, guides as steering files), or add the `powers/mockingbird` directory of a clone as a custom power in the Powers panel. |
 | VS Code (Copilot agent mode) | `mockingbird agent install vscode` (writes `.vscode/mcp.json` and `.github/skills`). |
 | Windsurf | `mockingbird agent install windsurf`. |
@@ -24,8 +24,8 @@ Every Mockingbird capability is available to coding agents: installing it, conne
 Except for the Claude Code plugin, the agent needs the binary first:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh | sh     # macOS, Linux
-irm https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.ps1 | iex           # Windows
+curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh     # macOS, Linux
+irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex           # Windows
 ```
 
 The scripts install the release binary for the platform into `~/.mockingbird/bin` after checking its SHA-256 (`MOCKINGBIRD_VERSION` pins a release, `MOCKINGBIRD_INSTALL_DIR` changes the directory), and build from source with `cargo install` when no release binary fits.

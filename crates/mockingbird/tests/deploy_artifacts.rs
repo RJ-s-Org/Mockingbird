@@ -169,7 +169,7 @@ fn values_schema_is_json() {
 #[test]
 fn chart_values_contract() {
     let v = yaml(&chart().join("values.yaml"));
-    assert_eq!(v["image"]["repository"], "ghcr.io/rjs-git/mockingbird");
+    assert_eq!(v["image"]["repository"], "ghcr.io/rj-s-org/mockingbird");
     assert_eq!(v["image"]["tag"], "");
     assert_eq!(v["image"]["flavor"], "full");
     assert_eq!(v["mode"], "allInOne");

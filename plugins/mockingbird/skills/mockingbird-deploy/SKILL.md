@@ -30,10 +30,10 @@ State (pid, log, ports) lives in `./.mockingbird` (`--state-dir`, `MB_STATE_DIR`
 ```sh
 docker run -d --name mockingbird -p 8080:8080 -p 9090:9090 -p 50051:50051 \
   -e OPENROUTER_API_KEY -v "$PWD:/work" -w /work \
-  ghcr.io/rjs-git/mockingbird serve -c mockingbird.yaml --host 0.0.0.0 --insecure-no-auth --watch
+  ghcr.io/rj-s-org/mockingbird serve -c mockingbird.yaml --host 0.0.0.0 --insecure-no-auth --watch
 ```
 
-`--insecure-no-auth` is only for a trusted network: without auth anyone who reaches port 9090 controls the server. Images: `ghcr.io/rjs-git/mockingbird:<version>` (Kafka, AMQP, MQTT) and `:<version>-slim`. Pass provider keys as environment variables (`-e NAME`), never in the config.
+`--insecure-no-auth` is only for a trusted network: without auth anyone who reaches port 9090 controls the server. Images: `ghcr.io/rj-s-org/mockingbird:<version>` (Kafka, AMQP, MQTT) and `:<version>-slim`. Pass provider keys as environment variables (`-e NAME`), never in the config.
 
 ## Team server with login
 
@@ -52,7 +52,7 @@ Roles come from the `groups` claim (`mb:<workspace>:<viewer|editor|admin|owner>`
 ## Kubernetes
 
 ```sh
-helm install mockingbird oci://ghcr.io/rjs-git/charts/mockingbird --version <version> -f values.yaml
+helm install mockingbird oci://ghcr.io/rj-s-org/charts/mockingbird --version <version> -f values.yaml
 ```
 
 The chart is in `deploy/helm/mockingbird` (values in its README). Postgres, Redis and the OIDC issuer are external. `mode: split` runs a control plane (console, Admin API) and an autoscaled data plane; it needs Postgres, and Redis or Postgres for state and bus. Read `docs/deploy/kubernetes.md` before a production install; `docs/operations/runbook.md` explains `/readyz` reasons and alerts.
