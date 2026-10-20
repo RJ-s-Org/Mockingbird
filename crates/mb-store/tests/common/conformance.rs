@@ -549,6 +549,7 @@ async fn profile_crud(store: &Arc<dyn ControlStore>) {
         timeout_ms: 30_000,
         max_tokens: 2048,
         fallback_profile: None,
+        headers: Default::default(),
         source: ResourceSource::Api,
     };
     store.put_profile(&p).await.expect("put");
@@ -562,9 +563,28 @@ async fn profile_crud(store: &Arc<dyn ControlStore>) {
     p.model = "llama3.1".into();
     p.fallback_profile = Some("slow".into());
     p.secret_ref = None;
+    p.headers = [
+        (
+            "cf-aig-authorization".to_string(),
+            "Bearer ${env:CF_AIG_API_KEY}".to_string(),
+        ),
+        ("x-title".to_string(), "Mockingbird".to_string()),
+    ]
+    .into();
     store.put_profile(&p).await.expect("upsert");
+    assert_eq!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "fast")
+            .await
+            .expect("get")
+            .expect("present")
+            .headers,
+        p.headers,
+        "headers round-trip"
+    );
     let slow = LlmProfile {
         name: "slow".into(),
+        headers: Default::default(),
         source: ResourceSource::File,
         ..p.clone()
     };
@@ -842,6 +862,7 @@ fn profile(ws: &str, name: &str) -> LlmProfile {
         timeout_ms: 1000,
         max_tokens: 100,
         fallback_profile: None,
+        headers: Default::default(),
         source: ResourceSource::Api,
     }
 }

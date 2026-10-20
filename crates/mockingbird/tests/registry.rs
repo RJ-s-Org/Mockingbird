@@ -329,6 +329,7 @@ fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
         timeout_ms: 3000,
         max_tokens: 512,
         fallback_profile: fallback.map(str::to_string),
+        headers: Default::default(),
         source: ResourceSource::Api,
     }
 }

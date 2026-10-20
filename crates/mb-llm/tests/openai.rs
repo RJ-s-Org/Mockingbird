@@ -26,6 +26,7 @@ fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
         api_key: Some("k".into()),
         model: "m".into(),
         json_schema,
+        headers: Vec::new(),
         http: HttpOptions::default(),
     })
     .unwrap()
@@ -60,6 +61,35 @@ async fn sends_json_object_and_parses_content() {
     assert_eq!(resp.content, "{\"a\":1}");
     assert_eq!(resp.usage.prompt_tokens, 5);
     assert_eq!(resp.usage.completion_tokens, 3);
+}
+
+#[tokio::test]
+async fn sends_extra_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer k"))
+        .and(header("cf-aig-authorization", "Bearer gw"))
+        .and(header("x-title", "Mockingbird"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatible::new(OpenAiConfig {
+        base_url: server.uri(),
+        api_key: Some("k".into()),
+        model: "m".into(),
+        json_schema: false,
+        headers: vec![
+            ("cf-aig-authorization".into(), "Bearer gw".into()),
+            ("x-title".into(), "Mockingbird".into()),
+        ],
+        http: HttpOptions::default(),
+    })
+    .unwrap();
+    let resp = provider
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\":1}");
 }
 
 #[tokio::test]

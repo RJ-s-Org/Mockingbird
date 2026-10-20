@@ -38,7 +38,7 @@ const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
      draft_meta";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source";
+     max_tokens, fallback_profile, source, headers";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 const SESSION_COLUMNS: &str = "id_hash, principal, created_at, expires_at, last_seen";
@@ -339,6 +339,7 @@ fn scenario_from_row(row: &SqliteRow) -> Result<Scenario, StoreError> {
 fn profile_from_row(row: &SqliteRow) -> Result<LlmProfile, StoreError> {
     let source: String = row.try_get("source")?;
     let temperature: f64 = row.try_get("temperature")?;
+    let headers: String = row.try_get("headers")?;
     Ok(LlmProfile {
         workspace: row.try_get("workspace")?,
         name: row.try_get("name")?,
@@ -351,6 +352,7 @@ fn profile_from_row(row: &SqliteRow) -> Result<LlmProfile, StoreError> {
         timeout_ms: from_i64(row.try_get("timeout_ms")?, "timeout_ms")?,
         max_tokens: from_i64(row.try_get("max_tokens")?, "max_tokens")?,
         fallback_profile: row.try_get("fallback_profile")?,
+        headers: serde_json::from_str(&headers)?,
         source: ResourceSource::parse(&source)?,
     })
 }
@@ -919,12 +921,12 @@ impl ControlStore for SqliteControlStore {
 
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
-            "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
-             source = excluded.source"
+             source = excluded.source, headers = excluded.headers"
         );
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_workspace(&mut tx, &p.workspace).await?;
@@ -940,6 +942,7 @@ impl ControlStore for SqliteControlStore {
             .bind(i64::from(p.max_tokens))
             .bind(&p.fallback_profile)
             .bind(p.source.as_str())
+            .bind(serde_json::to_string(&p.headers)?)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

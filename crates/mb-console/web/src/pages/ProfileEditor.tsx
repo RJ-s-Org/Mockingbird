@@ -78,6 +78,8 @@ export function ProfileEditor({
           timeout_ms: Number(timeoutMs),
           max_tokens: Number(maxTokens),
           fallback_profile: fallback || null,
+          // Not edited here: kept as stored so a save does not drop them.
+          headers: profile?.headers ?? {},
         },
       },
       { onSuccess: onSaved },

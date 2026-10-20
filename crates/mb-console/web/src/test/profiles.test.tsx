@@ -15,6 +15,7 @@ const fast = {
   timeout_ms: 1000,
   json_schema: true,
   fallback_profile: null,
+  headers: { "x-title": "Mockingbird" },
   source: "api",
 };
 
@@ -86,8 +87,25 @@ describe("llm profiles", () => {
       timeout_ms: 1000,
       max_tokens: 512,
       fallback_profile: "boot",
+      headers: {},
     });
     expect("api_key" in body).toBe(false);
+  });
+
+  it("editing a profile keeps its provider headers", async () => {
+    const user = userEvent.setup();
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${BASE}/llm-profiles`]: [fast],
+      [`PUT ${BASE}/llm-profiles/fast`]: () => json({ ...fast, warnings: [] }),
+    });
+    renderAt("/w/default/llm-profiles");
+    await user.click(await screen.findByRole("button", { name: "Edit fast" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const put = calls.find((c) => c.method === "PUT");
+    expect(JSON.parse(put?.body ?? "").headers).toEqual({ "x-title": "Mockingbird" });
   });
 
   it("a refused save shows the server's problem detail", async () => {

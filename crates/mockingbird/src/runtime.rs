@@ -490,9 +490,24 @@ async fn openai_provider(
         }
         None => None,
     };
+    let mut headers = Vec::with_capacity(profile.headers.len());
+    for (name, template) in &profile.headers {
+        let mut value = template.clone();
+        for reference in mb_store::header_secret_refs(template)? {
+            let secret = deps.ext.secrets.resolve(reference).await.with_context(|| {
+                format!(
+                    "resolving header {name:?} of LLM profile {:?}",
+                    profile.name
+                )
+            })?;
+            value = value.replace(&format!("${{{reference}}}"), &secret);
+        }
+        headers.push((name.clone(), value));
+    }
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: profile.base_url.clone(),
         api_key,
+        headers,
         model: profile.model.clone(),
         json_schema: profile.json_schema,
         http: deps.http.clone(),

@@ -27,6 +27,7 @@ const MAP_PATHS: &[&str] = &[
     "brokers",
     "mocks",
     "llm.profiles",
+    "llm.profiles.<name>.headers",
     "mocks.<name>.scenarios",
     "mocks.<name>.channels",
 ];

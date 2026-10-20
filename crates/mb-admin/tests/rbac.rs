@@ -557,6 +557,67 @@ async fn only_sysadmin_binds_a_secret_to_a_base_url() {
 }
 
 #[tokio::test]
+async fn only_sysadmin_binds_a_header_secret_to_a_base_url() {
+    let h = harness().await;
+    let uri = format!("{DEFAULT}/llm-profiles/gw");
+    let with = |base: &str, header: &str| {
+        json!({
+            "base_url": base,
+            "model": "m",
+            "headers": { "cf-aig-authorization": header, "x-title": "Mockingbird" }
+        })
+    };
+    let secret = "Bearer ${env:CF_AIG_API_KEY}";
+    let a = Some("admin");
+    h.call(
+        a,
+        Method::PUT,
+        &uri,
+        Some(with("https://attacker.example", secret)),
+    )
+    .await
+    .expect(StatusCode::FORBIDDEN, "admin binds a header secret");
+    h.call(
+        Some("sysadmin"),
+        Method::PUT,
+        &uri,
+        Some(with("https://gw", secret)),
+    )
+    .await
+    .expect(StatusCode::OK, "sysadmin binds a header secret");
+    let r = h.call(a, Method::GET, &uri, None).await;
+    r.expect(StatusCode::OK, "read back");
+    assert_eq!(r.json()["headers"]["cf-aig-authorization"], secret);
+    h.call(
+        a,
+        Method::PUT,
+        &uri,
+        Some(with("https://attacker.example", secret)),
+    )
+    .await
+    .expect(StatusCode::FORBIDDEN, "admin moves the header secret");
+    h.call(
+        Some("sysadmin"),
+        Method::PUT,
+        &uri,
+        Some(with("https://gw", "Bearer ${env:NOT_ALLOWED}")),
+    )
+    .await
+    .expect(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "reference outside api_secret_refs",
+    );
+    h.call(
+        Some("sysadmin"),
+        Method::PUT,
+        &uri,
+        Some(with("https://gw", "Bearer raw-token")),
+    )
+    .await
+    .expect(StatusCode::UNPROCESSABLE_ENTITY, "raw credential header");
+}
+
+#[tokio::test]
 async fn owner_can_patch_and_delete_workspace_admin_cannot() {
     let h = harness().await;
     h.call(Some("admin"), Method::DELETE, DEFAULT, None)
