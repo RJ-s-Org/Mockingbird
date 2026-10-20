@@ -29,7 +29,7 @@ mockingbird seed-fixtures --mock orders --session ci tests/fixtures/orders.json
 ```yaml
 - name: Install Mockingbird
   run: |
-    curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh
     echo "$HOME/.mockingbird/bin" >> "$GITHUB_PATH"
 - name: Start mocks
   run: mockingbird server start --offline -c tests/mockingbird.yaml
@@ -40,7 +40,7 @@ mockingbird seed-fixtures --mock orders --session ci tests/fixtures/orders.json
   run: mockingbird server logs -n 200; mockingbird server stop
 ```
 
-Or as a service container: `ghcr.io/rjs-git/mockingbird` with `serve --host 0.0.0.0 --insecure-no-auth --offline -c /work/mockingbird.yaml` (CI networks only).
+Or as a service container: `ghcr.io/rj-s-org/mockingbird` with `serve --host 0.0.0.0 --insecure-no-auth --offline -c /work/mockingbird.yaml` (CI networks only).
 
 ## Test frameworks
 

@@ -11,10 +11,10 @@ Check first: `mockingbird --version` (also try `~/.mockingbird/bin/mockingbird`)
 
 | Platform | Command |
 | --- | --- |
-| macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh \| sh` |
-| Windows (PowerShell) | `irm https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.ps1 \| iex` |
-| Docker | `docker run --rm -p 8080:8080 -p 9090:9090 -v "$PWD:/work" -w /work ghcr.io/rjs-git/mockingbird serve --host 0.0.0.0 --insecure-no-auth --offline api.yaml` |
-| From source (Rust 1.97+) | `cargo install --locked --git https://github.com/rjs-git/mockingbird mockingbird` |
+| macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh \| sh` |
+| Windows (PowerShell) | `irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 \| iex` |
+| Docker | `docker run --rm -p 8080:8080 -p 9090:9090 -v "$PWD:/work" -w /work ghcr.io/rj-s-org/mockingbird serve --host 0.0.0.0 --insecure-no-auth --offline api.yaml` |
+| From source (Rust 1.97+) | `cargo install --locked --git https://github.com/rj-s-org/mockingbird mockingbird` |
 
 The script installs the release binary for the platform into `~/.mockingbird/bin` (override with `MOCKINGBIRD_INSTALL_DIR`; pin with `MOCKINGBIRD_VERSION=v0.1.0`), verifies its SHA-256, and falls back to `cargo install` when no release binary fits. If `~/.mockingbird/bin` is not on `PATH`, call the binary by its full path.
 

@@ -3,9 +3,9 @@
   "name": "mockingbird",
   "version": "0.1.0-rc.1",
   "description": "Mock any API from its contract with LLM-generated, schema-valid responses: install, LLM onboarding, self-hosting and the full Admin API as MCP tools and skills.",
-  "author": { "name": "Mockingbird contributors", "url": "https://github.com/rjs-git/mockingbird" },
-  "homepage": "https://github.com/rjs-git/mockingbird",
-  "repository": "https://github.com/rjs-git/mockingbird",
+  "author": { "name": "Mockingbird contributors", "url": "https://github.com/rj-s-org/mockingbird" },
+  "homepage": "https://github.com/rj-s-org/mockingbird",
+  "repository": "https://github.com/rj-s-org/mockingbird",
   "license": "MIT OR Apache-2.0",
   "keywords": ["mock", "api", "openapi", "graphql", "grpc", "soap", "testing", "mcp"],
   "extensions": {

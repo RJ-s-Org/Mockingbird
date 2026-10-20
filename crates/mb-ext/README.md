@@ -1,6 +1,6 @@
 # mb-ext
 
-The extension contract of [Mockingbird](https://github.com/rjs-git/mockingbird): the traits a build of the server can replace, and the self-hosted defaults the open-source binary uses. `mockingbird-cloud` builds against this crate and nothing else.
+The extension contract of [Mockingbird](https://github.com/rj-s-org/mockingbird): the traits a build of the server can replace, and the self-hosted defaults the open-source binary uses. `mockingbird-cloud` builds against this crate and nothing else.
 
 | Trait | Called | Default |
 | --- | --- | --- |

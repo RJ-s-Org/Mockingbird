@@ -25,7 +25,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 Install the release binary (macOS, Linux; on Windows use `install.ps1`, see [Coding agents](docs/agents.md#install)):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rjs-git/mockingbird/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh
 ```
 
 or from a checkout:
@@ -87,7 +87,7 @@ Mockingbird listens on three ports: the data plane (REST, SSE, GraphQL and SOAP 
 Mockingbird is built to be driven by coding agents. `mockingbird mcp` is an MCP server whose tools cover the whole product: install checks (`doctor`), LLM onboarding (OpenRouter, Google AI Studio, Cloudflare AI Gateway and Workers AI, the major vendors, local runtimes, or any OpenAI-compatible endpoint with your own key), the background server, and every Admin API operation. Skills tell the agent when to use them.
 
 ```sh
-/plugin marketplace add rjs-git/mockingbird          # Claude Code, then /plugin install mockingbird@mockingbird
+/plugin marketplace add rj-s-org/mockingbird          # Claude Code, then /plugin install mockingbird@mockingbird
 mockingbird agent install codex                      # or cursor, gemini, kiro, vscode, windsurf, claude-desktop
 mockingbird mcp --transport http --auth-token-env MB_MCP_TOKEN   # remote agents such as ChatGPT
 ```
@@ -731,7 +731,7 @@ docker build -t mockingbird .
 docker run --rm mockingbird --version
 ```
 
-This builds the full image (Kafka, AMQP and MQTT); `--build-arg FEATURES=--no-default-features` builds the slim one (see [Images](#images)). Release images are published as `ghcr.io/rjs-git/mockingbird:<version>` (and `-slim`), signed with cosign; see [verifying releases](docs/deploy/kubernetes.md#verifying-images-and-binaries).
+This builds the full image (Kafka, AMQP and MQTT); `--build-arg FEATURES=--no-default-features` builds the slim one (see [Images](#images)). Release images are published as `ghcr.io/rj-s-org/mockingbird:<version>` (and `-slim`), signed with cosign; see [verifying releases](docs/deploy/kubernetes.md#verifying-images-and-binaries).
 
 The image builds the console too and exposes ports 8080 (data plane), 9090 (Admin API, console and ops) and 50051 (gRPC). It runs as a non-root user and, like the binary, binds loopback unless told otherwise. With `auth.mode: none`, binding all interfaces needs `--insecure-no-auth`; only do this on a trusted network (or use `oidc`, as in the [Compose stack](deploy/compose/README.md)):
 

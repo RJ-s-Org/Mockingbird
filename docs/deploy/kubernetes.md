@@ -1,6 +1,6 @@
 # Kubernetes
 
-The Helm chart in [`deploy/helm/mockingbird`](../../deploy/helm/mockingbird) runs Mockingbird on Kubernetes 1.27 or newer. Its [README](../../deploy/helm/mockingbird/README.md) lists every value; this page walks through a production install. Releases publish the chart, signed, to `oci://ghcr.io/rjs-git/charts/mockingbird`.
+The Helm chart in [`deploy/helm/mockingbird`](../../deploy/helm/mockingbird) runs Mockingbird on Kubernetes 1.27 or newer. Its [README](../../deploy/helm/mockingbird/README.md) lists every value; this page walks through a production install. Releases publish the chart, signed, to `oci://ghcr.io/rj-s-org/charts/mockingbird`.
 
 The chart has no subcharts: Postgres, Redis and the OIDC issuer are external, and the chart only takes their URLs or Secrets.
 
@@ -14,7 +14,7 @@ One Deployment running `--role all`. With SQLite or in-memory stores it must sta
 kubectl create secret generic mockingbird-db --from-literal=url='postgres://mb:…@pg:5432/mockingbird'
 kubectl create secret generic mockingbird-llm --from-literal=api-key='sk-…'
 
-helm install mockingbird oci://ghcr.io/rjs-git/charts/mockingbird --version 0.1.0 -f values.yaml
+helm install mockingbird oci://ghcr.io/rj-s-org/charts/mockingbird --version 0.1.0 -f values.yaml
 ```
 
 ```yaml
@@ -196,26 +196,26 @@ The sync route needs no patch: the driver keeps the Kubernetes Secret up to date
 
 ## Verifying images and binaries
 
-Release images (`ghcr.io/rjs-git/mockingbird:<version>` and `:<version>-slim`) and the chart are signed in CI with keyless cosign; the images also carry SLSA build provenance and a CycloneDX SBOM attestation. Binary archives are not signed: each has SLSA build provenance and a sha256 checksum (its `.sha256` file and the release's `SHA256SUMS`).
+Release images (`ghcr.io/rj-s-org/mockingbird:<version>` and `:<version>-slim`) and the chart are signed in CI with keyless cosign; the images also carry SLSA build provenance and a CycloneDX SBOM attestation. Binary archives are not signed: each has SLSA build provenance and a sha256 checksum (its `.sha256` file and the release's `SHA256SUMS`).
 
 ```sh
 # Image signature (keyless, from the release workflow on a tag).
-cosign verify ghcr.io/rjs-git/mockingbird:0.1.0 \
-  --certificate-identity-regexp '^https://github.com/rjs-git/mockingbird/\.github/workflows/release\.yml@refs/tags/v' \
+cosign verify ghcr.io/rj-s-org/mockingbird:0.1.0 \
+  --certificate-identity-regexp '^https://github.com/rj-s-org/mockingbird/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # Build provenance and SBOM of the image.
-gh attestation verify oci://ghcr.io/rjs-git/mockingbird:0.1.0 --repo rjs-git/mockingbird
-gh attestation verify oci://ghcr.io/rjs-git/mockingbird:0.1.0 --repo rjs-git/mockingbird \
+gh attestation verify oci://ghcr.io/rj-s-org/mockingbird:0.1.0 --repo rj-s-org/mockingbird
+gh attestation verify oci://ghcr.io/rj-s-org/mockingbird:0.1.0 --repo rj-s-org/mockingbird \
   --predicate-type https://cyclonedx.org/bom
 
 # Checksum and build provenance of a binary archive.
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify mockingbird-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo rjs-git/mockingbird
+gh attestation verify mockingbird-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo rj-s-org/mockingbird
 
 # The chart's signature.
-cosign verify ghcr.io/rjs-git/charts/mockingbird:0.1.0 \
-  --certificate-identity-regexp '^https://github.com/rjs-git/mockingbird/' \
+cosign verify ghcr.io/rj-s-org/charts/mockingbird:0.1.0 \
+  --certificate-identity-regexp '^https://github.com/rj-s-org/mockingbird/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

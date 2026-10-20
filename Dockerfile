@@ -57,7 +57,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 # leading `v`) and the commit SHA.
 ARG VERSION=dev
 ARG REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/rjs-git/mockingbird" \
+LABEL org.opencontainers.image.source="https://github.com/rj-s-org/mockingbird" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"

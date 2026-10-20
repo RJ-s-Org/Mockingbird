@@ -1,6 +1,6 @@
 # Mockingbird Helm chart
 
-Runs [Mockingbird](https://github.com/rjs-git/mockingbird) on Kubernetes 1.27 or newer, either as one all-in-one Deployment or split into a control plane and an autoscaled data plane. There are no subcharts: Postgres, Redis and the OIDC issuer (Rauthy or any other) are external, and the chart only takes their URLs or Secrets.
+Runs [Mockingbird](https://github.com/rj-s-org/mockingbird) on Kubernetes 1.27 or newer, either as one all-in-one Deployment or split into a control plane and an autoscaled data plane. There are no subcharts: Postgres, Redis and the OIDC issuer (Rauthy or any other) are external, and the chart only takes their URLs or Secrets.
 
 ```sh
 helm install mockingbird deploy/helm/mockingbird -f my-values.yaml
@@ -23,7 +23,7 @@ Secrets never go into `config`: the stores and the LLM key are passed as environ
 
 | Value | Default | Meaning |
 | --- | --- | --- |
-| `image.repository` | `ghcr.io/rjs-git/mockingbird` | |
+| `image.repository` | `ghcr.io/rj-s-org/mockingbird` | |
 | `image.tag` | `""` | defaults to the chart's `appVersion` |
 | `image.flavor` | `full` | `slim` appends `-slim` (no broker clients) |
 | `image.pullPolicy` | `IfNotPresent` | |

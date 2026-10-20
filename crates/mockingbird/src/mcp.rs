@@ -1261,7 +1261,7 @@ impl McpServer {
                 "name": "mockingbird",
                 "title": "Mockingbird",
                 "version": env!("CARGO_PKG_VERSION"),
-                "websiteUrl": "https://github.com/rjs-git/mockingbird",
+                "websiteUrl": "https://github.com/rj-s-org/mockingbird",
             },
             "instructions": INSTRUCTIONS,
         })

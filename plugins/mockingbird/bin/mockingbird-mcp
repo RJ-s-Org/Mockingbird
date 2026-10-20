@@ -15,7 +15,7 @@ find_mb() {
 }
 
 if ! mb=$(find_mb); then
-    echo "mockingbird is not installed; installing it (https://github.com/rjs-git/mockingbird)" >&2
+    echo "mockingbird is not installed; installing it (https://github.com/rj-s-org/mockingbird)" >&2
     sh "$(dirname "$0")/install.sh" >&2
     mb=$(find_mb)
 fi

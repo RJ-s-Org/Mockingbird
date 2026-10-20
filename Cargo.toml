@@ -6,7 +6,7 @@ members = ["crates/*", "examples/custom-ext"]
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rjs-git/mockingbird"
+repository = "https://github.com/rj-s-org/mockingbird"
 version = "0.1.0-rc.1"
 
 [workspace.dependencies]

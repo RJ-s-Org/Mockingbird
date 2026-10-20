@@ -43,5 +43,5 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 - Console: a refined look in light and dark mode. Colours come from semantic tokens defined once per theme; pages share one set of buttons, fields, cards, notices and badges; the header carries the product mark (and a favicon) and stays compact on phones; forms are grouped into titled cards, with Delete mock in its own card; HTTP methods, status codes, response sources and statuses (keys, contract versions, readiness, draft confidence) are shown as colour-coded badges.
 
-[Unreleased]: https://github.com/rjs-git/mockingbird/compare/v0.1.0-rc.1...HEAD
-[0.1.0-rc.1]: https://github.com/rjs-git/mockingbird/releases/tag/v0.1.0-rc.1
+[Unreleased]: https://github.com/rj-s-org/mockingbird/compare/v0.1.0-rc.1...HEAD
+[0.1.0-rc.1]: https://github.com/rj-s-org/mockingbird/releases/tag/v0.1.0-rc.1

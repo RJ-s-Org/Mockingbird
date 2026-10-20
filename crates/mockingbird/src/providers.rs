@@ -76,7 +76,7 @@ pub const PRESETS: &[Preset] = &[
         key_required: true,
         json_schema: false,
         headers: &[
-            ("http-referer", "https://github.com/rjs-git/mockingbird"),
+            ("http-referer", "https://github.com/rj-s-org/mockingbird"),
             ("x-title", "Mockingbird"),
         ],
         params: &[],
