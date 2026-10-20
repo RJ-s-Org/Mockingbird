@@ -7,7 +7,7 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rjs-git/mockingbird"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }

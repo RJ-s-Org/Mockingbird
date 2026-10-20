@@ -223,7 +223,7 @@ fn check_version_script() {
             .output()
             .unwrap()
     };
-    let ok = run("v0.1.0");
+    let ok = run("v0.1.0-rc.1");
     assert_eq!(
         ok.status.code(),
         Some(0),

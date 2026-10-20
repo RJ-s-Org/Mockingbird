@@ -66,9 +66,14 @@ target() {
     esac
 }
 
+# The newest final release; while there is none, the newest prerelease
+# (`releases/latest` skips prereleases).
 latest_tag() {
-    fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
-        sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1
+    tag=$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
+        sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    [ -n "$tag" ] || tag=$(fetch_stdout "https://api.github.com/repos/$REPO/releases?per_page=1" 2>/dev/null |
+        sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    echo "$tag"
 }
 
 install_release() {

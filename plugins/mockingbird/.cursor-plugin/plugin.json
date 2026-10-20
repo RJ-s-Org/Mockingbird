@@ -1,6 +1,6 @@
 {
   "name": "mockingbird",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "description": "Mock any API from its contract with LLM-generated, schema-valid responses: install, LLM onboarding, self-hosting and the full Admin API as MCP tools and skills.",
   "author": { "name": "Mockingbird contributors" },
   "homepage": "https://github.com/rjs-git/mockingbird",

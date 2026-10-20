@@ -21,6 +21,10 @@ function Install-Release {
     if (-not $tag) {
         try { $tag = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest").tag_name } catch { $tag = $null }
     }
+    if (-not $tag) {
+        # No final release yet: the newest prerelease (releases/latest skips them).
+        try { $tag = @(Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=1")[0].tag_name } catch { $tag = $null }
+    }
     if (-not $tag) { Say 'no published release found'; return $false }
     $version = $tag.TrimStart('v')
     $name = "mockingbird-$version-$Target"
