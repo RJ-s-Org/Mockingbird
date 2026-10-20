@@ -4,20 +4,36 @@ import { useDraft, usePreview, useApproveDraft, type DraftOperation, type DraftV
 import { useActivate } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import { ConfirmDialog, inputClass, primaryButton, secondaryButton } from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
-import { linkClass } from "../mocks/MocksList";
 import { ConfidenceBadge } from "./ConfidenceBadge";
 import { DraftDiff } from "./DraftDiff";
 import { OperationEditor } from "./OperationEditor";
 import { readOperation, type OpenApiDoc, type OperationRef } from "./openapi";
+import { Method } from "../../components/http";
+import {
+  Badge,
+  Card,
+  Field,
+  Loading,
+  cardClass,
+  hintClass,
+  inputClass,
+  linkClass,
+  preClass,
+  primaryButton,
+  secondaryButton,
+  type Tone,
+} from "../../components/ui";
 
 const col = columnHelper<DraftOperation>();
 
 function targetOf(op: OperationRef): string {
   return `${op.method} ${op.path}`;
 }
+
+const STATUS_TONE: Record<string, Tone> = { draft: "info", approved: "accent", active: "ok" };
 
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
@@ -34,7 +50,7 @@ export function DraftReview({ ws, mock, version }: { ws: string; mock: string; v
   const canEdit = me.data ? can(me.data, ws, "edit") : false;
 
   if (!draft.data) {
-    return draft.error ? <ProblemAlert error={draft.error} /> : <p className="text-slate-700 dark:text-slate-300">Loading…</p>;
+    return draft.error ? <ProblemAlert error={draft.error} /> : <Loading />;
   }
   return <Review ws={ws} mock={mock} version={version} view={draft.data} canEdit={canEdit} />;
 }
@@ -76,7 +92,7 @@ function Review({
   };
 
   const columns = [
-    col.accessor("method", { header: "Method" }),
+    col.accessor("method", { header: "Method", cell: (info) => <Method method={info.getValue()} /> }),
     col.accessor("path", { header: "Path", cell: (info) => <code>{info.getValue()}</code> }),
     col.accessor("summary", { header: "Summary", cell: (info) => info.getValue() ?? "" }),
     col.accessor("confidence", {
@@ -87,9 +103,7 @@ function Review({
       header: "Edited",
       cell: (info) =>
         info.getValue() ? (
-          <span className="rounded border border-indigo-700 dark:border-indigo-400 bg-indigo-50 dark:bg-indigo-950 px-1.5 py-0.5 text-xs font-medium text-indigo-900 dark:text-indigo-200">
-            edited
-          </span>
+          <Badge tone="accent">edited</Badge>
         ) : null,
     }),
     col.display({
@@ -106,7 +120,7 @@ function Review({
               const op = row.original;
               const target = targetOf(op);
               return (
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     className={secondaryButton}
@@ -138,59 +152,65 @@ function Review({
 
   return (
     <div className="space-y-6">
-      <header className="space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-lg font-semibold">{`Draft v${view.version}`}</h2>
-          <p className="text-sm font-medium" aria-live="polite">{`Status: ${view.status}`}</p>
-        </div>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt className="font-medium">Source</dt>
-          <dd className="break-all">{`${meta.source_kind} · ${source}`}</dd>
-          {deterministic ? (
-            <>
-              <dt className="font-medium">Generation</dt>
-              <dd>Deterministic import (no LLM used)</dd>
-            </>
-          ) : (
-            <>
-              <dt className="font-medium">Chunks</dt>
-              <dd>{`${meta.chunks_processed} of ${meta.chunk_count} chunks processed`}</dd>
-              <dt className="font-medium">Tokens</dt>
-              <dd>{`${meta.usage.prompt_tokens} prompt + ${meta.usage.completion_tokens} completion tokens`}</dd>
-            </>
-          )}
-        </dl>
-        {meta.warnings.length > 0 ? (
-          <div className="space-y-1">
-            <h3 className="text-sm font-semibold">{`Warnings (${meta.warnings.length})`}</h3>
-            <ul
-              role="list"
-              aria-label="Warnings"
-              className="list-disc space-y-1 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 pl-8 text-sm text-amber-950 dark:text-amber-200"
-            >
-              {meta.warnings.map((w, i) => (
-                <li key={i}>
-                  <code className="font-semibold">{w.code}</code>: {w.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-        {view.diff ? <DraftDiff diff={view.diff} /> : null}
-      </header>
+      <Card
+        as="section"
+        title={`Draft v${view.version}`}
+        actions={
+          <p aria-live="polite">
+            <Badge tone={STATUS_TONE[view.status] ?? "neutral"}>{`Status: ${view.status}`}</Badge>
+          </p>
+        }
+      >
+        <header className="space-y-5">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 text-sm">
+            <dt className="text-fg-muted">Source</dt>
+            <dd className="break-all">{`${meta.source_kind} · ${source}`}</dd>
+            {deterministic ? (
+              <>
+                <dt className="text-fg-muted">Generation</dt>
+                <dd>Deterministic import (no LLM used)</dd>
+              </>
+            ) : (
+              <>
+                <dt className="text-fg-muted">Chunks</dt>
+                <dd>{`${meta.chunks_processed} of ${meta.chunk_count} chunks processed`}</dd>
+                <dt className="text-fg-muted">Tokens</dt>
+                <dd>{`${meta.usage.prompt_tokens} prompt + ${meta.usage.completion_tokens} completion tokens`}</dd>
+              </>
+            )}
+          </dl>
+          {meta.warnings.length > 0 ? (
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold">{`Warnings (${meta.warnings.length})`}</h3>
+              <ul
+                role="list"
+                aria-label="Warnings"
+                className="list-disc space-y-1 rounded-md border border-warn-line bg-warn-bg py-2.5 pr-3 pl-8 text-sm text-warn-fg"
+              >
+                {meta.warnings.map((w, i) => (
+                  <li key={i}>
+                    <code className="font-semibold">{w.code}</code>: {w.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {view.diff ? <DraftDiff diff={view.diff} /> : null}
+        </header>
 
-      <Approval
-        ws={ws}
-        mock={mock}
-        view={view}
-        canEdit={canEdit}
-        dirty={dirty}
-        hintId={approveHint}
-        approving={approve.isPending}
-        activating={activate.isPending}
-        onApprove={() => setConfirmApprove(true)}
-        onActivate={() => activate.mutate(version)}
-      />
+        <Approval
+          ws={ws}
+          mock={mock}
+          view={view}
+          canEdit={canEdit}
+          dirty={dirty}
+          hintId={approveHint}
+          approving={approve.isPending}
+          activating={activate.isPending}
+          onApprove={() => setConfirmApprove(true)}
+          onActivate={() => activate.mutate(version)}
+        />
+      </Card>
       <ProblemAlert error={approve.error ?? activate.error} />
 
       {/* The editor and the preview open inline, right under their operation's row. */}
@@ -284,9 +304,11 @@ function Approval({
         Back to contracts
       </Link>
     ) : null;
-  if (!canEdit) return back ? <div>{back}</div> : null;
+  const toolbar = "mt-5 flex flex-wrap items-center gap-3 border-t border-line pt-4";
+  if (!canEdit) return back ? <div className={toolbar}>{back}</div> : null;
+  if (view.status !== "draft" && view.status !== "approved" && !back) return null;
   return (
-    <div className="flex flex-wrap items-center gap-3">
+    <div className={toolbar}>
       {view.status === "draft" ? (
         <>
           <button
@@ -299,7 +321,7 @@ function Approval({
             Approve
           </button>
           {dirty ? (
-            <p id={hintId} className="text-sm text-slate-700 dark:text-slate-300">
+            <p id={hintId} className={hintClass}>
               Save or cancel the open edit before approving.
             </p>
           ) : null}
@@ -319,12 +341,12 @@ function Approval({
 function Provenance({ op }: { op: DraftOperation }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  if (op.provenance.length === 0) return <span className="text-slate-600 dark:text-slate-400">—</span>;
+  if (op.provenance.length === 0) return <span className="text-fg-muted">—</span>;
   return (
     <div className="space-y-2">
       <button
         type="button"
-        className="text-sm text-indigo-700 dark:text-indigo-300 underline focus-visible:outline-2 focus-visible:outline-indigo-700 dark:focus-visible:outline-indigo-400"
+        className={`text-sm whitespace-nowrap ${linkClass}`}
         aria-expanded={open}
         aria-controls={id}
         aria-label={`Show provenance of ${targetOf(op)}`}
@@ -335,10 +357,10 @@ function Provenance({ op }: { op: DraftOperation }) {
       <ul id={id} role="list" hidden={!open} className="space-y-2">
         {op.provenance.map((p, i) => (
           <li key={i} className="space-y-1">
-            <blockquote className="border-l-4 border-slate-300 dark:border-slate-700 pl-3 text-sm whitespace-pre-wrap text-slate-800 dark:text-slate-200">
+            <blockquote className="border-l-2 border-line-strong pl-3 text-sm whitespace-pre-wrap text-fg">
               {p.excerpt}
             </blockquote>
-            <p className="text-xs text-slate-700 dark:text-slate-300">
+            <p className={hintClass}>
               <cite>{p.location}</cite>
               {p.chunk != null ? <span>{` (chunk ${p.chunk})`}</span> : null}
             </p>
@@ -380,14 +402,11 @@ function PreviewPanel({
     <section
       ref={ref}
       aria-label={`Preview of ${targetOf(op)}`}
-      className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4"
+      className={`${cardClass} space-y-4 p-4 sm:p-5`}
     >
       <h3 className="text-base font-semibold">{`Preview of ${targetOf(op)}`}</h3>
       <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1">
-          <label htmlFor={selectId} className="block text-sm font-medium">
-            Response status
-          </label>
+        <Field id={selectId} label="Response status" className="w-40">
           <select id={selectId} className={inputClass} value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">Default</option>
             {statuses.map((s) => (
@@ -396,7 +415,7 @@ function PreviewPanel({
               </option>
             ))}
           </select>
-        </div>
+        </Field>
         <button type="button" className={primaryButton} disabled={preview.isPending} onClick={generate}>
           Generate preview
         </button>
@@ -404,7 +423,7 @@ function PreviewPanel({
           Close preview
         </button>
       </div>
-      {preview.isPending ? <p className="text-sm text-slate-700 dark:text-slate-300">Generating…</p> : null}
+      {preview.isPending ? <Loading label="Generating…" /> : null}
       <ProblemAlert error={preview.error} />
       {result && !preview.isPending ? (
         <div className="space-y-2">
@@ -412,7 +431,7 @@ function PreviewPanel({
           <pre
             aria-label="Preview body"
             tabIndex={0}
-            className="max-h-96 overflow-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-xs text-slate-900 dark:text-slate-100"
+            className={`${preClass} max-h-96 overflow-y-auto`}
           >
             {JSON.stringify(result.body, null, 2)}
           </pre>

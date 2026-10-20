@@ -11,14 +11,31 @@ import {
 } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
-import { primaryButton, secondaryButton } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { OperationsTable } from "./OperationsTable";
-import { linkClass } from "./MocksList";
 import { readOnlyReason } from "./Overview";
+import {
+  Badge,
+  Card,
+  Checkbox,
+  Loading,
+  Notice,
+  hintClass,
+  labelClass,
+  linkClass,
+  primaryButton,
+  secondaryButton,
+  type Tone,
+} from "../../components/ui";
 
 const col = columnHelper<ContractSummary>();
+
+function statusTone(status: string): Tone {
+  if (status === "active") return "ok";
+  if (status === "draft") return "info";
+  return "neutral";
+}
 
 /** A mock's contract versions: upload, activate or roll back, inspect. */
 export function Contracts({ ws, mock }: { ws: string; mock: string }) {
@@ -33,16 +50,28 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
   const active = m.data?.active_version ?? null;
 
   const columns = [
-    col.accessor("version", { header: "Version", cell: (info) => `v${info.getValue()}` }),
-    col.accessor("status", { header: "Status" }),
+    col.accessor("version", {
+      header: "Version",
+      cell: (info) => <span className="font-medium whitespace-nowrap">{`v${info.getValue()}`}</span>,
+    }),
+    col.accessor("status", {
+      header: "Status",
+      cell: (info) => <Badge tone={statusTone(info.getValue())}>{info.getValue()}</Badge>,
+    }),
     col.accessor("source_digest", {
       header: "Digest",
-      cell: (info) => <code title={info.getValue()}>{info.getValue().slice(0, 12)}</code>,
+      cell: (info) => <code title={info.getValue()} className="text-xs text-fg-muted">
+          {info.getValue().slice(0, 12)}
+        </code>,
     }),
     col.accessor("created_by", { header: "Created by", cell: (info) => info.getValue() ?? "—" }),
     col.accessor("created_at", {
       header: "Created at",
-      cell: (info) => <time dateTime={info.getValue()}>{new Date(info.getValue()).toLocaleString()}</time>,
+      cell: (info) => (
+        <time dateTime={info.getValue()} className="whitespace-nowrap">
+          {new Date(info.getValue()).toLocaleString()}
+        </time>
+      ),
     }),
     col.accessor("operations", { header: "Operations" }),
     col.display({
@@ -100,7 +129,7 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
   return (
     <div className="space-y-6">
       {reason ? (
-        <p className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/60 p-3 text-sm text-amber-900 dark:text-amber-200">{reason}</p>
+        <Notice tone="warn">{reason}</Notice>
       ) : null}
       {reason === undefined ? <UploadForm ws={ws} mock={mock} /> : null}
       <ProblemAlert error={activate.error ?? versions.error} />
@@ -112,7 +141,7 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
           empty="No contract uploaded yet."
         />
       ) : versions.isPending ? (
-        <p className="text-slate-700 dark:text-slate-300">Loading…</p>
+        <Loading />
       ) : null}
       {viewing !== undefined ? (
         <OperationsTable ws={ws} mock={mock} version={viewing} onClose={() => setViewing(undefined)} />
@@ -143,48 +172,43 @@ function UploadForm({ ws, mock }: { ws: string; mock: string }) {
   };
 
   return (
-    <form onSubmit={submit} className="space-y-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
-      <h2 className="text-lg font-semibold">Upload a contract</h2>
-      <div className="flex flex-wrap items-end gap-4">
-        <div className="space-y-1">
-          <label htmlFor="contract-file" className="block text-sm font-medium">
-            Contract file
-          </label>
-          <input
-            id="contract-file"
-            ref={input}
-            type="file"
-            accept={CONTRACT_EXTENSIONS.join(",")}
-            className="text-sm"
-            onChange={(e) => setFile(e.target.files?.[0])}
-            aria-describedby="contract-file-hint"
-          />
-          <p id="contract-file-hint" className="text-xs text-slate-600 dark:text-slate-400">
-            OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL, .proto or descriptor set, WSDL, or a
-            zip/tar.gz archive of several files; at most 20 MiB.
-          </p>
+    <Card title="Upload a contract">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-4">
+          <div className="min-w-0 max-w-xl space-y-1.5">
+            <label htmlFor="contract-file" className={labelClass}>
+              Contract file
+            </label>
+            <input
+              id="contract-file"
+              ref={input}
+              type="file"
+              accept={CONTRACT_EXTENSIONS.join(",")}
+              className="block w-full text-sm text-fg file:mr-3 file:rounded-md file:border file:border-line-strong file:bg-surface-2 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-fg hover:file:bg-surface"
+              onChange={(e) => setFile(e.target.files?.[0])}
+              aria-describedby="contract-file-hint"
+            />
+            <p id="contract-file-hint" className={hintClass}>
+              OpenAPI 3.x or Swagger 2.0 (JSON or YAML), GraphQL SDL, .proto or descriptor set, WSDL, or a
+              zip/tar.gz archive of several files; at most 20 MiB.
+            </p>
+          </div>
+          <div className="pb-1">
+            <Checkbox id="contract-activate" label="Activate after upload" checked={activate} onChange={setActivate} />
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            id="contract-activate"
-            type="checkbox"
-            checked={activate}
-            onChange={(e) => setActivate(e.target.checked)}
-          />
-          <label htmlFor="contract-activate" className="text-sm font-medium">
-            Activate after upload
-          </label>
+        <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+          <button type="submit" className={primaryButton} disabled={!file || upload.isPending}>
+            Upload
+          </button>
+          {upload.data && !upload.isPending ? (
+            <p role="status" className="text-sm font-medium text-ok-fg">
+              Uploaded version {upload.data.version} ({upload.data.status}, {upload.data.operations} operations).
+            </p>
+          ) : null}
         </div>
-        <button type="submit" className={primaryButton} disabled={!file || upload.isPending}>
-          Upload
-        </button>
-      </div>
-      {upload.data && !upload.isPending ? (
-        <p role="status" className="text-sm text-green-800 dark:text-green-300">
-          Uploaded version {upload.data.version} ({upload.data.status}, {upload.data.operations} operations).
-        </p>
-      ) : null}
-      <ProblemAlert error={upload.error} />
-    </form>
+        <ProblemAlert error={upload.error} />
+      </form>
+    </Card>
   );
 }
