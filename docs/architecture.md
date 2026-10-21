@@ -17,7 +17,7 @@ Mockingbird turns an API contract into a running mock. Each call is decoded agai
 | `mb-auth` | OIDC relying party, RBAC and API keys. |
 | `mb-admin` | The Admin REST API (OpenAPI-described) and the audit log. |
 | `mb-console` | The embedded React console. |
-| `mb-evals` | Nightly LLM evals and the offline throughput bench (not published). |
+| `mb-evals` | Weekly LLM evals and the offline throughput bench (not published). |
 | `mockingbird` | The binary: CLI, configuration, role wiring, HA bridge, budget, TLS. |
 
 Protocol adapters contain no generation logic: they decode traffic into an operation call and encode the generated response (or stream items) back onto the wire. Data-plane processes load compiled MCM bundles from the control-plane store and never parse source contracts on the request path.

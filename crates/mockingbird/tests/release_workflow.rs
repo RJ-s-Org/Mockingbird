@@ -255,7 +255,6 @@ fn ci_gates_present() {
         "protocol-features",
         "console",
         "deny",
-        "image",
         "e2e",
         "helm",
         "semver",
@@ -300,25 +299,20 @@ fn ci_gates_present() {
         "cargo +1.97 check --workspace --all-features --locked"
     ));
 
+    // e2e builds the full image, then smoke-tests and scans it before the
+    // Compose stack runs it.
     let trivy: Vec<_> = all
         .iter()
-        .filter(|(id, step)| id == "image" && uses(step).starts_with("aquasecurity/trivy-action@"))
+        .filter(|(id, step)| id == "e2e" && uses(step).starts_with("aquasecurity/trivy-action@"))
         .collect();
-    assert_eq!(trivy.len(), 1, "the image job scans the image it built");
-    let variants: BTreeSet<String> = jobs(&doc)["image"]["strategy"]["matrix"]["include"]
-        .as_array()
-        .map(|rows| rows.iter().map(|row| scalar(&row["variant"])).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        variants,
-        BTreeSet::from(["full".to_owned(), "slim".to_owned()]),
-        "the image job builds and scans both images"
-    );
+    assert_eq!(trivy.len(), 1, "the e2e job scans the image it built");
     for (_, step) in trivy {
+        assert_eq!(scalar(&step["with"]["image-ref"]), "mockingbird:local");
         assert_eq!(scalar(&step["with"]["severity"]), "CRITICAL,HIGH");
         assert_eq!(scalar(&step["with"]["exit-code"]), "1");
         assert_eq!(scalar(&step["with"]["ignore-unfixed"]), "true");
     }
+    assert!(runs("e2e", "docker run --rm mockingbird:local --version"));
 
     assert!(runs("e2e", "e2e-compose/flow.spec.ts"));
     assert!(runs("e2e", "--profile ha up -d --wait"));

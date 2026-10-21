@@ -279,12 +279,12 @@ async fn bench_offline_smoke() {
 }
 
 #[test]
-fn evals_workflow_is_nightly_and_read_only() {
+fn evals_workflow_is_weekly_and_read_only() {
     let wf = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/evals.yml"),
     )
     .unwrap();
-    assert!(wf.contains("cron: \"17 3 * * *\""), "{wf}");
+    assert!(wf.contains("cron: \"17 3 * * 1\""), "{wf}");
     assert!(wf.contains("workflow_dispatch"));
     assert!(!wf.contains("pull_request"));
     assert!(wf.contains("contents: read"));

@@ -54,4 +54,4 @@ Compare runs on the same machine only, with nothing else busy. When you change t
 
 ## LLM quality
 
-`mb-evals run` measures the generation pipeline against a real provider (schema-valid, repair and fallback rates, and p95 latency per contract). It runs nightly in CI (`.github/workflows/evals.yml`) and fails when a rate crosses its threshold; see `mb-evals run --help`.
+`mb-evals run` measures the generation pipeline against a real provider (schema-valid, repair and fallback rates, and p95 latency per contract). It runs weekly in CI (Mondays) (`.github/workflows/evals.yml`) and fails when a rate crosses its threshold; see `mb-evals run --help`.

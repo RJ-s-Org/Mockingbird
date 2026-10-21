@@ -1,6 +1,6 @@
 [package]
 name = "mb-evals"
-description = "Nightly LLM evals against a real provider and an offline throughput bench"
+description = "Weekly LLM evals against a real provider and an offline throughput bench"
 publish = false
 version.workspace = true
 edition.workspace = true
