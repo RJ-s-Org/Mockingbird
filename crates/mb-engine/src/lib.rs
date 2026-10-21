@@ -16,6 +16,7 @@ use tracing::field::Empty;
 
 use crate::guards::Checked;
 
+pub mod compact;
 pub mod extract;
 pub mod faker;
 pub mod guards;
@@ -306,7 +307,7 @@ impl Engine {
                 });
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
-                    schema: bundle.with_reachable_defs(schema),
+                    schema: compact::prompt_schema(bundle, schema),
                 };
                 match self
                     .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)

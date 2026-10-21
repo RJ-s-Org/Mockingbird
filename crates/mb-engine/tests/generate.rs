@@ -753,3 +753,31 @@ async fn narrowed_schema_shapes_the_fallback() {
     assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
     assert!(body["id"].is_string());
 }
+
+#[tokio::test]
+async fn prompt_schema_is_compact_json() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order_at_o1().to_string())]);
+    engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    let system = &provider.requests()[0].messages[0].content;
+    let schema = system.split("Response JSON Schema:\n").nth(1).unwrap();
+    assert!(!schema.contains('\n'), "one line: {schema}");
+    assert!(schema.contains(r#""type":"object""#), "{schema}");
+}
+
+#[tokio::test]
+async fn prompt_asks_for_short_arrays() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order_at_o1().to_string())]);
+    engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(system.contains("3 to 5 items"), "{system}");
+}

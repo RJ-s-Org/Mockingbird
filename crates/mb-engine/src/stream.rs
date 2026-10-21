@@ -381,7 +381,7 @@ impl StreamState {
         });
         let format = ResponseFormat::JsonSchema {
             name: format_name(&self.op_id),
-            schema: self.bundle.with_reachable_defs(&self.schema),
+            schema: crate::compact::prompt_schema(&self.bundle, &self.schema),
         };
         let request = engine.chat_request(messages, format);
         let limit = provider.total_timeout(engine.config.timeout);
