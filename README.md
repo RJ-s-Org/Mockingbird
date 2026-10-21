@@ -17,6 +17,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 | [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |
 | [Upgrading](docs/upgrading.md) | Upgrade notes, migrations and the `mb-ext` 1.0 changes |
 | [Performance](docs/performance.md) | The offline bench: method, numbers and how to rerun it |
+| [Improvements](docs/improvements.md) | Known gaps and planned enhancements, from field trials and use |
 | [Extensions](crates/mb-ext/README.md) | The `mb-ext` extension API and its stability policy |
 | [Examples](examples/gallery/README.md) | Ready-to-serve configurations for every protocol and for chaos |
 
