@@ -16,12 +16,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 ### Phase 1: works out of the box for an agent
 
-- The MCP server does not inherit the user's shell environment, so it cannot see provider keys: `doctor` and `test_llm` report the key unset and `start_server` starts a faker-only server. `agent install` should pass the provider key through `.mcp.json`, `doctor` should say *which process* lacks it, and `start_server` should refuse when the default profile's secret is missing.
-- `init_config` has no port fields; `llm test` without flags ignores `mockingbird.yaml`.
-- Remote providers need different defaults: a 3 s timeout makes most DeepSeek calls fall back; JSON-object mode makes models wrap top-level arrays (`{"orders": [...]}`) so lists always fall back; 4,096 `max_tokens` truncates large bodies.
-- Provider failures are opaque (`missing choices[0].message.content`): reasoning-only replies, errors inside a 200, truncation. Retry once, use the reasoning field when it holds the JSON, log provider and finish reason, and expose the fallback reason on the request row and in a response header.
-- OpenRouter routes to providers that fail for this workload; a profile needs a way to send provider routing (`provider.order`/`ignore`) and reasoning settings.
-- Documentation import fails with the settings serving needs (strict JSON Schema, temperature 0.7): pin `temperature: 0` and JSON-object output for extraction. The "is a server running?" hint is appended to LLM failures and misleads agents.
+- `agent install` could still write the provider key's passthrough into `.mcp.json` for agents that start the MCP server without a login shell (the server now imports missing variables from `$SHELL -l -i`, which covers macOS and Linux desktops).
 
 ### Phase 2: real-world contracts load
 
@@ -64,4 +59,14 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 ## Done
 
-Nothing yet.
+- Phase 1, [#31](https://github.com/RJ-s-Org/Mockingbird/pull/31):
+  - the MCP server imports keys from the login shell;
+  - `doctor` names the process that lacks a key, and `start_server` refuses a profile whose key is missing;
+  - `init_config` ports;
+  - `llm test` defaults to `mockingbird.yaml`;
+  - 30 s / 16 384-token defaults and array-envelope unwrapping;
+  - reasoning-only, in-band error and truncated replies are handled, with one retry;
+  - `X-Mockingbird-Fallback-Reason` and `request_log.fallback_reason`;
+  - profile `extra_body`;
+  - docs import at temperature 0 in JSON-object mode;
+  - the server-running hint only on connection errors.
