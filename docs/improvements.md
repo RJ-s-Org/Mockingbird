@@ -74,7 +74,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
   - the server-running hint only on connection errors.
 
   Measured afterwards on the Stripe trial's mock: 25 `POST /v1/payment_intents` with OpenRouter's default routing gave 24 `llm`, 1 `repaired`, **0 fallbacks** (the trial's baseline was 28%), with a median of 7.4 s and a worst case of 9.6 s. Every call went to the DigitalOcean route that failed during the trial. It returns content in JSON-object mode but drops the answer in JSON Schema mode, so the OpenRouter preset uses JSON-object mode.
-- Phase 3 (part), [#33](https://github.com/RJ-s-Org/Mockingbird/pull/33):
+- Phase 3 (part), [#34](https://github.com/RJ-s-Org/Mockingbird/pull/34):
   - GraphQL generates only the selected fields (with their arguments);
   - the prompt's schema is compact and fitted to a 64 KiB budget, nearest definitions first;
   - the prompt asks for short arrays;
