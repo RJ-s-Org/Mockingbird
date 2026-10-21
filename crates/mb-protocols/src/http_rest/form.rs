@@ -17,8 +17,8 @@ enum Node {
 /// `pairs` as an object, nested by bracket notation and coerced through
 /// `schema` (an object schema; `$ref`s resolve against `defs`). A key the
 /// schema declares literally (`filter[status]`) is kept flat. Repeated keys
-/// become an array only where the schema wants one; otherwise the last
-/// value wins.
+/// become an array where the schema wants one or does not describe the
+/// key; otherwise the last value wins.
 pub(super) fn decode(
     pairs: Vec<(String, String)>,
     schema: Option<&Value>,
@@ -198,6 +198,10 @@ fn to_json(node: Node, schema: Option<&Value>, defs: &Map<String, Value>) -> Val
             let items = items(&branches);
             Value::Array(values.iter().map(|v| leaf(v, items, defs)).collect())
         }
+        // A repeated key the schema does not describe keeps every value.
+        Node::Leaf(values) if branches.is_empty() && values.len() > 1 => {
+            Value::Array(values.into_iter().map(Value::String).collect())
+        }
         Node::Leaf(values) => values
             .last()
             .map(|v| coerce(v, &types(&branches)))
@@ -269,7 +273,7 @@ mod tests {
         );
         assert_eq!(
             Value::Object(out),
-            json!({"a": {"b": {"c": "1"}}, "l": ["x", "y"], "e": ["p", "q"], "flat": "2", "odd[": "z"})
+            json!({"a": {"b": {"c": "1"}}, "l": ["x", "y"], "e": ["p", "q"], "flat": ["1", "2"], "odd[": "z"})
         );
     }
 

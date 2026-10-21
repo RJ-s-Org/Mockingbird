@@ -26,6 +26,7 @@ The first version is activated automatically; later imports need `activate: true
 `call_mock {method: "POST", path: "/orders/orders", body: {...}, session: "alice"}` (or curl `localhost:8080/...`). The result includes status, body and the `x-mockingbird-*` headers:
 
 - `X-Mockingbird-Source`: `llm`, `repaired` (LLM output fixed to fit the schema) or `fallback` (faker).
+- `X-Mockingbird-Validation`: on a request that failed validation, why. The reasons are also in the error body's message field and in the request log (`request.validation`).
 - Request overrides (on by default per mock): `X-Mockingbird-Session: <id>` (separate state), `X-Mockingbird-Status: 404` (force a declared status, or any 5xx), `X-Mockingbird-Latency: 250ms`, `X-Mockingbird-Scenario: <name>`, `X-Mockingbird-Stream-Items: 3`, `X-Mockingbird-Chaos: off`. `call_mock` has fields for each.
 - GraphQL is served at `<prefix>/graphql`; gRPC on `127.0.0.1:50051` with reflection (`grpcurl -plaintext 127.0.0.1:50051 list`); SOAP at the WSDL's address path (`?wsdl` returns the WSDL).
 
