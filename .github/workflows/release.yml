@@ -6,6 +6,10 @@ name: Release
 #
 # A manual run is a dry run by default: everything is built, scanned and
 # packaged, but nothing is pushed, signed, attested or published.
+#
+# Linux jobs run on the runners named by the CI_RUNNER, CI_RUNNER_LARGE and
+# CI_RUNNER_LARGE_ARM repository variables (Blacksmith), falling back to
+# GitHub-hosted runners; macOS and Windows builds stay on GitHub.
 on:
   push:
     tags: ['v*']
@@ -28,7 +32,7 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -72,7 +76,7 @@ jobs:
 
   console:
     needs: verify
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -99,10 +103,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-24.04
+            runner: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}
             zigbuild: true
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04
+            runner: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}
             zigbuild: true
           - target: aarch64-apple-darwin
             runner: macos-14
@@ -179,7 +183,7 @@ jobs:
 
   sbom:
     needs: verify
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     env:
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
@@ -212,8 +216,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: ubuntu-24.04 }
-          - { arch: arm64, runner: ubuntu-24.04-arm }
+          - { arch: amd64, runner: "${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}" }
+          - { arch: arm64, runner: "${{ vars.CI_RUNNER_LARGE_ARM || 'ubuntu-24.04-arm' }}" }
         flavor: [full, slim]
     env:
       IMAGE: ${{ needs.verify.outputs.image }}
@@ -282,7 +286,7 @@ jobs:
   manifest:
     needs: [verify, images, sbom]
     if: needs.verify.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     permissions:
       contents: read
       packages: write
@@ -367,7 +371,7 @@ jobs:
   chart:
     needs: [verify, manifest]
     if: needs.verify.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     permissions:
       contents: read
       packages: write
@@ -418,7 +422,7 @@ jobs:
   release:
     needs: [verify, binaries, sbom, manifest, chart]
     if: needs.verify.outputs.publish == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     permissions:
       contents: write
     steps:
@@ -450,7 +454,7 @@ jobs:
   publish-crate:
     needs: [verify, release]
     if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.prerelease == 'false'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
