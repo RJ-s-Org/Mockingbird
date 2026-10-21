@@ -8,6 +8,27 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- `X-Mockingbird-Fallback-Reason` on every `fallback` response says why the LLM answer was not used (GraphQL: `extensions.mockingbird.fallbackReasons`); the request log records it. Migration `0500_llm_diagnostics` adds `request_log.fallback_reason` and `llm_profiles.extra_body`.
+- LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
+- `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
+- `mockingbird init` (MCP `init_config`) takes `--port`, `--admin-port` and `--grpc-port`.
+
+### Changed
+
+- LLM profiles default to a 30 s timeout and 16 384 output tokens (were 3 s and 2048), which reasoning models need.
+- The OpenRouter preset uses `deepseek/deepseek-v4.1-flash` with JSON Schema output.
+- `mockingbird llm test` with no flags tests the default profile of `./mockingbird.yaml`.
+- MCP `start_server` refuses a config whose default profile's key the server cannot see, unless `offline: true`.
+- Documentation import extracts at temperature 0 in JSON-object mode.
+- The MCP "is a server running?" hint appears only when the Admin API is unreachable.
+
+### Fixed
+
+- Provider replies with the answer only in `reasoning`, errors inside a 200, or output cut at `max_tokens` are handled (with one retry for transient failures) instead of falling back without a reason.
+- A JSON array the model wrapped in a one-key object (JSON-object mode) is unwrapped when the inner value matches the schema.
+
 ## [0.1.0-rc.1] - 2026-10-20
 
 ### Added

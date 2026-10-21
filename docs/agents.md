@@ -74,6 +74,8 @@ mockingbird llm test -c mockingbird.yaml --profile openrouter            # ok, l
 
 Profiles can carry extra provider headers (`llm.profiles.<name>.headers`, see the [configuration reference](configuration.md#llm)); secrets in them are `${env:NAME}` references, resolved when the mock is built. Keys never pass through the agent: the output lists the variables the user must export.
 
+Agents usually start `mockingbird mcp` from a desktop app or an IDE whose environment lacks what the shell profile exports. So at startup the MCP server runs the login shell (`$SHELL -l -i -c env`, for at most 5 s) and takes the variables it lacks; `doctor` lists their names under `shell_env.imported`, and its problems say when the MCP server process still cannot see a key. Set `MB_NO_SHELL_ENV=1` to skip the import. `start_server` refuses a config whose default profile's key is missing, since every response would be faker output; pass `offline: true` to start anyway. `mockingbird init` takes `--port`, `--admin-port` and `--grpc-port` (written under `server:`) so several projects can run side by side, and `mockingbird llm test` with no flags tests the default profile of `./mockingbird.yaml`.
+
 ## Remote agents (ChatGPT)
 
 Agents that cannot start a local process connect over streamable HTTP:

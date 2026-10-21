@@ -82,12 +82,15 @@ llm:
       model: deepseek-chat
       api_key: env:DEEPSEEK_API_KEY
       json_schema: false
-      timeout: 3s
+      timeout: 30s
       temperature: 0.7
-      max_tokens: 2048
+      max_tokens: 16384
       fallback: local
       headers:
         x-title: Mockingbird
+      extra_body:
+        reasoning:
+          enabled: false
     local:
       workspace: default
       base_url: http://127.0.0.1:11434/v1

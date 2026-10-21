@@ -87,10 +87,10 @@ mockingbird llm test -c mockingbird.yaml --profile openrouter
 - 401/403: wrong key or variable not exported in this shell.
 - 404: wrong model name, account ID or gateway ID.
 - 400: the model rejects JSON mode or temperature: try another model or `--json-schema false`.
-- `latency_ms` above the profile timeout (3s by default): raise it with `--timeout 10s` or pick a faster model; otherwise the mock falls back to the faker.
+- `latency_ms` above the profile timeout (30s by default): raise it with `--timeout 60s` or pick a faster model; otherwise the mock falls back to the faker.
 
-Finally serve (`mockingbird server start -c mockingbird.yaml`) and check a response header: `X-Mockingbird-Source: llm`.
+Finally serve (`mockingbird server start -c mockingbird.yaml`) and check a response header: `X-Mockingbird-Source: llm`. On `fallback`, `X-Mockingbird-Fallback-Reason` says why.
 
 ## Profile fields
 
-A profile in `mockingbird.yaml` (`llm.profiles.<name>`): `base_url`, `model`, `api_key` (secret reference `env:NAME` or `file:/path`), `json_schema`, `timeout`, `temperature`, `max_tokens`, `fallback` (another profile tried on failure), `headers` (values may embed `${env:NAME}`; credential-like names must). `llm.default_profile` applies to mocks without `llm_profile`.
+A profile in `mockingbird.yaml` (`llm.profiles.<name>`): `base_url`, `model`, `api_key` (secret reference `env:NAME` or `file:/path`), `json_schema`, `timeout`, `temperature`, `max_tokens`, `fallback` (another profile tried on failure), `extra_body` (JSON merged into each request, e.g. OpenRouter `reasoning` settings), `headers` (values may embed `${env:NAME}`; credential-like names must). `llm.default_profile` applies to mocks without `llm_profile`.

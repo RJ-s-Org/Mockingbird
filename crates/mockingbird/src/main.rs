@@ -10,9 +10,25 @@ use mockingbird::server::{self, ServeError};
 use mockingbird::telemetry;
 use mockingbird::{mcp, providers};
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    if matches!(cli.cmd, Command::Mcp(_)) {
+        // SAFETY: nothing else runs yet; the runtime starts below.
+        unsafe { mockingbird::shell_env::import() };
+    }
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(run(cli)),
+        Err(e) => {
+            eprintln!("error: starting the async runtime: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run(cli: Cli) -> ExitCode {
     // Kept alive until exit so buffered spans are flushed.
     let _telemetry = match telemetry::init("mockingbird") {
         Ok(guard) => Some(guard),

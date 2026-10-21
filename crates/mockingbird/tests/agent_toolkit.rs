@@ -279,7 +279,20 @@ struct McpClient {
 
 impl McpClient {
     fn start(dir: &Path, admin_url: &str) -> Self {
-        let mut child = bin()
+        Self::start_with(dir, admin_url, |cmd| {
+            cmd.env("MB_NO_SHELL_ENV", "1");
+        })
+    }
+
+    /// Starts the server after `setup` adjusts its command (environment).
+    fn start_with(
+        dir: &Path,
+        admin_url: &str,
+        setup: impl FnOnce(&mut std::process::Command),
+    ) -> Self {
+        let mut cmd = bin();
+        setup(&mut cmd);
+        let mut child = cmd
             .args(["--admin-url", admin_url, "mcp"])
             .current_dir(dir)
             .stdin(Stdio::piped())
@@ -311,6 +324,16 @@ impl McpClient {
         let resp: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(resp["id"], id);
         resp
+    }
+
+    /// A tool call that must fail; returns its error text.
+    fn tool_error(&mut self, name: &str, args: Value) -> String {
+        let r = self.rpc("tools/call", json!({ "name": name, "arguments": args }));
+        assert_eq!(r["result"]["isError"], true, "{name} succeeded: {r}");
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     fn tool(&mut self, name: &str, args: Value) -> Value {
@@ -409,4 +432,150 @@ fn mcp_drives_a_background_server() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[test]
+fn init_writes_server_ports() {
+    let dir = tempdir();
+    run_json(
+        dir.path(),
+        &[
+            "init",
+            "--offline",
+            "--port",
+            "18080",
+            "--admin-port",
+            "19090",
+            "--grpc-port",
+            "15051",
+        ],
+    );
+    let cfg = mockingbird::file_config::load(&dir.path().join("mockingbird.yaml")).unwrap();
+    assert_eq!(cfg.server.port, 18080);
+    assert_eq!(cfg.server.admin_port, 19090);
+    assert_eq!(cfg.server.grpc_port, 15051);
+}
+
+#[test]
+fn llm_test_defaults_to_the_config_default_profile() {
+    let dir = tempdir();
+    run_json(
+        dir.path(),
+        &[
+            "init",
+            "--provider",
+            "custom",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--model",
+            "m",
+            "--no-api-key",
+            "--timeout",
+            "1s",
+        ],
+    );
+    // No --provider, --config or --profile: ./mockingbird.yaml's default.
+    let out = bin()
+        .args(["llm", "test"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "not JSON ({e}): {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(report["base_url"], "http://127.0.0.1:9/v1");
+    assert_eq!(report["ok"], false);
+}
+
+/// A login shell that exports a key, then runs the `-c` command it was given.
+fn fake_login_shell(dir: &Path) -> PathBuf {
+    let path = dir.join("fake-shell.sh");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nexport MB_TEST_SHELL_ONLY_API_KEY=from-the-shell\n\
+         while [ \"$1\" != \"-c\" ] && [ $# -gt 0 ]; do shift; done\nshift\nexec /bin/sh -c \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_imports_missing_variables_from_the_login_shell() {
+    let dir = tempdir();
+    run_json(
+        dir.path(),
+        &[
+            "init",
+            "--provider",
+            "custom",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--model",
+            "m",
+            "--api-key-env",
+            "MB_TEST_SHELL_ONLY_API_KEY",
+        ],
+    );
+    let shell = fake_login_shell(dir.path());
+    let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
+        cmd.env("SHELL", &shell)
+            .env_remove("MB_TEST_SHELL_ONLY_API_KEY");
+    });
+    let doctor = mcp.tool("doctor", json!({}));
+    let secrets = &doctor["config"]["profiles"][0]["secrets"][0];
+    assert_eq!(secrets["ref"], "env:MB_TEST_SHELL_ONLY_API_KEY");
+    assert_eq!(secrets["set"], true, "{doctor}");
+    assert_eq!(
+        doctor["shell_env"]["imported"],
+        json!(["MB_TEST_SHELL_ONLY_API_KEY"])
+    );
+    assert!(
+        !doctor.to_string().contains("from-the-shell"),
+        "doctor never shows values"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn start_server_refuses_a_profile_whose_key_is_missing() {
+    let dir = tempdir();
+    run_json(
+        dir.path(),
+        &[
+            "init",
+            "--provider",
+            "custom",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--model",
+            "m",
+            "--api-key-env",
+            "MB_TEST_NOWHERE_API_KEY",
+        ],
+    );
+    let admin = free_port();
+    let mut mcp = McpClient::start_with(dir.path(), &format!("http://127.0.0.1:{admin}"), |cmd| {
+        cmd.env("MB_NO_SHELL_ENV", "1")
+            .env_remove("MB_TEST_NOWHERE_API_KEY");
+    });
+    let doctor = mcp.tool("doctor", json!({}));
+    let problems = doctor["problems"].to_string();
+    assert!(problems.contains("MB_TEST_NOWHERE_API_KEY"), "{problems}");
+    assert!(problems.contains("MCP server"), "{problems}");
+    let err = mcp.tool_error(
+        "start_server",
+        json!({ "config": "mockingbird.yaml", "port": free_port(), "admin_port": admin, "grpc_port": free_port() }),
+    );
+    assert!(err.contains("MB_TEST_NOWHERE_API_KEY"), "{err}");
+    assert!(err.contains("offline"), "says how to start anyway: {err}");
 }

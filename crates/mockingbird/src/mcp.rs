@@ -122,11 +122,19 @@ impl From<ClientError> for ToolError {
             }
             ClientError::Usage(m) => m,
             ClientError::Incomplete { output, message } => format!("{message}: {output}"),
-            ClientError::Other(e) => format!(
+            ClientError::Other(e) if unreachable(&e) => format!(
                 "{e:#} (is a server running? start one with the start_server tool, or set MB_ADMIN_URL)"
             ),
+            ClientError::Other(e) => format!("{e:#}"),
         })
     }
+}
+
+/// Whether `e` is a failure to reach the Admin API at all.
+fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<reqwest::Error>())
+        .any(|r| r.is_connect())
 }
 
 type ToolResult = Result<Value, ToolError>;
@@ -181,7 +189,10 @@ fn provider_props() -> Map<String, Value> {
         ),
         ("gateway_id", "Cloudflare AI Gateway ID (default: default)."),
         ("resource", "Azure OpenAI resource name."),
-        ("timeout", "LLM timeout, e.g. 3s or 30s."),
+        (
+            "timeout",
+            "LLM timeout before the faker answers; default 30s.",
+        ),
     ] {
         m.insert(k.into(), s(d));
     }
@@ -198,6 +209,11 @@ fn provider_props() -> Map<String, Value> {
         "headers".into(),
         json!({ "type": "object", "additionalProperties": { "type": "string" },
             "description": "Extra provider headers; embed secrets as ${env:NAME}." }),
+    );
+    m.insert(
+        "extra_body".into(),
+        json!({ "type": "object",
+            "description": "JSON merged into every provider request body, e.g. OpenRouter routing {\"provider\": {\"order\": [\"atlas-cloud\"]}} or {\"reasoning\": {\"enabled\": false}}. Not for secrets." }),
     );
     m
 }
@@ -245,6 +261,9 @@ fn tools() -> Vec<Tool> {
                         "output": s("File to write; default mockingbird.yaml."),
                         "profile_name": s("Profile name; default the preset id."),
                         "force": b("Overwrite an existing file."),
+                        "port": { "type": "integer", "description": "Data-plane port (server.port); default 8080." },
+                        "admin_port": { "type": "integer", "description": "Admin API port (server.admin_port); default 9090. Point MB_ADMIN_URL at it." },
+                        "grpc_port": { "type": "integer", "description": "gRPC port (server.grpc_port); default 50051." },
                     }),
                 ),
                 &[],
@@ -280,8 +299,8 @@ fn tools() -> Vec<Tool> {
                 with(
                     provider_props(),
                     json!({
-                        "config": s("Config file whose profile to test."),
-                        "profile": s("Profile name in config."),
+                        "config": s("Config file whose profile to test; default ./mockingbird.yaml when no provider is given."),
+                        "profile": s("Profile name in config; default its llm.default_profile."),
                     }),
                 ),
                 &[],
@@ -678,6 +697,10 @@ fn provider_args(args: &Value) -> Result<ProviderArgs, ToolError> {
         headers,
         json_schema: args.get("json_schema").and_then(Value::as_bool),
         timeout: duration(args, "timeout")?,
+        extra_body: args
+            .get("extra_body")
+            .filter(|v| !v.is_null())
+            .map(Value::to_string),
     })
 }
 
@@ -771,6 +794,9 @@ impl McpServer {
                     profile_name: opt_str(a, "profile_name"),
                     contracts: paths(a, "contracts"),
                     storage_url: None,
+                    port: opt_port(a, "port")?,
+                    admin_port: opt_port(a, "admin_port")?,
+                    grpc_port: opt_port(a, "grpc_port")?,
                     output: opt_str(a, "output")
                         .map(PathBuf::from)
                         .unwrap_or_else(|| "mockingbird.yaml".into()),
@@ -827,6 +853,17 @@ impl McpServer {
                 };
                 if args.config.is_none() && args.contracts.is_empty() {
                     return Err(ToolError("give config or contracts".into()));
+                }
+                if let Some(config) = &args.config
+                    && !args.offline
+                {
+                    let missing = daemon::missing_default_secrets(config);
+                    if !missing.is_empty() {
+                        return Err(ToolError(format!(
+                            "the default LLM profile needs {} but this MCP server process cannot see it, so every response would be faker output. Export it where your agent starts (or in your shell profile) and restart the agent, or pass offline: true to start without an LLM.",
+                            missing.join(", ")
+                        )));
+                    }
                 }
                 Ok(daemon::start(&args).await?)
             }
@@ -1674,5 +1711,22 @@ mod tests {
             .await
             .unwrap_or_default();
         assert_eq!(r["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn server_hint_only_when_the_admin_api_is_unreachable() {
+        let refused = reqwest::Client::new()
+            .get("http://127.0.0.1:9/healthz")
+            .send()
+            .await
+            .err()
+            .map(ClientError::from);
+        let Some(refused) = refused else {
+            return;
+        };
+        assert!(ToolError::from(refused).0.contains("is a server running?"));
+        let llm = ClientError::Other(anyhow::anyhow!("the LLM call timed out"));
+        let text = ToolError::from(llm).0;
+        assert!(!text.contains("server running"), "{text}");
     }
 }
