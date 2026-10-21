@@ -121,26 +121,149 @@ impl OpenAiCompatible {
                 body: text,
             });
         }
-        let v: Value = serde_json::from_str(&text).map_err(|e| LlmError::Decode(e.to_string()))?;
-        let content = v
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| LlmError::Decode("missing choices[0].message.content".into()))?
-            .to_string();
-        let tok = |p: &str| {
-            v.pointer(p)
-                .and_then(Value::as_u64)
-                .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
-                .unwrap_or(0)
-        };
-        Ok(ChatResponse {
-            content,
-            usage: Usage {
-                prompt_tokens: tok("/usage/prompt_tokens"),
-                completion_tokens: tok("/usage/completion_tokens"),
-            },
-        })
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| LlmError::Decode(format!("{e}: {}", excerpt(&text))))?;
+        parse_reply(&v, req.max_tokens)
     }
+
+    /// [`Self::send`], once more when the first failure is retryable and
+    /// there is time left before `deadline`.
+    async fn send_with_retry(
+        &self,
+        req: &ChatRequest,
+        deadline: tokio::time::Instant,
+    ) -> Result<ChatResponse, LlmError> {
+        match self.send(req).await {
+            Err(e) if e.is_retryable() && tokio::time::Instant::now() < deadline => {
+                tracing::debug!(error = %e, "retrying the LLM call once");
+                self.send(req).await
+            }
+            other => other,
+        }
+    }
+}
+
+/// The content of a chat completion, or why there is none. Handles what
+/// OpenAI-compatible gateways actually send back: errors reported inside a
+/// 200 (`choices[0].error`, `finish_reason: "error"`, a top-level `error`),
+/// output cut at `max_tokens`, and reasoning models that put the whole
+/// answer in `reasoning` with `content` null.
+fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
+    let provider = v
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(|p| format!("provider {p}, "))
+        .unwrap_or_default();
+    let choice = v.pointer("/choices/0");
+    let finish = choice
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let error = choice
+        .and_then(|c| c.get("error"))
+        .or_else(|| v.get("error"))
+        .filter(|e| !e.is_null());
+    if error.is_some() || finish == "error" {
+        let error = error.cloned().unwrap_or(Value::Null);
+        let status = error
+            .get("code")
+            .and_then(Value::as_u64)
+            .and_then(|c| u16::try_from(c).ok())
+            .filter(|c| (400..600).contains(c))
+            .unwrap_or(502);
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("error reported inside a successful reply");
+        return Err(LlmError::Http {
+            status,
+            body: format!("{provider}{message}"),
+        });
+    }
+    let message = choice.and_then(|c| c.get("message"));
+    let content = message
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .filter(|c| !c.trim().is_empty());
+    if finish == "length" {
+        return Err(LlmError::Truncated(format!(
+            "{provider}stopped at max_tokens ({max_tokens}); raise the profile's max_tokens (got {})",
+            excerpt(content.unwrap_or_default())
+        )));
+    }
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => {
+            let reasoning = message
+                .and_then(|m| m.get("reasoning"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match json_in(reasoning) {
+                Some(json) => json.to_string(),
+                None if choice.is_none() => {
+                    return Err(LlmError::Decode(format!(
+                        "{provider}no choices in the reply: {}",
+                        excerpt(&v.to_string())
+                    )));
+                }
+                None => {
+                    return Err(LlmError::Empty(format!(
+                        "{provider}finish_reason {finish}, empty content{}",
+                        if reasoning.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" and reasoning without JSON: {}", excerpt(reasoning))
+                        }
+                    )));
+                }
+            }
+        }
+    };
+    let tok = |p: &str| {
+        v.pointer(p)
+            .and_then(Value::as_u64)
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .unwrap_or(0)
+    };
+    Ok(ChatResponse {
+        content,
+        usage: Usage {
+            prompt_tokens: tok("/usage/prompt_tokens"),
+            completion_tokens: tok("/usage/completion_tokens"),
+        },
+    })
+}
+
+/// The last complete JSON object or array in `text`, which reasoning output
+/// ends with when a model answers there instead of in `content`.
+fn json_in(text: &str) -> Option<&str> {
+    let mut found = None;
+    for (start, c) in text.char_indices() {
+        if c != '{' && c != '[' {
+            continue;
+        }
+        let rest = &text[start..];
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        if let Some(Ok(value)) = stream.next()
+            && (value.is_object() || value.is_array())
+        {
+            found = Some(&rest[..stream.byte_offset()]);
+        }
+    }
+    found
+}
+
+/// The first 300 bytes of `text`, cut at a character boundary.
+fn excerpt(text: &str) -> String {
+    const LIMIT: usize = 300;
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+    let mut end = LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 #[async_trait::async_trait]
@@ -156,7 +279,8 @@ impl Provider for OpenAiCompatible {
     /// `mb.llm` span).
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
         tracing::Span::current().record("llm.model", self.config.model.as_str());
-        match tokio::time::timeout(req.timeout, self.send(&req)).await {
+        let deadline = tokio::time::Instant::now() + req.timeout;
+        match tokio::time::timeout_at(deadline, self.send_with_retry(&req, deadline)).await {
             Ok(r) => r,
             Err(_) => Err(LlmError::Timeout),
         }
