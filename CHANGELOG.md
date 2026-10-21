@@ -14,6 +14,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
 - `mockingbird init` (MCP `init_config`) takes `--port`, `--admin-port` and `--grpc-port`.
+- A request that fails validation reports why: the `X-Mockingbird-Validation` response header, the declared error shape's message-like field (`message`, `detail`, … or nested, like Stripe's `error.message`), and `request.validation` in the request log.
 
 ### Changed
 
@@ -28,6 +29,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 - Provider replies with the answer only in `reasoning`, errors inside a 200, or output cut at `max_tokens` are handled (with one retry for transient failures) instead of falling back without a reason.
 - A JSON array the model wrapped in a one-key object (JSON-object mode) is unwrapped when the inner value matches the schema.
+- Real-world contracts load: a `$ref` inside a vendor extension (Stripe's `x-expansionResources`, GitHub's `x-github-breaking-changes`) no longer fails compilation, and an unresolvable `$ref` names its referrer and the JSON pointer where it sits.
+- GraphQL schemas with covariant interface fields serve (GitHub's `User.email: String!` implementing `ProfileOwner.email: String`): implementations are checked with the spec's rules instead of async-graphql's inverted check.
+- OpenAPI 3 `application/x-www-form-urlencoded` and `multipart/form-data` request bodies are compiled, decoded and validated; the engine no longer sees `"body": null` for them, nor for any non-empty body the contract does not describe. Bracket notation (`a[b][c]=1`, `a[0]=x`, `a[]=y`) nests in form bodies and query strings, so stripe-node requests validate against Stripe's schema. The request log shows the body as decoded. Swagger 2 `type: file` parameters are binary strings.
 
 ## [0.1.0-rc.1] - 2026-10-20
 

@@ -1116,3 +1116,88 @@ async fn list_of_enums_with_null_item_is_never_served() {
     let items = a.body["data"]["hero"]["appearsIn"].as_array().unwrap();
     assert!(items.iter().all(Value::is_string), "{}", a.body);
 }
+
+/// Interface fields implemented covariantly, as GitHub's schema does
+/// (`User.email: String!` for `ProfileOwner.email: String`).
+const COVARIANT_SDL: &str = r#"
+interface Node { id: ID! }
+interface ProfileOwner { email: String  owner: Node  friends: [Node]  pick: Item }
+union Item = User | Org
+type Org implements Node { id: ID! }
+type User implements Node & ProfileOwner {
+  id: ID!
+  email: String!
+  owner: User
+  friends: [User!]!
+  pick: Org
+}
+type Query { viewer: User  profile: ProfileOwner }
+"#;
+
+fn sdl_runtime(sdl: &str, provider: Option<Arc<ScriptedProvider>>) -> MockRuntime {
+    let dyn_provider = provider.map(|p| p as Arc<dyn Provider>);
+    MockRuntime::new(
+        "sdl",
+        Arc::new(compile(sdl.as_bytes()).unwrap()),
+        Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    )
+}
+
+#[tokio::test]
+async fn covariant_interface_fields_are_served() {
+    let user = |id: &str, email: &str| json!({"__typename": "User", "id": id, "email": email, "friends": []});
+    let mut viewer = user("u1", "a@example.com");
+    viewer["owner"] = user("u0", "o@example.com");
+    viewer["friends"] = json!([user("u2", "f@example.com")]);
+    viewer["pick"] = json!({"__typename": "Org", "id": "o1"});
+    let base = serve(sdl_runtime(COVARIANT_SDL, Some(scripted(vec![viewer])))).await;
+    let r = query(
+        &base,
+        "{ viewer { email owner { id email } friends { id } pick { id } } }",
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    let v = &r.body["data"]["viewer"];
+    assert_eq!(v["email"], "a@example.com");
+    assert_eq!(v["owner"], json!({"id": "u0", "email": "o@example.com"}));
+    assert_eq!(v["friends"], json!([{"id": "u2"}]));
+    assert_eq!(v["pick"], json!({"id": "o1"}));
+
+    // async-graphql 7 cannot register these as declared: a field narrowing
+    // nullability takes its interface's type, and the interface leaves out
+    // fields that narrow a named type, which keep their declared type.
+    let r = query(
+        &base,
+        r#"{ u: __type(name: "User") { fields { name type { kind name } } }
+             p: __type(name: "ProfileOwner") { fields { name } } }"#,
+    )
+    .await;
+    let fields = r.body["data"]["u"]["fields"].as_array().unwrap();
+    let field = |name: &str| fields.iter().find(|f| f["name"] == name).unwrap()["type"].clone();
+    assert_eq!(field("email"), json!({"kind": "SCALAR", "name": "String"}));
+    assert_eq!(field("owner"), json!({"kind": "OBJECT", "name": "User"}));
+    assert_eq!(r.body["data"]["p"]["fields"], json!([{"name": "email"}]));
+}
+
+#[test]
+fn invalid_interface_implementations_are_rejected() {
+    for (field, why) in [
+        ("email: Int", "a different named type"),
+        ("email: [String]", "a list for a scalar"),
+    ] {
+        let sdl = format!(
+            "interface P {{ email: String }}\ntype U implements P {{ {field} }}\ntype Query {{ u: U }}"
+        );
+        let err = graphql::try_router(Arc::new(sdl_runtime(&sdl, None)))
+            .err()
+            .unwrap_or_else(|| panic!("{why} was accepted"));
+        assert!(err.to_string().contains("U.email"), "{why}: {err}");
+    }
+    let sdl = "interface P { email: String! }\ntype U implements P { email: String }\ntype Query { u: U }";
+    let err = graphql::try_router(Arc::new(sdl_runtime(sdl, None)))
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("U.email"), "{err}");
+}
