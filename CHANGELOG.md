@@ -28,6 +28,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - The prompt (and the JSON Schema response format) carries the response schema as compact JSON fitted to 64 KiB: past that, descriptions are cut to 160 characters and the definitions furthest from the root become short stubs. Validation still uses the full schema. Stripe's `payment_intent` went from ~357k to ~23k prompt tokens.
 - The prompt asks for arrays of 3 to 5 items unless the request names a count.
 - The Admin API request log (and MCP `list_requests`) includes `fallback_reason`.
+- The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
+- An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
 
 ### Fixed
 

@@ -346,7 +346,7 @@ impl Engine {
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
-    /// keys, validated (and repaired) as a whole, then split and finished per
+    /// keys (a nullable part may be left out and reads as null), validated (and repaired) as a whole, then split and finished per
     /// part. The call's usage is reported on the first part. Without a
     /// provider, for a part with a forced status or no schema, or when the
     /// joint answer stays invalid, every part is generated on its own.
@@ -390,7 +390,14 @@ impl Engine {
             properties.insert(part.key.to_string(), schema.clone());
             shapes.push((variant, status, validator));
         }
-        let keys: Vec<Value> = parts.iter().map(|p| Value::from(p.key)).collect();
+        // A part that may be null may also be left out: models drop the
+        // fields they mean as null.
+        let keys: Vec<Value> = parts
+            .iter()
+            .zip(&shapes)
+            .filter(|(_, (_, _, validator))| validator.validate(&Value::Null).is_err())
+            .map(|(p, _)| Value::from(p.key))
+            .collect();
         let combined = serde_json::json!({
             "type": "object",
             "properties": properties,

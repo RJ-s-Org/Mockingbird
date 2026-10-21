@@ -858,3 +858,56 @@ async fn joint_generation_falls_back_to_separate_calls() {
             .all(|r| r.as_ref().unwrap().source == Source::Llm)
     );
 }
+
+/// Models asked for a GraphQL field answer like a GraphQL server:
+/// `{"data": {"field": ...}}`; the value two levels down is the answer.
+#[tokio::test]
+async fn answer_wrapped_like_a_graphql_response_is_unwrapped() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(
+        json!({"data": {"order": valid_order_at_o1()}}).to_string()
+    )]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(valid_order_at_o1()));
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+}
+
+/// A part whose schema allows null may be left out of the joint answer
+/// (models drop the fields they mean as null), and the joint answer may come
+/// wrapped in a GraphQL `data` envelope.
+#[tokio::test]
+async fn joint_answer_may_omit_nullable_parts() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let nullable = json!({"anyOf": [{"type": "object"}, {"type": "null"}]});
+    let (provider, engine) = scripted(vec![Ok(
+        json!({"data": {"order": valid_order_at_o1()}}).to_string()
+    )]);
+    let parts = [
+        JointPart {
+            key: "order",
+            op: get,
+            call: &call("getOrder"),
+            ctx: ctx(),
+        },
+        JointPart {
+            key: "maybe",
+            op: get,
+            call: &call("getOrder"),
+            ctx: GenerationContext {
+                response_schema: Some(&nullable),
+                ..ctx()
+            },
+        },
+    ];
+    let out = engine.generate_joint(&bundle, &parts).await;
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+    assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
+    assert_eq!(out[1].as_ref().unwrap().source, Source::Llm);
+}
