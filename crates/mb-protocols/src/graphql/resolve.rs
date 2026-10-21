@@ -12,6 +12,7 @@ use async_graphql::{Error, ErrorExtensions, Name};
 use axum::http::{HeaderMap, StatusCode};
 use mb_engine::{EngineError, OperationCall, Source};
 use mb_ext::{Rejection, Tenancy};
+use mb_mcm::{Effect, OperationKind};
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -332,9 +333,17 @@ async fn generate(
                         body: Some(Value::Object(args)),
                         ..Default::default()
                     };
+                    // A create or update stores its answer as the session's
+                    // resource, which other reads expect whole: generate it
+                    // in full. Everything else gets only the selected fields.
+                    let stores = matches!(
+                        op.kind,
+                        OperationKind::Command(Effect::Create | Effect::Update)
+                    );
                     let narrowed = op
                         .success_output()
                         .and_then(|o| o.schema.as_ref())
+                        .filter(|_| !stores)
                         .map(|schema| super::select::narrow(schema, &rt.bundle.defs, selection));
                     match call::generate_narrowed(rt, &plan, &call, narrowed.as_ref()).await {
                         Ok(generated) => {
