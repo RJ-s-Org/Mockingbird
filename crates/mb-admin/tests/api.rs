@@ -862,6 +862,36 @@ async fn scenario_status_must_be_declared_by_its_operations() {
 }
 
 #[tokio::test]
+async fn profile_extra_body_round_trips_and_rejects_reserved_fields() {
+    let h = harness().await;
+    let extra = json!({"provider": {"order": ["atlas-cloud"]}, "reasoning": {"enabled": false}});
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/routed",
+            json!({"base_url": "https://openrouter.ai/api/v1", "model": "m", "extra_body": extra}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()["extra_body"], extra);
+    let r = h.get("/api/v1/llm-profiles/routed").await;
+    assert_eq!(r.json()["extra_body"], extra);
+
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/routed",
+            json!({"base_url": "https://x", "model": "m", "extra_body": {"model": "other"}}),
+        )
+        .await;
+    let problem = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        problem["detail"].as_str().unwrap().contains("extra_body"),
+        "{problem}"
+    );
+}
+
+#[tokio::test]
 async fn profiles_never_return_secret_values() {
     // The API never resolves a secret_ref, so no variable needs setting.
     let h = harness().await;
@@ -883,8 +913,8 @@ async fn profiles_never_return_secret_values() {
     assert_eq!(body["name"], "fast");
     assert_eq!(body["source"], "api");
     assert_eq!(body["temperature"], 0.7);
-    assert_eq!(body["timeout_ms"], 3000);
-    assert_eq!(body["max_tokens"], 2048);
+    assert_eq!(body["timeout_ms"], 60_000);
+    assert_eq!(body["max_tokens"], 16_384);
     assert_eq!(body["json_schema"], false);
 
     let r = h.get("/api/v1/llm-profiles/fast").await;
@@ -1366,6 +1396,7 @@ async fn request_log_query() {
                     path: "/orders".into(),
                     status: 200,
                     source: Some(source.into()),
+                    fallback_reason: (source == "fallback").then(|| "LLM request timed out".into()),
                     latency_ms: 12,
                     prompt_tokens: 3,
                     completion_tokens: 4,
@@ -1400,6 +1431,9 @@ async fn request_log_query() {
     assert_eq!(all[0]["source"], "llm");
     assert_eq!(all[0]["status"], 200);
     assert_eq!(all[0]["response"], json!({ "ok": true }));
+    assert!(all[0].as_object().unwrap().contains_key("fallback_reason"));
+    assert_eq!(all[1]["source"], "fallback");
+    assert_eq!(all[1]["fallback_reason"], "LLM request timed out");
 
     let q = |s: &str| format!("/api/v1/mocks/orders/requests?{s}");
     assert_eq!(
@@ -1451,6 +1485,7 @@ async fn request_log_kind_query() {
                     path: "orders.placed".into(),
                     status: 200,
                     source: Some("llm".into()),
+                    fallback_reason: None,
                     latency_ms: 1,
                     prompt_tokens: 0,
                     completion_tokens: 0,
@@ -1555,6 +1590,7 @@ async fn file_managed_mock_is_read_only() {
             max_tokens: 2048,
             fallback_profile: None,
             headers: Default::default(),
+            extra_body: Default::default(),
             source: ResourceSource::File,
         })
         .await

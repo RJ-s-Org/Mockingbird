@@ -271,6 +271,8 @@ async fn validate<'a>(
         }
         mb_store::validate_profile_headers(&p.headers)
             .map_err(|e| anyhow!("LLM profile {label:?}: headers: {e}"))?;
+        mb_store::validate_extra_body(&p.extra_body)
+            .map_err(|e| anyhow!("LLM profile {label:?}: {e}"))?;
         for value in p.headers.values() {
             for reference in mb_store::header_secret_refs(value)? {
                 if !valid_secret_ref(reference) {
@@ -720,6 +722,7 @@ fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
         max_tokens: p.max_tokens,
         fallback_profile: p.fallback.clone(),
         headers: p.headers.clone(),
+        extra_body: p.extra_body.clone(),
         source: ResourceSource::File,
     })
 }

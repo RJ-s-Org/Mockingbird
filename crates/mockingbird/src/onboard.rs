@@ -32,6 +32,15 @@ pub struct InitArgs {
     /// Control-plane storage [default: sqlite://./mockingbird.db].
     #[arg(long)]
     pub storage_url: Option<String>,
+    /// Data-plane port (`server.port`) [default: 8080].
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// Admin API and console port (`server.admin_port`) [default: 9090].
+    #[arg(long)]
+    pub admin_port: Option<u16>,
+    /// gRPC port (`server.grpc_port`) [default: 50051].
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
     /// File to write.
     #[arg(short, long, default_value = "mockingbird.yaml")]
     pub output: PathBuf,
@@ -82,11 +91,13 @@ pub struct ConfigureArgs {
 pub struct TestArgs {
     #[command(flatten)]
     pub provider: ProviderArgs,
-    /// Test this profile of a config file instead of a preset.
-    #[arg(short, long, requires = "profile", conflicts_with = "provider")]
+    /// Test a profile of this config file instead of a preset [default:
+    /// ./mockingbird.yaml when no --provider is given].
+    #[arg(short, long, conflicts_with = "provider")]
     pub config: Option<PathBuf>,
-    /// The profile of --config to test.
-    #[arg(long)]
+    /// The profile of the config file to test [default: its
+    /// `llm.default_profile`].
+    #[arg(long, conflicts_with = "provider")]
     pub profile: Option<String>,
 }
 
@@ -178,6 +189,19 @@ pub fn init(args: &InitArgs) -> anyhow::Result<Value> {
         );
     }
     let mut doc = Map::new();
+    let mut server = Map::new();
+    for (key, port) in [
+        ("port", args.port),
+        ("admin_port", args.admin_port),
+        ("grpc_port", args.grpc_port),
+    ] {
+        if let Some(port) = port {
+            server.insert(key.into(), json!(port));
+        }
+    }
+    if !server.is_empty() {
+        doc.insert("server".into(), Value::Object(server));
+    }
     doc.insert(
         "storage".into(),
         json!({ "url": args.storage_url.as_deref().unwrap_or("sqlite://./mockingbird.db") }),
@@ -387,17 +411,29 @@ fn mb_admin_identifier(name: &str) -> bool {
 
 /// The profile `mockingbird llm test` checks.
 pub fn test_profile(args: &TestArgs) -> anyhow::Result<FileProfile> {
-    match (&args.config, &args.profile) {
-        (Some(config), Some(name)) => {
-            let cfg = file_config::load(config)?;
-            cfg.llm
-                .profiles
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow!("{} has no LLM profile {name:?}", config.display()))
-        }
-        _ => args.provider.profile(),
+    if args.provider.provider.is_some() {
+        return args.provider.profile();
     }
+    let config = match &args.config {
+        Some(config) => config.clone(),
+        None if Path::new("mockingbird.yaml").exists() => PathBuf::from("mockingbird.yaml"),
+        None => bail!(
+            "name a provider preset with --provider (see `mockingbird llm providers`), or run this next to a mockingbird.yaml (or pass --config)"
+        ),
+    };
+    let cfg = file_config::load(&config)?;
+    let name = match args.profile.clone().or(cfg.llm.default_profile.clone()) {
+        Some(name) => name,
+        None => bail!(
+            "{} has no llm.default_profile; pass --profile",
+            config.display()
+        ),
+    };
+    cfg.llm
+        .profiles
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| anyhow!("{} has no LLM profile {name:?}", config.display()))
 }
 
 /// `mockingbird validate` as JSON: the contract's title, version,

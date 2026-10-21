@@ -17,6 +17,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 | [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |
 | [Upgrading](docs/upgrading.md) | Upgrade notes, migrations and the `mb-ext` 1.0 changes |
 | [Performance](docs/performance.md) | The offline bench: method, numbers and how to rerun it |
+| [Improvements](docs/improvements.md) | Known gaps and planned enhancements, from field trials and use |
 | [Extensions](crates/mb-ext/README.md) | The `mb-ext` extension API and its stability policy |
 | [Examples](examples/gallery/README.md) | Ready-to-serve configurations for every protocol and for chaos |
 
@@ -72,7 +73,7 @@ curl -i localhost:8080/orders/<id> -H 'X-Mockingbird-Status: 404'
 curl -i localhost:8080/orders -H 'X-Mockingbird-Latency: 250ms'
 ```
 
-Every response carries `X-Mockingbird-Source: llm | repaired | fallback`.
+Every response carries `X-Mockingbird-Source: llm | repaired | fallback`. A `fallback` response also carries `X-Mockingbird-Fallback-Reason`, which says why the LLM answer was not used (no LLM configured, a timeout, a provider error, output cut at `max_tokens`, or an answer that did not match the schema); GraphQL reports it under `extensions.mockingbird.fallbackReasons`, and the request log records it.
 
 Check a contract without serving it:
 
@@ -531,7 +532,7 @@ A draft lists what the importer was unsure about. Warnings never fail a job; che
 
 ### Token budget
 
-The LLM calls of one job may spend at most `import.max_tokens` tokens (default 200 000), counted from the provider's reported usage. Before each chunk the importer estimates its cost (the chunk, the prompt and the profile's `max_tokens`); when the budget cannot cover it, the job stops early and assembles a partial draft with a `token_budget_exhausted` warning instead of failing. Extraction calls use the mock's LLM profile (or `import.llm_profile`) with a timeout of at least 120 s, at least 8192 output tokens and a temperature of at most 0.2. Document text is passed to the model only as delimited data, never as instructions; the model has no tools, and every answer is validated before use. With `--offline` there is no LLM, so only HAR and Postman imports work.
+The LLM calls of one job may spend at most `import.max_tokens` tokens (default 200 000), counted from the provider's reported usage. Before each chunk the importer estimates its cost (the chunk, the prompt and the profile's `max_tokens`); when the budget cannot cover it, the job stops early and assembles a partial draft with a `token_budget_exhausted` warning instead of failing. Extraction calls use the mock's LLM profile (or `import.llm_profile`) with a timeout of at least 120 s and at least 8192 output tokens, at temperature 0 and in JSON-object mode (the schema is in the prompt). Document text is passed to the model only as delimited data, never as instructions; the model has no tools, and every answer is validated before use. With `--offline` there is no LLM, so only HAR and Postman imports work.
 
 Imports and draft previews go through the same extension points as data-plane calls. Creating an import job is admitted by the quota guard (operation `import`, the caller's workspace); a refusal is answered with its own status, `429` by default, and `Retry-After` when the guard sets one. Every LLM call an import makes is reported to the usage sink (operation and source `import`, status `502` for a failed call), whether the job finishes, fails or is canceled, and `mb_import_tokens_total` counts the tokens of all of them. Previews are admitted and reported as calls of the previewed operation. `import.llm_profile` is passed through the provider policy like a mock's own profile.
 

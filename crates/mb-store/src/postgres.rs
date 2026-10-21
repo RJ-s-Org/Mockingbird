@@ -49,10 +49,10 @@ const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundl
 const JOB_SELECT: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress::text AS progress, \
      result_version, error, created_by, created_at, started_at, finished_at, updated_at";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers";
+     max_tokens, fallback_profile, source, headers, extra_body";
 /// [`PROFILE_COLUMNS`] with JSON read back as text.
 const PROFILE_SELECT: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers::text AS headers";
+     max_tokens, fallback_profile, source, headers::text AS headers, extra_body::text AS extra_body";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 /// [`API_KEY_COLUMNS`] with JSON read back as text.
@@ -63,7 +63,7 @@ const SESSION_SELECT: &str =
 const AUDIT_SELECT: &str = "id, workspace, actor_subject, actor_kind, action, target, \
      before_value::text AS before_value, after_value::text AS after_value, request_id, at";
 const LOG_SELECT: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
-     prompt_tokens, completion_tokens, request::text AS request, response::text AS response, at, kind";
+     prompt_tokens, completion_tokens, request::text AS request, response::text AS response, at, kind, fallback_reason";
 const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
 /// [`CHANNEL_COLUMNS`] with JSON read back as text.
 const CHANNEL_SELECT: &str =
@@ -343,6 +343,7 @@ fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
     let source: String = row.try_get("source")?;
     let temperature: f64 = row.try_get("temperature")?;
     let headers: String = row.try_get("headers")?;
+    let extra_body: String = row.try_get("extra_body")?;
     Ok(LlmProfile {
         workspace: row.try_get("workspace")?,
         name: row.try_get("name")?,
@@ -356,6 +357,7 @@ fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
         max_tokens: from_i64(row.try_get("max_tokens")?, "max_tokens")?,
         fallback_profile: row.try_get("fallback_profile")?,
         headers: serde_json::from_str(&headers)?,
+        extra_body: serde_json::from_str(&extra_body)?,
         source: ResourceSource::parse(&source)?,
     })
 }
@@ -374,6 +376,7 @@ fn log_from_row(row: &PgRow) -> Result<RequestLogEntry, StoreError> {
         path: row.try_get("path")?,
         status: from_i64(i64::from(status), "status")?,
         source: row.try_get("source")?,
+        fallback_reason: row.try_get("fallback_reason")?,
         latency_ms: from_i64(row.try_get("latency_ms")?, "latency_ms")?,
         prompt_tokens: from_i64(row.try_get("prompt_tokens")?, "prompt_tokens")?,
         completion_tokens: from_i64(row.try_get("completion_tokens")?, "completion_tokens")?,
@@ -943,12 +946,12 @@ impl ControlStore for PgStore {
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
             "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
-             source = excluded.source, headers = excluded.headers"
+             source = excluded.source, headers = excluded.headers, extra_body = excluded.extra_body"
         );
         let mut tx = self.pool.begin().await?;
         lock_workspace(&mut tx, &p.workspace).await?;
@@ -965,6 +968,7 @@ impl ControlStore for PgStore {
             .bind(&p.fallback_profile)
             .bind(p.source.as_str())
             .bind(serde_json::to_string(&p.headers)?)
+            .bind(serde_json::to_string(&p.extra_body)?)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -1000,8 +1004,8 @@ impl ControlStore for PgStore {
         let response = e.response.as_ref().map(serde_json::to_string).transpose()?;
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO request_log (mock_id, operation_id, session, method, path, status, source, \
-             latency_ms, prompt_tokens, completion_tokens, request, response, at, kind) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::json, $12::json, $13, $14) RETURNING id",
+             latency_ms, prompt_tokens, completion_tokens, request, response, at, kind, fallback_reason) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::json, $12::json, $13, $14, $15) RETURNING id",
         )
         .bind(e.mock_id)
         .bind(&e.operation_id)
@@ -1017,6 +1021,7 @@ impl ControlStore for PgStore {
         .bind(response)
         .bind(e.at)
         .bind(e.kind.as_str())
+        .bind(&e.fallback_reason)
         .fetch_one(&self.pool)
         .await?;
         if self.prune.tick(e.mock_id) {

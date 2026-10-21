@@ -130,6 +130,7 @@ fn log_entry(mock_id: Uuid, session: &str, op: &str, source: &str) -> NewRequest
         path: "/orders".into(),
         status: 200,
         source: Some(source.to_string()),
+        fallback_reason: None,
         latency_ms: 12,
         prompt_tokens: 3,
         completion_tokens: 4,
@@ -550,6 +551,7 @@ async fn profile_crud(store: &Arc<dyn ControlStore>) {
         max_tokens: 2048,
         fallback_profile: None,
         headers: Default::default(),
+        extra_body: Default::default(),
         source: ResourceSource::Api,
     };
     store.put_profile(&p).await.expect("put");
@@ -571,6 +573,10 @@ async fn profile_crud(store: &Arc<dyn ControlStore>) {
         ("x-title".to_string(), "Mockingbird".to_string()),
     ]
     .into();
+    p.extra_body = json!({"provider": {"order": ["atlas-cloud"]}, "reasoning": {"enabled": false}})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     store.put_profile(&p).await.expect("upsert");
     assert_eq!(
         store
@@ -581,6 +587,16 @@ async fn profile_crud(store: &Arc<dyn ControlStore>) {
             .headers,
         p.headers,
         "headers round-trip"
+    );
+    assert_eq!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "fast")
+            .await
+            .expect("get")
+            .expect("present")
+            .extra_body,
+        p.extra_body,
+        "extra_body round-trip"
     );
     let slow = LlmProfile {
         name: "slow".into(),
@@ -863,6 +879,7 @@ fn profile(ws: &str, name: &str) -> LlmProfile {
         max_tokens: 100,
         fallback_profile: None,
         headers: Default::default(),
+        extra_body: Default::default(),
         source: ResourceSource::Api,
     }
 }
@@ -2969,6 +2986,8 @@ async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
     let mut entry = log_entry(mock.id, "s1", "getOrder", "llm");
     entry.at = micros_now();
     entry.kind = RequestKind::Grpc;
+    entry.source = Some("fallback".into());
+    entry.fallback_reason = Some("LLM request timed out".into());
     let id = store
         .append_request_log(entry.clone(), 1000)
         .await
@@ -2990,6 +3009,11 @@ async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
     assert_eq!(got.response, entry.response);
     assert_eq!(got.at, entry.at);
     assert_eq!(got.kind, RequestKind::Grpc);
+    assert_eq!(
+        got.fallback_reason.as_deref(),
+        Some("LLM request timed out"),
+        "fallback reason round-trip"
+    );
     assert_eq!(
         store.get_request_log(id + 1_000_000).await.expect("get"),
         None

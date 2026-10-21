@@ -142,7 +142,7 @@ pub struct ServeArgs {
     /// Faker only, no LLM.
     #[arg(long)]
     pub offline: bool,
-    /// LLM timeout of the default profile [default: 3s].
+    /// LLM timeout of the default profile [default: 60s].
     #[arg(long)]
     pub llm_timeout: Option<humantime::Duration>,
     /// Which planes this node serves [default: all]; `control` and `data`

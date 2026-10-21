@@ -587,6 +587,10 @@ async fn cors_preflight_and_simple_requests() {
     assert_eq!(header_str(&resp, "access-control-allow-origin"), "*");
     let exposed = header_str(&resp, "access-control-expose-headers").to_ascii_lowercase();
     assert!(exposed.contains("x-mockingbird-source"), "{exposed}");
+    assert!(
+        exposed.contains("x-mockingbird-fallback-reason"),
+        "{exposed}"
+    );
 }
 
 const ONLY_404_CONTRACT: &str = r#"
@@ -803,6 +807,36 @@ async fn forced_status_undeclared_client_error_and_invalid_value_are_400() {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
         assert_eq!(body_json(resp).await["title"], "Invalid override");
     }
+}
+
+#[tokio::test]
+async fn llm_failure_sends_the_fallback_reason() {
+    let h = harness(Some(vec![Err(LlmError::Timeout)]), true);
+    let resp = send(&h, get("/orders/o1")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+    let reason = header_str(&resp, "x-mockingbird-fallback-reason");
+    assert!(reason.contains("timed out"), "{reason}");
+}
+
+#[tokio::test]
+async fn offline_fallback_says_no_llm_is_configured() {
+    let h = offline();
+    let resp = send(&h, get("/orders/o1")).await;
+    let reason = header_str(&resp, "x-mockingbird-fallback-reason");
+    assert!(reason.contains("no LLM"), "{reason}");
+}
+
+#[tokio::test]
+async fn llm_answer_sends_no_fallback_reason() {
+    let h = harness(Some(vec![Ok(order("o1", "c1").to_string())]), true);
+    let resp = send(&h, get("/orders/o1")).await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "llm");
+    assert!(
+        resp.headers()
+            .get("x-mockingbird-fallback-reason")
+            .is_none()
+    );
 }
 
 /// A Stripe-shaped OpenAPI 3 contract: form-encoded bodies and

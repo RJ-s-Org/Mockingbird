@@ -50,6 +50,9 @@ pub struct LlmProfileView {
     /// Extra provider request headers, as stored (`${…}` references are
     /// never resolved).
     pub headers: BTreeMap<String, String>,
+    /// JSON merged into every provider request body.
+    #[schema(value_type = Object)]
+    pub extra_body: serde_json::Map<String, serde_json::Value>,
     pub source: Source,
 }
 
@@ -67,6 +70,7 @@ impl From<LlmProfile> for LlmProfileView {
             max_tokens: p.max_tokens,
             fallback_profile: p.fallback_profile,
             headers: p.headers,
+            extra_body: p.extra_body,
         }
     }
 }
@@ -91,10 +95,10 @@ pub struct PutProfile {
     #[schema(default = 0.7)]
     pub temperature: f32,
     #[serde(default = "default_timeout_ms")]
-    #[schema(default = 3000)]
+    #[schema(default = 60000)]
     pub timeout_ms: u64,
     #[serde(default = "default_max_tokens")]
-    #[schema(default = 2048)]
+    #[schema(default = 16384)]
     pub max_tokens: u32,
     /// Profile tried when this one fails.
     pub fallback_profile: Option<String>,
@@ -105,6 +109,14 @@ pub struct PutProfile {
     /// whose name suggests a credential must use one.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// JSON merged into every request body sent to the provider, under the
+    /// fields Mockingbird sets itself (`model`, `messages`, `response_format`,
+    /// `temperature`, `max_tokens` and `stream` are rejected): OpenRouter's
+    /// `provider` routing or `reasoning` settings, for example. At most
+    /// 8 KiB; not for secrets.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub extra_body: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_temperature() -> f32 {
@@ -112,11 +124,11 @@ fn default_temperature() -> f32 {
 }
 
 fn default_timeout_ms() -> u64 {
-    3000
+    60_000
 }
 
 fn default_max_tokens() -> u32 {
-    2048
+    16_384
 }
 
 /// The secret reference forms `globs` (`server.api_secret_refs`) accept,
@@ -190,6 +202,10 @@ fn validate(name: &str, p: &PutProfile) -> ApiResult<()> {
         ));
     }
     mb_store::validate_profile_headers(&p.headers).map_err(|e| match e {
+        mb_store::StoreError::Invalid(detail) => Problem::invalid(INVALID_PROFILE, detail),
+        other => Problem::invalid(INVALID_PROFILE, other.to_string()),
+    })?;
+    mb_store::validate_extra_body(&p.extra_body).map_err(|e| match e {
         mb_store::StoreError::Invalid(detail) => Problem::invalid(INVALID_PROFILE, detail),
         other => Problem::invalid(INVALID_PROFILE, other.to_string()),
     })?;
@@ -384,6 +400,7 @@ pub async fn put(
         max_tokens: body.max_tokens,
         fallback_profile: body.fallback_profile,
         headers: body.headers,
+        extra_body: body.extra_body,
         source: ResourceSource::Api,
     };
     st.store.put_profile(&profile).await?;

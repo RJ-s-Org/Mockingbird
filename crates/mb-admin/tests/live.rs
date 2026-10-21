@@ -173,6 +173,7 @@ fn record(workspace: &str, mock: &str, op: &str, session: &str, source: &str) ->
         path: "/orders".into(),
         status: 200,
         source: Some(source.into()),
+        fallback_reason: None,
         latency: Duration::from_millis(12),
         prompt_tokens: 3,
         completion_tokens: 4,
@@ -255,6 +256,10 @@ async fn stream_emits_matching_records() {
     assert_eq!(d["path"], "/orders");
     assert_eq!(d["status"], 200);
     assert_eq!(d["source"], "llm");
+    assert!(
+        d.as_object().unwrap().contains_key("fallback_reason"),
+        "{d}"
+    );
     assert_eq!(d["latency_ms"], 12);
     assert_eq!(d["prompt_tokens"], 3);
     assert_eq!(d["completion_tokens"], 4);

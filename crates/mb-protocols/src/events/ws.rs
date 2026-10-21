@@ -227,6 +227,7 @@ fn record_refusal(
         path: path.to_string(),
         status,
         source: None,
+        fallback_reason: None,
         latency: std::time::Duration::ZERO,
         prompt_tokens: 0,
         completion_tokens: 0,

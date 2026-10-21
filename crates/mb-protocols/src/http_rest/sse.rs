@@ -237,6 +237,7 @@ impl Drop for ReportOnDrop {
             path: std::mem::take(&mut self.path),
             status: 200,
             source: self.source,
+            fallback_reason: None,
             usage: Default::default(),
             latency: self.started.elapsed(),
             tenancy: self.tenancy.take(),

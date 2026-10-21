@@ -226,6 +226,7 @@ impl ChannelInner {
                 path: msg.address.clone(),
                 status,
                 source: None,
+                fallback_reason: None,
                 latency: started.elapsed(),
                 prompt_tokens: 0,
                 completion_tokens: 0,

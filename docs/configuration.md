@@ -143,12 +143,13 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles.<name>.model` | string | required | | `MB_LLM_MODEL` (default `deepseek-chat`) | Model name. |
 | `llm.profiles.<name>.api_key` | secret reference | unset | | `MB_LLM_API_KEY` (stored as `env:MB_LLM_API_KEY`) | Provider API key. |
 | `llm.profiles.<name>.json_schema` | bool | `false` | | `MB_LLM_JSON_SCHEMA` | Request JSON Schema structured output instead of JSON mode. |
-| `llm.profiles.<name>.timeout` | duration | `3s` | | `--llm-timeout` (profile `default`) | Time before the call falls back to the faker. |
+| `llm.profiles.<name>.timeout` | duration | `60s` | | `--llm-timeout` (profile `default`) | Time before the call falls back to the faker. |
 | `llm.profiles.<name>.temperature` | number | `0.7` | | | Sampling temperature. |
-| `llm.profiles.<name>.max_tokens` | integer | `2048` | | | Completion token limit. |
+| `llm.profiles.<name>.max_tokens` | integer | `16384` | | | Completion token limit. A reply cut at this limit falls back to the faker, with the reason in `X-Mockingbird-Fallback-Reason`. |
 | `llm.profiles.<name>.fallback` | string | unset | A profile name | | Profile tried when this one's provider fails. |
 | `llm.profiles.<name>.headers` | map | `{}` | Lowercase header names; not `authorization`, `content-type`, `content-length`, `host` or `transfer-encoding` | | Extra request headers sent to the provider, such as Cloudflare AI Gateway's `cf-aig-authorization` or Azure OpenAI's `api-key`. A value may embed secret references as `${env:NAME}` or `${file:/path}` (`Bearer ${env:CF_AIG_API_KEY}`); a header whose name contains `auth`, `key`, `token`, `secret`, `password` or `cookie` must use one. Through the Admin API each reference must match `server.api_secret_refs`, and only a sysadmin may set them. |
 | `llm.profiles.<name>.headers.<name>` | string | | | | One header value. |
+| `llm.profiles.<name>.extra_body` | map | `{}` | Not `model`, `messages`, `response_format`, `temperature`, `max_tokens` or `stream`; at most 8 KiB as JSON | | JSON merged into every request body, such as OpenRouter's `provider` routing or `reasoning` settings (`{reasoning: {enabled: false}}`). |
 
 `--offline` serves every mock with the faker and makes no LLM calls.
 

@@ -74,6 +74,7 @@ async fn check_upgraded(store: &dyn ControlStore) {
                 path: "orders.created".into(),
                 status: 200,
                 source: Some("fallback".into()),
+                fallback_reason: None,
                 latency_ms: 1,
                 prompt_tokens: 0,
                 completion_tokens: 0,

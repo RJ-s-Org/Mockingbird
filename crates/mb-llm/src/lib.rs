@@ -98,6 +98,27 @@ pub enum LlmError {
     Transport(String),
     #[error("LLM response decode error: {0}")]
     Decode(String),
+    /// The provider stopped at `max_tokens`, so the output is cut short.
+    /// Retrying with the same limit would truncate again.
+    #[error("LLM output truncated: {0}")]
+    Truncated(String),
+    /// The reply carried no usable content: an empty answer, or reasoning
+    /// with no JSON in it.
+    #[error("LLM returned no content: {0}")]
+    Empty(String),
+}
+
+impl LlmError {
+    /// Whether one more attempt may succeed: transport failures, throttling
+    /// and server errors (including errors reported inside a 200 reply), and
+    /// empty replies.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            LlmError::Transport(_) | LlmError::Empty(_) => true,
+            LlmError::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
+            LlmError::Timeout | LlmError::Decode(_) | LlmError::Truncated(_) => false,
+        }
+    }
 }
 
 /// Text deltas of a streamed completion, in arrival order. A transport or

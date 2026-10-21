@@ -163,7 +163,24 @@ impl Engine {
         }
         match validator.validate(&value) {
             Ok(()) => Checked::Valid(value),
-            Err(errors) => Checked::Invalid(errors),
+            Err(errors) => match unwrap_envelope(validator, &value) {
+                Some(inner) => Checked::Valid(inner),
+                None => Checked::Invalid(errors),
+            },
         }
     }
+}
+
+/// The value inside a one-key object, when it is valid and the object is not.
+/// JSON-object output mode only allows an object at the top level, so models
+/// wrap the array (or scalar) an operation returns: `{"orders": [...]}`.
+fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+    if map.len() != 1 {
+        return None;
+    }
+    let inner = map.values().next()?;
+    validator.validate(inner).is_ok().then(|| inner.clone())
 }

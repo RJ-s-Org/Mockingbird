@@ -590,11 +590,15 @@ pub struct FileProfile {
     /// references as `${env:NAME}` or `${file:/path}`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// JSON merged into every provider request body (OpenRouter `provider`
+    /// routing, `reasoning` settings). Not for secrets.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra_body: serde_json::Map<String, serde_json::Value>,
 }
 
 impl FileProfile {
     fn default_timeout() -> Duration {
-        Duration::from_secs(3)
+        Duration::from_secs(60)
     }
 
     fn default_temperature() -> f32 {
@@ -602,7 +606,7 @@ impl FileProfile {
     }
 
     fn default_max_tokens() -> u32 {
-        2048
+        16_384
     }
 
     /// A profile with the given endpoint and every other field defaulted.
@@ -618,6 +622,7 @@ impl FileProfile {
             max_tokens: Self::default_max_tokens(),
             fallback: None,
             headers: BTreeMap::new(),
+            extra_body: serde_json::Map::new(),
         }
     }
 }

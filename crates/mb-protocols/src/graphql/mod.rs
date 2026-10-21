@@ -235,6 +235,7 @@ async fn admit_request(
         path: rt.protocols.graphql_path.clone(),
         status,
         source: None,
+        fallback_reason: None,
         usage: Default::default(),
         latency: started.elapsed(),
         tenancy,
@@ -272,8 +273,17 @@ async fn execute(
     ));
     let mut response = st.schema.execute(request.data(Arc::clone(&call))).await;
     let collected = call.collected();
+    let fallback_reason = collected
+        .fallback_reasons
+        .values()
+        .next()
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if !collected.sources.is_empty() {
-        let ext = json!({ "sources": collected.sources });
+        let mut ext = json!({ "sources": collected.sources });
+        if !collected.fallback_reasons.is_empty() {
+            ext["fallbackReasons"] = Value::Object(collected.fallback_reasons);
+        }
         if let Ok(v) = async_graphql::Value::from_json(ext) {
             response.extensions.insert("mockingbird".into(), v);
         }
@@ -293,6 +303,12 @@ async fn execute(
     if let Some(source) = collected.worst {
         resp.headers_mut()
             .insert(SOURCE_HEADER, HeaderValue::from_static(source.as_str()));
+    }
+    if let Some(reason) = fallback_reason {
+        resp.headers_mut().insert(
+            HeaderName::from_static("x-mockingbird-fallback-reason"),
+            crate::call::reason_header(&reason),
+        );
     }
     resp
 }
@@ -366,6 +382,7 @@ async fn refused_at(
         path: path.to_string(),
         status: resp.status().as_u16(),
         source: None,
+        fallback_reason: None,
         usage: Default::default(),
         latency: Default::default(),
         tenancy: None,

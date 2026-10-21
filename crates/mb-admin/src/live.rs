@@ -104,6 +104,8 @@ pub struct LiveRequestView {
     pub path: String,
     pub status: u16,
     pub source: Option<String>,
+    /// Why a `fallback` response did not use the LLM's answer.
+    pub fallback_reason: Option<String>,
     pub latency_ms: u64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -128,6 +130,7 @@ impl From<RequestRecord> for LiveRequestView {
             path: r.path,
             status: r.status,
             source: r.source,
+            fallback_reason: r.fallback_reason,
             latency_ms: u64::try_from(r.latency.as_millis()).unwrap_or(u64::MAX),
             prompt_tokens: r.prompt_tokens,
             completion_tokens: r.completion_tokens,

@@ -160,6 +160,7 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
     );
     let provider = OpenAiCompatible::new(OpenAiConfig {
         headers: Vec::new(),
+        extra_body: Default::default(),
         base_url: env.base_url.clone(),
         api_key: Some(env.api_key),
         model: env.model.clone(),

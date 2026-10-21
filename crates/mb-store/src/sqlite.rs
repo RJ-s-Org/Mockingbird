@@ -38,7 +38,7 @@ const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
      draft_meta";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers";
+     max_tokens, fallback_profile, source, headers, extra_body";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 const SESSION_COLUMNS: &str = "id_hash, principal, created_at, expires_at, last_seen";
@@ -48,7 +48,7 @@ const AUDIT_COLUMNS: &str = "id, workspace, actor_subject, actor_kind, action, t
 const JOB_COLUMNS: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress, result_version, \
      error, created_by, created_at, started_at, finished_at, updated_at";
 const LOG_COLUMNS: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
-     prompt_tokens, completion_tokens, request, response, at, kind";
+     prompt_tokens, completion_tokens, request, response, at, kind, fallback_reason";
 const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
 const EVENT_SETTINGS_COLUMNS: &str = "mock_id, broker, source, updated_at";
 
@@ -340,6 +340,7 @@ fn profile_from_row(row: &SqliteRow) -> Result<LlmProfile, StoreError> {
     let source: String = row.try_get("source")?;
     let temperature: f64 = row.try_get("temperature")?;
     let headers: String = row.try_get("headers")?;
+    let extra_body: String = row.try_get("extra_body")?;
     Ok(LlmProfile {
         workspace: row.try_get("workspace")?,
         name: row.try_get("name")?,
@@ -353,6 +354,7 @@ fn profile_from_row(row: &SqliteRow) -> Result<LlmProfile, StoreError> {
         max_tokens: from_i64(row.try_get("max_tokens")?, "max_tokens")?,
         fallback_profile: row.try_get("fallback_profile")?,
         headers: serde_json::from_str(&headers)?,
+        extra_body: serde_json::from_str(&extra_body)?,
         source: ResourceSource::parse(&source)?,
     })
 }
@@ -417,6 +419,7 @@ fn log_from_row(row: &SqliteRow) -> Result<RequestLogEntry, StoreError> {
         path: row.try_get("path")?,
         status: from_i64(row.try_get("status")?, "status")?,
         source: row.try_get("source")?,
+        fallback_reason: row.try_get("fallback_reason")?,
         latency_ms: from_i64(row.try_get("latency_ms")?, "latency_ms")?,
         prompt_tokens: from_i64(row.try_get("prompt_tokens")?, "prompt_tokens")?,
         completion_tokens: from_i64(row.try_get("completion_tokens")?, "completion_tokens")?,
@@ -921,12 +924,12 @@ impl ControlStore for SqliteControlStore {
 
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
-            "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
-             source = excluded.source, headers = excluded.headers"
+             source = excluded.source, headers = excluded.headers, extra_body = excluded.extra_body"
         );
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_workspace(&mut tx, &p.workspace).await?;
@@ -943,6 +946,7 @@ impl ControlStore for SqliteControlStore {
             .bind(&p.fallback_profile)
             .bind(p.source.as_str())
             .bind(serde_json::to_string(&p.headers)?)
+            .bind(serde_json::to_string(&p.extra_body)?)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -978,8 +982,8 @@ impl ControlStore for SqliteControlStore {
         let response = e.response.as_ref().map(serde_json::to_string).transpose()?;
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO request_log (mock_id, operation_id, session, method, path, status, source, latency_ms, \
-             prompt_tokens, completion_tokens, request, response, at, kind) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+             prompt_tokens, completion_tokens, request, response, at, kind, fallback_reason) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(e.mock_id.to_string())
         .bind(&e.operation_id)
@@ -995,6 +999,7 @@ impl ControlStore for SqliteControlStore {
         .bind(response)
         .bind(e.at)
         .bind(e.kind.as_str())
+        .bind(&e.fallback_reason)
         .fetch_one(&self.pool)
         .await?;
         if self.prune.tick(e.mock_id) {

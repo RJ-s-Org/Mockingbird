@@ -652,3 +652,45 @@ async fn prompt_names_grpc_binding() {
     );
     assert!(!system.contains("HTTP:"), "{system}");
 }
+
+/// JSON-object output mode makes models wrap a top-level array in an object
+/// (`{"orders": [...]}`); the array inside is what the operation returns.
+#[tokio::test]
+async fn array_wrapped_in_an_object_is_unwrapped() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"orders": [valid_order()]}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(json!([valid_order()])));
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+}
+
+#[tokio::test]
+async fn fallback_records_its_reason() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (_provider, engine) = scripted(vec![Err(LlmError::Timeout)]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Fallback);
+    let reason = out.fallback_reason.unwrap();
+    assert!(reason.contains("timed out"), "{reason}");
+}
+
+#[tokio::test]
+async fn llm_answer_has_no_fallback_reason() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (_provider, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.fallback_reason, None);
+}

@@ -367,6 +367,7 @@ impl ChannelInner {
                 path: r.address,
                 status: r.status,
                 source: Some(r.generated.source.as_str().to_string()),
+                fallback_reason: None,
                 latency,
                 prompt_tokens: r.generated.usage.prompt_tokens,
                 completion_tokens: r.generated.usage.completion_tokens,

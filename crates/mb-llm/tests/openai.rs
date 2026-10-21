@@ -27,6 +27,7 @@ fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
         model: "m".into(),
         json_schema,
         headers: Vec::new(),
+        extra_body: serde_json::Map::new(),
         http: HttpOptions::default(),
     })
     .unwrap()
@@ -82,6 +83,7 @@ async fn sends_extra_headers() {
             ("cf-aig-authorization".into(), "Bearer gw".into()),
             ("x-title".into(), "Mockingbird".into()),
         ],
+        extra_body: serde_json::Map::new(),
         http: HttpOptions::default(),
     })
     .unwrap();
@@ -215,4 +217,188 @@ async fn openai_stream_http_error_before_first_delta() {
         .stream(req(ResponseFormat::Text, Duration::from_secs(2)))
         .await;
     assert!(matches!(r, Err(LlmError::Http { status: 500, .. })));
+}
+
+fn reply(message: Value, finish_reason: &str) -> Value {
+    json!({
+        "provider": "SomeProvider",
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3}
+    })
+}
+
+/// Responds with each body in turn; the last one repeats.
+fn in_turn(bodies: Vec<ResponseTemplate>) -> impl wiremock::Respond {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    move |_: &Request| {
+        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        bodies[n.min(bodies.len() - 1)].clone()
+    }
+}
+
+#[tokio::test]
+async fn reasoning_only_reply_uses_the_json_in_reasoning() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply(
+            json!({"content": null, "reasoning": "The answer is {\"a\":1}"}),
+            "stop",
+        )))
+        .mount(&server)
+        .await;
+    let resp = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\":1}");
+}
+
+#[tokio::test]
+async fn reasoning_only_reply_uses_the_last_whole_value_not_a_nested_one() {
+    let server = MockServer::start().await;
+    let reasoning = "Draft: {\"id\":\"x\"}. Final: {\"id\":\"pi_1\",\"types\":[\"card\"],\"opts\":{\"card\":{}}}";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply(
+            json!({"content": null, "reasoning": reasoning}),
+            "stop",
+        )))
+        .mount(&server)
+        .await;
+    let resp = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.content,
+        "{\"id\":\"pi_1\",\"types\":[\"card\"],\"opts\":{\"card\":{}}}"
+    );
+}
+
+#[tokio::test]
+async fn in_band_error_is_retried_once() {
+    let server = MockServer::start().await;
+    let failed = json!({
+        "provider": "Flaky",
+        "choices": [{"message": {"content": ""}, "finish_reason": "error",
+                     "error": {"code": 502, "message": "upstream died"}}]
+    });
+    Mock::given(method("POST"))
+        .respond_with(in_turn(vec![
+            ResponseTemplate::new(200).set_body_json(failed),
+            ResponseTemplate::new(200).set_body_json(ok_body()),
+        ]))
+        .mount(&server)
+        .await;
+    let resp = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\":1}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn server_error_is_retried_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(in_turn(vec![
+            ResponseTemplate::new(502).set_body_string("bad gateway"),
+            ResponseTemplate::new(200).set_body_json(ok_body()),
+        ]))
+        .mount(&server)
+        .await;
+    let resp = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\":1}");
+}
+
+#[tokio::test]
+async fn empty_reply_error_names_the_provider_and_finish_reason() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply(
+            json!({"content": null, "reasoning": "thinking…"}),
+            "stop",
+        )))
+        .mount(&server)
+        .await;
+    let err = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("SomeProvider"), "{err}");
+    assert!(err.contains("finish_reason stop"), "{err}");
+    // Retried once before giving up.
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+/// Seen with OpenRouter's DigitalOcean route in JSON Schema mode: the answer
+/// is lost and the reasoning only plans it, quoting fragments.
+#[tokio::test]
+async fn reasoning_that_only_plans_the_answer_is_empty() {
+    let server = MockServer::start().await;
+    let reasoning = "payment_method_types: [\"card\"] from the form. amount_details: {} has no required fields. Output the JSON.";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply(
+            json!({"content": null, "reasoning": reasoning}),
+            "stop",
+        )))
+        .mount(&server)
+        .await;
+    let err = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("reasoning without JSON"), "{err}");
+}
+
+#[tokio::test]
+async fn truncated_reply_says_to_raise_max_tokens() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(reply(json!({"content": "{\"a\": [1, 2"}), "length")),
+        )
+        .mount(&server)
+        .await;
+    let err = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("max_tokens (100)"), "{err}");
+    // A truncated reply is not retried: the same limit would truncate again.
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn merges_extra_body_under_its_own_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let extra = json!({"provider": {"order": ["atlas-cloud"]}, "model": "ignored"});
+    let provider = OpenAiCompatible::new(OpenAiConfig {
+        base_url: server.uri(),
+        api_key: None,
+        model: "m".into(),
+        json_schema: false,
+        headers: Vec::new(),
+        extra_body: extra.as_object().unwrap().clone(),
+        http: HttpOptions::default(),
+    })
+    .unwrap();
+    provider
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let body = wire_body(&server).await;
+    assert_eq!(body["provider"]["order"][0], "atlas-cloud");
+    assert_eq!(body["model"], "m", "the client's own fields win");
 }

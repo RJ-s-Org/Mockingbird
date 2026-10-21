@@ -21,6 +21,7 @@ pub mod recorder;
 pub mod registry;
 pub mod runtime;
 pub mod server;
+pub mod shell_env;
 pub mod telemetry;
 pub mod tls;
 pub mod watch;

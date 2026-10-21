@@ -69,18 +69,29 @@ fn marker_nonce(user: &str, marker: &str) -> String {
 }
 
 #[tokio::test]
-async fn extraction_request_uses_json_schema_and_delimiters() {
+async fn extraction_request_uses_json_object_at_temperature_zero_and_delimiters() {
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer(json!([])))]));
     let result = extract_chunk(&llm(provider.clone()), &chunk(PETS_TEXT), 5, "pets.md").await;
     assert!(result.operations.is_empty());
     let req = &provider.requests()[0];
-    match &req.response_format {
-        ResponseFormat::JsonSchema { name, schema } => {
-            assert_eq!(name, "api_operations");
-            assert_eq!(schema["required"], json!(["operations"]));
-        }
-        other => panic!("unexpected format {other:?}"),
-    }
+    // The schema is in the system prompt; strict schema mode and the
+    // profile's serving temperature both made extraction fail in trials.
+    assert!(
+        matches!(req.response_format, ResponseFormat::JsonObject),
+        "{:?}",
+        req.response_format
+    );
+    assert_eq!(req.temperature, 0.0);
+    let system = req
+        .messages
+        .iter()
+        .find(|m| m.role == Role::System)
+        .unwrap();
+    assert!(
+        system.content.contains("\"required\":[\"operations\"]"),
+        "{}",
+        system.content
+    );
     assert_eq!(req.max_tokens, 1000);
     assert_eq!(req.timeout, Duration::from_secs(5));
     let user = user_message(&provider);

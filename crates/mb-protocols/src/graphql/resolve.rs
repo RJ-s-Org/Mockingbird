@@ -73,6 +73,8 @@ pub(crate) struct Collected {
     pub sources: Map<String, Value>,
     /// The worst source over the generated root fields.
     pub worst: Option<Source>,
+    /// Response key → why the faker answered that root field.
+    pub fallback_reasons: Map<String, Value>,
     /// The largest injected latency among the root fields.
     pub delay: Option<Duration>,
 }
@@ -130,8 +132,11 @@ impl HttpCall {
         }
     }
 
-    fn add_source(&self, key: String, source: Source) {
+    fn add_source(&self, key: String, source: Source, fallback_reason: Option<&str>) {
         let mut c = self.lock();
+        if let Some(reason) = fallback_reason {
+            c.fallback_reasons.insert(key.clone(), json!(reason));
+        }
         c.sources.insert(key, json!(source.as_str()));
         c.worst = Some(c.worst.map_or(source, |w| w.worst(source)));
     }
@@ -272,6 +277,7 @@ async fn generate(
         path: rt.protocols.graphql_path.clone(),
         status: 200,
         source: None,
+        fallback_reason: None,
         usage: Default::default(),
         latency: Default::default(),
         tenancy: None,
@@ -328,6 +334,7 @@ async fn generate(
                         Ok(generated) => {
                             report.usage = generated.usage;
                             report.source = Some(generated.source);
+                            report.fallback_reason = generated.fallback_reason;
                             Ok(generated.body.unwrap_or(Value::Null))
                         }
                         Err(EngineError::UndeclaredStatus(code)) => Err(Failure::new(
@@ -346,7 +353,7 @@ async fn generate(
         Ok(body) => {
             if let Some(source) = report.source {
                 span.record("source", source.as_str());
-                http.add_source(key, source);
+                http.add_source(key, source, report.fallback_reason.as_deref());
             }
             if rt.recorder.is_some() {
                 report.response = Some(body.clone());
