@@ -106,8 +106,9 @@ struct CallLog {
     usage: Usage,
     /// The response body, kept only when `record` is set.
     response: Option<Value>,
-    /// The request body as decoded as JSON by `serve`, kept only when
-    /// `record` is set, so the record need not parse it again.
+    /// The request body as `serve` decoded it (JSON, or a nested form),
+    /// kept only when `record` is set, so the record need not parse it
+    /// again.
     request_body: Option<Value>,
     /// Whether a recorder will receive this call's record.
     record: bool,
@@ -346,6 +347,10 @@ async fn serve(
             None
         }
     };
+    // The record shows the body as decoded, as the engine sees it.
+    if log.record {
+        log.request_body.clone_from(&body);
+    }
     if let Some(v) = validators {
         check(
             &mut errors,
@@ -467,15 +472,6 @@ async fn serve(
         }
         Err(e) => return log.problem(500, "Generation failed", e.to_string()),
     };
-    // Kept for the record only when `serve` decoded it as JSON.
-    if log.record
-        && !matches!(
-            log.declared_body_type.as_deref(),
-            Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)
-        )
-    {
-        log.request_body = call.body;
-    }
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
@@ -971,14 +967,12 @@ fn recorded_body(raw: &[u8], media_type: Option<&str>) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(raw).into_owned()))
 }
 
-/// The request body for the record: the JSON `serve` already decoded
-/// (`decoded`) unless the media type calls for form or multipart handling,
-/// else [`recorded_body`] of the raw bytes.
+/// The request body for the record: the body `serve` already decoded
+/// (`decoded`) unless it is multipart, else [`recorded_body`] of the raw
+/// bytes.
 fn request_body_record(raw: &[u8], media_type: Option<&str>, decoded: Option<Value>) -> Value {
     match decoded {
-        Some(body) if !matches!(media_type, Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)) => {
-            body
-        }
+        Some(body) if media_type != Some(MULTIPART_CONTENT_TYPE) => body,
         _ => recorded_body(raw, media_type),
     }
 }
@@ -1084,9 +1078,8 @@ mod tests {
         assert_eq!(log.response, Some(json!({"id": "o1"})));
     }
 
-    /// The record reuses the body `serve` decoded as JSON, but decodes
-    /// form and multipart bodies (and anything not decoded) from the raw
-    /// bytes.
+    /// The record reuses the body `serve` decoded, but not a multipart
+    /// one, and decodes anything not decoded from the raw bytes.
     #[test]
     fn recorded_body_reuses_decoded_json() {
         let decoded = Some(json!({"reused": true}));
@@ -1095,7 +1088,11 @@ mod tests {
             json!({"reused": true})
         );
         assert_eq!(
-            request_body_record(b"a=1", Some(FORM_CONTENT_TYPE), decoded.clone()),
+            request_body_record(b"a[b]=1", Some(FORM_CONTENT_TYPE), decoded.clone()),
+            json!({"reused": true})
+        );
+        assert_eq!(
+            request_body_record(b"a=1", Some(FORM_CONTENT_TYPE), None),
             json!({"a": "1"})
         );
         assert_eq!(

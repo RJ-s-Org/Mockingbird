@@ -1068,7 +1068,7 @@ async fn validation_failures_stay_visible() {
         .oneshot(post_form(
             "/v1/payment_intents",
             FORM,
-            "amount=lots&currency=eur",
+            "amount=lots&currency=eur&metadata[k]=v",
         ))
         .await
         .unwrap();
@@ -1080,6 +1080,11 @@ async fn validation_failures_stay_visible() {
     assert!(message.contains("/amount"), "{body}");
 
     let records = recorded.0.lock().unwrap().clone();
+    // The record shows the body as decoded.
+    assert_eq!(
+        records[0].request["body"],
+        json!({"amount": "lots", "currency": "eur", "metadata": {"k": "v"}})
+    );
     let validation = records[0].request["validation"].as_array().unwrap();
     assert!(
         validation[0].as_str().unwrap().contains("/amount"),
