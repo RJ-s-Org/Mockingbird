@@ -249,3 +249,120 @@ fn event_stream_item_schema_extension_and_plain_schema() {
         Some(&json!({"type": "object", "properties": {"m": {"type": "string"}}}))
     );
 }
+
+/// Vendor extensions are annotations: `$ref`s inside them (Stripe's
+/// `x-expansionResources`, GitHub's `x-github-breaking-changes`) are neither
+/// rewritten nor checked, while a property merely named `x-*` still is.
+#[test]
+fn refs_inside_vendor_extensions_are_ignored() {
+    let doc = json!({
+        "openapi": "3.0.0",
+        "info": {"title": "T", "version": "1"},
+        "paths": {},
+        "components": {"schemas": {
+            "file": {"type": "object", "properties": {"id": {"type": "string"}}},
+            "simple-repository": {"type": "object"},
+            "account_branding_settings": {
+                "type": "object",
+                "properties": {"icon": {
+                    "anyOf": [{"type": "string"}, {"$ref": "#/components/schemas/file"}],
+                    "x-expansionResources": {"oneOf": [{"$ref": "#/components/schemas/file"}]}
+                }}
+            },
+            "migration": {
+                "type": "object",
+                "properties": {"x-header": {"$ref": "#/components/schemas/file"}},
+                "x-github-breaking-changes": [{"patch": [{"op": "add", "value": {
+                    "type": "array", "items": {"$ref": "#/components/schemas/simple-repository"}
+                }}]}]
+            }
+        }}
+    });
+    let b = compile(doc.to_string().as_bytes()).unwrap();
+    let icon = &b.defs["account_branding_settings"]["properties"]["icon"];
+    assert_eq!(icon["anyOf"][1], json!({"$ref": "#/$defs/file"}));
+    assert_eq!(
+        b.defs["migration"]["properties"]["x-header"],
+        json!({"$ref": "#/$defs/file"})
+    );
+
+    // A dangling ref under a property named `x-*` is still an error.
+    let mut bad = doc.clone();
+    bad["components"]["schemas"]["migration"]["properties"]["x-header"]["$ref"] =
+        json!("#/components/schemas/gone");
+    match compile(bad.to_string().as_bytes()) {
+        Err(ImportError::Invalid { pointer, message }) => {
+            assert!(pointer.ends_with("/gone"), "{pointer}");
+            assert!(message.contains("schema migration"), "{message}");
+            assert!(
+                message.contains("/components/schemas/migration/properties/x-header"),
+                "{message}"
+            );
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+}
+
+/// A dangling ref is reported with its referrer and the JSON pointer of the
+/// `$ref` inside it.
+#[test]
+fn dangling_ref_names_referrer_and_location() {
+    let src = oas(r#"
+  /a:
+    post:
+      operationId: makeA
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tags: {type: array, items: {$ref: '#/components/schemas/Tag'}}
+      responses: {"200": {description: OK}}
+"#);
+    match compile(src.as_bytes()) {
+        Err(ImportError::Invalid { pointer, message }) => {
+            assert!(pointer.ends_with("/Tag"), "{pointer}");
+            assert!(message.contains("operation makeA"), "{message}");
+            assert!(message.contains("/properties/tags/items"), "{message}");
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+}
+
+#[test]
+fn form_and_multipart_bodies_are_compiled() {
+    let src = oas(r#"
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: {type: object, properties: {a: {type: integer}}}
+      responses: {"200": {description: OK}}
+  /multi:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: {type: object, properties: {f: {type: string, format: binary}}}
+      responses: {"200": {description: OK}}
+  /both:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded: {schema: {type: object}}
+          application/json: {schema: {type: object, properties: {j: {type: string}}}}
+      responses: {"200": {description: OK}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let body = |id: &str| b.operation(id).unwrap().input.body.clone().unwrap();
+    assert_eq!(
+        body("post_form"),
+        json!({"type": "object", "properties": {"a": {"type": "integer"}},
+               "x-content-type": "application/x-www-form-urlencoded"})
+    );
+    assert_eq!(body("post_multi")["x-content-type"], "multipart/form-data");
+    // JSON stays preferred, untagged.
+    assert_eq!(body("post_both").get("x-content-type"), None);
+}

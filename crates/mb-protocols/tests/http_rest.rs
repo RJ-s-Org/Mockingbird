@@ -804,3 +804,298 @@ async fn forced_status_undeclared_client_error_and_invalid_value_are_400() {
         assert_eq!(body_json(resp).await["title"], "Invalid override");
     }
 }
+
+/// A Stripe-shaped OpenAPI 3 contract: form-encoded bodies and
+/// bracket-notation query parameters.
+const STRIPE_LIKE: &str = r##"
+openapi: 3.0.0
+info: {title: Payments, version: "1"}
+paths:
+  /v1/payment_intents:
+    post:
+      operationId: PostPaymentIntents
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [amount, currency]
+              properties:
+                amount: {type: integer}
+                currency: {type: string}
+                payment_method_types: {type: array, items: {type: string}}
+                expand: {type: array, items: {type: string, maxLength: 5000}}
+                automatic_payment_methods:
+                  type: object
+                  properties: {enabled: {type: boolean}}
+                metadata:
+                  anyOf:
+                    - {type: object, additionalProperties: {type: string}}
+                    - {type: string, enum: [""]}
+                shipping: {$ref: "#/components/schemas/shipping"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/payment_intent"}
+        default:
+          description: Error
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/error"}
+    get:
+      operationId: GetPaymentIntents
+      parameters:
+        - name: created
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            anyOf:
+              - {type: object, properties: {gte: {type: integer}, lt: {type: integer}}}
+              - {type: integer}
+        - {name: expand, in: query, style: deepObject, explode: true,
+           schema: {type: array, items: {type: string}}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, properties: {data: {type: array, items: {$ref: "#/components/schemas/payment_intent"}}}}
+  /v1/files:
+    post:
+      operationId: PostFiles
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, purpose]
+              properties:
+                file: {type: string, format: binary}
+                purpose: {type: string, enum: [dispute_evidence, identity_document]}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, properties: {id: {type: string}}}
+  /v1/ping:
+    post:
+      operationId: Ping
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, properties: {ok: {type: boolean}}}
+components:
+  schemas:
+    shipping:
+      type: object
+      properties:
+        name: {type: string}
+        address: {type: object, properties: {line1: {type: string}, postal_code: {type: string}}}
+    payment_intent:
+      type: object
+      required: [id, amount]
+      properties:
+        id: {type: string}
+        amount: {type: integer}
+    error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: {type: string}
+            type: {type: string}
+"##;
+
+fn contract_harness(src: &str, script: Vec<Value>) -> Harness {
+    let provider = Arc::new(ScriptedProvider::new(
+        script.into_iter().map(|v| Ok(v.to_string())).collect(),
+    ));
+    let rt = Arc::new(MockRuntime::new(
+        "inline",
+        Arc::new(compile(src.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    ));
+    Harness {
+        router: http_rest::router(Arc::clone(&rt)),
+        rt,
+        provider: Some(provider),
+    }
+}
+
+/// The `<request>` block of the `n`th prompt the engine sent.
+fn engine_request(h: &Harness, n: usize) -> Value {
+    let requests = h.provider.as_ref().unwrap().requests();
+    let prompt = requests[n]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .find(|c| c.contains("<request>"))
+        .unwrap();
+    let start = prompt.find("<request>\n").unwrap() + "<request>\n".len();
+    let end = prompt[start..].find("\n</request>").unwrap() + start;
+    serde_json::from_str(&prompt[start..end]).unwrap()
+}
+
+const FORM: &str = "application/x-www-form-urlencoded";
+
+#[tokio::test]
+async fn openapi3_form_body_reaches_the_engine_decoded() {
+    let pi = json!({"id": "pi_1", "amount": 5999});
+    let h = contract_harness(STRIPE_LIKE, vec![pi.clone(), pi]);
+    let body = "amount=5999&currency=eur&payment_method_types[0]=card\
+        &metadata[order_id]=42&expand[]=customer&expand[]=latest_charge\
+        &automatic_payment_methods[enabled]=true\
+        &shipping[name]=Jo&shipping[address][postal_code]=10115";
+    let resp = send(&h, post_form("/v1/payment_intents", FORM, body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        engine_request(&h, 0)["body"],
+        json!({
+            "amount": 5999,
+            "currency": "eur",
+            "payment_method_types": ["card"],
+            "metadata": {"order_id": "42"},
+            "expand": ["customer", "latest_charge"],
+            "automatic_payment_methods": {"enabled": true},
+            "shipping": {"name": "Jo", "address": {"postal_code": "10115"}},
+        })
+    );
+
+    // Percent-encoded brackets, as stripe-node sends them.
+    let body = "amount=5999&currency=eur&payment_method_types%5B0%5D=card&metadata=";
+    let resp = send(&h, post_form("/v1/payment_intents", FORM, body)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        engine_request(&h, 1)["body"],
+        json!({"amount": 5999, "currency": "eur", "payment_method_types": ["card"], "metadata": ""})
+    );
+
+    // Still validated against the declared schema.
+    let resp = send(
+        &h,
+        post_form("/v1/payment_intents", FORM, "amount=lots&currency=eur"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bracket_query_parameters_are_nested() {
+    let h = contract_harness(STRIPE_LIKE, vec![json!({"data": []})]);
+    let resp = send(
+        &h,
+        get("/v1/payment_intents?created[gte]=10&expand[]=data.customer&expand[]=data.invoice&limit=3"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        engine_request(&h, 0)["query"],
+        json!({"created": {"gte": 10}, "expand": ["data.customer", "data.invoice"], "limit": 3})
+    );
+}
+
+#[tokio::test]
+async fn openapi3_multipart_body_is_decoded() {
+    let h = contract_harness(STRIPE_LIKE, vec![json!({"id": "file_1"})]);
+    let multipart = "--XyZ\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\ndispute_evidence\r\n\
+        --XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\
+        Content-Type: image/png\r\n\r\n\x01\x02\r\n--XyZ--\r\n";
+    let resp = send(
+        &h,
+        post_form("/v1/files", "multipart/form-data; boundary=XyZ", multipart),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        engine_request(&h, 0)["body"],
+        json!({"purpose": "dispute_evidence", "file": "a.png"})
+    );
+}
+
+/// A body the contract does not describe still reaches the engine.
+#[tokio::test]
+async fn undeclared_bodies_are_never_null() {
+    let ok = json!({"ok": true});
+    let h = contract_harness(STRIPE_LIKE, vec![ok.clone(), ok.clone(), ok]);
+    send(&h, post_form("/v1/ping", FORM, "a[b]=1&c=2")).await;
+    assert_eq!(
+        engine_request(&h, 0)["body"],
+        json!({"a": {"b": "1"}, "c": "2"})
+    );
+    send(&h, post_form("/v1/ping", "text/plain", "hello")).await;
+    assert_eq!(engine_request(&h, 1)["body"], json!("hello"));
+    send(&h, post_json("/v1/ping", r#"{"x":1}"#)).await;
+    assert_eq!(engine_request(&h, 2)["body"], json!({"x": 1}));
+}
+
+#[derive(Default)]
+struct Recorded(std::sync::Mutex<Vec<mb_protocols::RequestRecord>>);
+
+impl mb_protocols::RequestRecorder for Recorded {
+    fn record(&self, r: mb_protocols::RequestRecord) {
+        self.0.lock().unwrap().push(r);
+    }
+}
+
+/// A request failing validation is answered with the contract's error
+/// shape, which carries the reasons, as do a response header and the
+/// request record.
+#[tokio::test]
+async fn validation_failures_stay_visible() {
+    let recorded = Arc::new(Recorded::default());
+    let mut rt = MockRuntime::new(
+        "inline",
+        Arc::new(compile(STRIPE_LIKE.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.recorder = Some(recorded.clone());
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router
+        .oneshot(post_form(
+            "/v1/payment_intents",
+            FORM,
+            "amount=lots&currency=eur&metadata[k]=v",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let header = header_str(&resp, "x-mockingbird-validation").to_string();
+    assert!(header.contains("/amount"), "{header}");
+    let body = body_json(resp).await;
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("/amount"), "{body}");
+
+    let records = recorded.0.lock().unwrap().clone();
+    // The record shows the body as decoded.
+    assert_eq!(
+        records[0].request["body"],
+        json!({"amount": "lots", "currency": "eur", "metadata": {"k": "v"}})
+    );
+    let validation = records[0].request["validation"].as_array().unwrap();
+    assert!(
+        validation[0].as_str().unwrap().contains("/amount"),
+        "{validation:?}"
+    );
+
+    // The orders contract's 400 `Error` has a top-level `message`.
+    let h = offline();
+    let resp = send(&h, post_json("/orders", r#"{"total":-1}"#)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(!header_str(&resp, "x-mockingbird-validation").is_empty());
+    let body = body_json(resp).await;
+    assert!(body["message"].as_str().unwrap().contains("body"), "{body}");
+}

@@ -8,6 +8,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::MockRuntime;
 
+mod form;
 mod handler;
 pub mod problem;
 pub mod routing;
@@ -52,5 +53,8 @@ fn cors() -> CorsLayer {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
-        .expose_headers([HeaderName::from_static("x-mockingbird-source")])
+        .expose_headers([
+            HeaderName::from_static("x-mockingbird-source"),
+            handler::VALIDATION_HEADER,
+        ])
 }

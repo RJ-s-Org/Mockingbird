@@ -133,6 +133,13 @@ pub(crate) fn is_json_media(ct: &str) -> bool {
     base == "application/json" || base.ends_with("+json")
 }
 
+/// The form media types, whose body schemas are tagged with
+/// [`CONTENT_TYPE_EXT`] so the data plane decodes them as forms.
+pub(crate) const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+pub(crate) const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
+/// Extension naming the media type of a non-JSON request body schema.
+pub(crate) const CONTENT_TYPE_EXT: &str = "x-content-type";
+
 /// The server-sent events media type.
 pub(crate) const EVENT_STREAM: &str = "text/event-stream";
 /// Extension giving a stream's item schema explicitly.
@@ -317,34 +324,96 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
     Ok(outputs)
 }
 
-/// The JSON request body schema and whether the body is required.
+/// The request body schema and whether the body is required: the JSON
+/// media entry's, else the form's (then the multipart one's), tagged with
+/// its [`CONTENT_TYPE_EXT`].
 fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<(Option<Value>, bool), ImportError> {
     let Some(body) = op.get("requestBody") else {
         return Ok((None, false));
     };
     let body = deref(doc, body, &format!("{at}/requestBody"))?;
-    let schema = body
-        .get("content")
-        .and_then(Value::as_object)
-        .and_then(json_media)
-        .map(|(_, m)| schema_of(m));
+    let content = body.get("content").and_then(Value::as_object);
+    let schema = match content.and_then(json_media) {
+        Some((_, m)) => Some(schema_of(m)),
+        None => content.and_then(form_body),
+    };
     let required = body.get("required").and_then(Value::as_bool) == Some(true);
     Ok((schema, required))
 }
 
+/// The form (or else multipart) body schema of `content`, tagged with its
+/// media type.
+fn form_body(content: &Map<String, Value>) -> Option<Value> {
+    let media = |wanted: &str| {
+        content.iter().find(|(k, _)| {
+            k.split(';')
+                .next()
+                .is_some_and(|base| base.trim().eq_ignore_ascii_case(wanted))
+        })
+    };
+    let (ct, m) = [FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE]
+        .into_iter()
+        .find_map(|ct| media(ct).map(|(_, m)| (ct, m)))?;
+    let mut schema = schema_of(m);
+    if let Value::Object(o) = &mut schema {
+        o.insert(CONTENT_TYPE_EXT.into(), json!(ct));
+    }
+    Some(schema)
+}
+
+/// Rejects a `$ref` in `value` that names no definition. `at` names the
+/// referrer and `base` is the JSON pointer of `value` in the source document
+/// (empty when `value` was assembled from several places).
 pub(crate) fn check_refs(
     value: &Value,
     defs: &Map<String, Value>,
     at: &str,
+    base: &str,
 ) -> Result<(), ImportError> {
     let mut refs = Vec::new();
     collect_refs(value, &mut refs);
-    for r in refs {
+    for (pointer, r) in refs {
         if !defs_name(r).is_some_and(|n| defs.contains_key(n)) {
+            let pointer = format!("{base}{pointer}");
+            let location = if pointer.is_empty() {
+                String::new()
+            } else {
+                format!(" at {pointer}")
+            };
             return Err(invalid(
                 r,
-                format!("unresolvable $ref referenced from {at}"),
+                format!("unresolvable $ref referenced from {at}{location}"),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the refs of every input and output schema of `op`.
+pub(crate) fn check_operation_refs(
+    op: &Operation,
+    defs: &Map<String, Value>,
+) -> Result<(), ImportError> {
+    let input = &op.input;
+    let parts = [
+        ("path parameters", &input.path),
+        ("query parameters", &input.query),
+        ("header parameters", &input.headers),
+        ("request body", &input.body),
+    ];
+    for (part, schema) in parts {
+        if let Some(s) = schema {
+            check_refs(s, defs, &format!("operation {} {part}", op.id), "")?;
+        }
+    }
+    for o in &op.outputs {
+        if let Some(s) = &o.schema {
+            let status = match o.status {
+                StatusSelector::Code(c) => c.to_string(),
+                StatusSelector::Default => "default".into(),
+            };
+            let at = format!("operation {} response {status}", op.id);
+            check_refs(s, defs, &at, "")?;
         }
     }
     Ok(())
@@ -431,24 +500,17 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                     .extend(tags.iter().filter_map(Value::as_str).map(str::to_owned));
             }
 
-            let op_at = format!("operation {}", op_out.id);
-            for s in [
-                &op_out.input.path,
-                &op_out.input.query,
-                &op_out.input.headers,
-                &op_out.input.body,
-            ]
-            .into_iter()
-            .flatten()
-            .chain(op_out.outputs.iter().filter_map(|o| o.schema.as_ref()))
-            {
-                check_refs(s, &defs, &op_at)?;
-            }
+            check_operation_refs(&op_out, &defs)?;
             operations.push(op_out);
         }
     }
     for (name, s) in &defs {
-        check_refs(s, &defs, &format!("schema {name}"))?;
+        check_refs(
+            s,
+            &defs,
+            &format!("schema {name}"),
+            &format!("/components/schemas/{}", escape(name)),
+        )?;
     }
 
     let digest = Sha256::digest(bytes);

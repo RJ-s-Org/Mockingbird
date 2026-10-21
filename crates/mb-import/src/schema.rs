@@ -133,19 +133,42 @@ fn apply_nullable(obj: &mut Map<String, Value>) {
     }
 }
 
-/// Collect every `$ref` string found anywhere in `value`.
-pub(crate) fn collect_refs<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+/// Keywords whose object value maps names (not keywords) to schemas.
+const NAME_MAPS: [&str; 5] = [
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+];
+
+/// Collect every `$ref` string found in `value`, with the JSON pointer (relative
+/// to `value`) of the object holding it. Vendor extensions (`x-*` keywords)
+/// are annotations and are skipped: their refs are neither rewritten by
+/// [`normalize_schema`] nor resolved by anything downstream.
+pub(crate) fn collect_refs<'a>(value: &'a Value, out: &mut Vec<(String, &'a str)>) {
+    walk_refs(value, String::new(), false, out);
+}
+
+fn walk_refs<'a>(value: &'a Value, at: String, names: bool, out: &mut Vec<(String, &'a str)>) {
     match value {
         Value::Object(m) => {
             for (k, v) in m {
+                let child = || format!("{at}/{}", k.replace('~', "~0").replace('/', "~1"));
                 match (k.as_str(), v) {
-                    ("$ref", Value::String(r)) => out.push(r),
+                    _ if names => walk_refs(v, child(), false, out),
+                    ("$ref", Value::String(r)) => out.push((at.clone(), r)),
                     ("enum" | "const" | "default" | "examples", _) => {}
-                    _ => collect_refs(v, out),
+                    (k, _) if k.starts_with("x-") => {}
+                    (k, _) => walk_refs(v, child(), NAME_MAPS.contains(&k), out),
                 }
             }
         }
-        Value::Array(a) => a.iter().for_each(|v| collect_refs(v, out)),
+        Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                walk_refs(v, format!("{at}/{i}"), false, out);
+            }
+        }
         _ => {}
     }
 }

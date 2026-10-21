@@ -13,11 +13,12 @@ use mb_engine::{
 use mb_ext::{Rejection, Tenancy};
 use mb_llm::Usage;
 use mb_mcm::{HttpMethod, Operation, OperationKind, StatusSelector};
-use serde_json::{Map, Number, Value, json};
+use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
 use tracing::field::Empty;
 
+use super::form;
 use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
 use crate::MockRuntime;
@@ -27,6 +28,24 @@ use crate::call::{
 };
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+/// Why a request failed validation.
+pub(super) const VALIDATION_HEADER: HeaderName =
+    HeaderName::from_static("x-mockingbird-validation");
+/// The longest [`VALIDATION_HEADER`] value, in bytes.
+const MAX_VALIDATION_HEADER: usize = 2048;
+/// Properties of a declared error shape that carry the validation messages,
+/// most preferred first.
+const MESSAGE_FIELDS: [&str; 7] = [
+    "message",
+    "detail",
+    "error_description",
+    "description",
+    "msg",
+    "title",
+    "error",
+];
+/// How deep a message field is looked for in an error shape.
+const MAX_MESSAGE_DEPTH: usize = 3;
 const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
@@ -87,8 +106,9 @@ struct CallLog {
     usage: Usage,
     /// The response body, kept only when `record` is set.
     response: Option<Value>,
-    /// The request body as decoded as JSON by `serve`, kept only when
-    /// `record` is set, so the record need not parse it again.
+    /// The request body as `serve` decoded it (JSON, or a nested form),
+    /// kept only when `record` is set, so the record need not parse it
+    /// again.
     request_body: Option<Value>,
     /// Whether a recorder will receive this call's record.
     record: bool,
@@ -96,6 +116,8 @@ struct CallLog {
     delay: Option<Duration>,
     /// The body media type the matched operation declares (`x-content-type`).
     declared_body_type: Option<String>,
+    /// Why the request failed validation, if it did.
+    validation: Vec<String>,
     /// The response is an event stream, which reports the call itself when
     /// its body is dropped and sleeps any latency before its first event.
     streaming: bool,
@@ -115,6 +137,7 @@ impl CallLog {
             record,
             delay: None,
             declared_body_type: None,
+            validation: Vec::new(),
             streaming: false,
         }
     }
@@ -306,14 +329,28 @@ async fn serve(
                 Vec::new()
             }
         };
-    let query = coerce_params(group(public_query(rt, &raw_query)), op.input.query.as_ref());
-    let body = match decode_body(op, raw_body) {
+    let query = form::decode(
+        public_query(rt, &raw_query),
+        op.input.query.as_ref(),
+        &rt.bundle.defs,
+    );
+    // The entered span is not held across the await.
+    let decode_span = decode.exit();
+    let decoded = decode_body(op, &rt.bundle.defs, headers, raw_body)
+        .instrument(decode_span.clone())
+        .await;
+    let decode = decode_span.entered();
+    let body = match decoded {
         Ok(body) => body,
         Err(e) => {
             errors.push(e);
             None
         }
     };
+    // The record shows the body as decoded, as the engine sees it.
+    if log.record {
+        log.request_body.clone_from(&body);
+    }
     if let Some(v) = validators {
         check(
             &mut errors,
@@ -435,15 +472,6 @@ async fn serve(
         }
         Err(e) => return log.problem(500, "Generation failed", e.to_string()),
     };
-    // Kept for the record only when `serve` decoded it as JSON.
-    if log.record
-        && !matches!(
-            log.declared_body_type.as_deref(),
-            Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)
-        )
-    {
-        log.request_body = call.body;
-    }
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
@@ -507,11 +535,15 @@ async fn report(
     // The record's request is built only when a recorder will receive it.
     let request = if rt.recorder.is_some() {
         let media = media_type(headers).or(log.declared_body_type);
-        json!({
+        let mut request = json!({
             "query": recorded_query(rt, uri),
             "headers": recorded_headers(rt, headers),
             "body": request_body_record(raw_body, media.as_deref(), log.request_body),
-        })
+        });
+        if !log.validation.is_empty() {
+            request["validation"] = json!(log.validation);
+        }
+        request
     } else {
         Value::Null
     };
@@ -629,40 +661,50 @@ fn types(schema: &Value) -> Vec<&str> {
 }
 
 fn coerce(raw: &str, schema: Option<&Value>) -> Value {
-    let types = schema.map(types).unwrap_or_default();
-    if types.contains(&"integer")
-        && let Ok(n) = raw.parse::<i64>()
-    {
-        return Value::Number(n.into());
-    }
-    if types.contains(&"number")
-        && let Some(n) = raw.parse::<f64>().ok().and_then(Number::from_f64)
-    {
-        return Value::Number(n);
-    }
-    if types.contains(&"boolean") {
-        match raw {
-            "true" => return Value::Bool(true),
-            "false" => return Value::Bool(false),
-            _ => {}
-        }
-    }
-    Value::String(raw.to_string())
+    form::coerce(raw, &schema.map(types).unwrap_or_default())
 }
 
-/// The request body, decoded per the operation's body schema: JSON by
-/// default, `application/x-www-form-urlencoded` (Swagger 2 `formData`)
-/// coerced through the schema, and `multipart/form-data` passed through
-/// unvalidated as no body. A missing body is an error only when the
-/// contract marks it required.
-fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
-    let schema = op.input.body.as_ref();
-    let content_type = schema
-        .and_then(|s| s.get("x-content-type"))
-        .and_then(Value::as_str);
-    if content_type == Some(MULTIPART_CONTENT_TYPE) {
-        return Ok(None);
+/// How a request body is decoded.
+#[derive(Clone, Copy, PartialEq)]
+enum BodyKind {
+    Json,
+    Form,
+    Multipart,
+}
+
+impl BodyKind {
+    fn of(media_type: &str) -> Option<Self> {
+        match media_type {
+            FORM_CONTENT_TYPE => Some(Self::Form),
+            MULTIPART_CONTENT_TYPE => Some(Self::Multipart),
+            _ => None,
+        }
     }
+}
+
+/// The request body as JSON, by the request's form or multipart
+/// `Content-Type`, else the media type the contract declares
+/// (`x-content-type`), else as JSON. Form and multipart fields are nested
+/// by bracket notation and coerced through the body schema. A body that is
+/// not JSON, sent to an operation declaring no body, is passed on as text:
+/// a non-empty body never reaches the engine as null. A missing body is an
+/// error only when the contract marks it required.
+async fn decode_body(
+    op: &Operation,
+    defs: &Map<String, Value>,
+    headers: &HeaderMap,
+    raw: &[u8],
+) -> Result<Option<Value>, String> {
+    let schema = op.input.body.as_ref();
+    let declared = schema
+        .and_then(|s| s.get("x-content-type"))
+        .and_then(Value::as_str)
+        .and_then(BodyKind::of);
+    let kind = media_type(headers)
+        .as_deref()
+        .and_then(BodyKind::of)
+        .or(declared)
+        .unwrap_or(BodyKind::Json);
     if raw.iter().all(u8::is_ascii_whitespace) {
         return if op.input.body_required {
             Err("body: a request body is required".into())
@@ -670,16 +712,50 @@ fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
             Ok(None)
         };
     }
-    if content_type == Some(FORM_CONTENT_TYPE) {
-        return form_pairs(raw)
-            .map(|pairs| Some(Value::Object(coerce_params(group(pairs), schema))))
-            .map_err(|e| format!("body: not valid form data: {e}"));
+    match kind {
+        BodyKind::Form => form_pairs(raw)
+            .map(|pairs| Some(Value::Object(form::decode(pairs, schema, defs))))
+            .map_err(|e| format!("body: not valid form data: {e}")),
+        BodyKind::Multipart => multipart_fields(headers, raw)
+            .await
+            .map(|pairs| Some(Value::Object(form::decode(pairs, schema, defs))))
+            .map_err(|e| format!("body: not valid multipart data: {e}")),
+        BodyKind::Json => match serde_json::from_slice(raw) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if schema.is_some() => Err(format!("body: not valid JSON: {e}")),
+            Err(_) => Ok(Some(Value::String(
+                String::from_utf8_lossy(raw).into_owned(),
+            ))),
+        },
     }
-    match serde_json::from_slice(raw) {
-        Ok(v) => Ok(Some(v)),
-        Err(e) if schema.is_some() => Err(format!("body: not valid JSON: {e}")),
-        Err(_) => Ok(None),
+}
+
+/// The fields of a `multipart/form-data` body: a file part as its file
+/// name, any other part as its text.
+async fn multipart_fields(
+    headers: &HeaderMap,
+    raw: &[u8],
+) -> Result<Vec<(String, String)>, multer::Error> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let boundary = multer::parse_boundary(content_type)?;
+    let data = Bytes::copy_from_slice(raw);
+    let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(data) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let mut fields = Vec::new();
+    while let Some(field) = multipart.next_field().await? {
+        let Some(name) = field.name().map(str::to_string) else {
+            continue;
+        };
+        let value = match field.file_name() {
+            Some(file) => file.to_string(),
+            None => field.text().await?,
+        };
+        fields.push((name, value));
     }
+    Ok(fields)
 }
 
 fn check(
@@ -695,14 +771,18 @@ fn check(
     }
 }
 
-/// The contract's 400, 422 or `default` error shape if it declares one, else
-/// problem+json 400. Never calls the LLM.
+/// The contract's 400, 422 or `default` error shape if it declares one,
+/// else problem+json 400. Never calls the LLM. The reasons go into the
+/// error shape's message-like string field when it has one, the
+/// [`VALIDATION_HEADER`] and the request record.
 fn invalid_input(
     rt: &MockRuntime,
     op: &Operation,
     errors: &[String],
     log: &mut CallLog,
 ) -> Response {
+    log.validation = errors.to_vec();
+    let reasons = errors.join("; ");
     let declared = [
         StatusSelector::Code(400),
         StatusSelector::Code(422),
@@ -714,23 +794,115 @@ fn invalid_input(
             .iter()
             .find(|o| o.status == selector && o.schema.is_some())
     });
-    match declared {
+    let mut resp = match declared {
         Some(variant) => {
             let status = match variant.status {
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            log.generated(rt.engine.fallback(
+            let mut generated = rt.engine.fallback(
                 &rt.bundle,
                 op,
                 variant,
                 status,
                 &OperationCall::default(),
                 &GenerationContext::default(),
-            ))
+            );
+            if let (Some(body), Some(schema)) = (generated.body.as_mut(), &variant.schema) {
+                set_message(body, schema, &rt.bundle.defs, &reasons);
+            }
+            log.generated(generated)
         }
-        None => log.problem(400, "Invalid request", errors.join("; ")),
+        None => log.problem(400, "Invalid request", reasons.clone()),
+    };
+    if let Ok(v) = HeaderValue::from_str(&header_text(&reasons, MAX_VALIDATION_HEADER)) {
+        resp.headers_mut().insert(VALIDATION_HEADER, v);
     }
+    resp
+}
+
+/// `text` as a header value: visible ASCII only, at most `max` bytes.
+fn header_text(text: &str, max: usize) -> String {
+    text.chars()
+        .map(|c| {
+            if c == ' ' || c.is_ascii_graphic() {
+                c
+            } else {
+                '?'
+            }
+        })
+        .take(max)
+        .collect()
+}
+
+/// Writes `message` into the first message-like string property of
+/// `schema` (see [`MESSAGE_FIELDS`]), at the top level or nested in
+/// objects (Stripe's `error.message`), creating the objects on the way.
+fn set_message(body: &mut Value, schema: &Value, defs: &Map<String, Value>, message: &str) {
+    let Some(path) = message_path(schema, defs, 0) else {
+        return;
+    };
+    let mut at = body;
+    for (key, _) in &path[..path.len() - 1] {
+        let Value::Object(obj) = at else { return };
+        let slot = obj
+            .entry(key.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if slot.is_null() {
+            *slot = Value::Object(Map::new());
+        }
+        at = slot;
+    }
+    let (key, max_len) = &path[path.len() - 1];
+    if let Value::Object(obj) = at {
+        let text: String = match max_len {
+            Some(n) => message.chars().take(*n).collect(),
+            None => message.to_string(),
+        };
+        obj.insert(key.clone(), Value::String(text));
+    }
+}
+
+/// The property path to a message-like string field of `schema`, each
+/// step with the field's `maxLength`, preferring shallower fields.
+fn message_path(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    depth: usize,
+) -> Option<Vec<(String, Option<usize>)>> {
+    let branches = form::branches(Some(schema), defs);
+    let props: Vec<&Map<String, Value>> = branches
+        .iter()
+        .filter_map(|b| b.get("properties").and_then(Value::as_object))
+        .collect();
+    for name in MESSAGE_FIELDS {
+        for p in &props {
+            let Some(prop) = p.get(name) else { continue };
+            let prop_branches = form::branches(Some(prop), defs);
+            let free_string = form::types(&prop_branches).contains(&"string")
+                && prop_branches
+                    .iter()
+                    .all(|b| b.get("enum").is_none() && b.get("const").is_none());
+            if free_string {
+                let max_len = prop_branches
+                    .iter()
+                    .find_map(|b| b.get("maxLength").and_then(Value::as_u64))
+                    .and_then(|n| usize::try_from(n).ok());
+                return Some(vec![(name.to_string(), max_len)]);
+            }
+        }
+    }
+    if depth + 1 >= MAX_MESSAGE_DEPTH {
+        return None;
+    }
+    props
+        .iter()
+        .flat_map(|p| p.iter())
+        .find_map(|(name, prop)| {
+            let mut path = message_path(prop, defs, depth + 1)?;
+            path.insert(0, (name.clone(), None));
+            Some(path)
+        })
 }
 
 /// The raw query as recorded (without credential parameters): repeated keys
@@ -795,14 +967,12 @@ fn recorded_body(raw: &[u8], media_type: Option<&str>) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(raw).into_owned()))
 }
 
-/// The request body for the record: the JSON `serve` already decoded
-/// (`decoded`) unless the media type calls for form or multipart handling,
-/// else [`recorded_body`] of the raw bytes.
+/// The request body for the record: the body `serve` already decoded
+/// (`decoded`) unless it is multipart, else [`recorded_body`] of the raw
+/// bytes.
 fn request_body_record(raw: &[u8], media_type: Option<&str>, decoded: Option<Value>) -> Value {
     match decoded {
-        Some(body) if !matches!(media_type, Some(FORM_CONTENT_TYPE | MULTIPART_CONTENT_TYPE)) => {
-            body
-        }
+        Some(body) if media_type != Some(MULTIPART_CONTENT_TYPE) => body,
         _ => recorded_body(raw, media_type),
     }
 }
@@ -908,9 +1078,8 @@ mod tests {
         assert_eq!(log.response, Some(json!({"id": "o1"})));
     }
 
-    /// The record reuses the body `serve` decoded as JSON, but decodes
-    /// form and multipart bodies (and anything not decoded) from the raw
-    /// bytes.
+    /// The record reuses the body `serve` decoded, but not a multipart
+    /// one, and decodes anything not decoded from the raw bytes.
     #[test]
     fn recorded_body_reuses_decoded_json() {
         let decoded = Some(json!({"reused": true}));
@@ -919,7 +1088,11 @@ mod tests {
             json!({"reused": true})
         );
         assert_eq!(
-            request_body_record(b"a=1", Some(FORM_CONTENT_TYPE), decoded.clone()),
+            request_body_record(b"a[b]=1", Some(FORM_CONTENT_TYPE), decoded.clone()),
+            json!({"reused": true})
+        );
+        assert_eq!(
+            request_body_record(b"a=1", Some(FORM_CONTENT_TYPE), None),
             json!({"a": "1"})
         );
         assert_eq!(
