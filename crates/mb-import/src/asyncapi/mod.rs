@@ -109,7 +109,7 @@ pub(crate) fn resolve<'a>(
 pub(crate) fn reject_external(schema: &Value, at: &str) -> Result<(), ImportError> {
     let mut refs = Vec::new();
     collect_refs(schema, &mut refs);
-    if refs.iter().any(|r| !r.starts_with('#')) {
+    if refs.iter().any(|(_, r)| !r.starts_with('#')) {
         return Err(invalid(at, EXTERNAL_REF));
     }
     Ok(())
@@ -595,11 +595,16 @@ pub(crate) fn finish_defs(
         .flatten()
         .chain(c.parameters.values())
         {
-            check_refs(s, &defs, &at)?;
+            check_refs(s, &defs, &at, "")?;
         }
     }
     for (name, s) in &defs {
-        check_refs(s, &defs, &format!("schema {name}"))?;
+        check_refs(
+            s,
+            &defs,
+            &format!("schema {name}"),
+            &format!("/components/schemas/{}", escape(name)),
+        )?;
     }
     Ok(defs)
 }

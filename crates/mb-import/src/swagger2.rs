@@ -3,8 +3,8 @@
 use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::openapi3::{
-    EVENT_STREAM, METHODS, OperationIds, check_refs, deref, escape, invalid, is_event_stream,
-    is_json_media, slug, stream_item_schema, stream_kind,
+    EVENT_STREAM, METHODS, OperationIds, check_operation_refs, check_refs, deref, escape, invalid,
+    is_event_stream, is_json_media, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -272,24 +272,17 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                     .extend(tags.iter().filter_map(Value::as_str).map(str::to_owned));
             }
 
-            let op_at = format!("operation {}", op_out.id);
-            for s in [
-                &op_out.input.path,
-                &op_out.input.query,
-                &op_out.input.headers,
-                &op_out.input.body,
-            ]
-            .into_iter()
-            .flatten()
-            .chain(op_out.outputs.iter().filter_map(|o| o.schema.as_ref()))
-            {
-                check_refs(s, &defs, &op_at)?;
-            }
+            check_operation_refs(&op_out, &defs)?;
             operations.push(op_out);
         }
     }
     for (name, s) in &defs {
-        check_refs(s, &defs, &format!("schema {name}"))?;
+        check_refs(
+            s,
+            &defs,
+            &format!("schema {name}"),
+            &format!("/definitions/{}", escape(name)),
+        )?;
     }
 
     let digest = Sha256::digest(bytes);

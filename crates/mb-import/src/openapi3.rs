@@ -332,19 +332,59 @@ fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<(Option<Value>, boo
     Ok((schema, required))
 }
 
+/// Rejects a `$ref` in `value` that names no definition. `at` names the
+/// referrer and `base` is the JSON pointer of `value` in the source document
+/// (empty when `value` was assembled from several places).
 pub(crate) fn check_refs(
     value: &Value,
     defs: &Map<String, Value>,
     at: &str,
+    base: &str,
 ) -> Result<(), ImportError> {
     let mut refs = Vec::new();
     collect_refs(value, &mut refs);
-    for r in refs {
+    for (pointer, r) in refs {
         if !defs_name(r).is_some_and(|n| defs.contains_key(n)) {
+            let pointer = format!("{base}{pointer}");
+            let location = if pointer.is_empty() {
+                String::new()
+            } else {
+                format!(" at {pointer}")
+            };
             return Err(invalid(
                 r,
-                format!("unresolvable $ref referenced from {at}"),
+                format!("unresolvable $ref referenced from {at}{location}"),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the refs of every input and output schema of `op`.
+pub(crate) fn check_operation_refs(
+    op: &Operation,
+    defs: &Map<String, Value>,
+) -> Result<(), ImportError> {
+    let input = &op.input;
+    let parts = [
+        ("path parameters", &input.path),
+        ("query parameters", &input.query),
+        ("header parameters", &input.headers),
+        ("request body", &input.body),
+    ];
+    for (part, schema) in parts {
+        if let Some(s) = schema {
+            check_refs(s, defs, &format!("operation {} {part}", op.id), "")?;
+        }
+    }
+    for o in &op.outputs {
+        if let Some(s) = &o.schema {
+            let status = match o.status {
+                StatusSelector::Code(c) => c.to_string(),
+                StatusSelector::Default => "default".into(),
+            };
+            let at = format!("operation {} response {status}", op.id);
+            check_refs(s, defs, &at, "")?;
         }
     }
     Ok(())
@@ -431,24 +471,17 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                     .extend(tags.iter().filter_map(Value::as_str).map(str::to_owned));
             }
 
-            let op_at = format!("operation {}", op_out.id);
-            for s in [
-                &op_out.input.path,
-                &op_out.input.query,
-                &op_out.input.headers,
-                &op_out.input.body,
-            ]
-            .into_iter()
-            .flatten()
-            .chain(op_out.outputs.iter().filter_map(|o| o.schema.as_ref()))
-            {
-                check_refs(s, &defs, &op_at)?;
-            }
+            check_operation_refs(&op_out, &defs)?;
             operations.push(op_out);
         }
     }
     for (name, s) in &defs {
-        check_refs(s, &defs, &format!("schema {name}"))?;
+        check_refs(
+            s,
+            &defs,
+            &format!("schema {name}"),
+            &format!("/components/schemas/{}", escape(name)),
+        )?;
     }
 
     let digest = Sha256::digest(bytes);
