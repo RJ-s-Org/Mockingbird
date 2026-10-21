@@ -580,6 +580,10 @@ fn reference_prefix(field: &str) -> Option<&str> {
 
 /// Reads the target and related resources, generates one response, writes
 /// state for a 2xx and keeps the session alive.
+#[cfg_attr(
+    not(any(feature = "http-rest", feature = "grpc", feature = "soap")),
+    allow(dead_code)
+)]
 pub(crate) async fn generate_once(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,

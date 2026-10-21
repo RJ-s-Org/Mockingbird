@@ -24,6 +24,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - MCP `start_server` refuses a config whose default profile's key the server cannot see, unless `offline: true`.
 - Documentation import extracts at temperature 0 in JSON-object mode.
 - The MCP "is a server running?" hint appears only when the Admin API is unreachable.
+- GraphQL root fields are generated from the query's selection set: the prompt, validation and fallback use only the selected fields (fragments merged, each field's arguments noted); creates and updates are still generated whole, since they become stored state. GitHub's `viewer { login … }` went from ~347k to ~1k prompt tokens.
+- The prompt (and the JSON Schema response format) carries the response schema as compact JSON fitted to 64 KiB: past that, descriptions are cut to 160 characters and the definitions furthest from the root become short stubs. Validation still uses the full schema. Stripe's `payment_intent` went from ~357k to ~23k prompt tokens.
+- The prompt asks for arrays of 3 to 5 items unless the request names a count.
+- The Admin API request log (and MCP `list_requests`) includes `fallback_reason`.
 
 ### Fixed
 
