@@ -28,8 +28,10 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 ### Phase 3: cheaper, faster, consistent generation
 
-- Prompts carry the whole response schema, pretty-printed and sent twice (54k–340k prompt tokens per Stripe call). Serialize compactly, drop descriptions over a budget, cap `$defs` depth, warn at import when an operation's schema is huge.
-- GraphQL generates the whole return type and projects afterwards (696k tokens for `viewer { login }`); aliases with different arguments get the same value. Generate from the selection set, per alias, with arguments in the prompt.
+- Warn at import when an operation's schema is huge (the prompt now fits it to a budget, see Done).
+- GraphQL aliases of one field with different arguments still share one generated value.
+- GraphQL root fields of one query are generated independently, so they can contradict each other: github-readme-stats' pin card asks for `user(login:)` and `organization(login:)` and gets both, where GitHub returns exactly one (the card then fails with "Unexpected behavior"). Generate a query's root fields in one call, or tell each about its siblings.
+- Detail objects (TMDB movie, TV) often fail validation once and need a repair call, doubling their 30 s; find out which constraints the first answer misses.
 - GETs of a stored resource still call the LLM; serve them from session state.
 - No consistency across calls: an opt-in response cache keyed by operation and parameters, list → detail entity seeding, server-side unique ids, optional 404 for unknown ids.
 - Faker output breaks clients: int32-minimum counts, `null` lists, random words for ids and logins. Echo path and argument values into same-named fields, keep counts small and non-negative, prefer non-null lists, honour `format` and `pattern`.
@@ -72,3 +74,16 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
   - the server-running hint only on connection errors.
 
   Measured afterwards on the Stripe trial's mock: 25 `POST /v1/payment_intents` with OpenRouter's default routing gave 24 `llm`, 1 `repaired`, **0 fallbacks** (the trial's baseline was 28%), with a median of 7.4 s and a worst case of 9.6 s. Every call went to the DigitalOcean route that failed during the trial. It returns content in JSON-object mode but drops the answer in JSON Schema mode, so the OpenRouter preset uses JSON-object mode.
+- Phase 3 (part), [#34](https://github.com/RJ-s-Org/Mockingbird/pull/34):
+  - GraphQL generates only the selected fields (with their arguments);
+  - the prompt's schema is compact and fitted to a 64 KiB budget, nearest definitions first;
+  - the prompt asks for short arrays;
+  - the request log API shows the fallback reason.
+
+  Trials re-run on the full upstream contracts (no trimming), OpenRouter `deepseek/deepseek-v4.1-flash` with default routing:
+
+  | Trial | Run 1 (field trial) | After Phases 1–2 | After Phase 3 |
+  |---|---|---|---|
+  | Stripe `accept-a-payment`, 8 creates + 4 retrieves through the app | 25% fallbacks, trimmed contract | 0/22 fallbacks; 357k prompt tokens and 14.5 s median per call | 0/13 fallbacks; 23k prompt tokens and 5 s median per call |
+  | `nuxt/movies`, 5 pages | 28% fallbacks, 20–80 s pages | 4/5 pages real, 1/9 fallbacks (timeout), 9–121 s pages | 5/5 pages real, 0/9 fallbacks, 16–68 s pages |
+  | `github-readme-stats`, stats, top-langs, pin cards | trimmed schemas, 33% GraphQL fallbacks | every card errors: 347k prompt tokens, truncated or timed out | stats and top-langs render, 0/8 fallbacks, 750–1,350 prompt tokens, 2.5–7 s; pin card fails (sibling root fields, above) |

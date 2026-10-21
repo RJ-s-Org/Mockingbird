@@ -54,7 +54,7 @@ impl Engine {
         let messages = build_message_messages(bundle, channel, ctx, self.config.persona.as_deref());
         let format = ResponseFormat::JsonSchema {
             name: format_name(&channel.id),
-            schema: bundle.with_reachable_defs(schema),
+            schema: crate::compact::prompt_schema(bundle, schema),
         };
         let mut usage = Usage::default();
         let (payload, source) = match self

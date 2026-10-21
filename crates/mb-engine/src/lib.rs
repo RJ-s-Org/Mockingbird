@@ -16,6 +16,7 @@ use tracing::field::Empty;
 
 use crate::guards::Checked;
 
+pub mod compact;
 pub mod extract;
 pub mod faker;
 pub mod guards;
@@ -66,6 +67,10 @@ pub struct GenerationContext<'a> {
     /// The active scenario: its instructions go in the prompt and its `set`
     /// patches 2xx object bodies.
     pub scenario: Option<&'a ScenarioSpec>,
+    /// A narrower schema for a 2xx response, used instead of the operation's
+    /// (in the prompt, for validation and by the faker): the fields a
+    /// GraphQL selection set asks for. Self-contained (no `$ref`).
+    pub response_schema: Option<&'a Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,7 +266,10 @@ impl Engine {
             }
         };
 
-        let Some(schema) = &variant.schema else {
+        let narrowed = ctx
+            .response_schema
+            .filter(|_| (200..300).contains(&status) && variant.schema.is_some());
+        let Some(schema) = narrowed.or(variant.schema.as_ref()) else {
             return Ok(GeneratedResponse {
                 status,
                 content_type: variant.content_type.clone(),
@@ -272,7 +280,11 @@ impl Engine {
             });
         };
 
-        let validator = self.validator(bundle, op, status, schema)?;
+        // A narrowed schema varies per query, so its validator is not cached.
+        let validator = match narrowed {
+            Some(schema) => Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(schema))?),
+            None => self.validator(bundle, op, status, schema)?,
+        };
         let mut usage = Usage::default();
         let mut response = match &self.provider {
             None => {
@@ -295,7 +307,7 @@ impl Engine {
                 });
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
-                    schema: bundle.with_reachable_defs(schema),
+                    schema: compact::prompt_schema(bundle, schema),
                 };
                 match self
                     .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)

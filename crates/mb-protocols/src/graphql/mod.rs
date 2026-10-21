@@ -32,6 +32,7 @@ use crate::{DataPlaneAuthMode, MockRuntime, call};
 
 mod resolve;
 mod schema;
+mod select;
 mod subscription;
 
 pub(crate) use schema::build_schema;

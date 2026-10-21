@@ -580,10 +580,25 @@ fn reference_prefix(field: &str) -> Option<&str> {
 
 /// Reads the target and related resources, generates one response, writes
 /// state for a 2xx and keeps the session alive.
+#[cfg_attr(
+    not(any(feature = "http-rest", feature = "grpc", feature = "soap")),
+    allow(dead_code)
+)]
 pub(crate) async fn generate_once(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
+) -> Result<GeneratedResponse, EngineError> {
+    generate_narrowed(rt, plan, call, None).await
+}
+
+/// [`generate_once`] with a 2xx response schema narrowed to what the caller
+/// reads (see [`GenerationContext::response_schema`]).
+pub(crate) async fn generate_narrowed(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
     let op = plan.op;
     let session = &plan.session;
@@ -599,6 +614,7 @@ pub(crate) async fn generate_once(
         target: target.as_ref(),
         forced_status: plan.forced_status,
         scenario: plan.scenario.map(|s| &s.spec),
+        response_schema,
     };
     let generated = rt.engine.generate(&rt.bundle, op, call, ctx).await?;
 

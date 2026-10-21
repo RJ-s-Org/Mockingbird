@@ -24,7 +24,9 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024;
 pub const MAX_REQUEST_STREAM: usize = 20;
 
 const ROLE_STATEMENT: &str = "You generate realistic synthetic API response data. \
-Output only a single JSON value conforming to the schema. Never output real personal data.";
+Output only a single JSON value conforming to the schema. Never output real personal data. \
+Keep it compact: arrays hold 3 to 5 items unless the request asks for a number (a limit, page \
+size or `first` argument), and then at most that many.";
 
 const STREAM_ROLE_STATEMENT: &str = "You generate realistic synthetic API stream data. \
 Output newline-delimited JSON: exactly one JSON value per line, each conforming to the stream item \
@@ -91,9 +93,8 @@ pub(crate) fn stream_system_message(
     s.push_str(STREAM_ROLE_STATEMENT);
     s.push_str("\n\n");
     binding_lines(&mut s, bundle, op, persona);
-    let schema = bundle.with_reachable_defs(item_schema);
-    let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
-    let _ = write!(s, "Stream item JSON Schema:\n{pretty}");
+    let schema = crate::compact::prompt_schema(bundle, item_schema);
+    let _ = write!(s, "Stream item JSON Schema:\n{schema}");
     s
 }
 
@@ -103,6 +104,7 @@ fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) 
         target: ctx.target.as_ref(),
         forced_status: None,
         scenario: ctx.scenario.as_ref(),
+        response_schema: None,
     };
     let mut s = user_message(call, &unary);
     if !ctx.request_stream.is_empty() {
@@ -129,9 +131,8 @@ fn system_message(
     s.push_str("\n\n");
     binding_lines(&mut s, bundle, op, persona);
     let _ = writeln!(s, "Response status: {status}");
-    let schema = bundle.with_reachable_defs(schema);
-    let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
-    let _ = write!(s, "Response JSON Schema:\n{pretty}");
+    let schema = crate::compact::prompt_schema(bundle, schema);
+    let _ = write!(s, "Response JSON Schema:\n{schema}");
     s
 }
 
@@ -291,9 +292,8 @@ fn message_system_message(bundle: &Bundle, channel: &Channel, persona: Option<&s
             let _ = writeln!(s, "- {hint}");
         }
     }
-    let schema = bundle.with_reachable_defs(&channel.message_schema);
-    let pretty = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
-    let _ = write!(s, "Message JSON Schema:\n{pretty}");
+    let schema = crate::compact::prompt_schema(bundle, &channel.message_schema);
+    let _ = write!(s, "Message JSON Schema:\n{schema}");
     s
 }
 
