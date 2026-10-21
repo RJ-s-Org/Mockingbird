@@ -95,7 +95,7 @@ pub struct PutProfile {
     #[schema(default = 0.7)]
     pub temperature: f32,
     #[serde(default = "default_timeout_ms")]
-    #[schema(default = 30000)]
+    #[schema(default = 60000)]
     pub timeout_ms: u64,
     #[serde(default = "default_max_tokens")]
     #[schema(default = 16384)]
@@ -124,7 +124,7 @@ fn default_temperature() -> f32 {
 }
 
 fn default_timeout_ms() -> u64 {
-    30_000
+    60_000
 }
 
 fn default_max_tokens() -> u32 {

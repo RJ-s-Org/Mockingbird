@@ -548,7 +548,7 @@ async fn reconcile_creates_and_activates() {
         .unwrap();
     assert_eq!(profile.source, ResourceSource::File);
     assert_eq!(profile.secret_ref.as_deref(), Some("env:SOME_KEY"));
-    assert_eq!(profile.timeout_ms, 30_000);
+    assert_eq!(profile.timeout_ms, 60_000);
 
     // Applying the same file again changes nothing.
     let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)

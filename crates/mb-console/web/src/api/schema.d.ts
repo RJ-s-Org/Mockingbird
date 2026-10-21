@@ -1315,6 +1315,8 @@ export interface components {
             at: string;
             /** Format: int32 */
             completion_tokens: number;
+            /** @description Why a `fallback` response did not use the LLM's answer. */
+            fallback_reason?: string | null;
             /** @description Request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
             kind: string;
             /** Format: int64 */
@@ -1605,7 +1607,7 @@ export interface components {
             temperature: number;
             /**
              * Format: int64
-             * @default 30000
+             * @default 60000
              */
             timeout_ms: number;
         };
@@ -1660,6 +1662,8 @@ export interface components {
             at: string;
             /** Format: int32 */
             completion_tokens: number;
+            /** @description Why a `fallback` response did not use the LLM's answer. */
+            fallback_reason?: string | null;
             /** Format: int64 */
             id: number;
             /** @description `http`, `graphql`, `grpc`, `soap` or `event`. */

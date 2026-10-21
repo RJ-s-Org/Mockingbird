@@ -318,7 +318,7 @@ pub struct ProviderArgs {
     /// Request JSON Schema structured output [default: the preset's].
     #[arg(long)]
     pub json_schema: Option<bool>,
-    /// Time before a call falls back to the faker [default: 30s].
+    /// Time before a call falls back to the faker [default: 60s].
     #[arg(long)]
     pub timeout: Option<humantime::Duration>,
     /// JSON object merged into every provider request body, e.g.
@@ -634,7 +634,7 @@ mod tests {
         // JSON Schema mode loses the answer on some OpenRouter routes.
         assert!(!p.json_schema);
         assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
-        assert_eq!(p.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(p.timeout, std::time::Duration::from_secs(60));
         assert_eq!(p.max_tokens, 16_384);
     }
 

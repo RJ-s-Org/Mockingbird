@@ -913,7 +913,7 @@ async fn profiles_never_return_secret_values() {
     assert_eq!(body["name"], "fast");
     assert_eq!(body["source"], "api");
     assert_eq!(body["temperature"], 0.7);
-    assert_eq!(body["timeout_ms"], 30_000);
+    assert_eq!(body["timeout_ms"], 60_000);
     assert_eq!(body["max_tokens"], 16_384);
     assert_eq!(body["json_schema"], false);
 
@@ -1396,7 +1396,7 @@ async fn request_log_query() {
                     path: "/orders".into(),
                     status: 200,
                     source: Some(source.into()),
-                    fallback_reason: None,
+                    fallback_reason: (source == "fallback").then(|| "LLM request timed out".into()),
                     latency_ms: 12,
                     prompt_tokens: 3,
                     completion_tokens: 4,
@@ -1431,6 +1431,9 @@ async fn request_log_query() {
     assert_eq!(all[0]["source"], "llm");
     assert_eq!(all[0]["status"], 200);
     assert_eq!(all[0]["response"], json!({ "ok": true }));
+    assert!(all[0].as_object().unwrap().contains_key("fallback_reason"));
+    assert_eq!(all[1]["source"], "fallback");
+    assert_eq!(all[1]["fallback_reason"], "LLM request timed out");
 
     let q = |s: &str| format!("/api/v1/mocks/orders/requests?{s}");
     assert_eq!(

@@ -598,7 +598,7 @@ pub struct FileProfile {
 
 impl FileProfile {
     fn default_timeout() -> Duration {
-        Duration::from_secs(30)
+        Duration::from_secs(60)
     }
 
     fn default_temperature() -> f32 {

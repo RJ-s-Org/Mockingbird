@@ -143,7 +143,7 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles.<name>.model` | string | required | | `MB_LLM_MODEL` (default `deepseek-chat`) | Model name. |
 | `llm.profiles.<name>.api_key` | secret reference | unset | | `MB_LLM_API_KEY` (stored as `env:MB_LLM_API_KEY`) | Provider API key. |
 | `llm.profiles.<name>.json_schema` | bool | `false` | | `MB_LLM_JSON_SCHEMA` | Request JSON Schema structured output instead of JSON mode. |
-| `llm.profiles.<name>.timeout` | duration | `30s` | | `--llm-timeout` (profile `default`) | Time before the call falls back to the faker. |
+| `llm.profiles.<name>.timeout` | duration | `60s` | | `--llm-timeout` (profile `default`) | Time before the call falls back to the faker. |
 | `llm.profiles.<name>.temperature` | number | `0.7` | | | Sampling temperature. |
 | `llm.profiles.<name>.max_tokens` | integer | `16384` | | | Completion token limit. A reply cut at this limit falls back to the faker, with the reason in `X-Mockingbird-Fallback-Reason`. |
 | `llm.profiles.<name>.fallback` | string | unset | A profile name | | Profile tried when this one's provider fails. |

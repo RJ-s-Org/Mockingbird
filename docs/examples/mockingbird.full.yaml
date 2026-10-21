@@ -82,7 +82,7 @@ llm:
       model: deepseek-chat
       api_key: env:DEEPSEEK_API_KEY
       json_schema: false
-      timeout: 30s
+      timeout: 60s
       temperature: 0.7
       max_tokens: 16384
       fallback: local

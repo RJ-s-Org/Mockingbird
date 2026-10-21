@@ -64,7 +64,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
   - `doctor` names the process that lacks a key, and `start_server` refuses a profile whose key is missing;
   - `init_config` ports;
   - `llm test` defaults to `mockingbird.yaml`;
-  - 30 s / 16 384-token defaults and array-envelope unwrapping;
+  - 60 s / 16 384-token defaults and array-envelope unwrapping;
   - reasoning-only, in-band error and truncated replies are handled, with one retry;
   - `X-Mockingbird-Fallback-Reason` and `request_log.fallback_reason`;
   - profile `extra_body`;

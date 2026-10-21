@@ -40,6 +40,8 @@ pub struct RequestLogView {
     pub path: String,
     pub status: u16,
     pub source: Option<String>,
+    /// Why a `fallback` response did not use the LLM's answer.
+    pub fallback_reason: Option<String>,
     pub latency_ms: u64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -62,6 +64,7 @@ impl From<RequestLogEntry> for RequestLogView {
             path: e.path,
             status: e.status,
             source: e.source,
+            fallback_reason: e.fallback_reason,
             latency_ms: e.latency_ms,
             prompt_tokens: e.prompt_tokens,
             completion_tokens: e.completion_tokens,

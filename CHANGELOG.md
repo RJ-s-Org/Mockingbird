@@ -18,7 +18,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Changed
 
-- LLM profiles default to a 30 s timeout and 16 384 output tokens (were 3 s and 2048), which reasoning models need.
+- LLM profiles default to a 60 s timeout and 16 384 output tokens (were 3 s and 2048): a large response from a remote model takes 30 s or more.
 - The OpenRouter preset uses `deepseek/deepseek-v4.1-flash`.
 - `mockingbird llm test` with no flags tests the default profile of `./mockingbird.yaml`.
 - MCP `start_server` refuses a config whose default profile's key the server cannot see, unless `offline: true`.

@@ -191,7 +191,7 @@ fn provider_props() -> Map<String, Value> {
         ("resource", "Azure OpenAI resource name."),
         (
             "timeout",
-            "LLM timeout before the faker answers; default 30s.",
+            "LLM timeout before the faker answers; default 60s.",
         ),
     ] {
         m.insert(k.into(), s(d));

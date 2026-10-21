@@ -256,6 +256,10 @@ async fn stream_emits_matching_records() {
     assert_eq!(d["path"], "/orders");
     assert_eq!(d["status"], 200);
     assert_eq!(d["source"], "llm");
+    assert!(
+        d.as_object().unwrap().contains_key("fallback_reason"),
+        "{d}"
+    );
     assert_eq!(d["latency_ms"], 12);
     assert_eq!(d["prompt_tokens"], 3);
     assert_eq!(d["completion_tokens"], 4);
