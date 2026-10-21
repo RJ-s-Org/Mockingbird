@@ -140,7 +140,9 @@ impl RequestRecorder for Records {
 
 #[tokio::test]
 async fn query_with_variables_fragments_aliases() {
-    let provider = scripted(vec![repository("one"), repository("one")]);
+    let provider = scripted(vec![
+        json!({"a": repository("one"), "b": repository("one")}),
+    ]);
     let base = serve(runtime(Some(provider))).await;
     let q = r#"
         query Q($owner: String!, $name: String!) {
@@ -166,8 +168,8 @@ async fn query_with_variables_fragments_aliases() {
 }
 
 #[tokio::test]
-async fn one_engine_call_per_root_field() {
-    let provider = scripted(vec![user("a"), user("b")]);
+async fn aliases_are_answered_in_one_joint_call() {
+    let provider = scripted(vec![json!({"first": user("a"), "second": user("b")})]);
     let base = serve(runtime(Some(provider.clone()))).await;
     let r = query(
         &base,
@@ -176,7 +178,7 @@ async fn one_engine_call_per_root_field() {
     .await;
     assert_eq!(r.status, 200);
     assert!(r.body.get("errors").is_none(), "{}", r.body);
-    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(provider.requests().len(), 1);
     let logins: BTreeSet<String> = ["first", "second"]
         .iter()
         .map(|k| r.body["data"][k]["login"].as_str().unwrap().to_string())
@@ -318,9 +320,10 @@ async fn query_depth_and_complexity_limits() {
 
 #[tokio::test]
 async fn sources_in_extensions_and_header() {
-    // The first engine call gets a valid answer; the second finds the
-    // script exhausted and falls back.
-    let provider = scripted(vec![user("a")]);
+    // The joint answer and its repair are invalid, so the fields are
+    // generated separately: the first gets a valid answer, the second finds
+    // the script exhausted and falls back.
+    let provider = scripted(vec![json!("bad"), json!("bad"), user("a")]);
     let base = serve(runtime(Some(provider))).await;
     let r = query(&base, "{ x: viewer { login } y: viewer { login } }").await;
     assert_eq!(r.status, 200);
@@ -519,7 +522,10 @@ fn aliased_viewers(n: usize) -> String {
 
 #[tokio::test]
 async fn root_field_cap_rejects_before_engine() {
-    let provider = scripted((0..21).map(|i| user(&format!("u{i}"))).collect());
+    let joint: serde_json::Map<String, Value> = (0..20)
+        .map(|i| (format!("a{i}"), user(&format!("u{i}"))))
+        .collect();
+    let provider = scripted(vec![Value::Object(joint)]);
     let records = Arc::new(Records::default());
     let mut rt = runtime(Some(provider.clone()));
     rt.recorder = Some(records.clone());
@@ -540,11 +546,12 @@ async fn root_field_cap_rejects_before_engine() {
     assert_eq!(recs[0].status, 400);
     assert_eq!(recs[0].path, "/graphql");
 
-    // At the cap, every field runs.
+    // At the cap, every field runs (in one joint call).
     let r = query(&base, &aliased_viewers(20)).await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(r.body.get("errors").is_none(), "{}", r.body);
-    assert_eq!(provider.requests().len(), 20);
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(r.body["data"]["a19"]["login"], "u19");
 }
 
 #[tokio::test]
@@ -1232,6 +1239,32 @@ async fn generation_follows_the_selection_set() {
     }
     assert!(
         system.contains(r#"Queried with arguments {\"first\":3}"#),
+        "{system}"
+    );
+}
+
+/// A query's root fields are answered by one LLM call, so they can agree
+/// (GitHub's `user(login:)` and `organization(login:)`: one is null).
+#[tokio::test]
+async fn root_fields_of_one_query_share_one_call() {
+    let provider = scripted(vec![json!({
+        "repository": {"__typename": "Repository", "name": "n"},
+        "issue": null,
+    })]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let a = query(
+        &base,
+        r#"{ repository(owner: "o", name: "n") { name } issue(id: "I_1") { title } }"#,
+    )
+    .await;
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(a.body["data"]["repository"]["name"], "n");
+    assert_eq!(a.body["data"]["issue"], Value::Null);
+    assert_eq!(a.headers["x-mockingbird-source"], "llm");
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(
+        system.contains("`repository`") && system.contains("`issue`"),
         "{system}"
     );
 }

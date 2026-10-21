@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use mb_engine::{
-    Engine, EngineConfig, EngineError, GenerationContext, OperationCall, SchemaValidator, Source,
+    Engine, EngineConfig, EngineError, GenerationContext, JointPart, OperationCall,
+    SchemaValidator, Source,
 };
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, Role, ScriptedProvider};
@@ -780,4 +781,80 @@ async fn prompt_asks_for_short_arrays() {
         .unwrap();
     let system = &provider.requests()[0].messages[0].content;
     assert!(system.contains("3 to 5 items"), "{system}");
+}
+
+/// Two root fields of one GraphQL query answered by one LLM call: one
+/// object keyed by response key, split into one response per part.
+#[tokio::test]
+async fn joint_generation_answers_every_part_in_one_call() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let list = bundle.operation("listOrders").unwrap();
+    let mut other = valid_order();
+    other["id"] = json!("o2");
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "order": valid_order_at_o1(),
+        "recent": [other.clone()],
+    })
+    .to_string())]);
+    let parts = [
+        JointPart {
+            key: "order",
+            op: get,
+            call: &call("getOrder"),
+            ctx: ctx(),
+        },
+        JointPart {
+            key: "recent",
+            op: list,
+            call: &call("listOrders"),
+            ctx: ctx(),
+        },
+    ];
+    let out = engine.generate_joint(&bundle, &parts).await;
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].as_ref().unwrap().source, Source::Llm);
+    assert_eq!(out[0].as_ref().unwrap().body, Some(valid_order_at_o1()));
+    assert_eq!(out[1].as_ref().unwrap().body, Some(json!([other])));
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(
+        system.contains("`order`") && system.contains("`recent`"),
+        "{system}"
+    );
+}
+
+/// A joint answer that stays invalid after the repair falls back to one
+/// call per part, not to the faker.
+#[tokio::test]
+async fn joint_generation_falls_back_to_separate_calls() {
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let list = bundle.operation("listOrders").unwrap();
+    let (provider, engine) = scripted(vec![
+        Ok(json!({"order": 1}).to_string()),
+        Ok(json!({"order": 2}).to_string()),
+        Ok(valid_order_at_o1().to_string()),
+        Ok(json!([valid_order()]).to_string()),
+    ]);
+    let parts = [
+        JointPart {
+            key: "order",
+            op: get,
+            call: &call("getOrder"),
+            ctx: ctx(),
+        },
+        JointPart {
+            key: "recent",
+            op: list,
+            call: &call("listOrders"),
+            ctx: ctx(),
+        },
+    ];
+    let out = engine.generate_joint(&bundle, &parts).await;
+    assert_eq!(provider.requests().len(), 4);
+    assert!(
+        out.iter()
+            .all(|r| r.as_ref().unwrap().source == Source::Llm)
+    );
 }

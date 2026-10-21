@@ -30,6 +30,7 @@ use mb_ext::Tenancy;
 
 use crate::{DataPlaneAuthMode, MockRuntime, call};
 
+mod batch;
 mod resolve;
 mod schema;
 mod select;

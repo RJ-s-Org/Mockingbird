@@ -136,6 +136,53 @@ fn system_message(
     s
 }
 
+/// Messages for answering several root fields of one GraphQL query in one
+/// call: each part's operation lines under its response key, one schema
+/// (an object keyed by response key) and each part's request block.
+pub fn build_joint_messages(
+    bundle: &Bundle,
+    parts: &[crate::JointPart<'_>],
+    schema: &Value,
+    persona: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut system = String::new();
+    system.push_str(ROLE_STATEMENT);
+    system.push_str(
+        "\n\nOne query asks for several fields at once. Answer them together as one JSON object \
+keyed by field, consistent with each other: when two fields look up the same thing under \
+different types (the same login, id or name), at most one of them exists and the others are \
+null.\n\n",
+    );
+    if let Some(persona) = persona {
+        let _ = writeln!(system, "Persona: {persona}\n");
+    }
+    for part in parts {
+        let _ = writeln!(system, "Field `{}`:", part.key);
+        binding_lines(&mut system, bundle, part.op, None);
+        system.push('\n');
+    }
+    let _ = write!(system, "Response JSON Schema:\n{schema}");
+    let mut user = String::new();
+    for part in parts {
+        let _ = writeln!(
+            user,
+            "Field `{}`:\n{}",
+            part.key,
+            user_message(part.call, &part.ctx)
+        );
+    }
+    vec![
+        ChatMessage {
+            role: Role::System,
+            content: system,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: user,
+        },
+    ]
+}
+
 /// Persona, API, operation, binding, summary and hint lines.
 fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Option<&str>) {
     if let Some(persona) = persona {

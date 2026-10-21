@@ -592,6 +592,30 @@ pub(crate) async fn generate_once(
     generate_narrowed(rt, plan, call, None).await
 }
 
+/// The stored target and related resources a read-only generation of `call`
+/// takes into account (as [`generate_once`] reads them); the session is
+/// marked used.
+#[cfg(feature = "graphql")]
+pub(crate) async fn read_state(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+) -> (Option<StoredResource>, Vec<StoredResource>) {
+    let mut state = StateAccess::new(rt);
+    let target_id = target_id(plan.op, call);
+    let read = read_context(
+        &mut state,
+        &plan.session,
+        plan.op,
+        target_id.as_deref(),
+        call,
+    )
+    .instrument(state_span())
+    .await;
+    state.touch(&plan.session).instrument(state_span()).await;
+    read
+}
+
 /// [`generate_once`] with a 2xx response schema narrowed to what the caller
 /// reads (see [`GenerationContext::response_schema`]).
 pub(crate) async fn generate_narrowed(
