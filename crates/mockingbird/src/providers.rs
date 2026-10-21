@@ -74,9 +74,10 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("deepseek/deepseek-v4.1-flash"),
         key_env: Some("OPENROUTER_API_KEY"),
         key_required: true,
-        // Most routed models accept JSON Schema output; JSON-object mode
-        // makes them wrap top-level arrays.
-        json_schema: true,
+        // JSON-object mode: some routes (DeepSeek on DigitalOcean) drop the
+        // answer in JSON Schema mode and return only reasoning. The engine
+        // unwraps the arrays models wrap in an object in this mode.
+        json_schema: false,
         headers: &[
             ("http-referer", "https://github.com/rj-s-org/mockingbird"),
             ("x-title", "Mockingbird"),
@@ -630,7 +631,8 @@ mod tests {
         assert_eq!(p.headers["x-title"], "Mockingbird");
         // Field trials: JSON Schema output (JSON-object mode makes models
         // wrap top-level arrays) and a timeout a remote model can meet.
-        assert!(p.json_schema);
+        // JSON Schema mode loses the answer on some OpenRouter routes.
+        assert!(!p.json_schema);
         assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
         assert_eq!(p.timeout, std::time::Duration::from_secs(30));
         assert_eq!(p.max_tokens, 16_384);

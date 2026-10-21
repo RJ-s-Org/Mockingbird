@@ -70,3 +70,5 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
   - profile `extra_body`;
   - docs import at temperature 0 in JSON-object mode;
   - the server-running hint only on connection errors.
+
+  Measured afterwards on the Stripe trial's mock: 25 `POST /v1/payment_intents` with OpenRouter's default routing gave 24 `llm`, 1 `repaired`, **0 fallbacks** (the trial's baseline was 28%), with a median of 7.4 s and a worst case of 9.6 s. Every call went to the DigitalOcean route that failed during the trial. It returns content in JSON-object mode but drops the answer in JSON Schema mode, so the OpenRouter preset uses JSON-object mode.

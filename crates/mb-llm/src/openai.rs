@@ -244,12 +244,23 @@ fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
     })
 }
 
-/// The last complete JSON object or array in `text`, which reasoning output
-/// ends with when a model answers there instead of in `content`.
+/// The JSON object or array that `text` ends with (closing whitespace or a
+/// code fence aside): a model that answers in its reasoning instead of in
+/// `content` ends with the answer. Reasoning that goes on after its last JSON
+/// value only quotes fragments while planning, and yields nothing.
 fn json_in(text: &str) -> Option<&str> {
+    let (found, end) = last_json(text)?;
+    let rest = text[end..].trim().trim_start_matches("```").trim();
+    rest.is_empty().then_some(found)
+}
+
+/// The last complete top-level JSON object or array in `text`, and the byte
+/// offset where it ends. Values nested in one already found are skipped.
+fn last_json(text: &str) -> Option<(&str, usize)> {
     let mut found = None;
+    let mut next = 0;
     for (start, c) in text.char_indices() {
-        if c != '{' && c != '[' {
+        if start < next || (c != '{' && c != '[') {
             continue;
         }
         let rest = &text[start..];
@@ -257,7 +268,9 @@ fn json_in(text: &str) -> Option<&str> {
         if let Some(Ok(value)) = stream.next()
             && (value.is_object() || value.is_array())
         {
-            found = Some(&rest[..stream.byte_offset()]);
+            let end = stream.byte_offset();
+            next = start + end;
+            found = Some((&rest[..end], next));
         }
     }
     found

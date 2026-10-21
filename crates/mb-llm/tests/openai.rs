@@ -254,6 +254,27 @@ async fn reasoning_only_reply_uses_the_json_in_reasoning() {
 }
 
 #[tokio::test]
+async fn reasoning_only_reply_uses_the_last_whole_value_not_a_nested_one() {
+    let server = MockServer::start().await;
+    let reasoning = "Draft: {\"id\":\"x\"}. Final: {\"id\":\"pi_1\",\"types\":[\"card\"],\"opts\":{\"card\":{}}}";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply(
+            json!({"content": null, "reasoning": reasoning}),
+            "stop",
+        )))
+        .mount(&server)
+        .await;
+    let resp = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.content,
+        "{\"id\":\"pi_1\",\"types\":[\"card\"],\"opts\":{\"card\":{}}}"
+    );
+}
+
+#[tokio::test]
 async fn in_band_error_is_retried_once() {
     let server = MockServer::start().await;
     let failed = json!({
@@ -312,6 +333,27 @@ async fn empty_reply_error_names_the_provider_and_finish_reason() {
     assert!(err.contains("finish_reason stop"), "{err}");
     // Retried once before giving up.
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+/// Seen with OpenRouter's DigitalOcean route in JSON Schema mode: the answer
+/// is lost and the reasoning only plans it, quoting fragments.
+#[tokio::test]
+async fn reasoning_that_only_plans_the_answer_is_empty() {
+    let server = MockServer::start().await;
+    let reasoning = "payment_method_types: [\"card\"] from the form. amount_details: {} has no required fields. Output the JSON.";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply(
+            json!({"content": null, "reasoning": reasoning}),
+            "stop",
+        )))
+        .mount(&server)
+        .await;
+    let err = client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("reasoning without JSON"), "{err}");
 }
 
 #[tokio::test]
