@@ -88,7 +88,7 @@ fn changelog_missing_version_exits_1() {
 }
 
 #[test]
-fn dependabot_covers_three_ecosystems() {
+fn dependabot_covers_three_ecosystems_monthly() {
     let doc: Value = serde_saphyr::from_str(&read(&repo().join(".github/dependabot.yml"))).unwrap();
     assert_eq!(doc["version"], 2);
     let updates = doc["updates"].as_array().unwrap();
@@ -98,22 +98,20 @@ fn dependabot_covers_three_ecosystems() {
             .find(|u| u["package-ecosystem"] == eco)
             .unwrap_or_else(|| panic!("no {eco} entry"))
     };
+    // One grouped PR per ecosystem a month keeps CI runs down.
     for eco in ["cargo", "npm", "github-actions"] {
-        assert_eq!(find(eco)["schedule"]["interval"], "weekly", "{eco}");
+        assert_eq!(find(eco)["schedule"]["interval"], "monthly", "{eco}");
+        let groups = find(eco)["groups"].as_object().unwrap();
+        assert!(
+            groups
+                .values()
+                .any(|g| g["patterns"].as_array().unwrap().iter().any(|p| *p == "*")),
+            "{eco} updates are not grouped into one PR"
+        );
     }
     assert_eq!(find("cargo")["directory"], "/");
     assert_eq!(find("npm")["directory"], "/crates/mb-console/web");
     assert_eq!(find("github-actions")["directory"], "/");
-    for eco in ["cargo", "npm"] {
-        let groups = find(eco)["groups"].as_object().unwrap();
-        assert!(!groups.is_empty(), "{eco} updates are not grouped");
-        let types: Vec<&Value> = groups
-            .values()
-            .flat_map(|g| g["update-types"].as_array().unwrap())
-            .collect();
-        assert!(types.iter().any(|t| *t == "minor"), "{eco}");
-        assert!(types.iter().any(|t| *t == "patch"), "{eco}");
-    }
 }
 
 #[test]
