@@ -211,21 +211,25 @@ pub struct ChunkResult {
     pub usage: Usage,
 }
 
+/// JSON-object mode where the provider has it: the prompt already carries
+/// the schema, and strict schema mode rejects or stalls on these schemas with
+/// several gateways.
 fn response_format(provider: &dyn Provider, name: &str, schema: Value) -> ResponseFormat {
     let caps = provider.capabilities();
-    if caps.json_schema {
+    if caps.json_mode {
+        ResponseFormat::JsonObject
+    } else if caps.json_schema {
         ResponseFormat::JsonSchema {
             name: name.to_string(),
             schema,
         }
-    } else if caps.json_mode {
-        ResponseFormat::JsonObject
     } else {
         ResponseFormat::Text
     }
 }
 
-/// Sends one request, bounded by the provider's total timeout.
+/// Sends one request, bounded by the provider's total timeout. Extraction
+/// runs at temperature 0 whatever the profile serves with.
 async fn call(
     llm: &ExtractLlm,
     messages: Vec<ChatMessage>,
@@ -235,7 +239,7 @@ async fn call(
     let request = ChatRequest {
         messages,
         response_format: response_format(llm.provider.as_ref(), format_name, schema),
-        temperature: llm.settings.temperature,
+        temperature: 0.0,
         max_tokens: llm.settings.max_tokens,
         timeout: llm.settings.timeout,
     };
