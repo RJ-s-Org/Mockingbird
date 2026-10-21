@@ -27,6 +27,7 @@ use crate::call::{
 };
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+const FALLBACK_REASON_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-fallback-reason");
 const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
@@ -84,6 +85,8 @@ struct CallLog {
     /// Whether admission ran (a rejected call has no tenancy to bill).
     admitted_or_rejected: bool,
     source: Option<Source>,
+    /// Why the faker answered, when an LLM call failed or none is configured.
+    fallback_reason: Option<String>,
     usage: Usage,
     /// The response body, kept only when `record` is set.
     response: Option<Value>,
@@ -109,6 +112,7 @@ impl CallLog {
             tenancy: None,
             admitted_or_rejected: false,
             source: None,
+            fallback_reason: None,
             usage: Usage::default(),
             response: None,
             request_body: None,
@@ -132,6 +136,7 @@ impl CallLog {
     /// A generated response, remembered for the request record.
     fn generated(&mut self, generated: GeneratedResponse) -> Response {
         self.source = Some(generated.source);
+        self.fallback_reason.clone_from(&generated.fallback_reason);
         self.usage = generated.usage;
         let resp = respond(&generated);
         if self.record {
@@ -522,6 +527,7 @@ async fn report(
         path: uri.path().to_string(),
         status,
         source: log.source,
+        fallback_reason: log.fallback_reason,
         usage: log.usage,
         latency,
         tenancy: log.tenancy,
@@ -840,6 +846,9 @@ fn respond(generated: &GeneratedResponse) -> Response {
         SOURCE_HEADER,
         HeaderValue::from_static(generated.source.as_str()),
     );
+    if let Some(reason) = generated.fallback_reason.as_deref() {
+        headers.insert(FALLBACK_REASON_HEADER, call::reason_header(reason));
+    }
     resp
 }
 
@@ -890,6 +899,7 @@ mod tests {
             body: Some(json!({"id": "o1"})),
             source: mb_engine::Source::Fallback,
             usage: Default::default(),
+            fallback_reason: None,
         }
     }
 

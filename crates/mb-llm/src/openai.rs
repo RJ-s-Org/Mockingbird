@@ -16,6 +16,9 @@ pub struct OpenAiConfig {
     /// Extra request headers (name, value), already resolved: Cloudflare AI
     /// Gateway's `cf-aig-authorization`, Azure's `api-key`, attribution.
     pub headers: Vec<(String, String)>,
+    /// JSON merged into every request body, under the client's own fields
+    /// (OpenRouter `provider` routing, `reasoning` settings).
+    pub extra_body: serde_json::Map<String, Value>,
     /// Extra CA roots and the proxy (`outbound:`).
     pub http: HttpOptions,
 }
@@ -64,8 +67,15 @@ impl OpenAiCompatible {
                 }
             }
         };
-        if let (Some(f), Some(obj)) = (format, body.as_object_mut()) {
-            obj.insert("response_format".to_string(), f);
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(f) = format {
+                obj.insert("response_format".to_string(), f);
+            }
+            for (key, value) in &self.config.extra_body {
+                if !obj.contains_key(key) {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
         }
         body
     }

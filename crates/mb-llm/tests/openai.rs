@@ -27,6 +27,7 @@ fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
         model: "m".into(),
         json_schema,
         headers: Vec::new(),
+        extra_body: serde_json::Map::new(),
         http: HttpOptions::default(),
     })
     .unwrap()
@@ -82,6 +83,7 @@ async fn sends_extra_headers() {
             ("cf-aig-authorization".into(), "Bearer gw".into()),
             ("x-title".into(), "Mockingbird".into()),
         ],
+        extra_body: serde_json::Map::new(),
         http: HttpOptions::default(),
     })
     .unwrap();
@@ -330,4 +332,31 @@ async fn truncated_reply_says_to_raise_max_tokens() {
     assert!(err.contains("max_tokens (100)"), "{err}");
     // A truncated reply is not retried: the same limit would truncate again.
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn merges_extra_body_under_its_own_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let extra = json!({"provider": {"order": ["atlas-cloud"]}, "model": "ignored"});
+    let provider = OpenAiCompatible::new(OpenAiConfig {
+        base_url: server.uri(),
+        api_key: None,
+        model: "m".into(),
+        json_schema: false,
+        headers: Vec::new(),
+        extra_body: extra.as_object().unwrap().clone(),
+        http: HttpOptions::default(),
+    })
+    .unwrap();
+    provider
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let body = wire_body(&server).await;
+    assert_eq!(body["provider"]["order"][0], "atlas-cloud");
+    assert_eq!(body["model"], "m", "the client's own fields win");
 }

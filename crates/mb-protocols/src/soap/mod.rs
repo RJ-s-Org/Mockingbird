@@ -364,6 +364,7 @@ async fn serve_call(
         path,
         status: 200,
         source: None,
+        fallback_reason: None,
         usage: Default::default(),
         latency: Default::default(),
         tenancy: None,

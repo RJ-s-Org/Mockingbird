@@ -33,7 +33,10 @@ const MAP_PATHS: &[&str] = &[
 ];
 
 /// Paths holding free-form JSON, not config keys.
-const OPAQUE_PATHS: &[&str] = &["mocks.<name>.scenarios.<name>.set"];
+const OPAQUE_PATHS: &[&str] = &[
+    "mocks.<name>.scenarios.<name>.set",
+    "llm.profiles.<name>.extra_body",
+];
 
 /// Every key path in `value` below `prefix`: map entries become `<name>`
 /// and array items `[]` (`pii.custom[].name`).

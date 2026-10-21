@@ -850,6 +850,7 @@ impl Reporter {
             path: std::mem::take(&mut self.path),
             status: self.status,
             source: self.source,
+            fallback_reason: None,
             usage: self.usage,
             latency: self.started.elapsed(),
             tenancy: self.tenancy.take(),

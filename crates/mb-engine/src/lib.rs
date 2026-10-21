@@ -117,6 +117,10 @@ pub struct GeneratedResponse {
     /// Tokens spent on this response, summed over the primary and repair
     /// calls; zero when no LLM call was made.
     pub usage: Usage,
+    /// Why the faker answered instead of the LLM, when it did because an LLM
+    /// call failed or was not made (`None` for LLM answers and for
+    /// deliberate fallbacks such as a forced status with no LLM).
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +178,9 @@ pub struct StreamItem {
     /// for a faker item that read nothing from the provider.
     pub usage: Usage,
 }
+
+/// The fallback reason of a mock with no LLM provider.
+pub const OFFLINE_REASON: &str = "no LLM is configured for this mock (offline)";
 
 /// Faker attempts (cycling through top-level `oneOf`/`anyOf` branches and
 /// fresh random draws) before an unvalidated fallback body is accepted.
@@ -261,13 +268,19 @@ impl Engine {
                 body: None,
                 source: Source::Llm,
                 usage: Usage::default(),
+                fallback_reason: None,
             });
         };
 
         let validator = self.validator(bundle, op, status, schema)?;
         let mut usage = Usage::default();
         let mut response = match &self.provider {
-            None => self.fake_response(bundle, variant, status, schema, Some(&validator)),
+            None => {
+                let mut fake =
+                    self.fake_response(bundle, variant, status, schema, Some(&validator));
+                fake.fallback_reason = Some(OFFLINE_REASON.to_string());
+                fake
+            }
             Some(provider) => {
                 let messages = tracing::info_span!("mb.prompt").in_scope(|| {
                     build_messages(
@@ -294,10 +307,14 @@ impl Engine {
                         body: Some(body),
                         source,
                         usage: Usage::default(),
+                        fallback_reason: None,
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
-                        self.fake_response(bundle, variant, status, schema, Some(&validator))
+                        let mut fake =
+                            self.fake_response(bundle, variant, status, schema, Some(&validator));
+                        fake.fallback_reason = Some(reason);
+                        fake
                     }
                 }
             }
@@ -326,6 +343,7 @@ impl Engine {
                 body: None,
                 source: Source::Fallback,
                 usage: Usage::default(),
+                fallback_reason: None,
             };
         };
         match self.validator(bundle, op, status, schema) {
@@ -355,6 +373,7 @@ impl Engine {
             body: Some(self.fake_value(bundle, schema, validator)),
             source: Source::Fallback,
             usage: Usage::default(),
+            fallback_reason: None,
         }
     }
 

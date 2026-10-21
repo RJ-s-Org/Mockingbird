@@ -167,6 +167,7 @@ fn profile(ws: &str, name: &str, base_url: String) -> LlmProfile {
         max_tokens: 512,
         fallback_profile: None,
         headers: Default::default(),
+        extra_body: Default::default(),
         source: ResourceSource::Api,
     }
 }

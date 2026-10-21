@@ -52,5 +52,8 @@ fn cors() -> CorsLayer {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
-        .expose_headers([HeaderName::from_static("x-mockingbird-source")])
+        .expose_headers([
+            HeaderName::from_static("x-mockingbird-source"),
+            HeaderName::from_static("x-mockingbird-fallback-reason"),
+        ])
 }

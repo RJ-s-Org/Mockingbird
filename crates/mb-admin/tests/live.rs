@@ -173,6 +173,7 @@ fn record(workspace: &str, mock: &str, op: &str, session: &str, source: &str) ->
         path: "/orders".into(),
         status: 200,
         source: Some(source.into()),
+        fallback_reason: None,
         latency: Duration::from_millis(12),
         prompt_tokens: 3,
         completion_tokens: 4,

@@ -731,6 +731,8 @@ pub(crate) struct Report {
     pub status: u16,
     /// The (worst) source of a generated response; `None` for problems.
     pub source: Option<Source>,
+    /// Why the faker answered, when an LLM call failed or none is configured.
+    pub fallback_reason: Option<String>,
     pub usage: Usage,
     /// Time to build the response, plus any injected latency.
     pub latency: Duration,
@@ -800,6 +802,7 @@ fn record(rt: &MockRuntime, r: Report) {
             path: r.path,
             status: r.status,
             source: r.source.map(|s| s.as_str().to_string()),
+            fallback_reason: r.fallback_reason,
             latency: r.latency,
             prompt_tokens: r.usage.prompt_tokens,
             completion_tokens: r.usage.completion_tokens,
@@ -1099,6 +1102,24 @@ async fn write_state(
         }
         _ => {}
     }
+}
+
+/// `reason` as a header value: printable ASCII only (anything else becomes
+/// `?`), cut to 300 bytes.
+pub(crate) fn reason_header(reason: &str) -> axum::http::HeaderValue {
+    let clean: String = reason
+        .chars()
+        .map(|c| {
+            if c == ' ' || c.is_ascii_graphic() {
+                c
+            } else {
+                '?'
+            }
+        })
+        .take(300)
+        .collect();
+    axum::http::HeaderValue::from_str(&clean)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("unprintable"))
 }
 
 #[cfg(test)]

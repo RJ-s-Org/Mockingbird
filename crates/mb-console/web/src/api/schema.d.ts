@@ -1336,6 +1336,8 @@ export interface components {
         /** @description An LLM profile. `secret_ref` is returned as stored, never resolved. */
         LlmProfileView: {
             base_url: string;
+            /** @description JSON merged into every provider request body. */
+            extra_body: Record<string, never>;
             fallback_profile?: string | null;
             /**
              * @description Extra provider request headers, as stored (`${…}` references are
@@ -1560,6 +1562,14 @@ export interface components {
         PutProfile: {
             /** @description OpenAI-compatible base URL. */
             base_url: string;
+            /**
+             * @description JSON merged into every request body sent to the provider, under the
+             *     fields Mockingbird sets itself (`model`, `messages`, `response_format`,
+             *     `temperature`, `max_tokens` and `stream` are rejected): OpenRouter's
+             *     `provider` routing or `reasoning` settings, for example. At most
+             *     8 KiB; not for secrets.
+             */
+            extra_body?: Record<string, never>;
             /** @description Profile tried when this one fails. */
             fallback_profile?: string | null;
             /**
@@ -1576,7 +1586,7 @@ export interface components {
             json_schema?: boolean;
             /**
              * Format: int32
-             * @default 2048
+             * @default 16384
              */
             max_tokens: number;
             model: string;
@@ -1595,7 +1605,7 @@ export interface components {
             temperature: number;
             /**
              * Format: int64
-             * @default 3000
+             * @default 30000
              */
             timeout_ms: number;
         };

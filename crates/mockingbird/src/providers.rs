@@ -71,17 +71,19 @@ pub const PRESETS: &[Preset] = &[
         id: "openrouter",
         name: "OpenRouter",
         base_url: "https://openrouter.ai/api/v1",
-        default_model: Some("google/gemini-2.5-flash"),
+        default_model: Some("deepseek/deepseek-v4.1-flash"),
         key_env: Some("OPENROUTER_API_KEY"),
         key_required: true,
-        json_schema: false,
+        // Most routed models accept JSON Schema output; JSON-object mode
+        // makes them wrap top-level arrays.
+        json_schema: true,
         headers: &[
             ("http-referer", "https://github.com/rj-s-org/mockingbird"),
             ("x-title", "Mockingbird"),
         ],
         params: &[],
         key_url: Some("https://openrouter.ai/settings/keys"),
-        notes: "One key for hundreds of models; name them as vendor/model (openai/gpt-4.1-mini, anthropic/claude-haiku-4.5, meta-llama/llama-3.3-70b-instruct). Models ending in :free cost nothing.",
+        notes: "One key for hundreds of models; name them as vendor/model (openai/gpt-4.1-mini, anthropic/claude-haiku-4.5, meta-llama/llama-3.3-70b-instruct). Models ending in :free cost nothing. Pin or skip upstream providers with --extra-body '{\"provider\": {\"order\": [...]}}'.",
     },
     Preset {
         id: "google-ai-studio",
@@ -180,7 +182,7 @@ pub const PRESETS: &[Preset] = &[
         headers: &[],
         params: &[],
         key_url: Some("https://console.groq.com/keys"),
-        notes: "Very low latency, which suits a mock's default 3s LLM timeout.",
+        notes: "Very low latency: responses arrive well inside the LLM timeout.",
     },
     Preset {
         id: "mistral",
@@ -315,10 +317,13 @@ pub struct ProviderArgs {
     /// Request JSON Schema structured output [default: the preset's].
     #[arg(long)]
     pub json_schema: Option<bool>,
-    /// Time before a call falls back to the faker [default: 3s, 30s for
-    /// local runtimes].
+    /// Time before a call falls back to the faker [default: 30s].
     #[arg(long)]
     pub timeout: Option<humantime::Duration>,
+    /// JSON object merged into every provider request body, e.g.
+    /// OpenRouter routing: '{"provider": {"order": ["atlas-cloud"]}}'.
+    #[arg(long, value_name = "JSON")]
+    pub extra_body: Option<String>,
 }
 
 impl ProviderArgs {
@@ -395,12 +400,18 @@ impl ProviderArgs {
                 .insert(name.trim().to_ascii_lowercase(), value.to_string());
         }
         mb_store::validate_profile_headers(&profile.headers)?;
-        let local = preset.base_url.starts_with("http://127.0.0.1");
-        profile.timeout = match self.timeout {
-            Some(t) => t.into(),
-            None if local => Duration::from_secs(30),
-            None => profile.timeout,
-        };
+        if let Some(t) = self.timeout {
+            profile.timeout = t.into();
+        }
+        if let Some(raw) = &self.extra_body {
+            let parsed: Value =
+                serde_json::from_str(raw).map_err(|e| anyhow!("--extra-body is not JSON: {e}"))?;
+            let Value::Object(body) = parsed else {
+                bail!("--extra-body must be a JSON object");
+            };
+            mb_store::validate_extra_body(&body)?;
+            profile.extra_body = body;
+        }
         Ok(profile)
     }
 }
@@ -417,6 +428,7 @@ pub fn api_body(profile: &FileProfile, fallback: Option<&str>) -> Value {
         "max_tokens": profile.max_tokens,
         "fallback_profile": fallback.or(profile.fallback.as_deref()),
         "headers": profile.headers,
+        "extra_body": profile.extra_body,
     })
 }
 
@@ -488,6 +500,7 @@ pub async fn probe(profile: &FileProfile) -> anyhow::Result<ProbeReport> {
         model: profile.model.clone(),
         json_schema: profile.json_schema,
         headers,
+        extra_body: profile.extra_body.clone(),
         http: HttpOptions::default(),
     })?;
     let timeout = profile.timeout.max(Duration::from_secs(20));
@@ -615,6 +628,31 @@ mod tests {
         assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(p.api_key.as_deref(), Some("env:OPENROUTER_API_KEY"));
         assert_eq!(p.headers["x-title"], "Mockingbird");
+        // Field trials: JSON Schema output (JSON-object mode makes models
+        // wrap top-level arrays) and a timeout a remote model can meet.
+        assert!(p.json_schema);
+        assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
+        assert_eq!(p.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(p.max_tokens, 16_384);
+    }
+
+    #[test]
+    fn extra_body_flag() {
+        let p = ProviderArgs {
+            extra_body: Some(r#"{"provider": {"order": ["atlas-cloud"]}}"#.into()),
+            ..args("openrouter")
+        }
+        .profile()
+        .unwrap();
+        assert_eq!(p.extra_body["provider"]["order"][0], "atlas-cloud");
+        for bad in [r#"{"model": "x"}"#, "[1]", "not json"] {
+            let r = ProviderArgs {
+                extra_body: Some(bad.into()),
+                ..args("openrouter")
+            }
+            .profile();
+            assert!(r.is_err(), "{bad}");
+        }
     }
 
     #[test]

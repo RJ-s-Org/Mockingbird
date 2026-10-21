@@ -523,6 +523,7 @@ fn record(mock: &str, n: usize) -> RequestRecord {
         path: format!("/orders/{n}"),
         status: 200,
         source: Some("faker".into()),
+        fallback_reason: None,
         latency: Duration::from_millis(1),
         prompt_tokens: 0,
         completion_tokens: 0,

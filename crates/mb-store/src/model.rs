@@ -319,6 +319,12 @@ pub struct LlmProfile {
     /// [`crate::header_secret_refs`]); a raw secret is never stored.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// JSON merged into every request body sent to the provider, under the
+    /// fields Mockingbird sets itself (see [`crate::validate_extra_body`]):
+    /// OpenRouter's `provider` routing, `reasoning` settings and the like.
+    /// Not for secrets, which belong in `headers` as references.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra_body: serde_json::Map<String, Value>,
     pub source: ResourceSource,
 }
 
@@ -368,6 +374,9 @@ pub struct RequestLogEntry {
     pub path: String,
     pub status: u16,
     pub source: Option<String>,
+    /// Why the faker answered, when an LLM call failed or none is configured.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
     pub latency_ms: u64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -387,6 +396,9 @@ pub struct NewRequestLogEntry {
     pub path: String,
     pub status: u16,
     pub source: Option<String>,
+    /// Why the faker answered, when an LLM call failed or none is configured.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
     pub latency_ms: u64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,

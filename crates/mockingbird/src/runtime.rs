@@ -508,6 +508,7 @@ async fn openai_provider(
         base_url: profile.base_url.clone(),
         api_key,
         headers,
+        extra_body: profile.extra_body.clone(),
         model: profile.model.clone(),
         json_schema: profile.json_schema,
         http: deps.http.clone(),

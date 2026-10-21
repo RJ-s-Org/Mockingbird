@@ -435,6 +435,40 @@ pub fn validate_profile_headers(
     Ok(())
 }
 
+/// Request-body fields the LLM client sets itself, which `extra_body` may
+/// not override.
+pub const RESERVED_EXTRA_BODY_FIELDS: [&str; 6] = [
+    "model",
+    "messages",
+    "response_format",
+    "temperature",
+    "max_tokens",
+    "stream",
+];
+
+/// Largest accepted `extra_body`, serialized.
+const MAX_EXTRA_BODY_BYTES: usize = 8192;
+
+/// Checks an LLM profile's `extra_body`: no field the client sets itself
+/// (see [`RESERVED_EXTRA_BODY_FIELDS`]) and at most 8 KiB of JSON.
+pub fn validate_extra_body(body: &serde_json::Map<String, Value>) -> Result<(), StoreError> {
+    if let Some(field) = RESERVED_EXTRA_BODY_FIELDS
+        .iter()
+        .find(|f| body.contains_key(**f))
+    {
+        return Err(StoreError::Invalid(format!(
+            "extra_body field {field:?} is set by the client; use the profile's own setting"
+        )));
+    }
+    let size = serde_json::to_vec(body).map_or(usize::MAX, |b| b.len());
+    if size > MAX_EXTRA_BODY_BYTES {
+        return Err(StoreError::Invalid(format!(
+            "extra_body is {size} bytes; at most {MAX_EXTRA_BODY_BYTES} are accepted"
+        )));
+    }
+    Ok(())
+}
+
 /// `Invalid` when a mock's chaos or limits are out of range.
 pub(crate) fn validate_mock_settings(
     chaos: Option<&ChaosSettings>,
@@ -584,6 +618,34 @@ mod tests {
         assert!(ok(&[("authorization", "Bearer ${env:X_API_KEY}")]).is_err());
         assert!(ok(&[("X-Title", "Mockingbird")]).is_err());
         assert!(ok(&[("x-title", "a\r\nb")]).is_err());
+    }
+
+    #[test]
+    fn profile_extra_body() {
+        let ok = |v: serde_json::Value| validate_extra_body(v.as_object().unwrap());
+        assert!(ok(serde_json::json!({})).is_ok());
+        assert!(
+            ok(serde_json::json!({
+                "provider": {"order": ["atlas-cloud"], "allow_fallbacks": false},
+                "reasoning": {"enabled": false}
+            }))
+            .is_ok()
+        );
+        // Fields the client sets itself, and oversized bodies.
+        for reserved in [
+            "model",
+            "messages",
+            "response_format",
+            "temperature",
+            "max_tokens",
+            "stream",
+        ] {
+            assert!(
+                ok(serde_json::json!({ reserved: 1 })).is_err(),
+                "{reserved}"
+            );
+        }
+        assert!(ok(serde_json::json!({"x": "a".repeat(9000)})).is_err());
     }
 
     #[test]

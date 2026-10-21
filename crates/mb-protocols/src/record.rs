@@ -42,6 +42,8 @@ pub struct RequestRecord {
     pub status: u16,
     /// `X-Mockingbird-Source` of a generated response; `None` for problems.
     pub source: Option<String>,
+    /// Why the faker answered, when an LLM call failed or none is configured.
+    pub fallback_reason: Option<String>,
     /// Time to build the response, plus any injected latency.
     pub latency: Duration,
     pub prompt_tokens: u32,

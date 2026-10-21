@@ -330,6 +330,7 @@ fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
         max_tokens: 512,
         fallback_profile: fallback.map(str::to_string),
         headers: Default::default(),
+        extra_body: Default::default(),
         source: ResourceSource::Api,
     }
 }
