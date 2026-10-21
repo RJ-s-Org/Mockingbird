@@ -1040,3 +1040,57 @@ async fn undeclared_bodies_are_never_null() {
     send(&h, post_json("/v1/ping", r#"{"x":1}"#)).await;
     assert_eq!(engine_request(&h, 2)["body"], json!({"x": 1}));
 }
+
+#[derive(Default)]
+struct Recorded(std::sync::Mutex<Vec<mb_protocols::RequestRecord>>);
+
+impl mb_protocols::RequestRecorder for Recorded {
+    fn record(&self, r: mb_protocols::RequestRecord) {
+        self.0.lock().unwrap().push(r);
+    }
+}
+
+/// A request failing validation is answered with the contract's error
+/// shape, which carries the reasons, as do a response header and the
+/// request record.
+#[tokio::test]
+async fn validation_failures_stay_visible() {
+    let recorded = Arc::new(Recorded::default());
+    let mut rt = MockRuntime::new(
+        "inline",
+        Arc::new(compile(STRIPE_LIKE.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.recorder = Some(recorded.clone());
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router
+        .oneshot(post_form(
+            "/v1/payment_intents",
+            FORM,
+            "amount=lots&currency=eur",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let header = header_str(&resp, "x-mockingbird-validation").to_string();
+    assert!(header.contains("/amount"), "{header}");
+    let body = body_json(resp).await;
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("/amount"), "{body}");
+
+    let records = recorded.0.lock().unwrap().clone();
+    let validation = records[0].request["validation"].as_array().unwrap();
+    assert!(
+        validation[0].as_str().unwrap().contains("/amount"),
+        "{validation:?}"
+    );
+
+    // The orders contract's 400 `Error` has a top-level `message`.
+    let h = offline();
+    let resp = send(&h, post_json("/orders", r#"{"total":-1}"#)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(!header_str(&resp, "x-mockingbird-validation").is_empty());
+    let body = body_json(resp).await;
+    assert!(body["message"].as_str().unwrap().contains("body"), "{body}");
+}

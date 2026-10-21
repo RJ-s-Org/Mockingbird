@@ -28,6 +28,24 @@ use crate::call::{
 };
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
+/// Why a request failed validation.
+pub(super) const VALIDATION_HEADER: HeaderName =
+    HeaderName::from_static("x-mockingbird-validation");
+/// The longest [`VALIDATION_HEADER`] value, in bytes.
+const MAX_VALIDATION_HEADER: usize = 2048;
+/// Properties of a declared error shape that carry the validation messages,
+/// most preferred first.
+const MESSAGE_FIELDS: [&str; 7] = [
+    "message",
+    "detail",
+    "error_description",
+    "description",
+    "msg",
+    "title",
+    "error",
+];
+/// How deep a message field is looked for in an error shape.
+const MAX_MESSAGE_DEPTH: usize = 3;
 const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
@@ -97,6 +115,8 @@ struct CallLog {
     delay: Option<Duration>,
     /// The body media type the matched operation declares (`x-content-type`).
     declared_body_type: Option<String>,
+    /// Why the request failed validation, if it did.
+    validation: Vec<String>,
     /// The response is an event stream, which reports the call itself when
     /// its body is dropped and sleeps any latency before its first event.
     streaming: bool,
@@ -116,6 +136,7 @@ impl CallLog {
             record,
             delay: None,
             declared_body_type: None,
+            validation: Vec::new(),
             streaming: false,
         }
     }
@@ -518,11 +539,15 @@ async fn report(
     // The record's request is built only when a recorder will receive it.
     let request = if rt.recorder.is_some() {
         let media = media_type(headers).or(log.declared_body_type);
-        json!({
+        let mut request = json!({
             "query": recorded_query(rt, uri),
             "headers": recorded_headers(rt, headers),
             "body": request_body_record(raw_body, media.as_deref(), log.request_body),
-        })
+        });
+        if !log.validation.is_empty() {
+            request["validation"] = json!(log.validation);
+        }
+        request
     } else {
         Value::Null
     };
@@ -750,14 +775,18 @@ fn check(
     }
 }
 
-/// The contract's 400, 422 or `default` error shape if it declares one, else
-/// problem+json 400. Never calls the LLM.
+/// The contract's 400, 422 or `default` error shape if it declares one,
+/// else problem+json 400. Never calls the LLM. The reasons go into the
+/// error shape's message-like string field when it has one, the
+/// [`VALIDATION_HEADER`] and the request record.
 fn invalid_input(
     rt: &MockRuntime,
     op: &Operation,
     errors: &[String],
     log: &mut CallLog,
 ) -> Response {
+    log.validation = errors.to_vec();
+    let reasons = errors.join("; ");
     let declared = [
         StatusSelector::Code(400),
         StatusSelector::Code(422),
@@ -769,23 +798,115 @@ fn invalid_input(
             .iter()
             .find(|o| o.status == selector && o.schema.is_some())
     });
-    match declared {
+    let mut resp = match declared {
         Some(variant) => {
             let status = match variant.status {
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            log.generated(rt.engine.fallback(
+            let mut generated = rt.engine.fallback(
                 &rt.bundle,
                 op,
                 variant,
                 status,
                 &OperationCall::default(),
                 &GenerationContext::default(),
-            ))
+            );
+            if let (Some(body), Some(schema)) = (generated.body.as_mut(), &variant.schema) {
+                set_message(body, schema, &rt.bundle.defs, &reasons);
+            }
+            log.generated(generated)
         }
-        None => log.problem(400, "Invalid request", errors.join("; ")),
+        None => log.problem(400, "Invalid request", reasons.clone()),
+    };
+    if let Ok(v) = HeaderValue::from_str(&header_text(&reasons, MAX_VALIDATION_HEADER)) {
+        resp.headers_mut().insert(VALIDATION_HEADER, v);
     }
+    resp
+}
+
+/// `text` as a header value: visible ASCII only, at most `max` bytes.
+fn header_text(text: &str, max: usize) -> String {
+    text.chars()
+        .map(|c| {
+            if c == ' ' || c.is_ascii_graphic() {
+                c
+            } else {
+                '?'
+            }
+        })
+        .take(max)
+        .collect()
+}
+
+/// Writes `message` into the first message-like string property of
+/// `schema` (see [`MESSAGE_FIELDS`]), at the top level or nested in
+/// objects (Stripe's `error.message`), creating the objects on the way.
+fn set_message(body: &mut Value, schema: &Value, defs: &Map<String, Value>, message: &str) {
+    let Some(path) = message_path(schema, defs, 0) else {
+        return;
+    };
+    let mut at = body;
+    for (key, _) in &path[..path.len() - 1] {
+        let Value::Object(obj) = at else { return };
+        let slot = obj
+            .entry(key.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if slot.is_null() {
+            *slot = Value::Object(Map::new());
+        }
+        at = slot;
+    }
+    let (key, max_len) = &path[path.len() - 1];
+    if let Value::Object(obj) = at {
+        let text: String = match max_len {
+            Some(n) => message.chars().take(*n).collect(),
+            None => message.to_string(),
+        };
+        obj.insert(key.clone(), Value::String(text));
+    }
+}
+
+/// The property path to a message-like string field of `schema`, each
+/// step with the field's `maxLength`, preferring shallower fields.
+fn message_path(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    depth: usize,
+) -> Option<Vec<(String, Option<usize>)>> {
+    let branches = form::branches(Some(schema), defs);
+    let props: Vec<&Map<String, Value>> = branches
+        .iter()
+        .filter_map(|b| b.get("properties").and_then(Value::as_object))
+        .collect();
+    for name in MESSAGE_FIELDS {
+        for p in &props {
+            let Some(prop) = p.get(name) else { continue };
+            let prop_branches = form::branches(Some(prop), defs);
+            let free_string = form::types(&prop_branches).contains(&"string")
+                && prop_branches
+                    .iter()
+                    .all(|b| b.get("enum").is_none() && b.get("const").is_none());
+            if free_string {
+                let max_len = prop_branches
+                    .iter()
+                    .find_map(|b| b.get("maxLength").and_then(Value::as_u64))
+                    .and_then(|n| usize::try_from(n).ok());
+                return Some(vec![(name.to_string(), max_len)]);
+            }
+        }
+    }
+    if depth + 1 >= MAX_MESSAGE_DEPTH {
+        return None;
+    }
+    props
+        .iter()
+        .flat_map(|p| p.iter())
+        .find_map(|(name, prop)| {
+            let mut path = message_path(prop, defs, depth + 1)?;
+            path.insert(0, (name.clone(), None));
+            Some(path)
+        })
 }
 
 /// The raw query as recorded (without credential parameters): repeated keys

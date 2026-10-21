@@ -100,7 +100,10 @@ fn insert(entries: &mut Vec<(String, Node)>, path: &[String], value: String) {
 
 /// The concrete schemas `schema` stands for: itself and, recursively, its
 /// `$ref` target and `anyOf`/`oneOf`/`allOf` members.
-fn branches<'a>(schema: Option<&'a Value>, defs: &'a Map<String, Value>) -> Vec<&'a Value> {
+pub(super) fn branches<'a>(
+    schema: Option<&'a Value>,
+    defs: &'a Map<String, Value>,
+) -> Vec<&'a Value> {
     fn walk<'a>(
         schema: &'a Value,
         defs: &'a Map<String, Value>,
@@ -137,7 +140,7 @@ fn branches<'a>(schema: Option<&'a Value>, defs: &'a Map<String, Value>) -> Vec<
     out
 }
 
-fn types<'a>(branches: &[&'a Value]) -> Vec<&'a str> {
+pub(super) fn types<'a>(branches: &[&'a Value]) -> Vec<&'a str> {
     branches
         .iter()
         .flat_map(|b| match b.get("type") {
