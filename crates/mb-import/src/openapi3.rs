@@ -133,6 +133,13 @@ pub(crate) fn is_json_media(ct: &str) -> bool {
     base == "application/json" || base.ends_with("+json")
 }
 
+/// The form media types, whose body schemas are tagged with
+/// [`CONTENT_TYPE_EXT`] so the data plane decodes them as forms.
+pub(crate) const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+pub(crate) const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
+/// Extension naming the media type of a non-JSON request body schema.
+pub(crate) const CONTENT_TYPE_EXT: &str = "x-content-type";
+
 /// The server-sent events media type.
 pub(crate) const EVENT_STREAM: &str = "text/event-stream";
 /// Extension giving a stream's item schema explicitly.
@@ -317,19 +324,41 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
     Ok(outputs)
 }
 
-/// The JSON request body schema and whether the body is required.
+/// The request body schema and whether the body is required: the JSON
+/// media entry's, else the form's (then the multipart one's), tagged with
+/// its [`CONTENT_TYPE_EXT`].
 fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<(Option<Value>, bool), ImportError> {
     let Some(body) = op.get("requestBody") else {
         return Ok((None, false));
     };
     let body = deref(doc, body, &format!("{at}/requestBody"))?;
-    let schema = body
-        .get("content")
-        .and_then(Value::as_object)
-        .and_then(json_media)
-        .map(|(_, m)| schema_of(m));
+    let content = body.get("content").and_then(Value::as_object);
+    let schema = match content.and_then(json_media) {
+        Some((_, m)) => Some(schema_of(m)),
+        None => content.and_then(form_body),
+    };
     let required = body.get("required").and_then(Value::as_bool) == Some(true);
     Ok((schema, required))
+}
+
+/// The form (or else multipart) body schema of `content`, tagged with its
+/// media type.
+fn form_body(content: &Map<String, Value>) -> Option<Value> {
+    let media = |wanted: &str| {
+        content.iter().find(|(k, _)| {
+            k.split(';')
+                .next()
+                .is_some_and(|base| base.trim().eq_ignore_ascii_case(wanted))
+        })
+    };
+    let (ct, m) = [FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE]
+        .into_iter()
+        .find_map(|ct| media(ct).map(|(_, m)| (ct, m)))?;
+    let mut schema = schema_of(m);
+    if let Value::Object(o) = &mut schema {
+        o.insert(CONTENT_TYPE_EXT.into(), json!(ct));
+    }
+    Some(schema)
 }
 
 /// Rejects a `$ref` in `value` that names no definition. `at` names the

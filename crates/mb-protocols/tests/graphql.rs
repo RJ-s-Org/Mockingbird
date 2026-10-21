@@ -1146,9 +1146,7 @@ fn sdl_runtime(sdl: &str, provider: Option<Arc<ScriptedProvider>>) -> MockRuntim
 
 #[tokio::test]
 async fn covariant_interface_fields_are_served() {
-    let user = |id: &str, email: &str| {
-        json!({"__typename": "User", "id": id, "email": email, "friends": []})
-    };
+    let user = |id: &str, email: &str| json!({"__typename": "User", "id": id, "email": email, "friends": []});
     let mut viewer = user("u1", "a@example.com");
     viewer["owner"] = user("u0", "o@example.com");
     viewer["friends"] = json!([user("u2", "f@example.com")]);

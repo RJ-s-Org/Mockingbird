@@ -329,3 +329,40 @@ fn dangling_ref_names_referrer_and_location() {
         other => panic!("expected Invalid, got {other:?}"),
     }
 }
+
+#[test]
+fn form_and_multipart_bodies_are_compiled() {
+    let src = oas(r#"
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: {type: object, properties: {a: {type: integer}}}
+      responses: {"200": {description: OK}}
+  /multi:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: {type: object, properties: {f: {type: string, format: binary}}}
+      responses: {"200": {description: OK}}
+  /both:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded: {schema: {type: object}}
+          application/json: {schema: {type: object, properties: {j: {type: string}}}}
+      responses: {"200": {description: OK}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let body = |id: &str| b.operation(id).unwrap().input.body.clone().unwrap();
+    assert_eq!(
+        body("post_form"),
+        json!({"type": "object", "properties": {"a": {"type": "integer"}},
+               "x-content-type": "application/x-www-form-urlencoded"})
+    );
+    assert_eq!(body("post_multi")["x-content-type"], "multipart/form-data");
+    // JSON stays preferred, untagged.
+    assert_eq!(body("post_both").get("x-content-type"), None);
+}

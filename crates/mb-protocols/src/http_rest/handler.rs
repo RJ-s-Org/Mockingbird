@@ -13,11 +13,12 @@ use mb_engine::{
 use mb_ext::{Rejection, Tenancy};
 use mb_llm::Usage;
 use mb_mcm::{HttpMethod, Operation, OperationKind, StatusSelector};
-use serde_json::{Map, Number, Value, json};
+use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
 use tracing::field::Empty;
 
+use super::form;
 use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
 use crate::MockRuntime;
@@ -306,8 +307,18 @@ async fn serve(
                 Vec::new()
             }
         };
-    let query = coerce_params(group(public_query(rt, &raw_query)), op.input.query.as_ref());
-    let body = match decode_body(op, raw_body) {
+    let query = form::decode(
+        public_query(rt, &raw_query),
+        op.input.query.as_ref(),
+        &rt.bundle.defs,
+    );
+    // The entered span is not held across the await.
+    let decode_span = decode.exit();
+    let decoded = decode_body(op, &rt.bundle.defs, headers, raw_body)
+        .instrument(decode_span.clone())
+        .await;
+    let decode = decode_span.entered();
+    let body = match decoded {
         Ok(body) => body,
         Err(e) => {
             errors.push(e);
@@ -629,40 +640,50 @@ fn types(schema: &Value) -> Vec<&str> {
 }
 
 fn coerce(raw: &str, schema: Option<&Value>) -> Value {
-    let types = schema.map(types).unwrap_or_default();
-    if types.contains(&"integer")
-        && let Ok(n) = raw.parse::<i64>()
-    {
-        return Value::Number(n.into());
-    }
-    if types.contains(&"number")
-        && let Some(n) = raw.parse::<f64>().ok().and_then(Number::from_f64)
-    {
-        return Value::Number(n);
-    }
-    if types.contains(&"boolean") {
-        match raw {
-            "true" => return Value::Bool(true),
-            "false" => return Value::Bool(false),
-            _ => {}
-        }
-    }
-    Value::String(raw.to_string())
+    form::coerce(raw, &schema.map(types).unwrap_or_default())
 }
 
-/// The request body, decoded per the operation's body schema: JSON by
-/// default, `application/x-www-form-urlencoded` (Swagger 2 `formData`)
-/// coerced through the schema, and `multipart/form-data` passed through
-/// unvalidated as no body. A missing body is an error only when the
-/// contract marks it required.
-fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
-    let schema = op.input.body.as_ref();
-    let content_type = schema
-        .and_then(|s| s.get("x-content-type"))
-        .and_then(Value::as_str);
-    if content_type == Some(MULTIPART_CONTENT_TYPE) {
-        return Ok(None);
+/// How a request body is decoded.
+#[derive(Clone, Copy, PartialEq)]
+enum BodyKind {
+    Json,
+    Form,
+    Multipart,
+}
+
+impl BodyKind {
+    fn of(media_type: &str) -> Option<Self> {
+        match media_type {
+            FORM_CONTENT_TYPE => Some(Self::Form),
+            MULTIPART_CONTENT_TYPE => Some(Self::Multipart),
+            _ => None,
+        }
     }
+}
+
+/// The request body as JSON, by the request's form or multipart
+/// `Content-Type`, else the media type the contract declares
+/// (`x-content-type`), else as JSON. Form and multipart fields are nested
+/// by bracket notation and coerced through the body schema. A body that is
+/// not JSON, sent to an operation declaring no body, is passed on as text:
+/// a non-empty body never reaches the engine as null. A missing body is an
+/// error only when the contract marks it required.
+async fn decode_body(
+    op: &Operation,
+    defs: &Map<String, Value>,
+    headers: &HeaderMap,
+    raw: &[u8],
+) -> Result<Option<Value>, String> {
+    let schema = op.input.body.as_ref();
+    let declared = schema
+        .and_then(|s| s.get("x-content-type"))
+        .and_then(Value::as_str)
+        .and_then(BodyKind::of);
+    let kind = media_type(headers)
+        .as_deref()
+        .and_then(BodyKind::of)
+        .or(declared)
+        .unwrap_or(BodyKind::Json);
     if raw.iter().all(u8::is_ascii_whitespace) {
         return if op.input.body_required {
             Err("body: a request body is required".into())
@@ -670,16 +691,50 @@ fn decode_body(op: &Operation, raw: &[u8]) -> Result<Option<Value>, String> {
             Ok(None)
         };
     }
-    if content_type == Some(FORM_CONTENT_TYPE) {
-        return form_pairs(raw)
-            .map(|pairs| Some(Value::Object(coerce_params(group(pairs), schema))))
-            .map_err(|e| format!("body: not valid form data: {e}"));
+    match kind {
+        BodyKind::Form => form_pairs(raw)
+            .map(|pairs| Some(Value::Object(form::decode(pairs, schema, defs))))
+            .map_err(|e| format!("body: not valid form data: {e}")),
+        BodyKind::Multipart => multipart_fields(headers, raw)
+            .await
+            .map(|pairs| Some(Value::Object(form::decode(pairs, schema, defs))))
+            .map_err(|e| format!("body: not valid multipart data: {e}")),
+        BodyKind::Json => match serde_json::from_slice(raw) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if schema.is_some() => Err(format!("body: not valid JSON: {e}")),
+            Err(_) => Ok(Some(Value::String(
+                String::from_utf8_lossy(raw).into_owned(),
+            ))),
+        },
     }
-    match serde_json::from_slice(raw) {
-        Ok(v) => Ok(Some(v)),
-        Err(e) if schema.is_some() => Err(format!("body: not valid JSON: {e}")),
-        Err(_) => Ok(None),
+}
+
+/// The fields of a `multipart/form-data` body: a file part as its file
+/// name, any other part as its text.
+async fn multipart_fields(
+    headers: &HeaderMap,
+    raw: &[u8],
+) -> Result<Vec<(String, String)>, multer::Error> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let boundary = multer::parse_boundary(content_type)?;
+    let data = Bytes::copy_from_slice(raw);
+    let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(data) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let mut fields = Vec::new();
+    while let Some(field) = multipart.next_field().await? {
+        let Some(name) = field.name().map(str::to_string) else {
+            continue;
+        };
+        let value = match field.file_name() {
+            Some(file) => file.to_string(),
+            None => field.text().await?,
+        };
+        fields.push((name, value));
     }
+    Ok(fields)
 }
 
 fn check(

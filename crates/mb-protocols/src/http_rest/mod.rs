@@ -8,6 +8,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::MockRuntime;
 
+mod form;
 mod handler;
 pub mod problem;
 pub mod routing;

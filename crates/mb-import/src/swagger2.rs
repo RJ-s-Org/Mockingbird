@@ -3,8 +3,9 @@
 use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::openapi3::{
-    EVENT_STREAM, METHODS, OperationIds, check_operation_refs, check_refs, deref, escape, invalid,
-    is_event_stream, is_json_media, slug, stream_item_schema, stream_kind,
+    CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
+    OperationIds, check_operation_refs, check_refs, deref, escape, invalid, is_event_stream,
+    is_json_media, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -13,8 +14,6 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 const REF_PREFIX: &str = "#/definitions/";
-const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
-const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
 
 /// Parameter keys that describe the parameter itself, not its value schema.
 const PARAM_META: [&str; 6] = [
@@ -55,7 +54,11 @@ fn merged_parameters<'a>(
 }
 
 /// Swagger 2 non-body parameters carry their schema inline (`type`, `enum`, ...).
+/// A `type: file` form parameter is a binary string.
 fn inline_param_schema(p: &Value) -> Value {
+    if p.get("type").and_then(Value::as_str) == Some("file") {
+        return json!({"type": "string", "format": "binary"});
+    }
     let obj: Map<String, Value> = p
         .as_object()
         .map(|o| {
@@ -125,7 +128,7 @@ fn compile_body(params: &[&Value], consumes: &[String]) -> (Option<Value>, bool)
         FORM_CONTENT_TYPE
     };
     if let Value::Object(o) = &mut form {
-        o.insert("x-content-type".into(), json!(content_type));
+        o.insert(CONTENT_TYPE_EXT.into(), json!(content_type));
     }
     let required = params
         .iter()
