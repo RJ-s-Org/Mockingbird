@@ -238,7 +238,8 @@ pub(crate) async fn root(
                 .collect()
         })
     });
-    let result = generate(rt, op_id, &http, key, args)
+    let selection = super::select::Selection::of(&ctx.ctx.field());
+    let result = generate(rt, op_id, &http, key, args, &selection)
         .instrument(span.clone())
         .await;
     if websocket && let Some(delay) = http.collected().delay {
@@ -265,6 +266,7 @@ async fn generate(
     http: &HttpCall,
     key: String,
     args: Map<String, Value>,
+    selection: &super::select::Selection,
 ) -> Result<Value, Error> {
     let started = Instant::now();
     let Some(op) = rt.bundle.operation(op_id) else {
@@ -330,7 +332,11 @@ async fn generate(
                         body: Some(Value::Object(args)),
                         ..Default::default()
                     };
-                    match call::generate_once(rt, &plan, &call).await {
+                    let narrowed = op
+                        .success_output()
+                        .and_then(|o| o.schema.as_ref())
+                        .map(|schema| super::select::narrow(schema, &rt.bundle.defs, selection));
+                    match call::generate_narrowed(rt, &plan, &call, narrowed.as_ref()).await {
                         Ok(generated) => {
                             report.usage = generated.usage;
                             report.source = Some(generated.source);

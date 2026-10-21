@@ -67,6 +67,7 @@ fn ctx() -> GenerationContext<'static> {
         target: None,
         forced_status: None,
         scenario: None,
+        response_schema: None,
     }
 }
 
@@ -285,6 +286,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     target: Some(&target),
                     forced_status: None,
                     scenario: None,
+                    response_schema: None,
                 },
             )
             .await
@@ -693,4 +695,61 @@ async fn llm_answer_has_no_fallback_reason() {
         .await
         .unwrap();
     assert_eq!(out.fallback_reason, None);
+}
+
+/// A GraphQL selection set narrows the success schema: the prompt, the
+/// validation and the faker all use the narrowed schema.
+fn narrowed() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+        "additionalProperties": false
+    })
+}
+
+#[tokio::test]
+async fn narrowed_schema_replaces_the_operations_schema() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let schema = narrowed();
+    let (provider, engine) = scripted(vec![Ok(json!({"id": "o1"}).to_string())]);
+    let out = engine
+        .generate(
+            &bundle,
+            op,
+            &call("getOrder"),
+            GenerationContext {
+                response_schema: Some(&schema),
+                ..ctx()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm, "{:?}", out.fallback_reason);
+    assert_eq!(out.body, Some(json!({"id": "o1"})));
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(!system.contains("customerId"), "{system}");
+}
+
+#[tokio::test]
+async fn narrowed_schema_shapes_the_fallback() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let schema = narrowed();
+    let out = offline()
+        .generate(
+            &bundle,
+            op,
+            &call("getOrder"),
+            GenerationContext {
+                response_schema: Some(&schema),
+                ..ctx()
+            },
+        )
+        .await
+        .unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+    assert!(body["id"].is_string());
 }

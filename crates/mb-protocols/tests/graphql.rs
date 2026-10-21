@@ -1201,3 +1201,37 @@ fn invalid_interface_implementations_are_rejected() {
         .unwrap();
     assert!(err.to_string().contains("U.email"), "{err}");
 }
+
+/// The model is asked only for the selected fields: the prompt carries the
+/// narrowed schema (with nested arguments), and an answer holding only
+/// those fields is an LLM answer, not a fallback.
+#[tokio::test]
+async fn generation_follows_the_selection_set() {
+    let provider = scripted(vec![json!({
+        "__typename": "User",
+        "login": "octocat",
+        "repositories": [{"__typename": "Repository", "name": "hello"}],
+    })]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let a = query(
+        &base,
+        r#"{ viewer { login ...R } } fragment R on User { repositories(first: 3) { name } }"#,
+    )
+    .await;
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert_eq!(
+        a.headers["x-mockingbird-source"],
+        "llm",
+        "{:?}",
+        a.headers.get("x-mockingbird-fallback-reason")
+    );
+    assert_eq!(a.body["data"]["viewer"]["repositories"][0]["name"], "hello");
+    let system = &provider.requests()[0].messages[0].content;
+    for unselected in ["createdAt", "stargazerCount", "isPrivate"] {
+        assert!(!system.contains(unselected), "{unselected} in {system}");
+    }
+    assert!(
+        system.contains(r#"Queried with arguments {\"first\":3}"#),
+        "{system}"
+    );
+}
