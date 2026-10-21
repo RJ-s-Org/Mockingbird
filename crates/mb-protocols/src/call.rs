@@ -1106,6 +1106,7 @@ async fn write_state(
 
 /// `reason` as a header value: printable ASCII only (anything else becomes
 /// `?`), cut to 300 bytes.
+#[cfg(any(feature = "http-rest", feature = "graphql"))]
 pub(crate) fn reason_header(reason: &str) -> axum::http::HeaderValue {
     let clean: String = reason
         .chars()
