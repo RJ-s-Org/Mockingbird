@@ -600,6 +600,8 @@ fn meta_for(ids: &[&str]) -> DraftMeta {
             .collect::<BTreeMap<_, _>>(),
         usage: TokenUsage::default(),
         edited: false,
+        sources: Vec::new(),
+        merged_from: None,
     }
 }
 
@@ -1068,4 +1070,52 @@ async fn all_low_confidence_fails_quoting_the_reasons() {
     let text = err.to_string();
     assert!(matches!(err, SmartError::NoOperations(_)), "{text}");
     assert!(text.contains("was left out"), "{text}");
+}
+
+#[tokio::test]
+async fn two_sources_make_one_draft() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pets.md"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/markdown")
+                .set_body_bytes(fixture("smart/petstore.md")),
+        )
+        .mount(&server)
+        .await;
+    let har = ImportInput::Bytes {
+        kind: ImportKind::Har,
+        name: Some("petstore.har".into()),
+        bytes: fixture("smart/petstore.har"),
+    };
+    let url = ImportInput::Url(format!("{}/pets.md", server.uri()));
+    let missing = ImportInput::Url(format!("{}/missing.md", server.uri()));
+    // The HAR's summaries call comes first; its answer is not used.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(r#"{"summaries": []}"#.into()),
+        Ok(pets_answer()),
+    ]));
+    let draft = mb_import::smart::run_import_sources(
+        vec![har, url, missing],
+        Some(&llm(provider, 1000)),
+        &loopback_options(),
+        &NoopObserver,
+        &mb_import::smart::fetch::SystemResolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(draft.meta.sources.len(), 3);
+    assert_eq!(draft.meta.sources[0], "petstore.har");
+    assert!(draft.document["paths"]["/api/pets/{petId}"]["get"].is_object()); // from the HAR
+    assert!(draft.document["paths"]["/pets/{petId}"]["get"].is_object()); // from the docs
+    assert!(
+        draft
+            .meta
+            .warnings
+            .iter()
+            .any(|w| w.code == "source_skipped" && w.message.contains("missing.md")),
+        "{:?}",
+        draft.meta.warnings
+    );
 }

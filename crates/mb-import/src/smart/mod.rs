@@ -412,6 +412,41 @@ pub async fn run_import_with(
     observer: &dyn ImportObserver,
     resolver: &dyn Resolver,
 ) -> Result<DraftResult, SmartError> {
+    run_import_sources(vec![input], llm, opts, observer, resolver).await
+}
+
+/// Most sources of one import.
+pub const MAX_IMPORT_SOURCES: usize = 100;
+
+/// Where a source's operations came from.
+struct SourceInfo {
+    kind: ImportKind,
+    name: Option<String>,
+    url: Option<String>,
+}
+
+/// The name a source is reported by: its file name, or its URL with query
+/// values redacted.
+fn input_name(input: &ImportInput) -> String {
+    match input {
+        ImportInput::Bytes { kind, name, .. } => {
+            name.clone().unwrap_or_else(|| kind.as_str().to_string())
+        }
+        ImportInput::Url(url) => fetch::validate_url(url)
+            .map(|u| redact::redacted_url(&u))
+            .unwrap_or_else(|_| "an invalid URL".to_string()),
+    }
+}
+
+/// Fetches (for a URL) and extracts one source within `budget`.
+async fn extract_source(
+    input: ImportInput,
+    llm: Option<&ExtractLlm>,
+    opts: &ImportOptions,
+    observer: &dyn ImportObserver,
+    resolver: &dyn Resolver,
+    budget: &mut TokenBudget,
+) -> Result<(SourceInfo, Extracted), SmartError> {
     let (kind, bytes, source_name, source_url) = match input {
         ImportInput::Bytes { kind, name, bytes } => (kind, bytes, name, None),
         ImportInput::Url(url) => {
@@ -434,17 +469,8 @@ pub async fn run_import_with(
         )));
     }
 
-    let mut budget = TokenBudget::new(opts.max_tokens);
-    let mut extracted = if kind.needs_llm() {
-        extract_document(
-            kind,
-            bytes,
-            source_name.as_deref(),
-            llm,
-            &mut budget,
-            observer,
-        )
-        .await?
+    let extracted = if kind.needs_llm() {
+        extract_document(kind, bytes, source_name.as_deref(), llm, budget, observer).await?
     } else {
         let mut recorded = blocking(move || match kind {
             ImportKind::Har => har::import_har(&bytes),
@@ -453,7 +479,7 @@ pub async fn run_import_with(
         .await?;
         if let Some(llm) = llm {
             let warnings =
-                summarize_operations(llm, &mut recorded.operations, &mut budget, observer).await?;
+                summarize_operations(llm, &mut recorded.operations, budget, observer).await?;
             recorded.warnings.extend(warnings);
         }
         Extracted {
@@ -466,6 +492,127 @@ pub async fn run_import_with(
             embedded: Embedded::default(),
         }
     };
+    let info = SourceInfo {
+        kind,
+        name: source_name,
+        url: source_url,
+    };
+    Ok((info, extracted))
+}
+
+/// The extractions of several sources as one: operations merged (an
+/// embedded block's operation wins over the others), servers united,
+/// warnings and chunk counts summed. The first source with operations
+/// names the draft.
+fn combine(parts: Vec<(SourceInfo, Extracted)>) -> Option<(SourceInfo, Extracted)> {
+    if parts.len() <= 1 {
+        return parts.into_iter().next();
+    }
+    let first = parts
+        .iter()
+        .position(|(_, e)| !e.operations.is_empty() || !e.embedded.operations.is_empty())
+        .unwrap_or(0);
+    let mut info = None;
+    let mut combined = Extracted {
+        title: String::new(),
+        servers: Vec::new(),
+        operations: Vec::new(),
+        warnings: Vec::new(),
+        chunk_count: 0,
+        chunks_processed: 0,
+        embedded: Embedded::default(),
+    };
+    let mut seen_blocks = HashSet::new();
+    for (i, (source, e)) in parts.into_iter().enumerate() {
+        if i == first {
+            combined.title = e.title;
+            info = Some(source);
+        }
+        for server in e.servers {
+            if !combined.servers.contains(&server) {
+                combined.servers.push(server);
+            }
+        }
+        combined.operations.extend(e.operations);
+        combined.warnings.extend(e.warnings);
+        combined.chunk_count += e.chunk_count;
+        combined.chunks_processed += e.chunks_processed;
+        for op in e.embedded.operations {
+            if seen_blocks.insert(path_key(&op.method, &op.path)) {
+                combined.embedded.operations.push(op);
+            }
+        }
+        for (section, entries) in e.embedded.components {
+            let target = combined
+                .embedded
+                .components
+                .entry(section)
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let (Value::Object(target), Value::Object(entries)) = (target, entries) {
+                for (name, value) in entries {
+                    target.entry(name).or_insert(value);
+                }
+            }
+        }
+        for server in e.embedded.servers {
+            if !combined.embedded.servers.contains(&server) {
+                combined.embedded.servers.push(server);
+            }
+        }
+    }
+    let (mut operations, merge_warnings) =
+        merge_operations(std::mem::take(&mut combined.operations));
+    combined.warnings.extend(merge_warnings);
+    operations.retain(|o| !seen_blocks.contains(&path_key(&o.method, &o.path)));
+    combined.operations = operations;
+    info.map(|info| (info, combined))
+}
+
+/// Every source extracted under one token budget, operations merged
+/// ([`merge_operations`]), one draft assembled. A source that cannot be
+/// fetched or read is skipped with a `source_skipped` warning; when all
+/// fail, the first error is returned. [`SmartError::LlmRequired`] and
+/// [`SmartError::Canceled`] end the import at once.
+pub async fn run_import_sources(
+    inputs: Vec<ImportInput>,
+    llm: Option<&ExtractLlm>,
+    opts: &ImportOptions,
+    observer: &dyn ImportObserver,
+    resolver: &dyn Resolver,
+) -> Result<DraftResult, SmartError> {
+    if inputs.len() > MAX_IMPORT_SOURCES {
+        return Err(SmartError::Unsupported(format!(
+            "an import takes at most {MAX_IMPORT_SOURCES} sources"
+        )));
+    }
+    let names: Vec<String> = inputs.iter().map(input_name).collect();
+    let mut budget = TokenBudget::new(opts.max_tokens);
+    let mut parts = Vec::with_capacity(inputs.len());
+    let mut skipped = Vec::new();
+    let mut first_error = None;
+    for (input, name) in inputs.into_iter().zip(&names) {
+        match extract_source(input, llm, opts, observer, resolver, &mut budget).await {
+            Ok(part) => parts.push(part),
+            Err(e @ (SmartError::LlmRequired | SmartError::Canceled)) => return Err(e),
+            Err(e) => {
+                skipped.push(DraftWarning::new(
+                    "source_skipped",
+                    format!("{name} was skipped: {e}"),
+                ));
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    let Some((info, mut extracted)) = combine(parts) else {
+        return Err(first_error.unwrap_or_else(|| SmartError::NoOperations(String::new())));
+    };
+    extracted.warnings.extend(skipped);
+    let SourceInfo {
+        kind,
+        name: source_name,
+        url: source_url,
+    } = info;
+    let sources = if names.len() > 1 { names } else { Vec::new() };
 
     extracted.operations = drop_low_confidence(
         std::mem::take(&mut extracted.operations),
@@ -535,6 +682,8 @@ pub async fn run_import_with(
         operations,
         usage: budget.used,
         edited: false,
+        sources,
+        merged_from: None,
     };
     Ok(DraftResult {
         document,
