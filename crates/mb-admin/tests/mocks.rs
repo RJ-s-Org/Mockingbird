@@ -243,6 +243,7 @@ async fn file_managed_mock_rejects_chaos_patch() {
                     }),
                     ..MockLimits::default()
                 },
+                hosts: vec![],
             },
         )
         .await

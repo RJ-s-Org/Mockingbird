@@ -87,6 +87,7 @@ async fn mock_in(
                     mode: auth,
                     ..DataPlaneAuthConfig::default()
                 },
+                hosts: vec![],
             },
         )
         .await

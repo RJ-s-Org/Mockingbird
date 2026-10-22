@@ -314,6 +314,7 @@ pub async fn create(
                 data_plane_auth: body.data_plane_auth,
                 chaos: body.chaos,
                 limits: body.limits,
+                hosts: vec![],
             },
         )
         .await
