@@ -522,6 +522,7 @@ pub async fn create(
             source_name: job.source_name,
             input: job.input,
             created_by: Some(access.principal.subject.clone()),
+            mode: None,
         })
         .await?;
     st.imports.wake.notify_one();

@@ -36,7 +36,7 @@ const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_prof
      data_plane_auth, created_at, updated_at, chaos, limits";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
-     draft_meta";
+     draft_meta, warnings";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
      max_tokens, fallback_profile, source, headers, extra_body";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
@@ -46,7 +46,7 @@ const AUDIT_COLUMNS: &str = "id, workspace, actor_subject, actor_kind, action, t
      request_id, at";
 /// Every `import_jobs` column but `input`.
 const JOB_COLUMNS: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress, result_version, \
-     error, created_by, created_at, started_at, finished_at, updated_at";
+     error, created_by, created_at, started_at, finished_at, updated_at, mode";
 const LOG_COLUMNS: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
      prompt_tokens, completion_tokens, request, response, at, kind, fallback_reason";
 const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
@@ -184,9 +184,10 @@ impl SqliteControlStore {
             created_by: v.created_by,
             created_at: now(),
             draft_meta,
+            warnings: None,
         };
         let sql = format!(
-            "INSERT INTO contract_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO contract_versions ({VERSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)"
         );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(version.id.to_string())
@@ -285,6 +286,7 @@ fn version_from_row(row: &SqliteRow) -> Result<ContractVersion, StoreError> {
     let bundle: String = row.try_get("bundle")?;
     let status: String = row.try_get("status")?;
     let draft_meta: Option<String> = row.try_get("draft_meta")?;
+    let warnings: Option<String> = row.try_get("warnings")?;
     Ok(ContractVersion {
         id: parse_uuid(&id)?,
         mock_id: parse_uuid(&mock_id)?,
@@ -296,6 +298,7 @@ fn version_from_row(row: &SqliteRow) -> Result<ContractVersion, StoreError> {
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         draft_meta: draft_meta.map(|m| serde_json::from_str(&m)).transpose()?,
+        warnings: warnings.map(|w| serde_json::from_str(&w)).transpose()?,
     })
 }
 
@@ -320,6 +323,7 @@ fn job_from_row(row: &SqliteRow) -> Result<ImportJob, StoreError> {
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
         updated_at: row.try_get("updated_at")?,
+        mode: row.try_get("mode")?,
     })
 }
 
@@ -1486,6 +1490,29 @@ impl ControlStore for SqliteControlStore {
         Ok(approved)
     }
 
+    async fn set_contract_version_warnings(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        warnings: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        let warnings = serde_json::to_string(&warnings)?;
+        let sql = format!(
+            "UPDATE contract_versions SET warnings = ? WHERE mock_id = ? AND version = ? \
+             RETURNING {VERSION_COLUMNS}"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(warnings)
+            .bind(mock_id.to_string())
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| {
+                StoreError::NotFound(format!("contract version {version} of mock {mock_id}"))
+            })?;
+        version_from_row(&row)
+    }
+
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
         let progress = queued_progress();
         let progress_json = serde_json::to_string(&progress)?;
@@ -1512,10 +1539,11 @@ impl ControlStore for SqliteControlStore {
             started_at: None,
             finished_at: None,
             updated_at: at,
+            mode: j.mode,
         };
         sqlx::query(
             "INSERT INTO import_jobs (id, workspace, mock_id, mock, kind, source_name, input, status, \
-             progress, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             progress, created_by, created_at, updated_at, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(job.id.to_string())
         .bind(&job.workspace)
@@ -1529,6 +1557,7 @@ impl ControlStore for SqliteControlStore {
         .bind(&job.created_by)
         .bind(job.created_at)
         .bind(job.updated_at)
+        .bind(&job.mode)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
