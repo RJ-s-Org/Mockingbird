@@ -134,7 +134,17 @@ pub(crate) fn convert_id(id: &str) -> Option<String> {
 /// `<method>_<path slug>` with a numeric suffix on collision; with the
 /// docs' original id when it was converted.
 fn assign_id(op: &DraftOperation, used: &mut HashSet<String>) -> (String, Option<String>) {
-    if let Some(own) = op.operation_id.as_deref()
+    assign_id_parts(&op.method, &op.path, op.operation_id.as_deref(), used)
+}
+
+/// [`assign_id`] for the parts of an operation.
+pub(crate) fn assign_id_parts(
+    method: &str,
+    path: &str,
+    own: Option<&str>,
+    used: &mut HashSet<String>,
+) -> (String, Option<String>) {
+    if let Some(own) = own
         && let Some(id) = convert_id(own)
         && !used.contains(&id)
     {
@@ -144,8 +154,8 @@ fn assign_id(op: &DraftOperation, used: &mut HashSet<String>) -> (String, Option
     }
     let base = format!(
         "{}_{}",
-        op.method.to_ascii_lowercase(),
-        slug(&op.path).replace('-', "_")
+        method.to_ascii_lowercase(),
+        slug(path).replace('-', "_")
     );
     let mut id = base.clone();
     let mut n = 2;
@@ -426,15 +436,25 @@ pub fn implicated_operations(
     ops: &[DraftOperation],
     ids: &[String],
 ) -> Vec<usize> {
-    ops.iter()
+    let targets: Vec<(&str, &str)> = ops
+        .iter()
+        .map(|o| (o.method.as_str(), o.path.as_str()))
+        .collect();
+    implicated_targets(issues, &targets, ids)
+}
+
+/// [`implicated_operations`] for `(method, path)` pairs.
+pub fn implicated_targets(
+    issues: &[DraftIssue],
+    targets: &[(&str, &str)],
+    ids: &[String],
+) -> Vec<usize> {
+    targets
+        .iter()
         .zip(ids)
         .enumerate()
-        .filter(|(_, (op, id))| {
-            let at = format!(
-                "/paths/{}/{}",
-                escape(&op.path),
-                op.method.to_ascii_lowercase()
-            );
+        .filter(|(_, ((method, path), id))| {
+            let at = format!("/paths/{}/{}", escape(path), method.to_ascii_lowercase());
             issues.iter().any(|issue| {
                 issue.pointer == at
                     || issue

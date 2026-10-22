@@ -4,6 +4,7 @@
 pub mod assemble;
 pub mod chunk;
 pub mod complete;
+pub mod embedded;
 pub mod fetch;
 pub mod har;
 pub mod infer;
@@ -16,19 +17,25 @@ pub mod postman;
 pub mod redact;
 pub mod text;
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use mb_mcm::Bundle;
 use serde::Serialize;
 use serde_json::Value;
 
-use assemble::{DraftIssue, assemble_openapi, compile_draft, implicated_operations};
+use assemble::{
+    DraftIssue, assemble_openapi, compile_draft, implicated_operations, implicated_targets,
+};
 use chunk::{CHUNK_OVERLAP_TOKENS, CHUNK_TOKENS, chunk};
+use embedded::{Embedded, covers_endpoints, extract_embedded, insert_embedded};
 use fetch::{FetchPolicy, Fetched, Resolver, SystemResolver, fetch_with};
 pub use llm::ExtractLlm;
 use llm::{TokenBudget, extract_chunk, summarize_operations};
 use merge::merge_operations;
 pub use model::ImportKind;
 use model::{DraftMeta, DraftOperation, DraftWarning, OperationMeta};
+use paths::path_key;
 
 /// Largest accepted input (a file, decoded base64 or text).
 pub const MAX_IMPORT_BYTES: usize = 20 * 1024 * 1024;
@@ -280,28 +287,63 @@ struct Extracted {
     warnings: Vec<DraftWarning>,
     chunk_count: usize,
     chunks_processed: usize,
+    /// Operations of OpenAPI blocks embedded in a document.
+    embedded: Embedded,
 }
 
-/// Reads documentation with the LLM, chunk by chunk, within the budget.
+/// The draft's title: the document's, else the source name, else
+/// [`DEFAULT_TITLE`].
+fn document_title(title: Option<String>, source_name: Option<&str>) -> String {
+    title
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| source_name.map(str::to_string))
+        .unwrap_or_else(|| DEFAULT_TITLE.to_string())
+}
+
+/// Reads documentation: the operations of its embedded OpenAPI blocks,
+/// then the rest with the LLM, chunk by chunk, within the budget. When the
+/// blocks cover every endpoint the text names, no chunk is read (and no
+/// LLM is needed).
 async fn extract_document(
     kind: ImportKind,
     bytes: Vec<u8>,
     source_name: Option<&str>,
-    llm: &ExtractLlm,
+    llm: Option<&ExtractLlm>,
     budget: &mut TokenBudget,
     observer: &dyn ImportObserver,
 ) -> Result<Extracted, SmartError> {
     report(observer, Phase::Extracting, 0, 1).await?;
-    let (doc, chunks) = blocking(move || {
-        let doc = text::extract_text(kind, &bytes)?;
-        let chunks = chunk(&doc, CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS);
-        Ok((doc, chunks))
+    let (doc, chunks, embedded, covered) = blocking(move || {
+        let mut doc = text::extract_text(kind, &bytes)?;
+        let embedded = extract_embedded(kind, &bytes, &mut doc);
+        let covered = !embedded.operations.is_empty() && covers_endpoints(&embedded, &doc);
+        let chunks = if covered {
+            Vec::new()
+        } else {
+            chunk(&doc, CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS)
+        };
+        Ok((doc, chunks, embedded, covered))
     })
     .await?;
+    let llm = match llm {
+        Some(llm) => llm,
+        None if covered => {
+            return Ok(Extracted {
+                title: document_title(doc.title, source_name),
+                servers: embedded.servers.clone(),
+                operations: Vec::new(),
+                warnings: embedded.warnings.clone(),
+                chunk_count: 0,
+                chunks_processed: 0,
+                embedded,
+            });
+        }
+        None => return Err(SmartError::LlmRequired),
+    };
     let total = chunks.len();
     let name = source_name.unwrap_or(UNNAMED_SOURCE);
     let mut operations = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warnings = embedded.warnings.clone();
     let mut processed = 0usize;
     for c in &chunks {
         report(observer, Phase::Analyzing, processed, total).await?;
@@ -324,20 +366,29 @@ async fn extract_document(
         warnings.extend(result.warnings);
         processed += 1;
     }
-    let (operations, merge_warnings) = merge_operations(operations);
+    let (mut operations, merge_warnings) = merge_operations(operations);
     warnings.extend(merge_warnings);
-    let title = doc
-        .title
-        .filter(|t| !t.trim().is_empty())
-        .or_else(|| source_name.map(str::to_string))
-        .unwrap_or_else(|| DEFAULT_TITLE.to_string());
+    // An operation an embedded block defines is taken from the block.
+    let blocks: HashSet<(String, String)> = embedded
+        .operations
+        .iter()
+        .map(|o| path_key(&o.method, &o.path))
+        .collect();
+    let replaced: HashSet<String> = operations
+        .iter()
+        .filter(|o| blocks.contains(&path_key(&o.method, &o.path)))
+        .map(DraftOperation::target)
+        .collect();
+    operations.retain(|o| !blocks.contains(&path_key(&o.method, &o.path)));
+    warnings.retain(|w| w.operation.as_ref().is_none_or(|t| !replaced.contains(t)));
     Ok(Extracted {
-        title,
-        servers: Vec::new(),
+        title: document_title(doc.title, source_name),
+        servers: embedded.servers.clone(),
         operations,
         warnings,
         chunk_count: total,
         chunks_processed: processed,
+        embedded,
     })
 }
 
@@ -385,7 +436,6 @@ pub async fn run_import_with(
 
     let mut budget = TokenBudget::new(opts.max_tokens);
     let mut extracted = if kind.needs_llm() {
-        let llm = llm.ok_or(SmartError::LlmRequired)?;
         extract_document(
             kind,
             bytes,
@@ -413,6 +463,7 @@ pub async fn run_import_with(
             warnings: recorded.warnings,
             chunk_count: 0,
             chunks_processed: 0,
+            embedded: Embedded::default(),
         }
     };
 
@@ -420,7 +471,7 @@ pub async fn run_import_with(
         std::mem::take(&mut extracted.operations),
         &mut extracted.warnings,
     );
-    if extracted.operations.is_empty() {
+    if extracted.operations.is_empty() && extracted.embedded.operations.is_empty() {
         // Operations left out for low confidence say why themselves.
         let low = extracted
             .warnings
@@ -446,6 +497,7 @@ pub async fn run_import_with(
         extracted,
         document,
         ids,
+        embedded_ids,
         warnings: assembly_warnings,
         source,
         bundle,
@@ -463,6 +515,12 @@ pub async fn run_import_with(
                 },
             )
         })
+        .chain(
+            embedded_ids
+                .into_iter()
+                .zip(&extracted.embedded.operations)
+                .map(|(id, op)| (id, op.meta())),
+        )
         .collect();
     let mut warnings = extracted.warnings;
     warnings.extend(assembly_warnings);
@@ -540,23 +598,44 @@ struct Assembled {
     extracted: Extracted,
     document: Value,
     ids: Vec<String>,
+    /// The ids of `extracted.embedded`'s operations, in order.
+    embedded_ids: Vec<String>,
     warnings: Vec<DraftWarning>,
     source: Vec<u8>,
     bundle: Bundle,
 }
 
+/// The draft document of `extracted`: its operations assembled, its
+/// embedded operations inserted; with the ids of both, and warnings.
+fn build_document(extracted: &Extracted) -> (Value, Vec<String>, Vec<String>, Vec<DraftWarning>) {
+    let (mut document, ids, warnings) =
+        assemble_openapi(&extracted.title, &extracted.servers, &extracted.operations);
+    let mut used: HashSet<String> = ids.iter().cloned().collect();
+    let embedded_ids = insert_embedded(&mut document, &extracted.embedded, &mut used);
+    (document, ids, embedded_ids, warnings)
+}
+
 /// Assembles and compiles the extracted operations, skipping the ones the
 /// compiler's problems point at (§11.3); a problem elsewhere fails.
 fn assemble(mut extracted: Extracted) -> Result<Assembled, SmartError> {
-    let (mut document, mut ids, mut assembly_warnings) =
-        assemble_openapi(&extracted.title, &extracted.servers, &extracted.operations);
+    let (mut document, mut ids, mut embedded_ids, mut assembly_warnings) =
+        build_document(&extracted);
     let compiled = match compile_draft(&document) {
         Ok(compiled) => compiled,
         Err(issues) => {
             // Skip the operations the problems point at, never the job
             // (§11.3); a problem elsewhere still fails it.
             let bad = implicated_operations(&issues, &extracted.operations, &ids);
-            if bad.is_empty() || bad.len() == extracted.operations.len() {
+            let block_targets: Vec<(&str, &str)> = extracted
+                .embedded
+                .operations
+                .iter()
+                .map(|o| (o.method.as_str(), o.path.as_str()))
+                .collect();
+            let bad_blocks = implicated_targets(&issues, &block_targets, &embedded_ids);
+            let skipped = bad.len() + bad_blocks.len();
+            let total = extracted.operations.len() + extracted.embedded.operations.len();
+            if skipped == 0 || skipped == total {
                 return Err(compile_error(&issues));
             }
             let problems: Vec<String> = issues
@@ -564,8 +643,14 @@ fn assemble(mut extracted: Extracted) -> Result<Assembled, SmartError> {
                 .take(3)
                 .map(|i| format!("{}: {}", i.pointer, i.message))
                 .collect();
+            let mut targets: Vec<String> = Vec::with_capacity(skipped);
             for &i in bad.iter().rev() {
-                let target = extracted.operations.remove(i).target();
+                targets.push(extracted.operations.remove(i).target());
+            }
+            for &i in bad_blocks.iter().rev() {
+                targets.push(extracted.embedded.operations.remove(i).target());
+            }
+            for target in targets {
                 extracted.warnings.push(
                     DraftWarning::new(
                         "invalid_operation",
@@ -577,8 +662,7 @@ fn assemble(mut extracted: Extracted) -> Result<Assembled, SmartError> {
                     .for_operation(target),
                 );
             }
-            (document, ids, assembly_warnings) =
-                assemble_openapi(&extracted.title, &extracted.servers, &extracted.operations);
+            (document, ids, embedded_ids, assembly_warnings) = build_document(&extracted);
             compile_draft(&document).map_err(|issues| compile_error(&issues))?
         }
     };
@@ -587,6 +671,7 @@ fn assemble(mut extracted: Extracted) -> Result<Assembled, SmartError> {
         extracted,
         document,
         ids,
+        embedded_ids,
         warnings: assembly_warnings,
         source,
         bundle,
