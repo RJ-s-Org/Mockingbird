@@ -202,6 +202,82 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
     out
 }
 
+/// A body keyed by field names (generated in full) re-keyed by response
+/// key: each selected key takes its field name's member, recursively
+/// through objects and lists; `__typename` is kept. A value whose
+/// selection has no fields is returned unchanged.
+pub(crate) fn rekey(value: Value, sel: &Selection) -> Value {
+    if sel.fields.is_empty() {
+        return value;
+    }
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(|v| rekey(v, sel)).collect()),
+        Value::Object(obj) => {
+            let mut out = Map::new();
+            if let Some(typename) = obj.get("__typename") {
+                out.insert("__typename".into(), typename.clone());
+            }
+            for (key, child) in &sel.fields {
+                if let Some(member) = obj.get(&child.name) {
+                    out.insert(key.clone(), rekey(member.clone(), child));
+                }
+            }
+            Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+/// A narrowed body made whole: every child with `shares` gets a copy of
+/// the shared key's value (recursively, through lists), and at the top
+/// level a renamed key takes its field name's member when the engine
+/// put one there (stored target overlay, forced identity), provided that
+/// name is not itself a response key and only one non-shared child uses it.
+pub(crate) fn settle(value: &mut Value, sel: &Selection) {
+    if let Value::Object(obj) = value {
+        for (key, child) in sel.generated() {
+            let renamed = *key != child.name
+                && !sel.fields.contains_key(&child.name)
+                && sel
+                    .generated()
+                    .filter(|(_, c)| c.name == child.name)
+                    .count()
+                    == 1;
+            if let Some(member) = obj.get(&child.name).filter(|_| renamed) {
+                let member = member.clone();
+                obj.insert(key.clone(), member);
+            }
+        }
+    }
+    copy_shared(value, sel);
+}
+
+fn copy_shared(value: &mut Value, sel: &Selection) {
+    if sel.fields.is_empty() {
+        return;
+    }
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(|v| copy_shared(v, sel)),
+        Value::Object(obj) => {
+            for (key, child) in sel.generated() {
+                if let Some(member) = obj.get_mut(key) {
+                    copy_shared(member, child);
+                }
+            }
+            for (key, child) in &sel.fields {
+                let Some(shared) = &child.shares else {
+                    continue;
+                };
+                if let Some(member) = obj.get(shared) {
+                    let member = member.clone();
+                    obj.insert(key.clone(), member);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -393,5 +469,45 @@ mod tests {
         let out = narrow(&json!({"$ref": "#/$defs/User"}), &defs(), &query);
         assert!(out["properties"].get("b").is_none(), "{out}");
         assert_eq!(out["required"], json!(["__typename", "a"]));
+    }
+
+    #[test]
+    fn rekey_maps_field_names_to_response_keys() {
+        let query = sel([
+            ("title", aliased("body", json!({}), leaf())),
+            ("body", aliased("title", json!({}), leaf())),
+        ]);
+        let full = json!({"__typename": "Issue", "title": "T", "body": null, "state": "OPEN"});
+        assert_eq!(
+            rekey(full, &query),
+            json!({"__typename": "Issue", "title": null, "body": "T"})
+        );
+        let names = sel([(
+            "names",
+            aliased(
+                "nodes",
+                json!({}),
+                sel([("n", aliased("name", json!({}), leaf()))]),
+            ),
+        )]);
+        assert_eq!(
+            rekey(json!({"nodes": [{"name": "a"}, {"name": "b"}]}), &names),
+            json!({"names": [{"n": "a"}, {"n": "b"}]})
+        );
+    }
+
+    #[test]
+    fn settle_copies_shared_aliases_and_reflects_stored_names() {
+        let mut b = aliased("login", json!({}), leaf());
+        b.shares = Some("a".into());
+        let query = sel([
+            ("a", aliased("login", json!({}), leaf())),
+            ("b", b),
+            ("ref", aliased("id", json!({}), leaf())),
+        ]);
+        let mut body = json!({"a": "octocat", "ref": "generated", "id": "stored"});
+        settle(&mut body, &query);
+        assert_eq!(body["b"], "octocat");
+        assert_eq!(body["ref"], "stored");
     }
 }

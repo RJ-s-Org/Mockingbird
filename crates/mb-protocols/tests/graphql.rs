@@ -186,6 +186,117 @@ async fn aliases_are_answered_in_one_joint_call() {
     assert_eq!(logins, set(&["a", "b"]));
 }
 
+/// Two aliases of one field with different arguments are separate
+/// properties of the prompt and get separate values.
+#[tokio::test]
+async fn aliases_with_different_arguments_get_different_values() {
+    let repo = |n: &str| json!({"__typename": "Repository", "name": n});
+    let provider = scripted(vec![json!({
+        "__typename": "User",
+        "login": "octocat",
+        "small": [repo("one")],
+        "large": [repo("one"), repo("two")],
+    })]);
+    let base = serve(runtime(Some(provider.clone()))).await;
+    let r = query(
+        &base,
+        "{ viewer { login small: repositories(first: 1) { name } large: repositories(first: 5) { name } } }",
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.headers["x-mockingbird-source"],
+        "llm",
+        "{:?}",
+        r.headers.get("x-mockingbird-fallback-reason")
+    );
+    assert_eq!(r.body["data"]["viewer"]["small"], json!([{"name": "one"}]));
+    assert_eq!(
+        r.body["data"]["viewer"]["large"],
+        json!([{"name": "one"}, {"name": "two"}])
+    );
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(
+        system.contains(r#"{\"first\":1}"#) && system.contains(r#"{\"first\":5}"#),
+        "{system}"
+    );
+}
+
+/// Aliases with identical arguments share one generated value; the model
+/// is not asked for the second one.
+#[tokio::test]
+async fn aliases_with_identical_arguments_share_one_value() {
+    let provider = scripted(vec![json!({
+        "__typename": "User",
+        "a": [{"__typename": "Repository", "name": "x", "stargazerCount": 7}],
+    })]);
+    let base = serve(runtime(Some(provider))).await;
+    let r = query(
+        &base,
+        "{ viewer { a: repositories(first: 2) { name } b: repositories(first: 2) { stargazerCount } } }",
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.headers["x-mockingbird-source"], "llm");
+    assert_eq!(r.body["data"]["viewer"]["a"], json!([{"name": "x"}]));
+    assert_eq!(
+        r.body["data"]["viewer"]["b"],
+        json!([{"stargazerCount": 7}])
+    );
+}
+
+/// Swapped names in a narrowed read keep their own fields' values.
+#[tokio::test]
+async fn swapped_aliases_in_a_read_keep_their_fields() {
+    let provider = scripted(vec![
+        json!({"__typename": "Issue", "title": null, "body": "T"}),
+    ]);
+    let base = serve(runtime(Some(provider))).await;
+    let r = query(&base, r#"{ issue(id: "I_1") { title: body body: title } }"#).await;
+    assert_eq!(r.headers["x-mockingbird-source"], "llm", "{}", r.body);
+    assert_eq!(r.body["data"]["issue"], json!({"title": null, "body": "T"}));
+}
+
+/// A mutation answered in full serves swapped aliases, then an aliased read
+/// of the stored issue reflects it.
+#[tokio::test]
+async fn aliases_after_a_mutation_reflect_state() {
+    let provider = scripted(vec![
+        issue("i-1", "Crash on start"),
+        json!({"__typename": "Issue", "ref": "other", "heading": "Something else"}),
+    ]);
+    let base = serve(runtime(Some(provider))).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({
+            "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { id title: body body: title } }",
+            "variables": {"in": {"repositoryId": "r-1", "title": "Crash on start"}},
+        }),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let made = &created.body["data"]["createIssue"];
+    assert_eq!(made["title"], Value::Null);
+    assert_eq!(made["body"], "Crash on start");
+    let id = made["id"].as_str().unwrap();
+    let read = post(
+        &base,
+        json!({
+            "query": "query($id: ID!) { issue(id: $id) { ref: id heading: title } }",
+            "variables": {"id": id},
+        }),
+        &session,
+    )
+    .await;
+    assert!(read.body.get("errors").is_none(), "{}", read.body);
+    assert_eq!(
+        read.body["data"]["issue"],
+        json!({"ref": id, "heading": "Crash on start"})
+    );
+}
+
 #[tokio::test]
 async fn mutation_then_query_reflects_state() {
     let provider = scripted(vec![
