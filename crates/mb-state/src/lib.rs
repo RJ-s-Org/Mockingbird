@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 
 pub mod bus;
+pub mod cache;
 pub mod leader;
 pub mod memory;
 pub mod redis;
@@ -17,6 +18,7 @@ pub mod sql;
 
 pub use self::redis::RedisStateStore;
 pub use bus::{Bus, BusEnvelope, BusEvent, LocalBus, MemoryBusHub, PgBus, RedisBus};
+pub use cache::{CachedResponse, CachingStateStore, DEFAULT_CACHE_ENTRIES, ResponseCache};
 pub use leader::{LeaderBackend, Leadership};
 pub use memory::MemoryStore;
 pub use sql::SqlStateStore;
@@ -146,6 +148,11 @@ pub trait StateStore: Send + Sync {
     async fn seed(&self, s: &SessionKey, resources: Vec<StoredResource>) -> Result<(), StateError>;
     async fn ping(&self) -> Result<(), StateError>;
     fn subscribe(&self) -> broadcast::Receiver<StateChanged>;
+    /// The per-session response cache, when this store keeps one (see
+    /// [`CachingStateStore`]).
+    fn response_cache(&self) -> Option<&ResponseCache> {
+        None
+    }
 }
 
 /// Opens a state store: `memory` gives a [`MemoryStore`]; `redis://…` and
