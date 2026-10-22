@@ -719,3 +719,87 @@ async fn per_operation_instructions_replace_the_scenario_ones() {
         "{prompt}"
     );
 }
+
+/// Counts seeding calls over a caching store.
+struct SeedSpy {
+    inner: Arc<dyn StateStore>,
+    seeded: AtomicUsize,
+}
+
+#[async_trait]
+impl StateStore for SeedSpy {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, StateError> {
+        self.inner.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.list(s, t, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+        self.inner.upsert(s, r).await
+    }
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        self.seeded.fetch_add(1, Ordering::SeqCst);
+        self.inner.insert_seeded(s, r).await
+    }
+    async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
+        self.inner.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.reset(s).await
+    }
+    async fn reset_mock(&self, ws: &str, mock: &str) -> Result<(), StateError> {
+        self.inner.reset_mock(ws, mock).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.touch(s).await
+    }
+    async fn sessions(&self, ws: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
+        self.inner.sessions(ws, mock).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, r: Vec<StoredResource>) -> Result<(), StateError> {
+        self.inner.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), StateError> {
+        Ok(())
+    }
+    fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
+        self.inner.subscribe()
+    }
+    fn response_cache(&self) -> Option<&mb_state::ResponseCache> {
+        self.inner.response_cache()
+    }
+}
+
+/// A list answered from the cache was seeded when it was generated; a hit
+/// seeds nothing again.
+#[tokio::test]
+async fn cache_hits_do_not_seed_again() {
+    let store = Arc::new(SeedSpy {
+        inner: mb_state::CachingStateStore::wrap(
+            memory(),
+            Duration::from_secs(3600),
+            mb_state::DEFAULT_CACHE_ENTRIES,
+        ),
+        seeded: AtomicUsize::new(0),
+    });
+    let router = http_rest::router(Arc::new(runtime(None, store.clone())));
+    send(&router, get_with("/orders", &[])).await;
+    let first = store.seeded.load(Ordering::SeqCst);
+    assert!(first > 0);
+    let resp = send(&router, get_with("/orders", &[])).await;
+    assert_eq!(resp.headers()["x-mockingbird-source"], "cache");
+    assert_eq!(store.seeded.load(Ordering::SeqCst), first);
+}

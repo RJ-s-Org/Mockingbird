@@ -694,26 +694,9 @@ pub(crate) async fn generate_narrowed(
             usage: Usage::default(),
             fallback_reason: None,
         };
-        async {
-            if target_id.is_none()
-                && let Some(t) = resource_type
-            {
-                write_state(
-                    &mut state,
-                    session,
-                    op,
-                    t,
-                    None,
-                    &served,
-                    None,
-                    WriteOrigin::Seeded,
-                )
-                .await;
-            }
-            state.touch(session).await;
-        }
-        .instrument(state_span())
-        .await;
+        // The answer's items were seeded when it was generated; writes and
+        // resets that could remove them also clear the cache.
+        state.touch(session).instrument(state_span()).await;
         return Ok(served);
     }
 
