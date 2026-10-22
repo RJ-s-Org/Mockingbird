@@ -650,7 +650,7 @@ pub(crate) async fn generate_narrowed(
     if rt.unknown_ids == UnknownIds::NotFound
         && matches!(op.kind, OperationKind::Query)
         && plan.forced_status.is_none()
-        && op.identity.as_ref().is_some_and(|i| i.path_param.is_some())
+        && op.identity.as_ref().is_some_and(path_names_identity)
         && target.is_none()
         && state.available()
         && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
@@ -875,6 +875,19 @@ fn canonical(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
         other => other.clone(),
     }
+}
+
+/// Whether the path parameter carries the value state is keyed by: it is
+/// the identity field itself, or id-like (`id`, `orderId`, `movie_id`). A
+/// `/users/{username}` read keyed by `id` cannot tell a missing user.
+fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
+    let Some(param) = identity.path_param.as_deref() else {
+        return false;
+    };
+    param == identity.field
+        || param.eq_ignore_ascii_case("id")
+        || param.ends_with("Id")
+        || param.ends_with("_id")
 }
 
 /// Whether no scenario applies to the call and no status is forced (an

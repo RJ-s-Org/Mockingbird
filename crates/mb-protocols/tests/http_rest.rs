@@ -1441,3 +1441,32 @@ async fn create_never_reuses_a_stored_id() {
             .is_some()
     );
 }
+
+/// `/users/{username}` reads by login while state is keyed by `id`: a
+/// missing entry says nothing, so `unknown_ids: 404` keeps generating.
+#[tokio::test]
+async fn unknown_ids_404_only_when_the_path_names_the_identity() {
+    let src = r#"
+openapi: 3.1.0
+info: {title: Users, version: "1"}
+paths:
+  /users/{username}:
+    get:
+      operationId: getUser
+      parameters: [{name: username, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [id, login], properties: {id: {type: integer}, login: {type: string}}}}}}
+        "404": {description: Not found}
+"#;
+    let bundle = Arc::new(compile(src.as_bytes()).unwrap());
+    let mut rt = MockRuntime::new(
+        "users",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        memory_state(),
+    );
+    rt.unknown_ids = UnknownIds::NotFound;
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router.oneshot(get("/users/octocat")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
