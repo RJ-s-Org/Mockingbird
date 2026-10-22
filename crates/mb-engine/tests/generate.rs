@@ -1023,3 +1023,67 @@ paths:
     );
     assert_eq!(out.body.unwrap()["detail"], "pets p1 does not exist");
 }
+
+#[tokio::test]
+async fn duplicate_ids_in_a_list_are_made_unique() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let mut a2 = valid_order();
+    a2["id"] = json!("a");
+    let mut a1 = a2.clone();
+    a1["total"] = json!(1);
+    let mut b = valid_order();
+    b["id"] = json!("b");
+    let (_, engine) = scripted(vec![Ok(json!([a1, a2, b]).to_string())]);
+    let mut c = call("listOrders");
+    c.path_params.clear();
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let ids: Vec<&str> = out
+        .body
+        .as_ref()
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[0], "a");
+    assert_eq!(ids[2], "b");
+    assert!(ids[1] != "a" && ids[1] != "b", "{ids:?}");
+}
+
+#[test]
+fn list_items_finds_arrays_and_envelopes() {
+    use mb_engine::consistency::{list_identity, list_items};
+    assert_eq!(list_items(&json!([{"id": 1}])).unwrap().len(), 1);
+    assert_eq!(
+        list_items(&json!({"object": "list", "data": [{"id": 1}, {"id": 2}]}))
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        list_items(&json!({"page": 1, "results": [{"id": 1}]}))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(list_items(&json!({"a": [{"id": 1}], "b": [{"id": 2}]})).is_none());
+    let bundle = orders();
+    assert_eq!(
+        list_identity(&bundle, bundle.operation("listOrders").unwrap()),
+        "id"
+    );
+}
+
+#[test]
+fn fresh_identity_changes_only_the_id() {
+    let bundle = orders();
+    let op = bundle.operation("createOrder").unwrap();
+    let fresh = offline()
+        .fresh_identity(&bundle, op, &valid_order())
+        .unwrap();
+    assert_ne!(fresh["id"], valid_order()["id"]);
+    assert_eq!(fresh["customerId"], "c1");
+    validator(&bundle, "Order").validate(&fresh).unwrap();
+}

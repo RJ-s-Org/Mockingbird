@@ -17,6 +17,7 @@ use tracing::field::Empty;
 use crate::guards::Checked;
 
 pub mod compact;
+pub mod consistency;
 pub mod extract;
 pub mod faker;
 pub mod guards;
@@ -348,7 +349,7 @@ impl Engine {
             }
         };
         response.usage = usage;
-        Ok(finish(&validator, op, call, &ctx, response))
+        Ok(self.finish(&validator, bundle, schema, op, call, &ctx, response))
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
@@ -444,7 +445,14 @@ impl Engine {
                 usage: if i == 0 { usage } else { Usage::default() },
                 fallback_reason: None,
             };
-            responses.push(finish(&validator, part.op, part.call, &part.ctx, response));
+            let schema = part
+                .ctx
+                .response_schema
+                .or(variant.schema.as_ref())
+                .unwrap_or(&Value::Null);
+            responses.push(self.finish(
+                &validator, bundle, schema, part.op, part.call, &part.ctx, response,
+            ));
         }
         Some(responses)
     }
@@ -476,7 +484,7 @@ impl Engine {
             Ok(validator) => {
                 let response =
                     self.fake_response(bundle, variant, status, schema, Some(&validator));
-                finish(&validator, op, call, ctx, response)
+                self.finish(&validator, bundle, schema, op, call, ctx, response)
             }
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
@@ -558,6 +566,116 @@ impl Engine {
         response.source = Source::State;
         response.fallback_reason = None;
         response
+    }
+
+    /// Makes a generated answer consistent with the request, state and
+    /// scenario; a list read gets unique item ids.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        validator: &SchemaValidator,
+        bundle: &Bundle,
+        schema: &Value,
+        op: &Operation,
+        call: &OperationCall,
+        ctx: &GenerationContext<'_>,
+        response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        let response = reflect(validator, op, call, ctx, response);
+        let response = if matches!(op.kind, OperationKind::Query)
+            && ctx.target.is_none()
+            && (200..300).contains(&response.status)
+        {
+            self.unique_list_ids(bundle, schema, op, validator, response)
+        } else {
+            response
+        };
+        apply_scenario(validator, op, call, ctx, response)
+    }
+
+    /// A list body whose items share an identity gets a fresh value for
+    /// each later duplicate, kept only if the whole body still validates.
+    fn unique_list_ids(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        op: &Operation,
+        validator: &SchemaValidator,
+        mut response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        let Some(body) = &response.body else {
+            return response;
+        };
+        let field = consistency::list_identity(bundle, op);
+        let Some(items) = consistency::list_items(body) else {
+            return response;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let duplicate = items
+            .iter()
+            .filter_map(|item| item.get(&field))
+            .any(|id| !seen.insert(id.to_string()));
+        if !duplicate {
+            return response;
+        }
+        let Some(id_schema) = consistency::item_schema(bundle, schema, body)
+            .and_then(|item| consistency::property_schema(bundle, &item, &field))
+        else {
+            return response;
+        };
+        let mut fixed = body.clone();
+        let Some(items) = consistency::list_items_mut(&mut fixed) else {
+            return response;
+        };
+        let mut used: std::collections::HashSet<String> = items
+            .iter()
+            .filter_map(|item| item.get(&field))
+            .map(Value::to_string)
+            .collect();
+        let mut kept = std::collections::HashSet::new();
+        for item in items.iter_mut() {
+            let Some(id) = item.get(&field) else {
+                continue;
+            };
+            if kept.insert(id.to_string()) {
+                continue;
+            }
+            let fresh = (0..IDENTITY_DRAWS)
+                .map(|_| self.fake_value(bundle, &id_schema, None))
+                .find(|v| !v.is_null() && !used.contains(&v.to_string()));
+            if let (Some(fresh), Value::Object(obj)) = (fresh, &mut *item) {
+                used.insert(fresh.to_string());
+                kept.insert(fresh.to_string());
+                obj.insert(field.clone(), fresh);
+            }
+        }
+        if validator.validate(&fixed).is_ok() {
+            response.body = Some(fixed);
+        }
+        response
+    }
+
+    /// `body` (a create's answer) with its identity field (`op`'s, else
+    /// `id`) replaced by a different faker value that keeps it valid
+    /// against `op`'s success schema; `None` when none is found.
+    pub fn fresh_identity(&self, bundle: &Bundle, op: &Operation, body: &Value) -> Option<Value> {
+        let variant = op.success_output()?;
+        let schema = variant.schema.as_ref()?;
+        let validator = self
+            .validator(bundle, op, success_status(variant.status), schema)
+            .ok()?;
+        let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+        let current = body.get(field)?;
+        let id_schema = consistency::property_schema(bundle, schema, field)?;
+        (0..IDENTITY_DRAWS).find_map(|_| {
+            let fresh = self.fake_value(bundle, &id_schema, None);
+            if fresh.is_null() || &fresh == current {
+                return None;
+            }
+            let mut candidate = body.clone();
+            candidate.as_object_mut()?.insert(field.to_string(), fresh);
+            validator.validate(&candidate).is_ok().then_some(candidate)
+        })
     }
 
     fn fake_response(
@@ -737,6 +855,9 @@ pub(crate) fn record_usage(span: &tracing::Span, usage: Usage) {
 }
 
 /// The status a success variant is served with.
+/// Faker draws tried for an unused identity value.
+const IDENTITY_DRAWS: usize = 8;
+
 fn success_status(status: StatusSelector) -> u16 {
     match status {
         StatusSelector::Code(c) => c,
@@ -766,16 +887,6 @@ pub(crate) fn format_name(id: &str) -> String {
 
 /// Post-process a generated response: reflect request and state, then apply
 /// the scenario's `set` patch.
-fn finish(
-    validator: &SchemaValidator,
-    op: &Operation,
-    call: &OperationCall,
-    ctx: &GenerationContext<'_>,
-    response: GeneratedResponse,
-) -> GeneratedResponse {
-    let response = reflect(validator, op, call, ctx, response);
-    apply_scenario(validator, op, call, ctx, response)
-}
 
 /// For a 2xx object body, apply the scenario's `set` merge patch, re-apply
 /// the request body (create/update) and the identity so they still win, and
