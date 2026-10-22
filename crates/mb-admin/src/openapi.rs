@@ -82,6 +82,7 @@ use crate::{
         contracts::UploadResult,
         contracts::ContractVersionSummary,
         contracts::ContractWarningView,
+        drafts::ApproveRequest,
         contracts::ContractVersionDetail,
         contracts::OperationSummary,
         drafts::ProvenanceView,

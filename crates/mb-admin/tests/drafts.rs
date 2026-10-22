@@ -467,7 +467,7 @@ async fn approve_then_activate() {
             "editor",
             Method::POST,
             &Harness::url(v, "/approve"),
-            Some(json!({})),
+            Some(json!({ "activate": false })),
         )
         .await
         .expect(StatusCode::OK, "approve");
@@ -838,4 +838,52 @@ async fn put_draft_refreshes_schema_warnings() {
         .await
         .json();
     assert_eq!(list[0]["warnings"][0]["operation"], "getBig");
+}
+
+#[tokio::test]
+async fn approve_activates_by_default() {
+    let h = harness().await;
+    let v = h.har_draft().await;
+    let r = h
+        .call(
+            "editor",
+            Method::POST,
+            &Harness::url(v, "/approve"),
+            Some(json!({})),
+        )
+        .await
+        .expect(StatusCode::OK, "approve");
+    assert_eq!(r["status"], "active");
+    let actions = h.actions().await;
+    assert!(
+        actions.contains(&"contract.approve".into())
+            && actions.contains(&"contract.activate".into()),
+        "{actions:?}"
+    );
+    let v2 = h.har_draft().await;
+    let r = h
+        .call(
+            "editor",
+            Method::POST,
+            &Harness::url(v2, "/approve"),
+            Some(json!({ "activate": false })),
+        )
+        .await
+        .expect(StatusCode::OK, "approve only");
+    assert_eq!(r["status"], "approved");
+    let empty = Request::post(Harness::url(h.har_draft().await, "/approve"))
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.send(empty).await.json()["status"], "active");
+    let v4 = h.har_draft().await;
+    h.call(
+        "editor",
+        Method::POST,
+        &Harness::url(v4, "/approve"),
+        Some(json!({ "activate": "yes" })),
+    )
+    .await
+    .expect(StatusCode::BAD_REQUEST, "bad body");
 }

@@ -933,6 +933,11 @@ export interface components {
             scopes: string[];
             sysadmin: boolean;
         };
+        /** @description What to do on approval. */
+        ApproveRequest: {
+            /** @description Also activate the approved version (default true). */
+            activate?: boolean | null;
+        };
         /** @description One audit event. */
         AuditEventView: {
             /** @description e.g. `mock.create`. */
@@ -2725,15 +2730,29 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional: empty, `{}` or `{"activate": bool}` */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ApproveRequest"] | null;
+            };
+        };
         responses: {
-            /** @description Approved; activate it to serve it */
+            /** @description Approved and, unless activate is false, activated */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ContractVersionSummary"];
+                };
+            };
+            /** @description The body is not an approve request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             404: {
@@ -2744,7 +2763,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a draft, or managed by config file */
+            /** @description Not a draft, managed by config file, or (when activating) binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2753,7 +2772,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Content-Type is not application/json (the body is ignored) */
+            /** @description Content-Type is not application/json */
             415: {
                 headers: {
                     [name: string]: unknown;
@@ -4917,15 +4936,29 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional: empty, `{}` or `{"activate": bool}` */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ApproveRequest"] | null;
+            };
+        };
         responses: {
-            /** @description Approved; activate it to serve it */
+            /** @description Approved and, unless activate is false, activated */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ContractVersionSummary"];
+                };
+            };
+            /** @description The body is not an approve request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             404: {
@@ -4936,7 +4969,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a draft, or managed by config file */
+            /** @description Not a draft, managed by config file, or (when activating) binds a gRPC service another mock's active contract serves */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4945,7 +4978,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Content-Type is not application/json (the body is ignored) */
+            /** @description Content-Type is not application/json */
             415: {
                 headers: {
                     [name: string]: unknown;

@@ -19,7 +19,10 @@ use utoipa::ToSchema;
 
 use crate::access::WsAccess;
 use crate::audit::snapshot;
-use crate::contracts::{ContractVersionSummary, VersionPath, method_name, store_warnings, version};
+use crate::contracts::{
+    ContractVersionSummary, VersionPath, ensure_grpc_services_free, method_name, store_warnings,
+    version,
+};
 use crate::imports::ImportKindSchema;
 use crate::problem::{ApiResult, Json, PROBLEM_CONTENT_TYPE, Path, Problem, RequireJson};
 use crate::{AdminState, VersionStatus, ensure_api_managed};
@@ -428,11 +431,13 @@ pub async fn put_draft(
         ("mock" = String, Path, description = "Mock name"),
         ("version" = i64, Path, description = "Contract version number"),
     ),
+    request_body(content = Option<ApproveRequest>, description = "Optional: empty, `{}` or `{\"activate\": bool}`"),
     responses(
-        (status = 200, description = "Approved; activate it to serve it", body = ContractVersionSummary),
+        (status = 200, description = "Approved and, unless activate is false, activated", body = ContractVersionSummary),
+        (status = 400, description = "The body is not an approve request", body = Problem, content_type = "application/problem+json"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Not a draft, or managed by config file", body = Problem, content_type = "application/problem+json"),
-        (status = 415, description = "Content-Type is not application/json (the body is ignored)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Not a draft, managed by config file, or (when activating) binds a gRPC service another mock's active contract serves", body = Problem, content_type = "application/problem+json"),
+        (status = 415, description = "Content-Type is not application/json", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn approve(
@@ -443,11 +448,23 @@ pub async fn approve(
         version: number,
     }): Path<VersionPath>,
     _json: RequireJson,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<ContractVersionSummary>> {
     access.require(Permission::Edit)?;
+    let request: ApproveRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        ApproveRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| Problem::bad_request(format!("invalid approve request: {e}")))?
+    };
+    let activate = request.activate.unwrap_or(true);
     let m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     let v = version(&st, &m, number).await?;
+    if activate {
+        // Refused before approving, so a refusal changes nothing.
+        ensure_grpc_services_free(&st, &m, &v.bundle).await?;
+    }
     let approved = st.store.approve_contract_version(m.id, number).await?;
     let view = ContractVersionSummary::from(&approved);
     access
@@ -459,7 +476,28 @@ pub async fn approve(
             snapshot(&view),
         )
         .await;
+    if !activate {
+        return Ok(Json(view));
+    }
+    let active = st.store.activate_contract_version(m.id, number).await?;
+    let view = ContractVersionSummary::from(&active);
+    access
+        .audit(
+            &st.audit,
+            "contract.activate",
+            format!("contract:{mock}@{number}"),
+            None,
+            snapshot(&view),
+        )
+        .await;
     Ok(Json(view))
+}
+
+/// What to do on approval.
+#[derive(Deserialize, ToSchema, Debug, Default)]
+pub struct ApproveRequest {
+    /// Also activate the approved version (default true).
+    pub activate: Option<bool>,
 }
 
 #[utoipa::path(

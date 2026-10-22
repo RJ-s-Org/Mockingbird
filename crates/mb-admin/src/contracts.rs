@@ -427,7 +427,11 @@ pub async fn upload(
 /// A 409 problem when `bundle` binds a gRPC service that the active
 /// contract of another mock, in any workspace, already serves: every gRPC
 /// mock shares one listener, so a service has a single holder.
-async fn ensure_grpc_services_free(st: &AdminState, mock: &Mock, bundle: &Bundle) -> ApiResult<()> {
+pub(crate) async fn ensure_grpc_services_free(
+    st: &AdminState,
+    mock: &Mock,
+    bundle: &Bundle,
+) -> ApiResult<()> {
     let services = bundle.grpc_services();
     if services.is_empty() {
         return Ok(());
