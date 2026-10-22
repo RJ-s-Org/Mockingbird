@@ -9,14 +9,15 @@ use std::time::Duration;
 use axum::http::HeaderMap;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
+use mb_engine::consistency::{list_identity, list_items};
 use mb_engine::{
-    EngineError, GeneratedResponse, GenerationContext, OperationCall, Source, StreamContext,
-    StreamItem,
+    EngineError, GeneratedResponse, GenerationContext, OFFLINE_REASON, OperationCall, Source,
+    StreamContext, StreamItem,
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
 use mb_mcm::{Binding, Effect, Operation, OperationKind, Protocol};
-use mb_state::{ChangeKind, SessionKey, StateError, StoredResource};
+use mb_state::{CachedResponse, ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::Instrument;
@@ -667,6 +668,52 @@ pub(crate) async fn generate_narrowed(
         return Ok(served);
     }
 
+    let is_query = matches!(op.kind, OperationKind::Query);
+    let cache = rt
+        .state
+        .response_cache()
+        .filter(|_| is_query && rt.consistency && plain(plan));
+    let key = cache.map(|_| {
+        format!(
+            "{}:{}",
+            rt.bundle.source_digest,
+            cache_key(op, call, response_schema)
+        )
+    });
+    if let (Some(cache), Some(key)) = (cache, &key)
+        && let Some(hit) = cache.get(session, key)
+    {
+        let served = GeneratedResponse {
+            status: hit.status,
+            content_type: hit.content_type,
+            body: hit.body,
+            source: Source::Cache,
+            usage: Usage::default(),
+            fallback_reason: None,
+        };
+        async {
+            if target_id.is_none()
+                && let Some(t) = resource_type
+            {
+                write_state(
+                    &mut state,
+                    session,
+                    op,
+                    t,
+                    None,
+                    &served,
+                    None,
+                    WriteOrigin::Seeded,
+                )
+                .await;
+            }
+            state.touch(session).await;
+        }
+        .instrument(state_span())
+        .await;
+        return Ok(served);
+    }
+
     let ctx = GenerationContext {
         related: &related,
         target: target.as_ref(),
@@ -674,28 +721,156 @@ pub(crate) async fn generate_narrowed(
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
     };
-    let generated = rt.engine.generate(&rt.bundle, op, call, ctx).await?;
+    let mut generated = rt.engine.generate(&rt.bundle, op, call, ctx).await?;
 
-    async {
+    let writes = async {
+        let mut writes = Vec::new();
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
-            write_state(
-                &mut state,
-                session,
-                op,
-                t,
-                target_id,
-                &generated,
-                call.body.as_ref(),
-            )
-            .await;
+            if matches!(op.kind, OperationKind::Command(Effect::Create)) {
+                unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
+            }
+            let seeding = is_query && rt.consistency && target_id.is_none();
+            if !is_query || seeding {
+                let origin = if is_query {
+                    WriteOrigin::Seeded
+                } else {
+                    WriteOrigin::Call
+                };
+                writes = write_state(
+                    &mut state,
+                    session,
+                    op,
+                    t,
+                    target_id,
+                    &generated,
+                    call.body.as_ref(),
+                    origin,
+                )
+                .await;
+            }
         }
         state.touch(session).await;
+        writes
     }
     .instrument(state_span())
     .await;
+    // Post-write hooks go here: `WriteOrigin::Call` writes are what the
+    // client changed.
+    drop(writes);
+
+    // Seeded first, then cached: a later list never clears a cached one.
+    if let (Some(cache), Some(key)) = (cache, key)
+        && (200..300).contains(&generated.status)
+        && !transient_fallback(&generated)
+    {
+        cache.put(
+            session,
+            key,
+            resource_type,
+            CachedResponse {
+                status: generated.status,
+                content_type: generated.content_type.clone(),
+                body: generated.body.clone(),
+            },
+        );
+    }
     Ok(generated)
+}
+
+/// A faker answer standing in for a failed LLM call: not worth repeating.
+/// An offline mock's answers are its real ones.
+fn transient_fallback(generated: &GeneratedResponse) -> bool {
+    generated.source == Source::Fallback
+        && generated
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|r| r != OFFLINE_REASON)
+}
+
+/// Gives a create's answer a fresh identity when the session already holds
+/// a resource under the generated one and the request did not ask for it.
+async fn unique_create_id(
+    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    resource_type: &str,
+    call: &OperationCall,
+    generated: &mut GeneratedResponse,
+) {
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let Some(body) = generated.body.as_ref() else {
+        return;
+    };
+    let Some(id) = body.get(field).and_then(id_string) else {
+        return;
+    };
+    let requested = call
+        .body
+        .as_ref()
+        .and_then(|b| b.get(field))
+        .and_then(id_string);
+    if requested.as_deref() == Some(id.as_str())
+        || state.get(session, resource_type, &id).await.is_none()
+    {
+        return;
+    }
+    for _ in 0..3 {
+        let Some(fresh) = rt.engine.fresh_identity(&rt.bundle, op, body) else {
+            return;
+        };
+        let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
+            return;
+        };
+        if state.get(session, resource_type, &fresh_id).await.is_none() {
+            generated.body = Some(fresh);
+            return;
+        }
+    }
+}
+
+/// The response cache key of a read: its operation, path parameters,
+/// query (sorted), a query operation's body and the narrowed selection.
+fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Value>) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let body = match op.kind {
+        OperationKind::Query => call.body.as_ref().map(canonical),
+        _ => None,
+    };
+    let selection = response_schema.map(|schema| {
+        let mut hasher = DefaultHasher::new();
+        canonical(schema).to_string().hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    });
+    serde_json::json!([
+        op.id,
+        canonical(&Value::Object(call.path_params.clone())),
+        canonical(&Value::Object(call.query.clone())),
+        body,
+        selection,
+    ])
+    .to_string()
+}
+
+/// `value` with every object's keys sorted, whatever map order serde_json
+/// keeps.
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(obj) => {
+            let mut keys: Vec<&String> = obj.keys().collect();
+            keys.sort();
+            // Build an array of pairs: ordered with or without `preserve_order`.
+            Value::Array(
+                keys.into_iter()
+                    .map(|k| Value::Array(vec![Value::String(k.clone()), canonical(&obj[k])]))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Whether no scenario applies to the call and no status is forced (an
@@ -1095,18 +1270,38 @@ impl<'a> StateAccess<'a> {
         found.unwrap_or_default()
     }
 
-    async fn upsert(&mut self, s: &SessionKey, r: StoredResource) {
-        if self.open() {
-            let r = self.rt.state.upsert(s, r).await;
-            self.wrote |= self.settle(r).is_some();
+    /// Whether the store took the write.
+    async fn upsert(&mut self, s: &SessionKey, r: StoredResource) -> bool {
+        if !self.open() {
+            return false;
         }
+        let r = self.rt.state.upsert(s, r).await;
+        let ok = self.settle(r).is_some();
+        self.wrote |= ok;
+        ok
     }
 
-    async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) {
-        if self.open() {
-            let r = self.rt.state.delete(s, t, id).await;
-            self.wrote |= self.settle(r).is_some();
+    /// Whether the store took the delete.
+    async fn delete(&mut self, s: &SessionKey, t: &str, id: &str) -> bool {
+        if !self.open() {
+            return false;
         }
+        let r = self.rt.state.delete(s, t, id).await;
+        let ok = self.settle(r).is_some();
+        self.wrote |= ok;
+        ok
+    }
+
+    /// Stores a seeded resource unless one is stored under its id; `true`
+    /// when stored.
+    pub(crate) async fn insert_seeded(&mut self, s: &SessionKey, r: StoredResource) -> bool {
+        if !self.open() {
+            return false;
+        }
+        let r = self.rt.state.insert_seeded(s, r).await;
+        let stored = self.settle(r).unwrap_or(false);
+        self.wrote |= stored;
+        stored
     }
 }
 
@@ -1147,6 +1342,30 @@ async fn related(
     out
 }
 
+/// Who made a state write: the client's call, or list seeding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteOrigin {
+    Call,
+    Seeded,
+}
+
+/// One state write the store took.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // read by post-write hooks
+pub(crate) struct StateWrite {
+    pub origin: WriteOrigin,
+    /// `Effect::Create` for seeded items.
+    pub effect: Effect,
+    pub resource_type: String,
+    pub id: String,
+    /// `None` for deletes.
+    pub data: Option<Value>,
+}
+
+/// Writes a 2xx answer to state: a call's create, update or delete, or
+/// (`Seeded`) every identified item of a list answer that the session does
+/// not hold yet. Returns the writes the store took.
+#[allow(clippy::too_many_arguments)]
 async fn write_state(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1155,39 +1374,78 @@ async fn write_state(
     target_id: Option<String>,
     generated: &GeneratedResponse,
     request_body: Option<&Value>,
-) {
-    let data = generated.body.clone().or_else(|| request_body.cloned());
-    match op.kind {
-        OperationKind::Command(Effect::Create) => {
-            let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-            let Some(data) = data else { return };
-            let Some(id) = data.get(field).and_then(id_string) else {
-                return;
+    origin: WriteOrigin,
+) -> Vec<StateWrite> {
+    let mut writes = Vec::new();
+    if origin == WriteOrigin::Seeded {
+        let Some(items) = generated.body.as_ref().and_then(list_items) else {
+            return writes;
+        };
+        let field = list_identity(state.rt.bundle(), op);
+        for item in items {
+            let Some(id) = item.get(&field).and_then(id_string) else {
+                continue;
             };
             let resource = StoredResource {
                 resource_type: resource_type.into(),
-                id,
-                data,
+                id: id.clone(),
+                data: item.clone(),
             };
-            state.upsert(session, resource).await;
+            if state.insert_seeded(session, resource).await {
+                writes.push(StateWrite {
+                    origin,
+                    effect: Effect::Create,
+                    resource_type: resource_type.into(),
+                    id,
+                    data: Some(item.clone()),
+                });
+            }
+        }
+        return writes;
+    }
+    let data = generated.body.clone().or_else(|| request_body.cloned());
+    let (effect, id, data) = match op.kind {
+        OperationKind::Command(Effect::Create) => {
+            let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+            let Some(data) = data else { return writes };
+            let Some(id) = data.get(field).and_then(id_string) else {
+                return writes;
+            };
+            (Effect::Create, id, Some(data))
         }
         OperationKind::Command(Effect::Update) => {
             let (Some(id), Some(data)) = (target_id, data) else {
-                return;
+                return writes;
             };
-            let resource = StoredResource {
-                resource_type: resource_type.into(),
-                id,
-                data,
-            };
-            state.upsert(session, resource).await;
+            (Effect::Update, id, Some(data))
         }
         OperationKind::Command(Effect::Delete) => {
-            let Some(id) = target_id else { return };
-            state.delete(session, resource_type, &id).await;
+            let Some(id) = target_id else { return writes };
+            (Effect::Delete, id, None)
         }
-        _ => {}
+        _ => return writes,
+    };
+    let stored = match &data {
+        Some(data) => {
+            let resource = StoredResource {
+                resource_type: resource_type.into(),
+                id: id.clone(),
+                data: data.clone(),
+            };
+            state.upsert(session, resource).await
+        }
+        None => state.delete(session, resource_type, &id).await,
+    };
+    if stored {
+        writes.push(StateWrite {
+            origin,
+            effect,
+            resource_type: resource_type.into(),
+            id,
+            data,
+        });
     }
+    writes
 }
 
 /// `reason` as a header value: printable ASCII only (anything else becomes
@@ -1333,6 +1591,25 @@ paths:
             mock: "ticks".into(),
             session: name.into(),
         }
+    }
+
+    #[test]
+    fn cache_key_ignores_query_order_and_tracks_the_selection() {
+        let rt = stream_runtime();
+        let op = &rt.bundle.operations[0];
+        let call = |q: Value| OperationCall {
+            query: q.as_object().unwrap().clone(),
+            ..OperationCall::default()
+        };
+        let a = call(json!({"a": 1, "b": 2}));
+        let b = call(json!({"b": 2, "a": 1}));
+        assert_eq!(cache_key(op, &a, None), cache_key(op, &b, None));
+        assert_ne!(
+            cache_key(op, &a, None),
+            cache_key(op, &call(json!({"a": 2, "b": 2})), None)
+        );
+        let narrow = json!({"type": "object", "properties": {"id": {"type": "string"}}});
+        assert_ne!(cache_key(op, &a, None), cache_key(op, &a, Some(&narrow)));
     }
 
     #[test]

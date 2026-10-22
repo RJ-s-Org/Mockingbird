@@ -7,13 +7,15 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use mb_engine::{Engine, EngineConfig, SchemaValidator};
+use mb_engine::{Engine, EngineConfig, ScenarioSpec, SchemaValidator};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_mcm::{Bundle, HttpMethod};
 use mb_protocols::http_rest::{self, RouteTable};
-use mb_protocols::{MockRuntime, UnknownIds};
-use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
+use mb_protocols::{MockRuntime, ScenarioRuntime, UnknownIds};
+use mb_state::{
+    CachingStateStore, DEFAULT_CACHE_ENTRIES, MemoryStore, SessionKey, StateStore, StoredResource,
+};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -1285,5 +1287,157 @@ paths:
     assert_eq!(
         header_str(&resp, "content-type"),
         "application/problem+json"
+    );
+}
+
+fn cached_state() -> Arc<dyn StateStore> {
+    CachingStateStore::wrap(
+        memory_state(),
+        Duration::from_secs(3600),
+        DEFAULT_CACHE_ENTRIES,
+    )
+}
+
+#[tokio::test]
+async fn repeated_list_is_served_from_the_cache_until_a_write() {
+    let h = harness_with(None, cached_state(), |_| {});
+    let first = send(&h, get("/orders")).await;
+    assert_eq!(header_str(&first, "x-mockingbird-source"), "fallback");
+    let first = body_json(first).await;
+    let second = send(&h, get("/orders")).await;
+    assert_eq!(header_str(&second, "x-mockingbird-source"), "cache");
+    assert_eq!(body_json(second).await, first);
+    send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    let third = send(&h, get("/orders")).await;
+    assert_eq!(header_str(&third, "x-mockingbird-source"), "fallback");
+}
+
+#[tokio::test]
+async fn cache_is_bypassed_when_off_or_under_a_scenario() {
+    let h = harness_with(None, cached_state(), |rt| rt.consistency = false);
+    send(&h, get("/orders")).await;
+    assert_eq!(
+        header_str(&send(&h, get("/orders")).await, "x-mockingbird-source"),
+        "fallback"
+    );
+
+    let h = harness_with(None, cached_state(), |rt| {
+        rt.scenarios.insert(
+            "calm".into(),
+            ScenarioRuntime {
+                spec: ScenarioSpec {
+                    name: "calm".into(),
+                    ..ScenarioSpec::default()
+                },
+                ..ScenarioRuntime::default()
+            },
+        );
+    });
+    let with_scenario = || {
+        Request::get("/orders")
+            .header("x-mockingbird-scenario", "calm")
+            .body(Body::empty())
+            .unwrap()
+    };
+    send(&h, with_scenario()).await;
+    assert_eq!(
+        header_str(&send(&h, with_scenario()).await, "x-mockingbird-source"),
+        "fallback"
+    );
+}
+
+#[tokio::test]
+async fn listed_items_are_served_by_id_from_state() {
+    let h = offline();
+    let mut changes = h.rt.state.subscribe();
+    let list = body_json(send(&h, get("/orders")).await).await;
+    let item = list[0].clone();
+    assert!(changes.try_recv().is_err(), "seeding publishes no change");
+    let resp = send(
+        &h,
+        get(&format!("/orders/{}", item["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await, item);
+}
+
+#[tokio::test]
+async fn listing_keeps_a_created_resource() {
+    let h = harness(
+        Some(vec![
+            Ok(order("o1", "c1").to_string()),
+            Ok(json!([order("o1", "someone-else")]).to_string()),
+        ]),
+        true,
+    );
+    send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    send(&h, get("/orders")).await;
+    let kept =
+        h.rt.state
+            .get(&session("default"), "orders", "o1")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(kept.data["customerId"], "c1");
+}
+
+#[tokio::test]
+async fn no_seeding_when_consistency_is_off() {
+    let h = harness_with(None, memory_state(), |rt| rt.consistency = false);
+    let list = body_json(send(&h, get("/orders")).await).await;
+    let resp = send(
+        &h,
+        get(&format!("/orders/{}", list[0]["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+}
+
+#[tokio::test]
+async fn create_never_reuses_a_stored_id() {
+    let h = harness(Some(vec![Ok(order("o1", "c2").to_string())]), true);
+    h.rt.state
+        .upsert(
+            &session("default"),
+            StoredResource {
+                resource_type: "orders".into(),
+                id: "o1".into(),
+                data: order("o1", "c1"),
+            },
+        )
+        .await
+        .unwrap();
+    let body = body_json(
+        send(
+            &h,
+            post_json("/orders", r#"{"customerId":"c2","total":10}"#),
+        )
+        .await,
+    )
+    .await;
+    let id = body["id"].as_str().unwrap();
+    assert_ne!(id, "o1");
+    let kept =
+        h.rt.state
+            .get(&session("default"), "orders", "o1")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(kept.data["customerId"], "c1");
+    assert!(
+        h.rt.state
+            .get(&session("default"), "orders", id)
+            .await
+            .unwrap()
+            .is_some()
     );
 }

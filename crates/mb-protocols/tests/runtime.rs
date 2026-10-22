@@ -551,9 +551,10 @@ async fn a_request_touches_its_session_at_most_once() {
     assert!(store.touches.load(Ordering::SeqCst) <= 1);
 
     store.touches.store(0, Ordering::SeqCst);
+    // A list read seeds its items, a write that refreshes the session.
     let resp = send(&router, get_with("/orders", &[])).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(store.touches.load(Ordering::SeqCst), 1);
+    assert!(store.touches.load(Ordering::SeqCst) <= 1);
 
     store.touches.store(0, Ordering::SeqCst);
     let resp = send(&router, get_with("/orders/o1", &[])).await;
