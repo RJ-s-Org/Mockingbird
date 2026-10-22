@@ -12,7 +12,7 @@ use mb_engine::{
 };
 use mb_ext::{Rejection, Tenancy};
 use mb_llm::Usage;
-use mb_mcm::{HttpMethod, Operation, OperationKind, StatusSelector};
+use mb_mcm::{HttpMethod, Operation, OperationKind, OutputVariant, StatusSelector};
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -439,6 +439,30 @@ async fn serve(
         return resp;
     }
 
+    // An injected error answered in the shape of the `default` response
+    // (the only error the contract declares): faker-filled, never the LLM.
+    if plan.chaos.inject_error
+        && let Some(status) = plan.forced_status
+        && !op
+            .outputs
+            .iter()
+            .any(|o| o.status == StatusSelector::Code(status))
+        && let Some(variant) = op
+            .outputs
+            .iter()
+            .find(|o| o.status == StatusSelector::Default && o.schema.is_some())
+    {
+        log.delay = plan.delay;
+        let reason = StatusCode::from_u16(status)
+            .ok()
+            .and_then(|s| s.canonical_reason())
+            .unwrap_or("Error");
+        let message = format!("{reason} ({})", crate::chaos::CHAOS_ERROR_DETAIL);
+        let mut resp = log.generated(filled_error(rt, op, variant, status, &message));
+        mark_chaos(&mut resp);
+        return resp;
+    }
+
     // A stream, unless a non-2xx status is forced: that is answered once.
     if op.kind == OperationKind::StreamServer
         && plan
@@ -806,18 +830,7 @@ fn invalid_input(
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            let mut generated = rt.engine.fallback(
-                &rt.bundle,
-                op,
-                variant,
-                status,
-                &OperationCall::default(),
-                &GenerationContext::default(),
-            );
-            if let (Some(body), Some(schema)) = (generated.body.as_mut(), &variant.schema) {
-                set_message(body, schema, &rt.bundle.defs, &reasons);
-            }
-            log.generated(generated)
+            log.generated(filled_error(rt, op, variant, status, &reasons))
         }
         None => log.problem(400, "Invalid request", reasons.clone()),
     };
@@ -825,6 +838,29 @@ fn invalid_input(
         resp.headers_mut().insert(VALIDATION_HEADER, v);
     }
     resp
+}
+
+/// The contract's error shape `variant`, faker-filled, its message-like
+/// field set to `message`. Never calls the LLM.
+fn filled_error(
+    rt: &MockRuntime,
+    op: &Operation,
+    variant: &OutputVariant,
+    status: u16,
+    message: &str,
+) -> GeneratedResponse {
+    let mut generated = rt.engine.fallback(
+        &rt.bundle,
+        op,
+        variant,
+        status,
+        &OperationCall::default(),
+        &GenerationContext::default(),
+    );
+    if let (Some(body), Some(schema)) = (generated.body.as_mut(), &variant.schema) {
+        set_message(body, schema, &rt.bundle.defs, message);
+    }
+    generated
 }
 
 /// `text` as a header value: visible ASCII only, at most `max` bytes.

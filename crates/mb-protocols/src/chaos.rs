@@ -4,7 +4,9 @@
 //! `call::plan` asks the applying scenario's [`ChaosRuntime`]
 //! (else the mock's) for one [`ChaosDecision`] per call. An injected error
 //! uses the operation's first declared status of `503`, `500`, the smallest
-//! other `5xx`, or `429`; when none is declared, each adapter answers its
+//! other `5xx`, or `429`; else `503` in the shape of its `default` response
+//! when that has a schema (REST answers it faker-filled, its message-like
+//! field set); when none is declared, each adapter answers its
 //! protocol's native "unavailable" (REST `503` problem, GraphQL
 //! `UNAVAILABLE` field error, gRPC `UNAVAILABLE`, SOAP Server/Receiver
 //! Fault with HTTP `503`). A status already forced by a header or the
@@ -125,8 +127,9 @@ fn nanos(d: Duration) -> u64 {
 }
 
 /// The status of an error injected into `op`: its first declared status of
-/// `503`, `500`, the smallest other `5xx`, or `429`. `None` when it
-/// declares none of them (the protocol-native answer applies).
+/// `503`, `500`, the smallest other `5xx`, or `429`; else `503` when it
+/// declares a `default` response with a schema. `None` when it declares
+/// none of them (the protocol-native answer applies).
 pub(crate) fn error_status(op: &Operation) -> Option<u16> {
     let declared: Vec<u16> = op
         .outputs
@@ -148,6 +151,12 @@ pub(crate) fn error_status(op: &Operation) -> Option<u16> {
                 .min()
         })
         .or_else(|| has(429).then_some(429))
+        .or_else(|| {
+            op.outputs
+                .iter()
+                .any(|o| o.status == StatusSelector::Default && o.schema.is_some())
+                .then_some(503)
+        })
 }
 
 /// Counts one injected fault of `kind` (`error`, `latency` or `drop`).
@@ -253,5 +262,32 @@ mod tests {
         assert_eq!(error_status(&op(&[200, 429, 504, 502])), Some(502));
         assert_eq!(error_status(&op(&[200, 429])), Some(429));
         assert_eq!(error_status(&op(&[200, 404])), None);
+    }
+
+    #[test]
+    fn error_status_falls_back_to_a_default_shape() {
+        let op = |codes: &[u16], default_schema: bool| {
+            let default = if default_schema {
+                "        default: {description: e, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}\n"
+            } else {
+                "        default: {description: e}\n"
+            };
+            let codes: String = codes
+                .iter()
+                .map(|c| format!("        \"{c}\": {{description: x}}\n"))
+                .collect();
+            let bundle = mb_import::compile(
+                format!(
+                    "openapi: 3.0.3\ninfo: {{title: T, version: '1'}}\npaths:\n  /t:\n    get:\n      operationId: t\n      responses:\n{codes}{default}"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            bundle.operations[0].clone()
+        };
+        assert_eq!(error_status(&op(&[200], true)), Some(503));
+        assert_eq!(error_status(&op(&[200, 500], true)), Some(500));
+        assert_eq!(error_status(&op(&[200, 429], true)), Some(429));
+        assert_eq!(error_status(&op(&[200], false)), None);
     }
 }

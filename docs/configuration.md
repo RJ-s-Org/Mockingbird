@@ -228,7 +228,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 
 ### `mocks.<name>.chaos`
 
-Fault injection. Absent injects nothing. A request with `X-Mockingbird-Chaos: off` bypasses it when header overrides are enabled. An injected error uses the operation's declared error shape, or the protocol's native one (HTTP 503, gRPC `UNAVAILABLE`, SOAP Fault), and is marked `X-Mockingbird-Chaos: error` (gRPC metadata `x-mockingbird-chaos: error`, GraphQL `extensions.chaos = "error"`).
+Fault injection. Absent injects nothing. A request with `X-Mockingbird-Chaos: off` bypasses it when header overrides are enabled. An injected error uses the operation's declared 503, 500, other 5xx or 429 response; else its `default` response (HTTP 503, faker-filled, its message-like field set to `Service Unavailable (injected by chaos)`); else the protocol's native one (HTTP 503 problem+json, gRPC `UNAVAILABLE`, SOAP Fault), and is marked `X-Mockingbird-Chaos: error` (gRPC metadata `x-mockingbird-chaos: error`, GraphQL `extensions.chaos = "error"`).
 
 | Key | Type | Default | Range / rule | Env / flag | Meaning |
 | --- | --- | --- | --- | --- | --- |
