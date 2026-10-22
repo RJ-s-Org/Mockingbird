@@ -11,8 +11,8 @@ use mb_engine::{Engine, EngineConfig, SchemaValidator};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_mcm::{Bundle, HttpMethod};
-use mb_protocols::MockRuntime;
 use mb_protocols::http_rest::{self, RouteTable};
+use mb_protocols::{MockRuntime, UnknownIds};
 use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -1209,4 +1209,81 @@ async fn scenario_and_forced_status_skip_the_stored_answer() {
     let resp = send(&h, forced).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert_ne!(header_str(&resp, "x-mockingbird-source"), "state");
+}
+
+#[tokio::test]
+async fn unknown_ids_404_when_opted_in() {
+    let h = harness_with(None, memory_state(), |rt| {
+        rt.unknown_ids = UnknownIds::NotFound
+    });
+    let resp = send(&h, get("/orders/nope")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    let body = body_json(resp).await;
+    assert!(
+        body["code"].is_i64() && body["message"].is_string(),
+        "{body}"
+    );
+
+    let created = body_json(
+        send(
+            &h,
+            post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(
+        send(&h, get(&format!("/orders/{id}"))).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn unknown_ids_404_spares_lists_and_forced_status() {
+    let h = harness_with(None, memory_state(), |rt| {
+        rt.unknown_ids = UnknownIds::NotFound
+    });
+    assert_eq!(send(&h, get("/orders")).await.status(), StatusCode::OK);
+    let forced = Request::get("/orders/nope")
+        .header("x-mockingbird-status", "200")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&h, forced).await.status(), StatusCode::OK);
+    // Default: keep generating.
+    assert_eq!(
+        send(&offline(), get("/orders/nope")).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn unknown_id_without_declared_404_is_problem_json() {
+    let src = r#"
+openapi: 3.1.0
+info: {title: Pets, version: "1"}
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters: [{name: petId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+"#;
+    let bundle = Arc::new(compile(src.as_bytes()).unwrap());
+    let mut rt = MockRuntime::new(
+        "inline",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        memory_state(),
+    );
+    rt.unknown_ids = UnknownIds::NotFound;
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router.oneshot(get("/pets/p1")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
 }

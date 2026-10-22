@@ -24,7 +24,9 @@ use tracing::Instrument;
 use crate::chaos::{self, CHAOS_HEADER, ChaosDecision};
 pub(crate) use crate::dp_auth::Unauthorized;
 use crate::dp_auth::{authenticate, verify_key};
-use crate::{MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime};
+use crate::{
+    MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
+};
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
@@ -633,6 +635,19 @@ pub(crate) async fn generate_narrowed(
         .instrument(state_span())
         .await;
 
+    if rt.unknown_ids == UnknownIds::NotFound
+        && matches!(op.kind, OperationKind::Query)
+        && plan.forced_status.is_none()
+        && op.identity.as_ref().is_some_and(|i| i.path_param.is_some())
+        && target.is_none()
+        && state.available()
+        && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+    {
+        let detail = format!("{t} {id} does not exist in session {}", session.session);
+        state.touch(session).instrument(state_span()).await;
+        return Ok(rt.engine.not_found(&rt.bundle, op, call, &detail));
+    }
+
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
@@ -1014,6 +1029,12 @@ impl<'a> StateAccess<'a> {
             let r = self.rt.state.touch(s).await;
             self.settle(r);
         }
+    }
+
+    /// Whether the store answered this call's reads: a missing resource is
+    /// then known to be missing, not merely unread.
+    fn available(&self) -> bool {
+        self.gate == Gate::Open
     }
 
     /// Whether the next store call may run, asking the breaker on first use.
