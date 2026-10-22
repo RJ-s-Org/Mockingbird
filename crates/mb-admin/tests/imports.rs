@@ -1585,3 +1585,60 @@ async fn documents_import_reads_each_file() {
     assert_eq!(draft["meta"]["sources"], json!(["a.md", "b.md"]));
     assert_eq!(draft["operations"].as_array().unwrap().len(), 3, "{draft}");
 }
+
+#[tokio::test]
+async fn urls_job_fetches_each_url_into_one_draft() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock as WireMock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    WireMock::given(method("GET"))
+        .and(path("/pets.md"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/markdown")
+                .set_body_bytes(fixture("smart/petstore.md")),
+        )
+        .mount(&server)
+        .await;
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut st = AdminState {
+        auth: Arc::new(TestAuth),
+        ..AdminState::new(store, state)
+    };
+    st.llm = Arc::new(TestLlm(Some(scripted(vec![pets_answer()]))));
+    st.imports.settings.fetch =
+        mb_import::smart::fetch::FetchPolicy::from_allowlist(&["127.0.0.1/32".to_string()])
+            .unwrap();
+    let h = Harness {
+        app: router(st.clone()),
+        st,
+    };
+    h.create_mock("pets").await;
+    let view = h
+        .call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/pets/imports"),
+            Some(json!({ "urls": [
+                format!("{}/pets.md", server.uri()),
+                format!("{}/missing.md", server.uri())] })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "urls");
+    assert!(h.run().await);
+    let draft = h.job_draft("pets", view["id"].as_str().unwrap()).await;
+    assert_eq!(
+        draft["meta"]["sources"].as_array().unwrap().len(),
+        2,
+        "{draft}"
+    );
+    let skipped = draft["meta"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "source_skipped")
+        .count();
+    assert_eq!(skipped, 1, "{draft}");
+    assert_eq!(draft["operations"].as_array().unwrap().len(), 3, "{draft}");
+}

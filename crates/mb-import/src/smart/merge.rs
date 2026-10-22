@@ -227,11 +227,6 @@ fn document_operations(doc: &Value) -> Vec<(String, String)> {
     out
 }
 
-/// `"GET /pets"`.
-fn target(method: &str, path: &str) -> String {
-    format!("{} {path}", method.to_ascii_uppercase())
-}
-
 /// Every `operationId` in a document's `paths`.
 fn operation_ids(doc: &Value) -> HashSet<String> {
     document_operations(doc)
@@ -274,12 +269,10 @@ pub fn merge_drafts(base: &MergeBase, incoming: DraftResult) -> Result<DraftResu
     let incoming_ops = document_operations(&incoming.document);
     let incoming_keys: HashSet<(String, String)> =
         incoming_ops.iter().map(|(m, p)| path_key(m, p)).collect();
-    let mut replaced: HashSet<String> = HashSet::new();
     for (method, path) in document_operations(&doc) {
         if !incoming_keys.contains(&path_key(&method, &path)) {
             continue;
         }
-        replaced.insert(target(&method, &path));
         if let Some(Value::Object(paths)) = doc.get_mut("paths") {
             let empty = match paths.get_mut(&path) {
                 Some(Value::Object(item)) => {
@@ -432,12 +425,21 @@ pub fn merge_drafts(base: &MergeBase, incoming: DraftResult) -> Result<DraftResu
             (op.id.clone(), meta)
         })
         .collect();
+    // Base warnings about an operation the import touched (by method and
+    // path, so `{id}` and `{petId}` match), and about a merge the base
+    // itself skipped, are superseded by the import's.
+    let superseded = |w: &DraftWarning| {
+        w.code == "merge_skipped"
+            || w.operation.as_deref().is_some_and(|t| {
+                t.split_once(' ')
+                    .is_some_and(|(m, p)| incoming_keys.contains(&path_key(m, p)))
+            })
+    };
     let mut all_warnings: Vec<DraftWarning> = base_meta
         .map(|m| m.warnings.clone())
         .unwrap_or_default()
         .into_iter()
-        .filter(|w| w.code != "schema_too_large")
-        .filter(|w| w.operation.as_ref().is_none_or(|t| !replaced.contains(t)))
+        .filter(|w| w.code != "schema_too_large" && !superseded(w))
         .collect();
     all_warnings.extend(
         incoming
@@ -449,6 +451,8 @@ pub fn merge_drafts(base: &MergeBase, incoming: DraftResult) -> Result<DraftResu
     );
     all_warnings.extend(warnings);
     all_warnings.extend(schema_warnings(&bundle));
+    let mut seen = HashSet::new();
+    all_warnings.retain(|w| seen.insert((w.code.clone(), w.operation.clone(), w.message.clone())));
     let meta = DraftMeta {
         warnings: all_warnings,
         operations,

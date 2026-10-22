@@ -1280,3 +1280,55 @@ async fn merge_keeps_the_base_component_and_warns_on_a_conflict() {
         merged.meta.warnings
     );
 }
+
+#[tokio::test]
+async fn re_merging_the_same_import_does_not_pile_up_warnings() {
+    let answer = || {
+        json!({"operations": [
+            {"method": "GET", "path": "/pets", "confidence": 0.9, "evidence": "Returns all pets, newest first.",
+             "responses": [{"status": 200, "example": [{"id": 1}]}]},
+            {"method": "DELETE", "path": "/pets/{petId}", "confidence": 0.3}]})
+        .to_string()
+    };
+    let import = || async {
+        let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer())]));
+        run_import(
+            md_input(fixture("smart/petstore.md")),
+            Some(&llm(provider, 1000)),
+            &ImportOptions::default(),
+            &NoopObserver,
+        )
+        .await
+        .unwrap()
+    };
+    let first = import().await;
+    let mut base = MergeBase {
+        version: 1,
+        source: first.source.clone(),
+        meta: Some(first.meta.clone()),
+    };
+    for version in 2..4 {
+        let merged = merge_drafts(&base, import().await).unwrap();
+        assert_eq!(merged.meta.warnings, first.meta.warnings, "v{version}");
+        base = MergeBase {
+            version,
+            source: merged.source.clone(),
+            meta: Some(merged.meta.clone()),
+        };
+    }
+}
+
+#[test]
+fn valid_docs_operation_ids_are_kept_as_written() {
+    let ops = [
+        with_id(op("GET", "/a"), "_internal"),
+        with_id(op("GET", "/b"), "get__pets"),
+    ];
+    let (doc, ids, _) = assemble_openapi("T", &[], &ops);
+    assert_eq!(ids, vec!["_internal", "get__pets"]);
+    assert!(
+        doc["paths"]["/a"]["get"]
+            .get("x-original-operation-id")
+            .is_none()
+    );
+}

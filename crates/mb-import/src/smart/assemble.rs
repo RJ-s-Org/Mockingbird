@@ -104,11 +104,14 @@ fn valid_id(id: &str) -> bool {
         && id.len() <= MAX_ID_CHARS
 }
 
-/// `id` made valid: every char outside `[A-Za-z0-9_]` becomes `_`, runs of
+/// `id` itself when valid, else made valid: every char outside `[A-Za-z0-9_]` becomes `_`, runs of
 /// `_` collapse, leading and trailing `_` are trimmed, a leading digit gets
 /// a `_` prefix, at most [`MAX_ID_CHARS`] chars; `None` when nothing is
 /// left. Camel case is kept.
 pub(crate) fn convert_id(id: &str) -> Option<String> {
+    if valid_id(id) {
+        return Some(id.to_string());
+    }
     let mut out = String::with_capacity(id.len());
     for c in id.chars() {
         let c = if c.is_ascii_alphanumeric() { c } else { '_' };
