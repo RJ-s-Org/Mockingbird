@@ -41,13 +41,13 @@ const MOCK_SELECT: &str = "id, workspace, name, route_prefix, persona, llm_profi
      limits::text AS limits, hosts::text AS hosts";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
-     draft_meta";
+     draft_meta, warnings";
 /// [`VERSION_COLUMNS`] with JSON read back as text.
 const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundle::text AS bundle, status, \
-     created_by, created_at, draft_meta::text AS draft_meta";
+     created_by, created_at, draft_meta::text AS draft_meta, warnings::text AS warnings";
 /// Every `import_jobs` column but `input`, with JSON read back as text.
 const JOB_SELECT: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress::text AS progress, \
-     result_version, error, created_by, created_at, started_at, finished_at, updated_at";
+     result_version, error, created_by, created_at, started_at, finished_at, updated_at, mode";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
      max_tokens, fallback_profile, source, headers, extra_body";
 /// [`PROFILE_COLUMNS`] with JSON read back as text.
@@ -217,6 +217,7 @@ fn version_from_row(row: &PgRow) -> Result<ContractVersion, StoreError> {
     let bundle: String = row.try_get("bundle")?;
     let status: String = row.try_get("status")?;
     let draft_meta: Option<String> = row.try_get("draft_meta")?;
+    let warnings: Option<String> = row.try_get("warnings")?;
     Ok(ContractVersion {
         id: row.try_get("id")?,
         mock_id: row.try_get("mock_id")?,
@@ -228,6 +229,7 @@ fn version_from_row(row: &PgRow) -> Result<ContractVersion, StoreError> {
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         draft_meta: draft_meta.map(|m| serde_json::from_str(&m)).transpose()?,
+        warnings: warnings.map(|w| serde_json::from_str(&w)).transpose()?,
     })
 }
 
@@ -267,10 +269,11 @@ async fn insert_version(
         created_by: v.created_by,
         created_at: now(),
         draft_meta,
+        warnings: None,
     };
     let sql = format!(
         "INSERT INTO contract_versions ({VERSION_COLUMNS}) \
-         VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8, $9, $10::json)"
+         VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8, $9, $10::json, NULL)"
     );
     sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(version.id)
@@ -326,6 +329,7 @@ fn job_from_row(row: &PgRow) -> Result<ImportJob, StoreError> {
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
         updated_at: row.try_get("updated_at")?,
+        mode: row.try_get("mode")?,
     })
 }
 
@@ -1529,6 +1533,29 @@ impl ControlStore for PgStore {
         Ok(approved)
     }
 
+    async fn set_contract_version_warnings(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        warnings: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        let warnings = serde_json::to_string(&warnings)?;
+        let sql = format!(
+            "UPDATE contract_versions SET warnings = $1::json WHERE mock_id = $2 AND version = $3 \
+             RETURNING {VERSION_SELECT}"
+        );
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(warnings)
+            .bind(mock_id)
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| {
+                StoreError::NotFound(format!("contract version {version} of mock {mock_id}"))
+            })?;
+        version_from_row(&row)
+    }
+
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
         let progress = queued_progress();
         let progress_json = serde_json::to_string(&progress)?;
@@ -1551,11 +1578,12 @@ impl ControlStore for PgStore {
             started_at: None,
             finished_at: None,
             updated_at: at,
+            mode: j.mode,
         };
         sqlx::query(
             "INSERT INTO import_jobs (id, workspace, mock_id, mock, kind, source_name, input, status, \
-             progress, created_by, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12)",
+             progress, created_by, created_at, updated_at, mode) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12, $13)",
         )
         .bind(job.id)
         .bind(&job.workspace)
@@ -1569,6 +1597,7 @@ impl ControlStore for PgStore {
         .bind(&job.created_by)
         .bind(job.created_at)
         .bind(job.updated_at)
+        .bind(&job.mode)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

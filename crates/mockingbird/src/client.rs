@@ -162,21 +162,53 @@ pub struct ImportArgs {
     /// descriptor set, WSDL, zip or tar.gz) or a directory (uploaded as a tar.gz); or API
     /// documentation (Markdown, HTML, PDF, text), a HAR recording or a
     /// Postman collection as a file or an http(s) URL, imported as a draft.
+    /// A directory holding only .md, .markdown, .html, .htm and .txt files
+    /// is imported as documentation, one source per file.
     #[arg(value_name = "FILE|URL")]
     pub source: String,
+    /// More http(s) URLs imported into the same draft.
+    #[arg(value_name = "URL")]
+    pub more_urls: Vec<String>,
     /// The mock to import into.
     #[arg(long = "as", value_name = "MOCK")]
     pub mock: String,
     /// Activate the new version (the first contract version is always
-    /// activated; a draft needs --approve).
+    /// activated). For a draft, --approve already activates, and --activate
+    /// is accepted only with --approve.
     #[arg(long)]
     pub activate: bool,
-    /// Approve the draft when the import reported no warnings.
+    /// Approve the draft when the import reported no warnings; the approved
+    /// version is activated unless --no-activate.
     #[arg(long)]
     pub approve: bool,
+    /// With --approve: approve without activating.
+    #[arg(long, conflicts_with = "activate")]
+    pub no_activate: bool,
+    /// Merge into the mock's draft or active contract, or replace it
+    /// [default: merge when one exists].
+    #[arg(long, value_enum)]
+    pub mode: Option<ImportMode>,
     /// How long to wait for a draft import to finish.
     #[arg(long, default_value = "10m")]
     pub timeout: humantime::Duration,
+}
+
+/// How a draft import treats the mock's existing contract.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportMode {
+    /// Add new operations, replace those with the same method and path.
+    Merge,
+    /// The draft holds only what this import found.
+    Replace,
+}
+
+impl ImportMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Replace => "replace",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -302,6 +334,9 @@ pub async fn run(
         }
     }
 }
+
+/// Message of several sources that are not all URLs.
+const SEVERAL_SOURCES_NEED_URLS: &str = "several sources must all be http(s) URLs";
 
 /// Message of `--activate` given for a draft import without `--approve`.
 const ACTIVATE_NEEDS_APPROVE: &str =
@@ -482,12 +517,28 @@ pub fn parse_trigger_spec(spec: &str) -> Result<Value, String> {
 }
 
 async fn import(api: &AdminClient, args: ImportArgs) -> Result<Option<Value>, ClientError> {
+    if !args.more_urls.is_empty() {
+        let urls: Vec<&String> = std::iter::once(&args.source)
+            .chain(&args.more_urls)
+            .collect();
+        if !urls.iter().all(|u| is_url(u)) {
+            return Err(ClientError::Usage(SEVERAL_SOURCES_NEED_URLS.into()));
+        }
+        let body = json!({ "urls": urls });
+        return smart_import(api, &args, body).await;
+    }
     if is_url(&args.source) {
         let body = json!({ "url": args.source });
         return smart_import(api, &args, body).await;
     }
     let path = PathBuf::from(&args.source);
-    if !path.is_dir() {
+    if path.is_dir() {
+        let documents =
+            docs_folder(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        if let Some(documents) = documents {
+            return smart_import(api, &args, json!({ "documents": documents })).await;
+        }
+    } else {
         let bytes = read(&path)?;
         let name = path
             .file_name()
@@ -534,6 +585,71 @@ fn document_body(
     Ok(body)
 }
 
+/// Extensions of the files a documentation folder holds, with their kinds.
+const DOC_EXTENSIONS: [(&str, &str); 5] = [
+    ("md", "markdown"),
+    ("markdown", "markdown"),
+    ("html", "html"),
+    ("htm", "html"),
+    ("txt", "text"),
+];
+
+/// The documents of a folder holding only .md/.markdown/.html/.htm/.txt
+/// files (recursive, hidden entries skipped, sorted by relative path), as
+/// `{"filename", "kind", "text"}`; `None` when it holds anything else or
+/// nothing.
+fn docs_folder(dir: &Path) -> anyhow::Result<Option<Vec<Value>>> {
+    let mut files: Vec<(String, &'static str, PathBuf)> = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in std::fs::read_dir(&current)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Ok(None);
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                return Ok(None);
+            }
+            let ext = name
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            let Some((_, kind)) = DOC_EXTENSIONS.iter().find(|(e, _)| *e == ext) else {
+                return Ok(None);
+            };
+            let relative = path
+                .strip_prefix(dir)
+                .unwrap_or(&path)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            files.push((relative, kind, path));
+        }
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut documents = Vec::with_capacity(files.len());
+    for (filename, kind, path) in files {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("{filename} is not UTF-8 text"))?;
+        documents.push(json!({ "filename": filename, "kind": kind, "text": text }));
+    }
+    Ok(Some(documents))
+}
+
 /// Uploads a contract file or directory to `…/contracts`.
 async fn upload_contract(
     api: &AdminClient,
@@ -576,16 +692,19 @@ async fn ensure_mock(api: &AdminClient, name: &str) -> Result<(), ClientError> {
     }
 }
 
-/// Starts an import job with `body`, waits for its draft and summarises
-/// it; with `--approve`, approves (and with `--activate` activates) a
-/// draft without warnings.
+/// Starts an import job with `body` (and `--mode`), waits for its draft
+/// and summarises it; with `--approve`, approves a draft without warnings,
+/// which also activates it unless `--no-activate`.
 async fn smart_import(
     api: &AdminClient,
     args: &ImportArgs,
-    body: Value,
+    mut body: Value,
 ) -> Result<Option<Value>, ClientError> {
     if args.activate && !args.approve {
         return Err(ClientError::Usage(ACTIVATE_NEEDS_APPROVE.into()));
+    }
+    if let Some(mode) = args.mode {
+        body["mode"] = Value::String(mode.as_str().to_string());
     }
     ensure_mock(api, &args.mock).await?;
     let job = api
@@ -652,7 +771,7 @@ async fn smart_import(
             message: format!("not approved: the draft has {n} {noun}; review it in the console"),
         });
     }
-    let mut summary = api
+    let summary = api
         .send(
             Method::POST,
             &[
@@ -662,25 +781,10 @@ async fn smart_import(
                 &version_segment,
                 "approve",
             ],
-            Some(Body::Json(json!({}))),
+            Some(Body::Json(json!({ "activate": !args.no_activate }))),
         )
         .await?;
     output["approved"] = Value::Bool(true);
-    if args.activate {
-        summary = api
-            .send(
-                Method::POST,
-                &[
-                    "mocks",
-                    &args.mock,
-                    "contracts",
-                    &version_segment,
-                    "activate",
-                ],
-                Some(Body::Json(json!({}))),
-            )
-            .await?;
-    }
     if let Some(status) = summary.as_ref().and_then(|s| s.get("status")) {
         output["status"] = status.clone();
     }

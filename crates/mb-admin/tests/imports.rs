@@ -1348,3 +1348,298 @@ fn import_tokens_metric_counts_unfinished_jobs() {
         .sum();
     assert_eq!(tokens, 42);
 }
+
+impl Harness {
+    /// The draft view of the version a done job produced.
+    async fn job_draft(&self, mock: &str, job: &str) -> Value {
+        let done = self.job(mock, job).await;
+        assert_eq!(done["status"], "done", "{done}");
+        let v = done["result_version"].as_i64().unwrap();
+        self.call(
+            "viewer",
+            Method::GET,
+            &format!("{BASE}/{mock}/contracts/{v}/draft"),
+            None,
+        )
+        .await
+        .expect(StatusCode::OK, "get draft")
+    }
+
+    async fn import_postman(&self, mock: &str, mode: Option<&str>) -> Value {
+        let postman =
+            String::from_utf8(fixture("smart/legacy-v2.0.postman_collection.json")).unwrap();
+        let mut body = json!({ "kind": "postman", "text": postman });
+        if let Some(mode) = mode {
+            body["mode"] = json!(mode);
+        }
+        self.call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/{mock}/imports"),
+            Some(body),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "postman")
+    }
+}
+
+fn targets(draft: &Value) -> Vec<String> {
+    draft["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| {
+            format!(
+                "{} {}",
+                o["method"].as_str().unwrap(),
+                o["path"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn second_import_merges_into_the_first_draft() {
+    let h = harness().await;
+    let id = h.upload_har("pets").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(h.run().await);
+    let first = h.job("pets", &id).await["result_version"].as_i64().unwrap();
+    let view = h.import_postman("pets", None).await;
+    assert_eq!(view["mode"], Value::Null);
+    assert!(h.run().await);
+    let draft = h.job_draft("pets", view["id"].as_str().unwrap()).await;
+    let targets = targets(&draft);
+    assert!(
+        targets.contains(&"GET /api/pets/{petId}".to_string()),
+        "{targets:?}"
+    );
+    assert!(
+        targets.iter().any(|t| t.starts_with("GET /v1/orders")),
+        "{targets:?}"
+    );
+    assert_eq!(draft["meta"]["merged_from"], first);
+}
+
+#[tokio::test]
+async fn replace_mode_does_not_merge() {
+    let h = harness().await;
+    h.upload_har("pets").await;
+    assert!(h.run().await);
+    let view = h.import_postman("pets", Some("replace")).await;
+    assert_eq!(view["mode"], "replace");
+    assert!(h.run().await);
+    let draft = h.job_draft("pets", view["id"].as_str().unwrap()).await;
+    let targets = targets(&draft);
+    assert!(
+        !targets.iter().any(|t| t.contains("/api/pets")),
+        "{targets:?}"
+    );
+    assert!(draft["meta"].get("merged_from").is_none_or(Value::is_null));
+}
+
+#[tokio::test]
+async fn default_merge_over_graphql_falls_back_to_replace() {
+    let h = harness().await;
+    let req = Request::post(format!("{BASE}/pets/contracts"))
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, "application/graphql")
+        .body(Body::from(fixture("graphql/starwars.graphql")))
+        .unwrap();
+    h.send(req)
+        .await
+        .expect(StatusCode::CREATED, "graphql upload");
+
+    let id = h.upload_har("pets").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(h.run().await);
+    let draft = h.job_draft("pets", &id).await;
+    let codes: Vec<&str> = draft["meta"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"merge_skipped"), "{codes:?}");
+    assert!(
+        targets(&draft).iter().all(|t| t.contains(" /api/")),
+        "{draft}"
+    );
+
+    // An explicit merge fails instead. The draft above is newer than the
+    // GraphQL version, so merging targets it: upload another GraphQL
+    // version and activate it to make it the newest.
+    let req = Request::post(format!("{BASE}/pets/contracts?activate=true"))
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, "application/graphql")
+        .body(Body::from(fixture("graphql/starwars.graphql")))
+        .unwrap();
+    h.send(req)
+        .await
+        .expect(StatusCode::CREATED, "graphql again");
+    let har = String::from_utf8(fixture("smart/petstore.har")).unwrap();
+    let view = h
+        .call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/pets/imports"),
+            Some(json!({ "kind": "har", "text": har, "mode": "merge" })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "merge");
+    assert!(h.run().await);
+    let job = h.job("pets", view["id"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert!(
+        job["error"]
+            .as_str()
+            .unwrap()
+            .contains("import with mode replace"),
+        "{job}"
+    );
+}
+
+#[tokio::test]
+async fn urls_and_documents_validation() {
+    let h = harness_with(Some(scripted(vec![]))).await;
+    let uri = format!("{BASE}/pets/imports");
+    let bad = [
+        json!({ "urls": [] }),
+        json!({ "urls": ["ftp://x"] }),
+        json!({ "urls": ["https://a.example/x"], "url": "https://b.example/y" }),
+        json!({ "documents": [{ "filename": "a.pdf", "text": "x" }] }),
+        json!({ "documents": [] }),
+        json!({ "urls": (0..21).map(|i| format!("https://a.example/{i}")).collect::<Vec<_>>() }),
+    ];
+    for body in bad {
+        h.call("editor", Method::POST, &uri, Some(body.clone()))
+            .await
+            .expect(StatusCode::BAD_REQUEST, &body.to_string());
+    }
+    let ok = h
+        .call(
+            "editor",
+            Method::POST,
+            &uri,
+            Some(json!({ "urls": ["https://a.example/x?sig=s3cret", "https://b.example/y"], "mode": "replace" })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "urls");
+    assert_eq!(ok["kind"], "urls");
+    assert_eq!(ok["mode"], "replace");
+    assert_eq!(
+        ok["source_name"],
+        "https://a.example/x?sig=REDACTED (+1 more)"
+    );
+    let docs = h
+        .call(
+            "editor",
+            Method::POST,
+            &uri,
+            Some(json!({ "documents": [
+                { "filename": "a.md", "text": md_text() },
+                { "filename": "b.html", "text": "<h1>B</h1>" }] })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "documents");
+    assert_eq!(docs["kind"], "documents");
+    assert_eq!(docs["source_name"], "2 documents");
+}
+
+#[tokio::test]
+async fn documents_import_without_llm_is_422() {
+    let h = harness().await;
+    h.call(
+        "editor",
+        Method::POST,
+        &format!("{BASE}/pets/imports"),
+        Some(json!({ "documents": [{ "filename": "a.md", "text": md_text() }] })),
+    )
+    .await
+    .expect(StatusCode::UNPROCESSABLE_ENTITY, "documents without an LLM");
+}
+
+#[tokio::test]
+async fn documents_import_reads_each_file() {
+    let h = harness_with(Some(scripted(vec![
+        pets_answer(),
+        r#"{"operations": []}"#.to_string(),
+    ])))
+    .await;
+    let view = h
+        .call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/pets/imports"),
+            Some(json!({ "documents": [
+                { "filename": "a.md", "text": md_text() },
+                { "filename": "b.md", "text": "# B\n\nNothing here." }] })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "documents");
+    assert!(h.run().await);
+    let draft = h.job_draft("pets", view["id"].as_str().unwrap()).await;
+    assert_eq!(draft["meta"]["sources"], json!(["a.md", "b.md"]));
+    assert_eq!(draft["operations"].as_array().unwrap().len(), 3, "{draft}");
+}
+
+#[tokio::test]
+async fn urls_job_fetches_each_url_into_one_draft() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock as WireMock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    WireMock::given(method("GET"))
+        .and(path("/pets.md"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/markdown")
+                .set_body_bytes(fixture("smart/petstore.md")),
+        )
+        .mount(&server)
+        .await;
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut st = AdminState {
+        auth: Arc::new(TestAuth),
+        ..AdminState::new(store, state)
+    };
+    st.llm = Arc::new(TestLlm(Some(scripted(vec![pets_answer()]))));
+    st.imports.settings.fetch =
+        mb_import::smart::fetch::FetchPolicy::from_allowlist(&["127.0.0.1/32".to_string()])
+            .unwrap();
+    let h = Harness {
+        app: router(st.clone()),
+        st,
+    };
+    h.create_mock("pets").await;
+    let view = h
+        .call(
+            "editor",
+            Method::POST,
+            &format!("{BASE}/pets/imports"),
+            Some(json!({ "urls": [
+                format!("{}/pets.md", server.uri()),
+                format!("{}/missing.md", server.uri())] })),
+        )
+        .await
+        .expect(StatusCode::ACCEPTED, "urls");
+    assert!(h.run().await);
+    let draft = h.job_draft("pets", view["id"].as_str().unwrap()).await;
+    assert_eq!(
+        draft["meta"]["sources"].as_array().unwrap().len(),
+        2,
+        "{draft}"
+    );
+    let skipped = draft["meta"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "source_skipped")
+        .count();
+    assert_eq!(skipped, 1, "{draft}");
+    assert_eq!(draft["operations"].as_array().unwrap().len(), 3, "{draft}");
+}

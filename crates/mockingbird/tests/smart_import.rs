@@ -174,7 +174,8 @@ async fn markdown_import_end_to_end() {
 
     // Approve, then activate.
     let approved = send(
-        http.post(format!("{contract}/approve")).json(&json!({})),
+        http.post(format!("{contract}/approve"))
+            .json(&json!({ "activate": false })),
         200,
     )
     .await;

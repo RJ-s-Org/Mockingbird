@@ -17,18 +17,34 @@ export type ImportSource =
   | { type: "text"; kind: TextKind; text: string };
 
 /** Document file extensions the import wizard offers. */
-export const IMPORT_FILE_EXTENSIONS = [".md", ".markdown", ".html", ".htm", ".pdf", ".har", ".json", ".txt"];
+export const IMPORT_FILE_EXTENSIONS = [
+  ".md",
+  ".markdown",
+  ".html",
+  ".htm",
+  ".pdf",
+  ".har",
+  ".json",
+  ".txt",
+];
 
 /** Query keys of a mock's imports and drafts (under the mock's own key). */
 export const importKeys = {
-  imports: (ws: string, mock: string) => ["ws", ws, "mocks", mock, "imports"] as const,
-  job: (ws: string, mock: string, id: string) => ["ws", ws, "mocks", mock, "imports", id] as const,
-  draft: (ws: string, mock: string, version: number) => ["ws", ws, "mocks", mock, "draft", version] as const,
+  imports: (ws: string, mock: string) =>
+    ["ws", ws, "mocks", mock, "imports"] as const,
+  job: (ws: string, mock: string, id: string) =>
+    ["ws", ws, "mocks", mock, "imports", id] as const,
+  draft: (ws: string, mock: string, version: number) =>
+    ["ws", ws, "mocks", mock, "draft", version] as const,
 };
 
 /** Whether a job has stopped for good (`done`, `failed` or `canceled`). */
 export function isFinished(job: ImportJob): boolean {
-  return job.status === "done" || job.status === "failed" || job.status === "canceled";
+  return (
+    job.status === "done" ||
+    job.status === "failed" ||
+    job.status === "canceled"
+  );
 }
 
 /**
@@ -55,12 +71,23 @@ export function useCreateImport(ws: string, mock: string) {
           }),
         );
       }
-      const body: CreateImport = source.type === "url" ? { url: source.url } : { kind: source.kind, text: source.text };
-      return unwrap(await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/imports", { params, body }));
+      const body: CreateImport =
+        source.type === "url"
+          ? { url: source.url }
+          : { kind: source.kind, text: source.text };
+      return unwrap(
+        await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/imports", {
+          params,
+          body,
+        }),
+      );
     },
     onSuccess: async (job) => {
       queryClient.setQueryData(importKeys.job(ws, mock, job.id), job);
-      await queryClient.invalidateQueries({ queryKey: importKeys.imports(ws, mock), exact: true });
+      await queryClient.invalidateQueries({
+        queryKey: importKeys.imports(ws, mock),
+        exact: true,
+      });
     },
   });
 }
@@ -76,7 +103,8 @@ export function useImportJob(ws: string, mock: string, id: string | undefined) {
         }),
       ),
     enabled: id !== undefined,
-    refetchInterval: (query) => (query.state.data && !isFinished(query.state.data) ? 1000 : false),
+    refetchInterval: (query) =>
+      query.state.data && !isFinished(query.state.data) ? 1000 : false,
   });
 }
 
@@ -92,7 +120,10 @@ export function useCancelImport(ws: string, mock: string) {
       ),
     onSuccess: async (job) => {
       queryClient.setQueryData(importKeys.job(ws, mock, job.id), job);
-      await queryClient.invalidateQueries({ queryKey: importKeys.imports(ws, mock), exact: true });
+      await queryClient.invalidateQueries({
+        queryKey: importKeys.imports(ws, mock),
+        exact: true,
+      });
     },
   });
 }
@@ -108,9 +139,12 @@ export function useDraft(ws: string, mock: string, version: number) {
     queryKey: importKeys.draft(ws, mock, version),
     queryFn: async (): Promise<DraftView> =>
       unwrap(
-        await api.GET("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft", {
-          params: { path: { ws, mock, version } },
-        }),
+        await api.GET(
+          "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft",
+          {
+            params: { path: { ws, mock, version } },
+          },
+        ),
       ),
   });
 }
@@ -121,30 +155,43 @@ export function usePutDraft(ws: string, mock: string, version: number) {
   return useMutation({
     mutationFn: async (document: object): Promise<DraftView> =>
       unwrap(
-        await api.PUT("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft", {
-          params: { path: { ws, mock, version } },
-          body: { document: document as DraftView["document"] },
-        }),
+        await api.PUT(
+          "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/draft",
+          {
+            params: { path: { ws, mock, version } },
+            body: { document: document as DraftView["document"] },
+          },
+        ),
       ),
     onSuccess: async (view) => {
       queryClient.setQueryData(importKeys.draft(ws, mock, version), view);
-      await queryClient.invalidateQueries({ queryKey: keys.contracts(ws, mock) });
+      await queryClient.invalidateQueries({
+        queryKey: keys.contracts(ws, mock),
+      });
     },
   });
 }
 
-/** `POST …/contracts/{version}/approve`: approves a draft; refreshes the mock's versions and the draft. */
+/**
+ * `POST …/contracts/{version}/approve` with `activate: false`: approves a draft without activating
+ * it (the page offers activation as its own step); refreshes the mock's versions and the draft.
+ */
 export function useApproveDraft(ws: string, mock: string, version: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (): Promise<ContractSummary> =>
       unwrap(
-        await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/approve", {
-          params: { path: { ws, mock, version } },
-        }),
+        await api.POST(
+          "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/approve",
+          {
+            params: { path: { ws, mock, version } },
+            body: { activate: false },
+          },
+        ),
       ),
     // `["ws", ws, "mocks", mock]` prefixes the mock, its contracts and its drafts.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.mock(ws, mock) }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: keys.mock(ws, mock) }),
   });
 }
 
@@ -153,10 +200,13 @@ export function usePreview(ws: string, mock: string, version: number) {
   return useMutation({
     mutationFn: async (request: PreviewRequest): Promise<PreviewResponse> =>
       unwrap(
-        await api.POST("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/preview", {
-          params: { path: { ws, mock, version } },
-          body: request,
-        }),
+        await api.POST(
+          "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/preview",
+          {
+            params: { path: { ws, mock, version } },
+            body: request,
+          },
+        ),
       ),
   });
 }

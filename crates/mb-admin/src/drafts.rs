@@ -7,7 +7,9 @@ use axum::response::{IntoResponse, Response};
 use mb_auth::Permission;
 use mb_engine::{EngineError, GenerationContext, OperationCall};
 use mb_ext::{CallInfo, UsageEvent};
-use mb_import::smart::assemble::{DraftIssue, compile_draft, diff_bundles, refresh_meta};
+use mb_import::smart::assemble::{
+    DraftIssue, compile_draft, diff_bundles, refresh_meta, schema_warnings,
+};
 use mb_import::smart::model::DraftMeta;
 use mb_mcm::Binding;
 use mb_store::{ContractStatus, ContractVersion, Mock, StoreError};
@@ -17,7 +19,10 @@ use utoipa::ToSchema;
 
 use crate::access::WsAccess;
 use crate::audit::snapshot;
-use crate::contracts::{ContractVersionSummary, VersionPath, method_name, version};
+use crate::contracts::{
+    ContractVersionSummary, VersionPath, ensure_grpc_services_free, method_name, store_warnings,
+    version,
+};
 use crate::imports::ImportKindSchema;
 use crate::problem::{ApiResult, Json, PROBLEM_CONTENT_TYPE, Path, Problem, RequireJson};
 use crate::{AdminState, VersionStatus, ensure_api_managed};
@@ -78,6 +83,11 @@ pub struct DraftMetaView {
     pub usage: TokenUsageView,
     /// Whether the draft was edited through the API.
     pub edited: bool,
+    /// Names (file names or redacted URLs) of every source, when the import
+    /// had more than one.
+    pub sources: Vec<String>,
+    /// The contract version this draft was merged into.
+    pub merged_from: Option<i64>,
 }
 
 /// What a draft changes compared with the active version.
@@ -241,6 +251,8 @@ fn meta_view(meta: &DraftMeta) -> DraftMetaView {
             completion_tokens: meta.usage.completion_tokens,
         },
         edited: meta.edited,
+        sources: meta.sources.clone(),
+        merged_from: meta.merged_from,
     }
 }
 
@@ -388,13 +400,16 @@ pub async fn put_draft(
         .await
         .map_err(|e| internal(format!("draft compilation did not finish: {e}")))?;
     let (source, bundle) = compiled.map_err(DraftError::Invalid)?;
-    let new_meta = refresh_meta(&meta, &v.bundle, &bundle);
+    let mut new_meta = refresh_meta(&meta, &v.bundle, &bundle);
+    new_meta.warnings.retain(|w| w.code != "schema_too_large");
+    new_meta.warnings.extend(schema_warnings(&bundle));
+    let compile_warnings = mb_import::bundle_warnings(&bundle);
     let meta_value = serde_json::to_value(&new_meta)
         .map_err(|e| internal(format!("the draft metadata is invalid: {e}")))?;
-    let updated = st
-        .store
+    st.store
         .update_draft_contract_version(m.id, number, source, bundle, meta_value)
         .await?;
+    let updated = store_warnings(&st, m.id, number, &compile_warnings).await?;
     access
         .audit(
             &st.audit,
@@ -416,11 +431,13 @@ pub async fn put_draft(
         ("mock" = String, Path, description = "Mock name"),
         ("version" = i64, Path, description = "Contract version number"),
     ),
+    request_body(content = Option<ApproveRequest>, description = "Optional: empty, `{}` or `{\"activate\": bool}`"),
     responses(
-        (status = 200, description = "Approved; activate it to serve it", body = ContractVersionSummary),
+        (status = 200, description = "Approved and, unless activate is false, activated", body = ContractVersionSummary),
+        (status = 400, description = "The body is not an approve request", body = Problem, content_type = "application/problem+json"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Not a draft, or managed by config file", body = Problem, content_type = "application/problem+json"),
-        (status = 415, description = "Content-Type is not application/json (the body is ignored)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Not a draft, managed by config file, or (when activating) binds a gRPC service another mock's active contract serves", body = Problem, content_type = "application/problem+json"),
+        (status = 415, description = "Content-Type is not application/json", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn approve(
@@ -431,11 +448,23 @@ pub async fn approve(
         version: number,
     }): Path<VersionPath>,
     _json: RequireJson,
+    body: axum::body::Bytes,
 ) -> ApiResult<Json<ContractVersionSummary>> {
     access.require(Permission::Edit)?;
+    let request: ApproveRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        ApproveRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| Problem::bad_request(format!("invalid approve request: {e}")))?
+    };
+    let activate = request.activate.unwrap_or(true);
     let m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     let v = version(&st, &m, number).await?;
+    if activate {
+        // Refused before approving, so a refusal changes nothing.
+        ensure_grpc_services_free(&st, &m, &v.bundle).await?;
+    }
     let approved = st.store.approve_contract_version(m.id, number).await?;
     let view = ContractVersionSummary::from(&approved);
     access
@@ -447,7 +476,28 @@ pub async fn approve(
             snapshot(&view),
         )
         .await;
+    if !activate {
+        return Ok(Json(view));
+    }
+    let active = st.store.activate_contract_version(m.id, number).await?;
+    let view = ContractVersionSummary::from(&active);
+    access
+        .audit(
+            &st.audit,
+            "contract.activate",
+            format!("contract:{mock}@{number}"),
+            None,
+            snapshot(&view),
+        )
+        .await;
     Ok(Json(view))
+}
+
+/// What to do on approval.
+#[derive(Deserialize, ToSchema, Debug, Default)]
+pub struct ApproveRequest {
+    /// Also activate the approved version (default true).
+    pub activate: Option<bool>,
 }
 
 #[utoipa::path(

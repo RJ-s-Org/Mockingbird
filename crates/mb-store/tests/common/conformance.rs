@@ -77,6 +77,8 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     token_usage_cascades_with_mock(&store).await;
     token_usage_pruned_before_day(&store).await;
     get_request_log_by_id(&store).await;
+    contract_version_warnings_round_trip(&store).await;
+    import_job_mode_round_trips(&store).await;
 }
 
 fn new_mock(name: &str) -> NewMock {
@@ -1950,6 +1952,7 @@ fn new_job(mock_id: Uuid, input: &[u8]) -> NewImportJob {
         source_name: Some("petstore.md".into()),
         input: input.to_vec(),
         created_by: Some("alice".into()),
+        mode: None,
     }
 }
 
@@ -3058,4 +3061,62 @@ async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
         store.get_request_log(id + 1_000_000).await.expect("get"),
         None
     );
+}
+
+async fn contract_version_warnings_round_trip(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "warned").await;
+    let v = store
+        .add_contract_version(mock.id, new_version(ContractStatus::Approved, "a"))
+        .await
+        .expect("add");
+    assert_eq!(v.warnings, None);
+    let w =
+        json!([{"code": "schema_too_large", "operation": "getBig", "message": "m", "size": 70000}]);
+    let set = store
+        .set_contract_version_warnings(mock.id, v.version, w.clone())
+        .await
+        .expect("set");
+    assert_eq!(set.warnings, Some(w.clone()));
+    let read = store
+        .get_contract_version(mock.id, v.version)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(read.warnings, Some(w.clone()));
+    assert_eq!(
+        store.list_contract_versions(mock.id).await.expect("list")[0].warnings,
+        Some(w)
+    );
+    assert!(matches!(
+        store
+            .set_contract_version_warnings(mock.id, 99, json!([]))
+            .await,
+        Err(StoreError::NotFound(_))
+    ));
+}
+
+async fn import_job_mode_round_trips(store: &Arc<dyn ControlStore>) {
+    drain_queue(store).await;
+    let mock = create(store, "moded").await;
+    let mut j = new_job(mock.id, b"x");
+    j.mode = Some("replace".into());
+    let created = store.create_import_job(j).await.expect("create");
+    assert_eq!(created.mode.as_deref(), Some("replace"));
+    assert_eq!(
+        store
+            .get_import_job(created.id)
+            .await
+            .expect("get")
+            .expect("exists")
+            .mode
+            .as_deref(),
+        Some("replace")
+    );
+    let claimed = store
+        .claim_import_job(now_us())
+        .await
+        .expect("claim")
+        .expect("queued");
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.mode.as_deref(), Some("replace"));
 }

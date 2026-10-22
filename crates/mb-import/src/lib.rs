@@ -21,6 +21,7 @@ pub use archive::{
     unpack_archive,
 };
 use mb_mcm::Bundle;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use triggers::validate_triggers;
 
@@ -193,6 +194,67 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
             Ok(bundle)
         }
     }
+}
+
+/// Bytes of compact JSON the generation prompt shows of a response schema
+/// (about 16k tokens); larger schemas are trimmed in the prompt.
+pub const PROMPT_SCHEMA_BUDGET: usize = 64 * 1024;
+
+/// A non-fatal finding of compilation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Warning {
+    /// `schema_too_large`.
+    pub code: String,
+    /// The operation id the warning is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    pub message: String,
+    /// Compact JSON bytes of the schema with its reachable `$defs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// [`compile`], with the bundle's [`bundle_warnings`].
+pub fn compile_with_warnings(bytes: &[u8]) -> Result<(Bundle, Vec<Warning>), ImportError> {
+    let bundle = compile(bytes)?;
+    let warnings = bundle_warnings(&bundle);
+    Ok((bundle, warnings))
+}
+
+/// One `schema_too_large` warning per operation whose largest response
+/// schema, with its reachable definitions, exceeds [`PROMPT_SCHEMA_BUDGET`].
+pub fn bundle_warnings(bundle: &Bundle) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+    for op in &bundle.operations {
+        let largest = op
+            .outputs
+            .iter()
+            .filter_map(|o| {
+                let schema = o.schema.as_ref()?;
+                Some((o, bundle.with_reachable_defs(schema).to_string().len()))
+            })
+            .max_by_key(|(_, size)| *size);
+        let Some((output, size)) = largest else {
+            continue;
+        };
+        if size <= PROMPT_SCHEMA_BUDGET {
+            continue;
+        }
+        let status = match output.status {
+            mb_mcm::StatusSelector::Code(c) => c.to_string(),
+            mb_mcm::StatusSelector::Default => "default".to_string(),
+        };
+        let id = &op.id;
+        warnings.push(Warning {
+            code: "schema_too_large".into(),
+            operation: Some(id.clone()),
+            message: format!(
+                "operation {id}: the {status} response schema is {size} bytes, over the prompt budget of {PROMPT_SCHEMA_BUDGET}; the prompt shows a trimmed schema (validation uses the full one)"
+            ),
+            size: Some(size as u64),
+        });
+    }
+    warnings
 }
 
 /// Whether `path` names a GraphQL SDL file.

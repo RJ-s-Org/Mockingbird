@@ -396,6 +396,7 @@ describe("draft review", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     const approve = calls.find((c) => c.method === "POST" && c.path.endsWith("/approve"));
     expect(approve?.contentType).toBe("application/json");
+    expect(approve?.body).toBe(JSON.stringify({ activate: false }));
 
     await user.click(screen.getByRole("button", { name: "Activate" }));
     await screen.findByText("Status: active");

@@ -467,7 +467,7 @@ async fn approve_then_activate() {
             "editor",
             Method::POST,
             &Harness::url(v, "/approve"),
-            Some(json!({})),
+            Some(json!({ "activate": false })),
         )
         .await
         .expect(StatusCode::OK, "approve");
@@ -801,4 +801,89 @@ async fn preview_is_admitted_and_recorded() {
         1,
         "a refused preview is not recorded"
     );
+}
+
+#[tokio::test]
+async fn put_draft_refreshes_schema_warnings() {
+    let h = harness().await;
+    let v = h.har_draft().await;
+    let huge: Value = serde_json::from_slice(&fixture("openapi/huge-response.json")).unwrap();
+    let view = h
+        .call(
+            "editor",
+            Method::PUT,
+            &Harness::url(v, "/draft"),
+            Some(json!({ "document": huge })),
+        )
+        .await
+        .expect(StatusCode::OK, "put huge");
+    let codes: Vec<&str> = view["meta"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes.iter().filter(|c| **c == "schema_too_large").count(),
+        1,
+        "{codes:?}"
+    );
+    let list = h
+        .call(
+            "viewer",
+            Method::GET,
+            &format!("{BASE}/pets/contracts"),
+            None,
+        )
+        .await
+        .json();
+    assert_eq!(list[0]["warnings"][0]["operation"], "getBig");
+}
+
+#[tokio::test]
+async fn approve_activates_by_default() {
+    let h = harness().await;
+    let v = h.har_draft().await;
+    let r = h
+        .call(
+            "editor",
+            Method::POST,
+            &Harness::url(v, "/approve"),
+            Some(json!({})),
+        )
+        .await
+        .expect(StatusCode::OK, "approve");
+    assert_eq!(r["status"], "active");
+    let actions = h.actions().await;
+    assert!(
+        actions.contains(&"contract.approve".into())
+            && actions.contains(&"contract.activate".into()),
+        "{actions:?}"
+    );
+    let v2 = h.har_draft().await;
+    let r = h
+        .call(
+            "editor",
+            Method::POST,
+            &Harness::url(v2, "/approve"),
+            Some(json!({ "activate": false })),
+        )
+        .await
+        .expect(StatusCode::OK, "approve only");
+    assert_eq!(r["status"], "approved");
+    let empty = Request::post(Harness::url(h.har_draft().await, "/approve"))
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(h.send(empty).await.json()["status"], "active");
+    let v4 = h.har_draft().await;
+    h.call(
+        "editor",
+        Method::POST,
+        &Harness::url(v4, "/approve"),
+        Some(json!({ "activate": "yes" })),
+    )
+    .await
+    .expect(StatusCode::BAD_REQUEST, "bad body");
 }

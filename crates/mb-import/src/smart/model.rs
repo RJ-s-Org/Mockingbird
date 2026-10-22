@@ -209,6 +209,13 @@ pub struct DraftMeta {
     #[serde(default)]
     pub usage: TokenUsage,
     pub edited: bool,
+    /// Names (file names or redacted URLs) of every source, when there was
+    /// more than one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    /// The contract version this draft was merged into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_from: Option<i64>,
 }
 
 /// What the deterministic HAR/Postman importers return.

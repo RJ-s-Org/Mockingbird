@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 /// Bytes of compact JSON the prompt's schema may take (about 16k tokens).
-pub const PROMPT_SCHEMA_BUDGET: usize = 64 * 1024;
+pub use mb_import::PROMPT_SCHEMA_BUDGET;
 
 /// Longest description kept once the schema is over budget.
 pub const MAX_DESCRIPTION: usize = 160;
