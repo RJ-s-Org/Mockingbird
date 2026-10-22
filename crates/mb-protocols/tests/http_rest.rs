@@ -13,7 +13,7 @@ use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_mcm::{Bundle, HttpMethod};
 use mb_protocols::MockRuntime;
 use mb_protocols::http_rest::{self, RouteTable};
-use mb_state::{MemoryStore, SessionKey, StoredResource};
+use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -31,22 +31,36 @@ struct Harness {
     provider: Option<Arc<ScriptedProvider>>,
 }
 
-fn harness(script: Option<Vec<Result<String, LlmError>>>, header_overrides: bool) -> Harness {
+fn harness_with(
+    script: Option<Vec<Result<String, LlmError>>>,
+    state: Arc<dyn StateStore>,
+    configure: impl FnOnce(&mut MockRuntime),
+) -> Harness {
     let provider = script.map(|s| Arc::new(ScriptedProvider::new(s)));
     let dyn_provider = provider.clone().map(|p| p as Arc<dyn Provider>);
     let mut rt = MockRuntime::new(
         "orders",
         orders(),
         Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        state,
     );
-    rt.header_overrides = header_overrides;
+    configure(&mut rt);
     let rt = Arc::new(rt);
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
         rt,
         provider,
     }
+}
+
+fn harness(script: Option<Vec<Result<String, LlmError>>>, header_overrides: bool) -> Harness {
+    harness_with(script, memory_state(), |rt| {
+        rt.header_overrides = header_overrides
+    })
+}
+
+fn memory_state() -> Arc<dyn StateStore> {
+    Arc::new(MemoryStore::new(Duration::from_secs(3600)))
 }
 
 fn offline() -> Harness {
@@ -1132,4 +1146,67 @@ async fn validation_failures_stay_visible() {
     assert!(!header_str(&resp, "x-mockingbird-validation").is_empty());
     let body = body_json(resp).await;
     assert!(body["message"].as_str().unwrap().contains("body"), "{body}");
+}
+
+#[tokio::test]
+async fn get_after_create_is_served_from_state() {
+    let h = harness(Some(vec![Ok(order("o1", "c1").to_string())]), true);
+    send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    let resp = send(&h, get("/orders/o1")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await, order("o1", "c1"));
+    assert_eq!(
+        h.provider.as_ref().unwrap().requests().len(),
+        1,
+        "no LLM call for the GET"
+    );
+}
+
+#[tokio::test]
+async fn stored_partial_resource_is_generated_and_overlaid() {
+    let h = offline();
+    h.rt.state
+        .upsert(
+            &session("default"),
+            StoredResource {
+                resource_type: "orders".into(),
+                id: "o1".into(),
+                data: json!({"id": "o1", "customerId": "c9"}),
+            },
+        )
+        .await
+        .unwrap();
+    let resp = send(&h, get("/orders/o1")).await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+    let body = body_json(resp).await;
+    assert_eq!(body["customerId"], "c9");
+    assert!(body["total"].is_number(), "{body}");
+}
+
+#[tokio::test]
+async fn scenario_and_forced_status_skip_the_stored_answer() {
+    let h = offline();
+    h.rt.state
+        .upsert(
+            &session("default"),
+            StoredResource {
+                resource_type: "orders".into(),
+                id: "o1".into(),
+                data: order("o1", "c1"),
+            },
+        )
+        .await
+        .unwrap();
+    let forced = Request::get("/orders/o1")
+        .header("x-mockingbird-status", "404")
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&h, forced).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_ne!(header_str(&resp, "x-mockingbird-source"), "state");
 }

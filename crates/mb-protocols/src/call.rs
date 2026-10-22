@@ -633,6 +633,17 @@ pub(crate) async fn generate_narrowed(
         .instrument(state_span())
         .await;
 
+    if matches!(op.kind, OperationKind::Query)
+        && plain(plan)
+        && let Some(stored) = &target
+        && let Some(served) = rt
+            .engine
+            .serve_stored(&rt.bundle, op, &stored.data, response_schema)
+    {
+        state.touch(session).instrument(state_span()).await;
+        return Ok(served);
+    }
+
     let ctx = GenerationContext {
         related: &related,
         target: target.as_ref(),
@@ -662,6 +673,12 @@ pub(crate) async fn generate_narrowed(
     .instrument(state_span())
     .await;
     Ok(generated)
+}
+
+/// Whether no scenario applies to the call and no status is forced (an
+/// injected chaos error forces one).
+fn plain(plan: &CallPlan<'_>) -> bool {
+    plan.scenario.is_none() && plan.forced_status.is_none()
 }
 
 /// The span of a call's state reads, or of its writes.

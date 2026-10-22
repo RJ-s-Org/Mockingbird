@@ -257,10 +257,27 @@ pub struct MockRuntime {
     /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
     /// process begins to shut down. Never fires by default.
     pub shutdown: Shutdown,
+    /// Answer repeated reads from the session's response cache and seed
+    /// list items into session state. Defaults to `true`.
+    pub consistency: bool,
+    /// How a read of an id the session does not hold is answered.
+    pub unknown_ids: UnknownIds,
+    /// The scenario applied when a call names none.
+    pub default_scenario: Option<String>,
     /// The credential header and query names derived from
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
     credential_names: CredentialNames,
+}
+
+/// How a read of a path id the session holds no resource for is answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnknownIds {
+    /// Generate a resource for the id (the default).
+    #[default]
+    Generate,
+    /// Answer the operation's `404`.
+    NotFound,
 }
 
 /// A process stop signal that open-ended streams end on, so a graceful
@@ -319,6 +336,9 @@ impl MockRuntime {
             limits: RuntimeLimits::default(),
             chaos: None,
             shutdown: Shutdown::default(),
+            consistency: true,
+            unknown_ids: UnknownIds::default(),
+            default_scenario: None,
             credential_names,
         }
     }
