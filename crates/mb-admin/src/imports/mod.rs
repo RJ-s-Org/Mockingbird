@@ -44,6 +44,15 @@ const ACCEPTED_MEDIA: &str = "application/json, multipart/form-data";
 const LIST_LIMIT: u32 = 50;
 /// The job kind of an import from a URL.
 const URL_KIND: &str = "url";
+/// The job kind of an import from several URLs (input: a JSON array).
+pub(crate) const URLS_KIND: &str = "urls";
+/// The job kind of an import of several documents (input: a JSON array of
+/// `{"kind", "name", "text"}`).
+pub(crate) const DOCUMENTS_KIND: &str = "documents";
+/// Most URLs of one import.
+pub const MAX_IMPORT_URLS: usize = 20;
+/// Most documents of one import.
+pub const MAX_IMPORT_DOCUMENTS: usize = mb_import::smart::MAX_IMPORT_SOURCES;
 /// The operation id import jobs are admitted under and their LLM calls
 /// reported with (`CallInfo::operation_id`, `UsageEvent::operation_id` and
 /// `UsageEvent::source`).
@@ -105,10 +114,53 @@ pub enum ImportKindSchema {
     Postman,
     /// A document fetched from a URL (its kind is decided after fetching).
     Url,
+    /// Documents fetched from several URLs, imported into one draft.
+    Urls,
+    /// Several Markdown, HTML or text documents, imported into one draft.
+    Documents,
+}
+
+/// How an import treats the mock's existing contract.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportModeSchema {
+    /// Add new operations, replace those with the same method and path,
+    /// remove nothing.
+    Merge,
+    /// The draft holds only what this import found.
+    Replace,
+}
+
+impl ImportModeSchema {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Replace => "replace",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "merge" => Some(Self::Merge),
+            "replace" => Some(Self::Replace),
+            _ => None,
+        }
+    }
+}
+
+/// One text document of a `documents` import.
+#[derive(Deserialize, ToSchema, Debug)]
+pub struct ImportDocument {
+    /// The file name, shown as the source; decides the kind when `kind` is
+    /// absent (`.md`, `.markdown`, `.html`, `.htm`, `.txt`).
+    pub filename: Option<String>,
+    /// `markdown`, `html` or `text`.
+    pub kind: Option<ImportKindSchema>,
+    pub text: String,
 }
 
 impl ImportKindSchema {
-    /// The document kind; `None` for `url`.
+    /// The document kind; `None` for `url`, `urls` and `documents`.
     fn document_kind(self) -> Option<ImportKind> {
         match self {
             Self::Markdown => Some(ImportKind::Markdown),
@@ -117,11 +169,16 @@ impl ImportKindSchema {
             Self::Text => Some(ImportKind::Text),
             Self::Har => Some(ImportKind::Har),
             Self::Postman => Some(ImportKind::Postman),
-            Self::Url => None,
+            Self::Url | Self::Urls | Self::Documents => None,
         }
     }
 
     pub(crate) fn from_job_kind(kind: &str) -> Self {
+        match kind {
+            URLS_KIND => return Self::Urls,
+            DOCUMENTS_KIND => return Self::Documents,
+            _ => {}
+        }
         match ImportKind::parse(kind) {
             Some(ImportKind::Markdown) => Self::Markdown,
             Some(ImportKind::Html) => Self::Html,
@@ -129,15 +186,19 @@ impl ImportKindSchema {
             Some(ImportKind::Text) => Self::Text,
             Some(ImportKind::Har) => Self::Har,
             Some(ImportKind::Postman) => Self::Postman,
-            // Jobs are only created with the kinds above or `url`.
+            // Jobs are only created with the kinds above, `urls`,
+            // `documents` or `url`.
             None => Self::Url,
         }
     }
 
     /// The kind with the wire string `s`.
     fn parse(s: &str) -> Option<Self> {
-        if s == URL_KIND {
-            return Some(Self::Url);
+        match s {
+            URL_KIND => return Some(Self::Url),
+            URLS_KIND => return Some(Self::Urls),
+            DOCUMENTS_KIND => return Some(Self::Documents),
+            _ => {}
         }
         ImportKind::parse(s).map(|k| Self::from_job_kind(k.as_str()))
     }
@@ -166,12 +227,21 @@ impl From<&ImportJobStatus> for ImportStatusSchema {
     }
 }
 
-/// A JSON import request: exactly one of `url`, `text` and
-/// `content_base64`.
+/// A JSON import request: exactly one of `url`, `urls`, `text`,
+/// `content_base64` and `documents`.
 #[derive(Deserialize, ToSchema, Debug)]
 pub struct CreateImport {
     /// An http(s) URL to fetch. `kind` must be absent or `url`.
     pub url: Option<String>,
+    /// 1–20 http(s) URLs imported into one draft. `kind` must be absent.
+    pub urls: Option<Vec<String>>,
+    /// 1–100 Markdown, HTML or text documents (kind from `kind` or the file
+    /// name), at most 20 MiB in all, imported into one draft.
+    pub documents: Option<Vec<ImportDocument>>,
+    /// `merge` (add new operations, replace those with the same method and
+    /// path, remove nothing) or `replace`. Absent: merge when the mock has
+    /// a draft or an active version.
+    pub mode: Option<ImportModeSchema>,
     /// Required with `text` (markdown, html, text, har or postman); optional
     /// with `content_base64` (detected from the content and `filename`).
     pub kind: Option<ImportKindSchema>,
@@ -203,6 +273,9 @@ pub struct ImportJobView {
     /// replaced by `REDACTED`, fragment dropped) imported.
     pub source_name: Option<String>,
     pub status: ImportStatusSchema,
+    /// The mode requested; `null` = merge when a draft or active version
+    /// exists.
+    pub mode: Option<ImportModeSchema>,
     pub progress: ImportProgressView,
     /// The draft contract version a `done` job produced.
     pub result_version: Option<i64>,
@@ -222,6 +295,7 @@ impl From<&ImportJob> for ImportJobView {
             kind: ImportKindSchema::from_job_kind(&j.kind),
             source_name: j.source_name.clone(),
             status: ImportStatusSchema::from(&j.status),
+            mode: j.mode.as_deref().and_then(ImportModeSchema::parse),
             progress: ImportProgressView {
                 phase: j.progress.phase.clone(),
                 done: j.progress.done,
@@ -248,10 +322,11 @@ pub struct JobPath {
 struct NewJob {
     /// `url`, or the document kind's wire string.
     kind: String,
-    /// The document kind; `None` for a URL.
+    /// The document kind; `None` for URLs and `documents`.
     document: Option<ImportKind>,
     source_name: Option<String>,
     input: Vec<u8>,
+    mode: Option<ImportModeSchema>,
 }
 
 fn too_large() -> Problem {
@@ -298,20 +373,113 @@ fn document_job(
         document: Some(kind),
         source_name: filename,
         input: bytes,
+        mode: None,
+    })
+}
+
+/// A job of `urls`: each validated; the input is the JSON array of the
+/// (parsed, unredacted) URLs.
+fn urls_job(urls: Vec<String>) -> ApiResult<NewJob> {
+    if urls.is_empty() || urls.len() > MAX_IMPORT_URLS {
+        return Err(Problem::bad_request(format!(
+            "\"urls\" takes 1 to {MAX_IMPORT_URLS} URLs"
+        )));
+    }
+    let mut parsed = Vec::with_capacity(urls.len());
+    for (i, url) in urls.iter().enumerate() {
+        let url = validate_url(url).map_err(|e| Problem::bad_request(format!("urls[{i}]: {e}")))?;
+        parsed.push(url);
+    }
+    let first = parsed
+        .first()
+        .map(redacted_url)
+        .ok_or_else(|| Problem::bad_request("\"urls\" is empty"))?;
+    let source_name = match parsed.len() {
+        1 => first,
+        n => format!("{first} (+{} more)", n - 1),
+    };
+    let input: Vec<String> = parsed.iter().map(ToString::to_string).collect();
+    Ok(NewJob {
+        kind: URLS_KIND.to_string(),
+        document: None,
+        source_name: Some(source_name),
+        input: serde_json::to_vec(&input)
+            .map_err(|e| Problem::bad_request(format!("cannot encode the URLs: {e}")))?,
+        mode: None,
+    })
+}
+
+/// A job of `documents`: each a Markdown, HTML or text document; the input
+/// is the JSON array of `{"kind", "name", "text"}`.
+fn documents_job(documents: Vec<ImportDocument>) -> ApiResult<NewJob> {
+    if documents.is_empty() || documents.len() > MAX_IMPORT_DOCUMENTS {
+        return Err(Problem::bad_request(format!(
+            "\"documents\" takes 1 to {MAX_IMPORT_DOCUMENTS} documents"
+        )));
+    }
+    let total: usize = documents.iter().map(|d| d.text.len()).sum();
+    if total > MAX_IMPORT_BYTES {
+        return Err(too_large());
+    }
+    let n = documents.len();
+    let mut stored = Vec::with_capacity(n);
+    for (i, d) in documents.into_iter().enumerate() {
+        let name = d.filename.and_then(clean_name);
+        let kind = match d.kind {
+            Some(k) => k.document_kind(),
+            None => detect_kind(name.as_deref(), d.text.as_bytes()),
+        };
+        let kind = match kind {
+            Some(k @ (ImportKind::Markdown | ImportKind::Html | ImportKind::Text)) => k,
+            _ => {
+                return Err(Problem::bad_request(format!(
+                    "documents[{i}]: a document is markdown, html or text; pass \"kind\" or a \
+                     file name ending in .md, .markdown, .html, .htm or .txt"
+                )));
+            }
+        };
+        stored.push(serde_json::json!({ "kind": kind.as_str(), "name": name, "text": d.text }));
+    }
+    Ok(NewJob {
+        kind: DOCUMENTS_KIND.to_string(),
+        document: None,
+        source_name: Some(format!("{n} documents")),
+        input: serde_json::to_vec(&stored)
+            .map_err(|e| Problem::bad_request(format!("cannot encode the documents: {e}")))?,
+        mode: None,
     })
 }
 
 /// A job of a JSON [`CreateImport`].
 fn json_job(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
+    let mode = body.mode;
+    json_input(mock, body).map(|job| NewJob { mode, ..job })
+}
+
+/// The input of a JSON [`CreateImport`].
+fn json_input(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
     let given = [
         body.url.is_some(),
+        body.urls.is_some(),
         body.text.is_some(),
         body.content_base64.is_some(),
+        body.documents.is_some(),
     ];
     if given.iter().filter(|g| **g).count() != 1 {
         return Err(Problem::bad_request(
-            "pass exactly one of \"url\", \"text\" and \"content_base64\"",
+            "pass exactly one of \"url\", \"urls\", \"text\", \"content_base64\" and \"documents\"",
         ));
+    }
+    if let Some(urls) = body.urls {
+        if body.kind.is_some() {
+            return Err(Problem::bad_request(
+                "a \"urls\" import takes no \"kind\": each kind is decided after fetching",
+            ));
+        }
+        return urls_job(urls);
+    }
+    if let Some(documents) = body.documents {
+        return documents_job(documents);
     }
     if let Some(url) = body.url {
         if body.kind.is_some_and(|k| k != ImportKindSchema::Url) {
@@ -327,6 +495,7 @@ fn json_job(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
             document: None,
             source_name: Some(redacted_url(&url)),
             input: url.to_string().into_bytes(),
+            mode: None,
         });
     }
     if let Some(text) = body.text {
@@ -488,7 +657,7 @@ pub async fn create(
         json_job(&mock, body)?
     };
 
-    if job.document.is_some_and(ImportKind::needs_llm)
+    if (job.document.is_some_and(ImportKind::needs_llm) || job.kind == DOCUMENTS_KIND)
         && matches!(st.llm.for_import(&m).await, Ok(None))
     {
         return Err(Problem::unprocessable(SmartError::LlmRequired.to_string()));
@@ -522,7 +691,7 @@ pub async fn create(
             source_name: job.source_name,
             input: job.input,
             created_by: Some(access.principal.subject.clone()),
-            mode: None,
+            mode: job.mode.map(|m| m.as_str().to_string()),
         })
         .await?;
     st.imports.wake.notify_one();

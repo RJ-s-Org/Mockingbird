@@ -80,6 +80,11 @@ pub struct DraftMetaView {
     pub usage: TokenUsageView,
     /// Whether the draft was edited through the API.
     pub edited: bool,
+    /// Names (file names or redacted URLs) of every source, when the import
+    /// had more than one.
+    pub sources: Vec<String>,
+    /// The contract version this draft was merged into.
+    pub merged_from: Option<i64>,
 }
 
 /// What a draft changes compared with the active version.
@@ -243,6 +248,8 @@ fn meta_view(meta: &DraftMeta) -> DraftMetaView {
             completion_tokens: meta.usage.completion_tokens,
         },
         edited: meta.edited,
+        sources: meta.sources.clone(),
+        merged_from: meta.merged_from,
     }
 }
 
@@ -396,8 +403,7 @@ pub async fn put_draft(
     let compile_warnings = mb_import::bundle_warnings(&bundle);
     let meta_value = serde_json::to_value(&new_meta)
         .map_err(|e| internal(format!("the draft metadata is invalid: {e}")))?;
-    let updated = st
-        .store
+    st.store
         .update_draft_contract_version(m.id, number, source, bundle, meta_value)
         .await?;
     let updated = store_warnings(&st, m.id, number, &compile_warnings).await?;

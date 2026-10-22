@@ -99,6 +99,8 @@ use crate::{
         imports::ImportKindSchema,
         imports::ImportStatusSchema,
         imports::CreateImport,
+        imports::ImportModeSchema,
+        imports::ImportDocument,
         imports::ImportProgressView,
         imports::ImportJobView,
         contracts::ChannelSummary,

@@ -1113,19 +1113,27 @@ export interface components {
             sysadmin?: boolean;
         };
         /**
-         * @description A JSON import request: exactly one of `url`, `text` and
-         *     `content_base64`.
+         * @description A JSON import request: exactly one of `url`, `urls`, `text`,
+         *     `content_base64` and `documents`.
          */
         CreateImport: {
             /** @description The document, base64-encoded, at most 20 MiB decoded. */
             content_base64?: string | null;
+            /**
+             * @description 1–100 Markdown, HTML or text documents (kind from `kind` or the file
+             *     name), at most 20 MiB in all, imported into one draft.
+             */
+            documents?: components["schemas"]["ImportDocument"][] | null;
             /** @description The document's file name, shown as the job's source. */
             filename?: string | null;
             kind?: components["schemas"]["ImportKindSchema"] | null;
+            mode?: components["schemas"]["ImportModeSchema"] | null;
             /** @description The document itself, at most 20 MiB. */
             text?: string | null;
             /** @description An http(s) URL to fetch. `kind` must be absent or `url`. */
             url?: string | null;
+            /** @description 1–20 http(s) URLs imported into one draft. `kind` must be absent. */
+            urls?: string[] | null;
         };
         /** @description A new mock. Mocks created through the API always have `source = api`. */
         CreateMock: {
@@ -1198,9 +1206,19 @@ export interface components {
             chunks_processed: number;
             /** @description Whether the draft was edited through the API. */
             edited: boolean;
+            /**
+             * Format: int64
+             * @description The contract version this draft was merged into.
+             */
+            merged_from?: number | null;
             source_kind: components["schemas"]["ImportKindSchema"];
             source_name?: string | null;
             source_url?: string | null;
+            /**
+             * @description Names (file names or redacted URLs) of every source, when the import
+             *     had more than one.
+             */
+            sources: string[];
             usage: components["schemas"]["TokenUsageView"];
             warnings: components["schemas"]["DraftWarningView"][];
         };
@@ -1258,6 +1276,16 @@ export interface components {
             /** @description `file` or `api`. */
             source: string;
         };
+        /** @description One text document of a `documents` import. */
+        ImportDocument: {
+            /**
+             * @description The file name, shown as the source; decides the kind when `kind` is
+             *     absent (`.md`, `.markdown`, `.html`, `.htm`, `.txt`).
+             */
+            filename?: string | null;
+            kind?: components["schemas"]["ImportKindSchema"] | null;
+            text: string;
+        };
         /** @description An import job. */
         ImportJobView: {
             /** Format: date-time */
@@ -1271,6 +1299,7 @@ export interface components {
             id: string;
             kind: components["schemas"]["ImportKindSchema"];
             mock: string;
+            mode?: components["schemas"]["ImportModeSchema"] | null;
             progress: components["schemas"]["ImportProgressView"];
             /**
              * Format: int64
@@ -1290,7 +1319,12 @@ export interface components {
          * @description What an import reads.
          * @enum {string}
          */
-        ImportKindSchema: "markdown" | "html" | "pdf" | "text" | "har" | "postman" | "url";
+        ImportKindSchema: "markdown" | "html" | "pdf" | "text" | "har" | "postman" | "url" | "urls" | "documents";
+        /**
+         * @description How an import treats the mock's existing contract.
+         * @enum {string}
+         */
+        ImportModeSchema: "merge" | "replace";
         /** @description How far a job has got. */
         ImportProgressView: {
             /** Format: int32 */
