@@ -61,6 +61,26 @@ pub struct FileConfig {
     pub import: ImportConfig,
 }
 
+/// What the proxy does with a host no mock claims (`proxy.unmapped`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Unmapped {
+    /// Tunnel `CONNECT` and forward plain requests to the real host.
+    #[default]
+    Pass,
+    /// Answer 502 problem+json naming the host.
+    Block,
+}
+
+impl Unmapped {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unmapped::Pass => "pass",
+            Unmapped::Block => "block",
+        }
+    }
+}
+
 /// Which planes a node serves (`server.role`, `MB_ROLE`, `--role`).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
