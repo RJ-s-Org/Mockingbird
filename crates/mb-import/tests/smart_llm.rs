@@ -556,3 +556,63 @@ async fn summarize_reports_each_batch_and_honours_cancel() {
     assert!(matches!(err, SmartError::Canceled), "{err:?}");
     assert_eq!(provider.requests().len(), 1);
 }
+
+#[tokio::test]
+async fn extraction_prompt_asks_for_required_nullable_and_real_ids() {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer(json!([])))]));
+    let _ = extract_chunk(
+        &llm(provider.clone()),
+        &chunk("GET /pets lists pets."),
+        1,
+        "doc",
+    )
+    .await;
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(
+        system.contains(r#"Give every object schema a "required" list"#),
+        "{system}"
+    );
+    assert!(
+        system.contains("only when the documentation says it may be null"),
+        "{system}"
+    );
+    assert!(
+        system.contains(r#"Include a "default" only when the documentation states that value"#),
+        "{system}"
+    );
+    assert!(system.contains("own operation ids"), "{system}");
+}
+
+#[test]
+fn defaults_not_in_the_source_are_dropped() {
+    let c = chunk(
+        "GET /movies lists movies. Query `page` defaults to 1. Language is en-US by default.",
+    );
+    let ops = json!([{"method": "GET", "path": "/movies", "confidence": 0.9,
+        "parameters": [
+            {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}},
+            {"name": "region", "in": "query", "schema": {"type": "string", "default": "US-WEST"}},
+            {"name": "language", "in": "query", "schema": {"type": "string", "default": "en-US"}}],
+        "responses": [{"status": 200, "schema": {"type": "object",
+            "properties": {"adult": {"type": "boolean", "default": false}}}}]}]);
+    let (got, warnings) = parse_extraction(&answer(ops), &c).unwrap();
+    let p = &got[0].parameters;
+    assert_eq!(p[0].schema.as_ref().unwrap()["default"], 1);
+    assert!(p[1].schema.as_ref().unwrap().get("default").is_none());
+    assert_eq!(p[2].schema.as_ref().unwrap()["default"], "en-US");
+    assert!(
+        got[0].responses[0].schema.as_ref().unwrap()["properties"]["adult"]
+            .get("default")
+            .is_none()
+    );
+    let w: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "invented_default")
+        .collect();
+    assert_eq!(w.len(), 1);
+    assert!(
+        w[0].message.starts_with("GET /movies: 2 default value(s)"),
+        "{}",
+        w[0].message
+    );
+}
