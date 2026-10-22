@@ -15,6 +15,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
 - `mockingbird init` (MCP `init_config`) takes `--port`, `--admin-port` and `--grpc-port`.
 - A request that fails validation reports why: the `X-Mockingbird-Validation` response header, the declared error shape's message-like field (`message`, `detail`, … or nested, like Stripe's `error.message`), and `request.validation` in the request log.
+- Mocks take `hosts:` (config, Admin API, console client). Dispatch filters by `Host`, then takes the longest prefix, so mocks on different hosts may share a route prefix (GitHub REST at `/` and GraphQL at `/graphql` on `api.github.com`). A GraphQL mock also answers at its own mount point (`POST /graphql` for a mock at `/graphql`). Migration `0600_mock_hosts` adds `mocks.hosts`.
+- `mockingbird proxy` (and `serve --proxy` / `proxy.enabled`): an HTTP proxy that intercepts HTTPS to mapped hosts with a local CA (`~/.mockingbird/ca`, `MB_CA_DIR`, `proxy.ca_dir`; never installed system-wide); `proxy.unmapped: pass | block` (default `pass`); placeholder PNGs for `proxy.images`; `mockingbird ca path` and `mockingbird proxy env`; `GET /proxy/hosts` on the ops port. See [docs/proxy.md](docs/proxy.md).
 
 ### Changed
 
@@ -28,6 +30,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - The prompt (and the JSON Schema response format) carries the response schema as compact JSON fitted to 64 KiB: past that, descriptions are cut to 160 characters and the definitions furthest from the root become short stubs. Validation still uses the full schema. Stripe's `payment_intent` went from ~357k to ~23k prompt tokens.
 - The prompt asks for arrays of 3 to 5 items unless the request names a count.
 - The Admin API request log (and MCP `list_requests`) includes `fallback_reason`.
+- `/readyz` reports `config_reload: <error>` after a failed config reload until the next good one, and words a failed mock rebuild as `stale, serving the previous version` or `failed`.
+- Config reloads log `config reloaded: N added, N removed, N changed`.
 - The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
 - An LLM answer whose only errors are nulls the schema does not allow is patched instead of sent back for a repair call: an optional property is dropped, a required one gets a faker value. The response's source is `repaired`. Real APIs return null where their docs never say so (TMDB's `belongs_to_collection`), and models copy them; this saved a 20–40 s repair call on 4 of 8 TMDB detail pages.
 - An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
