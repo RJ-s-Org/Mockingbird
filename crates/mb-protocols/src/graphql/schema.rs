@@ -578,13 +578,10 @@ fn field(
                 )
             })
         }
-        None => {
-            let field_name = name.clone();
-            Field::new(name, registered, move |ctx| {
-                let out = resolve::nested(&field_name, &ty, &shapes, &ctx);
-                FieldFuture::new(async move { out })
-            })
-        }
+        None => Field::new(name, registered, move |ctx| {
+            let out = resolve::nested(&ty, &shapes, &ctx);
+            FieldFuture::new(async move { out })
+        }),
     };
     if let Some(d) = &f.description {
         out = out.description(d.node.clone());

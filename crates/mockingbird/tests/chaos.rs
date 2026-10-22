@@ -110,6 +110,97 @@ async fn error_uses_declared_variant() {
     assert_eq!(body["code"], "MAINTENANCE", "{body}");
 }
 
+const CHARGES: &str = r##"openapi: 3.0.3
+info: {title: Charges, version: 1.0.0}
+paths:
+  /v1/charges/{charge}:
+    get:
+      operationId: GetChargesCharge
+      parameters:
+        - {name: charge, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, required: [id], properties: {id: {type: string}}}
+        default:
+          description: Error response.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/error"}
+components:
+  schemas:
+    error:
+      type: object
+      required: [error]
+      properties:
+        error: {$ref: "#/components/schemas/api_errors"}
+    api_errors:
+      type: object
+      required: [type]
+      properties:
+        type: {type: string, enum: [api_error, card_error, invalid_request_error]}
+        message: {type: string, maxLength: 40000}
+"##;
+
+/// A charges mock with chaos always on, its `default` response `contract`.
+async fn charges_app(dir: &Path, contract: &str) -> App {
+    std::fs::write(dir.join("charges.yaml"), contract).unwrap();
+    app(
+        dir,
+        &format!("mocks:\n  charges:\n    contract: charges.yaml\n{ALWAYS_ERROR}"),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn default_only_error_uses_the_default_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = serve(charges_app(dir.path(), CHARGES).await.data.clone()).await;
+    let r = reqwest::get(format!("{data}/charges/v1/charges/ch_1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["x-mockingbird-chaos"], "error");
+    assert!(
+        r.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+    let body: Value = r.json().await.unwrap();
+    let bundle = mb_import::compile(CHARGES.as_bytes()).unwrap();
+    let op = bundle.operation("GetChargesCharge").unwrap();
+    // No 503 is declared, so this is the `default` variant.
+    let schema = op.output_for_status(503).unwrap().schema.as_ref().unwrap();
+    SchemaValidator::new(&bundle.with_reachable_defs(schema))
+        .unwrap()
+        .validate(&body)
+        .unwrap();
+    assert_eq!(
+        body["error"]["message"], "Service Unavailable (injected by chaos)",
+        "{body}"
+    );
+}
+
+/// A `default` without a schema has no shape to fill.
+#[tokio::test]
+async fn default_without_schema_is_protocol_native() {
+    let dir = tempfile::tempdir().unwrap();
+    let contract = CHARGES.replace(
+        "          description: Error response.\n          content:\n            application/json:\n              schema: {$ref: \"#/components/schemas/error\"}\n",
+        "          description: Error response.\n",
+    );
+    assert_ne!(contract, CHARGES);
+    let data = serve(charges_app(dir.path(), &contract).await.data.clone()).await;
+    let r = reqwest::get(format!("{data}/charges/v1/charges/ch_1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["content-type"], "application/problem+json");
+}
+
 struct Grpc {
     client: tonic::client::Grpc<tonic::transport::Channel>,
     pool: DescriptorPool,
