@@ -15,6 +15,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
 - `mockingbird init` (MCP `init_config`) takes `--port`, `--admin-port` and `--grpc-port`.
 - A request that fails validation reports why: the `X-Mockingbird-Validation` response header, the declared error shape's message-like field (`message`, `detail`, … or nested, like Stripe's `error.message`), and `request.validation` in the request log.
+- Smart import takes operations from OpenAPI 3.x blocks embedded in documentation (fenced code blocks, JSON scripts, ReadMe page data) as written; a page fully covered by its blocks needs no LLM.
+- Imports take `urls` (up to 20) and `documents` (up to 100) for one draft from several sources, and `mode: merge | replace`; by default an import merges into the mock's newest draft or active version (adds operations, replaces those with the same method and path, removes nothing). CLI: several URLs, docs folders, `--mode`.
+- Schema-size warnings (`schema_too_large`) on uploads, the version list, activation, approval, drafts and `mockingbird validate`, for response schemas over the 64 KiB prompt budget; `mb_import::compile_with_warnings`.
+- Migration `0650_import_drafts` adds `contract_versions.warnings` and `import_jobs.mode`.
 
 ### Changed
 
@@ -28,6 +32,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - The prompt (and the JSON Schema response format) carries the response schema as compact JSON fitted to 64 KiB: past that, descriptions are cut to 160 characters and the definitions furthest from the root become short stubs. Validation still uses the full schema. Stripe's `payment_intent` went from ~357k to ~23k prompt tokens.
 - The prompt asks for arrays of 3 to 5 items unless the request names a count.
 - The Admin API request log (and MCP `list_requests`) includes `fallback_reason`.
+- `POST …/contracts/{version}/approve` also activates the version unless the body is `{"activate": false}`; `mockingbird import --approve` activates unless `--no-activate`. The console still approves and activates in two steps.
+- Drafts keep the documentation's operation ids (converted when invalid, the original in `x-original-operation-id`), get `required` and nullable properties from the examples and the text, drop `default` values the documentation does not state, and leave out operations below 0.4 confidence with a `low_confidence` warning.
 - The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
 - An LLM answer whose only errors are nulls the schema does not allow is patched instead of sent back for a repair call: an optional property is dropped, a required one gets a faker value. The response's source is `repaired`. Real APIs return null where their docs never say so (TMDB's `belongs_to_collection`), and models copy them; this saved a 20–40 s repair call on 4 of 8 TMDB detail pages.
 - An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
