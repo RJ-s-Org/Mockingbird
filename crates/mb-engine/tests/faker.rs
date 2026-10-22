@@ -571,3 +571,38 @@ fn unconstrained_strings_stay_short_and_new_formats_parse() {
     assert!(s("hostname").ends_with(".example.com"));
     assert!(s("uri-reference").starts_with('/'));
 }
+
+#[test]
+fn strings_match_their_pattern() {
+    let pattern = r"^/[A-Za-z0-9]{22}\.jpg$";
+    let re = regex::Regex::new(pattern).unwrap();
+    for v in draws(json!({"type": "string", "pattern": pattern}), 100) {
+        let s = v.as_str().unwrap();
+        assert!(re.is_match(s) && s.len() == 27, "{s}");
+    }
+    let re = regex::Regex::new(r"^[a-z]+-\d+$").unwrap();
+    for v in draws(
+        json!({"type": "string", "pattern": r"^[a-z]+-\d+$", "maxLength": 20}),
+        100,
+    ) {
+        let s = v.as_str().unwrap();
+        assert!(re.is_match(s) && s.len() <= 20, "{s}");
+    }
+}
+
+#[test]
+fn unsupported_or_too_long_patterns_fall_back() {
+    for v in draws(json!({"type": "string", "pattern": r"^(a)\1$"}), 20) {
+        assert!(v.is_string());
+    }
+    for v in draws(
+        json!({"type": "string", "pattern": "^x{100}$", "maxLength": 10}),
+        20,
+    ) {
+        assert!(v.as_str().unwrap().chars().count() <= 10);
+    }
+    assert_eq!(
+        draws(json!({"type": "string", "pattern": "^v1$"}), 1)[0],
+        json!("v1")
+    );
+}

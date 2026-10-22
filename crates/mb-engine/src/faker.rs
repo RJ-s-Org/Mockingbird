@@ -2,6 +2,7 @@ use base64::Engine as _;
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 const WORDS: &[&str] = &[
     "alpha", "bravo", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris", "juniper",
@@ -22,6 +23,9 @@ const NODE_BUDGET: usize = 10_000;
 /// empty. Only reached when a schema has no finite instance (or a very large
 /// minimal one); keeps the worst case linear.
 const HARD_NODE_EXTRA: usize = 100_000;
+
+/// Extra repeats drawn for an unbounded `*`, `+` or `{n,}` in a pattern.
+pub const PATTERN_MAX_REPEAT: u32 = 64;
 
 /// Most characters in a string whose schema sets no `maxLength`.
 pub const UNCONSTRAINED_MAX_CHARS: usize = 64;
@@ -50,6 +54,15 @@ struct Ctx<'a> {
     root: &'a Value,
     costs: &'a Costs,
     generated: usize,
+    /// Compiled `pattern`s by repeat cap and source text; `None` when
+    /// unsupported.
+    patterns: HashMap<String, Option<Arc<Pattern>>>,
+}
+
+/// A `pattern` ready to draw from, with the regex its draws must match.
+struct Pattern {
+    generator: rand_regex::Regex,
+    check: regex::Regex,
 }
 
 impl Faker {
@@ -88,6 +101,7 @@ impl Faker {
             root: schema_with_defs,
             costs,
             generated: 0,
+            patterns: HashMap::new(),
         };
         self.gen_value(&mut ctx, schema_with_defs, None, 0, branch, rng)
     }
@@ -147,7 +161,7 @@ impl Faker {
             "boolean" => Value::Bool(rng.random_bool(0.5)),
             "integer" => fake_integer(s, field, rng),
             "number" => fake_number(s, rng),
-            "string" => Value::String(fake_string(s, rng)),
+            "string" => Value::String(fake_string(ctx, s, rng)),
             "array" if hard_limit => Value::Array(Vec::new()),
             "object" if hard_limit => Value::Object(Map::new()),
             "array" => self.fake_array(ctx, s, depth, at_limit, rng),
@@ -659,7 +673,7 @@ fn word<R: Rng>(rng: &mut R) -> String {
     WORDS[rng.random_range(0..WORDS.len())].to_string()
 }
 
-fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
+fn fake_string<R: Rng>(ctx: &mut Ctx<'_>, s: &Map<String, Value>, rng: &mut R) -> String {
     match s.get("format").and_then(Value::as_str) {
         Some("uuid") => {
             let mut bytes = [0u8; 16];
@@ -720,14 +734,19 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         }
         _ => {}
     }
-    if let Some(lit) = s
-        .get("pattern")
-        .and_then(Value::as_str)
-        .and_then(fixed_literal)
-    {
-        return lit;
-    }
     let min = s.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize;
+    if let Some(pattern) = s.get("pattern").and_then(Value::as_str) {
+        let declared_max = s
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .map(|m| m as usize);
+        if let Some(out) = pattern_string(ctx, pattern, min, declared_max, rng) {
+            return out;
+        }
+        if let Some(lit) = fixed_literal(pattern) {
+            return lit;
+        }
+    }
     let max = Some(
         s.get("maxLength")
             .and_then(Value::as_u64)
@@ -755,6 +774,72 @@ fn random_datetime<R: Rng>(rng: &mut R) -> chrono::DateTime<chrono::Utc> {
     // 2000-01-01 .. ~2033
     let secs = rng.random_range(946_684_800_i64..2_000_000_000);
     chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default()
+}
+
+/// A string matching `pattern` with `min..=max` characters, drawn by
+/// `rand_regex`; `None` when the pattern is unsupported (lookaround,
+/// backreferences) or no draw fits.
+fn pattern_string<R: Rng>(
+    ctx: &mut Ctx<'_>,
+    pattern: &str,
+    min: usize,
+    max: Option<usize>,
+    rng: &mut R,
+) -> Option<String> {
+    // With a `maxLength`, unbounded repeats are first drawn short (a quarter
+    // of it), then up to the full length.
+    let repeats = match max {
+        Some(m) => {
+            let full = u32::try_from(m).unwrap_or(u32::MAX).min(PATTERN_MAX_REPEAT);
+            vec![(full / 4).max(1), full.max(1)]
+        }
+        None => vec![PATTERN_MAX_REPEAT],
+    };
+    for repeat in repeats {
+        let compiled = ctx
+            .patterns
+            .entry(format!("{repeat}:{pattern}"))
+            .or_insert_with(|| compile_pattern(pattern, repeat).map(Arc::new))
+            .clone()?;
+        let found = (0..PATTERN_DRAWS).find_map(|_| {
+            let drawn: Result<String, std::string::FromUtf8Error> =
+                rand::distr::Distribution::sample(&compiled.generator, rng);
+            let drawn = drawn.ok()?;
+            let n = drawn.chars().count();
+            let fits = n >= min && max.is_none_or(|m| n <= m) && compiled.check.is_match(&drawn);
+            fits.then_some(drawn)
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// Draws tried for a string matching its pattern.
+const PATTERN_DRAWS: usize = 8;
+
+fn compile_pattern(pattern: &str, max_repeat: u32) -> Option<Pattern> {
+    let check = regex::Regex::new(pattern).ok()?;
+    let body = pattern.strip_prefix('^').unwrap_or(pattern);
+    let body = match body.strip_suffix('$') {
+        // An escaped `\$` is a literal dollar sign.
+        Some(rest) if !rest.ends_with('\\') || rest.ends_with("\\\\") => rest,
+        _ => body,
+    };
+    // ASCII first, so `\d` and `\w` draw readable characters.
+    let ascii = regex_syntax::ParserBuilder::new()
+        .unicode(false)
+        .utf8(true)
+        .build()
+        .parse(body)
+        .ok()
+        .and_then(|hir| rand_regex::Regex::with_hir(hir, max_repeat).ok());
+    let generator = match ascii {
+        Some(g) => g,
+        None => rand_regex::Regex::compile(body, max_repeat).ok()?,
+    };
+    Some(Pattern { generator, check })
 }
 
 /// A pattern that is just a literal (optionally anchored) can be satisfied
