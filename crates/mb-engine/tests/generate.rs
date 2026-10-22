@@ -955,3 +955,71 @@ async fn nulls_with_other_errors_still_ask_for_a_repair() {
     assert_eq!(provider.requests().len(), 2);
     assert_eq!(out.body, Some(valid_order_at_o1()));
 }
+
+#[test]
+fn stored_resource_that_validates_is_served_as_state() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let out = offline()
+        .serve_stored(&bundle, op, &valid_order_at_o1(), None)
+        .unwrap();
+    assert_eq!(out.status, 200);
+    assert_eq!(out.source, Source::State);
+    assert_eq!(out.source.to_string(), "state");
+    assert_eq!(out.body, Some(valid_order_at_o1()));
+    assert_eq!(Source::Cache.as_str(), "cache");
+    assert_eq!(Source::State.worst(Source::Llm), Source::State);
+    assert_eq!(Source::Cache.worst(Source::Fallback), Source::Fallback);
+}
+
+#[test]
+fn partial_stored_resource_is_not_served() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let partial = json!({"id": "o1", "customerId": "c1"});
+    assert!(
+        offline()
+            .serve_stored(&bundle, op, &partial, None)
+            .is_none()
+    );
+}
+
+#[test]
+fn not_found_uses_the_declared_404_else_problem_json() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let out = offline().not_found(&bundle, op, &call("getOrder"), "orders o1 does not exist");
+    assert_eq!(out.status, 404);
+    assert_eq!(out.source, Source::State);
+    let body = out.body.unwrap();
+    assert!(
+        body["code"].is_i64() && body["message"].is_string(),
+        "{body}"
+    );
+
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Pets, version: "1"}
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters: [{name: petId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+"#,
+    );
+    let op = bundle.operation("getPet").unwrap();
+    let out = offline().not_found(
+        &bundle,
+        op,
+        &OperationCall::default(),
+        "pets p1 does not exist",
+    );
+    assert_eq!(
+        out.content_type.as_deref(),
+        Some("application/problem+json")
+    );
+    assert_eq!(out.body.unwrap()["detail"], "pets p1 does not exist");
+}

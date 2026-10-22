@@ -88,6 +88,10 @@ pub enum Source {
     Llm,
     Repaired,
     Fallback,
+    /// Served from the session's stored resource, without the LLM.
+    State,
+    /// A repeat of an earlier answer in the same session.
+    Cache,
 }
 
 impl Source {
@@ -102,7 +106,7 @@ impl Source {
 
     fn rank(self) -> u8 {
         match self {
-            Source::Llm => 0,
+            Source::Llm | Source::State | Source::Cache => 0,
             Source::Repaired => 1,
             Source::Fallback => 2,
         }
@@ -113,6 +117,8 @@ impl Source {
             Source::Llm => "llm",
             Source::Repaired => "repaired",
             Source::Fallback => "fallback",
+            Source::State => "state",
+            Source::Cache => "cache",
         }
     }
 }
@@ -477,6 +483,81 @@ impl Engine {
                 self.fake_response(bundle, variant, status, schema, None)
             }
         }
+    }
+
+    /// `stored` served as `op`'s success answer, tagged `State`, when the
+    /// success variant has a schema (the narrowed `response_schema` when
+    /// given) and `stored` validates against it. `None` otherwise: a partial
+    /// resource stored by a create is generated and overlaid instead.
+    pub fn serve_stored(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        stored: &Value,
+        response_schema: Option<&Value>,
+    ) -> Option<GeneratedResponse> {
+        let variant = op.success_output()?;
+        let status = success_status(variant.status);
+        let schema = variant.schema.as_ref()?;
+        let validator = match response_schema {
+            Some(narrowed) => Arc::new(
+                SchemaValidator::new(&bundle.with_reachable_defs(narrowed))
+                    .inspect_err(|e| {
+                        tracing::warn!(operation = %op.id, error = %e, "narrowed schema cannot be validated");
+                    })
+                    .ok()?,
+            ),
+            None => self
+                .validator(bundle, op, status, schema)
+                .inspect_err(|e| {
+                    tracing::warn!(operation = %op.id, error = %e, "response schema cannot be validated");
+                })
+                .ok()?,
+        };
+        validator.validate(stored).ok()?;
+        Some(GeneratedResponse {
+            status,
+            content_type: variant.content_type.clone(),
+            body: Some(stored.clone()),
+            source: Source::State,
+            usage: Usage::default(),
+            fallback_reason: None,
+        })
+    }
+
+    /// A `404` for a resource the session does not hold: the operation's
+    /// declared `404` response, faker-filled, else a problem+json body with
+    /// `detail`. Always tagged `State`.
+    pub fn not_found(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        detail: &str,
+    ) -> GeneratedResponse {
+        let declared = op.output_for_status(404).map(|variant| {
+            let ctx = GenerationContext {
+                forced_status: Some(404),
+                ..GenerationContext::default()
+            };
+            self.fallback(bundle, op, variant, 404, call, &ctx)
+        });
+        let mut response = declared.unwrap_or_else(|| GeneratedResponse {
+            status: 404,
+            content_type: Some("application/problem+json".into()),
+            body: Some(serde_json::json!({
+                "type": "about:blank",
+                "title": "Not Found",
+                "status": 404,
+                "detail": detail,
+            })),
+            source: Source::State,
+            usage: Usage::default(),
+            fallback_reason: None,
+        });
+        response.source = Source::State;
+        response.fallback_reason = None;
+        response
     }
 
     fn fake_response(
