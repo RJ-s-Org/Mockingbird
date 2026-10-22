@@ -56,6 +56,10 @@ async fn run(cli: Cli) -> ExitCode {
             AgentCommand::Print { client } => Ok(agents::print(client)),
             AgentCommand::Skills { dir } => agents::skills(&dir),
         }),
+        Command::Proxy(args) => mockingbird::proxy::run(args, &cli.admin_url)
+            .await
+            .map_err(Failure::Other),
+        Command::Ca(cmd) => mockingbird::proxy::ca_command(cmd).map_err(Failure::Other),
         Command::Client(cmd) => {
             client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
         }

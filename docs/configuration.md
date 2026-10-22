@@ -62,6 +62,20 @@ Settings for the HTTP requests Mockingbird makes to LLM providers, the audit web
 | `outbound.proxy` | URL | unset | `http://` or `https://` URL with a host | | Proxy for outbound requests. |
 | `outbound.no_proxy` | list of strings | `[]` | Host names, or `.domain` suffixes | | Hosts reached without the proxy. |
 
+## `proxy`
+
+An HTTP proxy that lets unmodified apps reach mocks by their real host names: it intercepts HTTPS to every host a mock lists in `mocks.<name>.hosts` (and to `proxy.images`) with a certificate from a local CA, and passes other hosts through or blocks them. Started by `serve` on nodes serving the data plane; `mockingbird proxy` runs it on its own. See [the proxy guide](proxy.md). Read at startup.
+
+| Key | Type | Default | Range / rule | Env / flag | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `proxy` | section | | | | |
+| `proxy.enabled` | bool | `false` | | `--proxy` | Whether `serve` starts the proxy. |
+| `proxy.host` | IP address | `127.0.0.1` | Off loopback, `proxy.unmapped` must be `block` | | The proxy's bind address. Off loopback anyone who reaches the port can use it, so `pass` (an open relay) is refused there. |
+| `proxy.port` | port | `8888` | | `--proxy-port` | The proxy's port. |
+| `proxy.unmapped` | `pass`, `block` | `pass` | | | What happens to a host no mock claims: `pass` tunnels it to the real host; `block` answers 502 problem+json naming the host. Each such host is logged once. |
+| `proxy.images` | list of strings | `[]` | Lowercase host names, no port | | Hosts answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment, else 300×450). |
+| `proxy.ca_dir` | path | `~/.mockingbird/ca` | Relative to the config file | `MB_CA_DIR` | Where the local CA (`ca.pem`, `ca.key`) is kept; created on first use, never installed system-wide. |
+
 ## `limits`
 
 Global admission limits. Per-mock limits are under [`mocks.<name>.limits`](#mocksnamelimits). Read at startup.
@@ -218,6 +232,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.workspace` | string | `default` | | | Workspace (created if missing). |
 | `mocks.<name>.contract` | path | required | Relative to the config file | | OpenAPI 3.x, Swagger 2.0, GraphQL SDL, protobuf, WSDL 1.1 or AsyncAPI 2.x/3.0 contract. |
 | `mocks.<name>.route_prefix` | path | `/<name>` | | | Where the mock is mounted on the data plane. |
+| `mocks.<name>.hosts` | list of strings | `[]` | Lowercase host names, no port | | Hosts the mock answers for (by `Host`, e.g. through `mockingbird proxy`). With hosts, two mocks may share a route prefix; a mock with hosts is not reached under other hosts. |
 | `mocks.<name>.persona` | string | unset | | | Free text added to every prompt (locale, realism, style). |
 | `mocks.<name>.llm_profile` | string | `llm.default_profile` | | | LLM profile. |
 | `mocks.<name>.header_overrides` | bool | `true` | | | Honour `X-Mockingbird-*` request headers (status, latency, scenario, `X-Mockingbird-Chaos: off`). |
@@ -228,7 +243,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 
 ### `mocks.<name>.chaos`
 
-Fault injection. Absent injects nothing. A request with `X-Mockingbird-Chaos: off` bypasses it when header overrides are enabled. An injected error uses the operation's declared error shape, or the protocol's native one (HTTP 503, gRPC `UNAVAILABLE`, SOAP Fault), and is marked `X-Mockingbird-Chaos: error` (gRPC metadata `x-mockingbird-chaos: error`, GraphQL `extensions.chaos = "error"`).
+Fault injection. Absent injects nothing. A request with `X-Mockingbird-Chaos: off` bypasses it when header overrides are enabled. An injected error uses the operation's declared 503, 500, other 5xx or 429 response; else its `default` response (HTTP 503, faker-filled, its message-like field set to `Service Unavailable (injected by chaos)`); else the protocol's native one (HTTP 503 problem+json, gRPC `UNAVAILABLE`, SOAP Fault), and is marked `X-Mockingbird-Chaos: error` (gRPC metadata `x-mockingbird-chaos: error`, GraphQL `extensions.chaos = "error"`).
 
 | Key | Type | Default | Range / rule | Env / flag | Meaning |
 | --- | --- | --- | --- | --- | --- |
@@ -303,6 +318,9 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | `MB_GRPC_PORT` | `--grpc-port` | `server.grpc_port` |
 | | `--insecure-no-auth` | `server.insecure_no_auth` |
 | `MB_ROLE` | `--role` | `server.role` |
+| | `--proxy` | `proxy.enabled` |
+| | `--proxy-port` | `proxy.port` |
+| `MB_CA_DIR` | | `proxy.ca_dir` (also used by `mockingbird ca path` and `mockingbird proxy env`) |
 | `MB_STORAGE_URL` | `--storage-url` | `storage.url` |
 | `MB_STATE_URL` | | `storage.state_url` |
 | `MB_BUS_URL` | | `bus.url` |

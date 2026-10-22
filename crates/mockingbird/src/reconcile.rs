@@ -17,7 +17,8 @@ use mb_state::StateStore;
 use mb_store::{
     ChannelSettings, ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
     MockEventSettings, NewContractVersion, NewMock, ResourceSource, Scenario, ScenarioRules,
-    validate_header_name, validate_mock_name, validate_route_prefix, validate_workspace_name,
+    routes_collide, validate_header_name, validate_mock_name, validate_route_prefix,
+    validate_workspace_name,
 };
 use sha2::{Digest, Sha256};
 
@@ -46,6 +47,25 @@ impl ReconcileReport {
             && self.updated.is_empty()
             && self.deleted.is_empty()
             && self.new_versions.is_empty()
+    }
+
+    /// `"{added} added, {removed} removed, {changed} changed"`, counting
+    /// mocks: `changed` is the distinct mocks updated or given a new
+    /// contract version that were not created.
+    pub fn summary(&self) -> String {
+        let changed: std::collections::BTreeSet<&str> = self
+            .updated
+            .iter()
+            .map(String::as_str)
+            .chain(self.new_versions.iter().map(|(m, _)| m.as_str()))
+            .filter(|m| !self.created.iter().any(|c| c == m))
+            .collect();
+        format!(
+            "{} added, {} removed, {} changed",
+            self.created.len(),
+            self.deleted.len(),
+            changed.len()
+        )
     }
 }
 
@@ -298,8 +318,8 @@ async fn validate<'a>(
         bail!("default LLM profile {name:?} does not exist");
     }
 
-    // Route prefixes are unique across every workspace.
-    let mut prefixes: BTreeMap<String, String> = BTreeMap::new();
+    // Routes (a prefix on a host set) are unique across every workspace.
+    let mut routes: Vec<(String, Vec<String>, String)> = Vec::new();
     let mut prepared = Vec::with_capacity(cfg.mocks.len());
     for (name, mock) in &cfg.mocks {
         validate_mock_name(name).map_err(|e| anyhow!("{e}"))?;
@@ -311,9 +331,13 @@ async fn validate<'a>(
         }
         let prefix = mock.effective_prefix(name);
         validate_route_prefix(&prefix).map_err(|e| anyhow!("mock {label:?}: {e}"))?;
-        if let Some(other) = prefixes.insert(prefix.clone(), label.clone()) {
+        if let Some((_, _, other)) = routes
+            .iter()
+            .find(|(p, hosts, _)| routes_collide(p, hosts, &prefix, &mock.hosts))
+        {
             bail!("mocks {other:?} and {label:?} share the route prefix {prefix:?}");
         }
+        routes.push((prefix.clone(), mock.hosts.clone(), label.clone()));
         if let Some(profile) = &mock.llm_profile
             && !known_profile(ws, profile)
         {
@@ -449,7 +473,10 @@ async fn validate<'a>(
         .values()
         .filter(|m| m.source == ResourceSource::Api)
     {
-        if let Some(label) = prefixes.get(&api_mock.route_prefix) {
+        if let Some((_, _, label)) = routes
+            .iter()
+            .find(|(p, hosts, _)| routes_collide(p, hosts, &api_mock.route_prefix, &api_mock.hosts))
+        {
             bail!(
                 "mock {label:?}: route prefix {:?} is already used by mock {:?}, which is managed through the API",
                 api_mock.route_prefix,
@@ -515,6 +542,7 @@ async fn apply_mock(
                         chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
                         limits: p.mock.limits.to_store(),
                         data_plane_auth: p.mock.data_plane_auth.clone(),
+                        hosts: p.mock.hosts.clone(),
                     },
                 )
                 .await
@@ -531,6 +559,7 @@ async fn apply_mock(
                 data_plane_auth: p.mock.data_plane_auth.clone(),
                 chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
                 limits: p.mock.limits.to_store(),
+                hosts: p.mock.hosts.clone(),
                 ..current.clone()
             };
             if wanted != *current {

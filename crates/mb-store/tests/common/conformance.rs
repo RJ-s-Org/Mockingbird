@@ -21,6 +21,7 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     store.ping().await.expect("ping");
     mock_crud_and_conflict(&store).await;
     invalid_mock_name_rejected(&store).await;
+    mock_hosts_round_trip(&store).await;
     contract_versions_increment(&store).await;
     activation_is_exclusive_and_rolls_back(&store).await;
     draft_cannot_activate(&store).await;
@@ -91,7 +92,46 @@ fn new_mock(name: &str) -> NewMock {
         data_plane_auth: Default::default(),
         chaos: None,
         limits: MockLimits::default(),
+        hosts: vec![],
     }
+}
+
+async fn mock_hosts_round_trip(store: &Arc<dyn ControlStore>) {
+    let mut new = new_mock("hosted");
+    new.route_prefix = Some("/".into());
+    new.hosts = vec!["api.github.com".into()];
+    let m = store
+        .create_mock(DEFAULT_WORKSPACE, new)
+        .await
+        .expect("create");
+    assert_eq!(m.hosts, ["api.github.com"]);
+    let got = store
+        .get_mock(DEFAULT_WORKSPACE, "hosted")
+        .await
+        .expect("get")
+        .expect("some");
+    assert_eq!(got.hosts, ["api.github.com"]);
+    let updated = store
+        .update_mock(&Mock {
+            hosts: vec![],
+            ..got.clone()
+        })
+        .await
+        .expect("update");
+    assert!(updated.hosts.is_empty());
+    let bad = store
+        .update_mock(&Mock {
+            hosts: vec!["Bad:1".into()],
+            ..got
+        })
+        .await;
+    assert!(matches!(bad, Err(StoreError::Invalid(_))));
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "hosted")
+            .await
+            .expect("delete")
+    );
 }
 
 fn bundle(title: &str) -> Bundle {

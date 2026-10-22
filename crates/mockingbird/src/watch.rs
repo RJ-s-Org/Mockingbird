@@ -32,6 +32,32 @@ pub type Prepare = Arc<dyn Fn(&mut FileConfig) -> anyhow::Result<()> + Send + Sy
 pub type Applied =
     Arc<dyn Fn(FileConfig) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// The outcome of the last config reload, shared with `/readyz`: the
+/// error of the last reload when it failed, cleared by the next good one.
+#[derive(Clone, Default)]
+pub struct ReloadStatus(Arc<Mutex<Option<String>>>);
+
+impl ReloadStatus {
+    /// Records a failed reload.
+    pub fn failed(&self, error: String) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(error);
+        }
+    }
+
+    /// Records a successful reload.
+    pub fn succeeded(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Why the last reload failed; `None` when it succeeded (or none ran).
+    pub fn last_error(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|slot| slot.clone())
+    }
+}
+
 /// Keeps the watch running; dropping it stops watching.
 pub struct WatchGuard {
     _watcher: Arc<Mutex<Watcher>>,
@@ -119,6 +145,25 @@ pub fn spawn_with_hook(
     prepare: Prepare,
     applied: Option<Applied>,
 ) -> anyhow::Result<WatchGuard> {
+    spawn_with_status(
+        config_path,
+        store,
+        state,
+        prepare,
+        applied,
+        ReloadStatus::default(),
+    )
+}
+
+/// [`spawn_with_hook`] that records each reload's outcome in `status`.
+pub fn spawn_with_status(
+    config_path: PathBuf,
+    store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
+    prepare: Prepare,
+    applied: Option<Applied>,
+    status: ReloadStatus,
+) -> anyhow::Result<WatchGuard> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
     let debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
         match result {
@@ -168,6 +213,7 @@ pub fn spawn_with_hook(
             }
             match load_and_reconcile(&config_path, store.as_ref(), state.as_ref(), &prepare).await {
                 Ok((cfg, report)) => {
+                    status.succeeded();
                     if let Ok(mut w) = shared.lock() {
                         for path in contract_paths(&cfg) {
                             if let Err(error) = w.add(&path) {
@@ -181,17 +227,21 @@ pub fn spawn_with_hook(
                     if report.is_empty() {
                         tracing::debug!(config = %config_path.display(), "config reloaded; no changes");
                     } else {
+                        let changed = report.summary();
                         tracing::info!(
                             config = %config_path.display(),
+                            added = report.created.len(),
+                            removed = report.deleted.len(),
                             created = ?report.created,
                             updated = ?report.updated,
                             deleted = ?report.deleted,
                             new_versions = ?report.new_versions,
-                            "config reloaded"
+                            "config reloaded: {changed}"
                         );
                     }
                 }
                 Err(error) => {
+                    status.failed(format!("{error:#}"));
                     tracing::error!(
                         config = %config_path.display(),
                         error = %format!("{error:#}"),

@@ -692,6 +692,7 @@ async fn file_mock_import_409() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                hosts: vec![],
             },
         )
         .await

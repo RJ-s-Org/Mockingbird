@@ -19,6 +19,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Imports take `urls` (up to 20) and `documents` (up to 100) for one draft from several sources, and `mode: merge | replace`; by default an import merges into the mock's newest draft or active version (adds operations, replaces those with the same method and path, removes nothing). CLI: several URLs, docs folders, `--mode`.
 - Schema-size warnings (`schema_too_large`) on uploads, the version list, activation, approval, drafts and `mockingbird validate`, for response schemas over the 64 KiB prompt budget; `mb_import::compile_with_warnings`.
 - Migration `0650_import_drafts` adds `contract_versions.warnings` and `import_jobs.mode`.
+- Mocks take `hosts:` (config, Admin API, console client). Dispatch filters by `Host`, then takes the longest prefix, so mocks on different hosts may share a route prefix (GitHub REST at `/` and GraphQL at `/graphql` on `api.github.com`). A GraphQL mock also answers at its own mount point (`POST /graphql` for a mock at `/graphql`). Migration `0600_mock_hosts` adds `mocks.hosts`.
+- `mockingbird proxy` (and `serve --proxy` / `proxy.enabled`): an HTTP proxy that intercepts HTTPS to mapped hosts with a local CA (`~/.mockingbird/ca`, `MB_CA_DIR`, `proxy.ca_dir`; never installed system-wide); `proxy.unmapped: pass | block` (default `pass`); placeholder PNGs for `proxy.images`; `mockingbird ca path` and `mockingbird proxy env`; `GET /proxy/hosts` on the ops port. See [docs/proxy.md](docs/proxy.md).
 
 ### Changed
 
@@ -34,6 +36,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - The Admin API request log (and MCP `list_requests`) includes `fallback_reason`.
 - `POST …/contracts/{version}/approve` also activates the version unless the body is `{"activate": false}`; `mockingbird import --approve` activates unless `--no-activate`. The console still approves and activates in two steps.
 - Drafts keep the documentation's operation ids (converted when invalid, the original in `x-original-operation-id`), get `required` and nullable properties from the examples and the text, drop `default` values the documentation does not state, and leave out operations below 0.4 confidence with a `low_confidence` warning.
+- `/readyz` reports `config_reload: <error>` after a failed config reload until the next good one, and words a failed mock rebuild as `stale, serving the previous version` or `failed`.
+- Config reloads log `config reloaded: N added, N removed, N changed`.
 - The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
 - An LLM answer whose only errors are nulls the schema does not allow is patched instead of sent back for a repair call: an optional property is dropped, a required one gets a faker value. The response's source is `repaired`. Real APIs return null where their docs never say so (TMDB's `belongs_to_collection`), and models copy them; this saved a 20–40 s repair call on 4 of 8 TMDB detail pages.
 - An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
@@ -45,6 +49,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Real-world contracts load: a `$ref` inside a vendor extension (Stripe's `x-expansionResources`, GitHub's `x-github-breaking-changes`) no longer fails compilation, and an unresolvable `$ref` names its referrer and the JSON pointer where it sits.
 - GraphQL schemas with covariant interface fields serve (GitHub's `User.email: String!` implementing `ProfileOwner.email: String`): implementations are checked with the spec's rules instead of async-graphql's inverted check.
 - OpenAPI 3 `application/x-www-form-urlencoded` and `multipart/form-data` request bodies are compiled, decoded and validated; the engine no longer sees `"body": null` for them, nor for any non-empty body the contract does not describe. Bracket notation (`a[b][c]=1`, `a[0]=x`, `a[]=y`) nests in form bodies and query strings, so stripe-node requests validate against Stripe's schema. The request log shows the body as decoded. Swagger 2 `type: file` parameters are binary strings.
+- GraphQL aliases of one field with different arguments (`small: repositories(first: 1)`, `large: repositories(first: 5)`) get separate generated values; aliases with identical arguments share one.
+- Chaos errors on an operation that declares only a `default` error response (Stripe) answer HTTP 503 in that shape, with its message-like field set, instead of problem+json.
 
 ## [0.1.0-rc.1] - 2026-10-20
 

@@ -33,6 +33,14 @@ outbound:
   proxy: http://proxy.internal:3128
   no_proxy: [localhost, 127.0.0.1, .internal]
 
+proxy:
+  enabled: true
+  host: 127.0.0.1
+  port: 8888
+  unmapped: pass
+  images: [images.example.test]
+  ca_dir: /var/lib/mockingbird/ca
+
 limits:
   max_concurrent_generations: 64
   max_request_bytes: 1048576
@@ -150,6 +158,7 @@ mocks:
     workspace: default
     contract: ../../fixtures/openapi/orders-3.0.yaml
     route_prefix: /orders-api
+    hosts: [orders.example.test]
     persona: A small online shop selling hiking gear.
     llm_profile: deepseek
     header_overrides: true

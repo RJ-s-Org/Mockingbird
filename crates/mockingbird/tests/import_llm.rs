@@ -78,6 +78,7 @@ async fn mock(
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                hosts: vec![],
             },
         )
         .await

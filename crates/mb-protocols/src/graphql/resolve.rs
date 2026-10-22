@@ -376,9 +376,21 @@ async fn generate_in(
                         .and_then(|o| o.schema.as_ref())
                         .filter(|_| !stores)
                         .map(|schema| super::select::narrow(schema, &rt.bundle.defs, selection));
+                    let was_narrowed = narrowed.is_some();
+                    // The engine overlays a read's stored target by field
+                    // name, which an aliased selection must re-key (unless
+                    // a scenario's `set`, applied after it, wins).
+                    let rekeys_target = was_narrowed
+                        && op.kind == OperationKind::Query
+                        && plan.scenario.is_none()
+                        && selection.aliased();
+                    let mut stored = None;
                     let joined = match batch.take() {
                         Some(b) => {
                             let (target, related) = call::read_state(rt, &plan, &call).await;
+                            if rekeys_target {
+                                stored = target.as_ref().map(|t| t.data.clone());
+                            }
                             let part = super::batch::Part {
                                 key: key.clone(),
                                 op_id: op.id.clone(),
@@ -390,7 +402,13 @@ async fn generate_in(
                             };
                             b.join(rt, part).await
                         }
-                        None => None,
+                        None => {
+                            if rekeys_target {
+                                let (target, _) = call::read_state(rt, &plan, &call).await;
+                                stored = target.map(|t| t.data);
+                            }
+                            None
+                        }
                     };
                     let generated = match joined {
                         Some(joined) => joined.map_err(|reason| Failure::new(500, reason)),
@@ -411,7 +429,17 @@ async fn generate_in(
                         report.usage = generated.usage;
                         report.source = Some(generated.source);
                         report.fallback_reason = generated.fallback_reason;
-                        generated.body.unwrap_or(Value::Null)
+                        let body = generated.body.unwrap_or(Value::Null);
+                        // A narrowed answer is keyed by response key; a full
+                        // one by field name.
+                        if was_narrowed {
+                            let mut body = body;
+                            let identity = op.identity.as_ref().map(|i| i.field.as_str());
+                            super::select::settle(&mut body, selection, stored.as_ref(), identity);
+                            body
+                        } else {
+                            super::select::rekey(body, selection)
+                        }
                     })
                 }
             }
@@ -459,18 +487,18 @@ fn canonical_reason(status: u16) -> Option<&'static str> {
         .and_then(|c| c.canonical_reason())
 }
 
-/// Resolves a nested field: the parent object's member `name`, missing
-/// members being null. Arguments are ignored.
+/// Resolves a nested field: the parent object's member under this field's
+/// response key (alias or name), missing members being null. Arguments are
+/// ignored. Every parent is keyed by response key (see
+/// [`super::select::rekey`] and [`super::select::settle`]).
 pub(crate) fn nested(
-    name: &str,
     ty: &Type,
     shapes: &Shapes,
     ctx: &ResolverContext<'_>,
 ) -> async_graphql::Result<Option<FieldValue<'static>>> {
     let parent = ctx.parent_value.try_downcast_ref::<Value>()?;
-    Ok(parent
-        .get(name)
-        .and_then(|v| project(v.clone(), ty, shapes)))
+    let key = ctx.ctx.item.node.response_key().node.as_str();
+    Ok(parent.get(key).and_then(|v| project(v.clone(), ty, shapes)))
 }
 
 /// `value` as a field value of type `ty`: enums from strings, objects as

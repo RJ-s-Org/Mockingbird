@@ -79,6 +79,9 @@ pub struct Mock {
     pub chaos: Option<ChaosSettings>,
     #[serde(default)]
     pub limits: MockLimits,
+    /// Host names the mock answers for; empty answers for any host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -98,6 +101,9 @@ pub struct NewMock {
     pub chaos: Option<ChaosSettings>,
     #[serde(default)]
     pub limits: MockLimits,
+    /// Host names the mock answers for; empty answers for any host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 /// Bounds of a uniformly random added latency, in milliseconds.
