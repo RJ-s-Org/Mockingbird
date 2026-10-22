@@ -94,10 +94,72 @@ async fn create_mock(
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                hosts: vec![],
             },
         )
         .await
         .unwrap()
+}
+
+async fn create_hosted(
+    store: &Arc<dyn ControlStore>,
+    name: &str,
+    prefix: &str,
+    hosts: &[&str],
+) -> Mock {
+    store
+        .create_mock(
+            DEFAULT_WORKSPACE,
+            NewMock {
+                name: name.into(),
+                route_prefix: Some(prefix.into()),
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::Api,
+                chaos: None,
+                limits: Default::default(),
+                data_plane_auth: Default::default(),
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            },
+        )
+        .await
+        .unwrap()
+}
+
+/// Sends one request through `router` with a `host` header.
+async fn call(
+    router: &axum::Router,
+    method: &str,
+    host: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    use tower::ServiceExt as _;
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", host);
+    let body = match body {
+        Some(b) => {
+            req = req.header("content-type", "application/json");
+            axum::body::Body::from(b.to_string())
+        }
+        None => axum::body::Body::empty(),
+    };
+    let resp = router
+        .clone()
+        .oneshot(req.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 /// Adds `source` as a new approved version and activates it.
@@ -492,6 +554,11 @@ async fn failed_rebuild_keeps_serving_previous_version() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0].0, "c");
     assert!(failed[0].1.contains("secret"), "{failed:?}");
+    let issues = registry.mock_issues();
+    assert!(
+        issues[0].starts_with("mock c: stale, serving the previous version: "),
+        "{issues:?}"
+    );
 
     // Fixing the profile clears the failure.
     q.secret_ref = None;
@@ -746,6 +813,7 @@ async fn grpc_service_holder_survives_cross_workspace_newcomer() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                hosts: vec![],
             },
         )
         .await
@@ -924,4 +992,157 @@ async fn settings_change_restarts_runtime() {
             .map_err(|f| f.error),
         Err(PublishError::Disabled("orderCreated".into()))
     );
+}
+
+#[tokio::test]
+async fn mocks_share_a_prefix_on_different_hosts() {
+    let store = store().await;
+    let a = create_hosted(&store, "a", "/", &["a.test"]).await;
+    activate(&store, &a, &fixture_v2_source()).await; // has GET /ping
+    let b = create_hosted(&store, "b", "/", &["b.test"]).await;
+    activate(&store, &b, &fixture_source()).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    let r = registry.router();
+    assert_eq!(call(&r, "GET", "a.test", "/ping", None).await.0, 200);
+    assert_eq!(call(&r, "GET", "B.TEST:443", "/orders", None).await.0, 200);
+    assert_ne!(call(&r, "GET", "b.test", "/ping", None).await.0, 200);
+    let (status, body) = call(&r, "GET", "localhost:8080", "/orders", None).await;
+    assert_eq!(status, 404);
+    assert!(
+        body["detail"].as_str().unwrap().contains("localhost"),
+        "{body}"
+    );
+    assert_eq!(registry.claimed_hosts(), ["a.test", "b.test"]);
+    assert!(registry.claims_host("a.test") && !registry.claims_host("c.test"));
+}
+
+#[tokio::test]
+async fn rest_at_root_and_graphql_below_on_one_host() {
+    let store = store().await;
+    let rest = create_hosted(&store, "rest", "/", &["api.github.test"]).await;
+    activate(&store, &rest, &fixture_source()).await;
+    let gql = create_hosted(&store, "gql", "/graphql", &["api.github.test"]).await;
+    let sdl = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/graphql/github.graphql"),
+    )
+    .unwrap();
+    activate(&store, &gql, &sdl).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    let r = registry.router();
+    assert_eq!(
+        call(&r, "GET", "api.github.test", "/orders", None).await.0,
+        200
+    );
+    let (status, body) = call(
+        &r,
+        "POST",
+        "api.github.test",
+        "/graphql",
+        Some(json!({"query": "{ __typename }"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.get("data").is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn host_specific_mock_wins_over_hostless_at_same_prefix() {
+    let store = store().await;
+    let any = create_mock(&store, "any", "/", None).await;
+    activate(&store, &any, &fixture_source()).await;
+    let x = create_hosted(&store, "x", "/", &["x.test"]).await;
+    activate(&store, &x, &fixture_v2_source()).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    let r = registry.router();
+    assert_eq!(call(&r, "GET", "x.test", "/ping", None).await.0, 200);
+    assert_ne!(call(&r, "GET", "localhost", "/ping", None).await.0, 200);
+    assert_eq!(call(&r, "GET", "localhost", "/orders", None).await.0, 200);
+}
+
+#[tokio::test]
+async fn overlapping_host_sets_collide() {
+    let store = store().await;
+    let a = create_hosted(&store, "a", "/", &["a.test"]).await;
+    activate(&store, &a, &fixture_source()).await;
+    let b = create_hosted(&store, "b", "/", &["b.test", "a.test"]).await;
+    activate(&store, &b, &fixture_source()).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store.clone())).await.unwrap();
+    assert_eq!(
+        registry.mounted(),
+        [("default".to_string(), "a".to_string(), "/".to_string())]
+    );
+    registry
+        .reload_mock(&deps(store.clone()), DEFAULT_WORKSPACE, "b")
+        .await;
+    assert_eq!(
+        registry.mounted().len(),
+        1,
+        "a sorts first and keeps the route"
+    );
+}
+
+#[tokio::test]
+async fn failed_first_build_is_reported_failed() {
+    let store = store().await;
+    let mut q = profile("q", "http://127.0.0.1:9".into(), None);
+    q.secret_ref = Some("env:MB_TEST_REGISTRY_NOT_SET_7A1C".into());
+    store.put_profile(&q).await.unwrap();
+    let d = create_mock(&store, "d", "/d", Some("q")).await;
+    activate(&store, &d, &fixture_source()).await;
+    let mut deps = deps(store.clone());
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(registry.mock_issues()[0].starts_with("mock d: failed: "));
+}
+
+#[tokio::test]
+async fn hosted_mock_that_failed_to_build_keeps_its_host_and_answers_503() {
+    let store = store().await;
+    let mut q = profile("q", "http://127.0.0.1:9".into(), None);
+    q.secret_ref = Some("env:MB_TEST_REGISTRY_NOT_SET_7A1C".into());
+    store.put_profile(&q).await.unwrap();
+    let mut m = create_hosted(&store, "stripe", "/", &["api.stripe.test"]).await;
+    m.llm_profile = Some("q".into());
+    let m = store.update_mock(&m).await.unwrap();
+    activate(&store, &m, &fixture_source()).await;
+    let mut deps = deps(store.clone());
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(registry.mounted().is_empty());
+    assert!(
+        registry.claims_host("api.stripe.test"),
+        "fails closed, never passes through"
+    );
+    assert_eq!(registry.claimed_hosts(), ["api.stripe.test"]);
+    let (status, body) = call(
+        &registry.router(),
+        "GET",
+        "api.stripe.test",
+        "/orders",
+        None,
+    )
+    .await;
+    assert_eq!(status, 503, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("stripe"),
+        "{body}"
+    );
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "stripe")
+        .await;
+    assert!(registry.claims_host("api.stripe.test"));
+    store
+        .delete_mock(DEFAULT_WORKSPACE, "stripe")
+        .await
+        .unwrap();
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "stripe")
+        .await;
+    assert!(!registry.claims_host("api.stripe.test"));
 }

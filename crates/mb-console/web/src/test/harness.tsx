@@ -107,6 +107,7 @@ export function mockView(name: string, overrides: Record<string, unknown> = {}) 
     llm_profile: null,
     header_overrides: false,
     data_plane_auth: { mode: "none", header: "x-api-key" },
+    hosts: [],
     source: "api",
     active_version: null,
     created_at: "2026-10-16T00:00:00Z",

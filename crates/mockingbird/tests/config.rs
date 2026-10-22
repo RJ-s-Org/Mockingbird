@@ -14,7 +14,7 @@ use mockingbird::config::{
     App, ServeArgs, apply_flags, bind_admin, bind_grpc, build_app, resolve_config,
 };
 use mockingbird::file_config::{self, AuthConfig, AuthMode, FileConfig, OidcConfig, ServerConfig};
-use mockingbird::reconcile::reconcile;
+use mockingbird::reconcile::{ReconcileReport, reconcile};
 use serde_json::{Value, json};
 
 fn repo() -> PathBuf {
@@ -604,6 +604,7 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                hosts: vec![],
             },
         )
         .await
@@ -796,6 +797,7 @@ async fn reconcile_rejects_grpc_service_clashes() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                hosts: vec![],
             },
         )
         .await
@@ -1615,6 +1617,7 @@ async fn reconcile_same_name_two_workspaces() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
+                hosts: vec![],
             },
         )
         .await
@@ -1693,6 +1696,7 @@ async fn reconcile_prefix_collision_across_workspaces_errors() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
+                hosts: vec![],
             },
         )
         .await
@@ -3035,4 +3039,115 @@ fn unknown_p7_key_rejected() {
         ws.write(yaml);
         assert!(file_config::load(&ws.config_path()).is_err(), "{yaml}");
     }
+}
+
+const TWO_HOSTED: &str = "mocks:\n  rest:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [api.github.test]\n  other:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [HOSTS2]\n";
+
+#[tokio::test]
+async fn file_mocks_share_a_prefix_on_distinct_hosts() {
+    let ws = Workspace::new();
+    ws.write(&TWO_HOSTED.replace("HOSTS2", "uploads.github.test"));
+    let (store, state) = (store().await, no_state());
+    let cfg = file_config::load(&ws.config_path()).unwrap();
+    reconcile(store.as_ref(), state.as_ref(), &cfg)
+        .await
+        .unwrap();
+    let rest = store
+        .get_mock(DEFAULT_WORKSPACE, "rest")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.hosts, ["api.github.test"]);
+}
+
+#[tokio::test]
+async fn file_mocks_with_overlapping_hosts_are_rejected() {
+    let ws = Workspace::new();
+    ws.write(&TWO_HOSTED.replace("HOSTS2", "api.github.test"));
+    let (store, state) = (store().await, no_state());
+    let cfg = file_config::load(&ws.config_path()).unwrap();
+    let err = reconcile(store.as_ref(), state.as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("share the route prefix \"/\""),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn invalid_mock_host_is_rejected_at_load() {
+    let ws = Workspace::new();
+    ws.write(&TWO_HOSTED.replace("HOSTS2", "Bad.Host:1"));
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("mocks.other.hosts"), "{err:#}");
+}
+
+#[test]
+fn reconcile_report_summary_counts_mocks() {
+    let report = ReconcileReport {
+        created: vec!["a".into()],
+        updated: vec!["b".into()],
+        deleted: vec!["c".into(), "d".into()],
+        new_versions: vec![("a".into(), 1), ("b".into(), 2), ("e".into(), 3)],
+        warnings: vec![],
+    };
+    assert_eq!(report.summary(), "1 added, 2 removed, 2 changed");
+}
+
+/// Polls `GET {admin}/readyz` every 100 ms for up to 5 s until `pred` holds.
+async fn wait_for_readyz(admin: &str, pred: impl Fn(&Value) -> bool) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..50 {
+        last = reqwest::get(format!("{admin}/readyz"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if pred(&last) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("readyz never matched: {last}");
+}
+
+#[tokio::test]
+async fn readyz_degraded_after_failed_reload_until_fixed() {
+    let ws = Workspace::new();
+    ws.write(BASIC);
+    let app = start(config_args(&ws, true)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ws.write("mocks: [this is: not: valid\n");
+    let ready = wait_for_readyz(&app.admin, |b| b["status"] == "degraded").await;
+    assert!(
+        ready["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().starts_with("config_reload: ")),
+        "{ready}"
+    );
+    ws.write(BASIC);
+    wait_for_readyz(&app.admin, |b| b["status"] == "ready").await;
+}
+
+#[test]
+fn invalid_proxy_image_host_is_rejected_at_load() {
+    let ws = Workspace::new();
+    ws.write("proxy:\n  images: [Bad:1]\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("proxy.images"), "{err:#}");
+}
+
+#[test]
+fn a_non_loopback_proxy_must_block_unmapped_hosts() {
+    let ws = Workspace::new();
+    ws.write("proxy:\n  host: 0.0.0.0\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("proxy.unmapped"), "{err:#}");
+    ws.write("proxy:\n  host: 0.0.0.0\n  unmapped: block\n");
+    file_config::load(&ws.config_path()).unwrap();
+    assert_eq!(FileConfig::default().proxy.host.to_string(), "127.0.0.1");
 }

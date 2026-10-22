@@ -43,19 +43,28 @@ async fn server_config(cfg: &TlsConfig) -> anyhow::Result<ServerConfig> {
     let key = PrivateKeyDer::from_pem_slice(&key_pem)
         .map_err(|e| anyhow!("no PEM private key: {e}"))
         .with_context(|| key_path("server.tls.key_file", &cfg.key_file))?;
+    server_config_from(certs, key).with_context(|| {
+        format!(
+            "server.tls: {} does not match {}",
+            cfg.cert_file.display(),
+            cfg.key_file.display()
+        )
+    })
+}
+
+/// A rustls server configuration serving `certs` (leaf first) with `key`:
+/// aws-lc-rs, safe default protocol versions, ALPN `h2` then `http/1.1`.
+pub fn server_config_from(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> anyhow::Result<ServerConfig> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .context("configuring TLS")?
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .with_context(|| {
-            format!(
-                "server.tls: {} does not match {}",
-                cfg.cert_file.display(),
-                cfg.key_file.display()
-            )
-        })?;
+        .context("the certificate does not match the key")?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(config)
 }

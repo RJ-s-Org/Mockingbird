@@ -39,14 +39,18 @@ pub struct OpsState {
     /// [`Leadership::watch`](mb_state::leader::Leadership::watch)), which
     /// `/readyz` reports.
     pub leader: watch::Receiver<bool>,
+    /// The outcome of the last `--watch` config reload.
+    pub reload: crate::watch::ReloadStatus,
 }
 
 /// - `/healthz`: liveness, always `200 {"status":"ok"}`.
 /// - `/readyz`: `503 unavailable` when the control store is unreachable;
-///   `200 degraded` (with `reasons`) when the state store is unreachable, a
-///   mock failed to rebuild (`mock <label>: <error>`, labelled by
-///   [`mock_label`](crate::registry::mock_label); it keeps serving its
-///   previous version), a mock's channels are not all working (`mock
+///   `200 degraded` (with `reasons`) when the state store is unreachable,
+///   the last config reload failed (`config_reload: <error>`, until the
+///   next good one), a mock failed to rebuild (`mock <label>: stale,
+///   serving the previous version: <error>` while its previous version is
+///   mounted, else `mock <label>: failed: <error>`; labelled by
+///   [`mock_label`](crate::registry::mock_label)), a mock's channels are not all working (`mock
 ///   <label>: <reason>`, e.g. an unreachable broker), a mounted mock is
 ///   serving statelessly or a mock's daily token budget is exhausted
 ///   (`mock <label>: daily token budget exhausted`), or the cross-node bus
@@ -55,6 +59,8 @@ pub struct OpsState {
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
+/// - `/proxy/hosts`: `{"hosts": [...]}`, the hosts the mounted mocks claim
+///   (sorted), which a standalone `mockingbird proxy` intercepts.
 pub fn router(st: OpsState) -> Router {
     router_with_metrics_gate(st, None)
 }
@@ -74,7 +80,13 @@ pub fn router_with_metrics_gate(st: OpsState, metrics_gate: Option<AdminState>) 
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", metrics_route)
+        .route("/proxy/hosts", get(proxy_hosts))
         .with_state(st)
+}
+
+/// The hosts the mounted mocks claim, for a standalone `mockingbird proxy`.
+async fn proxy_hosts(State(st): State<OpsState>) -> Response {
+    axum::Json(json!({"hosts": st.registry.claimed_hosts()})).into_response()
 }
 
 async fn healthz() -> Response {
@@ -111,9 +123,10 @@ async fn readyz(State(st): State<OpsState>, headers: HeaderMap) -> Response {
             if let Some(Err(reason)) = st.bus.as_ref().map(|bus| bus.health()) {
                 reasons.push(format!("bus: {reason}"));
             }
-            for (mock, error) in st.registry.failed_mocks() {
-                reasons.push(format!("mock {mock}: {error}"));
+            if let Some(error) = st.reload.last_error() {
+                reasons.push(format!("config_reload: {error}"));
             }
+            reasons.extend(st.registry.mock_issues());
             for (mock, reason) in st.registry.event_issues() {
                 reasons.push(format!("mock {mock}: {reason}"));
             }
