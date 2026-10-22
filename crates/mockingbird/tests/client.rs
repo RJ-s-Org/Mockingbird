@@ -283,7 +283,7 @@ async fn import_directory_uploads_archive() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert_eq!(
         out.json(),
-        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0 })
+        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0, "warnings": [] })
     );
     let source = reqwest::get(format!("{admin}/api/v1/mocks/orders/contracts/1/source"))
         .await
@@ -526,7 +526,7 @@ async fn import_asyncapi_uses_asyncapi_media_type() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert_eq!(
         out.json(),
-        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4 })
+        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4, "warnings": [] })
     );
 }
 

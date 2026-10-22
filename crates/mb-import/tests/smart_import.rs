@@ -927,3 +927,12 @@ async fn url_import_redacts_query_values() {
         "the prompt carries the fragment"
     );
 }
+
+#[test]
+fn schema_warnings_name_the_operation_target() {
+    let bundle = mb_import::compile(&fixture("openapi/huge-response.json")).unwrap();
+    let ws = mb_import::smart::assemble::schema_warnings(&bundle);
+    assert_eq!(ws.len(), 1);
+    assert_eq!(ws[0].code, "schema_too_large");
+    assert_eq!(ws[0].operation.as_deref(), Some("GET /big"));
+}

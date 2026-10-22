@@ -81,6 +81,7 @@ use crate::{
         mocks::PatchMock,
         contracts::UploadResult,
         contracts::ContractVersionSummary,
+        contracts::ContractWarningView,
         contracts::ContractVersionDetail,
         contracts::OperationSummary,
         drafts::ProvenanceView,

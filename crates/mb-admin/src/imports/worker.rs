@@ -273,6 +273,7 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
     };
     let operations = draft.bundle.operations.len();
     let warnings = draft.meta.warnings.len();
+    let compile_warnings = mb_import::bundle_warnings(&draft.bundle);
     // The draft is stored only if the job is still running, in the same
     // transaction that marks it done: a cancel or stale sweep that won the
     // race leaves no orphaned draft and no audit event.
@@ -292,7 +293,22 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         )
         .await;
     let version = match completed {
-        Ok(Some(v)) => v.version,
+        Ok(Some(v)) => {
+            if !compile_warnings.is_empty() {
+                let stored = match serde_json::to_value(&compile_warnings) {
+                    Ok(value) => {
+                        st.store
+                            .set_contract_version_warnings(mock.id, v.version, value)
+                            .await
+                    }
+                    Err(e) => Err(StoreError::from(e)),
+                };
+                if let Err(e) = stored {
+                    tracing::warn!(job = %job.id, error = %e, "cannot store the draft's compilation warnings");
+                }
+            }
+            v.version
+        }
         Ok(None) => {
             count("canceled");
             return Ok(());

@@ -556,6 +556,27 @@ pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> 
     }
 }
 
+/// `schema_too_large` draft warnings for `bundle` (see
+/// [`crate::bundle_warnings`]), each naming its operation's target
+/// (`"GET /big"`).
+pub fn schema_warnings(bundle: &Bundle) -> Vec<DraftWarning> {
+    crate::bundle_warnings(bundle)
+        .into_iter()
+        .map(|w| {
+            let target = w
+                .operation
+                .as_deref()
+                .and_then(|id| bundle.operations.iter().find(|o| o.id == id))
+                .map(Operation::target);
+            let warning = DraftWarning::new(&w.code, w.message);
+            match target {
+                Some(t) => warning.for_operation(t),
+                None => warning,
+            }
+        })
+        .collect()
+}
+
 /// Meta after an edit: removed ids dropped; new or changed operations get
 /// confidence 1.0, edited = true; meta.edited = true.
 pub fn refresh_meta(meta: &DraftMeta, old: &Bundle, new: &Bundle) -> DraftMeta {

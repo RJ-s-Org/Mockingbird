@@ -455,6 +455,7 @@ pub async fn run_import_with(
         .collect();
     let mut warnings = extracted.warnings;
     warnings.extend(assembly_warnings);
+    warnings.extend(assemble::schema_warnings(&bundle));
     let meta = DraftMeta {
         source_kind: kind,
         source_name,

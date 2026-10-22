@@ -7,7 +7,9 @@ use axum::response::{IntoResponse, Response};
 use mb_auth::Permission;
 use mb_engine::{EngineError, GenerationContext, OperationCall};
 use mb_ext::{CallInfo, UsageEvent};
-use mb_import::smart::assemble::{DraftIssue, compile_draft, diff_bundles, refresh_meta};
+use mb_import::smart::assemble::{
+    DraftIssue, compile_draft, diff_bundles, refresh_meta, schema_warnings,
+};
 use mb_import::smart::model::DraftMeta;
 use mb_mcm::Binding;
 use mb_store::{ContractStatus, ContractVersion, Mock, StoreError};
@@ -17,7 +19,7 @@ use utoipa::ToSchema;
 
 use crate::access::WsAccess;
 use crate::audit::snapshot;
-use crate::contracts::{ContractVersionSummary, VersionPath, method_name, version};
+use crate::contracts::{ContractVersionSummary, VersionPath, method_name, store_warnings, version};
 use crate::imports::ImportKindSchema;
 use crate::problem::{ApiResult, Json, PROBLEM_CONTENT_TYPE, Path, Problem, RequireJson};
 use crate::{AdminState, VersionStatus, ensure_api_managed};
@@ -388,13 +390,17 @@ pub async fn put_draft(
         .await
         .map_err(|e| internal(format!("draft compilation did not finish: {e}")))?;
     let (source, bundle) = compiled.map_err(DraftError::Invalid)?;
-    let new_meta = refresh_meta(&meta, &v.bundle, &bundle);
+    let mut new_meta = refresh_meta(&meta, &v.bundle, &bundle);
+    new_meta.warnings.retain(|w| w.code != "schema_too_large");
+    new_meta.warnings.extend(schema_warnings(&bundle));
+    let compile_warnings = mb_import::bundle_warnings(&bundle);
     let meta_value = serde_json::to_value(&new_meta)
         .map_err(|e| internal(format!("the draft metadata is invalid: {e}")))?;
     let updated = st
         .store
         .update_draft_contract_version(m.id, number, source, bundle, meta_value)
         .await?;
+    let updated = store_warnings(&st, m.id, number, &compile_warnings).await?;
     access
         .audit(
             &st.audit,

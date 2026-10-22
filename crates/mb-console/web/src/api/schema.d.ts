@@ -1078,6 +1078,23 @@ export interface components {
             status: components["schemas"]["VersionStatus"];
             /** Format: int64 */
             version: number;
+            /** @description Compilation warnings (empty when there are none). */
+            warnings: components["schemas"]["ContractWarningView"][];
+        };
+        /**
+         * @description A non-fatal compilation finding, e.g. a response schema too large for
+         *     the generation prompt (`schema_too_large`).
+         */
+        ContractWarningView: {
+            code: string;
+            message: string;
+            /** @description The operation id the warning is about. */
+            operation?: string | null;
+            /**
+             * Format: int64
+             * @description Compact JSON bytes of the schema with its reachable definitions.
+             */
+            size?: number | null;
         };
         /** @description A new API key. */
         CreateApiKey: {
@@ -1755,6 +1772,8 @@ export interface components {
             status: components["schemas"]["VersionStatus"];
             /** Format: int64 */
             version: number;
+            /** @description Compilation warnings (empty when there are none). */
+            warnings: components["schemas"]["ContractWarningView"][];
         };
         /**
          * @description Lifecycle status of a contract version.

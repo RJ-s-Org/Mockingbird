@@ -802,3 +802,40 @@ async fn preview_is_admitted_and_recorded() {
         "a refused preview is not recorded"
     );
 }
+
+#[tokio::test]
+async fn put_draft_refreshes_schema_warnings() {
+    let h = harness().await;
+    let v = h.har_draft().await;
+    let huge: Value = serde_json::from_slice(&fixture("openapi/huge-response.json")).unwrap();
+    let view = h
+        .call(
+            "editor",
+            Method::PUT,
+            &Harness::url(v, "/draft"),
+            Some(json!({ "document": huge })),
+        )
+        .await
+        .expect(StatusCode::OK, "put huge");
+    let codes: Vec<&str> = view["meta"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes.iter().filter(|c| **c == "schema_too_large").count(),
+        1,
+        "{codes:?}"
+    );
+    let list = h
+        .call(
+            "viewer",
+            Method::GET,
+            &format!("{BASE}/pets/contracts"),
+            None,
+        )
+        .await
+        .json();
+    assert_eq!(list[0]["warnings"][0]["operation"], "getBig");
+}
