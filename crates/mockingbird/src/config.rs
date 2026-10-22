@@ -685,7 +685,7 @@ async fn build_app_on(
                 Arc::new(ca),
                 cfg.proxy.unmapped,
                 cfg.proxy.images.clone(),
-            ))
+            )?)
         }
         _ => None,
     };

@@ -1099,3 +1099,50 @@ async fn failed_first_build_is_reported_failed() {
     registry.reload_all(&deps).await.unwrap();
     assert!(registry.mock_issues()[0].starts_with("mock d: failed: "));
 }
+
+#[tokio::test]
+async fn hosted_mock_that_failed_to_build_keeps_its_host_and_answers_503() {
+    let store = store().await;
+    let mut q = profile("q", "http://127.0.0.1:9".into(), None);
+    q.secret_ref = Some("env:MB_TEST_REGISTRY_NOT_SET_7A1C".into());
+    store.put_profile(&q).await.unwrap();
+    let mut m = create_hosted(&store, "stripe", "/", &["api.stripe.test"]).await;
+    m.llm_profile = Some("q".into());
+    let m = store.update_mock(&m).await.unwrap();
+    activate(&store, &m, &fixture_source()).await;
+    let mut deps = deps(store.clone());
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(registry.mounted().is_empty());
+    assert!(
+        registry.claims_host("api.stripe.test"),
+        "fails closed, never passes through"
+    );
+    assert_eq!(registry.claimed_hosts(), ["api.stripe.test"]);
+    let (status, body) = call(
+        &registry.router(),
+        "GET",
+        "api.stripe.test",
+        "/orders",
+        None,
+    )
+    .await;
+    assert_eq!(status, 503, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("stripe"),
+        "{body}"
+    );
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "stripe")
+        .await;
+    assert!(registry.claims_host("api.stripe.test"));
+    store
+        .delete_mock(DEFAULT_WORKSPACE, "stripe")
+        .await
+        .unwrap();
+    registry
+        .reload_mock(&deps, DEFAULT_WORKSPACE, "stripe")
+        .await;
+    assert!(!registry.claims_host("api.stripe.test"));
+}

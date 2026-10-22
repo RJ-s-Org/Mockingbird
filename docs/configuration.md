@@ -70,7 +70,8 @@ An HTTP proxy that lets unmodified apps reach mocks by their real host names: it
 | --- | --- | --- | --- | --- | --- |
 | `proxy` | section | | | | |
 | `proxy.enabled` | bool | `false` | | `--proxy` | Whether `serve` starts the proxy. |
-| `proxy.port` | port | `8888` | | `--proxy-port` | The proxy's port, on `server.host`. |
+| `proxy.host` | IP address | `127.0.0.1` | Off loopback, `proxy.unmapped` must be `block` | | The proxy's bind address. Off loopback anyone who reaches the port can use it, so `pass` (an open relay) is refused there. |
+| `proxy.port` | port | `8888` | | `--proxy-port` | The proxy's port. |
 | `proxy.unmapped` | `pass`, `block` | `pass` | | | What happens to a host no mock claims: `pass` tunnels it to the real host; `block` answers 502 problem+json naming the host. Each such host is logged once. |
 | `proxy.images` | list of strings | `[]` | Lowercase host names, no port | | Hosts answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment, else 300×450). |
 | `proxy.ca_dir` | path | `~/.mockingbird/ca` | Relative to the config file | `MB_CA_DIR` | Where the local CA (`ca.pem`, `ca.key`) is kept; created on first use, never installed system-wide. |

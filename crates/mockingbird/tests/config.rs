@@ -3140,3 +3140,14 @@ fn invalid_proxy_image_host_is_rejected_at_load() {
     let err = file_config::load(&ws.config_path()).unwrap_err();
     assert!(format!("{err:#}").contains("proxy.images"), "{err:#}");
 }
+
+#[test]
+fn a_non_loopback_proxy_must_block_unmapped_hosts() {
+    let ws = Workspace::new();
+    ws.write("proxy:\n  host: 0.0.0.0\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("proxy.unmapped"), "{err:#}");
+    ws.write("proxy:\n  host: 0.0.0.0\n  unmapped: block\n");
+    file_config::load(&ws.config_path()).unwrap();
+    assert_eq!(FileConfig::default().proxy.host.to_string(), "127.0.0.1");
+}

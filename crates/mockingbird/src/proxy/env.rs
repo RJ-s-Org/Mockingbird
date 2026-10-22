@@ -22,7 +22,7 @@ pub struct ProxyEnvOptions {
 /// The options for the proxy `config` (a config file, with the `MB_*`
 /// environment applied; defaults without one) describes:
 /// - port: `port`, else `proxy.port` (8888 by default);
-/// - host: `server.host`, with `0.0.0.0`/`::` read as `127.0.0.1`;
+/// - host: `proxy.host`, with `0.0.0.0`/`::` read as `127.0.0.1`;
 /// - CA directory: `proxy.ca_dir`, else `MB_CA_DIR` or `~/.mockingbird/ca`.
 pub fn options_for(config: Option<&Path>, port: Option<u16>) -> anyhow::Result<ProxyEnvOptions> {
     let mut cfg = match config {
@@ -30,7 +30,7 @@ pub fn options_for(config: Option<&Path>, port: Option<u16>) -> anyhow::Result<P
         None => FileConfig::default(),
     };
     file_config::apply_env(&mut cfg)?;
-    let host = match cfg.server.host {
+    let host = match cfg.proxy.host {
         ip if ip.is_unspecified() => IpAddr::from([127, 0, 0, 1]),
         ip => ip,
     };

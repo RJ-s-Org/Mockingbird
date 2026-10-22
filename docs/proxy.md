@@ -46,6 +46,9 @@ It reads the hosts the server's mocks claim from `GET /proxy/hosts` on the admin
 - **Unmapped hosts are passed through or blocked.** With `proxy.unmapped: pass` (the default) other hosts are tunnelled to the real server untouched; with `block` the proxy answers 502 `application/problem+json` naming the host. Each unmapped host is logged once.
 - **The CA stays local.** It is created on first use in `~/.mockingbird/ca` (`proxy.ca_dir`, `MB_CA_DIR`): `ca.pem`, and `ca.key` readable by its owner only. It is never installed in a system trust store and no OS settings are changed. Apps trust it through the variables below. `mockingbird ca path` prints the certificate path.
 - **Placeholder images.** Requests to `proxy.images` hosts get a solid-colour PNG chosen from the path, sized from a `w123`-style path segment (else 300×450). No LLM call is made.
+- **A mapped host never leaks to the real one.** A host a mock lists stays intercepted while that mock is not mounted (its contract failed to build, it has none active, or another mock holds its route): requests get 503 problem+json naming the mock, never the real API.
+- **Loopback by default.** The proxy binds `proxy.host` (`127.0.0.1`). On any other address `proxy.unmapped` must be `block`, so the port is not an open relay.
+- **Start `serve` from a clean shell.** The server's own outbound clients (LLM providers, OIDC, Vault) honour `HTTPS_PROXY` like any app. Started from a shell that ran `mockingbird proxy env`, they reach their providers through the proxy: that works with `pass`, and fails with `block`. Use `outbound.proxy`/`outbound.no_proxy` or a shell without the variables.
 - A mock with `hosts` answers only under those hosts: `curl localhost:8080/…` no longer reaches it, but `curl -H 'Host: api.github.com' localhost:8080/…` does.
 
 ## The variables

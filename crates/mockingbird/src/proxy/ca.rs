@@ -65,18 +65,22 @@ impl std::fmt::Debug for LocalCa {
 }
 
 impl LocalCa {
-    /// Loads the CA in `dir`, creating it (and `dir`, mode `0700`) when
+    /// Loads the CA in `dir`, creating it (and a missing `dir`, mode `0700`) when
     /// there is none. Safe against another process creating it at the same
     /// time: the key is created exclusively, and the loser loads the
     /// winner's CA.
     pub fn load_or_create(dir: &Path) -> anyhow::Result<LocalCa> {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("cannot create the CA directory {}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("cannot restrict {}", dir.display()))?;
+        if !dir.exists() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("cannot create the CA directory {}", dir.display()))?;
+            // Only a directory made here is restricted: an existing one
+            // (a configured `proxy.ca_dir`) keeps its mode.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("cannot restrict {}", dir.display()))?;
+            }
         }
         let key_path = dir.join(KEY_FILE);
         let cert_path = dir.join(CERT_FILE);
@@ -307,8 +311,9 @@ mod tests {
 
     #[test]
     fn creates_once_with_private_key_and_reloads() {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = LocalCa::load_or_create(dir.path()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ca");
+        let ca = LocalCa::load_or_create(dir.as_path()).unwrap();
         assert!(ca.cert_pem().starts_with("-----BEGIN CERTIFICATE-----"));
         #[cfg(unix)]
         {
@@ -322,12 +327,29 @@ mod tests {
                 0o600
             );
             assert_eq!(
-                std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+                std::fs::metadata(dir.as_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o700
             );
         }
-        let again = LocalCa::load_or_create(dir.path()).unwrap();
+        let again = LocalCa::load_or_create(dir.as_path()).unwrap();
         assert_eq!(again.cert_pem(), ca.cert_pem());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_directory_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        LocalCa::load_or_create(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
     }
 
     #[test]

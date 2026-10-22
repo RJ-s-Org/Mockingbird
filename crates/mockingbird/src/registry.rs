@@ -162,6 +162,10 @@ pub struct MockRegistry {
     grpc_published: std::sync::Mutex<BTreeSet<MockKey>>,
     /// The h2c server every gRPC mock is published to.
     grpc: Arc<GrpcServer>,
+    /// `(workspace, name)` → the hosts of every stored mock that lists
+    /// some, mounted or not: a host stays claimed while its mock fails to
+    /// build, so the proxy fails closed instead of passing it through.
+    configured_hosts: std::sync::Mutex<BTreeMap<MockKey, Vec<String>>>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
     reload: Mutex<()>,
 }
@@ -174,6 +178,7 @@ impl MockRegistry {
             grpc_skipped: std::sync::Mutex::new(BTreeMap::new()),
             grpc_published: std::sync::Mutex::new(BTreeSet::new()),
             grpc: GrpcServer::new(),
+            configured_hosts: std::sync::Mutex::new(BTreeMap::new()),
             reload: Mutex::new(()),
         })
     }
@@ -194,6 +199,13 @@ impl MockRegistry {
     async fn reload_all_locked(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let mut mocks = deps.store.list_all_mocks().await?;
         mocks.sort_by(|a, b| (&a.workspace, &a.name).cmp(&(&b.workspace, &b.name)));
+        if let Ok(mut configured) = self.configured_hosts.lock() {
+            *configured = mocks
+                .iter()
+                .filter(|m| !m.hosts.is_empty())
+                .map(|m| ((m.workspace.clone(), m.name.clone()), m.hosts.clone()))
+                .collect();
+        }
         let current = self.mounted.load_full();
         let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
@@ -240,8 +252,14 @@ impl MockRegistry {
         let _guard = self.reload.lock().await;
         let label = mock_label(workspace, name);
         let built = match deps.store.get_mock(workspace, name).await {
-            Ok(Some(mock)) => build_mounted(deps, &mock).await,
-            Ok(None) => Ok(None),
+            Ok(Some(mock)) => {
+                self.set_configured_hosts(workspace, name, &mock.hosts);
+                build_mounted(deps, &mock).await
+            }
+            Ok(None) => {
+                self.set_configured_hosts(workspace, name, &[]);
+                Ok(None)
+            }
             Err(error) => {
                 tracing::error!(mock = %label, %error, "cannot load mock; leaving it as it was");
                 return;
@@ -378,23 +396,61 @@ impl MockRegistry {
             .collect()
     }
 
-    /// Whether a mounted mock lists `host` (already normalized) in its hosts.
+    /// Whether a mock lists `host` (already normalized) in its hosts,
+    /// whether or not it is mounted (see [`Self::claimed_hosts`]).
     pub fn claims_host(&self, host: &str) -> bool {
-        self.mounted
-            .load()
-            .iter()
-            .any(|m| m.hosts().iter().any(|h| h == host))
+        self.claimed_hosts().iter().any(|h| h == host)
     }
 
-    /// Every host a mounted mock lists, sorted and deduplicated.
+    /// Every host a mock lists, sorted and deduplicated: the mounted mocks'
+    /// and those of stored mocks that failed to build, have no active
+    /// contract or lost a route collision, so their hosts fail closed.
     pub fn claimed_hosts(&self) -> Vec<String> {
-        let hosts: BTreeSet<String> = self
+        let mut hosts: BTreeSet<String> = self
             .mounted
             .load()
             .iter()
             .flat_map(|m| m.hosts().iter().cloned())
             .collect();
+        if let Ok(configured) = self.configured_hosts.lock() {
+            hosts.extend(configured.values().flatten().cloned());
+        }
         hosts.into_iter().collect()
+    }
+
+    fn set_configured_hosts(&self, workspace: &str, name: &str, hosts: &[String]) {
+        if let Ok(mut configured) = self.configured_hosts.lock() {
+            let key = (workspace.to_string(), name.to_string());
+            if hosts.is_empty() {
+                configured.remove(&key);
+            } else {
+                configured.insert(key, hosts.to_vec());
+            }
+        }
+    }
+
+    /// The 503 for a request to `host` that a stored mock lists but that no
+    /// mounted mock serves; `None` when no such mock exists.
+    fn unmounted_host(&self, host: &str, mounted: &[Mounted]) -> Option<Response> {
+        let configured = self.configured_hosts.lock().ok()?;
+        let (ws, name) = configured
+            .iter()
+            .find(|((ws, name), hosts)| {
+                hosts.iter().any(|h| h == host) && !mounted.iter().any(|m| m.is(ws, name))
+            })
+            .map(|(key, _)| key.clone())?;
+        let label = mock_label(&ws, &name);
+        let why = self
+            .failed
+            .lock()
+            .ok()
+            .and_then(|f| f.get(&(ws, name)).cloned())
+            .unwrap_or_else(|| "it has no active contract, or another mock holds its route".into());
+        Some(problem(
+            503,
+            "Mock not mounted",
+            format!("mock {label} answers for host {host} but is not mounted: {why}"),
+        ))
     }
 
     /// `(workspace, name)` of every mounted mock, gRPC mocks included.
@@ -638,6 +694,12 @@ impl MockRegistry {
             }
             _ => None,
         }) else {
+            if let Some(resp) = host
+                .as_deref()
+                .and_then(|h| self.unmounted_host(h, &snapshot))
+            {
+                return resp;
+            }
             let detail = match &host {
                 Some(host) => format!("no mock is mounted at a prefix of {path} for host {host}"),
                 None => format!("no mock is mounted at a prefix of {path}"),

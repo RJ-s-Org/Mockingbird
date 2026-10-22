@@ -113,7 +113,7 @@ pub async fn run_with(
     };
 
     let app = build_app_with(&args, llm, ext).await?;
-    let proxy_addr = SocketAddr::new(cfg.server.host, cfg.proxy.port);
+    let proxy_addr = SocketAddr::new(cfg.proxy.host, cfg.proxy.port);
     let proxy = match &app.proxy {
         Some(_) if bind_data => Some(
             TcpListener::bind(proxy_addr)

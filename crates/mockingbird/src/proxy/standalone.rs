@@ -69,7 +69,8 @@ pub struct ProxyRunArgs {
     /// Config file whose `server` and `proxy` sections apply.
     #[arg(short = 'c', long)]
     pub config: Option<PathBuf>,
-    /// Bind address [default: server.host, else 127.0.0.1].
+    /// Bind address [default: proxy.host, else 127.0.0.1]; off loopback the
+    /// unmapped mode must be block.
     #[arg(long)]
     pub host: Option<IpAddr>,
     /// Port [default: proxy.port, else 8888].
@@ -173,22 +174,30 @@ pub async fn run_standalone(
                 .path_and_query()
                 .map_or("/", |p| p.as_str())
                 .to_owned();
-            match data_url.join(&path) {
-                Ok(target) => forward(&client, target, host.as_deref(), req).await,
-                Err(error) => mb_protocols::http_rest::problem(
-                    400,
-                    "Invalid request path",
-                    format!("{path}: {error}"),
-                ),
-            }
+            let target = upstream_url(&data_url, &path);
+            forward(&client, target, host.as_deref(), req).await
         }
     });
     let ca = LocalCa::load_or_create(&opts.ca_dir)
         .with_context(|| format!("loading the local CA in {}", opts.ca_dir.display()))?;
-    let state = ProxyState::new(claims, upstream, Arc::new(ca), opts.unmapped, opts.images);
+    let state = ProxyState::new(claims, upstream, Arc::new(ca), opts.unmapped, opts.images)?;
     let served = super::serve(listener, state, stop).await;
     refresher.abort();
     served.map_err(|e| anyhow!("proxy: {e}"))
+}
+
+/// `data_url` with `path_and_query` appended below its path. Never a URL
+/// join: `//other.test/x` must stay a path on the data plane.
+fn upstream_url(data_url: &reqwest::Url, path_and_query: &str) -> reqwest::Url {
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path_and_query, None),
+    };
+    let mut url = data_url.clone();
+    let base = url.path().trim_end_matches('/').to_owned();
+    url.set_path(&format!("{base}{path}"));
+    url.set_query(query);
+    url
 }
 
 /// Prints the local CA certificate path, creating the CA if missing.
@@ -219,7 +228,7 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         None => FileConfig::default(),
     };
     file_config::apply_env(&mut cfg)?;
-    let host = run.host.unwrap_or(cfg.server.host);
+    let host = run.host.unwrap_or(cfg.proxy.host);
     let port = run.port.unwrap_or(cfg.proxy.port);
     let data_host = match cfg.server.host {
         ip if ip.is_unspecified() => IpAddr::from([127, 0, 0, 1]),
@@ -234,11 +243,18 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
     let mut images = cfg.proxy.images.clone();
     images.extend(run.image_host.iter().map(|h| h.to_ascii_lowercase()));
     mb_store::validate_hosts(&images).map_err(|e| anyhow!("--image-host: {e}"))?;
+    let unmapped = run.unmapped.unwrap_or(cfg.proxy.unmapped);
+    crate::file_config::ProxyConfig {
+        unmapped,
+        ..cfg.proxy.clone()
+    }
+    .check_bind(host)
+    .map_err(|e| anyhow!(e))?;
     let opts = StandaloneOptions {
         data_url,
         admin_url: admin_url.to_owned(),
         ca_dir: cfg.proxy.effective_ca_dir()?,
-        unmapped: run.unmapped.unwrap_or(cfg.proxy.unmapped),
+        unmapped,
         images,
     };
     let addr = SocketAddr::new(host, port);
@@ -257,4 +273,21 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
         let _ = stop_tx.send(true);
     });
     run_standalone(listener, opts, stop_rx).await
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::upstream_url;
+
+    #[test]
+    fn upstream_paths_stay_on_the_data_plane() {
+        let base: reqwest::Url = "http://127.0.0.1:8080".parse().unwrap();
+        let u = upstream_url(&base, "//evil.test/x?a=1");
+        assert_eq!(u.host_str(), Some("127.0.0.1"));
+        assert_eq!(u.path(), "//evil.test/x");
+        assert_eq!(u.query(), Some("a=1"));
+        let prefixed: reqwest::Url = "http://127.0.0.1:8080/base/".parse().unwrap();
+        assert_eq!(upstream_url(&prefixed, "/orders").path(), "/base/orders");
+    }
 }

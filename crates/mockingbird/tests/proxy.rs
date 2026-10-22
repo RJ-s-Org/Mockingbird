@@ -108,7 +108,7 @@ async fn start_proxy(
 ) -> (String, TempDir, watch::Sender<bool>) {
     let dir = tempfile::tempdir().unwrap();
     let ca = Arc::new(LocalCa::load_or_create(dir.path()).unwrap());
-    let state = ProxyState::new(registry.clone(), registry.router(), ca, unmapped, images);
+    let state = ProxyState::new(registry.clone(), registry.router(), ca, unmapped, images).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stop_rx) = watch::channel(false);
@@ -224,7 +224,8 @@ fn unmapped_hosts_are_logged_once() {
         ca,
         Unmapped::Pass,
         vec![],
-    );
+    )
+    .unwrap();
     assert!(st.first_sighting("x.test"));
     assert!(!st.first_sighting("x.test"));
 }

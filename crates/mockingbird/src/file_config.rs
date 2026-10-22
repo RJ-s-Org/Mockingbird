@@ -69,7 +69,10 @@ pub struct FileConfig {
 pub struct ProxyConfig {
     /// Whether `serve` starts the proxy (`--proxy`).
     pub enabled: bool,
-    /// The proxy's port, on `server.host` (`--proxy-port`).
+    /// The proxy's bind address. Loopback by default: off loopback,
+    /// `unmapped` must be `block`, or the port would be an open relay.
+    pub host: IpAddr,
+    /// The proxy's port (`--proxy-port`).
     pub port: u16,
     /// What happens to hosts no mock claims.
     pub unmapped: Unmapped,
@@ -85,6 +88,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: crate::proxy::DEFAULT_PROXY_PORT,
             unmapped: Unmapped::Pass,
             images: Vec::new(),
@@ -94,6 +98,18 @@ impl Default for ProxyConfig {
 }
 
 impl ProxyConfig {
+    /// Refuses `unmapped: pass` on a non-loopback `host`: anyone who can
+    /// reach the port could tunnel to any address through it.
+    pub fn check_bind(&self, host: IpAddr) -> Result<(), String> {
+        if host.is_loopback() || self.unmapped == Unmapped::Block {
+            Ok(())
+        } else {
+            Err(format!(
+                "proxy.unmapped: pass on the non-loopback proxy address {host} would let anyone who reaches it tunnel to any host; set proxy.unmapped: block, or bind proxy.host to a loopback address"
+            ))
+        }
+    }
+
     /// `ca_dir`, else [`default_ca_dir`](crate::proxy::ca::default_ca_dir).
     pub fn effective_ca_dir(&self) -> anyhow::Result<PathBuf> {
         match &self.ca_dir {
@@ -1307,6 +1323,7 @@ impl FileConfig {
         self.validate_limits()?;
         self.validate_protocols()?;
         mb_store::validate_hosts(&self.proxy.images).map_err(|e| format!("proxy.images: {e}"))?;
+        self.proxy.check_bind(self.proxy.host)?;
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;

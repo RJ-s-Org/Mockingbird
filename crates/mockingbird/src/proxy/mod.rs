@@ -59,12 +59,11 @@ impl ProxyState {
         ca: Arc<ca::LocalCa>,
         unmapped: Unmapped,
         images: Vec<String>,
-    ) -> Arc<ProxyState> {
-        let client = forward::forward_client().unwrap_or_else(|error| {
-            tracing::error!(error = %format!("{error:#}"), "cannot build the proxy's forwarding client; using defaults");
-            reqwest::Client::new()
-        });
-        Arc::new(ProxyState {
+    ) -> anyhow::Result<Arc<ProxyState>> {
+        // No fallback to a default client: it would read `HTTP_PROXY`,
+        // which may point back at this proxy.
+        let client = forward::forward_client()?;
+        Ok(Arc::new(ProxyState {
             claims,
             upstream,
             ca,
@@ -72,7 +71,7 @@ impl ProxyState {
             images,
             client,
             seen: Mutex::new(HashSet::new()),
-        })
+        }))
     }
 
     /// `true` the first time `host` is seen, so each unmapped host is
