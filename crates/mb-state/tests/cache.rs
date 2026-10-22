@@ -103,3 +103,23 @@ async fn idle_sessions_expire() {
     tokio::time::advance(Duration::from_secs(61)).await;
     assert_eq!(c.get(&key("a"), "k"), None);
 }
+
+#[tokio::test]
+async fn an_answer_older_than_an_invalidation_is_not_cached() {
+    let st = store();
+    let c = st.response_cache().unwrap();
+    // A read misses, then a write (or reset) lands while it generates.
+    let before = c.epoch(&key("a"));
+    st.upsert(&key("a"), order("o1")).await.unwrap();
+    c.put_if_current(&key("a"), "list".into(), Some("orders"), answer(1), before);
+    assert_eq!(c.get(&key("a"), "list"), None);
+
+    let before = c.epoch(&key("a"));
+    st.reset_mock("default", "orders").await.unwrap();
+    c.put_if_current(&key("a"), "list".into(), Some("orders"), answer(1), before);
+    assert_eq!(c.get(&key("a"), "list"), None);
+
+    let before = c.epoch(&key("a"));
+    c.put_if_current(&key("a"), "list".into(), Some("orders"), answer(2), before);
+    assert_eq!(c.get(&key("a"), "list"), Some(answer(2)));
+}

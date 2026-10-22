@@ -640,6 +640,9 @@ pub(crate) async fn generate_narrowed(
     let mut state = StateAccess::new(rt);
     let resource_type = op.resource_type.as_deref();
     let target_id = target_id(op, call);
+    // Before any state is read: an answer generated from older state must
+    // not be cached after a write that lands meanwhile.
+    let since = rt.state.response_cache().map(|c| c.epoch(session));
     let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call)
         .instrument(state_span())
         .await;
@@ -761,11 +764,11 @@ pub(crate) async fn generate_narrowed(
     drop(writes);
 
     // Seeded first, then cached: a later list never clears a cached one.
-    if let (Some(cache), Some(key)) = (cache, key)
+    if let (Some(cache), Some(key), Some(since)) = (cache, key, since)
         && (200..300).contains(&generated.status)
         && !transient_fallback(&generated)
     {
-        cache.put(
+        cache.put_if_current(
             session,
             key,
             resource_type,
@@ -774,6 +777,7 @@ pub(crate) async fn generate_narrowed(
                 content_type: generated.content_type.clone(),
                 body: generated.body.clone(),
             },
+            since,
         );
     }
     Ok(generated)

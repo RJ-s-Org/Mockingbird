@@ -7,6 +7,7 @@
 //! clear nothing, so paginated lists do not evict each other.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -42,6 +43,8 @@ struct Entry {
 struct SessionCache {
     entries: HashMap<String, Entry>,
     clock: u64,
+    /// Bumped by every invalidation of the session.
+    epoch: u64,
     /// Monotonic, for idleness (pausable in tests).
     last_used: Instant,
 }
@@ -51,6 +54,7 @@ impl SessionCache {
         Self {
             entries: HashMap::new(),
             clock: 0,
+            epoch: 0,
             last_used: Instant::now(),
         }
     }
@@ -62,9 +66,19 @@ impl SessionCache {
     }
 }
 
+/// When an answer's generation began, as far as invalidation goes (see
+/// [`ResponseCache::put_if_current`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheEpoch {
+    clears: u64,
+    session: u64,
+}
+
 /// Per-session LRU of final responses, keyed by the caller's canonical key.
 pub struct ResponseCache {
     sessions: DashMap<SessionKey, SessionCache>,
+    /// Bumped by every clear spanning sessions (a mock reset, a lag).
+    clears: AtomicU64,
     capacity: usize,
     idle_ttl: Duration,
 }
@@ -73,6 +87,7 @@ impl ResponseCache {
     pub fn new(capacity: usize, idle_ttl: Duration) -> Self {
         Self {
             sessions: DashMap::new(),
+            clears: AtomicU64::new(0),
             capacity: capacity.max(1),
             idle_ttl,
         }
@@ -116,7 +131,9 @@ impl ResponseCache {
             .entry(s.clone())
             .or_insert_with(SessionCache::new);
         if self.idle(&cache, now) {
+            let epoch = cache.epoch;
             *cache = SessionCache::new();
+            cache.epoch = epoch;
         }
         let used = cache.tick();
         cache.entries.insert(
@@ -140,22 +157,56 @@ impl ResponseCache {
         }
     }
 
+    /// The session's invalidation epoch now: read it before generating an
+    /// answer and pass it to [`ResponseCache::put_if_current`].
+    pub fn epoch(&self, s: &SessionKey) -> CacheEpoch {
+        CacheEpoch {
+            clears: self.clears.load(Ordering::SeqCst),
+            session: self.sessions.get(s).map_or(0, |c| c.epoch),
+        }
+    }
+
+    /// [`ResponseCache::put`], unless the session was invalidated since
+    /// `since`: an answer generated before a write or reset must not
+    /// outlive it.
+    pub fn put_if_current(
+        &self,
+        s: &SessionKey,
+        key: String,
+        resource_type: Option<&str>,
+        value: CachedResponse,
+        since: CacheEpoch,
+    ) {
+        if self.epoch(s) == since {
+            self.put(s, key, resource_type, value);
+        }
+    }
+
     /// Drops the session's answers about `resource_type`.
     pub fn invalidate_type(&self, s: &SessionKey, resource_type: &str) {
-        if let Some(mut cache) = self.sessions.get_mut(s) {
-            cache
-                .entries
-                .retain(|_, e| e.resource_type.as_deref() != Some(resource_type));
-        }
+        let mut cache = self
+            .sessions
+            .entry(s.clone())
+            .or_insert_with(SessionCache::new);
+        cache.epoch += 1;
+        cache
+            .entries
+            .retain(|_, e| e.resource_type.as_deref() != Some(resource_type));
     }
 
     /// Drops every answer of the session.
     pub fn clear_session(&self, s: &SessionKey) {
-        self.sessions.remove(s);
+        let mut cache = self
+            .sessions
+            .entry(s.clone())
+            .or_insert_with(SessionCache::new);
+        cache.epoch += 1;
+        cache.entries.clear();
     }
 
     /// Drops every answer of every session of a mock.
     pub fn clear_mock(&self, workspace: &str, mock: &str) {
+        self.clears.fetch_add(1, Ordering::SeqCst);
         self.sessions
             .retain(|k, _| !(k.workspace == workspace && k.mock == mock));
     }
@@ -176,6 +227,7 @@ impl ResponseCache {
     }
 
     fn clear(&self) {
+        self.clears.fetch_add(1, Ordering::SeqCst);
         self.sessions.clear();
     }
 }
