@@ -39,6 +39,8 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Real-world contracts load: a `$ref` inside a vendor extension (Stripe's `x-expansionResources`, GitHub's `x-github-breaking-changes`) no longer fails compilation, and an unresolvable `$ref` names its referrer and the JSON pointer where it sits.
 - GraphQL schemas with covariant interface fields serve (GitHub's `User.email: String!` implementing `ProfileOwner.email: String`): implementations are checked with the spec's rules instead of async-graphql's inverted check.
 - OpenAPI 3 `application/x-www-form-urlencoded` and `multipart/form-data` request bodies are compiled, decoded and validated; the engine no longer sees `"body": null` for them, nor for any non-empty body the contract does not describe. Bracket notation (`a[b][c]=1`, `a[0]=x`, `a[]=y`) nests in form bodies and query strings, so stripe-node requests validate against Stripe's schema. The request log shows the body as decoded. Swagger 2 `type: file` parameters are binary strings.
+- GraphQL aliases of one field with different arguments (`small: repositories(first: 1)`, `large: repositories(first: 5)`) get separate generated values; aliases with identical arguments share one.
+- Chaos errors on an operation that declares only a `default` error response (Stripe) answer HTTP 503 in that shape, with its message-like field set, instead of problem+json.
 
 ## [0.1.0-rc.1] - 2026-10-20
 
