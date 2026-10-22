@@ -358,6 +358,10 @@ pub struct ContractVersion {
     /// versions created any other way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_meta: Option<Value>,
+    /// Compilation warnings (a JSON array of `mb_import::Warning`); `None`
+    /// when none were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -716,6 +720,10 @@ pub struct ImportJob {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+    /// `merge` or `replace`; `None` = merge when the mock has a draft or
+    /// active version.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -725,6 +733,10 @@ pub struct NewImportJob {
     pub source_name: Option<String>,
     pub input: Vec<u8>,
     pub created_by: Option<String>,
+    /// `merge` or `replace`; `None` = merge when the mock has a draft or
+    /// active version.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// How a running import ended.

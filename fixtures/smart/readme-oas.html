@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html>
+<head><title>Details</title></head>
+<body>
+<h1>Details</h1>
+<p>Get the top level details of a movie by ID.</p>
+<p>GET https://api.themoviedb.org/3/movie/{movie_id}</p>
+<script id="ssr-props" type="application/json">{"props": {"oasDefinition": {"openapi": "3.0.3", "info": {"title": "TMDB", "version": "3"}, "servers": [{"url": "https://api.themoviedb.org"}], "paths": {"/3/movie/{movie_id}": {"parameters": [{"name": "movie_id", "in": "path", "required": true, "schema": {"type": "integer"}}], "get": {"operationId": "movie-details", "summary": "Details", "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Movie"}}}}}}}, "/3/movie/{movie_id}/credits": {"get": {"operationId": "movie-credits", "summary": "Credits", "parameters": [{"name": "movie_id", "in": "path", "required": true, "schema": {"type": "integer"}}], "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}, "cast": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}}}}}}}}}}}}}, "components": {"schemas": {"Movie": {"type": "object", "required": ["id", "title"], "properties": {"id": {"type": "integer"}, "title": {"type": "string"}, "tagline": {"type": "string"}}}}}}}}</script>
+</body>
+</html>

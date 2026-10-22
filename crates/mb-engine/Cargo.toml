@@ -17,6 +17,7 @@ futures.workspace = true
 json-patch.workspace = true
 jsonschema.workspace = true
 metrics.workspace = true
+mb-import.workspace = true
 mb-llm.workspace = true
 mb-mcm.workspace = true
 mb-state.workspace = true
@@ -33,7 +34,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

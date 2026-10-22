@@ -223,6 +223,14 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         version: i64,
     ) -> Result<ContractVersion, StoreError>;
+    /// Replaces the version's compilation warnings. `NotFound` for a missing
+    /// version. Publishes nothing.
+    async fn set_contract_version_warnings(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        warnings: Value,
+    ) -> Result<ContractVersion, StoreError>;
     /// Queues a job with progress `{"queued", 0, 0}`, copying the mock's
     /// workspace and name. `NotFound` if the mock does not exist.
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError>;

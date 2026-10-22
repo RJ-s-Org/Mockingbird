@@ -8,13 +8,16 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use mb_ext::{Tenancy, UsageEvent, UsageSink};
+use mb_import::smart::fetch::SystemResolver;
+use mb_import::smart::merge::{MergeBase, merge_drafts};
+use mb_import::smart::model::{DraftMeta, DraftWarning};
 use mb_import::smart::{
-    ExtractLlm, ImportInput, ImportKind, ImportObserver, ImportOptions, Phase, SmartError,
-    run_import,
+    DraftResult, ExtractLlm, ImportInput, ImportKind, ImportObserver, ImportOptions, Phase,
+    SmartError, run_import_sources,
 };
 use mb_llm::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider};
 use mb_store::{
-    ContractStatus, ControlStore, ImportJob, ImportOutcome, ImportProgress, NewAuditEvent,
+    ContractStatus, ControlStore, ImportJob, ImportOutcome, ImportProgress, Mock, NewAuditEvent,
     NewContractVersion, StoreError,
 };
 use serde_json::json;
@@ -192,6 +195,104 @@ async fn fail(st: &AdminState, job: &ImportJob, error: String) -> Result<(), Sto
     Ok(())
 }
 
+/// The sources of a job from its kind and stored input.
+fn job_inputs(job: &ImportJob, input: Vec<u8>) -> Result<Vec<ImportInput>, String> {
+    match job.kind.as_str() {
+        "url" => String::from_utf8(input)
+            .map(|url| vec![ImportInput::Url(url)])
+            .map_err(|_| "the job's URL is not UTF-8".to_string()),
+        super::URLS_KIND => serde_json::from_slice::<Vec<String>>(&input)
+            .map(|urls| urls.into_iter().map(ImportInput::Url).collect())
+            .map_err(|e| format!("the job's URLs are invalid: {e}")),
+        super::DOCUMENTS_KIND => {
+            #[derive(serde::Deserialize)]
+            struct Stored {
+                kind: String,
+                name: Option<String>,
+                text: String,
+            }
+            let documents: Vec<Stored> = serde_json::from_slice(&input)
+                .map_err(|e| format!("the job's documents are invalid: {e}"))?;
+            documents
+                .into_iter()
+                .map(|d| match ImportKind::parse(&d.kind) {
+                    Some(kind) => Ok(ImportInput::Bytes {
+                        kind,
+                        name: d.name,
+                        bytes: d.text.into_bytes(),
+                    }),
+                    None => Err(format!("unknown document kind {:?}", d.kind)),
+                })
+                .collect()
+        }
+        kind => match ImportKind::parse(kind) {
+            Some(kind) => Ok(vec![ImportInput::Bytes {
+                kind,
+                name: job.source_name.clone(),
+                bytes: input,
+            }]),
+            None => Err(format!("unknown import kind {kind:?}")),
+        },
+    }
+}
+
+/// `draft` merged into the mock's newest draft or active version, unless
+/// the job's mode is `replace` or there is none. When the base cannot take
+/// a merge (not OpenAPI 3, or the merge does not compile), a job without a
+/// mode stores the draft unmerged with a `merge_skipped` warning; a job
+/// with mode `merge` fails.
+async fn merge_into_base(
+    st: &AdminState,
+    job: &ImportJob,
+    mock: &Mock,
+    mut draft: DraftResult,
+) -> Result<DraftResult, String> {
+    if job.mode.as_deref() == Some("replace") {
+        return Ok(draft);
+    }
+    let versions = st
+        .store
+        .list_contract_versions(mock.id)
+        .await
+        .map_err(|e| format!("cannot read the contract versions: {e}"))?;
+    let Some(base) = versions
+        .into_iter()
+        .find(|v| matches!(v.status, ContractStatus::Draft | ContractStatus::Active))
+    else {
+        return Ok(draft);
+    };
+    let version = base.version;
+    let base = MergeBase {
+        version,
+        source: base.source,
+        meta: base
+            .draft_meta
+            .and_then(|m| serde_json::from_value::<DraftMeta>(m).ok()),
+    };
+    let incoming = draft.clone();
+    let merged = tokio::task::spawn_blocking(move || merge_drafts(&base, incoming))
+        .await
+        .map_err(|e| {
+            tracing::error!(job = %job.id, error = %e, "merging the draft panicked");
+            UNEXPECTED_ERROR.to_string()
+        })?;
+    match merged {
+        Ok(merged) => Ok(merged),
+        Err(e) if job.mode.is_none() => {
+            let reason = match e {
+                SmartError::Unsupported(reason) => reason,
+                other => other.to_string(),
+            };
+            draft.meta.warnings.push(DraftWarning::new(
+                "merge_skipped",
+                format!("not merged into version {version}: {reason}"),
+            ));
+            Ok(draft)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Claims and runs one queued job to completion; Ok(false) when none was queued.
 pub async fn run_next_import(st: &AdminState) -> Result<bool, StoreError> {
     let Some(job) = st.store.claim_import_job(Utc::now()).await? else {
@@ -224,22 +325,9 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         }),
         Err(e) => return fail(st, job, e).await,
     };
-    let input = if job.kind == "url" {
-        match String::from_utf8(input) {
-            Ok(url) => ImportInput::Url(url),
-            Err(_) => return fail(st, job, "the job's URL is not UTF-8".to_string()).await,
-        }
-    } else {
-        match ImportKind::parse(&job.kind) {
-            Some(kind) => ImportInput::Bytes {
-                kind,
-                name: job.source_name.clone(),
-                bytes: input,
-            },
-            None => {
-                return fail(st, job, format!("unknown import kind {:?}", job.kind)).await;
-            }
-        }
+    let inputs = match job_inputs(job, input) {
+        Ok(inputs) => inputs,
+        Err(e) => return fail(st, job, e).await,
     };
     let opts = ImportOptions {
         max_tokens: st.imports.settings.max_tokens,
@@ -252,7 +340,7 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
     // A panic in the pipeline becomes a JoinError instead of killing the
     // worker; aborting the worker (shutdown) aborts the pipeline with it.
     let mut run = AbortOnDrop(tokio::spawn(async move {
-        run_import(input, llm.as_ref(), &opts, &observer).await
+        run_import_sources(inputs, llm.as_ref(), &opts, &observer, &SystemResolver).await
     }));
     let draft = match (&mut run.0).await {
         Err(e) => {
@@ -266,6 +354,10 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         Ok(Err(e)) => return fail(st, job, e.to_string()).await,
         Ok(Ok(draft)) => draft,
     };
+    let draft = match merge_into_base(st, job, &mock, draft).await {
+        Ok(draft) => draft,
+        Err(e) => return fail(st, job, e).await,
+    };
 
     let meta = match serde_json::to_value(&draft.meta) {
         Ok(meta) => meta,
@@ -273,6 +365,7 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
     };
     let operations = draft.bundle.operations.len();
     let warnings = draft.meta.warnings.len();
+    let compile_warnings = mb_import::bundle_warnings(&draft.bundle);
     // The draft is stored only if the job is still running, in the same
     // transaction that marks it done: a cancel or stale sweep that won the
     // race leaves no orphaned draft and no audit event.
@@ -292,7 +385,22 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         )
         .await;
     let version = match completed {
-        Ok(Some(v)) => v.version,
+        Ok(Some(v)) => {
+            if !compile_warnings.is_empty() {
+                let stored = match serde_json::to_value(&compile_warnings) {
+                    Ok(value) => {
+                        st.store
+                            .set_contract_version_warnings(mock.id, v.version, value)
+                            .await
+                    }
+                    Err(e) => Err(StoreError::from(e)),
+                };
+                if let Err(e) = stored {
+                    tracing::warn!(job = %job.id, error = %e, "cannot store the draft's compilation warnings");
+                }
+            }
+            v.version
+        }
         Ok(None) => {
             count("canceled");
             return Ok(());

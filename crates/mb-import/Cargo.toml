@@ -96,3 +96,11 @@ required-features = ["smart"]
 [[test]]
 name = "smart_import"
 required-features = ["smart"]
+
+[[test]]
+name = "smart_complete"
+required-features = ["smart"]
+
+[[test]]
+name = "smart_embedded"
+required-features = ["smart"]

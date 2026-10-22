@@ -454,7 +454,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0 })
+        json!({ "version": 1, "status": "active", "operations": 3, "channels": 0, "warnings": [] })
     );
 
     // Later uploads stay approved unless asked to activate; YAML is accepted.
@@ -462,7 +462,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 2, "status": "approved", "operations": 1, "channels": 0 })
+        json!({ "version": 2, "status": "approved", "operations": 1, "channels": 0, "warnings": [] })
     );
     assert_eq!(h.active_version("orders").await, 1);
 
@@ -470,7 +470,7 @@ async fn upload_activate_and_list_versions() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 3, "status": "active", "operations": 3, "channels": 0 })
+        json!({ "version": 3, "status": "active", "operations": 3, "channels": 0, "warnings": [] })
     );
     assert_eq!(h.active_version("orders").await, 3);
 
@@ -1877,7 +1877,7 @@ async fn upload_graphql_proto_wsdl_and_archive() {
         assert_eq!(r.status, StatusCode::CREATED, "{mock}: {}", r.text);
         assert_eq!(
             r.json(),
-            json!({ "version": 1, "status": "active", "operations": expected, "channels": 0 }),
+            json!({ "version": 1, "status": "active", "operations": expected, "channels": 0, "warnings": [] }),
             "{mock}"
         );
         let r = h
@@ -1964,7 +1964,7 @@ async fn upload_asyncapi_reports_channels() {
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
     assert_eq!(
         r.json(),
-        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4 })
+        json!({ "version": 1, "status": "active", "operations": 0, "channels": 4, "warnings": [] })
     );
 
     let r = h.get("/api/v1/mocks/lights/contracts").await;
@@ -2157,4 +2157,34 @@ async fn grpc_services_are_unique_across_workspaces() {
         .post_empty_json("/api/v1/mocks/routes/contracts/1/activate")
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+}
+
+fn repo_fixture(rel: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../../fixtures/{rel}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn huge_schema_warnings_on_upload_list_and_activate() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let r = h
+        .upload("orders", &repo_fixture("openapi/huge-response.json"), None)
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let up = r.json();
+    assert_eq!(up["warnings"][0]["code"], "schema_too_large");
+    assert_eq!(up["warnings"][0]["operation"], "getBig");
+    let list = h.get("/api/v1/mocks/orders/contracts").await.json();
+    assert_eq!(list[0]["warnings"][0]["operation"], "getBig");
+    let small = h.upload("orders", &contract_json("3.0"), None).await.json();
+    assert_eq!(small["warnings"], json!([]));
+    let active = h
+        .post_empty_json("/api/v1/mocks/orders/contracts/1/activate")
+        .await
+        .json();
+    assert_eq!(active["warnings"][0]["code"], "schema_too_large");
 }

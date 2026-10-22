@@ -10,13 +10,14 @@ use async_trait::async_trait;
 use mb_import::smart::assemble::{assemble_openapi, compile_draft, diff_bundles, refresh_meta};
 use mb_import::smart::fetch::FetchPolicy;
 use mb_import::smart::infer::infer_schema;
+use mb_import::smart::merge::{MergeBase, merge_drafts};
 use mb_import::smart::model::{
     DraftMeta, DraftOperation, DraftParam, DraftResponse, ImportKind, OperationMeta, ParamLocation,
     TokenUsage,
 };
 use mb_import::smart::{
-    ExtractLlm, ImportInput, ImportObserver, ImportOptions, NoopObserver, Phase, SmartError,
-    run_import,
+    DraftResult, ExtractLlm, ImportInput, ImportObserver, ImportOptions, NoopObserver, Phase,
+    SmartError, run_import,
 };
 use mb_llm::{HopSettings, ScriptedProvider, Usage};
 use serde_json::{Value, json};
@@ -199,7 +200,7 @@ fn assemble_unique_operation_ids() {
         with_id(op("POST", "/pets"), "bad id!"),
     ];
     let (doc, ids, _) = assemble_openapi("Pets", &[], &ops);
-    assert_eq!(ids, vec!["listPets", "get_pets_id", "post_pets"]);
+    assert_eq!(ids, vec!["listPets", "get_pets_id", "bad_id"]);
     assert_eq!(
         doc["paths"]["/pets/{id}"]["get"]["operationId"],
         "get_pets_id"
@@ -207,7 +208,7 @@ fn assemble_unique_operation_ids() {
     let (_, bundle) = compile_draft(&doc).unwrap();
     let mut got: Vec<String> = bundle.operations.iter().map(|o| o.id.clone()).collect();
     got.sort();
-    assert_eq!(got, vec!["get_pets_id", "listPets", "post_pets"]);
+    assert_eq!(got, vec!["bad_id", "get_pets_id", "listPets"]);
 
     let (_, ids, _) = assemble_openapi(
         "Pets",
@@ -600,6 +601,8 @@ fn meta_for(ids: &[&str]) -> DraftMeta {
             .collect::<BTreeMap<_, _>>(),
         usage: TokenUsage::default(),
         edited: false,
+        sources: Vec::new(),
+        merged_from: None,
     }
 }
 
@@ -925,5 +928,407 @@ async fn url_import_redacts_query_values() {
     assert!(
         !prompts.contains("t0ken"),
         "the prompt carries the fragment"
+    );
+}
+
+#[test]
+fn schema_warnings_name_the_operation_target() {
+    let bundle = mb_import::compile(&fixture("openapi/huge-response.json")).unwrap();
+    let ws = mb_import::smart::assemble::schema_warnings(&bundle);
+    assert_eq!(ws.len(), 1);
+    assert_eq!(ws[0].code, "schema_too_large");
+    assert_eq!(ws[0].operation.as_deref(), Some("GET /big"));
+}
+
+#[test]
+fn docs_operation_ids_are_converted_not_replaced() {
+    let ops = [
+        with_id(op("GET", "/3/movie/{movie_id}"), "movie-details"),
+        with_id(op("GET", "/3/tv"), "tv.list"),
+        with_id(op("GET", "/x"), "getX"),
+    ];
+    let (doc, ids, _) = assemble_openapi("TMDB", &[], &ops);
+    assert_eq!(ids, vec!["movie_details", "tv_list", "getX"]);
+    let get = &doc["paths"]["/3/movie/{movie_id}"]["get"];
+    assert_eq!(get["x-original-operation-id"], "movie-details");
+    assert!(
+        doc["paths"]["/x"]["get"]
+            .get("x-original-operation-id")
+            .is_none()
+    );
+    compile_draft(&doc).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_draft_has_required_and_nullable() {
+    let schema = json!({"type": "object", "properties": {
+        "id": {"type": "integer"},
+        "tagline": {"type": "string"},
+        "homepage": {"type": "string"},
+        "belongs_to_collection": {"type": "object", "description": "May be null."}}});
+    let answer = json!({"operations": [
+        {"method": "GET", "path": "/3/movie/{movie_id}", "operation_id": "movie-details",
+         "confidence": 0.9, "evidence": "Get the top level details of a movie by ID.",
+         "parameters": [{"name": "movie_id", "in": "path", "schema": {"type": "integer"}}],
+         "responses": [{"status": 200, "schema": schema,
+            "example": {"id": 550, "tagline": null, "homepage": "https://www.foxmovies.com/movies/fight-club"}}]},
+        {"method": "GET", "path": "/3/movie/{movie_id}", "operation_id": "movie-details",
+         "confidence": 0.9, "evidence": "Get the top level details of a movie by ID.",
+         "responses": [{"status": 200, "example": {"id": 551, "tagline": "Hell, upside down"}}]}
+    ]})
+    .to_string();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer)]));
+    let draft = run_import(
+        md_input(fixture("smart/draft-quality.md")),
+        Some(&llm(provider, 4000)),
+        &ImportOptions::default(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap();
+    let schema = &draft.document["paths"]["/3/movie/{movie_id}"]["get"]["responses"]["200"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(schema["required"], json!(["id", "tagline"]), "{schema}");
+    assert_eq!(
+        schema["properties"]["tagline"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        schema["properties"]["belongs_to_collection"]["type"],
+        json!(["object", "null"])
+    );
+    assert!(draft.meta.operations.contains_key("movie_details"));
+}
+
+#[tokio::test]
+async fn low_confidence_operations_are_dropped_with_a_reason() {
+    let answer = json!({"operations": [
+        {"method": "GET", "path": "/pets", "confidence": 0.9, "evidence": "Returns all pets, newest first.",
+         "responses": [{"status": 200, "example": [{"id": 1}]}]},
+        {"method": "DELETE", "path": "/pets/{petId}", "confidence": 0.5},
+        {"method": "GET", "path": "/owners", "confidence": 0.7,
+         "responses": [{"status": 200, "example": []}]}]})
+    .to_string();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer)]));
+    let draft = run_import(
+        md_input(fixture("smart/petstore.md")),
+        Some(&llm(provider, 1000)),
+        &ImportOptions::default(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(path_operations(&draft.document), 1);
+    let low: Vec<_> = draft
+        .meta
+        .warnings
+        .iter()
+        .filter(|w| w.code == "low_confidence")
+        .collect();
+    assert_eq!(low.len(), 2, "{:?}", draft.meta.warnings);
+    let delete = low
+        .iter()
+        .find(|w| w.operation.as_deref() == Some("DELETE /pets/{petId}"))
+        .unwrap();
+    assert!(
+        delete
+            .message
+            .contains("0.30 is below 0.40 (the documentation gives no response shape)"),
+        "{}",
+        delete.message
+    );
+    let owners = low
+        .iter()
+        .find(|w| w.operation.as_deref() == Some("GET /owners"))
+        .unwrap();
+    // `/owners` is not in petstore.md: 0.7 is halved to 0.35 with an `ungrounded_operation` warning.
+    assert!(
+        owners
+            .message
+            .contains("0.35 is below 0.40 (GET /owners is not grounded"),
+        "{}",
+        owners.message
+    );
+}
+
+#[tokio::test]
+async fn all_low_confidence_fails_quoting_the_reasons() {
+    let answer = json!({"operations": [
+        {"method": "GET", "path": "/owners", "confidence": 0.7, "responses": [{"status": 200, "example": []}]},
+        {"method": "GET", "path": "/vets", "confidence": 0.7, "responses": [{"status": 200, "example": []}]},
+        {"method": "GET", "path": "/visits", "confidence": 0.7, "responses": [{"status": 200, "example": []}]},
+        {"method": "DELETE", "path": "/pets/{petId}", "confidence": 0.3}]})
+    .to_string();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer)]));
+    let err = run_import(
+        md_input(fixture("smart/petstore.md")),
+        Some(&llm(provider, 1000)),
+        &ImportOptions::default(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(matches!(err, SmartError::NoOperations(_)), "{text}");
+    assert!(text.contains("was left out"), "{text}");
+}
+
+#[tokio::test]
+async fn two_sources_make_one_draft() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pets.md"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/markdown")
+                .set_body_bytes(fixture("smart/petstore.md")),
+        )
+        .mount(&server)
+        .await;
+    let har = ImportInput::Bytes {
+        kind: ImportKind::Har,
+        name: Some("petstore.har".into()),
+        bytes: fixture("smart/petstore.har"),
+    };
+    let url = ImportInput::Url(format!("{}/pets.md", server.uri()));
+    let missing = ImportInput::Url(format!("{}/missing.md", server.uri()));
+    // The HAR's summaries call comes first; its answer is not used.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(r#"{"summaries": []}"#.into()),
+        Ok(pets_answer()),
+    ]));
+    let draft = mb_import::smart::run_import_sources(
+        vec![har, url, missing],
+        Some(&llm(provider, 1000)),
+        &loopback_options(),
+        &NoopObserver,
+        &mb_import::smart::fetch::SystemResolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(draft.meta.sources.len(), 3);
+    assert_eq!(draft.meta.sources[0], "petstore.har");
+    assert!(draft.document["paths"]["/api/pets/{petId}"]["get"].is_object()); // from the HAR
+    assert!(draft.document["paths"]["/pets/{petId}"]["get"].is_object()); // from the docs
+    assert!(
+        draft
+            .meta
+            .warnings
+            .iter()
+            .any(|w| w.code == "source_skipped" && w.message.contains("missing.md")),
+        "{:?}",
+        draft.meta.warnings
+    );
+}
+
+/// `run_import` of fixtures/smart/petstore.har with no LLM.
+async fn har_draft() -> DraftResult {
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Har,
+        name: Some("petstore.har".into()),
+        bytes: fixture("smart/petstore.har"),
+    };
+    run_import(input, None, &ImportOptions::default(), &NoopObserver)
+        .await
+        .unwrap()
+}
+
+/// `run_import` of fixtures/smart/legacy-v2.0.postman_collection.json with no LLM.
+async fn postman_draft() -> DraftResult {
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Postman,
+        name: Some("legacy.json".into()),
+        bytes: fixture("smart/legacy-v2.0.postman_collection.json"),
+    };
+    run_import(input, None, &ImportOptions::default(), &NoopObserver)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn merge_adds_and_replaces_without_removing() {
+    let base = har_draft().await;
+    let base_ids: Vec<String> = base.meta.operations.keys().cloned().collect();
+    let mb = MergeBase {
+        version: 3,
+        source: base.source.clone(),
+        meta: Some(base.meta.clone()),
+    };
+    let merged = merge_drafts(&mb, postman_draft().await).unwrap();
+    for id in &base_ids {
+        assert!(merged.meta.operations.contains_key(id), "{id} lost");
+    }
+    assert!(merged.document["paths"]["/v1/orders/{orderId}"]["get"].is_object());
+    assert_eq!(merged.meta.merged_from, Some(3));
+}
+
+#[tokio::test]
+async fn merging_a_draft_into_itself_is_idempotent() {
+    let d = har_draft().await;
+    let mb = MergeBase {
+        version: 1,
+        source: d.source.clone(),
+        meta: Some(d.meta.clone()),
+    };
+    let merged = merge_drafts(&mb, har_draft().await).unwrap();
+    assert_eq!(
+        merged.meta.operations.keys().collect::<Vec<_>>(),
+        d.meta.operations.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(merged.bundle.operations.len(), d.bundle.operations.len());
+}
+
+#[tokio::test]
+async fn merge_into_yaml_openapi_works_and_graphql_is_refused() {
+    let yaml = MergeBase {
+        version: 1,
+        source: fixture("openapi/orders-3.0.yaml"),
+        meta: None,
+    };
+    let merged = merge_drafts(&yaml, har_draft().await).unwrap();
+    let orders_ops = mb_import::compile(&fixture("openapi/orders-3.0.yaml"))
+        .unwrap()
+        .operations
+        .len();
+    assert!(merged.bundle.operations.len() > orders_ops);
+    assert!(
+        merged
+            .meta
+            .operations
+            .values()
+            .any(|m| m.confidence == 1.0 && m.provenance.is_empty())
+    );
+    let sdl = MergeBase {
+        version: 2,
+        source: b"type Query { a: Int }".to_vec(),
+        meta: None,
+    };
+    let err = merge_drafts(&sdl, har_draft().await).unwrap_err();
+    assert!(
+        err.to_string().contains("import with mode replace"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn merge_renames_a_colliding_operation_id() {
+    // base: GET /a with operationId "list"; incoming: GET /b with operationId "list".
+    let (doc, _, _) = assemble_openapi("T", &[], &[with_id(op("GET", "/a"), "list")]);
+    let (source, _) = compile_draft(&doc).unwrap();
+    let (doc_b, _, _) = assemble_openapi("T", &[], &[with_id(op("GET", "/b"), "list")]);
+    let (source_b, bundle_b) = compile_draft(&doc_b).unwrap();
+    let incoming = DraftResult {
+        document: doc_b,
+        source: source_b,
+        bundle: bundle_b,
+        meta: meta_for(&["list"]),
+    };
+    let merged = merge_drafts(
+        &MergeBase {
+            version: 1,
+            source,
+            meta: None,
+        },
+        incoming,
+    )
+    .unwrap();
+    assert_eq!(
+        merged.document["paths"]["/b"]["get"]["operationId"],
+        "list_2"
+    );
+    assert_eq!(
+        merged.document["paths"]["/b"]["get"]["x-original-operation-id"],
+        "list"
+    );
+    assert!(merged.meta.operations.contains_key("list_2"));
+    assert!(merged.meta.operations.contains_key("list"));
+}
+
+#[tokio::test]
+async fn merge_keeps_the_base_component_and_warns_on_a_conflict() {
+    let with_component = |path: &str, kind: &str| {
+        let (mut doc, _, _) = assemble_openapi("T", &[], &[op("GET", path)]);
+        doc["components"] = json!({"schemas": {"Pet": {"type": kind}}});
+        doc
+    };
+    let (source, _) = compile_draft(&with_component("/a", "object")).unwrap();
+    let doc_b = with_component("/b", "string");
+    let (source_b, bundle_b) = compile_draft(&doc_b).unwrap();
+    let incoming = DraftResult {
+        document: doc_b,
+        source: source_b,
+        bundle: bundle_b,
+        meta: meta_for(&["get_b"]),
+    };
+    let base = MergeBase {
+        version: 4,
+        source,
+        meta: None,
+    };
+    let merged = merge_drafts(&base, incoming).unwrap();
+    assert_eq!(
+        merged.document["components"]["schemas"]["Pet"]["type"],
+        "object"
+    );
+    assert!(
+        merged
+            .meta
+            .warnings
+            .iter()
+            .any(|w| w.code == "conflicting_component" && w.message.contains("Pet")),
+        "{:?}",
+        merged.meta.warnings
+    );
+}
+
+#[tokio::test]
+async fn re_merging_the_same_import_does_not_pile_up_warnings() {
+    let answer = || {
+        json!({"operations": [
+            {"method": "GET", "path": "/pets", "confidence": 0.9, "evidence": "Returns all pets, newest first.",
+             "responses": [{"status": 200, "example": [{"id": 1}]}]},
+            {"method": "DELETE", "path": "/pets/{petId}", "confidence": 0.3}]})
+        .to_string()
+    };
+    let import = || async {
+        let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer())]));
+        run_import(
+            md_input(fixture("smart/petstore.md")),
+            Some(&llm(provider, 1000)),
+            &ImportOptions::default(),
+            &NoopObserver,
+        )
+        .await
+        .unwrap()
+    };
+    let first = import().await;
+    let mut base = MergeBase {
+        version: 1,
+        source: first.source.clone(),
+        meta: Some(first.meta.clone()),
+    };
+    for version in 2..4 {
+        let merged = merge_drafts(&base, import().await).unwrap();
+        assert_eq!(merged.meta.warnings, first.meta.warnings, "v{version}");
+        base = MergeBase {
+            version,
+            source: merged.source.clone(),
+            meta: Some(merged.meta.clone()),
+        };
+    }
+}
+
+#[test]
+fn valid_docs_operation_ids_are_kept_as_written() {
+    let ops = [
+        with_id(op("GET", "/a"), "_internal"),
+        with_id(op("GET", "/b"), "get__pets"),
+    ];
+    let (doc, ids, _) = assemble_openapi("T", &[], &ops);
+    assert_eq!(ids, vec!["_internal", "get__pets"]);
+    assert!(
+        doc["paths"]["/a"]["get"]
+            .get("x-original-operation-id")
+            .is_none()
     );
 }

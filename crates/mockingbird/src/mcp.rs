@@ -1133,6 +1133,9 @@ impl McpServer {
         };
         let cmd = client::ClientCommand::Import(client::ImportArgs {
             source,
+            more_urls: Vec::new(),
+            no_activate: false,
+            mode: None,
             mock,
             activate: opt_bool(a, "activate"),
             approve: opt_bool(a, "approve"),

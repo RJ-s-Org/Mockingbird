@@ -284,6 +284,16 @@ impl ControlStore for StubControl {
     ) -> Result<ContractVersion, StoreError> {
         self.inner.approve_contract_version(mock_id, version).await
     }
+    async fn set_contract_version_warnings(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        warnings: Value,
+    ) -> Result<ContractVersion, StoreError> {
+        self.inner
+            .set_contract_version_warnings(mock_id, version, warnings)
+            .await
+    }
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
         self.inner.create_import_job(j).await
     }

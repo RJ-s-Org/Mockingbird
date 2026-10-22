@@ -73,6 +73,59 @@ pub struct UploadResult {
     pub operations: usize,
     /// Number of event channels in the compiled contract.
     pub channels: usize,
+    /// Compilation warnings (empty when there are none).
+    pub warnings: Vec<ContractWarningView>,
+}
+
+/// A non-fatal compilation finding, e.g. a response schema too large for
+/// the generation prompt (`schema_too_large`).
+#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq)]
+pub struct ContractWarningView {
+    pub code: String,
+    /// The operation id the warning is about.
+    pub operation: Option<String>,
+    pub message: String,
+    /// Compact JSON bytes of the schema with its reachable definitions.
+    pub size: Option<u64>,
+}
+
+impl From<&mb_import::Warning> for ContractWarningView {
+    fn from(w: &mb_import::Warning) -> Self {
+        Self {
+            code: w.code.clone(),
+            operation: w.operation.clone(),
+            message: w.message.clone(),
+            size: w.size,
+        }
+    }
+}
+
+/// The warnings stored on `v`; an unparseable value counts as none.
+fn version_warnings(v: &ContractVersion) -> Vec<ContractWarningView> {
+    v.warnings
+        .as_ref()
+        .and_then(|w| serde_json::from_value::<Vec<mb_import::Warning>>(w.clone()).ok())
+        .map(|ws| ws.iter().map(ContractWarningView::from).collect())
+        .unwrap_or_default()
+}
+
+/// Stores compilation `warnings` on `version`; the updated version.
+pub(crate) async fn store_warnings(
+    st: &AdminState,
+    mock_id: uuid::Uuid,
+    version: i64,
+    warnings: &[mb_import::Warning],
+) -> ApiResult<ContractVersion> {
+    let value = serde_json::to_value(warnings).map_err(|e| {
+        Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot encode contract warnings: {e}"),
+        )
+    })?;
+    Ok(st
+        .store
+        .set_contract_version_warnings(mock_id, version, value)
+        .await?)
 }
 
 /// A contract version without its source or compiled bundle.
@@ -91,6 +144,8 @@ pub struct ContractVersionSummary {
     pub imported: bool,
     /// Number of event channels in the compiled contract.
     pub channels: usize,
+    /// Compilation warnings (empty when there are none).
+    pub warnings: Vec<ContractWarningView>,
 }
 
 /// One operation of a compiled contract.
@@ -154,6 +209,7 @@ impl From<&ContractVersion> for ContractVersionSummary {
             operations: v.bundle.operations.len(),
             imported: v.draft_meta.is_some(),
             channels: v.bundle.channels.len(),
+            warnings: version_warnings(v),
         }
     }
 }
@@ -309,7 +365,7 @@ pub async fn upload(
         .to_vec();
     // Compiling a large contract is CPU-bound: keep it off the runtime.
     let (source, compiled) = tokio::task::spawn_blocking(move || {
-        let compiled = mb_import::compile(&source);
+        let compiled = mb_import::compile_with_warnings(&source);
         (source, compiled)
     })
     .await
@@ -319,7 +375,7 @@ pub async fn upload(
             format!("contract compilation did not finish: {e}"),
         )
     })?;
-    let bundle =
+    let (bundle, warnings) =
         compiled.map_err(|e| Problem::unprocessable(format!("contract does not compile: {e}")))?;
     let operations = bundle.operations.len();
     let channels = bundle.channels.len();
@@ -341,6 +397,7 @@ pub async fn upload(
             },
         )
         .await?;
+    let added = store_warnings(&st, m.id, added.version, &warnings).await?;
     let stored = if activate {
         st.store
             .activate_contract_version(m.id, added.version)
@@ -353,6 +410,7 @@ pub async fn upload(
         status: VersionStatus::from(&stored.status),
         operations,
         channels,
+        warnings: version_warnings(&stored),
     };
     access
         .audit(
@@ -369,7 +427,11 @@ pub async fn upload(
 /// A 409 problem when `bundle` binds a gRPC service that the active
 /// contract of another mock, in any workspace, already serves: every gRPC
 /// mock shares one listener, so a service has a single holder.
-async fn ensure_grpc_services_free(st: &AdminState, mock: &Mock, bundle: &Bundle) -> ApiResult<()> {
+pub(crate) async fn ensure_grpc_services_free(
+    st: &AdminState,
+    mock: &Mock,
+    bundle: &Bundle,
+) -> ApiResult<()> {
     let services = bundle.grpc_services();
     if services.is_empty() {
         return Ok(());
