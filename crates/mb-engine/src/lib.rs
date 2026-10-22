@@ -30,7 +30,7 @@ pub mod stream;
 pub mod validate;
 
 pub use extract::extract_json;
-pub use faker::{Costs, Faker};
+pub use faker::{Costs, Faker, FakerHints};
 pub use guards::{EngineGuards, GenerationLimiter, TokenBudget};
 pub use message::{GeneratedMessage, MessageContext};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
@@ -305,8 +305,14 @@ impl Engine {
         let mut usage = Usage::default();
         let mut response = match &self.provider {
             None => {
-                let mut fake =
-                    self.fake_response(bundle, variant, status, schema, Some(&validator));
+                let mut fake = self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    Some(&validator),
+                    &FakerHints::from_call(op, call),
+                );
                 fake.fallback_reason = Some(OFFLINE_REASON.to_string());
                 fake
             }
@@ -340,8 +346,14 @@ impl Engine {
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
-                        let mut fake =
-                            self.fake_response(bundle, variant, status, schema, Some(&validator));
+                        let mut fake = self.fake_response(
+                            bundle,
+                            variant,
+                            status,
+                            schema,
+                            Some(&validator),
+                            &FakerHints::from_call(op, call),
+                        );
                         fake.fallback_reason = Some(reason);
                         fake
                     }
@@ -482,13 +494,26 @@ impl Engine {
         };
         match self.validator(bundle, op, status, schema) {
             Ok(validator) => {
-                let response =
-                    self.fake_response(bundle, variant, status, schema, Some(&validator));
+                let response = self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    Some(&validator),
+                    &FakerHints::from_call(op, call),
+                );
                 self.finish(&validator, bundle, schema, op, call, ctx, response)
             }
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
-                self.fake_response(bundle, variant, status, schema, None)
+                self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    None,
+                    &FakerHints::from_call(op, call),
+                )
             }
         }
     }
@@ -641,7 +666,7 @@ impl Engine {
                 continue;
             }
             let fresh = (0..IDENTITY_DRAWS)
-                .map(|_| self.fake_value(bundle, &id_schema, None))
+                .map(|_| self.fake_value(bundle, &id_schema, None, &FakerHints::default()))
                 .find(|v| !v.is_null() && !used.contains(&v.to_string()));
             if let (Some(fresh), Value::Object(obj)) = (fresh, &mut *item) {
                 used.insert(fresh.to_string());
@@ -668,7 +693,7 @@ impl Engine {
         let current = body.get(field)?;
         let id_schema = consistency::property_schema(bundle, schema, field)?;
         (0..IDENTITY_DRAWS).find_map(|_| {
-            let fresh = self.fake_value(bundle, &id_schema, None);
+            let fresh = self.fake_value(bundle, &id_schema, None, &FakerHints::default());
             if fresh.is_null() || &fresh == current {
                 return None;
             }
@@ -685,11 +710,12 @@ impl Engine {
         status: u16,
         schema: &Value,
         validator: Option<&SchemaValidator>,
+        hints: &FakerHints,
     ) -> GeneratedResponse {
         GeneratedResponse {
             status,
             content_type: variant.content_type.clone(),
-            body: Some(self.fake_value(bundle, schema, validator)),
+            body: Some(self.fake_value(bundle, schema, validator, hints)),
             source: Source::Fallback,
             usage: Usage::default(),
             fallback_reason: None,
@@ -704,9 +730,10 @@ impl Engine {
         bundle: &Bundle,
         schema: &Value,
         validator: Option<&SchemaValidator>,
+        hints: &FakerHints,
     ) -> Value {
         let schema = bundle.with_reachable_defs(schema);
-        let faker = Faker::new(self.config.faker_depth);
+        let faker = Faker::new(self.config.faker_depth).with_hints(hints.clone());
         // One cost table for every attempt: computing it walks the schema.
         let costs = Costs::compute(&schema);
         let mut rng = rand::rng();

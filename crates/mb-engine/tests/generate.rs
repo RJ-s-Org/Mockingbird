@@ -1087,3 +1087,25 @@ fn fresh_identity_changes_only_the_id() {
     assert_eq!(fresh["customerId"], "c1");
     validator(&bundle, "Order").validate(&fresh).unwrap();
 }
+
+#[tokio::test]
+async fn offline_answers_echo_path_parameters() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Users, version: "1"}
+paths:
+  /users/{login}:
+    get:
+      operationId: getUser
+      parameters: [{name: login, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [login], properties: {login: {type: string}}}}}}
+"#,
+    );
+    let op = bundle.operation("getUser").unwrap();
+    let mut c = OperationCall::default();
+    c.path_params.insert("login".into(), json!("octocat"));
+    let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.body.unwrap()["login"], "octocat");
+}

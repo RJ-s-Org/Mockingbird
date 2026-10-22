@@ -606,3 +606,18 @@ fn unsupported_or_too_long_patterns_fall_back() {
         json!("v1")
     );
 }
+
+#[test]
+fn echoed_values_fill_same_named_root_fields() {
+    let mut echoes = serde_json::Map::new();
+    echoes.insert("login".into(), json!("octocat"));
+    echoes.insert("page".into(), json!("3"));
+    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let schema = json!({"type": "object", "required": ["login", "page", "owner"], "properties": {
+        "login": {"type": "string"}, "page": {"type": "integer"},
+        "owner": {"type": "object", "required": ["login"], "properties": {"login": {"type": "string"}}}}});
+    let v = faker.fake(&schema, &mut StdRng::seed_from_u64(7));
+    assert_eq!(v["login"], "octocat");
+    assert_eq!(v["page"], 3);
+    assert_ne!(v["owner"]["login"], "octocat", "only root fields echo");
+}

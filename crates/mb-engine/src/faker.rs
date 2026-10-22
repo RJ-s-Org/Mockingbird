@@ -1,8 +1,11 @@
 use base64::Engine as _;
+use mb_mcm::{Operation, OperationKind};
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+use crate::OperationCall;
 
 const WORDS: &[&str] = &[
     "alpha", "bravo", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris", "juniper",
@@ -40,6 +43,42 @@ const INFINITE: u64 = u64::MAX;
 /// JSON Schema.
 pub struct Faker {
     max_depth: usize,
+    hints: FakerHints,
+}
+
+/// Request values the faker copies into same-named fields of the root
+/// object (`login`, `id`, `page`...).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FakerHints {
+    pub echoes: Map<String, Value>,
+}
+
+impl FakerHints {
+    /// The call's scalar path parameters, scalar query parameters and, for
+    /// a read, its body's top-level scalars (GraphQL arguments); an earlier
+    /// source wins over a later one.
+    pub fn from_call(op: &Operation, call: &OperationCall) -> Self {
+        let mut echoes = Map::new();
+        let mut add = |source: &Map<String, Value>| {
+            for (k, v) in source {
+                if is_scalar(v) && !echoes.contains_key(k) {
+                    echoes.insert(k.clone(), v.clone());
+                }
+            }
+        };
+        add(&call.path_params);
+        add(&call.query);
+        if matches!(op.kind, OperationKind::Query)
+            && let Some(Value::Object(body)) = &call.body
+        {
+            add(body);
+        }
+        Self { echoes }
+    }
+}
+
+fn is_scalar(v: &Value) -> bool {
+    matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_))
 }
 
 impl Default for Faker {
@@ -67,7 +106,16 @@ struct Pattern {
 
 impl Faker {
     pub fn new(max_depth: usize) -> Self {
-        Self { max_depth }
+        Self {
+            max_depth,
+            hints: FakerHints::default(),
+        }
+    }
+
+    /// This faker, echoing `hints` into same-named root fields.
+    pub fn with_hints(mut self, hints: FakerHints) -> Self {
+        self.hints = hints;
+        self
     }
 
     pub fn fake(&self, schema_with_defs: &Value, rng: &mut impl Rng) -> Value {
@@ -155,6 +203,14 @@ impl Faker {
             .find(|t| *t != "null")
             .or(types.first().copied())
             .unwrap_or_else(|| infer_type(s));
+
+        if depth == 1
+            && let Some(echo) = field
+                .and_then(|f| self.hints.echoes.get(f))
+                .and_then(|v| echo_as(v, chosen, s))
+        {
+            return echo;
+        }
 
         match chosen {
             "null" => Value::Null,
@@ -244,6 +300,41 @@ impl Faker {
             out.push(candidate);
         }
         Value::Array(out)
+    }
+}
+
+/// `value` as a `chosen`-typed instance of `s`, when it fits: strings as
+/// they are (when no `format` applies and the length and pattern allow
+/// them), numbers and booleans from their text.
+fn echo_as(value: &Value, chosen: &str, s: &Map<String, Value>) -> Option<Value> {
+    let text = match value {
+        Value::String(t) => t.clone(),
+        other => other.to_string(),
+    };
+    match chosen {
+        "string" => {
+            let n = text.chars().count();
+            let num = |k: &str| s.get(k).and_then(Value::as_u64).map(|m| m as usize);
+            let fits = !s.contains_key("format")
+                && num("minLength").is_none_or(|m| n >= m)
+                && num("maxLength").is_none_or(|m| n <= m)
+                && s.get("pattern")
+                    .and_then(Value::as_str)
+                    .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(&text)));
+            fits.then_some(Value::String(text))
+        }
+        "integer" => text.parse::<i64>().ok().map(Value::from),
+        "number" => text
+            .parse::<f64>()
+            .ok()
+            .and_then(Number::from_f64)
+            .map(Value::Number),
+        "boolean" => match text.as_str() {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
