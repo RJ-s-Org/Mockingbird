@@ -91,8 +91,8 @@ pub struct EngineGuards {
 /// LLM output after the guards and validation.
 pub(crate) enum Checked {
     Valid(Value),
-    /// Valid once the nulls the schema forbids were patched (see
-    /// [`SchemaValidator::patch_nulls`]).
+    /// Valid once the errors a fresh value fixes were patched locally (see
+    /// [`SchemaValidator::patch`]).
     Patched(Value),
     /// Repairable: the validation (or parse) errors.
     Invalid(Vec<String>),
@@ -168,9 +168,9 @@ impl Engine {
             Ok(()) => Checked::Valid(value),
             Err(errors) => match unwrap_envelope(validator, &value) {
                 Some(inner) => Checked::Valid(inner),
-                None => match self.patch_nulls(validator, &value) {
+                None => match self.patch(validator, &value) {
                     Some(patched) => {
-                        tracing::info!(errors = %errors.join("; "), "patched nulls the schema does not allow");
+                        tracing::info!(errors = %errors.join("; "), "patched the answer locally");
                         Checked::Patched(patched)
                     }
                     None => Checked::Invalid(errors),
@@ -181,10 +181,10 @@ impl Engine {
 }
 
 impl Engine {
-    fn patch_nulls(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
+    fn patch(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
         let mut rng = rand::rng();
-        validator.patch_nulls(value, |schema| faker.fake(schema, &mut rng))
+        validator.patch(value, |schema| faker.fake(schema, &mut rng))
     }
 }
 

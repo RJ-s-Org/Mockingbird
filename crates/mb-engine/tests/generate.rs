@@ -1109,3 +1109,35 @@ paths:
     let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
     assert_eq!(out.body.unwrap()["login"], "octocat");
 }
+
+#[tokio::test]
+async fn pattern_errors_are_patched_without_a_repair_call() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Images, version: "1"}
+paths:
+  /images/{id}:
+    get:
+      operationId: getImage
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [file_path], properties: {file_path: {type: string, pattern: "^/[A-Za-z0-9]{22}\\.jpg$"}}}}}}
+"#,
+    );
+    let op = bundle.operation("getImage").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"file_path": "/poster.jpg"}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &OperationCall::default(), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out.source, Source::Repaired);
+    let path = out.body.unwrap()["file_path"].as_str().unwrap().to_string();
+    assert!(
+        regex::Regex::new(r"^/[A-Za-z0-9]{22}\.jpg$")
+            .unwrap()
+            .is_match(&path),
+        "{path}"
+    );
+}

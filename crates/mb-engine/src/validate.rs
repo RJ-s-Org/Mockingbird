@@ -24,27 +24,39 @@ impl SchemaValidator {
         })
     }
 
-    /// `instance` with every `null` the schema forbids patched: removed where
-    /// it is an optional property, else replaced by `fill` of the expected
-    /// schema (carrying the `$defs`). `None` unless such nulls are all that is
-    /// wrong and the patched value is valid.
-    pub fn patch_nulls(
-        &self,
-        instance: &Value,
-        mut fill: impl FnMut(&Value) -> Value,
-    ) -> Option<Value> {
+    /// `instance` with the errors a fresh value can fix patched locally: a
+    /// `null` the schema forbids is removed where it is an optional property,
+    /// else replaced by `fill` of the expected schema; a value failing
+    /// `pattern`, `maxLength`, `minLength`, `enum`, `format` or `const` is
+    /// replaced by `fill` of the schema holding that keyword. `fill` gets the
+    /// schema with the root's `$defs`. `None` unless such errors are all that
+    /// is wrong and the patched value is valid.
+    pub fn patch(&self, instance: &Value, mut fill: impl FnMut(&Value) -> Value) -> Option<Value> {
         let mut nulls = Vec::new();
+        let mut refills = Vec::new();
         for e in self.inner.iter_errors(instance) {
-            if !(matches!(e.kind(), ValidationErrorKind::Type { .. }) && e.instance().is_null()) {
-                return None;
+            let pointer = e.instance_path().as_str().to_string();
+            let expected = || self.subschema(e.evaluation_path().as_str());
+            match e.kind() {
+                ValidationErrorKind::Type { .. } if e.instance().is_null() => {
+                    nulls.push((pointer, expected()?));
+                }
+                ValidationErrorKind::Pattern { .. }
+                | ValidationErrorKind::MaxLength { .. }
+                | ValidationErrorKind::MinLength { .. }
+                | ValidationErrorKind::Enum { .. }
+                | ValidationErrorKind::Format { .. }
+                | ValidationErrorKind::Constant { .. } => refills.push((pointer, expected()?)),
+                _ => return None,
             }
-            let expected = self.subschema(e.evaluation_path().as_str())?;
-            nulls.push((e.instance_path().as_str().to_string(), expected));
         }
-        if nulls.is_empty() {
+        if nulls.is_empty() && refills.is_empty() {
             return None;
         }
         let mut out = instance.clone();
+        for (pointer, expected) in &refills {
+            *out.pointer_mut(pointer)? = fill(expected);
+        }
         for (pointer, _) in &nulls {
             let (parent, key) = pointer.rsplit_once('/')?;
             if let Some(Value::Object(map)) = out.pointer_mut(parent) {
@@ -167,7 +179,7 @@ mod tests {
     fn optional_nulls_are_dropped_and_required_ones_filled() {
         let v = validator();
         let out = v
-            .patch_nulls(
+            .patch(
                 &json!({"title": null, "collection": null, "images": ["a", null]}),
                 fill,
             )
@@ -185,7 +197,7 @@ mod tests {
         }))
         .unwrap();
         let out = v
-            .patch_nulls(&json!({"c": null}), |s| {
+            .patch(&json!({"c": null}), |s| {
                 assert!(s.get("$defs").is_some(), "{s}");
                 json!({"id": 1})
             })
@@ -197,13 +209,48 @@ mod tests {
     fn other_errors_are_not_patched() {
         let v = validator();
         assert!(
-            v.patch_nulls(&json!({"title": 1, "collection": null, "images": []}), fill)
+            v.patch(&json!({"title": 1, "collection": null, "images": []}), fill)
                 .is_none()
         );
         assert!(
-            v.patch_nulls(&json!({"title": "t", "images": []}), fill)
+            v.patch(&json!({"title": "t", "images": []}), fill)
                 .is_none(),
             "nothing to patch"
+        );
+    }
+
+    #[test]
+    fn pattern_length_enum_and_const_errors_are_refilled() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "pattern": "^/x$"},
+                "code": {"type": "string", "maxLength": 2},
+                "kind": {"enum": ["a", "b"]},
+                "v": {"const": 1}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"path": "/y", "code": "long", "kind": "c", "v": 2}),
+                |s| {
+                    s.get("const")
+                        .or_else(|| s.get("enum").and_then(|e| e.get(0)))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            if s.get("pattern").is_some() {
+                                json!("/x")
+                            } else {
+                                json!("ok")
+                            }
+                        })
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({"path": "/x", "code": "ok", "kind": "a", "v": 1})
         );
     }
 }
