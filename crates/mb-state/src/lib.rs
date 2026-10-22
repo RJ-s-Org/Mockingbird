@@ -103,6 +103,17 @@ pub trait StateStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<StoredResource>, StateError>;
     async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError>;
+    /// Stores `r` only when the session holds no resource with its type and
+    /// id, creating or refreshing the session like `upsert`; `true` when
+    /// stored. Backends publish no change event (seeding is not a write a
+    /// client made). This default, for test doubles, does publish.
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        if self.get(s, &r.resource_type, &r.id).await?.is_some() {
+            return Ok(false);
+        }
+        self.upsert(s, r).await?;
+        Ok(true)
+    }
     /// `true` if the resource existed. Never creates a session.
     async fn delete(
         &self,
