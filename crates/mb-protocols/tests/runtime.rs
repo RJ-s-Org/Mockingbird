@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -668,4 +668,53 @@ fn new_runtime_defaults() {
     assert!(rt.recorder.is_none());
     assert!(!rt.state_health.is_degraded());
     let _: &HashMap<String, ScenarioRuntime> = &rt.scenarios;
+}
+
+#[tokio::test]
+async fn default_scenario_applies_without_a_header() {
+    let mut rt = offline();
+    rt.scenarios.insert("shipped".into(), shipped(&[]));
+    rt.default_scenario = Some("shipped".into());
+    let router = http_rest::router(Arc::new(rt));
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(body_json(resp).await["status"], "shipped");
+}
+
+#[tokio::test]
+async fn unknown_default_scenario_is_ignored() {
+    let mut rt = offline();
+    rt.default_scenario = Some("missing".into());
+    let router = http_rest::router(Arc::new(rt));
+    assert_eq!(
+        send(&router, get_with("/orders/o1", &[])).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn per_operation_instructions_replace_the_scenario_ones() {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(order("o1").to_string())]));
+    let mut rt = runtime(Some(provider.clone() as Arc<dyn Provider>), memory());
+    let instructions =
+        BTreeMap::from([("getOrder".to_string(), "This order is a gift.".to_string())]);
+    rt.scenarios.insert(
+        "shipped".into(),
+        shipped(&[]).with_operation_instructions(instructions),
+    );
+    let router = http_rest::router(Arc::new(rt));
+    send(
+        &router,
+        get_with("/orders/o1", &[("x-mockingbird-scenario", "shipped")]),
+    )
+    .await;
+    let prompt: String = provider.requests()[0]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(prompt.contains("This order is a gift."), "{prompt}");
+    assert!(
+        !prompt.contains("Every order has already shipped."),
+        "{prompt}"
+    );
 }

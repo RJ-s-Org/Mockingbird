@@ -394,7 +394,6 @@ pub(crate) async fn plan<'a>(
     };
     tracing::Span::current().record("session", overrides.session.as_str());
     let scenario = match overrides.scenario.as_deref() {
-        None => None,
         Some(name) => match rt.scenarios.get(name) {
             None => {
                 return Err(PlanFailure {
@@ -403,9 +402,18 @@ pub(crate) async fn plan<'a>(
                     session: Some(overrides.session),
                 });
             }
-            Some(s) => s.applies_to(&op.id).then_some(s),
+            Some(s) => Some(s),
         },
-    };
+        None => rt.default_scenario.as_deref().and_then(|name| {
+            let found = rt.scenarios.get(name);
+            if found.is_none() {
+                tracing::debug!(mock = %rt.name, scenario = name, "default scenario not found; ignored");
+            }
+            found
+        }),
+    }
+    .filter(|s| s.applies_to(&op.id))
+    .map(|s| s.for_operation(&op.id));
     // A scenario's status applies where the contract declares it, and as a
     // 5xx anywhere (answered natively, like an undeclared header 5xx); the
     // header override is used as given (each adapter answers an undeclared

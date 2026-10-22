@@ -3,7 +3,7 @@
 //! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
 //! `grpc`, `soap`, `websocket`, `events`); all of them share the `call` pipeline.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -137,12 +137,33 @@ pub struct ScenarioRuntime {
     pub stream_item_interval: Option<Duration>,
     /// Replaces the mock's chaos while the scenario applies.
     pub chaos: Option<Arc<ChaosRuntime>>,
+    /// This scenario with other instructions, by operation id (see
+    /// [`ScenarioRuntime::with_operation_instructions`]).
+    pub per_operation: HashMap<String, ScenarioRuntime>,
 }
 
 impl ScenarioRuntime {
     /// Whether the scenario applies to `operation_id`.
     pub fn applies_to(&self, operation_id: &str) -> bool {
         self.operations.is_empty() || self.operations.iter().any(|o| o == operation_id)
+    }
+
+    /// This scenario with each operation in `instructions` given its own
+    /// instructions in place of the scenario-wide ones.
+    pub fn with_operation_instructions(mut self, instructions: BTreeMap<String, String>) -> Self {
+        for (operation_id, text) in instructions {
+            let mut variant = self.clone();
+            variant.per_operation = HashMap::new();
+            variant.spec.instructions = Some(text);
+            self.per_operation.insert(operation_id, variant);
+        }
+        self
+    }
+
+    /// The scenario as it applies to `operation_id`: its per-operation
+    /// variant, else itself.
+    pub fn for_operation(&self, operation_id: &str) -> &ScenarioRuntime {
+        self.per_operation.get(operation_id).unwrap_or(self)
     }
 }
 

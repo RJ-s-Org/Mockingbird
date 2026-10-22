@@ -556,5 +556,6 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         stream_items: s.rules.stream_items.and_then(|n| usize::try_from(n).ok()),
         stream_item_interval: s.rules.stream_item_interval_ms.map(Duration::from_millis),
         chaos: s.rules.chaos.as_ref().map(chaos_runtime),
+        per_operation: HashMap::new(),
     }
 }
