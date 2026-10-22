@@ -219,7 +219,7 @@ pub struct DraftResult {
 /// Reports progress; errs with [`SmartError::Canceled`] when the observer
 /// cancels.
 /// The job error for a draft that does not compile: its first problem.
-fn compile_error(issues: &[DraftIssue]) -> SmartError {
+pub(crate) fn compile_error(issues: &[DraftIssue]) -> SmartError {
     let first = issues.first();
     SmartError::Compile(format!(
         "{}: {}",

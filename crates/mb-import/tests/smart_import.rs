@@ -10,13 +10,14 @@ use async_trait::async_trait;
 use mb_import::smart::assemble::{assemble_openapi, compile_draft, diff_bundles, refresh_meta};
 use mb_import::smart::fetch::FetchPolicy;
 use mb_import::smart::infer::infer_schema;
+use mb_import::smart::merge::{MergeBase, merge_drafts};
 use mb_import::smart::model::{
     DraftMeta, DraftOperation, DraftParam, DraftResponse, ImportKind, OperationMeta, ParamLocation,
     TokenUsage,
 };
 use mb_import::smart::{
-    ExtractLlm, ImportInput, ImportObserver, ImportOptions, NoopObserver, Phase, SmartError,
-    run_import,
+    DraftResult, ExtractLlm, ImportInput, ImportObserver, ImportOptions, NoopObserver, Phase,
+    SmartError, run_import,
 };
 use mb_llm::{HopSettings, ScriptedProvider, Usage};
 use serde_json::{Value, json};
@@ -1117,5 +1118,165 @@ async fn two_sources_make_one_draft() {
             .any(|w| w.code == "source_skipped" && w.message.contains("missing.md")),
         "{:?}",
         draft.meta.warnings
+    );
+}
+
+/// `run_import` of fixtures/smart/petstore.har with no LLM.
+async fn har_draft() -> DraftResult {
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Har,
+        name: Some("petstore.har".into()),
+        bytes: fixture("smart/petstore.har"),
+    };
+    run_import(input, None, &ImportOptions::default(), &NoopObserver)
+        .await
+        .unwrap()
+}
+
+/// `run_import` of fixtures/smart/legacy-v2.0.postman_collection.json with no LLM.
+async fn postman_draft() -> DraftResult {
+    let input = ImportInput::Bytes {
+        kind: ImportKind::Postman,
+        name: Some("legacy.json".into()),
+        bytes: fixture("smart/legacy-v2.0.postman_collection.json"),
+    };
+    run_import(input, None, &ImportOptions::default(), &NoopObserver)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn merge_adds_and_replaces_without_removing() {
+    let base = har_draft().await;
+    let base_ids: Vec<String> = base.meta.operations.keys().cloned().collect();
+    let mb = MergeBase {
+        version: 3,
+        source: base.source.clone(),
+        meta: Some(base.meta.clone()),
+    };
+    let merged = merge_drafts(&mb, postman_draft().await).unwrap();
+    for id in &base_ids {
+        assert!(merged.meta.operations.contains_key(id), "{id} lost");
+    }
+    assert!(merged.document["paths"]["/v1/orders/{orderId}"]["get"].is_object());
+    assert_eq!(merged.meta.merged_from, Some(3));
+}
+
+#[tokio::test]
+async fn merging_a_draft_into_itself_is_idempotent() {
+    let d = har_draft().await;
+    let mb = MergeBase {
+        version: 1,
+        source: d.source.clone(),
+        meta: Some(d.meta.clone()),
+    };
+    let merged = merge_drafts(&mb, har_draft().await).unwrap();
+    assert_eq!(
+        merged.meta.operations.keys().collect::<Vec<_>>(),
+        d.meta.operations.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(merged.bundle.operations.len(), d.bundle.operations.len());
+}
+
+#[tokio::test]
+async fn merge_into_yaml_openapi_works_and_graphql_is_refused() {
+    let yaml = MergeBase {
+        version: 1,
+        source: fixture("openapi/orders-3.0.yaml"),
+        meta: None,
+    };
+    let merged = merge_drafts(&yaml, har_draft().await).unwrap();
+    let orders_ops = mb_import::compile(&fixture("openapi/orders-3.0.yaml"))
+        .unwrap()
+        .operations
+        .len();
+    assert!(merged.bundle.operations.len() > orders_ops);
+    assert!(
+        merged
+            .meta
+            .operations
+            .values()
+            .any(|m| m.confidence == 1.0 && m.provenance.is_empty())
+    );
+    let sdl = MergeBase {
+        version: 2,
+        source: b"type Query { a: Int }".to_vec(),
+        meta: None,
+    };
+    let err = merge_drafts(&sdl, har_draft().await).unwrap_err();
+    assert!(
+        err.to_string().contains("import with mode replace"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn merge_renames_a_colliding_operation_id() {
+    // base: GET /a with operationId "list"; incoming: GET /b with operationId "list".
+    let (doc, _, _) = assemble_openapi("T", &[], &[with_id(op("GET", "/a"), "list")]);
+    let (source, _) = compile_draft(&doc).unwrap();
+    let (doc_b, _, _) = assemble_openapi("T", &[], &[with_id(op("GET", "/b"), "list")]);
+    let (source_b, bundle_b) = compile_draft(&doc_b).unwrap();
+    let incoming = DraftResult {
+        document: doc_b,
+        source: source_b,
+        bundle: bundle_b,
+        meta: meta_for(&["list"]),
+    };
+    let merged = merge_drafts(
+        &MergeBase {
+            version: 1,
+            source,
+            meta: None,
+        },
+        incoming,
+    )
+    .unwrap();
+    assert_eq!(
+        merged.document["paths"]["/b"]["get"]["operationId"],
+        "list_2"
+    );
+    assert_eq!(
+        merged.document["paths"]["/b"]["get"]["x-original-operation-id"],
+        "list"
+    );
+    assert!(merged.meta.operations.contains_key("list_2"));
+    assert!(merged.meta.operations.contains_key("list"));
+}
+
+#[tokio::test]
+async fn merge_keeps_the_base_component_and_warns_on_a_conflict() {
+    let with_component = |path: &str, kind: &str| {
+        let (mut doc, _, _) = assemble_openapi("T", &[], &[op("GET", path)]);
+        doc["components"] = json!({"schemas": {"Pet": {"type": kind}}});
+        doc
+    };
+    let (source, _) = compile_draft(&with_component("/a", "object")).unwrap();
+    let doc_b = with_component("/b", "string");
+    let (source_b, bundle_b) = compile_draft(&doc_b).unwrap();
+    let incoming = DraftResult {
+        document: doc_b,
+        source: source_b,
+        bundle: bundle_b,
+        meta: meta_for(&["get_b"]),
+    };
+    let base = MergeBase {
+        version: 4,
+        source,
+        meta: None,
+    };
+    let merged = merge_drafts(&base, incoming).unwrap();
+    assert_eq!(
+        merged.document["components"]["schemas"]["Pet"]["type"],
+        "object"
+    );
+    assert!(
+        merged
+            .meta
+            .warnings
+            .iter()
+            .any(|w| w.code == "conflicting_component" && w.message.contains("Pet")),
+        "{:?}",
+        merged.meta.warnings
     );
 }
