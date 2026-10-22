@@ -2,3 +2,4 @@
 //! claims, using a local CA.
 
 pub mod ca;
+pub mod images;
