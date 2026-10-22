@@ -31,6 +31,7 @@ async fn sqlite_file_url_creates_db() {
                     chaos: None,
                     limits: Default::default(),
                     data_plane_auth: Default::default(),
+                    behavior: Default::default(),
                     hosts: vec![],
                 },
             )
@@ -123,6 +124,7 @@ fn cancel_mock(name: String) -> NewMock {
         chaos: None,
         limits: Default::default(),
         data_plane_auth: Default::default(),
+        behavior: Default::default(),
         hosts: vec![],
     }
 }

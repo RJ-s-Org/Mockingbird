@@ -200,6 +200,18 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        let mut entry = self.inner.touch_or_create(s);
+        if entry
+            .resources
+            .contains_key(&(r.resource_type.clone(), r.id.clone()))
+        {
+            return Ok(false);
+        }
+        entry.insert(r);
+        Ok(true)
+    }
+
     async fn delete(
         &self,
         s: &SessionKey,

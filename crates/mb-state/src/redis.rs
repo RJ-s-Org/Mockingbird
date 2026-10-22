@@ -309,6 +309,27 @@ impl StateStore for RedisStateStore {
         values.iter().flatten().map(|j| decode(j)).collect()
     }
 
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        let k = Keys::of(s);
+        let f = field(&r.resource_type, &r.id);
+        let json = encode(&r)?;
+        let set: bool = redis::cmd("HSETNX")
+            .arg(&k.res)
+            .arg(&f)
+            .arg(json)
+            .query_async(&mut self.con())
+            .await?;
+        if set {
+            let seq = self.next_seq(1).await?;
+            let mut pipe = redis::pipe();
+            pipe.atomic();
+            pipe.cmd("ZADD").arg(&k.order).arg(seq).arg(&f).ignore();
+            self.refresh(&mut pipe, &k, &s.session);
+            pipe.query_async::<()>(&mut self.con()).await?;
+        }
+        Ok(set)
+    }
+
     async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
         let k = Keys::of(s);
         let f = field(&r.resource_type, &r.id);

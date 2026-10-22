@@ -3,7 +3,7 @@
 //! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
 //! `grpc`, `soap`, `websocket`, `events`); all of them share the `call` pipeline.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -137,12 +137,33 @@ pub struct ScenarioRuntime {
     pub stream_item_interval: Option<Duration>,
     /// Replaces the mock's chaos while the scenario applies.
     pub chaos: Option<Arc<ChaosRuntime>>,
+    /// This scenario with other instructions, by operation id (see
+    /// [`ScenarioRuntime::with_operation_instructions`]).
+    pub per_operation: HashMap<String, ScenarioRuntime>,
 }
 
 impl ScenarioRuntime {
     /// Whether the scenario applies to `operation_id`.
     pub fn applies_to(&self, operation_id: &str) -> bool {
         self.operations.is_empty() || self.operations.iter().any(|o| o == operation_id)
+    }
+
+    /// This scenario with each operation in `instructions` given its own
+    /// instructions in place of the scenario-wide ones.
+    pub fn with_operation_instructions(mut self, instructions: BTreeMap<String, String>) -> Self {
+        for (operation_id, text) in instructions {
+            let mut variant = self.clone();
+            variant.per_operation = HashMap::new();
+            variant.spec.instructions = Some(text);
+            self.per_operation.insert(operation_id, variant);
+        }
+        self
+    }
+
+    /// The scenario as it applies to `operation_id`: its per-operation
+    /// variant, else itself.
+    pub fn for_operation(&self, operation_id: &str) -> &ScenarioRuntime {
+        self.per_operation.get(operation_id).unwrap_or(self)
     }
 }
 
@@ -257,10 +278,27 @@ pub struct MockRuntime {
     /// Ends open-ended streams (SSE, GraphQL subscriptions) when the
     /// process begins to shut down. Never fires by default.
     pub shutdown: Shutdown,
+    /// Answer repeated reads from the session's response cache and seed
+    /// list items into session state. Defaults to `true`.
+    pub consistency: bool,
+    /// How a read of an id the session does not hold is answered.
+    pub unknown_ids: UnknownIds,
+    /// The scenario applied when a call names none.
+    pub default_scenario: Option<String>,
     /// The credential header and query names derived from
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
     credential_names: CredentialNames,
+}
+
+/// How a read of a path id the session holds no resource for is answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnknownIds {
+    /// Generate a resource for the id (the default).
+    #[default]
+    Generate,
+    /// Answer the operation's `404`.
+    NotFound,
 }
 
 /// A process stop signal that open-ended streams end on, so a graceful
@@ -319,6 +357,9 @@ impl MockRuntime {
             limits: RuntimeLimits::default(),
             chaos: None,
             shutdown: Shutdown::default(),
+            consistency: true,
+            unknown_ids: UnknownIds::default(),
+            default_scenario: None,
             credential_names,
         }
     }

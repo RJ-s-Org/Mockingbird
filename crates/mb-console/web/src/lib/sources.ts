@@ -18,6 +18,8 @@ const SOURCES: Record<string, SourceLabel> = {
     label: "Fallback",
     hint: "Generated without the LLM from the schema (offline, or the LLM failed or was over budget).",
   },
+  state: { label: "Session state", hint: "Served from the session's stored resource, without the LLM." },
+  cache: { label: "Cache", hint: "A repeat of an earlier answer in the same session." },
   // The server's `not_generated`, and the names older servers used for it.
   not_generated: NOT_GENERATED,
   none: NOT_GENERATED,

@@ -392,18 +392,14 @@ async fn validate<'a>(
             {
                 bail!("mock {label:?}, scenario {sname:?}: set must be a mapping");
             }
-            if let Some(op) = s
-                .operations
-                .iter()
-                .find(|op| !operations.contains(op.as_str()))
-            {
+            let ids = s.operation_ids();
+            if let Some(op) = ids.iter().find(|op| !operations.contains(op.as_str())) {
                 bail!(
                     "mock {label:?}, scenario {sname:?}: operation {op:?} is not in the contract"
                 );
             }
             if let Some(status) = s.status
-                && let Some(why) =
-                    mb_admin::undeclared_scenario_status(&bundle, &s.operations, status)
+                && let Some(why) = mb_admin::undeclared_scenario_status(&bundle, &ids, status)
             {
                 bail!("mock {label:?}, scenario {sname:?}: {why}");
             }
@@ -542,6 +538,7 @@ async fn apply_mock(
                         chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
                         limits: p.mock.limits.to_store(),
                         data_plane_auth: p.mock.data_plane_auth.clone(),
+                        behavior: behavior(p.mock),
                         hosts: p.mock.hosts.clone(),
                     },
                 )
@@ -559,6 +556,7 @@ async fn apply_mock(
                 data_plane_auth: p.mock.data_plane_auth.clone(),
                 chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
                 limits: p.mock.limits.to_store(),
+                behavior: behavior(p.mock),
                 hosts: p.mock.hosts.clone(),
                 ..current.clone()
             };
@@ -623,7 +621,7 @@ async fn apply_mock(
                 status: s.status,
                 latency_ms: duration_ms(name, sname, "latency", s.latency)?,
                 set: s.set.clone(),
-                operations: s.operations.clone(),
+                operations: s.operation_ids(),
                 stream_items: s.stream_items,
                 stream_item_interval_ms: duration_ms(
                     name,
@@ -632,6 +630,7 @@ async fn apply_mock(
                     s.stream_item_interval,
                 )?,
                 chaos: s.chaos.as_ref().map(|c| c.to_store()),
+                operation_instructions: s.operation_instructions(),
             },
             source: ResourceSource::File,
         };
@@ -754,6 +753,15 @@ fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
         extra_body: p.extra_body.clone(),
         source: ResourceSource::File,
     })
+}
+
+/// The stored form of a file mock's consistency settings.
+fn behavior(mock: &FileMock) -> mb_store::MockBehavior {
+    mb_store::MockBehavior {
+        consistency: mock.consistency,
+        unknown_ids: mock.unknown_ids,
+        default_scenario: mock.default_scenario.clone(),
+    }
 }
 
 fn duration_ms(

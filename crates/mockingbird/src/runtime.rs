@@ -18,11 +18,13 @@ use mb_protocols::events::EventDeps;
 use mb_protocols::{
     ChaosRuntime, ChaosSpec, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime,
     ProtocolSettings, RateLimiter, RequestRecorder, RuntimeLimits, ScenarioRuntime, Shutdown,
+    UnknownIds,
 };
 use mb_state::StateStore;
 use mb_store::{
-    ChaosSettings, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig,
+    ChaosSettings, Consistency, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig,
     DataPlaneAuthMode as StoredAuthMode, LlmProfile, Mock, Scenario,
+    UnknownIds as StoredUnknownIds,
 };
 
 use crate::budget::StoreTokenBudget;
@@ -333,6 +335,12 @@ pub async fn build_runtime_with_budget(
         .filter(|c| !c.is_noop())
         .map(chaos_runtime);
     rt.shutdown = Shutdown::new(STOP.subscribe());
+    rt.consistency = mock.behavior.consistency == Consistency::On;
+    rt.unknown_ids = match mock.behavior.unknown_ids {
+        StoredUnknownIds::Generate => UnknownIds::Generate,
+        StoredUnknownIds::NotFound => UnknownIds::NotFound,
+    };
+    rt.default_scenario = mock.behavior.default_scenario.clone();
     Ok(Some((rt, budget)))
 }
 
@@ -556,5 +564,7 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         stream_items: s.rules.stream_items.and_then(|n| usize::try_from(n).ok()),
         stream_item_interval: s.rules.stream_item_interval_ms.map(Duration::from_millis),
         chaos: s.rules.chaos.as_ref().map(chaos_runtime),
+        per_operation: HashMap::new(),
     }
+    .with_operation_instructions(s.rules.operation_instructions)
 }

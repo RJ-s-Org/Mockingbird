@@ -5,6 +5,8 @@ use axum::http::StatusCode;
 use mb_auth::Permission;
 use mb_mcm::{Bundle, Operation, StatusSelector};
 use mb_store::{ChaosSettings, ResourceSource, Scenario, ScenarioRules};
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -47,6 +49,10 @@ pub struct ScenarioView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ChaosSchema>)]
     pub chaos: Option<ChaosSettings>,
+    /// Instructions replacing `instructions` for one operation, by
+    /// operation id; absent when none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub operation_instructions: BTreeMap<String, String>,
     pub source: Source,
 }
 
@@ -63,6 +69,7 @@ impl From<Scenario> for ScenarioView {
             stream_items: s.rules.stream_items,
             stream_item_interval_ms: s.rules.stream_item_interval_ms,
             chaos: s.rules.chaos,
+            operation_instructions: s.rules.operation_instructions,
         }
     }
 }
@@ -96,6 +103,11 @@ pub struct PutScenario {
     #[serde(default)]
     #[schema(value_type = Option<ChaosSchema>)]
     pub chaos: Option<ChaosSettings>,
+    /// Instructions replacing `instructions` for one operation, by
+    /// operation id. Each must be one of `operations` when that is set,
+    /// and an operation of the active contract when there is one.
+    #[serde(default)]
+    pub operation_instructions: BTreeMap<String, String>,
 }
 
 /// A scenario status applies only where an operation it covers declares it
@@ -271,11 +283,28 @@ pub async fn put(
     if let Some(chaos) = &body.chaos {
         chaos.validate().map_err(Problem::unprocessable)?;
     }
+    if !body.operations.is_empty() {
+        let outside: Vec<&str> = body
+            .operation_instructions
+            .keys()
+            .map(String::as_str)
+            .filter(|op| !body.operations.iter().any(|o| o == op))
+            .collect();
+        if !outside.is_empty() {
+            return Err(Problem::invalid(
+                INVALID_SCENARIO,
+                format!(
+                    "operation_instructions names operations {outside:?} the scenario does not apply to"
+                ),
+            ));
+        }
+    }
     // Without an active contract there is nothing to check against yet.
     if let Some(contract) = st.store.active_contract(m.id).await? {
         let mut unknown: Vec<&str> = body
             .operations
             .iter()
+            .chain(body.operation_instructions.keys())
             .map(String::as_str)
             .filter(|op| contract.bundle.operation(op).is_none())
             .collect();
@@ -303,6 +332,7 @@ pub async fn put(
             stream_items: body.stream_items,
             stream_item_interval_ms: body.stream_item_interval_ms,
             chaos: body.chaos,
+            operation_instructions: body.operation_instructions,
         },
         source: ResourceSource::Api,
     };

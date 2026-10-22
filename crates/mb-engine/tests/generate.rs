@@ -955,3 +955,254 @@ async fn nulls_with_other_errors_still_ask_for_a_repair() {
     assert_eq!(provider.requests().len(), 2);
     assert_eq!(out.body, Some(valid_order_at_o1()));
 }
+
+#[test]
+fn stored_resource_that_validates_is_served_as_state() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let out = offline()
+        .serve_stored(&bundle, op, &valid_order_at_o1(), None)
+        .unwrap();
+    assert_eq!(out.status, 200);
+    assert_eq!(out.source, Source::State);
+    assert_eq!(out.source.to_string(), "state");
+    assert_eq!(out.body, Some(valid_order_at_o1()));
+    assert_eq!(Source::Cache.as_str(), "cache");
+    assert_eq!(Source::State.worst(Source::Llm), Source::State);
+    assert_eq!(Source::Cache.worst(Source::Fallback), Source::Fallback);
+}
+
+#[test]
+fn partial_stored_resource_is_not_served() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let partial = json!({"id": "o1", "customerId": "c1"});
+    assert!(
+        offline()
+            .serve_stored(&bundle, op, &partial, None)
+            .is_none()
+    );
+}
+
+#[test]
+fn not_found_uses_the_declared_404_else_problem_json() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let out = offline().not_found(&bundle, op, &call("getOrder"), "orders o1 does not exist");
+    assert_eq!(out.status, 404);
+    assert_eq!(out.source, Source::State);
+    let body = out.body.unwrap();
+    assert!(
+        body["code"].is_i64() && body["message"].is_string(),
+        "{body}"
+    );
+
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Pets, version: "1"}
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters: [{name: petId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+"#,
+    );
+    let op = bundle.operation("getPet").unwrap();
+    let out = offline().not_found(
+        &bundle,
+        op,
+        &OperationCall::default(),
+        "pets p1 does not exist",
+    );
+    assert_eq!(
+        out.content_type.as_deref(),
+        Some("application/problem+json")
+    );
+    assert_eq!(out.body.unwrap()["detail"], "pets p1 does not exist");
+}
+
+#[tokio::test]
+async fn duplicate_ids_in_a_list_are_made_unique() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let mut a2 = valid_order();
+    a2["id"] = json!("a");
+    let mut a1 = a2.clone();
+    a1["total"] = json!(1);
+    let mut b = valid_order();
+    b["id"] = json!("b");
+    let (_, engine) = scripted(vec![Ok(json!([a1, a2, b]).to_string())]);
+    let mut c = call("listOrders");
+    c.path_params.clear();
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let ids: Vec<&str> = out
+        .body
+        .as_ref()
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[0], "a");
+    assert_eq!(ids[2], "b");
+    assert!(ids[1] != "a" && ids[1] != "b", "{ids:?}");
+}
+
+#[test]
+fn list_items_finds_arrays_and_envelopes() {
+    use mb_engine::consistency::{list_identity, list_items};
+    assert_eq!(list_items(&json!([{"id": 1}])).unwrap().len(), 1);
+    assert_eq!(
+        list_items(&json!({"object": "list", "data": [{"id": 1}, {"id": 2}]}))
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        list_items(&json!({"page": 1, "results": [{"id": 1}]}))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(list_items(&json!({"a": [{"id": 1}], "b": [{"id": 2}]})).is_none());
+    let bundle = orders();
+    assert_eq!(
+        list_identity(&bundle, bundle.operation("listOrders").unwrap()),
+        "id"
+    );
+}
+
+#[test]
+fn fresh_identity_changes_only_the_id() {
+    let bundle = orders();
+    let op = bundle.operation("createOrder").unwrap();
+    let fresh = offline()
+        .fresh_identity(&bundle, op, &valid_order())
+        .unwrap();
+    assert_ne!(fresh["id"], valid_order()["id"]);
+    assert_eq!(fresh["customerId"], "c1");
+    validator(&bundle, "Order").validate(&fresh).unwrap();
+}
+
+#[tokio::test]
+async fn offline_answers_echo_path_parameters() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Users, version: "1"}
+paths:
+  /users/{login}:
+    get:
+      operationId: getUser
+      parameters: [{name: login, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [login], properties: {login: {type: string}}}}}}
+"#,
+    );
+    let op = bundle.operation("getUser").unwrap();
+    let mut c = OperationCall::default();
+    c.path_params.insert("login".into(), json!("octocat"));
+    let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.body.unwrap()["login"], "octocat");
+}
+
+#[tokio::test]
+async fn pattern_errors_are_patched_without_a_repair_call() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Images, version: "1"}
+paths:
+  /images/{id}:
+    get:
+      operationId: getImage
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [file_path], properties: {file_path: {type: string, pattern: "^/[A-Za-z0-9]{22}\\.jpg$"}}}}}}
+"#,
+    );
+    let op = bundle.operation("getImage").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"file_path": "/poster.jpg"}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &OperationCall::default(), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out.source, Source::Repaired);
+    let path = out.body.unwrap()["file_path"].as_str().unwrap().to_string();
+    assert!(
+        regex::Regex::new(r"^/[A-Za-z0-9]{22}\.jpg$")
+            .unwrap()
+            .is_match(&path),
+        "{path}"
+    );
+}
+
+#[tokio::test]
+async fn prompt_asks_for_short_free_text() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order_at_o1().to_string())]);
+    engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(system.contains("under 200 characters"), "{system}");
+}
+
+#[tokio::test]
+async fn runaway_strings_are_truncated_unless_a_max_length_allows_them() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Places, version: "1"}
+paths:
+  /places/{id}:
+    get:
+      operationId: getPlace
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, properties: {city: {type: string}, essay: {type: string, maxLength: 5000}}}}}}
+"#,
+    );
+    let op = bundle.operation("getPlace").unwrap();
+    let answer = json!({"city": "é".repeat(3000), "essay": "x".repeat(3000)});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = engine
+        .generate(&bundle, op, &OperationCall::default(), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(out.source, Source::Repaired);
+    let body = out.body.unwrap();
+    assert_eq!(body["city"].as_str().unwrap().chars().count(), 200);
+    assert_eq!(body["essay"].as_str().unwrap().len(), 3000);
+}
+
+#[test]
+fn fresh_integer_identities_are_spread_out() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Items, version: "1"}
+paths:
+  /items:
+    post:
+      operationId: createItem
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: integer}}}}}}
+"#,
+    );
+    let op = bundle.operation("createItem").unwrap();
+    let engine = offline();
+    let big = (0..20)
+        .filter_map(|_| engine.fresh_identity(&bundle, op, &json!({"id": 1})))
+        .filter(|v| v["id"].as_i64().unwrap() > 100)
+        .count();
+    assert!(big >= 15, "{big} of 20 fresh ids above 100");
+}

@@ -508,3 +508,131 @@ fn faker_formats_match_patterns() {
         }
     }
 }
+
+fn draws(schema: Value, n: u64) -> Vec<Value> {
+    let faker = Faker::default();
+    (0..n)
+        .map(|seed| faker.fake(&schema, &mut StdRng::seed_from_u64(seed)))
+        .collect()
+}
+
+#[test]
+fn counts_are_small_and_non_negative() {
+    let graphql_int = json!({"type": "object", "required": ["n"], "properties": {"n": {"type": "integer", "minimum": -2147483648i64, "maximum": 2147483647}}});
+    let named = json!({"type": "object", "required": ["total_count", "pageSize"], "properties": {
+        "total_count": {"type": "integer", "minimum": 0, "maximum": 1000000}, "pageSize": {"type": "integer"}}});
+    for v in draws(graphql_int, 200) {
+        assert!((0..=100).contains(&v["n"].as_i64().unwrap()), "{v}");
+    }
+    for v in draws(named, 200) {
+        assert!(
+            (0..=100).contains(&v["total_count"].as_i64().unwrap()),
+            "{v}"
+        );
+        assert!((0..=100).contains(&v["pageSize"].as_i64().unwrap()), "{v}");
+    }
+    for v in draws(json!({"type": "integer", "minimum": 5, "maximum": 10}), 100) {
+        assert!((5..=10).contains(&v.as_i64().unwrap()));
+    }
+    for v in draws(json!({"type": "integer", "minimum": 1}), 100) {
+        assert!((1..=101).contains(&v.as_i64().unwrap()));
+    }
+}
+
+#[test]
+fn nullable_lists_are_never_null() {
+    for v in draws(
+        json!({"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]}),
+        200,
+    ) {
+        assert!(v.is_array(), "{v}");
+    }
+    let at_limit = Faker::new(0).fake(
+        &json!({"type": ["array", "null"], "items": {"type": "string"}}),
+        &mut StdRng::seed_from_u64(1),
+    );
+    assert_eq!(at_limit, json!([]));
+}
+
+#[test]
+fn unconstrained_strings_stay_short_and_new_formats_parse() {
+    for v in draws(json!({"type": "string", "minLength": 10}), 50) {
+        let n = v.as_str().unwrap().chars().count();
+        assert!((10..=64).contains(&n), "{v}");
+    }
+    let s = |format: &str| {
+        draws(json!({"type": "string", "format": format}), 1)[0]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    s("ipv4").parse::<std::net::Ipv4Addr>().unwrap();
+    s("ipv6").parse::<std::net::Ipv6Addr>().unwrap();
+    assert!(s("hostname").ends_with(".example.com"));
+    assert!(s("uri-reference").starts_with('/'));
+}
+
+#[test]
+fn strings_match_their_pattern() {
+    let pattern = r"^/[A-Za-z0-9]{22}\.jpg$";
+    let re = regex::Regex::new(pattern).unwrap();
+    for v in draws(json!({"type": "string", "pattern": pattern}), 100) {
+        let s = v.as_str().unwrap();
+        assert!(re.is_match(s) && s.len() == 27, "{s}");
+    }
+    let re = regex::Regex::new(r"^[a-z]+-\d+$").unwrap();
+    for v in draws(
+        json!({"type": "string", "pattern": r"^[a-z]+-\d+$", "maxLength": 20}),
+        100,
+    ) {
+        let s = v.as_str().unwrap();
+        assert!(re.is_match(s) && s.len() <= 20, "{s}");
+    }
+}
+
+#[test]
+fn unsupported_or_too_long_patterns_fall_back() {
+    for v in draws(json!({"type": "string", "pattern": r"^(a)\1$"}), 20) {
+        assert!(v.is_string());
+    }
+    for v in draws(
+        json!({"type": "string", "pattern": "^x{100}$", "maxLength": 10}),
+        20,
+    ) {
+        assert!(v.as_str().unwrap().chars().count() <= 10);
+    }
+    assert_eq!(
+        draws(json!({"type": "string", "pattern": "^v1$"}), 1)[0],
+        json!("v1")
+    );
+}
+
+#[test]
+fn echoed_values_fill_same_named_root_fields() {
+    let mut echoes = serde_json::Map::new();
+    echoes.insert("login".into(), json!("octocat"));
+    echoes.insert("page".into(), json!("3"));
+    let faker = Faker::default().with_hints(mb_engine::FakerHints { echoes });
+    let schema = json!({"type": "object", "required": ["login", "page", "owner"], "properties": {
+        "login": {"type": "string"}, "page": {"type": "integer"},
+        "owner": {"type": "object", "required": ["login"], "properties": {"login": {"type": "string"}}}}});
+    let v = faker.fake(&schema, &mut StdRng::seed_from_u64(7));
+    assert_eq!(v["login"], "octocat");
+    assert_eq!(v["page"], 3);
+    assert_ne!(v["owner"]["login"], "octocat", "only root fields echo");
+}
+
+#[test]
+fn integer_ids_are_positive_and_spread_out() {
+    let schema = json!({"type": "object", "required": ["id", "owner_id", "userId"], "properties": {
+        "id": {"type": "integer"}, "owner_id": {"type": "integer"}, "userId": {"type": "integer", "minimum": -2147483648i64, "maximum": 2147483647}}});
+    let values: Vec<i64> = draws(schema, 100)
+        .iter()
+        .flat_map(|v| ["id", "owner_id", "userId"].map(|k| v[k].as_i64().unwrap()))
+        .collect();
+    assert!(values.iter().all(|n| *n >= 1), "{values:?}");
+    assert!(
+        values.iter().filter(|n| **n > 100).count() > 250,
+        "{values:?}"
+    );
+}

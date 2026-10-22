@@ -11,8 +11,8 @@ use mb_protocols::ProtocolSettings;
 use mb_protocols::events::EventDeps;
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
-    ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
-    ResourceSource, SqliteControlStore,
+    Consistency, ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, MockBehavior,
+    NewContractVersion, NewMock, ResourceSource, SqliteControlStore, UnknownIds,
 };
 use mockingbird::registry::MockRegistry;
 use mockingbird::runtime::{RuntimeDeps, build_provider};
@@ -95,6 +95,7 @@ async fn create_mock(
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 hosts: vec![],
+                behavior: Default::default(),
             },
         )
         .await
@@ -121,6 +122,7 @@ async fn create_hosted(
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                behavior: Default::default(),
             },
         )
         .await
@@ -814,6 +816,7 @@ async fn grpc_service_holder_survives_cross_workspace_newcomer() {
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 hosts: vec![],
+                behavior: Default::default(),
             },
         )
         .await
@@ -1145,4 +1148,24 @@ async fn hosted_mock_that_failed_to_build_keeps_its_host_and_answers_503() {
         .reload_mock(&deps, DEFAULT_WORKSPACE, "stripe")
         .await;
     assert!(!registry.claims_host("api.stripe.test"));
+}
+
+#[tokio::test]
+async fn runtime_carries_mock_behavior() {
+    let store = store().await;
+    let mut mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &fixture_source()).await;
+    mock.behavior = MockBehavior {
+        consistency: Consistency::Off,
+        unknown_ids: UnknownIds::NotFound,
+        default_scenario: Some("gift".into()),
+    };
+    let mock = store.update_mock(&mock).await.unwrap();
+    let rt = mockingbird::runtime::build_runtime(&deps(store.clone()), &mock)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!rt.consistency);
+    assert_eq!(rt.unknown_ids, mb_protocols::UnknownIds::NotFound);
+    assert_eq!(rt.default_scenario.as_deref(), Some("gift"));
 }

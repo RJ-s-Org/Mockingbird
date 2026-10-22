@@ -15,6 +15,13 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
 - `mockingbird init` (MCP `init_config`) takes `--port`, `--admin-port` and `--grpc-port`.
 - A request that fails validation reports why: the `X-Mockingbird-Validation` response header, the declared error shape's message-like field (`message`, `detail`, … or nested, like Stripe's `error.message`), and `request.validation` in the request log.
+- Reads of a resource the session holds are answered from session state without the LLM (`X-Mockingbird-Source: state`) when the stored value matches the response schema.
+- Per-session response cache: a session repeating a read gets the same answer (`cache`, 500 answers per session), cleared by any write of the resource type and by a session reset. `consistency: off` on a mock disables it and list seeding.
+- List→detail seeding: the items of a list answer are stored in the session, so a later read by id returns the same item.
+- `unknown_ids: 404` on a mock answers reads of ids the session does not hold with the operation's 404 (problem+json when none is declared).
+- `default_scenario` on a mock applies a scenario when a request names none; a scenario's `operations` entries may be `{id, instructions}` to give one operation its own instructions (config, Admin API and console client).
+- Faker: strings honour `pattern` (via `rand_regex`), formats `ipv4`, `ipv6`, `hostname` and `uri-reference`, and path, query and GraphQL argument values are echoed into same-named fields.
+- Migration `0610_mock_behavior` adds `mocks.behavior`.
 - Smart import takes operations from OpenAPI 3.x blocks embedded in documentation (fenced code blocks, JSON scripts, ReadMe page data) as written; a page fully covered by its blocks needs no LLM.
 - Imports take `urls` (up to 20) and `documents` (up to 100) for one draft from several sources, and `mode: merge | replace`; by default an import merges into the mock's newest draft or active version (adds operations, replaces those with the same method and path, removes nothing). CLI: several URLs, docs folders, `--mode`.
 - Schema-size warnings (`schema_too_large`) on uploads, the version list, activation, approval, drafts and `mockingbird validate`, for response schemas over the 64 KiB prompt budget; `mb_import::compile_with_warnings`.
@@ -24,6 +31,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Changed
 
+- Faker integers without tight bounds (and count-like fields) are drawn from 0..=100 (id-like fields such as `id`, `owner_id`, `userId` from 1..=1 000 000), ignoring bounds wider than ±2^31; nullable arrays are never `null`; strings without a `maxLength` are at most 64 characters.
+- An LLM string over 2 000 characters where the schema sets no `maxLength` is cut to 200 (`repaired`); the prompt asks for free text under 200 characters.
+- `pattern`, `maxLength`, `minLength`, `enum`, `format` and `const` errors in an LLM answer are patched locally without a repair call.
+- Generated lists get unique item ids, and a create never reuses an id the session already holds.
 - LLM profiles default to a 60 s timeout and 16 384 output tokens (were 3 s and 2048): a large response from a remote model takes 30 s or more.
 - The OpenRouter preset uses `deepseek/deepseek-v4.1-flash`.
 - `mockingbird llm test` with no flags tests the default profile of `./mockingbird.yaml`.

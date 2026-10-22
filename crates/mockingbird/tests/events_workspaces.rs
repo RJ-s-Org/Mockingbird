@@ -99,6 +99,7 @@ async fn setup() -> Setup {
                     mode: DataPlaneAuthMode::ApiKey,
                     ..DataPlaneAuthConfig::default()
                 },
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )
@@ -337,6 +338,7 @@ async fn orders_mock(store: &Arc<dyn ControlStore>, ws: &str, prefix: &str) -> M
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )

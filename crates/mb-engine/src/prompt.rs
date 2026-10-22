@@ -26,7 +26,8 @@ pub const MAX_REQUEST_STREAM: usize = 20;
 const ROLE_STATEMENT: &str = "You generate realistic synthetic API response data. \
 Output only a single JSON value conforming to the schema. Never output real personal data. \
 Keep it compact: arrays hold 3 to 5 items unless the request asks for a number (a limit, page \
-size or `first` argument), and then at most that many.";
+size or `first` argument), and then at most that many. Keep free-text strings under 200 characters \
+unless the schema allows more.";
 
 const STREAM_ROLE_STATEMENT: &str = "You generate realistic synthetic API stream data. \
 Output newline-delimited JSON: exactly one JSON value per line, each conforming to the stream item \
