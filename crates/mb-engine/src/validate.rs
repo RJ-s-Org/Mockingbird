@@ -7,6 +7,16 @@ use crate::EngineError;
 
 const MAX_ERRORS: usize = 10;
 
+/// A string longer than this, where the schema sets no `maxLength`, is a
+/// runaway generation.
+pub const RUNAWAY_CHARS: usize = 2_000;
+
+/// What a runaway string is cut to.
+pub const TRUNCATED_CHARS: usize = 200;
+
+/// Schema nodes visited when looking up the schema of one location.
+const MAX_SCHEMA_HOPS: usize = 64;
+
 /// JSON Schema (draft 2020-12) validator over a schema that carries its own
 /// `$defs`.
 pub struct SchemaValidator {
@@ -118,6 +128,80 @@ impl SchemaValidator {
         Some(expected)
     }
 
+    /// `instance` with every string longer than [`RUNAWAY_CHARS`] whose
+    /// schema location declares no `maxLength` cut to its first
+    /// [`TRUNCATED_CHARS`] characters; `None` unless something was cut and
+    /// the result validates.
+    pub fn truncate_runaway(&self, instance: &Value) -> Option<Value> {
+        let mut long = Vec::new();
+        collect_long_strings(instance, String::new(), &mut long);
+        let mut out = instance.clone();
+        let mut cut = false;
+        for pointer in long {
+            if self.declares_max_length(&pointer) {
+                continue;
+            }
+            if let Some(Value::String(text)) = out.pointer_mut(&pointer) {
+                *text = text.chars().take(TRUNCATED_CHARS).collect();
+                cut = true;
+            }
+        }
+        (cut && self.validate(&out).is_ok()).then_some(out)
+    }
+
+    /// Whether any schema reachable for the instance location `pointer`
+    /// (through `$ref`, `allOf`, `oneOf`, `anyOf`) declares `maxLength`.
+    fn declares_max_length(&self, pointer: &str) -> bool {
+        let mut nodes = self.expand(vec![&self.schema]);
+        for segment in pointer.split('/').skip(1).map(unescape) {
+            let index = segment.parse::<usize>().ok();
+            let next: Vec<&Value> = nodes
+                .iter()
+                .filter_map(|node| {
+                    let property = node.get("properties").and_then(|p| p.get(&segment));
+                    let additional = node.get("additionalProperties").filter(|a| a.is_object());
+                    let item = index.and_then(|i| {
+                        node.get("prefixItems")
+                            .and_then(|p| p.get(i))
+                            .or_else(|| node.get("items"))
+                    });
+                    property.or(item).or(additional)
+                })
+                .collect();
+            nodes = self.expand(next);
+            if nodes.is_empty() {
+                return false;
+            }
+        }
+        nodes.iter().any(|node| node.get("maxLength").is_some())
+    }
+
+    /// `nodes` and every schema they reach through `$ref` (to `$defs`),
+    /// `allOf`, `oneOf` and `anyOf`, bounded.
+    fn expand<'a>(&'a self, mut pending: Vec<&'a Value>) -> Vec<&'a Value> {
+        let mut out = Vec::new();
+        while let Some(node) = pending.pop() {
+            if out.len() >= MAX_SCHEMA_HOPS {
+                break;
+            }
+            out.push(node);
+            if let Some(target) = node
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.strip_prefix("#/$defs/"))
+                .and_then(|name| self.schema.get("$defs")?.get(name))
+            {
+                pending.push(target);
+            }
+            for key in ["allOf", "oneOf", "anyOf"] {
+                if let Some(Value::Array(members)) = node.get(key) {
+                    pending.extend(members);
+                }
+            }
+        }
+        out
+    }
+
     /// Returns up to 10 violations formatted as `"<instance path>: <message>"`.
     pub fn validate(&self, instance: &Value) -> Result<(), Vec<String>> {
         let errors: Vec<String> = self
@@ -131,6 +215,24 @@ impl SchemaValidator {
         } else {
             Err(errors)
         }
+    }
+}
+
+/// Pointers of every string in `value` longer than [`RUNAWAY_CHARS`].
+fn collect_long_strings(value: &Value, pointer: String, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) if text.chars().count() > RUNAWAY_CHARS => out.push(pointer),
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                collect_long_strings(item, format!("{pointer}/{i}"), out);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                collect_long_strings(item, format!("{pointer}/{}", escape(key)), out);
+            }
+        }
+        _ => {}
     }
 }
 

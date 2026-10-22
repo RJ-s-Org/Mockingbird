@@ -164,6 +164,22 @@ impl Engine {
                     .increment(n as u64);
             }
         }
+        match self.check_value(validator, value) {
+            Checked::Valid(v) => match validator.truncate_runaway(&v) {
+                Some(cut) => {
+                    tracing::info!("truncated runaway strings");
+                    Checked::Patched(cut)
+                }
+                None => Checked::Valid(v),
+            },
+            Checked::Patched(v) => Checked::Patched(validator.truncate_runaway(&v).unwrap_or(v)),
+            other => other,
+        }
+    }
+
+    /// Validate, unwrapping an envelope or patching locally when that makes
+    /// the value valid.
+    fn check_value(&self, validator: &SchemaValidator, value: Value) -> Checked {
         match validator.validate(&value) {
             Ok(()) => Checked::Valid(value),
             Err(errors) => match unwrap_envelope(validator, &value) {

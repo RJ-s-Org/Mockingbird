@@ -1141,3 +1141,45 @@ paths:
         "{path}"
     );
 }
+
+#[tokio::test]
+async fn prompt_asks_for_short_free_text() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order_at_o1().to_string())]);
+    engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    let system = &provider.requests()[0].messages[0].content;
+    assert!(system.contains("under 200 characters"), "{system}");
+}
+
+#[tokio::test]
+async fn runaway_strings_are_truncated_unless_a_max_length_allows_them() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Places, version: "1"}
+paths:
+  /places/{id}:
+    get:
+      operationId: getPlace
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, properties: {city: {type: string}, essay: {type: string, maxLength: 5000}}}}}}
+"#,
+    );
+    let op = bundle.operation("getPlace").unwrap();
+    let answer = json!({"city": "é".repeat(3000), "essay": "x".repeat(3000)});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = engine
+        .generate(&bundle, op, &OperationCall::default(), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(out.source, Source::Repaired);
+    let body = out.body.unwrap();
+    assert_eq!(body["city"].as_str().unwrap().chars().count(), 200);
+    assert_eq!(body["essay"].as_str().unwrap().len(), 3000);
+}
