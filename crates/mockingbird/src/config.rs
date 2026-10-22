@@ -108,6 +108,12 @@ pub enum Command {
     /// Windsurf, Claude Desktop).
     #[command(subcommand)]
     Agent(crate::agents::AgentCommand),
+    /// Run the intercepting HTTP proxy in front of a running server, or
+    /// print the variables that send an app through it (`proxy env`).
+    Proxy(crate::proxy::ProxyArgs),
+    /// The local CA the proxy signs certificates with.
+    #[command(subcommand)]
+    Ca(crate::proxy::CaCommand),
     #[command(flatten)]
     Client(ClientCommand),
 }

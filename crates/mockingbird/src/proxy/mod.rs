@@ -4,9 +4,11 @@
 //! and answers placeholder images for `proxy.images` hosts ([`images`]).
 
 pub mod ca;
+pub mod env;
 pub mod forward;
 pub mod images;
 mod server;
+mod standalone;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -15,6 +17,10 @@ use crate::file_config::Unmapped;
 use crate::registry::MockRegistry;
 
 pub use server::serve;
+pub use standalone::{
+    CaCommand, ProxyArgs, ProxyCommand, ProxyEnvArgs, ProxyRunArgs, StandaloneOptions, ca_command,
+    run, run_standalone,
+};
 
 /// The proxy's port unless `proxy.port` or `--port` says otherwise.
 pub const DEFAULT_PROXY_PORT: u16 = 8888;

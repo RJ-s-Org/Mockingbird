@@ -18,7 +18,7 @@ use mb_store::{
 use mockingbird::config::{ServeArgs, apply_flags, build_app};
 use mockingbird::file_config::{FileConfig, Unmapped};
 use mockingbird::proxy::ca::LocalCa;
-use mockingbird::proxy::{ProxyState, serve};
+use mockingbird::proxy::{ProxyState, StandaloneOptions, run_standalone, serve};
 use mockingbird::registry::MockRegistry;
 use mockingbird::runtime::RuntimeDeps;
 use mockingbird::server::{Listeners, serve_app};
@@ -324,4 +324,118 @@ fn proxy_flags_override_config() {
     assert_eq!(cfg.proxy.port, 9999);
     assert_eq!(FileConfig::default().proxy.port, 8888);
     assert_eq!(FileConfig::default().proxy.unmapped, Unmapped::Pass);
+}
+
+#[test]
+fn ca_path_prints_the_certificate_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = assert_cmd::Command::cargo_bin("mockingbird")
+        .unwrap()
+        .env("MB_CA_DIR", dir.path())
+        .args(["ca", "path"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let path = dir.path().join("ca.pem");
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("{}\n", path.display())
+    );
+    assert!(path.exists());
+}
+
+#[test]
+fn proxy_env_prints_exports_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let cmd = |args: &[&str]| {
+        assert_cmd::Command::cargo_bin("mockingbird")
+            .unwrap()
+            .env("MB_CA_DIR", dir.path())
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+    let text = String::from_utf8(cmd(&["proxy", "env", "--port", "9999"])).unwrap();
+    assert!(text.contains("export NODE_USE_ENV_PROXY='1'"), "{text}");
+    let json: Value = serde_json::from_slice(&cmd(&["proxy", "env", "--json"])).unwrap();
+    assert_eq!(json["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8888");
+}
+
+/// Serves an app with the `orders` mock on `host` (proxy disabled): data
+/// plane and admin port on ephemeral ports.
+async fn serve_hosted_app(host: &str) -> (String, String, watch::Sender<bool>, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("mockingbird.yaml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "storage:\n  url: \"sqlite::memory:\"\nmocks:\n  orders:\n    contract: {}\n    route_prefix: /\n    hosts: [{host}]\n",
+            fixture("openapi/orders-3.0.yaml").display()
+        ),
+    )
+    .unwrap();
+    let app = build_app(
+        &ServeArgs {
+            config: Some(cfg),
+            offline: true,
+            ..ServeArgs::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let (data, admin) = (ephemeral().await, ephemeral().await);
+    let urls = (
+        format!("http://{}", data.local_addr().unwrap()),
+        format!("http://{}", admin.local_addr().unwrap()),
+    );
+    let (stop, stop_rx) = watch::channel(false);
+    tokio::spawn(serve_app(
+        app,
+        Listeners {
+            data: Some(data),
+            admin: Some(admin),
+            grpc: None,
+            proxy: None,
+        },
+        stop_rx,
+    ));
+    (urls.0, urls.1, stop, dir)
+}
+
+#[tokio::test]
+async fn standalone_proxy_forwards_to_a_running_server() {
+    let (data_url, admin_url, _stop, _dir) = serve_hosted_app("api.orders.test").await;
+    let ca_dir = tempfile::tempdir().unwrap();
+    let listener = ephemeral().await;
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let (_tx, rx) = watch::channel(false);
+    tokio::spawn(run_standalone(
+        listener,
+        StandaloneOptions {
+            data_url: data_url.parse().unwrap(),
+            admin_url,
+            ca_dir: ca_dir.path().into(),
+            unmapped: Unmapped::Block,
+            images: vec![],
+        },
+        rx,
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    let r = client(&proxy_url, &ca)
+        .get("https://api.orders.test/orders")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        200,
+        "Host survives forwarding, so the hosted mock answers"
+    );
 }
