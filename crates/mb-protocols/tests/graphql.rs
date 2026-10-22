@@ -297,6 +297,104 @@ async fn aliases_after_a_mutation_reflect_state() {
     );
 }
 
+/// A stored issue read with swapped and nested aliases: each key carries
+/// its own field of the stored resource.
+#[tokio::test]
+async fn swapped_aliases_on_a_stored_read_reflect_state() {
+    let mut created = issue("i-1", "Crash on start");
+    created["body"] = json!("Stack trace");
+    let provider = scripted(vec![
+        created,
+        json!({
+            "__typename": "Issue",
+            "title": "model body",
+            "body": "model title",
+            "repository": {"__typename": "Repository", "n": "model", "owner": {"__typename": "User", "name": "model"}},
+        }),
+    ]);
+    let base = serve(runtime(Some(provider))).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({
+            "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { id } }",
+            "variables": {"in": {"repositoryId": "r-1", "title": "Crash on start"}},
+        }),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let id = created.body["data"]["createIssue"]["id"].as_str().unwrap();
+    let read = post(
+        &base,
+        json!({
+            "query": "query($id: ID!) { issue(id: $id) { title: body body: title repository { n: name owner { name: login } } } }",
+            "variables": {"id": id},
+        }),
+        &session,
+    )
+    .await;
+    assert!(read.body.get("errors").is_none(), "{}", read.body);
+    assert_eq!(
+        read.body["data"]["issue"],
+        json!({
+            "title": "Stack trace",
+            "body": "Crash on start",
+            "repository": {"n": "hello", "owner": {"name": "octocat"}},
+        })
+    );
+}
+
+/// A key the model left out is null, not a sibling's same-named member.
+#[tokio::test]
+async fn a_missing_alias_is_null() {
+    let provider = scripted(vec![json!({"__typename": "Issue", "body": "T"})]);
+    let base = serve(runtime(Some(provider))).await;
+    let r = query(&base, r#"{ issue(id: "I_1") { title: body body: title } }"#).await;
+    assert_eq!(r.headers["x-mockingbird-source"], "llm", "{}", r.body);
+    assert_eq!(r.body["data"]["issue"], json!({"title": null, "body": "T"}));
+}
+
+/// Identical-argument aliases whose sub-selections give one key different
+/// fields are generated separately.
+#[tokio::test]
+async fn aliases_with_conflicting_sub_selections_are_not_shared() {
+    let provider = scripted(vec![json!({
+        "__typename": "User",
+        "a": [{"__typename": "Repository", "n": "x"}],
+        "b": [{"__typename": "Repository", "n": 7}],
+    })]);
+    let base = serve(runtime(Some(provider))).await;
+    let r = query(
+        &base,
+        "{ viewer { a: repositories(first: 2) { n: name } b: repositories(first: 2) { n: stargazerCount } } }",
+    )
+    .await;
+    assert_eq!(r.headers["x-mockingbird-source"], "llm", "{}", r.body);
+    assert_eq!(r.body["data"]["viewer"]["a"], json!([{"n": "x"}]));
+    assert_eq!(r.body["data"]["viewer"]["b"], json!([{"n": 7}]));
+}
+
+/// One response key naming different fields on different union members.
+#[tokio::test]
+async fn one_alias_across_union_members() {
+    let provider = scripted(vec![json!([
+        {"__typename": "User", "label": "octocat"},
+        {"__typename": "Issue", "label": "Crash"},
+    ])]);
+    let base = serve(runtime(Some(provider))).await;
+    let r = query(
+        &base,
+        r#"{ search(query: "x") { ... on Issue { label: title } ... on User { label: login } } }"#,
+    )
+    .await;
+    assert_eq!(r.headers["x-mockingbird-source"], "llm", "{}", r.body);
+    assert_eq!(
+        r.body["data"]["search"],
+        json!([{"label": "octocat"}, {"label": "Crash"}])
+    );
+}
+
 #[tokio::test]
 async fn mutation_then_query_reflects_state() {
     let provider = scripted(vec![

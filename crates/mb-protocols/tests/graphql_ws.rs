@@ -268,6 +268,28 @@ async fn complete_stops_engine_stream() {
     assert_eq!(provider.chunks_yielded(), after_complete);
 }
 
+/// A subscription payload is keyed by field name: an alias named like
+/// another field reads its own field.
+#[tokio::test]
+async fn aliased_subscription_fields_read_their_own_field() {
+    let provider =
+        Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![Ok(issue_line(1))])]));
+    let addr = serve(runtime(Some(provider))).await;
+    let mut ws = init(&addr, json!({"x-mockingbird-stream-items": "1"})).await;
+    let query = r#"subscription { issueAdded(repositoryId: "r-1") { id title: id } }"#;
+    send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "1", "payload": {"query": query}}),
+    )
+    .await;
+    let first = recv(&mut ws).await;
+    assert_eq!(
+        first["payload"]["data"]["issueAdded"],
+        json!({"id": "i-1", "title": "i-1"}),
+        "{first}"
+    );
+}
+
 #[tokio::test]
 async fn forced_status_sends_one_error_then_completes() {
     let addr = serve(runtime(None)).await;

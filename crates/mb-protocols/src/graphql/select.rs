@@ -24,6 +24,10 @@ use serde_json::{Map, Value, json};
 pub(crate) struct Selection {
     /// The field's name (empty for a hand-built root).
     pub name: String,
+    /// Other field names under this response key, from fragments on other
+    /// types (`... on Issue { label: title } ... on User { label: login }`):
+    /// each object type reads the first of these names it has.
+    pub also: Vec<String>,
     /// Literal argument values (variables resolved).
     pub args: Map<String, Value>,
     /// Children by response key (alias or name), merged across fragments.
@@ -69,11 +73,9 @@ impl Selection {
             let Some(child) = sel.fields.get(key) else {
                 continue;
             };
-            let earlier = order[..i].iter().find(|k| {
-                sel.fields.get(*k).is_some_and(|e| {
-                    e.shares.is_none() && e.name == child.name && e.args == child.args
-                })
-            });
+            let earlier = order[..i]
+                .iter()
+                .find(|k| sel.fields.get(*k).is_some_and(|e| e.can_share(child)));
             let Some(earlier) = earlier.cloned() else {
                 continue;
             };
@@ -91,8 +93,37 @@ impl Selection {
         sel
     }
 
-    /// Merges `other`'s children (by response key) and missing arguments.
+    /// Whether `other` can copy this (generated) child's value: same field
+    /// and arguments, and no response key below both that reads different
+    /// fields.
+    fn can_share(&self, other: &Selection) -> bool {
+        self.shares.is_none()
+            && self.name == other.name
+            && self.also == other.also
+            && self.args == other.args
+            && compatible(self, other)
+    }
+
+    /// The field names this response key reads, first one first.
+    fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.also.iter().map(String::as_str))
+    }
+
+    /// Whether any key below renames its field or copies another's value.
+    pub(crate) fn aliased(&self) -> bool {
+        self.fields.iter().any(|(key, c)| {
+            *key != c.name || !c.also.is_empty() || c.shares.is_some() || c.aliased()
+        })
+    }
+
+    /// Merges `other`'s field name (when it differs), children (by
+    /// response key) and missing arguments.
     fn merge(&mut self, other: Selection) {
+        for name in std::iter::once(other.name).chain(other.also) {
+            if !name.is_empty() && name != self.name && !self.also.contains(&name) {
+                self.also.push(name);
+            }
+        }
         for (key, child) in other.fields {
             match self.fields.entry(key) {
                 Entry::Occupied(mut entry) => entry.get_mut().merge(child),
@@ -110,6 +141,15 @@ impl Selection {
     fn generated(&self) -> impl Iterator<Item = (&String, &Selection)> {
         self.fields.iter().filter(|(_, c)| c.shares.is_none())
     }
+}
+
+/// Whether every response key below both `a` and `b` reads the same field
+/// with the same arguments, recursively.
+fn compatible(a: &Selection, b: &Selection) -> bool {
+    a.fields.iter().all(|(key, x)| match b.fields.get(key) {
+        Some(y) => x.name == y.name && x.also == y.also && x.args == y.args && compatible(x, y),
+        None => true,
+    })
 }
 
 /// `schema` with every object reduced to one property per response key `sel`
@@ -160,7 +200,7 @@ fn required(value: &Value, sel: &Selection) -> Vec<Value> {
         out.push(json!("__typename"));
     }
     for (key, child) in sel.generated() {
-        if key != "__typename" && listed(&child.name) {
+        if key != "__typename" && child.names().any(listed) {
             out.push(json!(key));
         }
     }
@@ -180,7 +220,7 @@ fn properties(value: &Value, defs: &Map<String, Value>, sel: &Selection) -> Map<
             continue;
         }
         // Another member of a union may not have this field.
-        let Some(schema) = props.get(&child.name) else {
+        let Some(schema) = child.names().find_map(|n| props.get(n)) else {
             continue;
         };
         let mut narrowed = narrow(schema, defs, child);
@@ -218,7 +258,7 @@ pub(crate) fn rekey(value: Value, sel: &Selection) -> Value {
                 out.insert("__typename".into(), typename.clone());
             }
             for (key, child) in &sel.fields {
-                if let Some(member) = obj.get(&child.name) {
+                if let Some(member) = child.names().find_map(|n| obj.get(n)) {
                     out.insert(key.clone(), rekey(member.clone(), child));
                 }
             }
@@ -228,24 +268,36 @@ pub(crate) fn rekey(value: Value, sel: &Selection) -> Value {
     }
 }
 
-/// A narrowed body made whole: every child with `shares` gets a copy of
-/// the shared key's value (recursively, through lists), and at the top
-/// level a renamed key takes its field name's member when the engine
-/// put one there (stored target overlay, forced identity), provided that
-/// name is not itself a response key and only one non-shared child uses it.
-pub(crate) fn settle(value: &mut Value, sel: &Selection) {
+/// A narrowed body (keyed by response key) made whole. The engine overlays
+/// the stored `target` of a read and the forced `identity` field by field
+/// name; here each generated key takes its field's member of `target`
+/// (re-keyed below), and each key reading the identity field takes the
+/// body's member under that name. Then every child with `shares` gets a
+/// copy of the shared key's value (recursively, through lists).
+pub(crate) fn settle(
+    value: &mut Value,
+    sel: &Selection,
+    target: Option<&Value>,
+    identity: Option<&str>,
+) {
     if let Value::Object(obj) = value {
-        for (key, child) in sel.generated() {
-            let renamed = *key != child.name
-                && !sel.fields.contains_key(&child.name)
-                && sel
-                    .generated()
-                    .filter(|(_, c)| c.name == child.name)
-                    .count()
-                    == 1;
-            if let Some(member) = obj.get(&child.name).filter(|_| renamed) {
-                let member = member.clone();
-                obj.insert(key.clone(), member);
+        if let Some(Value::Object(stored)) = target {
+            for (key, child) in sel.generated() {
+                if let Some(member) = child.names().find_map(|n| stored.get(n)) {
+                    obj.insert(key.clone(), rekey(member.clone(), child));
+                }
+            }
+        }
+        // The identity's member is ambiguous when another field's key took
+        // its name.
+        if let Some(field) = identity
+            && sel.fields.get(field).is_none_or(|c| c.name == field)
+            && let Some(id) = obj.get(field).cloned()
+        {
+            for (key, child) in sel.generated() {
+                if child.name == field {
+                    obj.insert(key.clone(), id.clone());
+                }
             }
         }
     }
@@ -506,8 +558,65 @@ mod tests {
             ("ref", aliased("id", json!({}), leaf())),
         ]);
         let mut body = json!({"a": "octocat", "ref": "generated", "id": "stored"});
-        settle(&mut body, &query);
+        settle(&mut body, &query, None, Some("id"));
         assert_eq!(body["b"], "octocat");
         assert_eq!(body["ref"], "stored");
+    }
+
+    #[test]
+    fn one_key_with_different_fields_per_union_member() {
+        let mut label = aliased("seats", json!({}), leaf());
+        label.also = vec!["login".into()];
+        let query = sel([("owner", sel([("label", label)]))]);
+        let out = narrow(&json!({"$ref": "#/$defs/User"}), &defs(), &query);
+        let members = out["properties"]["owner"]["oneOf"].as_array().unwrap();
+        // User has no `seats`: its `label` is its `login`.
+        assert_eq!(members[0]["properties"]["label"], json!({"type": "string"}));
+        assert_eq!(members[0]["required"], json!(["__typename", "label"]));
+        assert_eq!(
+            members[1]["properties"]["label"],
+            json!({"type": "integer"})
+        );
+        assert_eq!(
+            rekey(
+                json!({"__typename": "User", "login": "octo"}),
+                &sel([("label", {
+                    let mut l = aliased("seats", json!({}), leaf());
+                    l.also = vec!["login".into()];
+                    l
+                })])
+            ),
+            json!({"__typename": "User", "label": "octo"})
+        );
+    }
+
+    #[test]
+    fn settle_rekeys_the_stored_target_and_the_identity() {
+        let query = sel([
+            ("title", aliased("body", json!({}), leaf())),
+            ("body", aliased("title", json!({}), leaf())),
+            (
+                "repo",
+                aliased(
+                    "repository",
+                    json!({}),
+                    sel([("n", aliased("name", json!({}), leaf()))]),
+                ),
+            ),
+            ("ref", aliased("id", json!({}), leaf())),
+        ]);
+        let stored = json!({"title": "T", "body": "B", "repository": {"name": "hello"}});
+        let mut body =
+            json!({"title": "x", "body": "y", "repo": {"n": "z"}, "ref": "r", "id": "I_1"});
+        settle(&mut body, &query, Some(&stored), Some("id"));
+        assert_eq!(
+            body,
+            json!({"title": "B", "body": "T", "repo": {"n": "hello"}, "ref": "I_1", "id": "I_1"})
+        );
+        // Without a stored target or identity, a model's extra member does
+        // not replace an alias.
+        let mut body = json!({"ref": "r", "id": "other"});
+        settle(&mut body, &query, None, None);
+        assert_eq!(body["ref"], "r");
     }
 }
