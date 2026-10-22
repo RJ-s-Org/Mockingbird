@@ -150,6 +150,7 @@ mocks:
     workspace: default
     contract: ../../fixtures/openapi/orders-3.0.yaml
     route_prefix: /orders-api
+    hosts: [orders.example.test]
     persona: A small online shop selling hiking gear.
     llm_profile: deepseek
     header_overrides: true

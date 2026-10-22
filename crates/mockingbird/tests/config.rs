@@ -3040,3 +3040,45 @@ fn unknown_p7_key_rejected() {
         assert!(file_config::load(&ws.config_path()).is_err(), "{yaml}");
     }
 }
+
+const TWO_HOSTED: &str = "mocks:\n  rest:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [api.github.test]\n  other:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [HOSTS2]\n";
+
+#[tokio::test]
+async fn file_mocks_share_a_prefix_on_distinct_hosts() {
+    let ws = Workspace::new();
+    ws.write(&TWO_HOSTED.replace("HOSTS2", "uploads.github.test"));
+    let (store, state) = (store().await, no_state());
+    let cfg = file_config::load(&ws.config_path()).unwrap();
+    reconcile(store.as_ref(), state.as_ref(), &cfg)
+        .await
+        .unwrap();
+    let rest = store
+        .get_mock(DEFAULT_WORKSPACE, "rest")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.hosts, ["api.github.test"]);
+}
+
+#[tokio::test]
+async fn file_mocks_with_overlapping_hosts_are_rejected() {
+    let ws = Workspace::new();
+    ws.write(&TWO_HOSTED.replace("HOSTS2", "api.github.test"));
+    let (store, state) = (store().await, no_state());
+    let cfg = file_config::load(&ws.config_path()).unwrap();
+    let err = reconcile(store.as_ref(), state.as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("share the route prefix \"/\""),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn invalid_mock_host_is_rejected_at_load() {
+    let ws = Workspace::new();
+    ws.write(&TWO_HOSTED.replace("HOSTS2", "Bad.Host:1"));
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("mocks.other.hosts"), "{err:#}");
+}

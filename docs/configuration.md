@@ -218,6 +218,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.workspace` | string | `default` | | | Workspace (created if missing). |
 | `mocks.<name>.contract` | path | required | Relative to the config file | | OpenAPI 3.x, Swagger 2.0, GraphQL SDL, protobuf, WSDL 1.1 or AsyncAPI 2.x/3.0 contract. |
 | `mocks.<name>.route_prefix` | path | `/<name>` | | | Where the mock is mounted on the data plane. |
+| `mocks.<name>.hosts` | list of strings | `[]` | Lowercase host names, no port | | Hosts the mock answers for (by `Host`, e.g. through `mockingbird proxy`). With hosts, two mocks may share a route prefix; a mock with hosts is not reached under other hosts. |
 | `mocks.<name>.persona` | string | unset | | | Free text added to every prompt (locale, realism, style). |
 | `mocks.<name>.llm_profile` | string | `llm.default_profile` | | | LLM profile. |
 | `mocks.<name>.header_overrides` | bool | `true` | | | Honour `X-Mockingbird-*` request headers (status, latency, scenario, `X-Mockingbird-Chaos: off`). |

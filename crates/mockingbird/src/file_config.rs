@@ -942,6 +942,10 @@ pub struct FileMock {
     /// Admission limits; unset fields use the global `limits:`.
     #[serde(default)]
     pub limits: FileMockLimits,
+    /// Host names the mock answers for (by `Host`); empty answers for any
+    /// host. With hosts, two mocks may share a route prefix.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 /// A mock's (or scenario's) `chaos:`.
@@ -1079,6 +1083,7 @@ impl FileMock {
             data_plane_auth: DataPlaneAuthConfig::default(),
             chaos: None,
             limits: FileMockLimits::default(),
+            hosts: Vec::new(),
         }
     }
 
@@ -1241,6 +1246,7 @@ impl FileConfig {
         self.validate_protocols()?;
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
+            mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
             if let Some(chaos) = &mock.chaos {
                 chaos.validate(&prefix)?;
             }
