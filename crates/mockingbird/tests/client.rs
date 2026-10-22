@@ -963,3 +963,73 @@ fn validate_prints_schema_warnings() {
         "{stdout}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_approve_activates_unless_no_activate() {
+    let admin = admin_url().await;
+    let c = smart_fixture("legacy-v2.0.postman_collection.json");
+    let out = run(
+        &admin,
+        &["import", c.to_str().unwrap(), "--as", "a", "--approve"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json()["status"], "active");
+    let out = run(
+        &admin,
+        &[
+            "import",
+            c.to_str().unwrap(),
+            "--as",
+            "b",
+            "--approve",
+            "--no-activate",
+            "--mode",
+            "replace",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.json()["status"], "approved");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_docs_folder_goes_to_imports() {
+    let admin = admin_url().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "# A\n\nGET /a returns a.").unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/b.html"), "<h1>B</h1>").unwrap();
+    let out = run(
+        &admin,
+        &["import", dir.path().to_str().unwrap(), "--as", "docs"],
+    )
+    .await;
+    assert_eq!(out.code, 1, "stdout: {}", out.stdout);
+    // Offline: documents need an LLM.
+    assert!(out.stderr.contains("LLM profile"), "stderr: {}", out.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn several_sources_must_be_urls() {
+    let admin = admin_url().await;
+    let har = smart_fixture("petstore.har");
+    let out = run(
+        &admin,
+        &[
+            "import",
+            har.to_str().unwrap(),
+            "https://a.example/x",
+            "--as",
+            "m",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 2, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("several sources must all be http(s) URLs"),
+        "{}",
+        out.stderr
+    );
+}
