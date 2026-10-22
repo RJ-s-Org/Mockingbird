@@ -911,3 +911,47 @@ async fn joint_answer_may_omit_nullable_parts() {
     assert_eq!(out[1].as_ref().unwrap().body, Some(Value::Null));
     assert_eq!(out[1].as_ref().unwrap().source, Source::Llm);
 }
+
+/// A `null` the schema does not allow is patched locally instead of costing
+/// a repair call: dropped where the property is optional, faked where it is
+/// required. Real APIs return null where their docs never say so (TMDB's
+/// `belongs_to_collection`), and models copy them.
+#[tokio::test]
+async fn disallowed_nulls_are_patched_without_a_repair_call() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let mut answer = valid_order_at_o1();
+    answer["category"] = Value::Null;
+    answer["customerId"] = Value::Null;
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out.source, Source::Repaired);
+    let body = out.body.unwrap();
+    assert!(body.get("category").is_none(), "{body}");
+    assert!(body["customerId"].is_string(), "{body}");
+    assert_eq!(body["total"], 42.5);
+}
+
+/// Anything else wrong still goes to the model for a repair.
+#[tokio::test]
+async fn nulls_with_other_errors_still_ask_for_a_repair() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let mut answer = valid_order_at_o1();
+    answer["category"] = Value::Null;
+    answer["total"] = json!(-1);
+    let (provider, engine) = scripted(vec![
+        Ok(answer.to_string()),
+        Ok(valid_order_at_o1().to_string()),
+    ]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(out.body, Some(valid_order_at_o1()));
+}

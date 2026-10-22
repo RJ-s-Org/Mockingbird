@@ -328,6 +328,7 @@ impl StreamState {
     async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
         let errors = match self.engine.check_output(&self.validator, line) {
             Checked::Valid(value) => return (value, Source::Llm),
+            Checked::Patched(value) => return (value, Source::Repaired),
             Checked::Rejected(reason) => {
                 tracing::warn!(operation = %self.op_id, %reason, "stream item fell back to faker");
                 return (self.fake(), Source::Fallback);
@@ -398,7 +399,7 @@ impl StreamState {
             Err(_) => return Err("LLM repair timed out".into()),
         };
         match engine.check_output(&self.validator, &text) {
-            Checked::Valid(value) => Ok(value),
+            Checked::Valid(value) | Checked::Patched(value) => Ok(value),
             Checked::Rejected(reason) => Err(reason),
             Checked::Invalid(errors) => Err(errors.join("; ")),
         }

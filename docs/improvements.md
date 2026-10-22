@@ -30,7 +30,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 - Warn at import when an operation's schema is huge (the prompt now fits it to a budget, see Done).
 - GraphQL aliases of one field with different arguments still share one generated value.
-- Detail objects (TMDB movie, TV) often fail validation once and need a repair call, doubling their 30 s. The cause is the contract, not the prompt (see Phase 4).
+- TMDB movie and TV detail pages (with `append_to_response`) take 15–66 s: the answer is large. Nulls no longer cost a repair call (see Done); the remaining repairs come from a `pattern` the trial agent wrote (`file_path` must be exactly 27 characters).
 - GETs of a stored resource still call the LLM; serve them from session state.
 - No consistency across calls: an opt-in response cache keyed by operation and parameters, list → detail entity seeding, server-side unique ids, optional 404 for unknown ids.
 - Faker output breaks clients: int32-minimum counts, `null` lists, random words for ids and logins. Echo path and argument values into same-named fields, keep counts small and non-negative, prefer non-null lists, honour `format` and `pattern`.
@@ -40,7 +40,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 - No MCP tools to view, edit or approve a draft; `approve` does not activate; each import replaces the contract instead of merging; a list of URLs or a docs folder is not accepted.
 - Drafts have no `required` lists, so `{"page":1}` is a valid answer; operationIds from the docs are replaced; invented `default`s; low-confidence operations kept.
-- Drafts mark fields non-nullable that the real API returns as null: TMDB's `iso_639_1`, `logo_path` and `belongs_to_collection` are `null` for many movies, the model answers `null`, validation fails and every movie or TV detail page pays for a repair call. Import should make a field nullable when an example shows `null` or the docs call it optional. (The trial's draft also had a 27-character `pattern` on `file_path` that the trial agent added itself.)
+- Drafts mark fields non-nullable that the real API returns as null: TMDB's `iso_639_1`, `logo_path` and `belongs_to_collection` are `null` for many movies. TMDB's own docs and examples never show it, so import cannot tell; the engine now patches such nulls instead of asking for a repair. Import should still make a field nullable when an example shows `null` or the docs call it optional or nullable.
 - Embedded OpenAPI blocks in documentation pages (ReadMe-hosted docs such as TMDB) are ignored and re-derived by the LLM.
 - MCP output sizes: `validate_contract` lists every operation, `list_requests` returns full bodies, `server_logs` keeps ANSI codes; `server_logs`/`stop_server` resolve state from the MCP process's folder instead of the server.
 
