@@ -6,8 +6,8 @@ use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_store::{
-    ChaosSettings, DataPlaneAuthConfig, Mock, MockLimits, NewMock, ResourceSource, StoreError,
-    validate_route_prefix,
+    ChaosSettings, Consistency, DataPlaneAuthConfig, Mock, MockBehavior, MockLimits, NewMock,
+    ResourceSource, StoreError, UnknownIds, validate_route_prefix,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
@@ -125,6 +125,17 @@ pub struct MockView {
     pub chaos: Option<ChaosSettings>,
     #[schema(value_type = MockLimitsSchema)]
     pub limits: MockLimits,
+    /// `on` (default): repeated reads in a session get the same answer and
+    /// listed items are served by id; `off` generates every answer anew.
+    #[schema(value_type = String, example = "on")]
+    pub consistency: Consistency,
+    /// `generate` (default) or `404`: how a read of an id the session does
+    /// not hold is answered.
+    #[schema(value_type = String, example = "generate")]
+    pub unknown_ids: UnknownIds,
+    /// The scenario applied when a call names none; absent when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_scenario: Option<String>,
     pub source: Source,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -146,6 +157,9 @@ impl MockView {
             data_plane_auth: m.data_plane_auth,
             chaos: m.chaos,
             limits: m.limits,
+            consistency: m.behavior.consistency,
+            unknown_ids: m.behavior.unknown_ids,
+            default_scenario: m.behavior.default_scenario,
             created_at: m.created_at,
             updated_at: m.updated_at,
             active_version,
@@ -177,6 +191,14 @@ pub struct CreateMock {
     #[serde(default)]
     #[schema(value_type = Option<MockLimitsSchema>)]
     pub limits: MockLimits,
+    /// `on` (default) or `off`.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub consistency: Consistency,
+    /// `generate` (default) or `404`.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub unknown_ids: UnknownIds,
 }
 
 fn default_true() -> bool {
@@ -206,6 +228,16 @@ pub struct PatchMock {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<MockLimitsSchema>)]
     pub limits: Option<Option<MockLimits>>,
+    /// `on` or `off`.
+    #[schema(value_type = Option<String>)]
+    pub consistency: Option<Consistency>,
+    /// `generate` or `404`.
+    #[schema(value_type = Option<String>)]
+    pub unknown_ids: Option<UnknownIds>,
+    /// A scenario of the mock; `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub default_scenario: Option<Option<String>>,
 }
 
 /// Distinguishes an explicit `null` (`Some(None)`) from an absent field (`None`).
@@ -314,6 +346,11 @@ pub async fn create(
                 data_plane_auth: body.data_plane_auth,
                 chaos: body.chaos,
                 limits: body.limits,
+                behavior: MockBehavior {
+                    consistency: body.consistency,
+                    unknown_ids: body.unknown_ids,
+                    default_scenario: None,
+                },
             },
         )
         .await
@@ -371,7 +408,7 @@ pub async fn get_one(
         (status = 200, body = MockView),
         (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file, or another mock has the route prefix", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid route prefix, chaos or limits", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid route prefix, chaos or limits, or a default scenario the mock does not have", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn patch(
@@ -406,6 +443,28 @@ pub async fn patch(
     }
     if let Some(limits) = body.limits {
         m.limits = limits.unwrap_or_default();
+    }
+    if let Some(consistency) = body.consistency {
+        m.behavior.consistency = consistency;
+    }
+    if let Some(unknown_ids) = body.unknown_ids {
+        m.behavior.unknown_ids = unknown_ids;
+    }
+    if let Some(default_scenario) = body.default_scenario {
+        if let Some(name) = &default_scenario
+            && !st
+                .store
+                .list_scenarios(m.id)
+                .await?
+                .iter()
+                .any(|s| &s.name == name)
+        {
+            return Err(Problem::invalid(
+                "Invalid mock",
+                format!("mock {mock:?} has no scenario {name:?}"),
+            ));
+        }
+        m.behavior.default_scenario = default_scenario;
     }
     let updated = view(&st, st.store.update_mock(&m).await?).await?;
     access

@@ -94,6 +94,7 @@ async fn create_mock(
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
             },
         )
         .await
@@ -746,6 +747,7 @@ async fn grpc_service_holder_survives_cross_workspace_newcomer() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
             },
         )
         .await

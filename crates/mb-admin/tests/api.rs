@@ -1545,6 +1545,7 @@ async fn file_managed_mock_is_read_only() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
             },
         )
         .await

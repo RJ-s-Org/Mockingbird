@@ -79,6 +79,9 @@ pub struct Mock {
     pub chaos: Option<ChaosSettings>,
     #[serde(default)]
     pub limits: MockLimits,
+    /// Response consistency, unknown-id handling and the default scenario.
+    #[serde(default, skip_serializing_if = "MockBehavior::is_default")]
+    pub behavior: MockBehavior,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -98,6 +101,92 @@ pub struct NewMock {
     pub chaos: Option<ChaosSettings>,
     #[serde(default)]
     pub limits: MockLimits,
+    #[serde(default, skip_serializing_if = "MockBehavior::is_default")]
+    pub behavior: MockBehavior,
+}
+
+/// Whether a mock answers repeated reads from a per-session cache and seeds
+/// list items into session state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Consistency {
+    #[default]
+    On,
+    Off,
+}
+
+impl Serialize for Consistency {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Consistency::On => "on",
+            Consistency::Off => "off",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Consistency {
+    /// `"on"`/`"off"`, or a boolean (`true` is on).
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::Bool(true) => Ok(Consistency::On),
+            Value::Bool(false) => Ok(Consistency::Off),
+            Value::String(s) if s == "on" => Ok(Consistency::On),
+            Value::String(s) if s == "off" => Ok(Consistency::Off),
+            other => Err(serde::de::Error::custom(format!(
+                "consistency must be \"on\" or \"off\", not {other}"
+            ))),
+        }
+    }
+}
+
+/// How a mock answers a read of an id its session does not hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnknownIds {
+    /// Generate a resource for the id.
+    #[default]
+    Generate,
+    /// Answer the operation's 404.
+    NotFound,
+}
+
+impl Serialize for UnknownIds {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            UnknownIds::Generate => "generate",
+            UnknownIds::NotFound => "404",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for UnknownIds {
+    /// `"generate"`, `"404"` or the number `404` (YAML `unknown_ids: 404`).
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::String(s) if s == "generate" => Ok(UnknownIds::Generate),
+            Value::String(s) if s == "404" => Ok(UnknownIds::NotFound),
+            Value::Number(n) if n.as_u64() == Some(404) => Ok(UnknownIds::NotFound),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown_ids must be \"generate\" or 404, not {other}"
+            ))),
+        }
+    }
+}
+
+/// A mock's answer-consistency settings.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct MockBehavior {
+    #[serde(default)]
+    pub consistency: Consistency,
+    #[serde(default)]
+    pub unknown_ids: UnknownIds,
+    /// The scenario applied when a call names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_scenario: Option<String>,
+}
+
+impl MockBehavior {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Bounds of a uniformly random added latency, in milliseconds.
@@ -290,6 +379,10 @@ pub struct ScenarioRules {
     /// Replaces the mock's chaos while the scenario applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chaos: Option<ChaosSettings>,
+    /// Instructions replacing the scenario's for one operation, by
+    /// operation id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub operation_instructions: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

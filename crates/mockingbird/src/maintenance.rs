@@ -305,6 +305,7 @@ mod tests {
                     data_plane_auth: Default::default(),
                     chaos: None,
                     limits: Default::default(),
+                    behavior: Default::default(),
                 },
             )
             .await

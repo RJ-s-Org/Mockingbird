@@ -1,18 +1,19 @@
 //! Backend-neutral `ControlStore` conformance suite. Every backend's test file
 //! calls [`run_all`] so all backends run identical assertions.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
 use mb_mcm::Bundle;
 use mb_mcm::Trigger;
 use mb_store::{
-    AdminSession, ApiKey, AuditFilter, ChannelSettings, ChaosSettings, ContractStatus,
+    AdminSession, ApiKey, AuditFilter, ChannelSettings, ChaosSettings, Consistency, ContractStatus,
     ControlChange, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
-    ImportJobStatus, ImportOutcome, ImportProgress, LatencyJitter, LlmProfile, Mock,
+    ImportJobStatus, ImportOutcome, ImportProgress, LatencyJitter, LlmProfile, Mock, MockBehavior,
     MockEventSettings, MockLimits, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
     NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError,
+    ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 pub async fn run_all(store: Arc<dyn ControlStore>) {
     store.ping().await.expect("ping");
     mock_crud_and_conflict(&store).await;
+    mock_behavior_round_trips(&store).await;
     invalid_mock_name_rejected(&store).await;
     contract_versions_increment(&store).await;
     activation_is_exclusive_and_rolls_back(&store).await;
@@ -89,6 +91,7 @@ fn new_mock(name: &str) -> NewMock {
         data_plane_auth: Default::default(),
         chaos: None,
         limits: MockLimits::default(),
+        behavior: Default::default(),
     }
 }
 
@@ -112,6 +115,52 @@ fn new_version(status: ContractStatus, src: &str) -> NewContractVersion {
         status,
         created_by: Some("tester".into()),
     }
+}
+
+async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
+    let mut mock = create(store, "behaving").await;
+    assert_eq!(mock.behavior, MockBehavior::default());
+    mock.behavior = MockBehavior {
+        consistency: Consistency::Off,
+        unknown_ids: UnknownIds::NotFound,
+        default_scenario: Some("calm".into()),
+    };
+    store.update_mock(&mock).await.expect("update");
+    let got = store
+        .get_mock(DEFAULT_WORKSPACE, "behaving")
+        .await
+        .expect("get")
+        .expect("mock");
+    assert_eq!(got.behavior, mock.behavior);
+    let rules = ScenarioRules {
+        operation_instructions: BTreeMap::from([("getOrder".into(), "A gift.".into())]),
+        ..ScenarioRules::default()
+    };
+    store
+        .put_scenario(&Scenario {
+            mock_id: got.id,
+            name: "calm".into(),
+            instructions: None,
+            rules: rules.clone(),
+            source: ResourceSource::Api,
+        })
+        .await
+        .expect("put scenario");
+    assert_eq!(
+        store.list_scenarios(got.id).await.expect("list")[0].rules,
+        rules
+    );
+    assert_eq!(
+        serde_json::to_value(MockBehavior::default()).expect("serialize"),
+        json!({"consistency": "on", "unknown_ids": "generate"})
+    );
+    let parsed: MockBehavior =
+        serde_json::from_value(json!({"consistency": false, "unknown_ids": 404}))
+            .expect("deserialize");
+    assert_eq!(
+        (parsed.consistency, parsed.unknown_ids),
+        (Consistency::Off, UnknownIds::NotFound)
+    );
 }
 
 async fn create(store: &Arc<dyn ControlStore>, name: &str) -> Mock {
@@ -482,6 +531,7 @@ async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
             stream_items: Some(3),
             stream_item_interval_ms: Some(250),
             chaos: None,
+            operation_instructions: Default::default(),
         },
         source: ResourceSource::File,
     };

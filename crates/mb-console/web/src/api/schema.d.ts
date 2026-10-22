@@ -1113,6 +1113,8 @@ export interface components {
         /** @description A new mock. Mocks created through the API always have `source = api`. */
         CreateMock: {
             chaos?: components["schemas"]["ChaosSettings"] | null;
+            /** @description `on` (default) or `off`. */
+            consistency?: string | null;
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
             /** @description Whether callers may steer responses with `X-Mockingbird-*` headers. */
             header_overrides?: boolean;
@@ -1123,6 +1125,8 @@ export interface components {
             persona?: string | null;
             /** @description Defaults to `/<name>`. */
             route_prefix?: string | null;
+            /** @description `generate` (default) or `404`. */
+            unknown_ids?: string | null;
         };
         /** @description A new workspace. */
         CreateWorkspace: {
@@ -1406,9 +1410,17 @@ export interface components {
              */
             active_version?: number | null;
             chaos?: components["schemas"]["ChaosSettings"] | null;
+            /**
+             * @description `on` (default): repeated reads in a session get the same answer and
+             *     listed items are served by id; `off` generates every answer anew.
+             * @example on
+             */
+            consistency: string;
             /** Format: date-time */
             created_at: string;
             data_plane_auth: components["schemas"]["DataPlaneAuthConfig"];
+            /** @description The scenario applied when a call names none; absent when unset. */
+            default_scenario?: string | null;
             header_overrides: boolean;
             /** Format: uuid */
             id: string;
@@ -1418,6 +1430,12 @@ export interface components {
             persona?: string | null;
             route_prefix: string;
             source: components["schemas"]["Source"];
+            /**
+             * @description `generate` (default) or `404`: how a read of an id the session does
+             *     not hold is answered.
+             * @example generate
+             */
+            unknown_ids: string;
             /** Format: date-time */
             updated_at: string;
             workspace: string;
@@ -1445,12 +1463,18 @@ export interface components {
         /** @description JSON merge patch of a mock: absent fields are kept, `null` clears. */
         PatchMock: {
             chaos?: components["schemas"]["ChaosSettings"] | null;
+            /** @description `on` or `off`. */
+            consistency?: string | null;
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
+            /** @description A scenario of the mock; `null` clears it. */
+            default_scenario?: string | null;
             header_overrides?: boolean | null;
             limits?: components["schemas"]["MockLimits"] | null;
             llm_profile?: string | null;
             persona?: string | null;
             route_prefix?: string | null;
+            /** @description `generate` or `404`. */
+            unknown_ids?: string | null;
         };
         /** @description The editable fields of a workspace. */
         PatchWorkspace: {
@@ -1618,6 +1642,14 @@ export interface components {
             /** Format: int64 */
             latency_ms?: number | null;
             /**
+             * @description Instructions replacing `instructions` for one operation, by
+             *     operation id. Each must be one of `operations` when that is set,
+             *     and an operation of the active contract when there is one.
+             */
+            operation_instructions?: {
+                [key: string]: string;
+            };
+            /**
              * @description Operation ids the scenario applies to; empty means all. When the
              *     mock has an active contract, each must be one of its operations.
              */
@@ -1698,6 +1730,13 @@ export interface components {
              */
             latency_ms?: number | null;
             name: string;
+            /**
+             * @description Instructions replacing `instructions` for one operation, by
+             *     operation id; absent when none.
+             */
+            operation_instructions?: {
+                [key: string]: string;
+            };
             /** @description Operation ids the scenario applies to; empty means all. */
             operations: string[];
             /** @description Fields forced into the response body. */
@@ -2210,7 +2249,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid route prefix, chaos or limits */
+            /** @description Invalid route prefix, chaos or limits, or a default scenario the mock does not have */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4384,7 +4423,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid route prefix, chaos or limits */
+            /** @description Invalid route prefix, chaos or limits, or a default scenario the mock does not have */
             422: {
                 headers: {
                     [name: string]: unknown;

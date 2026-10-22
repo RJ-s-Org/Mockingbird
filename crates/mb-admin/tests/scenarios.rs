@@ -176,3 +176,34 @@ async fn put_scenario_interval_over_30s_422() {
     assert_eq!(status, StatusCode::OK, "{view}");
     assert_eq!(view["stream_item_interval_ms"], 30_000);
 }
+
+#[tokio::test]
+async fn put_scenario_with_operation_instructions() {
+    let h = harness().await;
+    h.send(
+        Method::POST,
+        "/api/v1/mocks",
+        Some(json!({"name": "orders"})),
+    )
+    .await;
+    let (status, view) = h
+        .send(
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/gift",
+            Some(json!({
+            "operations": ["getOrder"], "operation_instructions": {"getOrder": "A gift."}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["operation_instructions"]["getOrder"], "A gift.");
+    let (status, body) = h
+        .send(
+            Method::PUT,
+            "/api/v1/mocks/orders/scenarios/gift",
+            Some(json!({
+            "operations": ["getOrder"], "operation_instructions": {"listOrders": "Nope."}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["type"].is_string(), "{body}");
+}

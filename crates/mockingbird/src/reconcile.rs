@@ -515,6 +515,7 @@ async fn apply_mock(
                         chaos: p.mock.chaos.as_ref().map(|c| c.to_store()),
                         limits: p.mock.limits.to_store(),
                         data_plane_auth: p.mock.data_plane_auth.clone(),
+                        behavior: Default::default(),
                     },
                 )
                 .await
@@ -603,6 +604,7 @@ async fn apply_mock(
                     s.stream_item_interval,
                 )?,
                 chaos: s.chaos.as_ref().map(|c| c.to_store()),
+                operation_instructions: Default::default(),
             },
             source: ResourceSource::File,
         };

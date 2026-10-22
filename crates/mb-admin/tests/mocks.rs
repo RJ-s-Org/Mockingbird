@@ -243,6 +243,7 @@ async fn file_managed_mock_rejects_chaos_patch() {
                     }),
                     ..MockLimits::default()
                 },
+                behavior: Default::default(),
             },
         )
         .await
@@ -281,4 +282,63 @@ async fn patch_limits_null_clears() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.limits, MockLimits::default());
+}
+
+#[tokio::test]
+async fn patch_consistency_settings() {
+    let h = harness().await;
+    let (status, created) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({"name": "orders"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        (
+            created["consistency"].as_str(),
+            created["unknown_ids"].as_str()
+        ),
+        (Some("on"), Some("generate"))
+    );
+    assert!(created.get("default_scenario").is_none());
+    let (status, body) = h
+        .send(
+            Method::PATCH,
+            "/api/v1/mocks/orders",
+            Some(json!({"default_scenario": "calm"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    h.send(
+        Method::PUT,
+        "/api/v1/mocks/orders/scenarios/calm",
+        Some(json!({})),
+    )
+    .await;
+    let (status, view) = h
+        .send(
+            Method::PATCH,
+            "/api/v1/mocks/orders",
+            Some(json!({"consistency": "off", "unknown_ids": "404", "default_scenario": "calm"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(
+        (
+            view["consistency"].as_str(),
+            view["unknown_ids"].as_str(),
+            view["default_scenario"].as_str()
+        ),
+        (Some("off"), Some("404"), Some("calm"))
+    );
+    let (_, view) = h
+        .send(
+            Method::PATCH,
+            "/api/v1/mocks/orders",
+            Some(json!({"default_scenario": null})),
+        )
+        .await;
+    assert!(view.get("default_scenario").is_none());
 }
