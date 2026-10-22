@@ -231,6 +231,8 @@ pub struct App {
     pub tls: Option<axum_server::tls_rustls::RustlsConfig>,
     /// Stops the certificate reloader when the app is dropped.
     pub tls_reloader: Option<crate::tls::ReloaderGuard>,
+    /// The outcome of the last `--watch` reload, which `/readyz` reports.
+    pub reload: watch::ReloadStatus,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
@@ -683,6 +685,7 @@ async fn build_app_on(
     let hooks_auth = admin_state.clone();
     // In `oidc` mode only authenticated callers see why `/readyz` is not ready.
     let readyz_auth = (cfg.auth.mode == AuthMode::Oidc).then(|| admin_state.auth.clone());
+    let reload = watch::ReloadStatus::default();
     let ops = ops::router_with_metrics_gate(
         OpsState {
             store: store.clone(),
@@ -693,6 +696,7 @@ async fn build_app_on(
             bus: Some(ha.bus.clone()),
             role,
             leader: leadership.watch(),
+            reload: reload.clone(),
         },
         metrics_gate,
     );
@@ -758,13 +762,15 @@ async fn build_app_on(
                     (Some(path), true) => {
                         let path = path.clone();
                         let (store, state) = (store.clone(), state.clone());
+                        let reload = reload.clone();
                         let start: crate::maintenance::StartWatch = Arc::new(move || {
-                            watch::spawn_with_hook(
+                            watch::spawn_with_status(
                                 path.clone(),
                                 store.clone(),
                                 state.clone(),
                                 prepare.clone(),
                                 Some(applied.clone()),
+                                reload.clone(),
                             )
                         });
                         Some(start)
@@ -813,6 +819,7 @@ async fn build_app_on(
         state,
         tls,
         tls_reloader,
+        reload,
     })
 }
 

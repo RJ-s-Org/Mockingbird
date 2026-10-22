@@ -554,6 +554,11 @@ async fn failed_rebuild_keeps_serving_previous_version() {
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0].0, "c");
     assert!(failed[0].1.contains("secret"), "{failed:?}");
+    let issues = registry.mock_issues();
+    assert!(
+        issues[0].starts_with("mock c: stale, serving the previous version: "),
+        "{issues:?}"
+    );
 
     // Fixing the profile clears the failure.
     q.secret_ref = None;
@@ -1078,4 +1083,19 @@ async fn overlapping_host_sets_collide() {
         1,
         "a sorts first and keeps the route"
     );
+}
+
+#[tokio::test]
+async fn failed_first_build_is_reported_failed() {
+    let store = store().await;
+    let mut q = profile("q", "http://127.0.0.1:9".into(), None);
+    q.secret_ref = Some("env:MB_TEST_REGISTRY_NOT_SET_7A1C".into());
+    store.put_profile(&q).await.unwrap();
+    let d = create_mock(&store, "d", "/d", Some("q")).await;
+    activate(&store, &d, &fixture_source()).await;
+    let mut deps = deps(store.clone());
+    deps.offline = false;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert!(registry.mock_issues()[0].starts_with("mock d: failed: "));
 }

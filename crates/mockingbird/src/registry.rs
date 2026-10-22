@@ -422,6 +422,35 @@ impl MockRegistry {
             .collect()
     }
 
+    /// One `/readyz` reason per mock in [`Self::failed_mocks`], sorted:
+    /// `mock <label>: stale, serving the previous version: <error>` when
+    /// its rebuild failed and its previous version is still mounted, else
+    /// `mock <label>: failed: <error>` (gRPC service collisions included).
+    pub fn mock_issues(&self) -> Vec<String> {
+        let failed = self.failed.lock().map(|f| f.clone()).unwrap_or_default();
+        let mounted = self.mounted.load();
+        let mut issues: Vec<String> = failed
+            .iter()
+            .map(|((ws, name), error)| {
+                let label = mock_label(ws, name);
+                if mounted.iter().any(|m| m.is(ws, name)) {
+                    format!("mock {label}: stale, serving the previous version: {error}")
+                } else {
+                    format!("mock {label}: failed: {error}")
+                }
+            })
+            .collect();
+        if let Ok(skipped) = self.grpc_skipped.lock() {
+            for ((ws, name), error) in skipped.iter() {
+                if !failed.contains_key(&(ws.clone(), name.clone())) {
+                    issues.push(format!("mock {}: failed: {error}", mock_label(ws, name)));
+                }
+            }
+        }
+        issues.sort();
+        issues
+    }
+
     fn set_failed(&self, workspace: &str, name: &str, error: Option<String>) {
         if let Ok(mut failed) = self.failed.lock() {
             let key = (workspace.to_string(), name.to_string());

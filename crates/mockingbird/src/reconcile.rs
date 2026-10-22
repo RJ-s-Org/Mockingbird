@@ -48,6 +48,25 @@ impl ReconcileReport {
             && self.deleted.is_empty()
             && self.new_versions.is_empty()
     }
+
+    /// `"{added} added, {removed} removed, {changed} changed"`, counting
+    /// mocks: `changed` is the distinct mocks updated or given a new
+    /// contract version that were not created.
+    pub fn summary(&self) -> String {
+        let changed: std::collections::BTreeSet<&str> = self
+            .updated
+            .iter()
+            .map(String::as_str)
+            .chain(self.new_versions.iter().map(|(m, _)| m.as_str()))
+            .filter(|m| !self.created.iter().any(|c| c == m))
+            .collect();
+        format!(
+            "{} added, {} removed, {} changed",
+            self.created.len(),
+            self.deleted.len(),
+            changed.len()
+        )
+    }
 }
 
 /// A file mock with its contract read and compiled.

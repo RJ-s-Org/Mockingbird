@@ -511,6 +511,7 @@ fn ops_state(
         bus: None,
         role: mockingbird::file_config::Role::All,
         leader: tokio::sync::watch::channel(true).1,
+        reload: Default::default(),
     }
 }
 
@@ -1035,6 +1036,7 @@ async fn metrics_exposes_request_counters() {
         bus: None,
         role: mockingbird::file_config::Role::All,
         leader: tokio::sync::watch::channel(true).1,
+        reload: Default::default(),
     }))
     .await;
     let r = reqwest::get(format!("{base}/metrics")).await.unwrap();
