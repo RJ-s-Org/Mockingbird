@@ -23,6 +23,12 @@ const NODE_BUDGET: usize = 10_000;
 /// minimal one); keeps the worst case linear.
 const HARD_NODE_EXTRA: usize = 100_000;
 
+/// Most characters in a string whose schema sets no `maxLength`.
+pub const UNCONSTRAINED_MAX_CHARS: usize = 64;
+
+/// Width of the window an integer without tight bounds is drawn from.
+pub const SMALL_INT_WINDOW: i64 = 100;
+
 /// Cost of a schema with no finite instance.
 const INFINITE: u64 = u64::MAX;
 
@@ -83,13 +89,15 @@ impl Faker {
             costs,
             generated: 0,
         };
-        self.gen_value(&mut ctx, schema_with_defs, 0, branch, rng)
+        self.gen_value(&mut ctx, schema_with_defs, None, 0, branch, rng)
     }
 
+    /// A value for `schema`; `field` is the object member it fills, if any.
     fn gen_value<R: Rng>(
         &self,
         ctx: &mut Ctx<'_>,
         schema: &Value,
+        field: Option<&str>,
         depth: usize,
         branch: Option<usize>,
         rng: &mut R,
@@ -122,7 +130,8 @@ impl Faker {
         }
 
         let types = type_names(s);
-        if at_limit && types.contains(&"null") {
+        // A list is never null: at the limit it is empty instead.
+        if at_limit && types.contains(&"null") && !types.contains(&"array") {
             return Value::Null;
         }
 
@@ -136,7 +145,7 @@ impl Faker {
         match chosen {
             "null" => Value::Null,
             "boolean" => Value::Bool(rng.random_bool(0.5)),
-            "integer" => fake_integer(s, rng),
+            "integer" => fake_integer(s, field, rng),
             "number" => fake_number(s, rng),
             "string" => Value::String(fake_string(s, rng)),
             "array" if hard_limit => Value::Array(Vec::new()),
@@ -167,7 +176,7 @@ impl Faker {
             let sub = props.and_then(|p| p.get(*name)).unwrap_or(&any);
             out.insert(
                 (*name).to_string(),
-                self.gen_value(ctx, sub, depth + 1, None, rng),
+                self.gen_value(ctx, sub, Some(name), depth + 1, None, rng),
             );
         }
         if let Some(props) = props {
@@ -177,7 +186,8 @@ impl Faker {
                     break;
                 }
                 if !out.contains_key(name) {
-                    out.insert(name.clone(), self.gen_value(ctx, sub, depth + 1, None, rng));
+                    let value = self.gen_value(ctx, sub, Some(name), depth + 1, None, rng);
+                    out.insert(name.clone(), value);
                 }
             }
         }
@@ -209,11 +219,11 @@ impl Faker {
             if hard_exhausted(ctx) || (i >= min && ctx.generated >= NODE_BUDGET) {
                 break;
             }
-            let mut candidate = self.gen_value(ctx, items, depth + 1, None, rng);
+            let mut candidate = self.gen_value(ctx, items, None, depth + 1, None, rng);
             if unique {
                 let mut tries = 0;
                 while out.contains(&candidate) && tries < 32 && !hard_exhausted(ctx) {
-                    candidate = self.gen_value(ctx, items, depth + 1, None, rng);
+                    candidate = self.gen_value(ctx, items, None, depth + 1, None, rng);
                     tries += 1;
                 }
             }
@@ -552,14 +562,19 @@ fn flatten<R: Rng>(
         if let Some(Value::Array(branches)) = obj.get(key)
             && !branches.is_empty()
         {
+            // A nullable list takes its list branch: lists are never null.
+            let has_list = branches.iter().any(|b| is_array_schema(root, b));
+            let eligible: Vec<usize> = (0..branches.len())
+                .filter(|i| !(has_list && is_null_schema(&branches[*i])))
+                .collect();
             let index = match pick {
                 Pick::Forced(i) => i % branches.len(),
-                Pick::Random => rng.random_range(0..branches.len()),
-                Pick::Shallow => branches
+                Pick::Random => eligible[rng.random_range(0..eligible.len())],
+                Pick::Shallow => eligible
                     .iter()
-                    .enumerate()
-                    .min_by_key(|(_, b)| costs.of(root, b))
-                    .map_or(0, |(i, _)| i),
+                    .copied()
+                    .min_by_key(|i| costs.of(root, &branches[*i]))
+                    .unwrap_or(0),
             };
             extras.push(flatten(root, costs, &branches[index], hops + 1, pick, rng));
         }
@@ -579,6 +594,25 @@ fn flatten<R: Rng>(
         }
     }
     Value::Object(out)
+}
+
+/// Whether `schema` (through one `$ref`) is a list: `type: array` or `items`.
+fn is_array_schema(root: &Value, schema: &Value) -> bool {
+    let schema = match schema.get("$ref").and_then(Value::as_str) {
+        Some(r) => resolve_ref(root, r).unwrap_or(schema),
+        None => schema,
+    };
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    obj.contains_key("items") || type_names(obj) == ["array"]
+}
+
+/// Whether `schema` admits only `null`.
+fn is_null_schema(schema: &Value) -> bool {
+    schema
+        .as_object()
+        .is_some_and(|obj| type_names(obj) == ["null"])
 }
 
 fn merge_keyword(out: &mut Map<String, Value>, key: String, value: Value) {
@@ -640,6 +674,20 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         Some("date") => return random_datetime(rng).format("%Y-%m-%d").to_string(),
         Some("email") => return format!("{}@example.com", word(rng)),
         Some("uri") => return format!("https://example.com/{}", word(rng)),
+        Some("uri-reference") => return format!("/{}/{}", word(rng), word(rng)),
+        Some("hostname") => return format!("{}.example.com", word(rng)),
+        Some("ipv4") => {
+            return (0..4)
+                .map(|_| rng.random_range(0..=255u8).to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+        }
+        Some("ipv6") => {
+            return (0..8)
+                .map(|_| format!("{:04x}", rng.random_range(0..=u16::MAX)))
+                .collect::<Vec<_>>()
+                .join(":");
+        }
         Some("int64") => return rng.random_range(-1_000_000_i64..1_000_000).to_string(),
         Some("uint64") => return rng.random_range(0_u64..1_000_000).to_string(),
         Some("byte") => {
@@ -680,10 +728,12 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         return lit;
     }
     let min = s.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let max = s
-        .get("maxLength")
-        .and_then(Value::as_u64)
-        .map(|m| m as usize);
+    let max = Some(
+        s.get("maxLength")
+            .and_then(Value::as_u64)
+            .map_or(UNCONSTRAINED_MAX_CHARS, |m| m as usize)
+            .max(min),
+    );
     let mut out = word(rng);
     let mut len = out.chars().count();
     if len < min {
@@ -756,24 +806,59 @@ fn bounds(s: &Map<String, Value>) -> Bounds {
     }
 }
 
-fn fake_integer<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> Value {
-    let b = bounds(s);
+/// Field names whose integers are counts: small and non-negative.
+const COUNT_SUFFIXES: [&str; 8] = [
+    "count", "total", "size", "length", "page", "pages", "limit", "offset",
+];
+
+/// An integer within the declared bounds. Without tight bounds (missing,
+/// wider than 10 000, or at the 32-bit limits) and for count-like fields,
+/// it comes from a small non-negative window instead.
+fn fake_integer<R: Rng>(s: &Map<String, Value>, field: Option<&str>, rng: &mut R) -> Value {
+    let num = |k: &str| s.get(k).and_then(Value::as_f64);
+    let mut lo = num("minimum").map(f64::ceil);
+    if let Some(x) = num("exclusiveMinimum") {
+        let x = x.floor() + 1.0;
+        lo = Some(lo.map_or(x, |l| l.max(x)));
+    }
+    let mut hi = num("maximum").map(f64::floor);
+    if let Some(x) = num("exclusiveMaximum") {
+        let x = x.ceil() - 1.0;
+        hi = Some(hi.map_or(x, |h| h.min(x)));
+    }
+    const I32_MIN: f64 = -2_147_483_648.0;
+    const I32_MAX: f64 = 2_147_483_647.0;
+    let window = SMALL_INT_WINDOW as f64;
+    let huge = match (lo, hi) {
+        (Some(l), Some(h)) => h - l > 10_000.0 || l <= I32_MIN || h >= I32_MAX,
+        _ => true,
+    };
+    let county = field.is_some_and(|f| {
+        let f = f.to_ascii_lowercase();
+        COUNT_SUFFIXES.iter().any(|suffix| f.ends_with(suffix))
+    });
+    let wide = match (lo, hi) {
+        (Some(l), Some(h)) => h - l > window,
+        _ => true,
+    };
+    let (w_lo, w_hi) = if huge || (county && wide) {
+        let base = lo.unwrap_or(0.0).max(0.0);
+        match hi {
+            Some(h) if h < base => (lo.map_or(h - window, |l| l.max(h - window)), h),
+            Some(h) => (base, h.min(base + window)),
+            None => (base, base + window),
+        }
+    } else {
+        (lo.unwrap_or(0.0), hi.unwrap_or(0.0))
+    };
     let step = s
         .get("multipleOf")
         .and_then(Value::as_f64)
         .filter(|m| *m > 0.0)
         .unwrap_or(1.0);
-    // Candidate multiples k*step within the bounds.
-    let mut k_lo = (b.lo / step).ceil();
-    if b.lo_exclusive && k_lo * step <= b.lo {
-        k_lo += 1.0;
-    }
-    let mut k_hi = (b.hi / step).floor();
-    if b.hi_exclusive && k_hi * step >= b.hi {
-        k_hi -= 1.0;
-    }
-    // Keep the choice inside i64 and a modest window for readable output.
-    let k_hi = k_hi.min(k_lo + 1000.0);
+    // Candidate multiples k*step within the window.
+    let k_lo = (w_lo / step).ceil();
+    let k_hi = (w_hi / step).floor();
     let k = if k_hi >= k_lo {
         let span = (k_hi - k_lo) as i64;
         k_lo + rng.random_range(0..=span) as f64

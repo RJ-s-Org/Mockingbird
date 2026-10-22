@@ -508,3 +508,66 @@ fn faker_formats_match_patterns() {
         }
     }
 }
+
+fn draws(schema: Value, n: u64) -> Vec<Value> {
+    let faker = Faker::default();
+    (0..n)
+        .map(|seed| faker.fake(&schema, &mut StdRng::seed_from_u64(seed)))
+        .collect()
+}
+
+#[test]
+fn counts_are_small_and_non_negative() {
+    let graphql_int = json!({"type": "object", "required": ["n"], "properties": {"n": {"type": "integer", "minimum": -2147483648i64, "maximum": 2147483647}}});
+    let named = json!({"type": "object", "required": ["total_count", "pageSize"], "properties": {
+        "total_count": {"type": "integer", "minimum": 0, "maximum": 1000000}, "pageSize": {"type": "integer"}}});
+    for v in draws(graphql_int, 200) {
+        assert!((0..=100).contains(&v["n"].as_i64().unwrap()), "{v}");
+    }
+    for v in draws(named, 200) {
+        assert!(
+            (0..=100).contains(&v["total_count"].as_i64().unwrap()),
+            "{v}"
+        );
+        assert!((0..=100).contains(&v["pageSize"].as_i64().unwrap()), "{v}");
+    }
+    for v in draws(json!({"type": "integer", "minimum": 5, "maximum": 10}), 100) {
+        assert!((5..=10).contains(&v.as_i64().unwrap()));
+    }
+    for v in draws(json!({"type": "integer", "minimum": 1}), 100) {
+        assert!((1..=101).contains(&v.as_i64().unwrap()));
+    }
+}
+
+#[test]
+fn nullable_lists_are_never_null() {
+    for v in draws(
+        json!({"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]}),
+        200,
+    ) {
+        assert!(v.is_array(), "{v}");
+    }
+    let at_limit = Faker::new(0).fake(
+        &json!({"type": ["array", "null"], "items": {"type": "string"}}),
+        &mut StdRng::seed_from_u64(1),
+    );
+    assert_eq!(at_limit, json!([]));
+}
+
+#[test]
+fn unconstrained_strings_stay_short_and_new_formats_parse() {
+    for v in draws(json!({"type": "string", "minLength": 10}), 50) {
+        let n = v.as_str().unwrap().chars().count();
+        assert!((10..=64).contains(&n), "{v}");
+    }
+    let s = |format: &str| {
+        draws(json!({"type": "string", "format": format}), 1)[0]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    s("ipv4").parse::<std::net::Ipv4Addr>().unwrap();
+    s("ipv6").parse::<std::net::Ipv6Addr>().unwrap();
+    assert!(s("hostname").ends_with(".example.com"));
+    assert!(s("uri-reference").starts_with('/'));
+}
