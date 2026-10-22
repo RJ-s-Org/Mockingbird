@@ -568,8 +568,8 @@ impl Engine {
         response
     }
 
-    /// Makes a generated answer consistent with the request, state and
-    /// scenario; a list read gets unique item ids.
+    /// Post-process a generated response: reflect request and state, give a
+    /// list read unique item ids, then apply the scenario's `set` patch.
     #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
@@ -884,9 +884,6 @@ pub(crate) fn format_name(id: &str) -> String {
         name
     }
 }
-
-/// Post-process a generated response: reflect request and state, then apply
-/// the scenario's `set` patch.
 
 /// For a 2xx object body, apply the scenario's `set` merge patch, re-apply
 /// the request body (create/update) and the identity so they still win, and
