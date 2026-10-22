@@ -384,7 +384,7 @@ pub async fn run_import_with(
     }
 
     let mut budget = TokenBudget::new(opts.max_tokens);
-    let extracted = if kind.needs_llm() {
+    let mut extracted = if kind.needs_llm() {
         let llm = llm.ok_or(SmartError::LlmRequired)?;
         extract_document(
             kind,
@@ -416,10 +416,20 @@ pub async fn run_import_with(
         }
     };
 
+    extracted.operations = drop_low_confidence(
+        std::mem::take(&mut extracted.operations),
+        &mut extracted.warnings,
+    );
     if extracted.operations.is_empty() {
+        // Operations left out for low confidence say why themselves.
+        let low = extracted
+            .warnings
+            .iter()
+            .any(|w| w.code == "low_confidence");
         let reasons: Vec<&str> = extracted
             .warnings
             .iter()
+            .filter(|w| !low || w.code == "low_confidence")
             .take(NO_OPERATIONS_REASONS)
             .map(|w| w.message.as_str())
             .collect();
@@ -474,6 +484,55 @@ pub async fn run_import_with(
         bundle,
         meta,
     })
+}
+
+/// Operations below this confidence are left out of the draft.
+pub const MIN_CONFIDENCE: f32 = 0.4;
+
+/// `ops` without those below [`MIN_CONFIDENCE`]; each one left out gets a
+/// `low_confidence` warning with the reason: the existing warnings about
+/// it, else a missing response shape, else the model's own doubt.
+fn drop_low_confidence(
+    ops: Vec<DraftOperation>,
+    warnings: &mut Vec<DraftWarning>,
+) -> Vec<DraftOperation> {
+    let mut kept = Vec::with_capacity(ops.len());
+    let mut dropped = Vec::new();
+    for op in ops {
+        if op.confidence >= MIN_CONFIDENCE {
+            kept.push(op);
+            continue;
+        }
+        let target = op.target();
+        let known: Vec<&str> = warnings
+            .iter()
+            .filter(|w| w.operation.as_deref() == Some(target.as_str()))
+            .map(|w| w.message.as_str())
+            .collect();
+        let reason = if !known.is_empty() {
+            known.join("; ")
+        } else if !op
+            .responses
+            .iter()
+            .any(|r| r.schema.is_some() || !r.examples.is_empty())
+        {
+            "the documentation gives no response shape".to_string()
+        } else {
+            "the model was unsure".to_string()
+        };
+        dropped.push(
+            DraftWarning::new(
+                "low_confidence",
+                format!(
+                    "{target} was left out: confidence {:.2} is below 0.40 ({reason})",
+                    op.confidence
+                ),
+            )
+            .for_operation(target),
+        );
+    }
+    warnings.extend(dropped);
+    kept
 }
 
 /// A compiled draft before its metadata is attached.

@@ -996,3 +996,76 @@ async fn markdown_draft_has_required_and_nullable() {
     );
     assert!(draft.meta.operations.contains_key("movie_details"));
 }
+
+#[tokio::test]
+async fn low_confidence_operations_are_dropped_with_a_reason() {
+    let answer = json!({"operations": [
+        {"method": "GET", "path": "/pets", "confidence": 0.9, "evidence": "Returns all pets, newest first.",
+         "responses": [{"status": 200, "example": [{"id": 1}]}]},
+        {"method": "DELETE", "path": "/pets/{petId}", "confidence": 0.5},
+        {"method": "GET", "path": "/owners", "confidence": 0.7,
+         "responses": [{"status": 200, "example": []}]}]})
+    .to_string();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer)]));
+    let draft = run_import(
+        md_input(fixture("smart/petstore.md")),
+        Some(&llm(provider, 1000)),
+        &ImportOptions::default(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(path_operations(&draft.document), 1);
+    let low: Vec<_> = draft
+        .meta
+        .warnings
+        .iter()
+        .filter(|w| w.code == "low_confidence")
+        .collect();
+    assert_eq!(low.len(), 2, "{:?}", draft.meta.warnings);
+    let delete = low
+        .iter()
+        .find(|w| w.operation.as_deref() == Some("DELETE /pets/{petId}"))
+        .unwrap();
+    assert!(
+        delete
+            .message
+            .contains("0.30 is below 0.40 (the documentation gives no response shape)"),
+        "{}",
+        delete.message
+    );
+    let owners = low
+        .iter()
+        .find(|w| w.operation.as_deref() == Some("GET /owners"))
+        .unwrap();
+    // `/owners` is not in petstore.md: 0.7 is halved to 0.35 with an `ungrounded_operation` warning.
+    assert!(
+        owners
+            .message
+            .contains("0.35 is below 0.40 (GET /owners is not grounded"),
+        "{}",
+        owners.message
+    );
+}
+
+#[tokio::test]
+async fn all_low_confidence_fails_quoting_the_reasons() {
+    let answer = json!({"operations": [
+        {"method": "GET", "path": "/owners", "confidence": 0.7, "responses": [{"status": 200, "example": []}]},
+        {"method": "GET", "path": "/vets", "confidence": 0.7, "responses": [{"status": 200, "example": []}]},
+        {"method": "GET", "path": "/visits", "confidence": 0.7, "responses": [{"status": 200, "example": []}]},
+        {"method": "DELETE", "path": "/pets/{petId}", "confidence": 0.3}]})
+    .to_string();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer)]));
+    let err = run_import(
+        md_input(fixture("smart/petstore.md")),
+        Some(&llm(provider, 1000)),
+        &ImportOptions::default(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap_err();
+    let text = err.to_string();
+    assert!(matches!(err, SmartError::NoOperations(_)), "{text}");
+    assert!(text.contains("was left out"), "{text}");
+}
