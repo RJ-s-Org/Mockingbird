@@ -11,6 +11,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 | [Coding agents](docs/agents.md) | The MCP server, skills and plugins for Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code, Windsurf and ChatGPT; LLM provider onboarding |
 | [Architecture](docs/architecture.md) | Crates, roles, the request flow, HA (bus, leader election) and state backends |
 | [Configuration reference](docs/configuration.md) | Every `mockingbird.yaml` key, with its default, range, environment variable and flag |
+| [Proxy](docs/proxy.md) | `mockingbird proxy`: reaching mocks by real host names (`hosts:`) over HTTPS with a local CA, per runtime |
 | [Running locally](docs/deploy/local.md) | The binary, `serve`, offline mode and TLS |
 | [Docker Compose](docs/deploy/compose.md) | The Compose stack and its `ha`, `kafka`, `amqp` and `mqtt` profiles |
 | [Kubernetes](docs/deploy/kubernetes.md) | The Helm chart, external stores, OIDC, ingress, secrets and verifying releases |

@@ -243,6 +243,7 @@ async fn file_managed_mock_rejects_chaos_patch() {
                     }),
                     ..MockLimits::default()
                 },
+                hosts: vec![],
                 behavior: Default::default(),
             },
         )
@@ -282,6 +283,74 @@ async fn patch_limits_null_clears() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.limits, MockLimits::default());
+}
+
+#[tokio::test]
+async fn hosts_let_mocks_share_a_prefix() {
+    let h = harness().await;
+    let create =
+        |name: &str, hosts: Value| json!({"name": name, "route_prefix": "/", "hosts": hosts});
+    let (s, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(create("a", json!(["a.test"]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(body["hosts"], json!(["a.test"]));
+    let (s, _) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(create("b", json!(["b.test"]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(create("c", json!(["c.test", "b.test"]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(
+        body["detail"].as_str().unwrap().contains("\"b.test\""),
+        "{body}"
+    );
+    assert!(
+        body["detail"].as_str().unwrap().contains("default/b"),
+        "{body}"
+    );
+    let (s, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(create("d", json!(["D.test:80"]))),
+        )
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+#[tokio::test]
+async fn patch_hosts_replaces_and_checks_collisions() {
+    let h = harness().await;
+    for (name, host) in [("a", "a.test"), ("b", "b.test")] {
+        let body = json!({"name": name, "route_prefix": "/", "hosts": [host]});
+        assert_eq!(
+            h.send(Method::POST, "/api/v1/mocks", Some(body)).await.0,
+            StatusCode::CREATED
+        );
+    }
+    let (s, _) = h.patch("b", json!({"hosts": ["a.test"]})).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, body) = h.patch("b", json!({"hosts": ["c.test"]})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["hosts"], json!(["c.test"]));
+    let (s, body) = h.patch("b", json!({"hosts": []})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["hosts"], json!([]));
 }
 
 #[tokio::test]

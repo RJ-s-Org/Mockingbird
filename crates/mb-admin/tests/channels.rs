@@ -475,6 +475,7 @@ async fn put_on_file_mock_409() {
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
+                hosts: vec![],
             },
         )
         .await

@@ -100,6 +100,7 @@ async fn setup() -> Setup {
                     ..DataPlaneAuthConfig::default()
                 },
                 behavior: Default::default(),
+                hosts: vec![],
             },
         )
         .await
@@ -338,6 +339,7 @@ async fn orders_mock(store: &Arc<dyn ControlStore>, ws: &str, prefix: &str) -> M
                 limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
                 behavior: Default::default(),
+                hosts: vec![],
             },
         )
         .await

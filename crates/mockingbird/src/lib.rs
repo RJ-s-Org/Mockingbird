@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod onboard;
 pub mod ops;
 pub mod providers;
+pub mod proxy;
 pub mod reconcile;
 pub mod recorder;
 pub mod registry;

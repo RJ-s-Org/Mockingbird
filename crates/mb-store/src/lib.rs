@@ -505,6 +505,46 @@ pub fn validate_route_prefix(prefix: &str) -> Result<(), StoreError> {
     }
 }
 
+/// Each host is a lowercase DNS name or IPv4 address without a port: 1–253
+/// bytes of `.`-separated labels made of `[a-z0-9-]`, not starting or ending
+/// with `-`. No host may be listed twice.
+pub fn validate_hosts(hosts: &[String]) -> Result<(), StoreError> {
+    let mut seen = std::collections::HashSet::new();
+    for h in hosts {
+        let valid = (1..=253).contains(&h.len())
+            && h.split('.').all(|label| {
+                !label.is_empty()
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            });
+        if !valid {
+            return Err(StoreError::Invalid(format!(
+                "host {h:?} must be a lowercase DNS name or IPv4 address without a port"
+            )));
+        }
+        if !seen.insert(h.as_str()) {
+            return Err(StoreError::Invalid(format!("host {h:?} is listed twice")));
+        }
+    }
+    Ok(())
+}
+
+/// Whether two mocks' routes clash: the same prefix, and either both answer
+/// for any host or their host sets share a host.
+pub fn routes_collide(
+    a_prefix: &str,
+    a_hosts: &[String],
+    b_prefix: &str,
+    b_hosts: &[String],
+) -> bool {
+    a_prefix == b_prefix
+        && ((a_hosts.is_empty() && b_hosts.is_empty())
+            || a_hosts.iter().any(|h| b_hosts.contains(h)))
+}
+
 /// Per-mock request-log insert counters deciding when to prune.
 #[derive(Default)]
 pub(crate) struct PruneCounter(Mutex<HashMap<Uuid, i64>>);
@@ -720,6 +760,42 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn hosts_are_validated() {
+        let ok = |h: &[&str]| validate_hosts(&h.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(ok(&[]).is_ok());
+        assert!(ok(&["api.github.com", "image.tmdb.org", "localhost", "127.0.0.1"]).is_ok());
+        for bad in [
+            &["API.github.com"][..],
+            &["api.github.com:443"],
+            &["-a.test"],
+            &["a..test"],
+            &[""],
+            &["a.test", "a.test"],
+            &["*.github.com"],
+        ] {
+            assert!(matches!(ok(bad), Err(StoreError::Invalid(_))), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn routes_collide_by_prefix_and_host_set() {
+        let h = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(routes_collide("/", &h(&[]), "/", &h(&[])));
+        assert!(routes_collide(
+            "/",
+            &h(&["a.test"]),
+            "/",
+            &h(&["b.test", "a.test"])
+        ));
+        assert!(!routes_collide("/", &h(&["a.test"]), "/", &h(&["b.test"])));
+        assert!(
+            !routes_collide("/", &h(&["a.test"]), "/", &h(&[])),
+            "host-specific and hostless coexist"
+        );
+        assert!(!routes_collide("/", &h(&[]), "/graphql", &h(&[])));
     }
 
     #[test]

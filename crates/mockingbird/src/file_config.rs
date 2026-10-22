@@ -59,6 +59,84 @@ pub struct FileConfig {
     pub pii: PiiConfig,
     /// Smart imports (documentation, HAR, Postman). Read at startup.
     pub import: ImportConfig,
+    /// The intercepting HTTP proxy `serve` may start. Read at startup.
+    pub proxy: ProxyConfig,
+}
+
+/// The `proxy:` section.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProxyConfig {
+    /// Whether `serve` starts the proxy (`--proxy`).
+    pub enabled: bool,
+    /// The proxy's bind address. Loopback by default: off loopback,
+    /// `unmapped` must be `block`, or the port would be an open relay.
+    pub host: IpAddr,
+    /// The proxy's port (`--proxy-port`).
+    pub port: u16,
+    /// What happens to hosts no mock claims.
+    pub unmapped: Unmapped,
+    /// Hosts answered with generated placeholder images.
+    pub images: Vec<String>,
+    /// Where the local CA lives; unset uses `MB_CA_DIR` or
+    /// `~/.mockingbird/ca`. Relative paths are resolved against the config
+    /// file's directory by [`load`].
+    pub ca_dir: Option<PathBuf>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: crate::proxy::DEFAULT_PROXY_PORT,
+            unmapped: Unmapped::Pass,
+            images: Vec::new(),
+            ca_dir: None,
+        }
+    }
+}
+
+impl ProxyConfig {
+    /// Refuses `unmapped: pass` on a non-loopback `host`: anyone who can
+    /// reach the port could tunnel to any address through it.
+    pub fn check_bind(&self, host: IpAddr) -> Result<(), String> {
+        if host.is_loopback() || self.unmapped == Unmapped::Block {
+            Ok(())
+        } else {
+            Err(format!(
+                "proxy.unmapped: pass on the non-loopback proxy address {host} would let anyone who reaches it tunnel to any host; set proxy.unmapped: block, or bind proxy.host to a loopback address"
+            ))
+        }
+    }
+
+    /// `ca_dir`, else [`default_ca_dir`](crate::proxy::ca::default_ca_dir).
+    pub fn effective_ca_dir(&self) -> anyhow::Result<PathBuf> {
+        match &self.ca_dir {
+            Some(dir) => Ok(dir.clone()),
+            None => crate::proxy::ca::default_ca_dir(),
+        }
+    }
+}
+
+/// What the proxy does with a host no mock claims (`proxy.unmapped`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Unmapped {
+    /// Tunnel `CONNECT` and forward plain requests to the real host.
+    #[default]
+    Pass,
+    /// Answer 502 problem+json naming the host.
+    Block,
+}
+
+impl Unmapped {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unmapped::Pass => "pass",
+            Unmapped::Block => "block",
+        }
+    }
 }
 
 /// Which planes a node serves (`server.role`, `MB_ROLE`, `--role`).
@@ -953,6 +1031,10 @@ pub struct FileMock {
     /// A scenario of this mock applied when a call names none.
     #[serde(default)]
     pub default_scenario: Option<String>,
+    /// Host names the mock answers for (by `Host`); empty answers for any
+    /// host. With hosts, two mocks may share a route prefix.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 /// A mock's (or scenario's) `chaos:`.
@@ -1093,6 +1175,7 @@ impl FileMock {
             consistency: Consistency::default(),
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
+            hosts: Vec::new(),
         }
     }
 
@@ -1301,8 +1384,11 @@ impl FileConfig {
         }
         self.validate_limits()?;
         self.validate_protocols()?;
+        mb_store::validate_hosts(&self.proxy.images).map_err(|e| format!("proxy.images: {e}"))?;
+        self.proxy.check_bind(self.proxy.host)?;
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
+            mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
             if let Some(chaos) = &mock.chaos {
                 chaos.validate(&prefix)?;
             }
@@ -1533,6 +1619,11 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
         if mock.contract.is_relative() {
             mock.contract = dir.join(&mock.contract);
         }
+    }
+    if let Some(ca_dir) = &mut cfg.proxy.ca_dir
+        && ca_dir.is_relative()
+    {
+        *ca_dir = dir.join(&*ca_dir);
     }
     cfg.validate_file()
         .map_err(|e| anyhow!(e))

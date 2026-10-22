@@ -108,6 +108,12 @@ pub enum Command {
     /// Windsurf, Claude Desktop).
     #[command(subcommand)]
     Agent(crate::agents::AgentCommand),
+    /// Run the intercepting HTTP proxy in front of a running server, or
+    /// print the variables that send an app through it (`proxy env`).
+    Proxy(crate::proxy::ProxyArgs),
+    /// The local CA the proxy signs certificates with.
+    #[command(subcommand)]
+    Ca(crate::proxy::CaCommand),
     #[command(flatten)]
     Client(ClientCommand),
 }
@@ -152,6 +158,13 @@ pub struct ServeArgs {
     /// Reconcile again whenever the config file or a contract changes.
     #[arg(long, requires = "config")]
     pub watch: bool,
+    /// Start the intercepting HTTP proxy (`proxy.enabled`); see
+    /// `mockingbird proxy env`.
+    #[arg(long)]
+    pub proxy: bool,
+    /// The proxy's port [default: 8888].
+    #[arg(long)]
+    pub proxy_port: Option<u16>,
     #[arg(required_unless_present = "config")]
     pub contracts: Vec<PathBuf>,
 }
@@ -231,6 +244,11 @@ pub struct App {
     pub tls: Option<axum_server::tls_rustls::RustlsConfig>,
     /// Stops the certificate reloader when the app is dropped.
     pub tls_reloader: Option<crate::tls::ReloaderGuard>,
+    /// The outcome of the last `--watch` reload, which `/readyz` reports.
+    pub reload: watch::ReloadStatus,
+    /// The intercepting proxy (`proxy.enabled` on a node serving the data
+    /// plane); `None` otherwise.
+    pub proxy: Option<Arc<crate::proxy::ProxyState>>,
 }
 
 /// How long [`App::shutdown`] waits for the request log to drain.
@@ -331,6 +349,12 @@ pub fn apply_flags(cfg: &mut FileConfig, args: &ServeArgs) {
     }
     if let Some(url) = &args.storage_url {
         cfg.storage.url = url.clone();
+    }
+    if args.proxy {
+        cfg.proxy.enabled = true;
+    }
+    if let Some(port) = args.proxy_port {
+        cfg.proxy.port = port;
     }
     if let Some(timeout) = args.llm_timeout
         && let Some(name) = cfg.llm.default_profile.clone()
@@ -656,6 +680,21 @@ async fn build_app_on(
             axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
         )
         .merge(registry.router());
+    let proxy = match (role, cfg.proxy.enabled) {
+        (Role::All | Role::Data, true) => {
+            let dir = cfg.proxy.effective_ca_dir().context("proxy.ca_dir")?;
+            let ca = crate::proxy::ca::LocalCa::load_or_create(&dir)
+                .with_context(|| format!("proxy.ca_dir {}", dir.display()))?;
+            Some(crate::proxy::ProxyState::new(
+                registry.clone(),
+                data.clone(),
+                Arc::new(ca),
+                cfg.proxy.unmapped,
+                cfg.proxy.images.clone(),
+            )?)
+        }
+        _ => None,
+    };
 
     let sessions = web_auth.as_ref().map(|w| w.sessions.clone());
     let prometheus = telemetry::install_prometheus()?;
@@ -689,6 +728,7 @@ async fn build_app_on(
     let hooks_auth = admin_state.clone();
     // In `oidc` mode only authenticated callers see why `/readyz` is not ready.
     let readyz_auth = (cfg.auth.mode == AuthMode::Oidc).then(|| admin_state.auth.clone());
+    let reload = watch::ReloadStatus::default();
     let ops = ops::router_with_metrics_gate(
         OpsState {
             store: store.clone(),
@@ -699,6 +739,7 @@ async fn build_app_on(
             bus: Some(ha.bus.clone()),
             role,
             leader: leadership.watch(),
+            reload: reload.clone(),
         },
         metrics_gate,
     );
@@ -764,13 +805,15 @@ async fn build_app_on(
                     (Some(path), true) => {
                         let path = path.clone();
                         let (store, state) = (store.clone(), state.clone());
+                        let reload = reload.clone();
                         let start: crate::maintenance::StartWatch = Arc::new(move || {
-                            watch::spawn_with_hook(
+                            watch::spawn_with_status(
                                 path.clone(),
                                 store.clone(),
                                 state.clone(),
                                 prepare.clone(),
                                 Some(applied.clone()),
+                                reload.clone(),
                             )
                         });
                         Some(start)
@@ -819,6 +862,8 @@ async fn build_app_on(
         state,
         tls,
         tls_reloader,
+        reload,
+        proxy,
     })
 }
 

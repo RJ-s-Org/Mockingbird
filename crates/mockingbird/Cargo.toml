@@ -29,6 +29,10 @@ axum-server.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
+flate2.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 mb-admin.workspace = true
@@ -52,15 +56,20 @@ metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-native-certs.workspace = true
 serde_json.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["signal", "io-std", "io-util"] }
+tokio-rustls.workspace = true
 tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-opentelemetry.workspace = true
 uuid.workspace = true
+webpki-root-certs.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
@@ -77,3 +86,4 @@ tonic = { workspace = true, features = ["tls-aws-lc"] }
 tonic-health.workspace = true
 wiremock.workspace = true
 predicates = "3"
+x509-parser = "0.18.1"

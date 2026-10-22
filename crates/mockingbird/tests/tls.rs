@@ -81,6 +81,7 @@ async fn run(app: App) -> Running {
         data: Some(data),
         admin: Some(admin),
         grpc: Some(grpc),
+        proxy: None,
     };
     tokio::spawn(async move { serve_app(app, listeners, stop_rx).await.unwrap() });
     Running {

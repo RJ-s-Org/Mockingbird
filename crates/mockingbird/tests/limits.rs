@@ -449,6 +449,7 @@ async fn budget_shared_through_store() {
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
+                hosts: vec![],
             },
         )
         .await

@@ -548,7 +548,8 @@ pub(crate) fn field(
             };
             let conn = Arc::clone(ctx.data::<Arc<WsCall>>()?);
             let args = arguments(&ctx);
-            let items = open(rt, op_id, ty, shapes, conn, args).await?;
+            let selection = super::select::Selection::of(&ctx.ctx.field());
+            let items = open(rt, op_id, ty, shapes, selection, conn, args).await?;
             Ok(items.map(|r| r.map(widen)))
         })
     });
@@ -584,6 +585,7 @@ async fn open(
     op_id: String,
     ty: Type,
     shapes: Arc<Shapes>,
+    selection: super::select::Selection,
     conn: Arc<WsCall>,
     args: Map<String, Value>,
 ) -> async_graphql::Result<Items> {
@@ -690,6 +692,7 @@ async fn open(
         report,
         ty,
         shapes,
+        selection,
         dropped: false,
     };
     Ok(stream::unfold(state, |mut st| async move {
@@ -763,6 +766,8 @@ struct Subscription {
     /// The field's type, to project each item.
     ty: Type,
     shapes: Arc<Shapes>,
+    /// The field's selection, to re-key each item (keyed by field name).
+    selection: super::select::Selection,
     /// Chaos dropped the subscription: nothing more is sent.
     dropped: bool,
 }
@@ -793,6 +798,7 @@ impl Subscription {
             }
         };
         self.report.items += 1;
+        let value = super::select::rekey(value, &self.selection);
         Ok(project(value, &self.ty, &self.shapes).unwrap_or(FieldValue::NULL))
     }
 }

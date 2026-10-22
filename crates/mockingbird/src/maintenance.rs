@@ -306,6 +306,7 @@ mod tests {
                     chaos: None,
                     limits: Default::default(),
                     behavior: Default::default(),
+                    hosts: vec![],
                 },
             )
             .await

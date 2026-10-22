@@ -82,6 +82,9 @@ pub struct Mock {
     /// Response consistency, unknown-id handling and the default scenario.
     #[serde(default, skip_serializing_if = "MockBehavior::is_default")]
     pub behavior: MockBehavior,
+    /// Host names the mock answers for; empty answers for any host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -103,6 +106,9 @@ pub struct NewMock {
     pub limits: MockLimits,
     #[serde(default, skip_serializing_if = "MockBehavior::is_default")]
     pub behavior: MockBehavior,
+    /// Host names the mock answers for; empty answers for any host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 /// Whether a mock answers repeated reads from a per-session cache and seeds
