@@ -15,11 +15,14 @@ use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, NewContractVersion, NewMock, ResourceSource,
     SqliteControlStore,
 };
-use mockingbird::file_config::Unmapped;
+use mockingbird::config::{ServeArgs, apply_flags, build_app};
+use mockingbird::file_config::{FileConfig, Unmapped};
 use mockingbird::proxy::ca::LocalCa;
 use mockingbird::proxy::{ProxyState, serve};
 use mockingbird::registry::MockRegistry;
 use mockingbird::runtime::RuntimeDeps;
+use mockingbird::server::{Listeners, serve_app};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -242,4 +245,83 @@ async fn forwarding_ignores_proxy_environment() {
         .await
         .unwrap();
     assert_eq!(r.status(), 204);
+}
+
+async fn ephemeral() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").await.unwrap()
+}
+
+#[tokio::test]
+async fn serve_starts_the_proxy_from_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_dir = dir.path().join("ca");
+    let orders = fixture("openapi/orders-3.0.yaml");
+    let cfg = dir.path().join("mockingbird.yaml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "storage:\n  url: \"sqlite::memory:\"\nproxy:\n  enabled: true\n  unmapped: block\n  ca_dir: {}\nmocks:\n  orders:\n    contract: {}\n    route_prefix: /\n    hosts: [api.orders.test]\n",
+            ca_dir.display(),
+            orders.display()
+        ),
+    )
+    .unwrap();
+    let app = build_app(
+        &ServeArgs {
+            config: Some(cfg),
+            offline: true,
+            ..ServeArgs::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(app.proxy.is_some());
+    let (data, admin, proxy) = (ephemeral().await, ephemeral().await, ephemeral().await);
+    let (admin_url, proxy_url) = (
+        format!("http://{}", admin.local_addr().unwrap()),
+        format!("http://{}", proxy.local_addr().unwrap()),
+    );
+    let (_stop, stop_rx) = watch::channel(false);
+    tokio::spawn(serve_app(
+        app,
+        Listeners {
+            data: Some(data),
+            admin: Some(admin),
+            grpc: None,
+            proxy: Some(proxy),
+        },
+        stop_rx,
+    ));
+    let ca = std::fs::read(ca_dir.join("ca.pem")).unwrap();
+    let r = client(&proxy_url, &ca)
+        .get("https://api.orders.test/orders")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let hosts: Value = reqwest::get(format!("{admin_url}/proxy/hosts"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hosts, json!({"hosts": ["api.orders.test"]}));
+}
+
+#[test]
+fn proxy_flags_override_config() {
+    let mut cfg = FileConfig::default();
+    apply_flags(
+        &mut cfg,
+        &ServeArgs {
+            proxy: true,
+            proxy_port: Some(9999),
+            ..ServeArgs::default()
+        },
+    );
+    assert!(cfg.proxy.enabled);
+    assert_eq!(cfg.proxy.port, 9999);
+    assert_eq!(FileConfig::default().proxy.port, 8888);
+    assert_eq!(FileConfig::default().proxy.unmapped, Unmapped::Pass);
 }

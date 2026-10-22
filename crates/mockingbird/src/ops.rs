@@ -59,6 +59,8 @@ pub struct OpsState {
 ///   [`PING_TIMEOUT`]. With [`OpsState::readyz_auth`] set, `reasons` are
 ///   left out for callers without valid credentials.
 /// - `/metrics`: Prometheus text exposition.
+/// - `/proxy/hosts`: `{"hosts": [...]}`, the hosts the mounted mocks claim
+///   (sorted), which a standalone `mockingbird proxy` intercepts.
 pub fn router(st: OpsState) -> Router {
     router_with_metrics_gate(st, None)
 }
@@ -78,7 +80,13 @@ pub fn router_with_metrics_gate(st: OpsState, metrics_gate: Option<AdminState>) 
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", metrics_route)
+        .route("/proxy/hosts", get(proxy_hosts))
         .with_state(st)
+}
+
+/// The hosts the mounted mocks claim, for a standalone `mockingbird proxy`.
+async fn proxy_hosts(State(st): State<OpsState>) -> Response {
+    axum::Json(json!({"hosts": st.registry.claimed_hosts()})).into_response()
 }
 
 async fn healthz() -> Response {

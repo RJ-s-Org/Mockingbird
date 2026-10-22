@@ -59,6 +59,48 @@ pub struct FileConfig {
     pub pii: PiiConfig,
     /// Smart imports (documentation, HAR, Postman). Read at startup.
     pub import: ImportConfig,
+    /// The intercepting HTTP proxy `serve` may start. Read at startup.
+    pub proxy: ProxyConfig,
+}
+
+/// The `proxy:` section.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProxyConfig {
+    /// Whether `serve` starts the proxy (`--proxy`).
+    pub enabled: bool,
+    /// The proxy's port, on `server.host` (`--proxy-port`).
+    pub port: u16,
+    /// What happens to hosts no mock claims.
+    pub unmapped: Unmapped,
+    /// Hosts answered with generated placeholder images.
+    pub images: Vec<String>,
+    /// Where the local CA lives; unset uses `MB_CA_DIR` or
+    /// `~/.mockingbird/ca`. Relative paths are resolved against the config
+    /// file's directory by [`load`].
+    pub ca_dir: Option<PathBuf>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: crate::proxy::DEFAULT_PROXY_PORT,
+            unmapped: Unmapped::Pass,
+            images: Vec::new(),
+            ca_dir: None,
+        }
+    }
+}
+
+impl ProxyConfig {
+    /// `ca_dir`, else [`default_ca_dir`](crate::proxy::ca::default_ca_dir).
+    pub fn effective_ca_dir(&self) -> anyhow::Result<PathBuf> {
+        match &self.ca_dir {
+            Some(dir) => Ok(dir.clone()),
+            None => crate::proxy::ca::default_ca_dir(),
+        }
+    }
 }
 
 /// What the proxy does with a host no mock claims (`proxy.unmapped`).
@@ -1264,6 +1306,7 @@ impl FileConfig {
         }
         self.validate_limits()?;
         self.validate_protocols()?;
+        mb_store::validate_hosts(&self.proxy.images).map_err(|e| format!("proxy.images: {e}"))?;
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
@@ -1490,6 +1533,11 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
         if mock.contract.is_relative() {
             mock.contract = dir.join(&mock.contract);
         }
+    }
+    if let Some(ca_dir) = &mut cfg.proxy.ca_dir
+        && ca_dir.is_relative()
+    {
+        *ca_dir = dir.join(&*ca_dir);
     }
     cfg.validate_file()
         .map_err(|e| anyhow!(e))

@@ -51,6 +51,8 @@ pub struct Listeners {
     pub data: Option<TcpListener>,
     pub admin: Option<TcpListener>,
     pub grpc: Option<TcpListener>,
+    /// The intercepting proxy, when [`App::proxy`] is set.
+    pub proxy: Option<TcpListener>,
 }
 
 /// Which listeners a role binds: (data, admin, grpc). A `control` node
@@ -111,6 +113,15 @@ pub async fn run_with(
     };
 
     let app = build_app_with(&args, llm, ext).await?;
+    let proxy_addr = SocketAddr::new(cfg.server.host, cfg.proxy.port);
+    let proxy = match &app.proxy {
+        Some(_) if bind_data => Some(
+            TcpListener::bind(proxy_addr)
+                .await
+                .map_err(|e| anyhow::anyhow!("cannot bind the proxy on {proxy_addr}: {e}"))?,
+        ),
+        _ => None,
+    };
     tracing::info!(role = role.as_str(), "starting");
     let (scheme, grpc_mode) = match app.tls {
         Some(_) => ("https", "TLS"),
@@ -129,6 +140,12 @@ pub async fn run_with(
         Some(_) => tracing::info!("gRPC ({grpc_mode}) on {grpc_addr}"),
         None => tracing::info!("no gRPC listener"),
     }
+    if let (Some(_), Some(state)) = (&proxy, &app.proxy) {
+        tracing::info!(
+            "proxy on http://{proxy_addr} (CA {})",
+            state.ca_cert_path().display()
+        );
+    }
 
     let (stop_tx, stop_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -137,7 +154,17 @@ pub async fn run_with(
         crate::runtime::stop_open_streams();
         let _ = stop_tx.send(true);
     });
-    serve_app(app, Listeners { data, admin, grpc }, stop_rx).await?;
+    serve_app(
+        app,
+        Listeners {
+            data,
+            admin,
+            grpc,
+            proxy,
+        },
+        stop_rx,
+    )
+    .await?;
     Ok(())
 }
 
@@ -150,7 +177,12 @@ pub async fn serve_app(
     listeners: Listeners,
     stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let Listeners { data, admin, grpc } = listeners;
+    let Listeners {
+        data,
+        admin,
+        grpc,
+        proxy,
+    } = listeners;
     let grace_rx = stop.clone();
     let tls = app.tls.clone();
     // The peer address keys the login-failure audit rate limit.
@@ -158,8 +190,9 @@ pub async fn serve_app(
     let admin = serve_listener(admin, app.admin.clone(), tls.clone(), stop.clone());
     // axum serves HTTP/2 prior knowledge (h2c), which is what gRPC uses;
     // over TLS, ALPN negotiates h2.
-    let grpc = serve_listener(grpc, app.grpc.clone(), tls, stop);
-    let servers = async { tokio::join!(data, admin, grpc) };
+    let grpc = serve_listener(grpc, app.grpc.clone(), tls, stop.clone());
+    let proxy = serve_proxy(proxy, app.proxy.clone(), stop);
+    let servers = async { tokio::join!(data, admin, grpc, proxy) };
     // Connections still open this long after the stop signal (a gRPC
     // stream, a WebSocket) are abandoned, so the request log is still
     // flushed before the supervisor's kill.
@@ -168,10 +201,11 @@ pub async fn serve_app(
         tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT).await;
     };
     tokio::select! {
-        (data, admin, grpc) = servers => {
+        (data, admin, grpc, proxy) = servers => {
             data.map_err(|e| anyhow::anyhow!("data plane: {e}"))?;
             admin.map_err(|e| anyhow::anyhow!("admin API: {e}"))?;
             grpc.map_err(|e| anyhow::anyhow!("gRPC: {e}"))?;
+            proxy.map_err(|e| anyhow::anyhow!("proxy: {e}"))?;
         }
         () = grace => tracing::warn!(
             "connections still open {GRACEFUL_SHUTDOWN_TIMEOUT:?} after the stop signal; closing them"
@@ -179,6 +213,19 @@ pub async fn serve_app(
     }
     app.shutdown().await;
     Ok(())
+}
+
+/// Serves the proxy on `listener` until `stop` turns true; nothing to do
+/// without both a listener and a proxy.
+async fn serve_proxy(
+    listener: Option<TcpListener>,
+    state: Option<std::sync::Arc<crate::proxy::ProxyState>>,
+    stop: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    match (listener, state) {
+        (Some(listener), Some(state)) => crate::proxy::serve(listener, state, stop).await,
+        _ => Ok(()),
+    }
 }
 
 /// Resolves once `rx` turns true.

@@ -3132,3 +3132,11 @@ async fn readyz_degraded_after_failed_reload_until_fixed() {
     ws.write(BASIC);
     wait_for_readyz(&app.admin, |b| b["status"] == "ready").await;
 }
+
+#[test]
+fn invalid_proxy_image_host_is_rejected_at_load() {
+    let ws = Workspace::new();
+    ws.write("proxy:\n  images: [Bad:1]\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(format!("{err:#}").contains("proxy.images"), "{err:#}");
+}

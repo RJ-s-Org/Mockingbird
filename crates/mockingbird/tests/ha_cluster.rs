@@ -171,6 +171,7 @@ async fn start(dir: &Path, name: &str, role: &str, pg: &str, redis: &str) -> Nod
         data,
         admin: Some(admin),
         grpc,
+        proxy: None,
     };
     let served = tokio::spawn(async move { serve_app(app, listeners, stop_rx).await.unwrap() });
     Node {

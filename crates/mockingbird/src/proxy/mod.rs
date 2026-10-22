@@ -78,6 +78,11 @@ impl ProxyState {
             .unwrap_or(false)
     }
 
+    /// The local CA's certificate path.
+    pub fn ca_cert_path(&self) -> std::path::PathBuf {
+        self.ca.cert_path()
+    }
+
     /// Whether `host` gets placeholder images.
     pub(crate) fn is_image_host(&self, host: &str) -> bool {
         self.images.iter().any(|h| h == host)

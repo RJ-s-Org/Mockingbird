@@ -62,6 +62,19 @@ Settings for the HTTP requests Mockingbird makes to LLM providers, the audit web
 | `outbound.proxy` | URL | unset | `http://` or `https://` URL with a host | | Proxy for outbound requests. |
 | `outbound.no_proxy` | list of strings | `[]` | Host names, or `.domain` suffixes | | Hosts reached without the proxy. |
 
+## `proxy`
+
+An HTTP proxy that lets unmodified apps reach mocks by their real host names: it intercepts HTTPS to every host a mock lists in `mocks.<name>.hosts` (and to `proxy.images`) with a certificate from a local CA, and passes other hosts through or blocks them. Started by `serve` on nodes serving the data plane; `mockingbird proxy` runs it on its own. Read at startup.
+
+| Key | Type | Default | Range / rule | Env / flag | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `proxy` | section | | | | |
+| `proxy.enabled` | bool | `false` | | `--proxy` | Whether `serve` starts the proxy. |
+| `proxy.port` | port | `8888` | | `--proxy-port` | The proxy's port, on `server.host`. |
+| `proxy.unmapped` | `pass`, `block` | `pass` | | | What happens to a host no mock claims: `pass` tunnels it to the real host; `block` answers 502 problem+json naming the host. Each such host is logged once. |
+| `proxy.images` | list of strings | `[]` | Lowercase host names, no port | | Hosts answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment, else 300×450). |
+| `proxy.ca_dir` | path | `~/.mockingbird/ca` | Relative to the config file | `MB_CA_DIR` | Where the local CA (`ca.pem`, `ca.key`) is kept; created on first use, never installed system-wide. |
+
 ## `limits`
 
 Global admission limits. Per-mock limits are under [`mocks.<name>.limits`](#mocksnamelimits). Read at startup.
@@ -304,6 +317,9 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | `MB_GRPC_PORT` | `--grpc-port` | `server.grpc_port` |
 | | `--insecure-no-auth` | `server.insecure_no_auth` |
 | `MB_ROLE` | `--role` | `server.role` |
+| | `--proxy` | `proxy.enabled` |
+| | `--proxy-port` | `proxy.port` |
+| `MB_CA_DIR` | | `proxy.ca_dir` (also used by `mockingbird ca path` and `mockingbird proxy env`) |
 | `MB_STORAGE_URL` | `--storage-url` | `storage.url` |
 | `MB_STATE_URL` | | `storage.state_url` |
 | `MB_BUS_URL` | | `bus.url` |
