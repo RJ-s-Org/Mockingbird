@@ -36,6 +36,10 @@ pub const UNCONSTRAINED_MAX_CHARS: usize = 64;
 /// Width of the window an integer without tight bounds is drawn from.
 pub const SMALL_INT_WINDOW: i64 = 100;
 
+/// Width of the window an id-like integer (`id`, `*_id`, `*Id`) without
+/// tight bounds is drawn from, starting at 1.
+pub const ID_WINDOW: i64 = 1_000_000;
+
 /// Cost of a schema with no finite instance.
 const INFINITE: u64 = u64::MAX;
 
@@ -1009,6 +1013,19 @@ fn fake_integer<R: Rng>(s: &Map<String, Value>, field: Option<&str>, rng: &mut R
         (Some(l), Some(h)) => h - l > 10_000.0 || l <= I32_MIN || h >= I32_MAX,
         _ => true,
     };
+    let id_like = field.is_some_and(|f| {
+        f.eq_ignore_ascii_case("id") || f.ends_with("_id") || f.ends_with("Id") || f.ends_with("ID")
+    });
+    // Identifiers keep a wide positive range: a small window would make
+    // ids collide.
+    if huge && id_like {
+        let base = lo.unwrap_or(1.0).max(1.0);
+        let top = hi.unwrap_or(f64::INFINITY).min(base + ID_WINDOW as f64);
+        if top >= base {
+            let span = (top - base) as i64;
+            return Value::from(base as i64 + rng.random_range(0..=span));
+        }
+    }
     let county = field.is_some_and(|f| {
         let f = f.to_ascii_lowercase();
         COUNT_SUFFIXES.iter().any(|suffix| f.ends_with(suffix))

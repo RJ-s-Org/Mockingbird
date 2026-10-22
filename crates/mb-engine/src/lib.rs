@@ -666,7 +666,7 @@ impl Engine {
                 continue;
             }
             let fresh = (0..IDENTITY_DRAWS)
-                .map(|_| self.fake_value(bundle, &id_schema, None, &FakerHints::default()))
+                .map(|_| self.fake_field(bundle, &field, &id_schema))
                 .find(|v| !v.is_null() && !used.contains(&v.to_string()));
             if let (Some(fresh), Value::Object(obj)) = (fresh, &mut *item) {
                 used.insert(fresh.to_string());
@@ -693,7 +693,7 @@ impl Engine {
         let current = body.get(field)?;
         let id_schema = consistency::property_schema(bundle, schema, field)?;
         (0..IDENTITY_DRAWS).find_map(|_| {
-            let fresh = self.fake_value(bundle, &id_schema, None, &FakerHints::default());
+            let fresh = self.fake_field(bundle, field, &id_schema);
             if fresh.is_null() || &fresh == current {
                 return None;
             }
@@ -720,6 +720,20 @@ impl Engine {
             usage: Usage::default(),
             fallback_reason: None,
         }
+    }
+
+    /// A faker value for object member `field` of schema `schema`, so the
+    /// faker's name-based rules (id ranges) apply.
+    fn fake_field(&self, bundle: &Bundle, field: &str, schema: &Value) -> Value {
+        let wrapper = serde_json::json!({
+            "type": "object",
+            "required": [field],
+            "properties": {field: schema},
+        });
+        self.fake_value(bundle, &wrapper, None, &FakerHints::default())
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Null)
     }
 
     /// A faker value for `schema`, validated by `validator` when given:

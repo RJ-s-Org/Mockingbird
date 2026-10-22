@@ -25,7 +25,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Changed
 
-- Faker integers without tight bounds (and count-like fields) are drawn from 0..=100, ignoring bounds wider than ±2^31; nullable arrays are never `null`; strings without a `maxLength` are at most 64 characters.
+- Faker integers without tight bounds (and count-like fields) are drawn from 0..=100 (id-like fields such as `id`, `owner_id`, `userId` from 1..=1 000 000), ignoring bounds wider than ±2^31; nullable arrays are never `null`; strings without a `maxLength` are at most 64 characters.
 - An LLM string over 2 000 characters where the schema sets no `maxLength` is cut to 200 (`repaired`); the prompt asks for free text under 200 characters.
 - `pattern`, `maxLength`, `minLength`, `enum`, `format` and `const` errors in an LLM answer are patched locally without a repair call.
 - Generated lists get unique item ids, and a create never reuses an id the session already holds.

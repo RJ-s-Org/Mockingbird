@@ -621,3 +621,18 @@ fn echoed_values_fill_same_named_root_fields() {
     assert_eq!(v["page"], 3);
     assert_ne!(v["owner"]["login"], "octocat", "only root fields echo");
 }
+
+#[test]
+fn integer_ids_are_positive_and_spread_out() {
+    let schema = json!({"type": "object", "required": ["id", "owner_id", "userId"], "properties": {
+        "id": {"type": "integer"}, "owner_id": {"type": "integer"}, "userId": {"type": "integer", "minimum": -2147483648i64, "maximum": 2147483647}}});
+    let values: Vec<i64> = draws(schema, 100)
+        .iter()
+        .flat_map(|v| ["id", "owner_id", "userId"].map(|k| v[k].as_i64().unwrap()))
+        .collect();
+    assert!(values.iter().all(|n| *n >= 1), "{values:?}");
+    assert!(
+        values.iter().filter(|n| **n > 100).count() > 250,
+        "{values:?}"
+    );
+}

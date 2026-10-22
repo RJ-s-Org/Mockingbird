@@ -1183,3 +1183,26 @@ paths:
     assert_eq!(body["city"].as_str().unwrap().chars().count(), 200);
     assert_eq!(body["essay"].as_str().unwrap().len(), 3000);
 }
+
+#[test]
+fn fresh_integer_identities_are_spread_out() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Items, version: "1"}
+paths:
+  /items:
+    post:
+      operationId: createItem
+      responses:
+        "201": {description: OK, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: integer}}}}}}
+"#,
+    );
+    let op = bundle.operation("createItem").unwrap();
+    let engine = offline();
+    let big = (0..20)
+        .filter_map(|_| engine.fresh_identity(&bundle, op, &json!({"id": 1})))
+        .filter(|v| v["id"].as_i64().unwrap() > 100)
+        .count();
+    assert!(big >= 15, "{big} of 20 fresh ids above 100");
+}
