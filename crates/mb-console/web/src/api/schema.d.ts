@@ -1116,6 +1116,12 @@ export interface components {
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
             /** @description Whether callers may steer responses with `X-Mockingbird-*` headers. */
             header_overrides?: boolean;
+            /**
+             * @description Host names the mock answers for (lowercase, no port); none by
+             *     default, which answers for any host. Mocks with different hosts may
+             *     share a route prefix.
+             */
+            hosts?: string[];
             limits?: components["schemas"]["MockLimits"] | null;
             llm_profile?: string | null;
             /** @description `^[a-z0-9][a-z0-9-]{0,62}$` */
@@ -1410,6 +1416,8 @@ export interface components {
             created_at: string;
             data_plane_auth: components["schemas"]["DataPlaneAuthConfig"];
             header_overrides: boolean;
+            /** @description Host names the mock answers for; empty answers for any host. */
+            hosts: string[];
             /** Format: uuid */
             id: string;
             limits: components["schemas"]["MockLimits"];
@@ -1447,6 +1455,8 @@ export interface components {
             chaos?: components["schemas"]["ChaosSettings"] | null;
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
             header_overrides?: boolean | null;
+            /** @description Replaces the host list; `[]` clears it. */
+            hosts?: string[] | null;
             limits?: components["schemas"]["MockLimits"] | null;
             llm_profile?: string | null;
             persona?: string | null;
@@ -2072,7 +2082,7 @@ export interface operations {
                     "application/json": components["schemas"]["MockView"];
                 };
             };
-            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix */
+            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix on an overlapping host set */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2081,7 +2091,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name, route prefix, chaos or limits */
+            /** @description Invalid name, route prefix, hosts, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2201,7 +2211,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Managed by config file, or another mock has the route prefix */
+            /** @description Managed by config file, or another mock has its route prefix on an overlapping host set */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2210,7 +2220,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid route prefix, chaos or limits */
+            /** @description Invalid route prefix, hosts, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4240,7 +4250,7 @@ export interface operations {
                     "application/json": components["schemas"]["MockView"];
                 };
             };
-            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix */
+            /** @description The mock already exists (title "Mock already exists"), or another mock has its route prefix on an overlapping host set */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4249,7 +4259,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name, route prefix, chaos or limits */
+            /** @description Invalid name, route prefix, hosts, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4375,7 +4385,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Managed by config file, or another mock has the route prefix */
+            /** @description Managed by config file, or another mock has its route prefix on an overlapping host set */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4384,7 +4394,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid route prefix, chaos or limits */
+            /** @description Invalid route prefix, hosts, chaos or limits */
             422: {
                 headers: {
                     [name: string]: unknown;

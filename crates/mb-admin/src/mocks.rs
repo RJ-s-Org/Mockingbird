@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_store::{
     ChaosSettings, DataPlaneAuthConfig, Mock, MockLimits, NewMock, ResourceSource, StoreError,
-    validate_route_prefix,
+    routes_collide, validate_hosts, validate_route_prefix,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
@@ -125,6 +125,8 @@ pub struct MockView {
     pub chaos: Option<ChaosSettings>,
     #[schema(value_type = MockLimitsSchema)]
     pub limits: MockLimits,
+    /// Host names the mock answers for; empty answers for any host.
+    pub hosts: Vec<String>,
     pub source: Source,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -146,6 +148,7 @@ impl MockView {
             data_plane_auth: m.data_plane_auth,
             chaos: m.chaos,
             limits: m.limits,
+            hosts: m.hosts,
             created_at: m.created_at,
             updated_at: m.updated_at,
             active_version,
@@ -177,6 +180,11 @@ pub struct CreateMock {
     #[serde(default)]
     #[schema(value_type = Option<MockLimitsSchema>)]
     pub limits: MockLimits,
+    /// Host names the mock answers for (lowercase, no port); none by
+    /// default, which answers for any host. Mocks with different hosts may
+    /// share a route prefix.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -206,6 +214,8 @@ pub struct PatchMock {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<MockLimitsSchema>)]
     pub limits: Option<Option<MockLimits>>,
+    /// Replaces the host list; `[]` clears it.
+    pub hosts: Option<Vec<String>>,
 }
 
 /// Distinguishes an explicit `null` (`Some(None)`) from an absent field (`None`).
@@ -217,8 +227,6 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
-/// A 409 problem when a mock other than `except` (workspace, name), in any
-/// workspace, already serves `prefix`: route prefixes are global.
 /// Title of the 409 for a mock name already taken in the workspace.
 const MOCK_EXISTS: &str = "Mock already exists";
 
@@ -230,21 +238,34 @@ fn mock_exists(ws: &str, name: &str) -> Problem {
     )
 }
 
-async fn ensure_prefix_free(
+/// A 409 problem when a mock other than `except` (workspace, name), in any
+/// workspace, already serves `prefix` on an overlapping host set (see
+/// [`routes_collide`]): routes are global.
+async fn ensure_route_free(
     st: &AdminState,
     prefix: &str,
+    hosts: &[String],
     except: Option<(&str, &str)>,
 ) -> ApiResult<()> {
     let holder = st.store.list_all_mocks().await?.into_iter().find(|m| {
-        m.route_prefix == prefix && Some((m.workspace.as_str(), m.name.as_str())) != except
+        routes_collide(prefix, hosts, &m.route_prefix, &m.hosts)
+            && Some((m.workspace.as_str(), m.name.as_str())) != except
     });
-    match holder {
-        Some(holder) => Err(Problem::conflict(format!(
-            "route prefix {prefix:?} is already used by mock {}/{}",
-            holder.workspace, holder.name
-        ))),
-        None => Ok(()),
-    }
+    let Some(holder) = holder else {
+        return Ok(());
+    };
+    Err(Problem::conflict(
+        match hosts.iter().find(|h| holder.hosts.contains(h)) {
+            Some(host) => format!(
+                "route prefix {prefix:?} on host {host:?} is already used by mock {}/{}",
+                holder.workspace, holder.name
+            ),
+            None => format!(
+                "route prefix {prefix:?} is already used by mock {}/{}",
+                holder.workspace, holder.name
+            ),
+        },
+    ))
 }
 
 async fn view(st: &AdminState, m: Mock) -> ApiResult<MockView> {
@@ -279,8 +300,8 @@ pub async fn list(
     request_body = CreateMock,
     responses(
         (status = 201, body = MockView),
-        (status = 409, description = "The mock already exists (title \"Mock already exists\"), or another mock has its route prefix", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid name, route prefix, chaos or limits", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The mock already exists (title \"Mock already exists\"), or another mock has its route prefix on an overlapping host set", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid name, route prefix, hosts, chaos or limits", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn create(
@@ -298,7 +319,8 @@ pub async fn create(
         .route_prefix
         .clone()
         .unwrap_or_else(|| format!("/{}", body.name));
-    ensure_prefix_free(&st, &prefix, None).await?;
+    validate_hosts(&body.hosts)?;
+    ensure_route_free(&st, &prefix, &body.hosts, None).await?;
     let name = body.name.clone();
     let created = st
         .store
@@ -314,7 +336,7 @@ pub async fn create(
                 data_plane_auth: body.data_plane_auth,
                 chaos: body.chaos,
                 limits: body.limits,
-                hosts: vec![],
+                hosts: body.hosts,
             },
         )
         .await
@@ -371,8 +393,8 @@ pub async fn get_one(
     responses(
         (status = 200, body = MockView),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Managed by config file, or another mock has the route prefix", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid route prefix, chaos or limits", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Managed by config file, or another mock has its route prefix on an overlapping host set", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid route prefix, hosts, chaos or limits", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn patch(
@@ -385,10 +407,22 @@ pub async fn patch(
     let mut m = st.mock(&access.ws, &mock).await?;
     ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
     let before = snapshot(&view(&st, m.clone()).await?);
+    if let Some(hosts) = &body.hosts {
+        validate_hosts(hosts)?;
+    }
+    if let Some(prefix) = &body.route_prefix {
+        validate_route_prefix(prefix)?;
+    }
+    if body.route_prefix.is_some() || body.hosts.is_some() {
+        let prefix = body.route_prefix.as_deref().unwrap_or(&m.route_prefix);
+        let hosts = body.hosts.as_deref().unwrap_or(&m.hosts);
+        ensure_route_free(&st, prefix, hosts, Some((&m.workspace, &m.name))).await?;
+    }
     if let Some(prefix) = body.route_prefix {
-        validate_route_prefix(&prefix)?;
-        ensure_prefix_free(&st, &prefix, Some((&m.workspace, &m.name))).await?;
         m.route_prefix = prefix;
+    }
+    if let Some(hosts) = body.hosts {
+        m.hosts = hosts;
     }
     if let Some(persona) = body.persona {
         m.persona = persona;
