@@ -29,6 +29,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - The prompt asks for arrays of 3 to 5 items unless the request names a count.
 - The Admin API request log (and MCP `list_requests`) includes `fallback_reason`.
 - The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
+- An LLM answer whose only errors are nulls the schema does not allow is patched instead of sent back for a repair call: an optional property is dropped, a required one gets a faker value. The response's source is `repaired`. Real APIs return null where their docs never say so (TMDB's `belongs_to_collection`), and models copy them; this saved a 20–40 s repair call on 4 of 8 TMDB detail pages.
 - An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
 
 ### Fixed

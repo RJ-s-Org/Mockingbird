@@ -569,6 +569,7 @@ impl Engine {
             tracing::info_span!("mb.validate").in_scope(|| self.check_output(validator, &first));
         let errors = match checked {
             Checked::Valid(value) => return Ok((value, Source::Llm)),
+            Checked::Patched(value) => return Ok((value, Source::Repaired)),
             Checked::Rejected(reason) => return Err(reason),
             Checked::Invalid(errors) => errors,
         };
@@ -594,7 +595,7 @@ impl Engine {
             let checked = tracing::info_span!("mb.validate")
                 .in_scope(|| self.check_output(validator, &second));
             match checked {
-                Checked::Valid(value) => Ok((value, Source::Repaired)),
+                Checked::Valid(value) | Checked::Patched(value) => Ok((value, Source::Repaired)),
                 Checked::Rejected(reason) => Err(reason),
                 Checked::Invalid(errors) => Err(format!(
                     "repaired output still invalid: {}",
