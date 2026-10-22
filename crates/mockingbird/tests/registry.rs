@@ -11,8 +11,8 @@ use mb_protocols::ProtocolSettings;
 use mb_protocols::events::EventDeps;
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{
-    ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, NewContractVersion, NewMock,
-    ResourceSource, SqliteControlStore,
+    Consistency, ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock, MockBehavior,
+    NewContractVersion, NewMock, ResourceSource, SqliteControlStore, UnknownIds,
 };
 use mockingbird::registry::MockRegistry;
 use mockingbird::runtime::{RuntimeDeps, build_provider};
@@ -926,4 +926,24 @@ async fn settings_change_restarts_runtime() {
             .map_err(|f| f.error),
         Err(PublishError::Disabled("orderCreated".into()))
     );
+}
+
+#[tokio::test]
+async fn runtime_carries_mock_behavior() {
+    let store = store().await;
+    let mut mock = create_mock(&store, "orders", "/orders", None).await;
+    activate(&store, &mock, &fixture_source()).await;
+    mock.behavior = MockBehavior {
+        consistency: Consistency::Off,
+        unknown_ids: UnknownIds::NotFound,
+        default_scenario: Some("gift".into()),
+    };
+    let mock = store.update_mock(&mock).await.unwrap();
+    let rt = mockingbird::runtime::build_runtime(&deps(store.clone()), &mock)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!rt.consistency);
+    assert_eq!(rt.unknown_ids, mb_protocols::UnknownIds::NotFound);
+    assert_eq!(rt.default_scenario.as_deref(), Some("gift"));
 }

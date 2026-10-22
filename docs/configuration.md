@@ -225,6 +225,9 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.data_plane_auth` | section | | | | How callers of the mock authenticate. |
 | `mocks.<name>.data_plane_auth.mode` | `none`, `api_key`, `passthrough_validate` | `none` | | | `api_key`: a `data-plane` API key of the mock's workspace is required. `passthrough_validate`: credentials must be present in the form the contract's security requirements declare, without being verified. |
 | `mocks.<name>.data_plane_auth.header` | string | `x-api-key` | Lowercase | | Header carrying the key in `api_key` mode (or `?api_key=`). |
+| `mocks.<name>.consistency` | `on`, `off` | `on` | | | `on`: a session repeating a read gets the same answer (`X-Mockingbird-Source: cache`, 500 answers per session, cleared by any write of the resource type and by a session reset), and the items of a list answer are stored so a later read by id returns them. `off` generates every answer anew. Reads of a stored resource are answered from session state (`state`) either way. |
+| `mocks.<name>.unknown_ids` | `generate`, `404` | `generate` | | | How a read by path id of a resource the session does not hold (created or listed) is answered: generated, or the operation's declared 404 (problem+json when it declares none). A forced status wins; reads without a path id are never 404'd. |
+| `mocks.<name>.default_scenario` | string | unset | A key of `mocks.<name>.scenarios` | | Scenario applied when a call sends no `X-Mockingbird-Scenario` header. |
 
 ### `mocks.<name>.chaos`
 
@@ -257,7 +260,7 @@ Admission limits of one mock. Unset fields use the global [`limits`](#limits), o
 
 ### `mocks.<name>.scenarios`
 
-Named scenarios, applied with `X-Mockingbird-Scenario: <name>` or from the console.
+Named scenarios, applied with `X-Mockingbird-Scenario: <name>`, by the mock's `default_scenario` when a request names none, or from the console.
 
 | Key | Type | Default | Range / rule | Env / flag | Meaning |
 | --- | --- | --- | --- | --- | --- |
@@ -267,7 +270,9 @@ Named scenarios, applied with `X-Mockingbird-Scenario: <name>` or from the conso
 | `mocks.<name>.scenarios.<name>.status` | integer | unset | A status the contract declares, or a 5xx | | Answer with this status's response variant (`set` applies to it too); an undeclared 5xx is answered natively. Any other status must be declared by one of the scenario's `operations` (by any operation when it lists none), or the config is rejected, as the Admin API answers 422; an operation that does not declare it serves its own status. |
 | `mocks.<name>.scenarios.<name>.latency` | duration | unset | | | Added latency. |
 | `mocks.<name>.scenarios.<name>.set` | JSON object | unset | | | Fields forced into the response body. |
-| `mocks.<name>.scenarios.<name>.operations` | list | `[]` (all) | Operation ids | | Operations the scenario applies to. |
+| `mocks.<name>.scenarios.<name>.operations` | list | `[]` (all) | Operation ids | | Operations the scenario applies to. Each entry is an operation id, or `{id, instructions}`. |
+| `mocks.<name>.scenarios.<name>.operations[].id` | string | | An operation id | | The operation of an `{id, instructions}` entry. |
+| `mocks.<name>.scenarios.<name>.operations[].instructions` | string | unset | | | Instructions replacing the scenario's `instructions` for that operation. |
 | `mocks.<name>.scenarios.<name>.stream_items` | integer | unset | | | Items per streamed response unless `X-Mockingbird-Stream-Items` overrides it. |
 | `mocks.<name>.scenarios.<name>.stream_item_interval` | duration | unset | At most `30s` | | Pause between streamed items. |
 | `mocks.<name>.scenarios.<name>.chaos` | section | unset | | | Replaces the mock's chaos while the scenario applies. |

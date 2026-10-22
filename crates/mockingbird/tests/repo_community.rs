@@ -166,7 +166,7 @@ fn assert_scenario_statuses_declared(path: &Path) {
         for (sname, sc) in &m.scenarios {
             if let Some(status) = sc.status
                 && let Some(why) =
-                    mb_admin::undeclared_scenario_status(&bundle, &sc.operations, status)
+                    mb_admin::undeclared_scenario_status(&bundle, &sc.operation_ids(), status)
             {
                 panic!("{}: mock {mock}, scenario {sname}: {why}", path.display());
             }

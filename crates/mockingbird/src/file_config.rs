@@ -17,8 +17,8 @@ use mb_mcm::{StateChangeKind, Trigger};
 use mb_protocols::ProtocolSettings;
 use mb_protocols::events::{BrokerConfig, BrokerKind, MQTT_TLS_UNSUPPORTED, SaslConfig};
 use mb_store::{
-    ChaosSettings, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode, LatencyJitter,
-    MockLimits, RateLimit,
+    ChaosSettings, Consistency, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
+    LatencyJitter, MockLimits, RateLimit, UnknownIds,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -942,6 +942,17 @@ pub struct FileMock {
     /// Admission limits; unset fields use the global `limits:`.
     #[serde(default)]
     pub limits: FileMockLimits,
+    /// `on` (default): repeated reads in a session get the same answer and
+    /// listed items are served by id; `off` generates every answer anew.
+    #[serde(default)]
+    pub consistency: Consistency,
+    /// `generate` (default) or `404`: how a read of an id the session does
+    /// not hold is answered.
+    #[serde(default)]
+    pub unknown_ids: UnknownIds,
+    /// A scenario of this mock applied when a call names none.
+    #[serde(default)]
+    pub default_scenario: Option<String>,
 }
 
 /// A mock's (or scenario's) `chaos:`.
@@ -1079,6 +1090,9 @@ impl FileMock {
             data_plane_auth: DataPlaneAuthConfig::default(),
             chaos: None,
             limits: FileMockLimits::default(),
+            consistency: Consistency::default(),
+            unknown_ids: UnknownIds::default(),
+            default_scenario: None,
         }
     }
 
@@ -1150,8 +1164,9 @@ pub struct FileScenario {
     pub latency: Option<Duration>,
     /// A JSON object of fields forced into the response body.
     pub set: Option<Value>,
-    /// Operation ids the scenario applies to; empty means all.
-    pub operations: Vec<String>,
+    /// Operations the scenario applies to (an id, or `{id, instructions}`);
+    /// empty means all.
+    pub operations: Vec<FileScenarioOperation>,
     /// Items per streamed response unless `X-Mockingbird-Stream-Items`
     /// overrides it.
     pub stream_items: Option<u32>,
@@ -1160,6 +1175,53 @@ pub struct FileScenario {
     pub stream_item_interval: Option<Duration>,
     /// Replaces the mock's chaos while the scenario applies.
     pub chaos: Option<FileChaos>,
+}
+
+/// One `operations:` entry of a scenario: an operation id, or an id with
+/// instructions replacing the scenario's for that operation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum FileScenarioOperation {
+    Id(String),
+    Entry(FileScenarioOperationEntry),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileScenarioOperationEntry {
+    pub id: String,
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+impl FileScenarioOperation {
+    pub fn id(&self) -> &str {
+        match self {
+            FileScenarioOperation::Id(id) => id,
+            FileScenarioOperation::Entry(e) => &e.id,
+        }
+    }
+}
+
+impl FileScenario {
+    /// The ids of `operations`, in order.
+    pub fn operation_ids(&self) -> Vec<String> {
+        self.operations.iter().map(|o| o.id().to_string()).collect()
+    }
+
+    /// Per-operation instructions from `operations`, by id.
+    pub fn operation_instructions(&self) -> BTreeMap<String, String> {
+        self.operations
+            .iter()
+            .filter_map(|o| match o {
+                FileScenarioOperation::Entry(FileScenarioOperationEntry {
+                    id,
+                    instructions: Some(text),
+                }) => Some((id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Longest accepted `auth.session_ttl`.
@@ -1248,6 +1310,13 @@ impl FileConfig {
                 .to_store()
                 .validate()
                 .map_err(|e| format!("{prefix}{e}"))?;
+            if let Some(default) = &mock.default_scenario
+                && !mock.scenarios.contains_key(default)
+            {
+                return Err(format!(
+                    "{prefix}default_scenario: no scenario named {default:?}"
+                ));
+            }
             for (sname, scenario) in &mock.scenarios {
                 let prefix = format!("mocks.{name}.scenarios.{sname}.");
                 if let Some(chaos) = &scenario.chaos {
