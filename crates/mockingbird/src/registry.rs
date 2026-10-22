@@ -59,8 +59,17 @@ struct Mounted {
 /// How a mounted mock is reached.
 #[derive(Clone)]
 enum Served {
-    /// By the data-plane dispatcher, below a route prefix.
-    Http { prefix: String, router: Router },
+    /// By the data-plane dispatcher, below a route prefix, for the hosts
+    /// it lists (any host when empty).
+    Http {
+        prefix: String,
+        hosts: Vec<String>,
+        /// The path a request for the mount point itself is sent to: a
+        /// GraphQL mock at `/graphql` answers `POST /graphql`, as well as
+        /// `/graphql/graphql`.
+        root: Option<String>,
+        router: Router,
+    },
     /// By the shared gRPC server; the mock's route prefix is ignored.
     Grpc(Arc<GrpcMock>),
 }
@@ -85,6 +94,48 @@ impl Mounted {
             Served::Grpc(_) => None,
         }
     }
+
+    /// The hosts the mock answers for; empty for any host or a gRPC mock.
+    fn hosts(&self) -> &[String] {
+        match &self.served {
+            Served::Http { hosts, .. } => hosts,
+            Served::Grpc(_) => &[],
+        }
+    }
+
+    /// Whether this mock and `other` claim the same data-plane route.
+    fn collides(&self, other: &Mounted) -> bool {
+        match (self.prefix(), other.prefix()) {
+            (Some(a), Some(b)) => mb_store::routes_collide(a, self.hosts(), b, other.hosts()),
+            _ => false,
+        }
+    }
+}
+
+/// `raw` (a `Host` value or URI host) lowercased, without a port, IPv6
+/// brackets or one trailing dot; `None` when nothing is left.
+pub fn normalize_host(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let host = if let Some(rest) = raw.strip_prefix('[') {
+        rest.split_once(']').map_or(rest, |(h, _)| h)
+    } else if raw.matches(':').count() == 1 {
+        raw.split_once(':').map_or(raw, |(h, _)| h)
+    } else {
+        raw
+    };
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// The host a request is addressed to: the URI authority (absolute-form or
+/// HTTP/2 `:authority`), else the `Host` header; see [`normalize_host`].
+pub fn request_host(req: &Request) -> Option<String> {
+    req.uri().host().and_then(normalize_host).or_else(|| {
+        req.headers()
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .and_then(normalize_host)
+    })
 }
 
 /// Mounted mocks from every workspace, sorted by prefix length, longest
@@ -159,7 +210,7 @@ impl MockRegistry {
                 }
             };
             if let Some(prefix) = mounted.prefix()
-                && let Some(holder) = next.iter().find(|m| m.prefix() == Some(prefix))
+                && let Some(holder) = next.iter().find(|m| m.collides(&mounted))
             {
                 tracing::error!(
                     mock = %mounted.label(),
@@ -214,9 +265,11 @@ impl MockRegistry {
             .load()
             .iter()
             .find(|m| m.is(workspace, name))
-            .and_then(|m| m.prefix().map(str::to_owned));
+            .and_then(|m| m.prefix().map(|p| (p.to_owned(), m.hosts().to_vec())));
         let released = match (&held, &mounted) {
-            (Some(old), Some(new)) => new.prefix() != Some(old.as_str()),
+            (Some((old, old_hosts)), Some(new)) => {
+                new.prefix() != Some(old.as_str()) || new.hosts() != old_hosts.as_slice()
+            }
             (Some(_), None) => true,
             (None, _) => false,
         };
@@ -241,31 +294,29 @@ impl MockRegistry {
             .cloned()
             .collect();
         if let Some(mounted) = mounted {
-            let prefix = mounted.prefix().map(str::to_owned);
-            let holder = prefix
-                .as_deref()
-                .and_then(|p| next.iter().position(|m| m.prefix() == Some(p)));
-            match (holder, prefix) {
-                // The holder sorts first by (workspace, name), so it keeps
-                // the prefix.
-                (Some(i), Some(prefix)) if next[i].key() < mounted.key() => {
+            let prefix = mounted.prefix().unwrap_or_default().to_owned();
+            let holders: Vec<usize> = (0..next.len())
+                .filter(|&i| next[i].collides(&mounted))
+                .collect();
+            // A holder that sorts first by (workspace, name) keeps the route.
+            if let Some(&i) = holders.iter().find(|&&i| next[i].key() < mounted.key()) {
+                tracing::error!(
+                    mock = %mounted.label(),
+                    prefix = %prefix,
+                    holder = %next[i].label(),
+                    "route prefix already mounted by another mock; mock skipped"
+                );
+            } else {
+                for &i in holders.iter().rev() {
+                    let displaced = next.remove(i);
                     tracing::error!(
-                        mock = %mounted.label(),
-                        prefix = %prefix,
-                        holder = %next[i].label(),
-                        "route prefix already mounted by another mock; mock skipped"
-                    );
-                }
-                (Some(i), Some(prefix)) => {
-                    tracing::error!(
-                        mock = %next[i].label(),
+                        mock = %displaced.label(),
                         prefix = %prefix,
                         holder = %mounted.label(),
                         "route prefix taken by a mock that sorts first; mock unmounted"
                     );
-                    next[i] = mounted;
                 }
-                _ => next.push(mounted),
+                next.push(mounted);
             }
         }
         self.publish(next).await;
@@ -302,7 +353,9 @@ impl MockRegistry {
     }
 
     /// The data-plane router: forwards each request to the mock with the
-    /// longest matching prefix, with that prefix stripped.
+    /// longest matching prefix among those answering for the request's
+    /// host (see [`request_host`]), with that prefix stripped. At equal
+    /// prefix length a mock listing the host wins over one with no hosts.
     pub fn router(self: &Arc<Self>) -> Router {
         let registry = Arc::clone(self);
         Router::new().fallback(move |req: Request| {
@@ -323,6 +376,25 @@ impl MockRegistry {
                     .map(|p| (m.workspace.clone(), m.name.clone(), p.to_owned()))
             })
             .collect()
+    }
+
+    /// Whether a mounted mock lists `host` (already normalized) in its hosts.
+    pub fn claims_host(&self, host: &str) -> bool {
+        self.mounted
+            .load()
+            .iter()
+            .any(|m| m.hosts().iter().any(|h| h == host))
+    }
+
+    /// Every host a mounted mock lists, sorted and deduplicated.
+    pub fn claimed_hosts(&self) -> Vec<String> {
+        let hosts: BTreeSet<String> = self
+            .mounted
+            .load()
+            .iter()
+            .flat_map(|m| m.hosts().iter().cloned())
+            .collect();
+        hosts.into_iter().collect()
     }
 
     /// `(workspace, name)` of every mounted mock, gRPC mocks included.
@@ -447,9 +519,11 @@ impl MockRegistry {
     /// Callers hold `self.reload`, so publishes do not interleave.
     async fn publish(&self, mut next: Vec<Mounted>) {
         let prefix_len = |m: &Mounted| m.prefix().map_or(0, str::len);
+        // Longest prefix first; at equal length host-specific mocks first.
         next.sort_by(|a, b| {
             prefix_len(b)
                 .cmp(&prefix_len(a))
+                .then_with(|| a.hosts().is_empty().cmp(&b.hosts().is_empty()))
                 .then_with(|| a.key().cmp(&b.key()))
         });
         let grpc: Vec<(MockKey, Arc<GrpcMock>)> = next
@@ -520,17 +594,26 @@ impl MockRegistry {
         // One snapshot per request: a swap mid-request does not affect it.
         let snapshot = self.mounted.load_full();
         let path = req.uri().path().to_owned();
+        let host = request_host(&req);
         let Some((prefix, router, rest)) = snapshot.iter().find_map(|m| match &m.served {
-            Served::Http { prefix, router } => {
-                strip_prefix(&path, prefix).map(|rest| (prefix, router, rest))
+            Served::Http {
+                prefix,
+                hosts,
+                root,
+                router,
+            } if hosts.is_empty() || host.as_ref().is_some_and(|h| hosts.contains(h)) => {
+                strip_prefix(&path, prefix).map(|rest| match root {
+                    Some(root) if prefix != "/" && rest == "/" => (prefix, router, root.as_str()),
+                    _ => (prefix, router, rest),
+                })
             }
-            Served::Grpc(_) => None,
+            _ => None,
         }) else {
-            return problem(
-                404,
-                "No mock mounted at this path",
-                format!("no mock is mounted at a prefix of {path}"),
-            );
+            let detail = match &host {
+                Some(host) => format!("no mock is mounted at a prefix of {path} for host {host}"),
+                None => format!("no mock is mounted at a prefix of {path}"),
+            };
+            return problem(404, "No mock mounted at this path", detail);
         };
         match rewrite_path(req.uri(), rest) {
             Ok(uri) => *req.uri_mut() = uri,
@@ -618,8 +701,11 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
         ))
     };
     let ws = events.as_ref().and_then(|events| events.ws_router());
+    let root = (protocol == Protocol::Graphql).then(|| deps.protocols.graphql_path.clone());
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
+        hosts: mock.hosts.clone(),
+        root: root.clone(),
         router: match &ws {
             Some(ws) => ws.clone().fallback_service(router),
             None => router,
@@ -706,7 +792,22 @@ async fn event_setup(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_prefix;
+    use super::{normalize_host, strip_prefix};
+
+    #[test]
+    fn hosts_are_normalized() {
+        assert_eq!(
+            normalize_host("API.Example.TEST:443").as_deref(),
+            Some("api.example.test")
+        );
+        assert_eq!(
+            normalize_host("api.example.test.").as_deref(),
+            Some("api.example.test")
+        );
+        assert_eq!(normalize_host("[::1]:8080").as_deref(), Some("::1"));
+        assert_eq!(normalize_host("127.0.0.1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(normalize_host(""), None);
+    }
 
     #[test]
     fn prefixes_match_at_segment_boundaries() {
