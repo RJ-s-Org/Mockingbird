@@ -171,16 +171,24 @@ impl Engine {
     }
 }
 
-/// The value inside a one-key object, when it is valid and the object is not.
-/// JSON-object output mode only allows an object at the top level, so models
-/// wrap the array (or scalar) an operation returns: `{"orders": [...]}`.
+/// The value inside one or two nested one-key objects, when it is valid and
+/// the object is not. JSON-object output mode only allows an object at the
+/// top level, so models wrap the array (or scalar) an operation returns:
+/// `{"orders": [...]}`; asked for a GraphQL field they answer like a GraphQL
+/// server: `{"data": {"user": {...}}}`.
 fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> {
-    let Value::Object(map) = value else {
-        return None;
-    };
-    if map.len() != 1 {
-        return None;
+    let mut value = value;
+    for _ in 0..2 {
+        let Value::Object(map) = value else {
+            return None;
+        };
+        if map.len() != 1 {
+            return None;
+        }
+        value = map.values().next()?;
+        if validator.validate(value).is_ok() {
+            return Some(value.clone());
+        }
     }
-    let inner = map.values().next()?;
-    validator.validate(inner).is_ok().then(|| inner.clone())
+    None
 }

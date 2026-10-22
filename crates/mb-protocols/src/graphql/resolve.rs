@@ -65,6 +65,8 @@ pub(crate) struct HttpCall {
     /// admitted again.
     admitted: Option<Tenancy>,
     collected: Mutex<Collected>,
+    /// The query's shared LLM call, set up by the first root resolver.
+    pub(crate) batch: std::sync::OnceLock<Option<Arc<super::batch::Batch>>>,
 }
 
 /// What the root resolvers learned, read once execution is done.
@@ -96,6 +98,7 @@ impl HttpCall {
             variables,
             admitted,
             collected: Mutex::new(Collected::default()),
+            batch: std::sync::OnceLock::new(),
         }
     }
 
@@ -240,7 +243,15 @@ pub(crate) async fn root(
         })
     });
     let selection = super::select::Selection::of(&ctx.ctx.field());
-    let result = generate(rt, op_id, &http, key, args, &selection)
+    // Over HTTP, a query's root fields share one LLM call.
+    let batch = if websocket {
+        None
+    } else {
+        http.batch
+            .get_or_init(|| super::batch::Batch::for_query(ctx.ctx))
+            .clone()
+    };
+    let result = generate(rt, op_id, &http, key, args, &selection, batch.as_deref())
         .instrument(span.clone())
         .await;
     if websocket && let Some(delay) = http.collected().delay {
@@ -268,6 +279,26 @@ async fn generate(
     key: String,
     args: Map<String, Value>,
     selection: &super::select::Selection,
+    batch: Option<&super::batch::Batch>,
+) -> Result<Value, Error> {
+    let mut batch = batch;
+    let result = generate_in(rt, op_id, http, key, args, selection, &mut batch).await;
+    // A root field that did not join the batch must not hold it up.
+    if let Some(batch) = batch {
+        batch.withdraw();
+    }
+    result
+}
+
+/// [`generate`]; takes `batch` (leaving `None`) when it joins it.
+async fn generate_in(
+    rt: &MockRuntime,
+    op_id: &str,
+    http: &HttpCall,
+    key: String,
+    args: Map<String, Value>,
+    selection: &super::select::Selection,
+    batch: &mut Option<&super::batch::Batch>,
 ) -> Result<Value, Error> {
     let started = Instant::now();
     let Some(op) = rt.bundle.operation(op_id) else {
@@ -345,19 +376,43 @@ async fn generate(
                         .and_then(|o| o.schema.as_ref())
                         .filter(|_| !stores)
                         .map(|schema| super::select::narrow(schema, &rt.bundle.defs, selection));
-                    match call::generate_narrowed(rt, &plan, &call, narrowed.as_ref()).await {
-                        Ok(generated) => {
-                            report.usage = generated.usage;
-                            report.source = Some(generated.source);
-                            report.fallback_reason = generated.fallback_reason;
-                            Ok(generated.body.unwrap_or(Value::Null))
+                    let joined = match batch.take() {
+                        Some(b) => {
+                            let (target, related) = call::read_state(rt, &plan, &call).await;
+                            let part = super::batch::Part {
+                                key: key.clone(),
+                                op_id: op.id.clone(),
+                                call: call.clone(),
+                                schema: narrowed.clone(),
+                                target,
+                                related,
+                                scenario: plan.scenario.map(|s| s.spec.clone()),
+                            };
+                            b.join(rt, part).await
                         }
-                        Err(EngineError::UndeclaredStatus(code)) => Err(Failure::new(
-                            400,
-                            format!("operation {} declares no response for status {code}", op.id),
-                        )),
-                        Err(e) => Err(Failure::new(500, e.to_string())),
-                    }
+                        None => None,
+                    };
+                    let generated = match joined {
+                        Some(joined) => joined.map_err(|reason| Failure::new(500, reason)),
+                        None => call::generate_narrowed(rt, &plan, &call, narrowed.as_ref())
+                            .await
+                            .map_err(|e| match e {
+                                EngineError::UndeclaredStatus(code) => Failure::new(
+                                    400,
+                                    format!(
+                                        "operation {} declares no response for status {code}",
+                                        op.id
+                                    ),
+                                ),
+                                e => Failure::new(500, e.to_string()),
+                            }),
+                    };
+                    generated.map(|generated| {
+                        report.usage = generated.usage;
+                        report.source = Some(generated.source);
+                        report.fallback_reason = generated.fallback_reason;
+                        generated.body.unwrap_or(Value::Null)
+                    })
                 }
             }
         }

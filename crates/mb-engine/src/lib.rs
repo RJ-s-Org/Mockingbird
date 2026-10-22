@@ -57,6 +57,16 @@ pub struct OperationCall {
     pub body: Option<Value>,
 }
 
+/// One root field of a GraphQL query answered by
+/// [`Engine::generate_joint`]: its response key, operation, call and context
+/// (a 2xx response; `ctx.response_schema` narrows it).
+pub struct JointPart<'a> {
+    pub key: &'a str,
+    pub op: &'a Operation,
+    pub call: &'a OperationCall,
+    pub ctx: GenerationContext<'a>,
+}
+
 /// State the response must stay consistent with.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GenerationContext<'a> {
@@ -335,6 +345,104 @@ impl Engine {
         Ok(finish(&validator, op, call, &ctx, response))
     }
 
+    /// Answers every part with one LLM call: one object keyed by the parts'
+    /// keys (a nullable part may be left out and reads as null), validated (and repaired) as a whole, then split and finished per
+    /// part. The call's usage is reported on the first part. Without a
+    /// provider, for a part with a forced status or no schema, or when the
+    /// joint answer stays invalid, every part is generated on its own.
+    pub async fn generate_joint(
+        &self,
+        bundle: &Bundle,
+        parts: &[JointPart<'_>],
+    ) -> Vec<Result<GeneratedResponse, EngineError>> {
+        match self.try_joint(bundle, parts).await {
+            Some(responses) => responses.into_iter().map(Ok).collect(),
+            None => {
+                futures::future::join_all(
+                    parts
+                        .iter()
+                        .map(|p| self.generate(bundle, p.op, p.call, p.ctx)),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn try_joint(
+        &self,
+        bundle: &Bundle,
+        parts: &[JointPart<'_>],
+    ) -> Option<Vec<GeneratedResponse>> {
+        let provider = self.provider.as_ref()?;
+        let mut shapes = Vec::with_capacity(parts.len());
+        let mut properties = Map::new();
+        for part in parts {
+            if part.ctx.forced_status.is_some() {
+                return None;
+            }
+            let variant = part.op.success_output()?;
+            let status = success_status(variant.status);
+            let schema = part.ctx.response_schema.or(variant.schema.as_ref())?;
+            let validator = match part.ctx.response_schema {
+                Some(s) => Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(s)).ok()?),
+                None => self.validator(bundle, part.op, status, schema).ok()?,
+            };
+            properties.insert(part.key.to_string(), schema.clone());
+            shapes.push((variant, status, validator));
+        }
+        // A part that may be null may also be left out: models drop the
+        // fields they mean as null.
+        let keys: Vec<Value> = parts
+            .iter()
+            .zip(&shapes)
+            .filter(|(_, (_, _, validator))| validator.validate(&Value::Null).is_err())
+            .map(|(p, _)| Value::from(p.key))
+            .collect();
+        let combined = serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": keys,
+        });
+        let validator = SchemaValidator::new(&bundle.with_reachable_defs(&combined)).ok()?;
+        let prompt_schema = compact::prompt_schema(bundle, &combined);
+        let messages = tracing::info_span!("mb.prompt").in_scope(|| {
+            prompt::build_joint_messages(
+                bundle,
+                parts,
+                &prompt_schema,
+                self.config.persona.as_deref(),
+            )
+        });
+        let format = ResponseFormat::JsonSchema {
+            name: "query".into(),
+            schema: prompt_schema,
+        };
+        let mut usage = Usage::default();
+        let (value, source) = match self
+            .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)
+            .await
+        {
+            Ok(answer) => answer,
+            Err(reason) => {
+                tracing::info!(%reason, "joint generation failed; answering each field on its own");
+                return None;
+            }
+        };
+        let mut responses = Vec::with_capacity(parts.len());
+        for (i, (part, (variant, status, validator))) in parts.iter().zip(shapes).enumerate() {
+            let response = GeneratedResponse {
+                status,
+                content_type: variant.content_type.clone(),
+                body: Some(value.get(part.key).cloned().unwrap_or(Value::Null)),
+                source,
+                usage: if i == 0 { usage } else { Usage::default() },
+                fallback_reason: None,
+            };
+            responses.push(finish(&validator, part.op, part.call, &part.ctx, response));
+        }
+        Some(responses)
+    }
+
     /// A faker-generated response for `variant`, tagged `Fallback`. The body
     /// is validated against the variant's schema (retrying other branches and
     /// draws) and, for 2xx responses, made consistent with the request and
@@ -467,6 +575,7 @@ impl Engine {
         if self.budget_exhausted() {
             return Err("token budget exhausted".into());
         }
+        tracing::info!(errors = %errors.join("; "), "LLM output invalid; asking for a repair");
         async {
             messages.push(ChatMessage {
                 role: Role::Assistant,

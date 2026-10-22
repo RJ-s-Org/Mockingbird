@@ -30,8 +30,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 - Warn at import when an operation's schema is huge (the prompt now fits it to a budget, see Done).
 - GraphQL aliases of one field with different arguments still share one generated value.
-- GraphQL root fields of one query are generated independently, so they can contradict each other: github-readme-stats' pin card asks for `user(login:)` and `organization(login:)` and gets both, where GitHub returns exactly one (the card then fails with "Unexpected behavior"). Generate a query's root fields in one call, or tell each about its siblings.
-- Detail objects (TMDB movie, TV) often fail validation once and need a repair call, doubling their 30 s; find out which constraints the first answer misses.
+- Detail objects (TMDB movie, TV) often fail validation once and need a repair call, doubling their 30 s. The cause is the contract, not the prompt (see Phase 4).
 - GETs of a stored resource still call the LLM; serve them from session state.
 - No consistency across calls: an opt-in response cache keyed by operation and parameters, list → detail entity seeding, server-side unique ids, optional 404 for unknown ids.
 - Faker output breaks clients: int32-minimum counts, `null` lists, random words for ids and logins. Echo path and argument values into same-named fields, keep counts small and non-negative, prefer non-null lists, honour `format` and `pattern`.
@@ -41,6 +40,7 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
 
 - No MCP tools to view, edit or approve a draft; `approve` does not activate; each import replaces the contract instead of merging; a list of URLs or a docs folder is not accepted.
 - Drafts have no `required` lists, so `{"page":1}` is a valid answer; operationIds from the docs are replaced; invented `default`s; low-confidence operations kept.
+- Drafts mark fields non-nullable that the real API returns as null: TMDB's `iso_639_1`, `logo_path` and `belongs_to_collection` are `null` for many movies, the model answers `null`, validation fails and every movie or TV detail page pays for a repair call. Import should make a field nullable when an example shows `null` or the docs call it optional. (The trial's draft also had a 27-character `pattern` on `file_path` that the trial agent added itself.)
 - Embedded OpenAPI blocks in documentation pages (ReadMe-hosted docs such as TMDB) are ignored and re-derived by the LLM.
 - MCP output sizes: `validate_contract` lists every operation, `list_requests` returns full bodies, `server_logs` keeps ANSI codes; `server_logs`/`stop_server` resolve state from the MCP process's folder instead of the server.
 
@@ -86,4 +86,5 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
   |---|---|---|---|
   | Stripe `accept-a-payment`, 8 creates + 4 retrieves through the app | 25% fallbacks, trimmed contract | 0/22 fallbacks; 357k prompt tokens and 14.5 s median per call | 0/13 fallbacks; 23k prompt tokens and 5 s median per call |
   | `nuxt/movies`, 5 pages | 28% fallbacks, 20–80 s pages | 4/5 pages real, 1/9 fallbacks (timeout), 9–121 s pages | 5/5 pages real, 0/9 fallbacks, 16–68 s pages |
-  | `github-readme-stats`, stats, top-langs, pin cards | trimmed schemas, 33% GraphQL fallbacks | every card errors: 347k prompt tokens, truncated or timed out | stats and top-langs render, 0/8 fallbacks, 750–1,350 prompt tokens, 2.5–7 s; pin card fails (sibling root fields, above) |
+  | `github-readme-stats`, stats, top-langs, pin cards | trimmed schemas, 33% GraphQL fallbacks | every card errors: 347k prompt tokens, truncated or timed out | stats and top-langs render, 0/8 fallbacks, 750–1,350 prompt tokens, 2.5–7 s; pin card fails (sibling root fields contradict each other) |
+- Phase 3 (part), [#35](https://github.com/RJ-s-Org/Mockingbird/pull/35): a GraphQL query's root fields are generated in one LLM call, so they agree; GraphQL-style `{"data": …}` answers are unwrapped. github-readme-stats pin cards: 0/6 → 10/10 render, one call each, ~1.5k prompt tokens, 1.6–3.5 s, no repairs.
