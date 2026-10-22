@@ -945,3 +945,21 @@ async fn brokers_list_stays_global() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert_eq!(out.json()[0]["name"], "mem", "{}", out.stdout);
 }
+
+#[test]
+fn validate_prints_schema_warnings() {
+    let out = Command::cargo_bin("mockingbird")
+        .unwrap()
+        .arg("validate")
+        .arg(repo_path("fixtures/openapi/huge-response.json"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("warning: ") && l.contains("getBig")),
+        "{stdout}"
+    );
+}

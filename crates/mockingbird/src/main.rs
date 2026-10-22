@@ -196,8 +196,8 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
     use anyhow::Context;
     let bytes =
         mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
-    let bundle =
-        mb_import::compile(&bytes).with_context(|| format!("cannot compile {}", path.display()))?;
+    let (bundle, warnings) = mb_import::compile_with_warnings(&bytes)
+        .with_context(|| format!("cannot compile {}", path.display()))?;
     println!(
         "{} {} ({} operations, {} channels)",
         bundle.title,
@@ -225,6 +225,9 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
             c.binding.protocol(),
             c.binding.address()
         );
+    }
+    for w in &warnings {
+        println!("warning: {}", w.message);
     }
     Ok(())
 }

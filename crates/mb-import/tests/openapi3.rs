@@ -366,3 +366,28 @@ fn form_and_multipart_bodies_are_compiled() {
     // JSON stays preferred, untagged.
     assert_eq!(body("post_both").get("x-content-type"), None);
 }
+
+#[test]
+fn compile_with_warnings_flags_schemas_over_the_prompt_budget() {
+    let bytes = fixture("huge-response.json");
+    let (bundle, warnings) = mb_import::compile_with_warnings(&bytes).unwrap();
+    assert_eq!(bundle.operations.len(), 2);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let w = &warnings[0];
+    assert_eq!(w.code, "schema_too_large");
+    assert_eq!(w.operation.as_deref(), Some("getBig"));
+    assert!(w.size.unwrap() > mb_import::PROMPT_SCHEMA_BUDGET as u64);
+    assert!(
+        w.message.contains("getBig") && w.message.contains("trimmed"),
+        "{}",
+        w.message
+    );
+    assert_eq!(mb_import::compile(&bytes).unwrap(), bundle);
+    let small = fixture("orders-3.0.yaml");
+    assert!(
+        mb_import::compile_with_warnings(&small)
+            .unwrap()
+            .1
+            .is_empty()
+    );
+}
