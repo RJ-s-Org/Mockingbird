@@ -7,6 +7,7 @@ use mb_mcm::{Binding, Bundle, Operation};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use super::complete::complete_schema;
 use super::infer::{infer_scalar, infer_schema};
 use super::model::{
     DraftBody, DraftMeta, DraftOperation, DraftParam, DraftResponse, DraftWarning, OperationMeta,
@@ -103,15 +104,43 @@ fn valid_id(id: &str) -> bool {
         && id.len() <= MAX_ID_CHARS
 }
 
-/// The operation's own id when valid and unused, else
-/// `<method>_<path slug>` with a numeric suffix on collision.
-fn assign_id(op: &DraftOperation, used: &mut HashSet<String>) -> String {
+/// `id` made valid: every char outside `[A-Za-z0-9_]` becomes `_`, runs of
+/// `_` collapse, leading and trailing `_` are trimmed, a leading digit gets
+/// a `_` prefix, at most [`MAX_ID_CHARS`] chars; `None` when nothing is
+/// left. Camel case is kept.
+pub(crate) fn convert_id(id: &str) -> Option<String> {
+    let mut out = String::with_capacity(id.len());
+    for c in id.chars() {
+        let c = if c.is_ascii_alphanumeric() { c } else { '_' };
+        if c == '_' && out.ends_with('_') {
+            continue;
+        }
+        out.push(c);
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut id = if trimmed.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+    id.truncate(MAX_ID_CHARS);
+    Some(id).filter(|id| valid_id(id))
+}
+
+/// The operation's own id (converted when invalid) when unused, else
+/// `<method>_<path slug>` with a numeric suffix on collision; with the
+/// docs' original id when it was converted.
+fn assign_id(op: &DraftOperation, used: &mut HashSet<String>) -> (String, Option<String>) {
     if let Some(own) = op.operation_id.as_deref()
-        && valid_id(own)
-        && !used.contains(own)
+        && let Some(id) = convert_id(own)
+        && !used.contains(&id)
     {
-        used.insert(own.to_string());
-        return own.to_string();
+        used.insert(id.clone());
+        let original = (id != own).then(|| own.to_string());
+        return (id, original);
     }
     let base = format!(
         "{}_{}",
@@ -125,7 +154,7 @@ fn assign_id(op: &DraftOperation, used: &mut HashSet<String>) -> String {
         n += 1;
     }
     used.insert(id.clone());
-    id
+    (id, None)
 }
 
 /// Names of the `{params}` of a path template, in order.
@@ -226,7 +255,12 @@ fn media(schema: Option<&Value>, examples: &[Value]) -> Value {
         None if !examples.is_empty() => Some(infer_schema(examples)),
         None => None,
     };
-    if let Some(schema) = schema {
+    if let Some(mut schema) = schema {
+        let kept: Vec<&Value> = examples
+            .iter()
+            .filter(|e| json_depth(e) <= MAX_EXAMPLE_DEPTH)
+            .collect();
+        complete_schema(&mut schema, &kept);
         obj.insert("schema".into(), schema);
     }
     if let Some(example) = first_example(examples) {
@@ -289,7 +323,12 @@ fn response_object(response: &DraftResponse) -> Value {
     Value::Object(obj)
 }
 
-fn operation_object(op: &DraftOperation, id: &str, warnings: &mut Vec<DraftWarning>) -> Value {
+fn operation_object(
+    op: &DraftOperation,
+    id: &str,
+    original: Option<&str>,
+    warnings: &mut Vec<DraftWarning>,
+) -> Value {
     if has_too_deep(op) {
         let target = op.target();
         warnings.push(
@@ -305,6 +344,9 @@ fn operation_object(op: &DraftOperation, id: &str, warnings: &mut Vec<DraftWarni
     }
     let mut obj = Map::new();
     obj.insert("operationId".into(), json!(id));
+    if let Some(original) = original {
+        obj.insert("x-original-operation-id".into(), json!(original));
+    }
     if let Some(s) = &op.summary {
         obj.insert("summary".into(), json!(s));
     }
@@ -352,8 +394,8 @@ pub fn assemble_openapi(
     let mut warnings = Vec::new();
     let mut paths = Map::new();
     for op in ops {
-        let id = assign_id(op, &mut used);
-        let operation = operation_object(op, &id, &mut warnings);
+        let (id, original) = assign_id(op, &mut used);
+        let operation = operation_object(op, &id, original.as_deref(), &mut warnings);
         let item = paths
             .entry(op.path.clone())
             .or_insert_with(|| Value::Object(Map::new()));

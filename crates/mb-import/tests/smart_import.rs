@@ -199,7 +199,7 @@ fn assemble_unique_operation_ids() {
         with_id(op("POST", "/pets"), "bad id!"),
     ];
     let (doc, ids, _) = assemble_openapi("Pets", &[], &ops);
-    assert_eq!(ids, vec!["listPets", "get_pets_id", "post_pets"]);
+    assert_eq!(ids, vec!["listPets", "get_pets_id", "bad_id"]);
     assert_eq!(
         doc["paths"]["/pets/{id}"]["get"]["operationId"],
         "get_pets_id"
@@ -207,7 +207,7 @@ fn assemble_unique_operation_ids() {
     let (_, bundle) = compile_draft(&doc).unwrap();
     let mut got: Vec<String> = bundle.operations.iter().map(|o| o.id.clone()).collect();
     got.sort();
-    assert_eq!(got, vec!["get_pets_id", "listPets", "post_pets"]);
+    assert_eq!(got, vec!["bad_id", "get_pets_id", "listPets"]);
 
     let (_, ids, _) = assemble_openapi(
         "Pets",
@@ -935,4 +935,64 @@ fn schema_warnings_name_the_operation_target() {
     assert_eq!(ws.len(), 1);
     assert_eq!(ws[0].code, "schema_too_large");
     assert_eq!(ws[0].operation.as_deref(), Some("GET /big"));
+}
+
+#[test]
+fn docs_operation_ids_are_converted_not_replaced() {
+    let ops = [
+        with_id(op("GET", "/3/movie/{movie_id}"), "movie-details"),
+        with_id(op("GET", "/3/tv"), "tv.list"),
+        with_id(op("GET", "/x"), "getX"),
+    ];
+    let (doc, ids, _) = assemble_openapi("TMDB", &[], &ops);
+    assert_eq!(ids, vec!["movie_details", "tv_list", "getX"]);
+    let get = &doc["paths"]["/3/movie/{movie_id}"]["get"];
+    assert_eq!(get["x-original-operation-id"], "movie-details");
+    assert!(
+        doc["paths"]["/x"]["get"]
+            .get("x-original-operation-id")
+            .is_none()
+    );
+    compile_draft(&doc).unwrap();
+}
+
+#[tokio::test]
+async fn markdown_draft_has_required_and_nullable() {
+    let schema = json!({"type": "object", "properties": {
+        "id": {"type": "integer"},
+        "tagline": {"type": "string"},
+        "homepage": {"type": "string"},
+        "belongs_to_collection": {"type": "object", "description": "May be null."}}});
+    let answer = json!({"operations": [
+        {"method": "GET", "path": "/3/movie/{movie_id}", "operation_id": "movie-details",
+         "confidence": 0.9, "evidence": "Get the top level details of a movie by ID.",
+         "parameters": [{"name": "movie_id", "in": "path", "schema": {"type": "integer"}}],
+         "responses": [{"status": 200, "schema": schema,
+            "example": {"id": 550, "tagline": null, "homepage": "https://www.foxmovies.com/movies/fight-club"}}]},
+        {"method": "GET", "path": "/3/movie/{movie_id}", "operation_id": "movie-details",
+         "confidence": 0.9, "evidence": "Get the top level details of a movie by ID.",
+         "responses": [{"status": 200, "example": {"id": 551, "tagline": "Hell, upside down"}}]}
+    ]})
+    .to_string();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer)]));
+    let draft = run_import(
+        md_input(fixture("smart/draft-quality.md")),
+        Some(&llm(provider, 4000)),
+        &ImportOptions::default(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap();
+    let schema = &draft.document["paths"]["/3/movie/{movie_id}"]["get"]["responses"]["200"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(schema["required"], json!(["id", "tagline"]), "{schema}");
+    assert_eq!(
+        schema["properties"]["tagline"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        schema["properties"]["belongs_to_collection"]["type"],
+        json!(["object", "null"])
+    );
+    assert!(draft.meta.operations.contains_key("movie_details"));
 }

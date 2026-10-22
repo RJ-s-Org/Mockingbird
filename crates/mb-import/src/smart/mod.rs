@@ -3,6 +3,7 @@
 
 pub mod assemble;
 pub mod chunk;
+pub mod complete;
 pub mod fetch;
 pub mod har;
 pub mod infer;
