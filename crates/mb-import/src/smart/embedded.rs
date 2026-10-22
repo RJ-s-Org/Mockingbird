@@ -10,8 +10,8 @@
 //!    `document.api.schema`, in a `type="application/x-ssr-props"` script),
 //!    and the value of any `data-initial-props` attribute, each read as JSON.
 //! 2. Code blocks (Markdown fences, HTML `<pre>`) that parse as JSON or YAML.
-//! 3. In every value read, depth first (at most [`MAX_WALK_DEPTH`] deep and
-//!    [`MAX_WALK_NODES`] nodes): an object with an `openapi` string starting
+//! 3. In every value read, depth first (at most 64 deep and
+//!    200 000 nodes): an object with an `openapi` string starting
 //!    `3.` and an object `paths` is a document; a long string that looks
 //!    like stringified JSON naming `"openapi"` is parsed and walked too
 //!    (ReadMe's `oasDefinition`). Documents with the same paths count once.
