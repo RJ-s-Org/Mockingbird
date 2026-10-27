@@ -60,6 +60,9 @@ async fn run(cli: Cli) -> ExitCode {
             .await
             .map_err(Failure::Other),
         Command::Ca(cmd) => mockingbird::proxy::ca_command(cmd).map_err(Failure::Other),
+        Command::Keys(mockingbird::keys::KeysCommand::Setup(args)) => {
+            print_json(mockingbird::keys::setup(&args).await)
+        }
         Command::Client(cmd) => {
             client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
         }

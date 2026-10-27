@@ -37,7 +37,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 /// Largest body `call_mock` returns inline.
 const MAX_INLINE_BODY: usize = 64 * 1024;
 
-const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports. The `mockingbird://skills/…` resources hold the full guides.";
+const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -103,6 +103,7 @@ const LOCAL_TOOLS: &[&str] = &[
     "server_logs",
     "stop_server",
     "proxy_env",
+    "open_key_setup",
 ];
 
 /// Why a tool call failed: shown to the model as an error result.
@@ -351,6 +352,22 @@ fn tools() -> Vec<Tool> {
                 &[],
             ),
             read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "open_key_setup",
+            title: "Let the user store an LLM key",
+            description: "Open a one-shot page on this machine where the user types an LLM key; Mockingbird stores it in ~/.mockingbird/secrets/<name> (mode 0600) and points the config's profile at the file. Returns only the key's name, never the key. Use it when doctor reports a missing key that the agent's environment cannot provide.",
+            schema: obj(
+                json!({
+                    "name": s("Key name in the store; default the profile's name."),
+                    "config": s("Config whose profile to update; default mockingbird.yaml."),
+                    "profile": s("Profile to update; default llm.default_profile or the only one."),
+                    "open": b("Open the browser and wait for the key (default true); false returns the URL for the user to open."),
+                }),
+                &[],
+            ),
+            read_only: false,
             destructive: false,
         },
         Tool {
@@ -1110,6 +1127,29 @@ impl McpServer {
                         .unwrap_or_default()
                 });
                 self.proxy_env(config.as_deref(), opt_port(a, "port")?)
+            }
+            "open_key_setup" => {
+                let config = opt_str(a, "config").unwrap_or_else(|| "mockingbird.yaml".into());
+                let opts = crate::keys::page_options(
+                    opt_str(a, "name").as_deref(),
+                    std::path::Path::new(&config),
+                    opt_str(a, "profile").as_deref(),
+                    crate::keys::page::PAGE_TIMEOUT,
+                )?;
+                let page = crate::keys::page::start(opts).await?;
+                let open = a.get("open").and_then(Value::as_bool).unwrap_or(true);
+                if open && crate::keys::page::open_browser(&page.url) {
+                    let saved = page.wait().await?;
+                    Ok(json!({ "saved": saved.name }))
+                } else {
+                    let url = page.url.clone();
+                    crate::keys::page::detach(page);
+                    Ok(json!({
+                        "url": url,
+                        "saved": null,
+                        "detail": "Ask the user to open this URL on this machine and paste the key there; the page stays open for 10 minutes. doctor lists the key once it is saved.",
+                    }))
+                }
             }
             "server_status" => Ok(daemon::status(&self.server_state(a)).await?),
             "server_logs" => {
@@ -1893,7 +1933,7 @@ struct HttpState {
 }
 
 /// Equal in time independent of where the inputs differ.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

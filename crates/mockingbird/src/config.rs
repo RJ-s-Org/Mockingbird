@@ -114,6 +114,10 @@ pub enum Command {
     /// The local CA the proxy signs certificates with.
     #[command(subcommand)]
     Ca(crate::proxy::CaCommand),
+    /// Store an LLM key in a private file through a local page, and point
+    /// the profile at it.
+    #[command(subcommand)]
+    Keys(crate::keys::KeysCommand),
     #[command(flatten)]
     Client(ClientCommand),
 }

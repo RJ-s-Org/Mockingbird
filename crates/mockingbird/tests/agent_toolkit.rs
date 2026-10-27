@@ -658,6 +658,86 @@ fn doctor_reports_the_key_store() {
     assert!(report["problems"].to_string().contains("chmod 600"), "{report}");
 }
 
+/// POSTs `key=<value>` to the key page at `url` (a plain TCP client: the
+/// test needs no async runtime). Returns the status line.
+fn post_key(url: &str, key: &str) -> String {
+    use std::io::Read;
+    let rest = url.strip_prefix("http://").unwrap();
+    let (host, path) = rest.split_once('/').unwrap();
+    let body = format!("key={key}");
+    let mut conn = std::net::TcpStream::connect(host).unwrap();
+    write!(
+        conn,
+        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    conn.read_to_string(&mut response).unwrap();
+    assert!(!response.contains(key), "the page echoed the key");
+    response.lines().next().unwrap_or_default().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn open_key_setup_never_returns_the_key() {
+    let dir = tempdir();
+    run_json(dir.path(), &["init", "--provider", "openrouter"]);
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
+        cmd.env("MB_NO_SHELL_ENV", "1")
+            .env("HOME", &home)
+            .env_remove("OPENROUTER_API_KEY");
+    });
+    let r = mcp.tool("open_key_setup", json!({ "open": false }));
+    let url = r["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://127.0.0.1:"), "{r}");
+    assert!(r["saved"].is_null(), "{r}");
+    let status = post_key(&url, "sk-or-v1-from-browser");
+    assert!(status.contains("200"), "{status}");
+    let mut doctor = Value::Null;
+    for _ in 0..50 {
+        doctor = mcp.tool("doctor", json!({}));
+        if doctor["key_store"]["keys"][0]["name"] == "openrouter" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(doctor["key_store"]["keys"][0]["name"], "openrouter", "{doctor}");
+    assert_eq!(doctor["key_store"]["keys"][0]["private"], true);
+    assert_eq!(
+        doctor["config"]["profiles"][0]["secrets"][0]["set"], true,
+        "{doctor}"
+    );
+    assert!(!doctor.to_string().contains("sk-or-v1-from-browser"));
+    assert!(!r.to_string().contains("sk-or-v1-from-browser"));
+    let config = read(&dir.path().join("mockingbird.yaml"));
+    assert!(!config.contains("sk-or-v1-from-browser"));
+    assert!(config.contains("file:"), "{config}");
+    assert_eq!(
+        read(&home.join(".mockingbird/secrets/openrouter")),
+        "sk-or-v1-from-browser"
+    );
+}
+
+#[test]
+fn keys_setup_needs_a_name_without_a_config() {
+    let dir = tempdir();
+    let out = bin()
+        .args(["keys", "setup", "--no-open", "-c", "none.yaml"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("mockingbird keys setup <name>"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn init_writes_server_ports() {
     let dir = tempdir();
