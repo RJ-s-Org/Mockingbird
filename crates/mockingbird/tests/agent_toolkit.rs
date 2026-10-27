@@ -269,6 +269,88 @@ fn agent_install_writes_mcp_config_and_skills() {
     assert!(steering.starts_with("---\ninclusion: manual\n---"));
 }
 
+// Unix: Claude Desktop's config lives under HOME there (APPDATA on Windows).
+#[cfg(unix)]
+#[test]
+fn agent_install_passes_key_names_not_values() {
+    let dir = tempdir();
+    run_json(dir.path(), &["init", "--provider", "openrouter"]);
+    let run = |dir: &Path, args: &[&str]| -> Value {
+        let out = bin()
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", dir)
+            .env("OPENROUTER_API_KEY", "sk-or-secret-value")
+            .env("MB_NO_SHELL_ENV", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let out = run(dir.path(), &["agent", "install", "cursor", "--no-skills"]);
+    assert_eq!(out["passthrough"], json!(["OPENROUTER_API_KEY"]), "{out}");
+    let cursor: Value =
+        serde_json::from_str(&read(&dir.path().join(".cursor/mcp.json"))).unwrap();
+    assert_eq!(
+        cursor["mcpServers"]["mockingbird"]["env"]["OPENROUTER_API_KEY"],
+        "${env:OPENROUTER_API_KEY}"
+    );
+    run(dir.path(), &["agent", "install", "codex", "--no-skills"]);
+    assert!(
+        read(&dir.path().join(".codex/config.toml")).contains("env_vars = [\"OPENROUTER_API_KEY\"]")
+    );
+    run(
+        dir.path(),
+        &["agent", "install", "claude-code", "--no-skills", "--pass-env", "EXTRA_KEY"],
+    );
+    let claude: Value = serde_json::from_str(&read(&dir.path().join(".mcp.json"))).unwrap();
+    assert_eq!(
+        claude["mcpServers"]["mockingbird"]["env"],
+        json!({ "EXTRA_KEY": "${EXTRA_KEY}", "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}" })
+    );
+    let out = run(dir.path(), &["agent", "install", "claude-desktop", "--no-skills"]);
+    assert!(
+        out["passthrough_unsupported"]
+            .as_str()
+            .unwrap()
+            .contains("keys setup"),
+        "{out}"
+    );
+    let bad = bin()
+        .args(["agent", "install", "cursor", "--no-skills", "--pass-env", "not a name"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    for f in [".cursor/mcp.json", ".codex/config.toml", ".mcp.json"] {
+        assert!(!read(&dir.path().join(f)).contains("sk-or-secret-value"), "{f}");
+    }
+    let desktop = mockingbird_desktop_config(dir.path());
+    assert!(!read(&desktop).contains("sk-or-secret-value"));
+    assert!(!read(&desktop).contains("\"env\""));
+
+    let bare = tempdir();
+    let out = run(bare.path(), &["agent", "install", "cursor", "--no-skills"]);
+    assert!(out.get("passthrough").is_none(), "{out}");
+    let cursor: Value =
+        serde_json::from_str(&read(&bare.path().join(".cursor/mcp.json"))).unwrap();
+    assert!(cursor["mcpServers"]["mockingbird"].get("env").is_none());
+}
+
+/// Claude Desktop's config under `home`.
+#[cfg(unix)]
+fn mockingbird_desktop_config(home: &Path) -> PathBuf {
+    match std::env::consts::OS {
+        "macos" => home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        _ => home.join(".config/Claude/claude_desktop_config.json"),
+    }
+}
+
 /// A `mockingbird mcp` child speaking newline-delimited JSON-RPC.
 struct McpClient {
     child: Child,

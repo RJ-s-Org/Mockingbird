@@ -181,18 +181,40 @@ pub fn missing_default_secrets(config: &Path) -> Vec<String> {
     let Ok(cfg) = file_config::load(config) else {
         return Vec::new();
     };
-    let profile = match &cfg.llm.default_profile {
-        Some(name) => cfg.llm.profiles.get(name),
-        None if cfg.llm.profiles.len() == 1 => cfg.llm.profiles.values().next(),
-        None => None,
-    };
-    profile
+    default_profile(&cfg)
         .map(crate::providers::secret_status)
         .unwrap_or_default()
         .into_iter()
         .filter(|s| s["set"] == false)
         .filter_map(|s| s["ref"].as_str().map(String::from))
         .collect()
+}
+
+/// `llm.default_profile`, else the only profile.
+fn default_profile(cfg: &file_config::FileConfig) -> Option<&file_config::FileProfile> {
+    match &cfg.llm.default_profile {
+        Some(name) => cfg.llm.profiles.get(name),
+        None if cfg.llm.profiles.len() == 1 => cfg.llm.profiles.values().next(),
+        None => None,
+    }
+}
+
+/// The environment variable names `config`'s default LLM profile references
+/// (`api_key: env:NAME`, `${env:NAME}` in headers), sorted; empty when the
+/// config is missing or does not load.
+pub fn default_profile_env_names(config: &Path) -> Vec<String> {
+    let Ok(cfg) = file_config::load(config) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = default_profile(&cfg)
+        .map(crate::providers::secret_status)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| s["ref"].as_str()?.strip_prefix("env:").map(String::from))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// `server start`.

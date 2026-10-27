@@ -122,6 +122,52 @@ pub struct InstallArgs {
     /// Command the agent runs [default: this binary's absolute path].
     #[arg(long)]
     pub command: Option<String>,
+    /// Config whose default LLM profile names the key variables to pass
+    /// through to the MCP server.
+    #[arg(short = 'c', long, default_value = "mockingbird.yaml")]
+    pub config: PathBuf,
+    /// Another environment variable to pass through (its name; repeatable).
+    #[arg(long = "pass-env", value_name = "NAME")]
+    pub pass_env: Vec<String>,
+}
+
+/// How an agent's MCP config refers to a variable of the agent's own
+/// environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvSyntax {
+    /// `"env": {"NAME": "${NAME}"}`.
+    Braced,
+    /// `"env": {"NAME": "${env:NAME}"}`.
+    EnvPrefixed,
+    /// `env_vars = ["NAME"]` in Codex's TOML table.
+    CodexEnvVars,
+    /// The agent expands nothing in its MCP config.
+    Unsupported,
+}
+
+/// The passthrough syntax of `client`'s MCP config for `scope` (each from
+/// the agent's MCP configuration docs; see docs/agents.md).
+pub fn env_syntax(client: Client, scope: Scope) -> EnvSyntax {
+    match (client, scope) {
+        (Client::ClaudeCode, Scope::Project) => EnvSyntax::Braced,
+        // A printed `claude mcp add` line: a shell would expand the value
+        // into ~/.claude.json.
+        (Client::ClaudeCode, Scope::User) => EnvSyntax::Unsupported,
+        (Client::ClaudeDesktop, _) => EnvSyntax::Unsupported,
+        (Client::Codex, _) => EnvSyntax::CodexEnvVars,
+        (Client::Cursor | Client::Vscode | Client::Windsurf, _) => EnvSyntax::EnvPrefixed,
+        // Kiro expands only the names approved in its settings.
+        (Client::Gemini | Client::Kiro, _) => EnvSyntax::Braced,
+    }
+}
+
+/// Whether `name` can be an environment variable name.
+fn env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn home() -> anyhow::Result<PathBuf> {
@@ -210,19 +256,38 @@ fn skills_dir(client: Client, scope: Scope) -> anyhow::Result<Option<PathBuf>> {
     })
 }
 
-/// The server entry as `client` wants it.
-fn entry_for(client: Client, command: &str) -> Value {
-    match client {
+/// The server entry as `client` wants it, passing `env` through (names
+/// only) where its config can refer to them.
+fn entry_for(client: Client, command: &str, env: &[String], scope: Scope) -> Value {
+    let mut entry = match client {
         Client::Vscode => json!({ "type": "stdio", "command": command, "args": ["mcp"] }),
         _ => server_entry(command),
+    };
+    let reference = match env_syntax(client, scope) {
+        EnvSyntax::Braced => |n: &str| format!("${{{n}}}"),
+        EnvSyntax::EnvPrefixed => |n: &str| format!("${{env:{n}}}"),
+        EnvSyntax::CodexEnvVars | EnvSyntax::Unsupported => return entry,
+    };
+    if !env.is_empty() {
+        let vars: Map<String, Value> = env
+            .iter()
+            .map(|n| (n.clone(), json!(reference(n))))
+            .collect();
+        entry["env"] = Value::Object(vars);
     }
+    entry
 }
 
-fn codex_toml(command: &str) -> String {
-    format!(
+fn codex_toml(command: &str, env: &[String]) -> String {
+    let mut table = format!(
         "[mcp_servers.mockingbird]\ncommand = {}\nargs = [\"mcp\"]\n",
         toml_string(command)
-    )
+    );
+    if !env.is_empty() {
+        let names: Vec<String> = env.iter().map(|n| toml_string(n)).collect();
+        table.push_str(&format!("env_vars = [{}]\n", names.join(", ")));
+    }
+    table
 }
 
 fn toml_string(s: &str) -> String {
@@ -233,13 +298,15 @@ fn toml_string(s: &str) -> String {
 pub fn print(client: Client) -> Value {
     let cmd = command(None);
     match client {
-        Client::Codex => json!({ "file": "~/.codex/config.toml", "toml": codex_toml(&cmd) }),
+        Client::Codex => json!({ "file": "~/.codex/config.toml", "toml": codex_toml(&cmd, &[]) }),
         Client::ClaudeCode => json!({
             "command": format!("claude mcp add --scope user mockingbird -- {cmd} mcp"),
             "json": { "mcpServers": { "mockingbird": server_entry(&cmd) } },
         }),
-        Client::Vscode => json!({ "servers": { "mockingbird": entry_for(client, &cmd) } }),
-        _ => json!({ "mcpServers": { "mockingbird": entry_for(client, &cmd) } }),
+        Client::Vscode => {
+            json!({ "servers": { "mockingbird": entry_for(client, &cmd, &[], Scope::User) } })
+        }
+        _ => json!({ "mcpServers": { "mockingbird": entry_for(client, &cmd, &[], Scope::User) } }),
     }
 }
 
@@ -282,7 +349,7 @@ fn merge_json(path: &Path, key: &str, entry: Value, dry_run: bool) -> anyhow::Re
     Ok(json!({ "file": path, "key": format!("{key}.mockingbird"), "replaced": replaced }))
 }
 
-fn install_codex(scope: Scope, cmd: &str, dry_run: bool) -> anyhow::Result<Value> {
+fn install_codex(scope: Scope, cmd: &str, env: &[String], dry_run: bool) -> anyhow::Result<Value> {
     let path = match scope {
         Scope::Project => PathBuf::from(".codex/config.toml"),
         Scope::User => std::env::var_os("CODEX_HOME")
@@ -306,7 +373,7 @@ fn install_codex(scope: Scope, cmd: &str, dry_run: bool) -> anyhow::Result<Value
         } else {
             "\n\n"
         };
-        std::fs::write(&path, format!("{text}{sep}{}", codex_toml(cmd)))
+        std::fs::write(&path, format!("{text}{sep}{}", codex_toml(cmd, env)))
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(json!({ "file": path, "added": "[mcp_servers.mockingbird]" }))
@@ -347,14 +414,27 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<Value> {
     if args.no_mcp && args.no_skills {
         bail!("--no-mcp and --no-skills leave nothing to do");
     }
+    if let Some(bad) = args.pass_env.iter().find(|n| !env_name(n)) {
+        bail!("--pass-env {bad:?} is not a variable name");
+    }
+    let mut names = crate::daemon::default_profile_env_names(&args.config);
+    names.extend(args.pass_env.iter().cloned());
+    names.sort();
+    names.dedup();
     let cmd = command(args.command.as_deref());
     let mut out = Map::new();
     let mut next = Vec::new();
     if !args.no_mcp {
+        let syntax = env_syntax(args.client, args.scope);
         let mcp = match args.client {
-            Client::Codex => install_codex(args.scope, &cmd, args.dry_run)?,
+            Client::Codex => install_codex(args.scope, &cmd, &names, args.dry_run)?,
             client => match mcp_target(client, args.scope)? {
-                Some((path, key)) => merge_json(&path, key, entry_for(client, &cmd), args.dry_run)?,
+                Some((path, key)) => merge_json(
+                    &path,
+                    key,
+                    entry_for(client, &cmd, &names, args.scope),
+                    args.dry_run,
+                )?,
                 None if client == Client::ClaudeCode => {
                     let line = format!("claude mcp add --scope user mockingbird -- {cmd} mcp");
                     next.push(format!("run: {line}"));
@@ -369,6 +449,26 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<Value> {
             },
         };
         out.insert("mcp".into(), mcp);
+        let written = !names.is_empty()
+            && syntax != EnvSyntax::Unsupported
+            && !(args.client == Client::Codex && out["mcp"].get("unchanged").is_some());
+        if written {
+            out.insert("passthrough".into(), json!(names));
+            if args.client == Client::Kiro {
+                next.push(format!(
+                    "approve {} in Kiro's settings (Mcp Approved Env Vars) so Kiro expands them",
+                    names.join(", ")
+                ));
+            }
+        } else if !names.is_empty() && syntax == EnvSyntax::Unsupported {
+            out.insert(
+                "passthrough_unsupported".into(),
+                json!(format!(
+                    "{} cannot read variables in its MCP config; run `mockingbird keys setup` to store the key in a file instead",
+                    args.client.to_possible_value().map(|v| v.get_name().to_string()).unwrap_or_default()
+                )),
+            );
+        }
     }
     if !args.no_skills {
         match skills_dir(args.client, args.scope)? {
@@ -397,8 +497,35 @@ pub fn skills(dir: &Path) -> anyhow::Result<Value> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passthrough_uses_each_agents_syntax() {
+        let env = vec!["OPENROUTER_API_KEY".to_string()];
+        let var = |client, scope| entry_for(client, "/mb", &env, scope)["env"]["OPENROUTER_API_KEY"].clone();
+        assert_eq!(var(Client::Cursor, Scope::Project), "${env:OPENROUTER_API_KEY}");
+        assert_eq!(var(Client::Windsurf, Scope::User), "${env:OPENROUTER_API_KEY}");
+        assert_eq!(var(Client::Vscode, Scope::Project), "${env:OPENROUTER_API_KEY}");
+        assert_eq!(var(Client::ClaudeCode, Scope::Project), "${OPENROUTER_API_KEY}");
+        assert_eq!(var(Client::Gemini, Scope::Project), "${OPENROUTER_API_KEY}");
+        assert_eq!(var(Client::Kiro, Scope::Project), "${OPENROUTER_API_KEY}");
+        assert!(
+            entry_for(Client::ClaudeDesktop, "/mb", &env, Scope::User)
+                .get("env")
+                .is_none()
+        );
+        assert!(
+            entry_for(Client::Cursor, "/mb", &[], Scope::Project)
+                .get("env")
+                .is_none()
+        );
+        assert_eq!(env_syntax(Client::ClaudeCode, Scope::User), EnvSyntax::Unsupported);
+        assert_eq!(env_syntax(Client::Codex, Scope::User), EnvSyntax::CodexEnvVars);
+        assert!(codex_toml("/mb", &env).contains("env_vars = [\"OPENROUTER_API_KEY\"]"));
+        assert!(!codex_toml("/mb", &[]).contains("env_vars"));
+    }
 
     #[test]
     fn skills_have_front_matter() {
