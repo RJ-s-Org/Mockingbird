@@ -427,7 +427,11 @@ pub fn resolve_profile(config: &Path, profile: Option<&str>) -> anyhow::Result<S
         }
         bail!("{} has no LLM profile {name:?}", config.display());
     }
-    if let Some(name) = cfg.llm.default_profile.filter(|n| cfg.llm.profiles.contains_key(n)) {
+    if let Some(name) = cfg
+        .llm
+        .default_profile
+        .filter(|n| cfg.llm.profiles.contains_key(n))
+    {
         return Ok(name);
     }
     if cfg.llm.profiles.len() == 1
@@ -497,7 +501,10 @@ pub const SUMMARY_OPERATIONS: usize = 20;
 /// The first [`SUMMARY_OPERATIONS`] items, and how many were left out.
 fn capped(items: Vec<Value>) -> (Vec<Value>, usize) {
     let left_out = items.len().saturating_sub(SUMMARY_OPERATIONS);
-    (items.into_iter().take(SUMMARY_OPERATIONS).collect(), left_out)
+    (
+        items.into_iter().take(SUMMARY_OPERATIONS).collect(),
+        left_out,
+    )
 }
 
 /// `mockingbird validate` as JSON: the contract's title, version, counts
@@ -572,9 +579,7 @@ mod tests {
     #[test]
     fn contract_summary_caps_the_operation_list() {
         let dir = tempfile::tempdir().unwrap();
-        let mut doc = String::from(
-            "openapi: 3.0.3\ninfo: {title: Many, version: '1'}\npaths:\n",
-        );
+        let mut doc = String::from("openapi: 3.0.3\ninfo: {title: Many, version: '1'}\npaths:\n");
         for i in 0..25 {
             doc.push_str(&format!(
                 "  /r{i}:\n    get:\n      operationId: r{i}\n      responses:\n        '200': {{description: ok}}\n"

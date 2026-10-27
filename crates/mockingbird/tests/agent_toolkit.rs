@@ -293,26 +293,36 @@ fn agent_install_passes_key_names_not_values() {
     };
     let out = run(dir.path(), &["agent", "install", "cursor", "--no-skills"]);
     assert_eq!(out["passthrough"], json!(["OPENROUTER_API_KEY"]), "{out}");
-    let cursor: Value =
-        serde_json::from_str(&read(&dir.path().join(".cursor/mcp.json"))).unwrap();
+    let cursor: Value = serde_json::from_str(&read(&dir.path().join(".cursor/mcp.json"))).unwrap();
     assert_eq!(
         cursor["mcpServers"]["mockingbird"]["env"]["OPENROUTER_API_KEY"],
         "${env:OPENROUTER_API_KEY}"
     );
     run(dir.path(), &["agent", "install", "codex", "--no-skills"]);
     assert!(
-        read(&dir.path().join(".codex/config.toml")).contains("env_vars = [\"OPENROUTER_API_KEY\"]")
+        read(&dir.path().join(".codex/config.toml"))
+            .contains("env_vars = [\"OPENROUTER_API_KEY\"]")
     );
     run(
         dir.path(),
-        &["agent", "install", "claude-code", "--no-skills", "--pass-env", "EXTRA_KEY"],
+        &[
+            "agent",
+            "install",
+            "claude-code",
+            "--no-skills",
+            "--pass-env",
+            "EXTRA_KEY",
+        ],
     );
     let claude: Value = serde_json::from_str(&read(&dir.path().join(".mcp.json"))).unwrap();
     assert_eq!(
         claude["mcpServers"]["mockingbird"]["env"],
         json!({ "EXTRA_KEY": "${EXTRA_KEY}", "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}" })
     );
-    let out = run(dir.path(), &["agent", "install", "claude-desktop", "--no-skills"]);
+    let out = run(
+        dir.path(),
+        &["agent", "install", "claude-desktop", "--no-skills"],
+    );
     assert!(
         out["passthrough_unsupported"]
             .as_str()
@@ -321,14 +331,24 @@ fn agent_install_passes_key_names_not_values() {
         "{out}"
     );
     let bad = bin()
-        .args(["agent", "install", "cursor", "--no-skills", "--pass-env", "not a name"])
+        .args([
+            "agent",
+            "install",
+            "cursor",
+            "--no-skills",
+            "--pass-env",
+            "not a name",
+        ])
         .current_dir(dir.path())
         .env("HOME", dir.path())
         .output()
         .unwrap();
     assert!(!bad.status.success());
     for f in [".cursor/mcp.json", ".codex/config.toml", ".mcp.json"] {
-        assert!(!read(&dir.path().join(f)).contains("sk-or-secret-value"), "{f}");
+        assert!(
+            !read(&dir.path().join(f)).contains("sk-or-secret-value"),
+            "{f}"
+        );
     }
     let desktop = mockingbird_desktop_config(dir.path());
     assert!(!read(&desktop).contains("sk-or-secret-value"));
@@ -337,8 +357,7 @@ fn agent_install_passes_key_names_not_values() {
     let bare = tempdir();
     let out = run(bare.path(), &["agent", "install", "cursor", "--no-skills"]);
     assert!(out.get("passthrough").is_none(), "{out}");
-    let cursor: Value =
-        serde_json::from_str(&read(&bare.path().join(".cursor/mcp.json"))).unwrap();
+    let cursor: Value = serde_json::from_str(&read(&bare.path().join(".cursor/mcp.json"))).unwrap();
     assert!(cursor["mcpServers"]["mockingbird"].get("env").is_none());
 }
 
@@ -626,7 +645,13 @@ fn skills_recommend_proxy_mode() {
         assert!(skill.text.contains("mockingbird proxy env"), "{name}");
     }
     let entry = SKILLS.iter().find(|s| s.name == "mockingbird").unwrap();
-    for tool in ["get_draft", "edit_draft", "approve_draft", "get_request", "proxy_env"] {
+    for tool in [
+        "get_draft",
+        "edit_draft",
+        "approve_draft",
+        "get_request",
+        "proxy_env",
+    ] {
         assert!(entry.text.contains(tool), "{tool}");
     }
 }
@@ -650,12 +675,18 @@ fn doctor_reports_the_key_store() {
         serde_json::from_slice(&out.stdout).unwrap()
     };
     let report = doctor(dir.path());
-    assert_eq!(report["key_store"]["keys"][0]["name"], "openrouter", "{report}");
+    assert_eq!(
+        report["key_store"]["keys"][0]["name"], "openrouter",
+        "{report}"
+    );
     assert_eq!(report["key_store"]["keys"][0]["private"], true);
     assert!(!report.to_string().contains("sk-or-test"));
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let report = doctor(dir.path());
-    assert!(report["problems"].to_string().contains("chmod 600"), "{report}");
+    assert!(
+        report["problems"].to_string().contains("chmod 600"),
+        "{report}"
+    );
 }
 
 /// POSTs `key=<value>` to the key page at `url` (a plain TCP client: the
@@ -704,7 +735,10 @@ fn open_key_setup_never_returns_the_key() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert_eq!(doctor["key_store"]["keys"][0]["name"], "openrouter", "{doctor}");
+    assert_eq!(
+        doctor["key_store"]["keys"][0]["name"], "openrouter",
+        "{doctor}"
+    );
     assert_eq!(doctor["key_store"]["keys"][0]["private"], true);
     assert_eq!(
         doctor["config"]["profiles"][0]["secrets"][0]["set"], true,

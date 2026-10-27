@@ -22,7 +22,8 @@ pub trait SecretStore: Send + Sync {
 /// (`~/.mockingbird/secrets/<name>`).
 pub fn in_key_store(path: &Path) -> bool {
     let dir = path.parent();
-    dir.and_then(Path::file_name).is_some_and(|n| n == "secrets")
+    dir.and_then(Path::file_name)
+        .is_some_and(|n| n == "secrets")
         && dir
             .and_then(Path::parent)
             .and_then(Path::file_name)

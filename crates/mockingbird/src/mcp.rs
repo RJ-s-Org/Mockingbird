@@ -374,7 +374,10 @@ fn tools() -> Vec<Tool> {
             name: "server_status",
             title: "Background server status",
             description: "Whether the background server runs, and its /readyz (ready, degraded reasons).",
-            schema: obj(json!({ "config": s("Config file the server was started with; default: the one start_server used.") }), &[]),
+            schema: obj(
+                json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
             read_only: true,
             destructive: false,
         },
@@ -393,7 +396,10 @@ fn tools() -> Vec<Tool> {
             name: "stop_server",
             title: "Stop the background server",
             description: "Stop the server started with start_server.",
-            schema: obj(json!({ "config": s("Config file the server was started with; default: the one start_server used.") }), &[]),
+            schema: obj(
+                json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
             read_only: false,
             destructive: true,
         },
@@ -817,9 +823,16 @@ fn paths(args: &Value, key: &str) -> Vec<PathBuf> {
 
 /// The operation `id` of a draft view, or an error listing known ids.
 fn draft_operation<'a>(view: &'a Value, id: &str) -> Result<&'a Value, ToolError> {
-    let ops = view["operations"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let ops = view["operations"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     ops.iter().find(|o| o["id"] == id).ok_or_else(|| {
-        let known: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).take(20).collect();
+        let known: Vec<&str> = ops
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .take(20)
+            .collect();
         ToolError(format!(
             "the draft has no operation {id:?}; known: {}",
             known.join(", ")
@@ -849,10 +862,16 @@ fn draft_summary(view: &Value, operation: Option<&str>) -> ToolResult {
             .map(|w| w["message"].clone())
             .collect()
     };
-    let ops = view["operations"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let ops = view["operations"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     if let Some(id) = operation {
         let op = draft_operation(view, id)?;
-        let method = op["method"].as_str().unwrap_or_default().to_ascii_lowercase();
+        let method = op["method"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let path = op["path"].as_str().unwrap_or_default();
         return Ok(json!({
             "version": view["version"],
@@ -1450,7 +1469,10 @@ impl McpServer {
                 let op = draft_operation(&view, &id)?;
                 let (path, method) = (
                     op["path"].as_str().unwrap_or_default(),
-                    op["method"].as_str().unwrap_or_default().to_ascii_lowercase(),
+                    op["method"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase(),
                 );
                 let target = document
                     .get_mut("paths")
@@ -1493,15 +1515,18 @@ impl McpServer {
             Some("merge") => Some(client::ImportMode::Merge),
             Some("replace") => Some(client::ImportMode::Replace),
             Some(other) => {
-                return Err(ToolError(format!(
-                    "mode {other:?}: use merge or replace"
-                )));
+                return Err(ToolError(format!("mode {other:?}: use merge or replace")));
             }
         };
         let urls: Vec<String> = a
             .get("urls")
             .and_then(Value::as_array)
-            .map(|u| u.iter().filter_map(Value::as_str).map(String::from).collect())
+            .map(|u| {
+                u.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         let given = [
             a.get("source").is_some(),
@@ -2188,23 +2213,20 @@ mod tests {
             json!({"id":"getPet","method":"GET","path":"/pets/{id}","confidence":0.5,"warnings":["x"]})
         );
         assert_eq!(r["operations"][0]["warnings"], json!([]));
-        assert_eq!(r["warnings"], json!([{"code":"chunk_skipped","message":"y"}]));
+        assert_eq!(
+            r["warnings"],
+            json!([{"code":"chunk_skipped","message":"y"}])
+        );
         assert!(r.get("document").is_none());
-        let one = call_tool(
-            &s,
-            "get_draft",
-            json!({"mock":"pets","operation":"getPet"}),
-        )
-        .await;
+        let one = call_tool(&s, "get_draft", json!({"mock":"pets","operation":"getPet"})).await;
         assert!(one["definition"]["responses"].is_object(), "{one}");
         assert_eq!(one["warnings"], json!(["x"]));
-        let text = call_tool_error(
-            &s,
-            "get_draft",
-            json!({"mock":"pets","operation":"nope"}),
-        )
-        .await;
-        assert!(text.contains("listPets") && text.contains("getPet"), "{text}");
+        let text =
+            call_tool_error(&s, "get_draft", json!({"mock":"pets","operation":"nope"})).await;
+        assert!(
+            text.contains("listPets") && text.contains("getPet"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

@@ -53,7 +53,10 @@ pub fn page_options(
             profile,
         })
     } else if profile.is_some() {
-        bail!("{} does not exist, so it has no profile to update", config.display());
+        bail!(
+            "{} does not exist, so it has no profile to update",
+            config.display()
+        );
     } else {
         None
     };

@@ -253,7 +253,10 @@ async fn key_store_files_must_be_private() {
         .resolve(&format!("file:{}", key.display()))
         .await;
     let err = r.expect_err("0644 must be refused").to_string();
-    assert!(err.contains("chmod 600") && !err.contains("sk-test"), "{err}");
+    assert!(
+        err.contains("chmod 600") && !err.contains("sk-test"),
+        "{err}"
+    );
     assert!(mb_ext::check_secret_file(&key).is_err());
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).expect("chmod");
     assert_eq!(

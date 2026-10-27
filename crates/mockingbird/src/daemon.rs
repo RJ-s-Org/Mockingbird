@@ -489,7 +489,11 @@ pub fn resolve_state_dir(state_dir: &Path, config: Option<&Path>, cwd: &Path) ->
         .chain(cwd.ancestors())
         .map(|a| a.join(state_dir))
         .find(|d| info_file(d).is_file());
-    found.unwrap_or_else(|| config_dir.unwrap_or_else(|| cwd.to_path_buf()).join(state_dir))
+    found.unwrap_or_else(|| {
+        config_dir
+            .unwrap_or_else(|| cwd.to_path_buf())
+            .join(state_dir)
+    })
 }
 
 /// `mockingbird doctor`.
@@ -619,7 +623,10 @@ mod tests {
             strip_ansi("\x1b[2m2026\x1b[0m \x1b[32m INFO\x1b[0m ready"),
             "2026  INFO ready"
         );
-        assert_eq!(strip_ansi("a\x1b]8;;http://x\x07link\x1b]8;;\x1b\\b"), "alinkb");
+        assert_eq!(
+            strip_ansi("a\x1b]8;;http://x\x07link\x1b]8;;\x1b\\b"),
+            "alinkb"
+        );
         assert_eq!(strip_ansi("plain"), "plain");
         assert_eq!(strip_ansi("lone\x1b"), "lone");
     }

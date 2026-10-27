@@ -65,7 +65,9 @@ pub struct KeyPage {
 
 impl std::fmt::Debug for KeyPage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KeyPage").field("name", &self.name).finish_non_exhaustive()
+        f.debug_struct("KeyPage")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
     }
 }
 
@@ -183,10 +185,15 @@ pub fn open_browser(url: &str) -> bool {
 async fn safe_headers(mut resp: Response) -> Response {
     let h = resp.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"),
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+        ),
     );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     resp
@@ -234,7 +241,10 @@ async fn handle(
     }
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
     if host != Some(st.host.as_str()) {
-        return status(StatusCode::FORBIDDEN, "Open this page at the address you were given.");
+        return status(
+            StatusCode::FORBIDDEN,
+            "Open this page at the address you were given.",
+        );
     }
     let name = &st.opts.name;
     match method {
@@ -247,12 +257,16 @@ async fn handle(
             }
             let mut done = st.done.lock().await;
             if done.is_none() {
-                return status(StatusCode::GONE, "The key was already saved; this page is closed.");
+                return status(
+                    StatusCode::GONE,
+                    "The key was already saved; this page is closed.",
+                );
             }
             let key = match form_data {
                 Ok(Form(KeyForm { key })) => key,
                 Err(_) => {
-                    return (StatusCode::BAD_REQUEST, form(name, Some("Enter the key."))).into_response();
+                    return (StatusCode::BAD_REQUEST, form(name, Some("Enter the key.")))
+                        .into_response();
                 }
             };
             let trimmed = key.trim();
@@ -268,7 +282,10 @@ async fn handle(
                     if let Some(tx) = done.take() {
                         let _ = tx.send(saved);
                     }
-                    status(StatusCode::OK, &format!("Saved {name}. You can close this tab."))
+                    status(
+                        StatusCode::OK,
+                        &format!("Saved {name}. You can close this tab."),
+                    )
                 }
                 Err(e) => status(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -284,7 +301,11 @@ async fn handle(
 fn save(opts: &PageOptions, key: &str) -> anyhow::Result<SavedKey> {
     let file = store::write_secret(&opts.store_dir, &opts.name, key)?;
     if let Some(target) = &opts.profile {
-        onboard::set_profile_api_key(&target.config, &target.profile, &store::file_reference(&file))?;
+        onboard::set_profile_api_key(
+            &target.config,
+            &target.profile,
+            &store::file_reference(&file),
+        )?;
     }
     Ok(SavedKey {
         name: opts.name.clone(),
@@ -310,7 +331,9 @@ mod tests {
             let encoded: String = key
                 .bytes()
                 .map(|b| match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                        (b as char).to_string()
+                    }
                     b' ' => "+".into(),
                     _ => format!("%{b:02X}"),
                 })
@@ -382,7 +405,10 @@ mod tests {
         assert_eq!(saved.name, "openrouter");
         assert_eq!(saved.profile.as_deref(), Some("openrouter"));
         assert!(!format!("{saved:?}").contains("sk-or-v1-secret"));
-        assert_eq!(std::fs::read_to_string(&saved.file).unwrap(), "sk-or-v1-secret");
+        assert_eq!(
+            std::fs::read_to_string(&saved.file).unwrap(),
+            "sk-or-v1-secret"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -412,7 +438,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 404);
-        assert_eq!(c.get(format!("{base}/")).send().await.unwrap().status(), 404);
+        assert_eq!(
+            c.get(format!("{base}/")).send().await.unwrap().status(),
+            404
+        );
         assert!(!dir.join("openrouter").exists());
     }
 
@@ -445,7 +474,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 403);
         assert!(!dir.join("openrouter").exists());
-        let origin = page.url.rsplitn(2, '/').nth(1).unwrap().to_string();
+        let origin = page.url.rsplit_once('/').unwrap().0.to_string();
         let r = c
             .post(&page.url)
             .header("origin", origin)

@@ -504,11 +504,25 @@ mod tests {
     #[test]
     fn passthrough_uses_each_agents_syntax() {
         let env = vec!["OPENROUTER_API_KEY".to_string()];
-        let var = |client, scope| entry_for(client, "/mb", &env, scope)["env"]["OPENROUTER_API_KEY"].clone();
-        assert_eq!(var(Client::Cursor, Scope::Project), "${env:OPENROUTER_API_KEY}");
-        assert_eq!(var(Client::Windsurf, Scope::User), "${env:OPENROUTER_API_KEY}");
-        assert_eq!(var(Client::Vscode, Scope::Project), "${env:OPENROUTER_API_KEY}");
-        assert_eq!(var(Client::ClaudeCode, Scope::Project), "${OPENROUTER_API_KEY}");
+        let var = |client, scope| {
+            entry_for(client, "/mb", &env, scope)["env"]["OPENROUTER_API_KEY"].clone()
+        };
+        assert_eq!(
+            var(Client::Cursor, Scope::Project),
+            "${env:OPENROUTER_API_KEY}"
+        );
+        assert_eq!(
+            var(Client::Windsurf, Scope::User),
+            "${env:OPENROUTER_API_KEY}"
+        );
+        assert_eq!(
+            var(Client::Vscode, Scope::Project),
+            "${env:OPENROUTER_API_KEY}"
+        );
+        assert_eq!(
+            var(Client::ClaudeCode, Scope::Project),
+            "${OPENROUTER_API_KEY}"
+        );
         assert_eq!(var(Client::Gemini, Scope::Project), "${OPENROUTER_API_KEY}");
         assert_eq!(var(Client::Kiro, Scope::Project), "${OPENROUTER_API_KEY}");
         assert!(
@@ -521,8 +535,14 @@ mod tests {
                 .get("env")
                 .is_none()
         );
-        assert_eq!(env_syntax(Client::ClaudeCode, Scope::User), EnvSyntax::Unsupported);
-        assert_eq!(env_syntax(Client::Codex, Scope::User), EnvSyntax::CodexEnvVars);
+        assert_eq!(
+            env_syntax(Client::ClaudeCode, Scope::User),
+            EnvSyntax::Unsupported
+        );
+        assert_eq!(
+            env_syntax(Client::Codex, Scope::User),
+            EnvSyntax::CodexEnvVars
+        );
         assert!(codex_toml("/mb", &env).contains("env_vars = [\"OPENROUTER_API_KEY\"]"));
         assert!(!codex_toml("/mb", &[]).contains("env_vars"));
     }

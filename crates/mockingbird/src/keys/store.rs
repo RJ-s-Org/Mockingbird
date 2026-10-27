@@ -105,7 +105,10 @@ fn icacls(path: &Path, grant: &str) -> anyhow::Result<()> {
         .status()
         .context("running icacls")?;
     if !status.success() {
-        bail!("icacls could not make {} private ({status})", path.display());
+        bail!(
+            "icacls could not make {} private ({status})",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -167,10 +170,20 @@ mod tests {
     #[test]
     fn secret_names_are_plain() {
         let long = "x".repeat(65);
-        for bad in ["", "../../.ssh/id", "a/b", "a\\b", ".hidden", "..", long.as_str()] {
+        for bad in [
+            "",
+            "../../.ssh/id",
+            "a/b",
+            "a\\b",
+            ".hidden",
+            "..",
+            long.as_str(),
+        ] {
             assert!(!valid_name(bad), "{bad:?}");
         }
-        assert!(valid_name("openrouter") && valid_name("OPENROUTER_API_KEY") && valid_name("a.b-c"));
+        assert!(
+            valid_name("openrouter") && valid_name("OPENROUTER_API_KEY") && valid_name("a.b-c")
+        );
         let dir = tempfile::tempdir().unwrap();
         assert!(write_secret(dir.path(), "../x", "v").is_err());
         assert!(write_secret(dir.path(), "ok", "  ").is_err());
@@ -186,10 +199,19 @@ mod tests {
         let path = write_secret(&dir, "openrouter", "  sk-abc \n").unwrap();
         assert_eq!(path, dir.join("openrouter"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "sk-abc");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let listed = list(&dir);
-        assert_eq!(listed, vec![json!({"name":"openrouter","file":path,"private":true})]);
+        assert_eq!(
+            listed,
+            vec![json!({"name":"openrouter","file":path,"private":true})]
+        );
         assert!(!serde_json::to_string(&listed).unwrap().contains("sk-abc"));
         write_secret(&dir, "openrouter", "sk-new").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "sk-new");
