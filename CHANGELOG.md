@@ -32,7 +32,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Request log: Admin API `GET …/mocks/{mock}/requests/{id}` and `?fields=summary` (entries without bodies, with `request_bytes` / `response_bytes`); MCP `get_request`.
 - MCP `proxy_env` (the proxy variables and CA path, with `export` lines) and `start_server {proxy: true}`; `mockingbird server start --proxy`.
 - `mockingbird agent install` passes the default profile's key variables (names only) through to the agent's MCP config in each agent's syntax; `--config`, `--pass-env`.
-- `mockingbird keys setup` and MCP `open_key_setup`: a one-shot local page that stores an LLM key in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it, returning only the name. `doctor` reports the store under `key_store`.
+- `mockingbird keys setup` and MCP `open_key_setup`: a one-shot local page that stores an LLM key in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it, returning only the name and profile (the URL when the user takes longer than 45 s). `doctor` reports the store under `key_store`.
 - `mb-ext`: `check_secret_file` and `in_key_store` (additive).
 
 ### Changed
@@ -41,6 +41,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Background-server logs carry no ANSI codes (colour only on a terminal; `server_logs` strips any left), and the MCP server tools find the server's state next to the config `start_server` used (or the `config` argument), not in the MCP process's folder.
 - The mock-api and testing skills recommend proxy mode over editing an app's base URL.
 - A `file:` secret reference into `~/.mockingbird/secrets` is refused when the file is readable by group or others; other `file:` paths (container mounts) are unchanged.
+- `mockingbird mcp`'s login-shell import also fills a variable that is set but empty (an agent's `${NAME:-}` passthrough) when the shell has a value.
 - `server start` drops `HTTP(S)_PROXY` variables that point at the server's own proxy from the server's environment.
 - Faker integers without tight bounds (and count-like fields) are drawn from 0..=100 (id-like fields such as `id`, `owner_id`, `userId` from 1..=1 000 000), ignoring bounds wider than ±2^31; nullable arrays are never `null`; strings without a `maxLength` are at most 64 characters.
 - An LLM string over 2 000 characters where the schema sets no `maxLength` is cut to 200 (`repaired`); the prompt asks for free text under 200 characters.

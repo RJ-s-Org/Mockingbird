@@ -38,7 +38,7 @@ Desktop agents and IDEs often start MCP servers without the user's shell environ
 
 | Agent | What `agent install` writes |
 | --- | --- |
-| Claude Code (project `.mcp.json`) | `"env": {"NAME": "${NAME}"}` |
+| Claude Code (project `.mcp.json`) | `"env": {"NAME": "${NAME:-}"}` (empty rather than the literal text when Claude Code lacks the variable; the MCP server then takes it from the login shell) |
 | Claude Code (`--scope user`, a printed `claude mcp add`) | nothing (a shell would expand the value into `~/.claude.json`) |
 | Codex | `env_vars = ["NAME"]` in `[mcp_servers.mockingbird]` |
 | Cursor, VS Code, Windsurf | `"env": {"NAME": "${env:NAME}"}` |
@@ -50,7 +50,7 @@ An existing Codex `[mcp_servers.mockingbird]` table is left as it is.
 
 ### Key setup page
 
-When the agent cannot see the key at all, `mockingbird keys setup [name]` (MCP `open_key_setup`) opens a one-shot page on `127.0.0.1:<random port>` whose URL carries a random token. The user types the key there; Mockingbird writes it to `~/.mockingbird/secrets/<name>` (file `0600`, directory `0700`; an owner-only ACL on Windows) and sets the profile's `api_key` to `file:<that path>` (`-c`, `--profile`; default the default profile, and its name as the key name). The page accepts one submission from its own origin, refuses other `Host` and `Origin` headers, and closes after 10 minutes (`--timeout`). The MCP tool waits for the key and returns only `{"saved": name}`; with `open: false`, or when no browser opens, it returns the URL for the user instead. `doctor` lists the stored keys under `key_store` (names and paths, never values), and a `file:` reference into the store is refused when the file is readable by group or others.
+When the agent cannot see the key at all, `mockingbird keys setup [name]` (MCP `open_key_setup`) opens a one-shot page on `127.0.0.1:<random port>` whose URL carries a random token. The user types the key there; Mockingbird writes it to `~/.mockingbird/secrets/<name>` (file `0600`, directory `0700`; an owner-only ACL on Windows) and sets the profile's `api_key` to `file:<that path>` (`-c`, `--profile`; default the default profile, and its name as the key name). The page accepts one submission from its own origin, refuses other `Host` and `Origin` headers, and closes after 10 minutes (`--timeout`). The MCP tool opens the browser and waits up to 45 s (under agents' tool-call timeouts) for the key, then returns `{"saved": name, "profile", "config"}`, never the key; when the user is slower, with `open: false`, or when no browser opens, it returns the URL instead and the page stays open. It updates the config `start_server` used unless given `config`. `doctor` lists the stored keys under `key_store` (names and paths, never values), and a `file:` reference into the store is refused when the file is readable by group or others.
 
 ## What an agent can do
 

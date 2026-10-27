@@ -34,6 +34,10 @@ use crate::providers::{self, ProviderArgs};
 /// Protocol versions this server speaks, newest first.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// How long `open_key_setup` waits for the key before it returns the URL:
+/// under the common 60 s tool-call timeout of agents.
+const KEY_PAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// Largest body `call_mock` returns inline.
 const MAX_INLINE_BODY: usize = 64 * 1024;
 
@@ -357,7 +361,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "open_key_setup",
             title: "Let the user store an LLM key",
-            description: "Open a one-shot page on this machine where the user types an LLM key; Mockingbird stores it in ~/.mockingbird/secrets/<name> (mode 0600) and points the config's profile at the file. Returns only the key's name, never the key. Use it when doctor reports a missing key that the agent's environment cannot provide.",
+            description: "Open a one-shot page on this machine where the user types an LLM key; Mockingbird stores it in ~/.mockingbird/secrets/<name> (mode 0600) and points the config's profile at the file. Returns the key's name and the profile it updated, never the key; if the user has not saved it within 45 s, the URL (the page stays open 10 minutes). Use it when doctor reports a missing key that the agent's environment cannot provide.",
             schema: obj(
                 json!({
                     "name": s("Key name in the store; default the profile's name."),
@@ -1024,6 +1028,56 @@ impl McpServer {
         Ok(out)
     }
 
+    /// The key setup page for the tool's config (default: the one
+    /// `start_server` used, else ./mockingbird.yaml). With a browser, waits
+    /// briefly for the key (agents' tool calls time out); otherwise, or when
+    /// the user is slower, returns the URL and leaves the page open.
+    async fn open_key_setup(&self, a: &Value) -> ToolResult {
+        let config = opt_str(a, "config")
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.started_config
+                    .lock()
+                    .map(|c| c.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_else(|| "mockingbird.yaml".into());
+        let opts = crate::keys::page_options(
+            opt_str(a, "name").as_deref(),
+            &config,
+            opt_str(a, "profile").as_deref(),
+            crate::keys::page::PAGE_TIMEOUT,
+        )?;
+        let target = json!({
+            "profile": opts.profile.as_ref().map(|t| t.profile.clone()),
+            "config": opts.profile.as_ref().map(|t| t.config.clone()),
+        });
+        let mut page = crate::keys::page::start(opts).await?;
+        let open = a.get("open").and_then(Value::as_bool).unwrap_or(true);
+        let opened = open && crate::keys::page::open_browser(&page.url);
+        if opened && let Some(saved) = page.saved_within(KEY_PAGE_WAIT).await {
+            return Ok(json!({
+                "saved": saved.name,
+                "profile": target["profile"],
+                "config": target["config"],
+            }));
+        }
+        let url = page.url.clone();
+        crate::keys::page::detach(page);
+        let detail = if opened {
+            "The page is open in the user's browser; ask them to paste the key there (or open this URL on this machine). It stays open for 10 minutes; doctor lists the key once it is saved."
+        } else {
+            "Ask the user to open this URL on this machine and paste the key there; the page stays open for 10 minutes. doctor lists the key once it is saved."
+        };
+        Ok(json!({
+            "url": url,
+            "saved": null,
+            "profile": target["profile"],
+            "config": target["config"],
+            "detail": detail,
+        }))
+    }
+
     /// [`Self::state_for`] the tool's `config` argument.
     fn server_state(&self, a: &Value) -> daemon::StateArgs {
         self.state_for(opt_str(a, "config").map(PathBuf::from).as_deref())
@@ -1147,29 +1201,7 @@ impl McpServer {
                 });
                 self.proxy_env(config.as_deref(), opt_port(a, "port")?)
             }
-            "open_key_setup" => {
-                let config = opt_str(a, "config").unwrap_or_else(|| "mockingbird.yaml".into());
-                let opts = crate::keys::page_options(
-                    opt_str(a, "name").as_deref(),
-                    std::path::Path::new(&config),
-                    opt_str(a, "profile").as_deref(),
-                    crate::keys::page::PAGE_TIMEOUT,
-                )?;
-                let page = crate::keys::page::start(opts).await?;
-                let open = a.get("open").and_then(Value::as_bool).unwrap_or(true);
-                if open && crate::keys::page::open_browser(&page.url) {
-                    let saved = page.wait().await?;
-                    Ok(json!({ "saved": saved.name }))
-                } else {
-                    let url = page.url.clone();
-                    crate::keys::page::detach(page);
-                    Ok(json!({
-                        "url": url,
-                        "saved": null,
-                        "detail": "Ask the user to open this URL on this machine and paste the key there; the page stays open for 10 minutes. doctor lists the key once it is saved.",
-                    }))
-                }
-            }
+            "open_key_setup" => self.open_key_setup(a).await,
             "server_status" => Ok(daemon::status(&self.server_state(a)).await?),
             "server_logs" => {
                 let lines = opt_u64(a, "lines").unwrap_or(100);
@@ -2370,6 +2402,23 @@ mod tests {
                 .contains("export NODE_USE_ENV_PROXY='1'"),
             "{r}"
         );
+    }
+
+    #[tokio::test]
+    async fn open_key_setup_uses_the_started_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("svc.yaml");
+        std::fs::write(
+            &config,
+            "llm:\n  default_profile: gw\n  profiles:\n    gw:\n      base_url: https://example.com/v1\n      model: m\n      api_key: env:GW_KEY\n",
+        )
+        .unwrap();
+        let s = server(false);
+        *s.started_config.lock().unwrap() = Some(config.clone());
+        let r = call_tool(&s, "open_key_setup", json!({ "open": false })).await;
+        assert_eq!(r["profile"], "gw", "{r}");
+        assert_eq!(PathBuf::from(r["config"].as_str().unwrap()), config);
+        assert!(r["url"].as_str().unwrap().starts_with("http://127.0.0.1:"));
     }
 
     #[tokio::test]

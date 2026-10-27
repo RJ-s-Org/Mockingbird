@@ -471,29 +471,46 @@ pub fn logs(args: &StateArgs, lines: usize) -> anyhow::Result<String> {
     Ok(strip_ansi(&tail(&path, lines)))
 }
 
-/// The state directory of a background server: `state_dir` when absolute;
-/// otherwise the first `<ancestor>/<state_dir>` holding a `server.json`,
-/// walking up from the config file's directory and then from `cwd`; with
-/// none, next to the config (or in `cwd` without one).
+/// The state directory of the background server for `config`:
+/// `state_dir` when absolute. Otherwise, with a config, the first
+/// `<ancestor>/<state_dir>` above the config whose `server.json` records
+/// that same config (a server started from a parent folder with `-c
+/// sub/…`), else `<config dir>/<state_dir>`; never another project's
+/// server. Without a config, `<cwd>/<state_dir>` (as `server start` does).
 pub fn resolve_state_dir(state_dir: &Path, config: Option<&Path>, cwd: &Path) -> PathBuf {
     if state_dir.is_absolute() {
         return state_dir.to_path_buf();
     }
-    let config_dir = config.map(|c| {
-        let c = cwd.join(c);
-        c.parent().map(Path::to_path_buf).unwrap_or(c)
-    });
-    let found = config_dir
-        .iter()
-        .flat_map(|d| d.ancestors())
-        .chain(cwd.ancestors())
-        .map(|a| a.join(state_dir))
-        .find(|d| info_file(d).is_file());
-    found.unwrap_or_else(|| {
-        config_dir
-            .unwrap_or_else(|| cwd.to_path_buf())
-            .join(state_dir)
-    })
+    let Some(config) = config.map(|c| cwd.join(c)) else {
+        return cwd.join(state_dir);
+    };
+    let wanted = same_file_key(&config);
+    let config_dir = config
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    config_dir
+        .ancestors()
+        .map(|a| (a, a.join(state_dir)))
+        .find(|(ancestor, dir)| {
+            std::fs::read(info_file(dir))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v["config"].as_str().map(PathBuf::from))
+                // A relative `-c` was relative to the folder it was run in,
+                // which holds the state directory.
+                .is_some_and(|recorded| same_file_key(&ancestor.join(recorded)) == wanted)
+        })
+        .map(|(_, dir)| dir)
+        .unwrap_or_else(|| config_dir.join(state_dir))
+}
+
+/// `path` canonicalized when it exists, else made absolute: for comparing
+/// two spellings of one config path.
+fn same_file_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// `mockingbird doctor`.
@@ -636,7 +653,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("app/sub");
         std::fs::create_dir_all(root.path().join("app/.mockingbird")).unwrap();
-        std::fs::write(root.path().join("app/.mockingbird/server.json"), "{}").unwrap();
+        // Started from app/ with `-c sub/mockingbird.yaml`.
+        std::fs::write(
+            root.path().join("app/.mockingbird/server.json"),
+            r#"{"config": "sub/mockingbird.yaml"}"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(&project).unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let rel = Path::new(".mockingbird");
@@ -647,6 +669,27 @@ mod tests {
                 elsewhere.path()
             ),
             root.path().join("app/.mockingbird")
+        );
+        // Another project's server above this config is not this one's.
+        let other = root.path().join("app/sub/other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert_eq!(
+            resolve_state_dir(rel, Some(&other.join("m.yaml")), elsewhere.path()),
+            other.join(".mockingbird")
+        );
+        // Nor is a server found by walking up from the working folder.
+        std::fs::create_dir_all(elsewhere.path().join(".mockingbird")).unwrap();
+        std::fs::write(
+            elsewhere.path().join(".mockingbird/server.json"),
+            r#"{"config": "a.yaml"}"#,
+        )
+        .unwrap();
+        let nested = elsewhere.path().join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let fresh_cfg = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_state_dir(rel, Some(&fresh_cfg.path().join("m.yaml")), &nested),
+            fresh_cfg.path().join(".mockingbird")
         );
         let fresh = tempfile::tempdir().unwrap();
         assert_eq!(

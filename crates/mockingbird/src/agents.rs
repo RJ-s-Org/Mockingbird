@@ -137,6 +137,9 @@ pub struct InstallArgs {
 pub enum EnvSyntax {
     /// `"env": {"NAME": "${NAME}"}`.
     Braced,
+    /// `"env": {"NAME": "${NAME:-}"}`: empty, not the literal text, when
+    /// the agent lacks the variable.
+    BracedOrEmpty,
     /// `"env": {"NAME": "${env:NAME}"}`.
     EnvPrefixed,
     /// `env_vars = ["NAME"]` in Codex's TOML table.
@@ -149,7 +152,8 @@ pub enum EnvSyntax {
 /// the agent's MCP configuration docs; see docs/agents.md).
 pub fn env_syntax(client: Client, scope: Scope) -> EnvSyntax {
     match (client, scope) {
-        (Client::ClaudeCode, Scope::Project) => EnvSyntax::Braced,
+        // Claude Code passes an unset `${NAME}` on as the literal text.
+        (Client::ClaudeCode, Scope::Project) => EnvSyntax::BracedOrEmpty,
         // A printed `claude mcp add` line: a shell would expand the value
         // into ~/.claude.json.
         (Client::ClaudeCode, Scope::User) => EnvSyntax::Unsupported,
@@ -265,6 +269,7 @@ fn entry_for(client: Client, command: &str, env: &[String], scope: Scope) -> Val
     };
     let reference = match env_syntax(client, scope) {
         EnvSyntax::Braced => |n: &str| format!("${{{n}}}"),
+        EnvSyntax::BracedOrEmpty => |n: &str| format!("${{{n}:-}}"),
         EnvSyntax::EnvPrefixed => |n: &str| format!("${{env:{n}}}"),
         EnvSyntax::CodexEnvVars | EnvSyntax::Unsupported => return entry,
     };
@@ -519,9 +524,11 @@ mod tests {
             var(Client::Vscode, Scope::Project),
             "${env:OPENROUTER_API_KEY}"
         );
+        // An unset `${NAME}` reaches the server as the literal text, which
+        // would count as a key; `:-` makes it empty.
         assert_eq!(
             var(Client::ClaudeCode, Scope::Project),
-            "${OPENROUTER_API_KEY}"
+            "${OPENROUTER_API_KEY:-}"
         );
         assert_eq!(var(Client::Gemini, Scope::Project), "${OPENROUTER_API_KEY}");
         assert_eq!(var(Client::Kiro, Scope::Project), "${OPENROUTER_API_KEY}");

@@ -317,7 +317,7 @@ fn agent_install_passes_key_names_not_values() {
     let claude: Value = serde_json::from_str(&read(&dir.path().join(".mcp.json"))).unwrap();
     assert_eq!(
         claude["mcpServers"]["mockingbird"]["env"],
-        json!({ "EXTRA_KEY": "${EXTRA_KEY}", "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}" })
+        json!({ "EXTRA_KEY": "${EXTRA_KEY:-}", "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}" })
     );
     let out = run(
         dir.path(),
@@ -725,6 +725,11 @@ fn open_key_setup_never_returns_the_key() {
     let url = r["url"].as_str().unwrap().to_string();
     assert!(url.starts_with("http://127.0.0.1:"), "{r}");
     assert!(r["saved"].is_null(), "{r}");
+    assert_eq!(r["profile"], "openrouter", "{r}");
+    assert!(
+        r["config"].as_str().unwrap().ends_with("mockingbird.yaml"),
+        "{r}"
+    );
     let status = post_key(&url, "sk-or-v1-from-browser");
     assert!(status.contains("200"), "{status}");
     let mut doctor = Value::Null;
@@ -880,6 +885,37 @@ fn mcp_imports_missing_variables_from_the_login_shell() {
     assert!(
         !doctor.to_string().contains("from-the-shell"),
         "doctor never shows values"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_passed_through_variable_is_imported_from_the_login_shell() {
+    let dir = tempdir();
+    run_json(
+        dir.path(),
+        &[
+            "init",
+            "--provider",
+            "custom",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--model",
+            "m",
+            "--api-key-env",
+            "MB_TEST_SHELL_ONLY_API_KEY",
+        ],
+    );
+    let shell = fake_login_shell(dir.path());
+    // What an agent's `${NAME:-}` passthrough hands over when it lacks the key.
+    let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
+        cmd.env("SHELL", &shell)
+            .env("MB_TEST_SHELL_ONLY_API_KEY", "");
+    });
+    let doctor = mcp.tool("doctor", json!({}));
+    assert_eq!(
+        doctor["config"]["profiles"][0]["secrets"][0]["set"], true,
+        "{doctor}"
     );
 }
 

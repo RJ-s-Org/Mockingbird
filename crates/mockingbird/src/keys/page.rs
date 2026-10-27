@@ -139,6 +139,12 @@ pub async fn start(opts: PageOptions) -> anyhow::Result<KeyPage> {
 }
 
 impl KeyPage {
+    /// The saved key, when one is saved within `wait`; the page stays open
+    /// otherwise.
+    pub async fn saved_within(&mut self, wait: Duration) -> Option<SavedKey> {
+        tokio::time::timeout(wait, &mut self.saved).await.ok()?.ok()
+    }
+
     /// Waits until a key is saved, at most the page's timeout.
     pub async fn wait(self) -> anyhow::Result<SavedKey> {
         let timeout = self.timeout;
@@ -185,9 +191,11 @@ pub fn open_browser(url: &str) -> bool {
 async fn safe_headers(mut resp: Response) -> Response {
     let h = resp.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Not `no-referrer`: with it browsers send `Origin: null` on the form
+    // post, which the origin check refuses. Nothing here links off-site.
     h.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static("same-origin"),
     );
     h.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -376,7 +384,9 @@ mod tests {
         let r = reqwest::get(&page.url).await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.headers()["cache-control"], "no-store");
-        assert_eq!(r.headers()["referrer-policy"], "no-referrer");
+        // `no-referrer` would make browsers send `Origin: null` with the
+        // form post, which the origin check refuses.
+        assert_eq!(r.headers()["referrer-policy"], "same-origin");
         assert!(
             r.headers()["content-security-policy"]
                 .to_str()
@@ -473,6 +483,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 403);
+        let r = c
+            .post(&page.url)
+            .header("origin", "null")
+            .key_form("k")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
         assert!(!dir.join("openrouter").exists());
         let origin = page.url.rsplit_once('/').unwrap().0.to_string();
         let r = c
@@ -497,6 +515,26 @@ mod tests {
             std::fs::read_to_string(dir.join("openrouter")).unwrap(),
             "first"
         );
+    }
+
+    #[tokio::test]
+    async fn a_short_wait_leaves_the_page_open() {
+        let (_root, dir, _) = setup();
+        let mut page = start(opts(&dir, None)).await.unwrap();
+        assert!(
+            page.saved_within(Duration::from_millis(100))
+                .await
+                .is_none()
+        );
+        let r = reqwest::Client::new()
+            .post(&page.url)
+            .key_form("later")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let saved = page.saved_within(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(saved.name, "openrouter");
     }
 
     #[tokio::test]
