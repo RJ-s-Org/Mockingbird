@@ -495,6 +495,52 @@ llm:
 }
 
 #[test]
+fn webhooks_parse_and_validate() {
+    let ws = Workspace::new();
+    let cfg = ws.load(
+        r#"
+mocks:
+  shop:
+    contract: orders.yaml
+    webhooks:
+      - url: http://localhost:4242/webhook
+        events: [createCustomer, "customer.updated"]
+        secret: env:SHOP_WEBHOOK_SECRET
+        signing: stripe
+        delay_ms: 100
+"#,
+    );
+    let w = &cfg.mocks["shop"].webhooks[0];
+    let target = w.to_store();
+    assert_eq!(target.effective_signing(), mb_store::WebhookSigning::Stripe);
+    assert_eq!(target.events, ["createCustomer", "customer.updated"]);
+    assert_eq!(target.delay_ms, 100);
+    assert_eq!(cfg.validate_ranges(), Ok(()));
+    let defaulted =
+        ws.load("mocks:\n  shop:\n    contract: orders.yaml\n    webhooks: [{url: http://x/h}]\n");
+    assert_eq!(defaulted.mocks["shop"].webhooks[0].to_store().events, ["*"]);
+    let load_err = |yaml: &str| {
+        ws.write(yaml);
+        format!("{:#}", file_config::load(&ws.config_path()).unwrap_err())
+    };
+    let err = load_err(
+        "mocks:\n  shop:\n    contract: orders.yaml\n    webhooks: [{url: http://x/h, signing: stripe}]\n",
+    );
+    assert!(err.contains("mocks.shop.webhooks[0].signing"), "{err}");
+    let err = load_err(
+        "mocks:\n  shop:\n    contract: orders.yaml\n    webhooks: [{url: http://x/h, secret: whsec_pasted}]\n",
+    );
+    assert!(
+        err.contains("secret reference") && !err.contains("whsec_pasted"),
+        "{err}"
+    );
+    let err = load_err(
+        "mocks:\n  shop:\n    contract: orders.yaml\n    webhooks: [{url: http://x/h, sekret: env:A}]\n",
+    );
+    assert!(err.contains("sekret"), "{err}");
+}
+
+#[test]
 fn env_llm_vars_create_default_profile() {
     let mut cfg = FileConfig::default();
     file_config::apply_env_from(&mut cfg, |k| {

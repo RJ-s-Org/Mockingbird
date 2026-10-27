@@ -51,6 +51,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     }
 }
 

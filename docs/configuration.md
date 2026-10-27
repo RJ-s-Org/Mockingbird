@@ -259,6 +259,20 @@ Fault injection. Absent injects nothing. A request with `X-Mockingbird-Chaos: of
 
 `MB_CHAOS_SEED` (an integer) seeds the random choices, for repeatable test runs.
 
+### `mocks.<name>.webhooks`
+
+Where the mock POSTs an event after each successful (2xx) write: a create, update, delete or other command, never a read. The body is the contract's OpenAPI `webhooks`/`callbacks` payload when it defines one, else a Stripe-shaped event `{id, object: "event", type: "<resource>.<created|updated|deleted>", created, data: {object: <response>}}`. Each delivery is retried 3 times (after 1 s, 2 s, 4 s) on a non-2xx answer or transport error and never delays the response. See [the webhooks guide](webhooks.md).
+
+| Key | Type | Default | Range / rule | Env / flag | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `mocks.<name>.webhooks` | list | `[]` | At most 16 | | The mock's webhook targets. |
+| `mocks.<name>.webhooks[]` | section | | | | One target. |
+| `mocks.<name>.webhooks[].url` | URL | required | Absolute `http`/`https` | | Where events are POSTed. Userinfo and query are kept off the delivery log. |
+| `mocks.<name>.webhooks[].events` | list of strings | `["*"]` | Not empty | | Which events go to this target: operation ids (`createCustomer`), event types (`customer.created`) or `*`. |
+| `mocks.<name>.webhooks[].secret` | secret reference | unset | `env:`, `file:` or `vault:` | | Signing key. A reference that does not resolve keeps the mock serving; that target's deliveries are recorded `failed` and nothing is sent unsigned. |
+| `mocks.<name>.webhooks[].signing` | `stripe`, `hmac-sha256`, `none` | `hmac-sha256` with a secret, else `none` | `stripe` and `hmac-sha256` need `secret` | | `stripe`: `Stripe-Signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`. `hmac-sha256`: `X-Mockingbird-Signature: sha256=<hex HMAC-SHA256(secret, body)>`. |
+| `mocks.<name>.webhooks[].delay_ms` | integer (ms) | `0` | 0..=60000 | | Wait before the first attempt. |
+
 ### `mocks.<name>.limits`
 
 Admission limits of one mock. Unset fields use the global [`limits`](#limits), or no limit.

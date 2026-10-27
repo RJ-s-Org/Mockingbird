@@ -172,6 +172,12 @@ mocks:
       error_rate: 0.05
       latency_jitter: {min: 50ms, max: 500ms}
       drop_stream_rate: 0.01
+    webhooks:
+      - url: http://localhost:4242/webhook
+        events: [createOrder, order.updated]
+        secret: env:SHOP_WEBHOOK_SECRET
+        signing: stripe
+        delay_ms: 100
     limits:
       rate_limit: {requests_per_second: 50, burst: 100}
       daily_token_budget: 1000000

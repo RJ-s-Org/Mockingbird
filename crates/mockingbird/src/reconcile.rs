@@ -540,7 +540,7 @@ async fn apply_mock(
                         data_plane_auth: p.mock.data_plane_auth.clone(),
                         behavior: behavior(p.mock),
                         hosts: p.mock.hosts.clone(),
-                        webhooks: Vec::new(),
+                        webhooks: webhooks(p.mock),
                     },
                 )
                 .await
@@ -559,6 +559,7 @@ async fn apply_mock(
                 limits: p.mock.limits.to_store(),
                 behavior: behavior(p.mock),
                 hosts: p.mock.hosts.clone(),
+                webhooks: webhooks(p.mock),
                 ..current.clone()
             };
             if wanted != *current {
@@ -763,6 +764,13 @@ fn behavior(mock: &FileMock) -> mb_store::MockBehavior {
         unknown_ids: mock.unknown_ids,
         default_scenario: mock.default_scenario.clone(),
     }
+}
+
+fn webhooks(mock: &FileMock) -> Vec<mb_store::WebhookTarget> {
+    mock.webhooks
+        .iter()
+        .map(crate::file_config::FileWebhook::to_store)
+        .collect()
 }
 
 fn duration_ms(

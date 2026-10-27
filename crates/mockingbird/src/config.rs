@@ -637,6 +637,7 @@ async fn build_app_on(
             Role::Control => ServeMode::ControlOnly,
             Role::All | Role::Data => ServeMode::Full,
         },
+        webhook_log: Default::default(),
     };
     let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();

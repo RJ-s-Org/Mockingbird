@@ -143,6 +143,7 @@ async fn setup() -> Setup {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
@@ -439,6 +440,7 @@ async fn twins() -> Twins {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();

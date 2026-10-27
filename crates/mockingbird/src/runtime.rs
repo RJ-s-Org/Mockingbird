@@ -15,6 +15,11 @@ use mb_ext::{Extensions, Tenancy};
 use mb_import::smart::ExtractLlm;
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
 use mb_protocols::events::EventDeps;
+use mb_protocols::webhooks::deliver::{
+    DispatchSettings, ResolvedTarget, SecretBytes, WebhookDispatcher,
+};
+use mb_protocols::webhooks::log::SharedDeliveryLog;
+use mb_protocols::webhooks::sign::Signing;
 use mb_protocols::{
     ChaosRuntime, ChaosSpec, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime,
     ProtocolSettings, RateLimiter, RequestRecorder, RuntimeLimits, ScenarioRuntime, Shutdown,
@@ -24,7 +29,7 @@ use mb_state::StateStore;
 use mb_store::{
     ChaosSettings, Consistency, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig,
     DataPlaneAuthMode as StoredAuthMode, LlmProfile, Mock, Scenario,
-    UnknownIds as StoredUnknownIds,
+    UnknownIds as StoredUnknownIds, WebhookSigning,
 };
 
 use crate::budget::StoreTokenBudget;
@@ -88,6 +93,8 @@ pub struct RuntimeDeps {
     pub http: mb_llm::HttpOptions,
     /// What the runtimes run (see [`ServeMode`]).
     pub mode: ServeMode,
+    /// Every mock's recent webhook deliveries, shared with the Admin API.
+    pub webhook_log: SharedDeliveryLog,
 }
 
 /// The profile used by mocks that name none: a shared, swappable cell, so
@@ -341,6 +348,7 @@ pub async fn build_runtime_with_budget(
         StoredUnknownIds::NotFound => UnknownIds::NotFound,
     };
     rt.default_scenario = mock.behavior.default_scenario.clone();
+    rt.webhooks = webhook_dispatcher(deps, mock).await?;
     Ok(Some((rt, budget)))
 }
 
@@ -484,6 +492,58 @@ async fn load_profile(
         .await
         .with_context(|| format!("loading LLM profile {name:?} of workspace {workspace:?}"))?
         .ok_or_else(|| anyhow!("LLM profile {name:?} not found in workspace {workspace:?}"))
+}
+
+/// The mock's webhook dispatcher; `None` without targets. A secret that
+/// does not resolve leaves the mock serving: that target's deliveries are
+/// recorded failed, naming the reference.
+pub(crate) async fn webhook_dispatcher(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+) -> anyhow::Result<Option<Arc<WebhookDispatcher>>> {
+    if mock.webhooks.is_empty() {
+        return Ok(None);
+    }
+    let mut targets = Vec::with_capacity(mock.webhooks.len());
+    for t in &mock.webhooks {
+        let secret = match &t.secret {
+            None => Ok(None),
+            Some(reference) => match deps.ext.secrets.resolve(reference).await {
+                Ok(value) => Ok(Some(SecretBytes::new(value))),
+                Err(_) => {
+                    tracing::warn!(
+                        mock = %mock.name,
+                        reference = %reference,
+                        "webhook secret reference could not be resolved; its deliveries will fail"
+                    );
+                    Err(format!(
+                        "secret reference {reference} could not be resolved"
+                    ))
+                }
+            },
+        };
+        targets.push(ResolvedTarget {
+            url: t.url.clone(),
+            events: t.events.clone(),
+            signing: match t.effective_signing() {
+                WebhookSigning::Stripe => Signing::Stripe,
+                WebhookSigning::HmacSha256 => Signing::HmacSha256,
+                WebhookSigning::None => Signing::None,
+            },
+            secret,
+            delay: Duration::from_millis(t.delay_ms),
+        });
+    }
+    let http = mb_llm::http_client(&deps.http, None)
+        .map_err(|e| anyhow!("building the webhook client of mock {:?}: {e}", mock.name))?;
+    Ok(Some(Arc::new(WebhookDispatcher::new(
+        mock.workspace.clone(),
+        mock.name.clone(),
+        targets,
+        http,
+        deps.webhook_log.clone(),
+        DispatchSettings::default(),
+    ))))
 }
 
 async fn openai_provider(
