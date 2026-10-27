@@ -374,6 +374,7 @@ pub async fn create(
                     default_scenario: None,
                 },
                 hosts: body.hosts,
+                webhooks: Vec::new(),
             },
         )
         .await

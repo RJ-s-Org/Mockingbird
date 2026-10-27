@@ -307,6 +307,7 @@ mod tests {
                     limits: Default::default(),
                     behavior: Default::default(),
                     hosts: vec![],
+                    webhooks: Vec::new(),
                 },
             )
             .await

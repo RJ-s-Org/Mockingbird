@@ -80,6 +80,7 @@ async fn mock(
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await

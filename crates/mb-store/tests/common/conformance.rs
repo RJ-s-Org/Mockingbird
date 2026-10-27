@@ -13,7 +13,7 @@ use mb_store::{
     ImportJobStatus, ImportOutcome, ImportProgress, LatencyJitter, LlmProfile, Mock, MockBehavior,
     MockEventSettings, MockLimits, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
     NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds,
+    ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds, WebhookSigning, WebhookTarget,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -24,6 +24,7 @@ pub async fn run_all(store: Arc<dyn ControlStore>) {
     mock_behavior_round_trips(&store).await;
     invalid_mock_name_rejected(&store).await;
     mock_hosts_round_trip(&store).await;
+    mock_webhooks_round_trip(&store).await;
     contract_versions_increment(&store).await;
     activation_is_exclusive_and_rolls_back(&store).await;
     draft_cannot_activate(&store).await;
@@ -96,7 +97,75 @@ fn new_mock(name: &str) -> NewMock {
         limits: MockLimits::default(),
         behavior: Default::default(),
         hosts: vec![],
+        webhooks: vec![],
     }
+}
+
+async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
+    let mut nm = new_mock("hooks");
+    nm.webhooks = vec![WebhookTarget {
+        url: "http://127.0.0.1:4242/hook".into(),
+        events: vec!["createOrder".into()],
+        secret: Some("env:SHOP_WEBHOOK_SECRET".into()),
+        signing: Some(WebhookSigning::Stripe),
+        delay_ms: 250,
+    }];
+    let m = store
+        .create_mock(DEFAULT_WORKSPACE, nm.clone())
+        .await
+        .unwrap();
+    assert_eq!(m.webhooks, nm.webhooks);
+    assert_eq!(
+        store
+            .get_mock(DEFAULT_WORKSPACE, "hooks")
+            .await
+            .unwrap()
+            .unwrap()
+            .webhooks,
+        nm.webhooks
+    );
+    let mut cleared = m.clone();
+    cleared.webhooks.clear();
+    assert!(
+        store
+            .update_mock(&cleared)
+            .await
+            .unwrap()
+            .webhooks
+            .is_empty()
+    );
+    // A mock without webhooks serialises without the key.
+    let stored = store
+        .get_mock(DEFAULT_WORKSPACE, "hooks")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.webhooks.is_empty());
+    assert!(
+        serde_json::to_value(&stored)
+            .unwrap()
+            .get("webhooks")
+            .is_none()
+    );
+    let mut bad = new_mock("hooks-bad");
+    bad.webhooks = vec![WebhookTarget {
+        url: "nope".into(),
+        ..nm.webhooks[0].clone()
+    }];
+    assert!(matches!(
+        store.create_mock(DEFAULT_WORKSPACE, bad).await,
+        Err(StoreError::Invalid(_))
+    ));
+    let mut stored = stored;
+    stored.webhooks = vec![WebhookTarget {
+        url: "nope".into(),
+        ..nm.webhooks[0].clone()
+    }];
+    assert!(matches!(
+        store.update_mock(&stored).await,
+        Err(StoreError::Invalid(_))
+    ));
+    store.delete_mock(DEFAULT_WORKSPACE, "hooks").await.unwrap();
 }
 
 async fn mock_hosts_round_trip(store: &Arc<dyn ControlStore>) {

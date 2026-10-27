@@ -245,6 +245,7 @@ async fn file_managed_mock_rejects_chaos_patch() {
                 },
                 hosts: vec![],
                 behavior: Default::default(),
+                webhooks: Vec::new(),
             },
         )
         .await

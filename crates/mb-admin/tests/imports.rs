@@ -694,6 +694,7 @@ async fn file_mock_import_409() {
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await

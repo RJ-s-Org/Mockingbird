@@ -85,6 +85,9 @@ pub struct Mock {
     /// Host names the mock answers for; empty answers for any host.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Where the mock POSTs an event after each successful write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<WebhookTarget>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -109,6 +112,118 @@ pub struct NewMock {
     /// Host names the mock answers for; empty answers for any host.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Where the mock POSTs an event after each successful write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<WebhookTarget>,
+}
+
+/// How a webhook delivery is signed.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebhookSigning {
+    /// `Stripe-Signature: t=<ts>,v1=<hex HMAC-SHA256(secret, "<ts>.<body>")>`.
+    #[serde(rename = "stripe")]
+    Stripe,
+    /// `X-Mockingbird-Signature: sha256=<hex HMAC-SHA256(secret, body)>`.
+    #[serde(rename = "hmac-sha256")]
+    HmacSha256,
+    #[serde(rename = "none")]
+    None,
+}
+
+/// One URL a mock POSTs webhook events to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WebhookTarget {
+    /// Absolute `http` or `https` URL.
+    pub url: String,
+    /// Operation ids, event types or `"*"`; default `["*"]`.
+    #[serde(default = "WebhookTarget::all_events")]
+    pub events: Vec<String>,
+    /// A secret reference (`env:`, `file:`, `vault:`), never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Default: `hmac-sha256` with a secret, `none` without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing: Option<WebhookSigning>,
+    /// Wait before the first attempt, at most [`Self::MAX_DELAY_MS`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delay_ms: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl WebhookTarget {
+    pub const MAX_TARGETS: usize = 16;
+    pub const MAX_DELAY_MS: u64 = 60_000;
+
+    pub fn all_events() -> Vec<String> {
+        vec!["*".into()]
+    }
+
+    /// `signing`, else `hmac-sha256` with a secret and `none` without.
+    pub fn effective_signing(&self) -> WebhookSigning {
+        match (self.signing, &self.secret) {
+            (Some(s), _) => s,
+            (None, Some(_)) => WebhookSigning::HmacSha256,
+            (None, None) => WebhookSigning::None,
+        }
+    }
+
+    /// The first problem with this target, naming the field without the
+    /// `webhooks[i].` prefix the caller adds. Never echoes the secret.
+    pub fn validate(&self) -> Result<(), String> {
+        let url_ok = url::Url::parse(&self.url)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host());
+        if !url_ok {
+            return Err("url must be an absolute http or https URL".into());
+        }
+        if self.events.is_empty() || self.events.iter().any(|e| e.trim().is_empty()) {
+            return Err("events must list operation ids, event types or \"*\" (none empty)".into());
+        }
+        if let Some(secret) = &self.secret
+            && !is_secret_reference(secret)
+        {
+            return Err(
+                "secret must be a secret reference (env:NAME, file:/path or vault:path#key), not a value"
+                    .into(),
+            );
+        }
+        let signs = matches!(
+            self.effective_signing(),
+            WebhookSigning::Stripe | WebhookSigning::HmacSha256
+        );
+        if signs && self.secret.is_none() {
+            return Err("signing stripe or hmac-sha256 needs a secret".into());
+        }
+        if self.delay_ms > Self::MAX_DELAY_MS {
+            return Err(format!("delay_ms must be at most {}", Self::MAX_DELAY_MS));
+        }
+        Ok(())
+    }
+}
+
+/// `env:`, `file:` or `vault:` followed by a non-blank remainder.
+fn is_secret_reference(s: &str) -> bool {
+    ["env:", "file:", "vault:"].iter().any(|p| {
+        s.strip_prefix(p)
+            .is_some_and(|rest| !rest.trim().is_empty() && !rest.contains(char::is_whitespace))
+    })
+}
+
+/// At most [`WebhookTarget::MAX_TARGETS`] targets, each valid; messages
+/// name the offending `webhooks[i].<field>`.
+pub fn validate_webhooks(targets: &[WebhookTarget]) -> Result<(), String> {
+    if targets.len() > WebhookTarget::MAX_TARGETS {
+        return Err(format!(
+            "webhooks: at most {} targets per mock",
+            WebhookTarget::MAX_TARGETS
+        ));
+    }
+    for (i, t) in targets.iter().enumerate() {
+        t.validate().map_err(|e| format!("webhooks[{i}].{e}"))?;
+    }
+    Ok(())
 }
 
 /// Whether a mock answers repeated reads from a per-session cache and seeds

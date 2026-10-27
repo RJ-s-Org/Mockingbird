@@ -540,6 +540,7 @@ async fn apply_mock(
                         data_plane_auth: p.mock.data_plane_auth.clone(),
                         behavior: behavior(p.mock),
                         hosts: p.mock.hosts.clone(),
+                        webhooks: Vec::new(),
                     },
                 )
                 .await

@@ -89,6 +89,7 @@ async fn mock_in(
                 },
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await

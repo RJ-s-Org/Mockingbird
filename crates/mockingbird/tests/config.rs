@@ -606,6 +606,7 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -800,6 +801,7 @@ async fn reconcile_rejects_grpc_service_clashes() {
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -1621,6 +1623,7 @@ async fn reconcile_same_name_two_workspaces() {
                 data_plane_auth: DataPlaneAuthConfig::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -1701,6 +1704,7 @@ async fn reconcile_prefix_collision_across_workspaces_errors() {
                 data_plane_auth: DataPlaneAuthConfig::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await

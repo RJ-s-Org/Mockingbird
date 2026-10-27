@@ -76,6 +76,7 @@ async fn hosted_registry(host: &str) -> Arc<MockRegistry> {
                 data_plane_auth: Default::default(),
                 hosts: vec![host.into()],
                 behavior: Default::default(),
+                webhooks: Vec::new(),
             },
         )
         .await

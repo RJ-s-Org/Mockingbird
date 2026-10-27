@@ -1547,6 +1547,7 @@ async fn file_managed_mock_is_read_only() {
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
