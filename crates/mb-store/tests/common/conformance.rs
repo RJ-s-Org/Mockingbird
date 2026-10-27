@@ -147,6 +147,7 @@ fn bundle(title: &str) -> Bundle {
         defs: serde_json::Map::new(),
         protocol_payload: None,
         channels: Vec::new(),
+        webhooks: Vec::new(),
     }
 }
 

@@ -634,6 +634,7 @@ fn compile_text(sdl: &str, bytes: &[u8], title: Option<String>) -> Result<Bundle
             sdl: sdl.to_owned(),
         }),
         channels: Vec::new(),
+        webhooks: Vec::new(),
     })
 }
 

@@ -48,6 +48,7 @@ fn message_bundle() -> Bundle {
         defs: Map::new(),
         protocol_payload: None,
         channels: vec![channel],
+        webhooks: Vec::new(),
     }
 }
 
