@@ -268,7 +268,7 @@ Where the mock POSTs an event after each successful (2xx) write: a create, updat
 | --- | --- | --- | --- | --- | --- |
 | `mocks.<name>.webhooks` | list | `[]` | At most 16 | | The mock's webhook targets. |
 | `mocks.<name>.webhooks[]` | section | | | | One target. |
-| `mocks.<name>.webhooks[].url` | URL | required | Absolute `http`/`https` | | Where events are POSTed. Userinfo and query are kept off the delivery log. |
+| `mocks.<name>.webhooks[].url` | URL | required | Absolute `http`/`https`, no `user:password@` | | Where events are POSTed. Redirects are not followed (a 3xx is a failed attempt). The query is shown as `?<redacted>` by the Admin API and in audit events, and is kept off the delivery log. |
 | `mocks.<name>.webhooks[].events` | list of strings | `["*"]` | Not empty | | Which events go to this target: operation ids (`createCustomer`), event types (`customer.created`) or `*`. |
 | `mocks.<name>.webhooks[].secret` | secret reference | unset | `env:`, `file:` or `vault:` | | Signing key. A reference that does not resolve keeps the mock serving; that target's deliveries are recorded `failed` and nothing is sent unsigned. |
 | `mocks.<name>.webhooks[].signing` | `stripe`, `hmac-sha256`, `none` | `hmac-sha256` with a secret, else `none` | `stripe` and `hmac-sha256` need `secret` | | `stripe`: `Stripe-Signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`. `hmac-sha256`: `X-Mockingbird-Signature: sha256=<hex HMAC-SHA256(secret, body)>`. |

@@ -54,6 +54,38 @@ pub enum WebhookSigningSchema {
     None,
 }
 
+/// What views and audit events show of a target URL: its query (which may
+/// carry a token) replaced by `?<redacted>`.
+fn redacted_url(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _)) => format!(
+            "{}?{REDACTED_QUERY}",
+            base.split('#').next().unwrap_or(base)
+        ),
+        None => url.to_string(),
+    }
+}
+
+const REDACTED_QUERY: &str = "<redacted>";
+
+fn redact_target(mut t: WebhookTarget) -> WebhookTarget {
+    t.url = redacted_url(&t.url);
+    t
+}
+
+/// A PATCH that sends back the redacted URL a view showed means the stored
+/// URL of that target: each such URL is restored from `stored`.
+fn restore_redacted(targets: &mut [WebhookTarget], stored: &[WebhookTarget]) {
+    for t in targets {
+        if !t.url.ends_with(&format!("?{REDACTED_QUERY}")) {
+            continue;
+        }
+        if let Some(s) = stored.iter().find(|s| redacted_url(&s.url) == t.url) {
+            t.url = s.url.clone();
+        }
+    }
+}
+
 /// 422 `Invalid webhooks` for an out-of-range target, then 422 `Secret
 /// reference not allowed` for a secret no `allowed` glob
 /// (`server.api_webhook_secret_refs`) matches. Neither echoes a secret.
@@ -228,7 +260,7 @@ impl MockView {
             unknown_ids: m.behavior.unknown_ids,
             default_scenario: m.behavior.default_scenario,
             hosts: m.hosts,
-            webhooks: m.webhooks,
+            webhooks: m.webhooks.into_iter().map(redact_target).collect(),
             created_at: m.created_at,
             updated_at: m.updated_at,
             active_version,
@@ -524,7 +556,9 @@ pub async fn patch(
     if let Some(hosts) = &body.hosts {
         validate_hosts(hosts)?;
     }
-    if let Some(webhooks) = &body.webhooks {
+    let mut webhooks = body.webhooks;
+    if let Some(webhooks) = &mut webhooks {
+        restore_redacted(webhooks, &m.webhooks);
         check_webhooks(webhooks, &st.api_webhook_secret_refs)?;
     }
     if let Some(prefix) = &body.route_prefix {
@@ -541,7 +575,7 @@ pub async fn patch(
     if let Some(hosts) = body.hosts {
         m.hosts = hosts;
     }
-    if let Some(webhooks) = body.webhooks {
+    if let Some(webhooks) = webhooks {
         m.webhooks = webhooks;
     }
     if let Some(persona) = body.persona {

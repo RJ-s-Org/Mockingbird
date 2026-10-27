@@ -534,7 +534,16 @@ pub(crate) async fn webhook_dispatcher(
             delay: Duration::from_millis(t.delay_ms),
         });
     }
-    let http = mb_llm::http_client(&deps.http, None)
+    // A redirect is the receiver's answer: following it would turn the POST
+    // into a GET (or re-send the signed body to another host).
+    let http = deps
+        .http
+        .apply(reqwest::Client::builder())
+        .and_then(|b| {
+            b.redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| mb_llm::LlmError::Transport(e.to_string()))
+        })
         .map_err(|e| anyhow!("building the webhook client of mock {:?}: {e}", mock.name))?;
     Ok(Some(Arc::new(WebhookDispatcher::new(
         mock.workspace.clone(),

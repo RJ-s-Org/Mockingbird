@@ -19,7 +19,7 @@ use mb_store::{
 };
 use mockingbird::runtime::{RuntimeDeps, ServeMode, build_runtime};
 use serde_json::{Value, json};
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // Set for this test process only; a throwaway value.
@@ -188,4 +188,39 @@ async fn unset_secret_keeps_serving_and_records_failure() {
             .contains(&format!("env:{UNSET_VAR}"))
     );
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn redirects_are_not_followed() {
+    unsafe { std::env::set_var(SECRET_VAR, "whsec_test_secret") };
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhook"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/ok"))
+        .mount(&server)
+        .await;
+    Mock::given(path("/ok"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let (base, log) = serve(&server, &format!("env:{SECRET_VAR}")).await;
+    assert_eq!(create_order(&base).await, 201);
+    for _ in 0..500 {
+        if let Some(r) = log.list(DEFAULT_WORKSPACE, "orders", 1).first()
+            && r.attempts >= 1
+        {
+            assert_ne!(r.status, DeliveryStatus::Delivered, "{r:?}");
+            assert_eq!(r.response_status, Some(302), "{r:?}");
+            let followed = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|req| req.url.path() == "/ok");
+            assert!(!followed, "the redirect was followed");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no attempt recorded");
 }

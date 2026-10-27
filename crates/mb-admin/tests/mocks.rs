@@ -499,3 +499,72 @@ async fn webhook_secret_refs_are_restricted() {
         .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn webhook_url_credentials_never_leave_the_store() {
+    let h = harness().await;
+    // Userinfo is refused; the refusal does not echo it.
+    let (status, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/workspaces/default/mocks",
+            Some(json!({"name": "shop",
+                "webhooks": [{"url": "https://user:pw-secret@hooks.test/in"}]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["title"], "Invalid webhooks");
+    assert!(!body.to_string().contains("pw-secret"), "{body}");
+    // A query is kept in the store but redacted in views and audit events.
+    h.create("shop").await;
+    let (status, body) = h
+        .patch(
+            "shop",
+            json!({"webhooks": [{"url": "https://hooks.test/in?token=abc123"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["webhooks"][0]["url"],
+        "https://hooks.test/in?<redacted>"
+    );
+    let (_, got) = h
+        .send(Method::GET, "/api/v1/workspaces/default/mocks/shop", None)
+        .await;
+    assert!(!got.to_string().contains("abc123"), "{got}");
+    let events = h
+        .store
+        .list_audit(&AuditFilter {
+            action: Some("mock.update".into()),
+            ..AuditFilter::default()
+        })
+        .await
+        .unwrap();
+    assert!(!serde_json::to_string(&events).unwrap().contains("abc123"));
+    let stored = |h: &Harness| {
+        let store = h.store.clone();
+        async move {
+            store
+                .get_mock(DEFAULT_WORKSPACE, "shop")
+                .await
+                .unwrap()
+                .unwrap()
+                .webhooks
+        }
+    };
+    assert_eq!(
+        stored(&h).await[0].url,
+        "https://hooks.test/in?token=abc123"
+    );
+    // Writing back what a GET returned keeps the stored URL.
+    let (status, body) = h
+        .patch(
+            "shop",
+            json!({"webhooks": [{"url": "https://hooks.test/in?<redacted>", "delay_ms": 5}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let targets = stored(&h).await;
+    assert_eq!(targets[0].url, "https://hooks.test/in?token=abc123");
+    assert_eq!(targets[0].delay_ms, 5);
+}

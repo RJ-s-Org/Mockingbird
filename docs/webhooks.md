@@ -75,6 +75,8 @@ It prints `{"header": "stripe-signature", "value": "t=…,v1=…"}`; `--timestam
 
 ## Delivery and retries
 
+A target URL may not carry `user:password@`; sign with `secret` instead. A query (`?token=…`) is allowed but shown as `?<redacted>` by the Admin API and in audit events; a `PATCH` that sends back the redacted URL keeps the stored one. Redirects are not followed: a 3xx answer is a failed attempt.
+
 Each (event, target) pair is one delivery: after `delay_ms`, up to 4 attempts (the first and 3 retries after 1 s, 2 s and 4 s), each with a 10 s timeout. A 2xx answer delivers it; anything else is retried. At most 256 deliveries per mock are in flight; beyond that new ones are recorded `dropped`.
 
 A secret reference that does not resolve (an unset environment variable) does not stop the mock: its deliveries are recorded `failed` with an error naming the reference, and nothing is sent unsigned.

@@ -173,10 +173,17 @@ impl WebhookTarget {
     /// The first problem with this target, naming the field without the
     /// `webhooks[i].` prefix the caller adds. Never echoes the secret.
     pub fn validate(&self) -> Result<(), String> {
-        let url_ok = url::Url::parse(&self.url)
-            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host());
-        if !url_ok {
+        let Some(url) = url::Url::parse(&self.url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https") && u.has_host())
+        else {
             return Err("url must be an absolute http or https URL".into());
+        };
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(
+                "url must not carry credentials (user:password@); sign with a secret instead"
+                    .into(),
+            );
         }
         if self.events.is_empty() || self.events.iter().any(|e| e.trim().is_empty()) {
             return Err("events must list operation ids, event types or \"*\" (none empty)".into());
