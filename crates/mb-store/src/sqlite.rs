@@ -33,7 +33,7 @@ use crate::{
 const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 
 const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
-     data_plane_auth, created_at, updated_at, chaos, limits, hosts";
+     data_plane_auth, created_at, updated_at, chaos, limits, behavior, hosts";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
      draft_meta, warnings";
@@ -263,6 +263,7 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
     let data_plane_auth: String = row.try_get("data_plane_auth")?;
     let chaos: Option<String> = row.try_get("chaos")?;
     let limits: String = row.try_get("limits")?;
+    let behavior: String = row.try_get("behavior")?;
     let hosts: String = row.try_get("hosts")?;
     Ok(Mock {
         id: parse_uuid(&id)?,
@@ -276,6 +277,7 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
         data_plane_auth: serde_json::from_str(&data_plane_auth)?,
         chaos: chaos.map(|c| serde_json::from_str(&c)).transpose()?,
         limits: serde_json::from_str(&limits)?,
+        behavior: serde_json::from_str(&behavior)?,
         hosts: serde_json::from_str(&hosts)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -640,6 +642,7 @@ impl ControlStore for SqliteControlStore {
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
         let limits = serde_json::to_string(&m.limits)?;
+        let behavior = serde_json::to_string(&m.behavior)?;
         let hosts = serde_json::to_string(&m.hosts)?;
         let at = now();
         let mock = Mock {
@@ -654,6 +657,7 @@ impl ControlStore for SqliteControlStore {
             data_plane_auth: m.data_plane_auth,
             chaos: m.chaos,
             limits: m.limits,
+            behavior: m.behavior,
             hosts: m.hosts,
             created_at: at,
             updated_at: at,
@@ -661,7 +665,7 @@ impl ControlStore for SqliteControlStore {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_workspace(&mut tx, ws).await?;
         let sql = format!(
-            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(mock.id.to_string())
@@ -677,6 +681,7 @@ impl ControlStore for SqliteControlStore {
             .bind(mock.updated_at)
             .bind(chaos)
             .bind(limits)
+            .bind(behavior)
             .bind(hosts)
             .execute(&mut *tx)
             .await
@@ -700,6 +705,7 @@ impl ControlStore for SqliteControlStore {
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
         let limits = serde_json::to_string(&m.limits)?;
+        let behavior = serde_json::to_string(&m.behavior)?;
         let hosts = serde_json::to_string(&m.hosts)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let sql = format!("SELECT {MOCK_COLUMNS} FROM mocks WHERE id = ?");
@@ -720,7 +726,7 @@ impl ControlStore for SqliteControlStore {
         };
         sqlx::query(
             "UPDATE mocks SET name = ?, route_prefix = ?, persona = ?, llm_profile = ?, header_overrides = ?, \
-             source = ?, data_plane_auth = ?, chaos = ?, limits = ?, hosts = ?, updated_at = ? WHERE id = ?",
+             source = ?, data_plane_auth = ?, chaos = ?, limits = ?, behavior = ?, hosts = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&updated.name)
         .bind(&updated.route_prefix)
@@ -731,6 +737,7 @@ impl ControlStore for SqliteControlStore {
         .bind(data_plane_auth)
         .bind(chaos)
         .bind(limits)
+        .bind(behavior)
         .bind(hosts)
         .bind(updated.updated_at)
         .bind(updated.id.to_string())

@@ -3450,7 +3450,9 @@ dependencies = [
  "metrics 0.24.6",
  "proptest",
  "rand 0.10.3",
+ "rand_regex",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5215,6 +5217,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_regex"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79e745eeef604742ec751000e44d91cdc0552aacacb2c74bee88cc7685918cfa"
+dependencies = [
+ "rand 0.10.3",
+ "regex-syntax",
 ]
 
 [[package]]

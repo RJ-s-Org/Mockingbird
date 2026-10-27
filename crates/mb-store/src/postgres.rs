@@ -34,11 +34,11 @@ use crate::{
 const MIGRATIONS_TABLE: &str = "_mb_store_migrations";
 
 const MOCK_COLUMNS: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
-     data_plane_auth, created_at, updated_at, chaos, limits, hosts";
+     data_plane_auth, created_at, updated_at, chaos, limits, behavior, hosts";
 /// [`MOCK_COLUMNS`] with JSON read back as text.
 const MOCK_SELECT: &str = "id, workspace, name, route_prefix, persona, llm_profile, header_overrides, source, \
      data_plane_auth::text AS data_plane_auth, created_at, updated_at, chaos::text AS chaos, \
-     limits::text AS limits, hosts::text AS hosts";
+     limits::text AS limits, behavior::text AS behavior, hosts::text AS hosts";
 const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
      draft_meta, warnings";
@@ -194,6 +194,7 @@ fn mock_from_row(row: &PgRow) -> Result<Mock, StoreError> {
     let data_plane_auth: String = row.try_get("data_plane_auth")?;
     let chaos: Option<String> = row.try_get("chaos")?;
     let limits: String = row.try_get("limits")?;
+    let behavior: String = row.try_get("behavior")?;
     let hosts: String = row.try_get("hosts")?;
     Ok(Mock {
         id: row.try_get("id")?,
@@ -207,6 +208,7 @@ fn mock_from_row(row: &PgRow) -> Result<Mock, StoreError> {
         data_plane_auth: serde_json::from_str(&data_plane_auth)?,
         chaos: chaos.map(|c| serde_json::from_str(&c)).transpose()?,
         limits: serde_json::from_str(&limits)?,
+        behavior: serde_json::from_str(&behavior)?,
         hosts: serde_json::from_str(&hosts)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -654,6 +656,7 @@ impl ControlStore for PgStore {
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
         let limits = serde_json::to_string(&m.limits)?;
+        let behavior = serde_json::to_string(&m.behavior)?;
         let hosts = serde_json::to_string(&m.hosts)?;
         let at = now();
         let mock = Mock {
@@ -668,6 +671,7 @@ impl ControlStore for PgStore {
             data_plane_auth: m.data_plane_auth,
             chaos: m.chaos,
             limits: m.limits,
+            behavior: m.behavior,
             hosts: m.hosts,
             created_at: at,
             updated_at: at,
@@ -675,7 +679,7 @@ impl ControlStore for PgStore {
         let mut tx = self.pool.begin().await?;
         lock_workspace(&mut tx, ws).await?;
         let sql = format!(
-            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb)"
+            "INSERT INTO mocks ({MOCK_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb)"
         );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(mock.id)
@@ -691,6 +695,7 @@ impl ControlStore for PgStore {
             .bind(mock.updated_at)
             .bind(chaos)
             .bind(limits)
+            .bind(behavior)
             .bind(hosts)
             .execute(&mut *tx)
             .await
@@ -709,6 +714,7 @@ impl ControlStore for PgStore {
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
         let limits = serde_json::to_string(&m.limits)?;
+        let behavior = serde_json::to_string(&m.behavior)?;
         let hosts = serde_json::to_string(&m.hosts)?;
         let mut tx = self.pool.begin().await?;
         let sql = format!("SELECT {MOCK_SELECT} FROM mocks WHERE id = $1 FOR UPDATE");
@@ -730,7 +736,8 @@ impl ControlStore for PgStore {
         sqlx::query(
             "UPDATE mocks SET name = $1, route_prefix = $2, persona = $3, llm_profile = $4, \
              header_overrides = $5, source = $6, data_plane_auth = $7::json, updated_at = $8, \
-             chaos = $10::jsonb, limits = $11::jsonb, hosts = $12::jsonb WHERE id = $9",
+             chaos = $10::jsonb, limits = $11::jsonb, behavior = $12::jsonb, hosts = $13::jsonb \
+             WHERE id = $9",
         )
         .bind(&updated.name)
         .bind(&updated.route_prefix)
@@ -743,6 +750,7 @@ impl ControlStore for PgStore {
         .bind(updated.id)
         .bind(chaos)
         .bind(limits)
+        .bind(behavior)
         .bind(hosts)
         .execute(&mut *tx)
         .await

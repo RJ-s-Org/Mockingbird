@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -551,9 +551,10 @@ async fn a_request_touches_its_session_at_most_once() {
     assert!(store.touches.load(Ordering::SeqCst) <= 1);
 
     store.touches.store(0, Ordering::SeqCst);
+    // A list read seeds its items, a write that refreshes the session.
     let resp = send(&router, get_with("/orders", &[])).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(store.touches.load(Ordering::SeqCst), 1);
+    assert!(store.touches.load(Ordering::SeqCst) <= 1);
 
     store.touches.store(0, Ordering::SeqCst);
     let resp = send(&router, get_with("/orders/o1", &[])).await;
@@ -668,4 +669,137 @@ fn new_runtime_defaults() {
     assert!(rt.recorder.is_none());
     assert!(!rt.state_health.is_degraded());
     let _: &HashMap<String, ScenarioRuntime> = &rt.scenarios;
+}
+
+#[tokio::test]
+async fn default_scenario_applies_without_a_header() {
+    let mut rt = offline();
+    rt.scenarios.insert("shipped".into(), shipped(&[]));
+    rt.default_scenario = Some("shipped".into());
+    let router = http_rest::router(Arc::new(rt));
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(body_json(resp).await["status"], "shipped");
+}
+
+#[tokio::test]
+async fn unknown_default_scenario_is_ignored() {
+    let mut rt = offline();
+    rt.default_scenario = Some("missing".into());
+    let router = http_rest::router(Arc::new(rt));
+    assert_eq!(
+        send(&router, get_with("/orders/o1", &[])).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn per_operation_instructions_replace_the_scenario_ones() {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(order("o1").to_string())]));
+    let mut rt = runtime(Some(provider.clone() as Arc<dyn Provider>), memory());
+    let instructions =
+        BTreeMap::from([("getOrder".to_string(), "This order is a gift.".to_string())]);
+    rt.scenarios.insert(
+        "shipped".into(),
+        shipped(&[]).with_operation_instructions(instructions),
+    );
+    let router = http_rest::router(Arc::new(rt));
+    send(
+        &router,
+        get_with("/orders/o1", &[("x-mockingbird-scenario", "shipped")]),
+    )
+    .await;
+    let prompt: String = provider.requests()[0]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(prompt.contains("This order is a gift."), "{prompt}");
+    assert!(
+        !prompt.contains("Every order has already shipped."),
+        "{prompt}"
+    );
+}
+
+/// Counts seeding calls over a caching store.
+struct SeedSpy {
+    inner: Arc<dyn StateStore>,
+    seeded: AtomicUsize,
+}
+
+#[async_trait]
+impl StateStore for SeedSpy {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, StateError> {
+        self.inner.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.list(s, t, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+        self.inner.upsert(s, r).await
+    }
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        self.seeded.fetch_add(1, Ordering::SeqCst);
+        self.inner.insert_seeded(s, r).await
+    }
+    async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
+        self.inner.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.reset(s).await
+    }
+    async fn reset_mock(&self, ws: &str, mock: &str) -> Result<(), StateError> {
+        self.inner.reset_mock(ws, mock).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.touch(s).await
+    }
+    async fn sessions(&self, ws: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
+        self.inner.sessions(ws, mock).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, r: Vec<StoredResource>) -> Result<(), StateError> {
+        self.inner.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), StateError> {
+        Ok(())
+    }
+    fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
+        self.inner.subscribe()
+    }
+    fn response_cache(&self) -> Option<&mb_state::ResponseCache> {
+        self.inner.response_cache()
+    }
+}
+
+/// A list answered from the cache was seeded when it was generated; a hit
+/// seeds nothing again.
+#[tokio::test]
+async fn cache_hits_do_not_seed_again() {
+    let store = Arc::new(SeedSpy {
+        inner: mb_state::CachingStateStore::wrap(
+            memory(),
+            Duration::from_secs(3600),
+            mb_state::DEFAULT_CACHE_ENTRIES,
+        ),
+        seeded: AtomicUsize::new(0),
+    });
+    let router = http_rest::router(Arc::new(runtime(None, store.clone())));
+    send(&router, get_with("/orders", &[])).await;
+    let first = store.seeded.load(Ordering::SeqCst);
+    assert!(first > 0);
+    let resp = send(&router, get_with("/orders", &[])).await;
+    assert_eq!(resp.headers()["x-mockingbird-source"], "cache");
+    assert_eq!(store.seeded.load(Ordering::SeqCst), first);
 }

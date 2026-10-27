@@ -46,7 +46,12 @@ impl Engine {
         let schema = &channel.message_schema;
         let Some(provider) = &self.provider else {
             return Ok(GeneratedMessage {
-                payload: self.fake_value(bundle, schema, Some(&validator)),
+                payload: self.fake_value(
+                    bundle,
+                    schema,
+                    Some(&validator),
+                    &crate::FakerHints::default(),
+                ),
                 source: Source::Fallback,
                 usage: Usage::default(),
             });
@@ -65,7 +70,12 @@ impl Engine {
             Err(reason) => {
                 tracing::warn!(channel = %channel.id, %reason, "LLM message generation fell back to faker");
                 (
-                    self.fake_value(bundle, schema, Some(&validator)),
+                    self.fake_value(
+                        bundle,
+                        schema,
+                        Some(&validator),
+                        &crate::FakerHints::default(),
+                    ),
                     Source::Fallback,
                 )
             }
@@ -96,10 +106,15 @@ impl Engine {
     /// value is accepted. An uncompilable schema is faked unvalidated.
     pub fn fake(&self, bundle: &Bundle, schema: &Value) -> Value {
         match SchemaValidator::new(&bundle.with_reachable_defs(schema)) {
-            Ok(validator) => self.fake_value(bundle, schema, Some(&validator)),
+            Ok(validator) => self.fake_value(
+                bundle,
+                schema,
+                Some(&validator),
+                &crate::FakerHints::default(),
+            ),
             Err(e) => {
                 tracing::warn!(error = %e, "schema cannot be validated; faking unvalidated");
-                self.fake_value(bundle, schema, None)
+                self.fake_value(bundle, schema, None, &crate::FakerHints::default())
             }
         }
     }

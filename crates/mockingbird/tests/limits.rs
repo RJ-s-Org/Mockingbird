@@ -387,14 +387,15 @@ async fn budget_exhausted_serves_fallback_and_degrades_readyz() {
     assert_eq!(ready["status"], "ready", "{ready}");
 
     // 600 tokens, then 1200: the second call still starts under the budget.
-    for _ in 0..2 {
-        let r = reqwest::get(format!("{data}/orders/orders/o1"))
+    // Distinct ids, so no answer comes from the session's response cache.
+    for id in ["o1", "o2"] {
+        let r = reqwest::get(format!("{data}/orders/orders/{id}"))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(source(&r), "llm");
     }
-    let r = reqwest::get(format!("{data}/orders/orders/o1"))
+    let r = reqwest::get(format!("{data}/orders/orders/o3"))
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
@@ -447,6 +448,7 @@ async fn budget_shared_through_store() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )

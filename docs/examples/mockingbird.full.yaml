@@ -162,6 +162,9 @@ mocks:
     persona: A small online shop selling hiking gear.
     llm_profile: deepseek
     header_overrides: true
+    consistency: on
+    unknown_ids: generate
+    default_scenario: friendly
     data_plane_auth:
       mode: api_key
       header: x-api-key
@@ -188,6 +191,10 @@ mocks:
           error_rate: 0.5
           latency_jitter: {min: 0s, max: 2s}
           drop_stream_rate: 0.0
+      friendly:
+        operations:
+          - id: getOrder
+            instructions: Orders belong to returning customers.
   order-events:
     workspace: default
     contract: ../../fixtures/asyncapi/orders-amqp-2.6.yaml

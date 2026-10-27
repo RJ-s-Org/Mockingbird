@@ -418,6 +418,8 @@ curl -i localhost:8080/orders/orders/o1 -H 'X-Mockingbird-Scenario: out-of-stock
 
 A scenario's status applies only to operations whose contract declares that status (or a `default` response), where its `set` fields are forced into that response's body too; a 5xx also applies to operations that do not declare it and is answered natively, as with `X-Mockingbird-Status`. Other operations are served normally, with the scenario's other overrides. The Admin API rejects (`422 Scenario status not declared`), and a config file may not declare, a non-5xx status that none of the scenario's operations declares in the mock's active contract, since it could never take effect. An unknown scenario name is a 400. Scenarios come from the config file or from `PUT /api/v1/mocks/{mock}/scenarios/{name}`.
 
+A mock's `default_scenario` applies when a request names none, so clients that cannot send headers still get it. A scenario's `operations` entries may be `{id, instructions}` to give one operation its own instructions in place of the scenario's.
+
 ## Admin API
 
 The Admin API lives under `http://127.0.0.1:9090/api/v1`; its OpenAPI document is served at [`/api/openapi.json`](http://127.0.0.1:9090/api/openapi.json). Every error is an RFC 9457 `application/problem+json` document.

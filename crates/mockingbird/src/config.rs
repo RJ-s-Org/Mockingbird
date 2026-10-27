@@ -546,7 +546,13 @@ async fn build_app_on(
             .await
             .context("connecting the cross-node bus")?,
     };
-    let state = ha.shared_state(state);
+    // The response cache wraps the shared store, so a session reset through
+    // the Admin API and every write clear it.
+    let state = mb_state::CachingStateStore::wrap(
+        ha.shared_state(state),
+        cfg.storage.session_ttl,
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
 
     let broker_configs = file_config::broker_configs(&cfg).context("applying the configuration")?;
     // Before anything is applied, so a bad auth setup changes nothing.

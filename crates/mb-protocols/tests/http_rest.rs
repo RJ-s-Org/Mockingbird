@@ -7,13 +7,15 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use mb_engine::{Engine, EngineConfig, SchemaValidator};
+use mb_engine::{Engine, EngineConfig, ScenarioSpec, SchemaValidator};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_mcm::{Bundle, HttpMethod};
-use mb_protocols::MockRuntime;
 use mb_protocols::http_rest::{self, RouteTable};
-use mb_state::{MemoryStore, SessionKey, StoredResource};
+use mb_protocols::{MockRuntime, ScenarioRuntime, UnknownIds};
+use mb_state::{
+    CachingStateStore, DEFAULT_CACHE_ENTRIES, MemoryStore, SessionKey, StateStore, StoredResource,
+};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -31,22 +33,36 @@ struct Harness {
     provider: Option<Arc<ScriptedProvider>>,
 }
 
-fn harness(script: Option<Vec<Result<String, LlmError>>>, header_overrides: bool) -> Harness {
+fn harness_with(
+    script: Option<Vec<Result<String, LlmError>>>,
+    state: Arc<dyn StateStore>,
+    configure: impl FnOnce(&mut MockRuntime),
+) -> Harness {
     let provider = script.map(|s| Arc::new(ScriptedProvider::new(s)));
     let dyn_provider = provider.clone().map(|p| p as Arc<dyn Provider>);
     let mut rt = MockRuntime::new(
         "orders",
         orders(),
         Arc::new(Engine::new(dyn_provider, EngineConfig::default())),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        state,
     );
-    rt.header_overrides = header_overrides;
+    configure(&mut rt);
     let rt = Arc::new(rt);
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
         rt,
         provider,
     }
+}
+
+fn harness(script: Option<Vec<Result<String, LlmError>>>, header_overrides: bool) -> Harness {
+    harness_with(script, memory_state(), |rt| {
+        rt.header_overrides = header_overrides
+    })
+}
+
+fn memory_state() -> Arc<dyn StateStore> {
+    Arc::new(MemoryStore::new(Duration::from_secs(3600)))
 }
 
 fn offline() -> Harness {
@@ -1132,4 +1148,325 @@ async fn validation_failures_stay_visible() {
     assert!(!header_str(&resp, "x-mockingbird-validation").is_empty());
     let body = body_json(resp).await;
     assert!(body["message"].as_str().unwrap().contains("body"), "{body}");
+}
+
+#[tokio::test]
+async fn get_after_create_is_served_from_state() {
+    let h = harness(Some(vec![Ok(order("o1", "c1").to_string())]), true);
+    send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    let resp = send(&h, get("/orders/o1")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await, order("o1", "c1"));
+    assert_eq!(
+        h.provider.as_ref().unwrap().requests().len(),
+        1,
+        "no LLM call for the GET"
+    );
+}
+
+#[tokio::test]
+async fn stored_partial_resource_is_generated_and_overlaid() {
+    let h = offline();
+    h.rt.state
+        .upsert(
+            &session("default"),
+            StoredResource {
+                resource_type: "orders".into(),
+                id: "o1".into(),
+                data: json!({"id": "o1", "customerId": "c9"}),
+            },
+        )
+        .await
+        .unwrap();
+    let resp = send(&h, get("/orders/o1")).await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+    let body = body_json(resp).await;
+    assert_eq!(body["customerId"], "c9");
+    assert!(body["total"].is_number(), "{body}");
+}
+
+#[tokio::test]
+async fn scenario_and_forced_status_skip_the_stored_answer() {
+    let h = offline();
+    h.rt.state
+        .upsert(
+            &session("default"),
+            StoredResource {
+                resource_type: "orders".into(),
+                id: "o1".into(),
+                data: order("o1", "c1"),
+            },
+        )
+        .await
+        .unwrap();
+    let forced = Request::get("/orders/o1")
+        .header("x-mockingbird-status", "404")
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&h, forced).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_ne!(header_str(&resp, "x-mockingbird-source"), "state");
+}
+
+#[tokio::test]
+async fn unknown_ids_404_when_opted_in() {
+    let h = harness_with(None, memory_state(), |rt| {
+        rt.unknown_ids = UnknownIds::NotFound
+    });
+    let resp = send(&h, get("/orders/nope")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    let body = body_json(resp).await;
+    assert!(
+        body["code"].is_i64() && body["message"].is_string(),
+        "{body}"
+    );
+
+    let created = body_json(
+        send(
+            &h,
+            post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(
+        send(&h, get(&format!("/orders/{id}"))).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn unknown_ids_404_spares_lists_and_forced_status() {
+    let h = harness_with(None, memory_state(), |rt| {
+        rt.unknown_ids = UnknownIds::NotFound
+    });
+    assert_eq!(send(&h, get("/orders")).await.status(), StatusCode::OK);
+    let forced = Request::get("/orders/nope")
+        .header("x-mockingbird-status", "200")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&h, forced).await.status(), StatusCode::OK);
+    // Default: keep generating.
+    assert_eq!(
+        send(&offline(), get("/orders/nope")).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn unknown_id_without_declared_404_is_problem_json() {
+    let src = r#"
+openapi: 3.1.0
+info: {title: Pets, version: "1"}
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters: [{name: petId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+"#;
+    let bundle = Arc::new(compile(src.as_bytes()).unwrap());
+    let mut rt = MockRuntime::new(
+        "inline",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        memory_state(),
+    );
+    rt.unknown_ids = UnknownIds::NotFound;
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router.oneshot(get("/pets/p1")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
+}
+
+fn cached_state() -> Arc<dyn StateStore> {
+    CachingStateStore::wrap(
+        memory_state(),
+        Duration::from_secs(3600),
+        DEFAULT_CACHE_ENTRIES,
+    )
+}
+
+#[tokio::test]
+async fn repeated_list_is_served_from_the_cache_until_a_write() {
+    let h = harness_with(None, cached_state(), |_| {});
+    let first = send(&h, get("/orders")).await;
+    assert_eq!(header_str(&first, "x-mockingbird-source"), "fallback");
+    let first = body_json(first).await;
+    let second = send(&h, get("/orders")).await;
+    assert_eq!(header_str(&second, "x-mockingbird-source"), "cache");
+    assert_eq!(body_json(second).await, first);
+    send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    let third = send(&h, get("/orders")).await;
+    assert_eq!(header_str(&third, "x-mockingbird-source"), "fallback");
+}
+
+#[tokio::test]
+async fn cache_is_bypassed_when_off_or_under_a_scenario() {
+    let h = harness_with(None, cached_state(), |rt| rt.consistency = false);
+    send(&h, get("/orders")).await;
+    assert_eq!(
+        header_str(&send(&h, get("/orders")).await, "x-mockingbird-source"),
+        "fallback"
+    );
+
+    let h = harness_with(None, cached_state(), |rt| {
+        rt.scenarios.insert(
+            "calm".into(),
+            ScenarioRuntime {
+                spec: ScenarioSpec {
+                    name: "calm".into(),
+                    ..ScenarioSpec::default()
+                },
+                ..ScenarioRuntime::default()
+            },
+        );
+    });
+    let with_scenario = || {
+        Request::get("/orders")
+            .header("x-mockingbird-scenario", "calm")
+            .body(Body::empty())
+            .unwrap()
+    };
+    send(&h, with_scenario()).await;
+    assert_eq!(
+        header_str(&send(&h, with_scenario()).await, "x-mockingbird-source"),
+        "fallback"
+    );
+}
+
+#[tokio::test]
+async fn listed_items_are_served_by_id_from_state() {
+    let h = offline();
+    let mut changes = h.rt.state.subscribe();
+    let list = body_json(send(&h, get("/orders")).await).await;
+    let item = list[0].clone();
+    assert!(changes.try_recv().is_err(), "seeding publishes no change");
+    let resp = send(
+        &h,
+        get(&format!("/orders/{}", item["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await, item);
+}
+
+#[tokio::test]
+async fn listing_keeps_a_created_resource() {
+    let h = harness(
+        Some(vec![
+            Ok(order("o1", "c1").to_string()),
+            Ok(json!([order("o1", "someone-else")]).to_string()),
+        ]),
+        true,
+    );
+    send(
+        &h,
+        post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+    )
+    .await;
+    send(&h, get("/orders")).await;
+    let kept =
+        h.rt.state
+            .get(&session("default"), "orders", "o1")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(kept.data["customerId"], "c1");
+}
+
+#[tokio::test]
+async fn no_seeding_when_consistency_is_off() {
+    let h = harness_with(None, memory_state(), |rt| rt.consistency = false);
+    let list = body_json(send(&h, get("/orders")).await).await;
+    let resp = send(
+        &h,
+        get(&format!("/orders/{}", list[0]["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+}
+
+#[tokio::test]
+async fn create_never_reuses_a_stored_id() {
+    let h = harness(Some(vec![Ok(order("o1", "c2").to_string())]), true);
+    h.rt.state
+        .upsert(
+            &session("default"),
+            StoredResource {
+                resource_type: "orders".into(),
+                id: "o1".into(),
+                data: order("o1", "c1"),
+            },
+        )
+        .await
+        .unwrap();
+    let body = body_json(
+        send(
+            &h,
+            post_json("/orders", r#"{"customerId":"c2","total":10}"#),
+        )
+        .await,
+    )
+    .await;
+    let id = body["id"].as_str().unwrap();
+    assert_ne!(id, "o1");
+    let kept =
+        h.rt.state
+            .get(&session("default"), "orders", "o1")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(kept.data["customerId"], "c1");
+    assert!(
+        h.rt.state
+            .get(&session("default"), "orders", id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// `/users/{username}` reads by login while state is keyed by `id`: a
+/// missing entry says nothing, so `unknown_ids: 404` keeps generating.
+#[tokio::test]
+async fn unknown_ids_404_only_when_the_path_names_the_identity() {
+    let src = r#"
+openapi: 3.1.0
+info: {title: Users, version: "1"}
+paths:
+  /users/{username}:
+    get:
+      operationId: getUser
+      parameters: [{name: username, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [id, login], properties: {id: {type: integer}, login: {type: string}}}}}}
+        "404": {description: Not found}
+"#;
+    let bundle = Arc::new(compile(src.as_bytes()).unwrap());
+    let mut rt = MockRuntime::new(
+        "users",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        memory_state(),
+    );
+    rt.unknown_ids = UnknownIds::NotFound;
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router.oneshot(get("/users/octocat")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }

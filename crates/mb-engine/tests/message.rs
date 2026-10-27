@@ -109,7 +109,8 @@ async fn llm_message_validated() {
 async fn invalid_message_is_repaired() {
     let bundle = message_bundle();
     let (provider, engine) = scripted(vec![
-        Ok(json!({"id": "x", "status": "zzz"}).to_string()),
+        // A wrong type is not patched locally (an off-enum value would be).
+        Ok(json!({"id": "x", "status": 5}).to_string()),
         Ok(json!({"id": "x", "status": "b"}).to_string()),
     ]);
     let out = engine

@@ -395,6 +395,55 @@ impl StateStore for SqlStateStore {
         Ok(())
     }
 
+    async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
+        let now = now_ms();
+        let cutoff = self.inner.cutoff(now);
+        let purge = format!("DELETE FROM state_sessions WHERE {KEY_WHERE} AND last_touched <= $4");
+        let inserted = on_pool!(&self.inner.pool, |p| {
+            let mut tx = p.begin().await?;
+            // An expired session restarts empty.
+            sqlx::query(sqlx::AssertSqlSafe(purge.as_str()))
+                .bind(&s.workspace)
+                .bind(&s.mock)
+                .bind(&s.session)
+                .bind(cutoff)
+                .execute(&mut *tx)
+                .await?;
+            let seq: i64 = sqlx::query_scalar(
+                "INSERT INTO state_sessions (workspace, mock, session, last_touched, seq) \
+                 VALUES ($1, $2, $3, $4, 1) \
+                 ON CONFLICT (workspace, mock, session) DO UPDATE \
+                 SET last_touched = excluded.last_touched, seq = state_sessions.seq + 1 \
+                 RETURNING seq",
+            )
+            .bind(&s.workspace)
+            .bind(&s.mock)
+            .bind(&s.session)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?;
+            let inserted = sqlx::query(
+                "INSERT INTO state_resources \
+                 (workspace, mock, session, resource_type, id, seq, data) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT (workspace, mock, session, resource_type, id) DO NOTHING",
+            )
+            .bind(&s.workspace)
+            .bind(&s.mock)
+            .bind(&s.session)
+            .bind(&r.resource_type)
+            .bind(&r.id)
+            .bind(seq)
+            .bind(Json(&r.data))
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tx.commit().await?;
+            inserted
+        });
+        Ok(inserted > 0)
+    }
+
     async fn delete(
         &self,
         s: &SessionKey,

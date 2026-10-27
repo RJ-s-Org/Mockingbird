@@ -450,6 +450,7 @@ async fn orders_mock(store: &Arc<dyn ControlStore>) -> Mock {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )

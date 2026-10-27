@@ -165,7 +165,7 @@ fn loads_full_example_config() {
     assert_eq!(s.status, Some(400));
     assert_eq!(s.latency, Some(Duration::from_millis(250)));
     assert_eq!(s.set, Some(json!({"message": "Out of stock"})));
-    assert_eq!(s.operations, ["createOrder"]);
+    assert_eq!(s.operation_ids(), ["createOrder"]);
     assert_eq!(
         m.scenarios["slow"].latency,
         Some(Duration::from_secs(2)),
@@ -604,6 +604,7 @@ async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )
@@ -797,6 +798,7 @@ async fn reconcile_rejects_grpc_service_clashes() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )
@@ -1617,6 +1619,7 @@ async fn reconcile_same_name_two_workspaces() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )
@@ -1696,6 +1699,7 @@ async fn reconcile_prefix_collision_across_workspaces_errors() {
                 chaos: None,
                 limits: Default::default(),
                 data_plane_auth: DataPlaneAuthConfig::default(),
+                behavior: Default::default(),
                 hosts: vec![],
             },
         )
@@ -3041,6 +3045,62 @@ fn unknown_p7_key_rejected() {
     }
 }
 
+const BEHAVIOR: &str = r#"
+mocks:
+  orders:
+    contract: orders.yaml
+    consistency: off
+    unknown_ids: 404
+    default_scenario: gift
+    scenarios:
+      gift:
+        operations:
+          - listOrders
+          - {id: getOrder, instructions: This order is a gift.}
+"#;
+
+#[tokio::test]
+async fn reconcile_applies_mock_behavior_and_operation_instructions() {
+    let ws = Workspace::new();
+    let cfg = ws.load(BEHAVIOR);
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mock.behavior.consistency, mb_store::Consistency::Off);
+    assert_eq!(mock.behavior.unknown_ids, mb_store::UnknownIds::NotFound);
+    assert_eq!(mock.behavior.default_scenario.as_deref(), Some("gift"));
+    let s = &store.list_scenarios(mock.id).await.unwrap()[0];
+    assert_eq!(s.rules.operations, ["listOrders", "getOrder"]);
+    assert_eq!(
+        s.rules
+            .operation_instructions
+            .get("getOrder")
+            .map(String::as_str),
+        Some("This order is a gift.")
+    );
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.updated.is_empty(), "{again:?}");
+}
+
+#[test]
+fn default_scenario_must_name_a_scenario() {
+    let ws = Workspace::new();
+    ws.write("mocks:\n  orders:\n    contract: orders.yaml\n    default_scenario: missing\n");
+    // `load` validates the file.
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("mocks.orders.default_scenario"),
+        "{err:#}"
+    );
+}
 const TWO_HOSTED: &str = "mocks:\n  rest:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [api.github.test]\n  other:\n    contract: orders.yaml\n    route_prefix: /\n    hosts: [HOSTS2]\n";
 
 #[tokio::test]

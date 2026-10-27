@@ -1,7 +1,11 @@
 use base64::Engine as _;
+use mb_mcm::{Operation, OperationKind};
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use crate::OperationCall;
 
 const WORDS: &[&str] = &[
     "alpha", "bravo", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris", "juniper",
@@ -23,6 +27,19 @@ const NODE_BUDGET: usize = 10_000;
 /// minimal one); keeps the worst case linear.
 const HARD_NODE_EXTRA: usize = 100_000;
 
+/// Extra repeats drawn for an unbounded `*`, `+` or `{n,}` in a pattern.
+pub const PATTERN_MAX_REPEAT: u32 = 64;
+
+/// Most characters in a string whose schema sets no `maxLength`.
+pub const UNCONSTRAINED_MAX_CHARS: usize = 64;
+
+/// Width of the window an integer without tight bounds is drawn from.
+pub const SMALL_INT_WINDOW: i64 = 100;
+
+/// Width of the window an id-like integer (`id`, `*_id`, `*Id`) without
+/// tight bounds is drawn from, starting at 1.
+pub const ID_WINDOW: i64 = 1_000_000;
+
 /// Cost of a schema with no finite instance.
 const INFINITE: u64 = u64::MAX;
 
@@ -30,6 +47,42 @@ const INFINITE: u64 = u64::MAX;
 /// JSON Schema.
 pub struct Faker {
     max_depth: usize,
+    hints: FakerHints,
+}
+
+/// Request values the faker copies into same-named fields of the root
+/// object (`login`, `id`, `page`...).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FakerHints {
+    pub echoes: Map<String, Value>,
+}
+
+impl FakerHints {
+    /// The call's scalar path parameters, scalar query parameters and, for
+    /// a read, its body's top-level scalars (GraphQL arguments); an earlier
+    /// source wins over a later one.
+    pub fn from_call(op: &Operation, call: &OperationCall) -> Self {
+        let mut echoes = Map::new();
+        let mut add = |source: &Map<String, Value>| {
+            for (k, v) in source {
+                if is_scalar(v) && !echoes.contains_key(k) {
+                    echoes.insert(k.clone(), v.clone());
+                }
+            }
+        };
+        add(&call.path_params);
+        add(&call.query);
+        if matches!(op.kind, OperationKind::Query)
+            && let Some(Value::Object(body)) = &call.body
+        {
+            add(body);
+        }
+        Self { echoes }
+    }
+}
+
+fn is_scalar(v: &Value) -> bool {
+    matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_))
 }
 
 impl Default for Faker {
@@ -44,11 +97,29 @@ struct Ctx<'a> {
     root: &'a Value,
     costs: &'a Costs,
     generated: usize,
+    /// Compiled `pattern`s by repeat cap and source text; `None` when
+    /// unsupported.
+    patterns: HashMap<String, Option<Arc<Pattern>>>,
+}
+
+/// A `pattern` ready to draw from, with the regex its draws must match.
+struct Pattern {
+    generator: rand_regex::Regex,
+    check: regex::Regex,
 }
 
 impl Faker {
     pub fn new(max_depth: usize) -> Self {
-        Self { max_depth }
+        Self {
+            max_depth,
+            hints: FakerHints::default(),
+        }
+    }
+
+    /// This faker, echoing `hints` into same-named root fields.
+    pub fn with_hints(mut self, hints: FakerHints) -> Self {
+        self.hints = hints;
+        self
     }
 
     pub fn fake(&self, schema_with_defs: &Value, rng: &mut impl Rng) -> Value {
@@ -82,14 +153,17 @@ impl Faker {
             root: schema_with_defs,
             costs,
             generated: 0,
+            patterns: HashMap::new(),
         };
-        self.gen_value(&mut ctx, schema_with_defs, 0, branch, rng)
+        self.gen_value(&mut ctx, schema_with_defs, None, 0, branch, rng)
     }
 
+    /// A value for `schema`; `field` is the object member it fills, if any.
     fn gen_value<R: Rng>(
         &self,
         ctx: &mut Ctx<'_>,
         schema: &Value,
+        field: Option<&str>,
         depth: usize,
         branch: Option<usize>,
         rng: &mut R,
@@ -122,7 +196,8 @@ impl Faker {
         }
 
         let types = type_names(s);
-        if at_limit && types.contains(&"null") {
+        // A list is never null: at the limit it is empty instead.
+        if at_limit && types.contains(&"null") && !types.contains(&"array") {
             return Value::Null;
         }
 
@@ -133,12 +208,20 @@ impl Faker {
             .or(types.first().copied())
             .unwrap_or_else(|| infer_type(s));
 
+        if depth == 1
+            && let Some(echo) = field
+                .and_then(|f| self.hints.echoes.get(f))
+                .and_then(|v| echo_as(v, chosen, s))
+        {
+            return echo;
+        }
+
         match chosen {
             "null" => Value::Null,
             "boolean" => Value::Bool(rng.random_bool(0.5)),
-            "integer" => fake_integer(s, rng),
+            "integer" => fake_integer(s, field, rng),
             "number" => fake_number(s, rng),
-            "string" => Value::String(fake_string(s, rng)),
+            "string" => Value::String(fake_string(ctx, s, rng)),
             "array" if hard_limit => Value::Array(Vec::new()),
             "object" if hard_limit => Value::Object(Map::new()),
             "array" => self.fake_array(ctx, s, depth, at_limit, rng),
@@ -167,7 +250,7 @@ impl Faker {
             let sub = props.and_then(|p| p.get(*name)).unwrap_or(&any);
             out.insert(
                 (*name).to_string(),
-                self.gen_value(ctx, sub, depth + 1, None, rng),
+                self.gen_value(ctx, sub, Some(name), depth + 1, None, rng),
             );
         }
         if let Some(props) = props {
@@ -177,7 +260,8 @@ impl Faker {
                     break;
                 }
                 if !out.contains_key(name) {
-                    out.insert(name.clone(), self.gen_value(ctx, sub, depth + 1, None, rng));
+                    let value = self.gen_value(ctx, sub, Some(name), depth + 1, None, rng);
+                    out.insert(name.clone(), value);
                 }
             }
         }
@@ -209,17 +293,52 @@ impl Faker {
             if hard_exhausted(ctx) || (i >= min && ctx.generated >= NODE_BUDGET) {
                 break;
             }
-            let mut candidate = self.gen_value(ctx, items, depth + 1, None, rng);
+            let mut candidate = self.gen_value(ctx, items, None, depth + 1, None, rng);
             if unique {
                 let mut tries = 0;
                 while out.contains(&candidate) && tries < 32 && !hard_exhausted(ctx) {
-                    candidate = self.gen_value(ctx, items, depth + 1, None, rng);
+                    candidate = self.gen_value(ctx, items, None, depth + 1, None, rng);
                     tries += 1;
                 }
             }
             out.push(candidate);
         }
         Value::Array(out)
+    }
+}
+
+/// `value` as a `chosen`-typed instance of `s`, when it fits: strings as
+/// they are (when no `format` applies and the length and pattern allow
+/// them), numbers and booleans from their text.
+fn echo_as(value: &Value, chosen: &str, s: &Map<String, Value>) -> Option<Value> {
+    let text = match value {
+        Value::String(t) => t.clone(),
+        other => other.to_string(),
+    };
+    match chosen {
+        "string" => {
+            let n = text.chars().count();
+            let num = |k: &str| s.get(k).and_then(Value::as_u64).map(|m| m as usize);
+            let fits = !s.contains_key("format")
+                && num("minLength").is_none_or(|m| n >= m)
+                && num("maxLength").is_none_or(|m| n <= m)
+                && s.get("pattern")
+                    .and_then(Value::as_str)
+                    .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(&text)));
+            fits.then_some(Value::String(text))
+        }
+        "integer" => text.parse::<i64>().ok().map(Value::from),
+        "number" => text
+            .parse::<f64>()
+            .ok()
+            .and_then(Number::from_f64)
+            .map(Value::Number),
+        "boolean" => match text.as_str() {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -552,14 +671,19 @@ fn flatten<R: Rng>(
         if let Some(Value::Array(branches)) = obj.get(key)
             && !branches.is_empty()
         {
+            // A nullable list takes its list branch: lists are never null.
+            let has_list = branches.iter().any(|b| is_array_schema(root, b));
+            let eligible: Vec<usize> = (0..branches.len())
+                .filter(|i| !(has_list && is_null_schema(&branches[*i])))
+                .collect();
             let index = match pick {
                 Pick::Forced(i) => i % branches.len(),
-                Pick::Random => rng.random_range(0..branches.len()),
-                Pick::Shallow => branches
+                Pick::Random => eligible[rng.random_range(0..eligible.len())],
+                Pick::Shallow => eligible
                     .iter()
-                    .enumerate()
-                    .min_by_key(|(_, b)| costs.of(root, b))
-                    .map_or(0, |(i, _)| i),
+                    .copied()
+                    .min_by_key(|i| costs.of(root, &branches[*i]))
+                    .unwrap_or(0),
             };
             extras.push(flatten(root, costs, &branches[index], hops + 1, pick, rng));
         }
@@ -579,6 +703,25 @@ fn flatten<R: Rng>(
         }
     }
     Value::Object(out)
+}
+
+/// Whether `schema` (through one `$ref`) is a list: `type: array` or `items`.
+fn is_array_schema(root: &Value, schema: &Value) -> bool {
+    let schema = match schema.get("$ref").and_then(Value::as_str) {
+        Some(r) => resolve_ref(root, r).unwrap_or(schema),
+        None => schema,
+    };
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    obj.contains_key("items") || type_names(obj) == ["array"]
+}
+
+/// Whether `schema` admits only `null`.
+fn is_null_schema(schema: &Value) -> bool {
+    schema
+        .as_object()
+        .is_some_and(|obj| type_names(obj) == ["null"])
 }
 
 fn merge_keyword(out: &mut Map<String, Value>, key: String, value: Value) {
@@ -625,7 +768,7 @@ fn word<R: Rng>(rng: &mut R) -> String {
     WORDS[rng.random_range(0..WORDS.len())].to_string()
 }
 
-fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
+fn fake_string<R: Rng>(ctx: &mut Ctx<'_>, s: &Map<String, Value>, rng: &mut R) -> String {
     match s.get("format").and_then(Value::as_str) {
         Some("uuid") => {
             let mut bytes = [0u8; 16];
@@ -640,6 +783,20 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         Some("date") => return random_datetime(rng).format("%Y-%m-%d").to_string(),
         Some("email") => return format!("{}@example.com", word(rng)),
         Some("uri") => return format!("https://example.com/{}", word(rng)),
+        Some("uri-reference") => return format!("/{}/{}", word(rng), word(rng)),
+        Some("hostname") => return format!("{}.example.com", word(rng)),
+        Some("ipv4") => {
+            return (0..4)
+                .map(|_| rng.random_range(0..=255u8).to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+        }
+        Some("ipv6") => {
+            return (0..8)
+                .map(|_| format!("{:04x}", rng.random_range(0..=u16::MAX)))
+                .collect::<Vec<_>>()
+                .join(":");
+        }
         Some("int64") => return rng.random_range(-1_000_000_i64..1_000_000).to_string(),
         Some("uint64") => return rng.random_range(0_u64..1_000_000).to_string(),
         Some("byte") => {
@@ -672,18 +829,25 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
         }
         _ => {}
     }
-    if let Some(lit) = s
-        .get("pattern")
-        .and_then(Value::as_str)
-        .and_then(fixed_literal)
-    {
-        return lit;
-    }
     let min = s.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let max = s
-        .get("maxLength")
-        .and_then(Value::as_u64)
-        .map(|m| m as usize);
+    if let Some(pattern) = s.get("pattern").and_then(Value::as_str) {
+        let declared_max = s
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .map(|m| m as usize);
+        if let Some(out) = pattern_string(ctx, pattern, min, declared_max, rng) {
+            return out;
+        }
+        if let Some(lit) = fixed_literal(pattern) {
+            return lit;
+        }
+    }
+    let max = Some(
+        s.get("maxLength")
+            .and_then(Value::as_u64)
+            .map_or(UNCONSTRAINED_MAX_CHARS, |m| m as usize)
+            .max(min),
+    );
     let mut out = word(rng);
     let mut len = out.chars().count();
     if len < min {
@@ -705,6 +869,72 @@ fn random_datetime<R: Rng>(rng: &mut R) -> chrono::DateTime<chrono::Utc> {
     // 2000-01-01 .. ~2033
     let secs = rng.random_range(946_684_800_i64..2_000_000_000);
     chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default()
+}
+
+/// A string matching `pattern` with `min..=max` characters, drawn by
+/// `rand_regex`; `None` when the pattern is unsupported (lookaround,
+/// backreferences) or no draw fits.
+fn pattern_string<R: Rng>(
+    ctx: &mut Ctx<'_>,
+    pattern: &str,
+    min: usize,
+    max: Option<usize>,
+    rng: &mut R,
+) -> Option<String> {
+    // With a `maxLength`, unbounded repeats are first drawn short (a quarter
+    // of it), then up to the full length.
+    let repeats = match max {
+        Some(m) => {
+            let full = u32::try_from(m).unwrap_or(u32::MAX).min(PATTERN_MAX_REPEAT);
+            vec![(full / 4).max(1), full.max(1)]
+        }
+        None => vec![PATTERN_MAX_REPEAT],
+    };
+    for repeat in repeats {
+        let compiled = ctx
+            .patterns
+            .entry(format!("{repeat}:{pattern}"))
+            .or_insert_with(|| compile_pattern(pattern, repeat).map(Arc::new))
+            .clone()?;
+        let found = (0..PATTERN_DRAWS).find_map(|_| {
+            let drawn: Result<String, std::string::FromUtf8Error> =
+                rand::distr::Distribution::sample(&compiled.generator, rng);
+            let drawn = drawn.ok()?;
+            let n = drawn.chars().count();
+            let fits = n >= min && max.is_none_or(|m| n <= m) && compiled.check.is_match(&drawn);
+            fits.then_some(drawn)
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// Draws tried for a string matching its pattern.
+const PATTERN_DRAWS: usize = 8;
+
+fn compile_pattern(pattern: &str, max_repeat: u32) -> Option<Pattern> {
+    let check = regex::Regex::new(pattern).ok()?;
+    let body = pattern.strip_prefix('^').unwrap_or(pattern);
+    let body = match body.strip_suffix('$') {
+        // An escaped `\$` is a literal dollar sign.
+        Some(rest) if !rest.ends_with('\\') || rest.ends_with("\\\\") => rest,
+        _ => body,
+    };
+    // ASCII first, so `\d` and `\w` draw readable characters.
+    let ascii = regex_syntax::ParserBuilder::new()
+        .unicode(false)
+        .utf8(true)
+        .build()
+        .parse(body)
+        .ok()
+        .and_then(|hir| rand_regex::Regex::with_hir(hir, max_repeat).ok());
+    let generator = match ascii {
+        Some(g) => g,
+        None => rand_regex::Regex::compile(body, max_repeat).ok()?,
+    };
+    Some(Pattern { generator, check })
 }
 
 /// A pattern that is just a literal (optionally anchored) can be satisfied
@@ -756,24 +986,72 @@ fn bounds(s: &Map<String, Value>) -> Bounds {
     }
 }
 
-fn fake_integer<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> Value {
-    let b = bounds(s);
+/// Field names whose integers are counts: small and non-negative.
+const COUNT_SUFFIXES: [&str; 8] = [
+    "count", "total", "size", "length", "page", "pages", "limit", "offset",
+];
+
+/// An integer within the declared bounds. Without tight bounds (missing,
+/// wider than 10 000, or at the 32-bit limits) and for count-like fields,
+/// it comes from a small non-negative window instead.
+fn fake_integer<R: Rng>(s: &Map<String, Value>, field: Option<&str>, rng: &mut R) -> Value {
+    let num = |k: &str| s.get(k).and_then(Value::as_f64);
+    let mut lo = num("minimum").map(f64::ceil);
+    if let Some(x) = num("exclusiveMinimum") {
+        let x = x.floor() + 1.0;
+        lo = Some(lo.map_or(x, |l| l.max(x)));
+    }
+    let mut hi = num("maximum").map(f64::floor);
+    if let Some(x) = num("exclusiveMaximum") {
+        let x = x.ceil() - 1.0;
+        hi = Some(hi.map_or(x, |h| h.min(x)));
+    }
+    const I32_MIN: f64 = -2_147_483_648.0;
+    const I32_MAX: f64 = 2_147_483_647.0;
+    let window = SMALL_INT_WINDOW as f64;
+    let huge = match (lo, hi) {
+        (Some(l), Some(h)) => h - l > 10_000.0 || l <= I32_MIN || h >= I32_MAX,
+        _ => true,
+    };
+    let id_like = field.is_some_and(|f| {
+        f.eq_ignore_ascii_case("id") || f.ends_with("_id") || f.ends_with("Id") || f.ends_with("ID")
+    });
+    // Identifiers keep a wide positive range: a small window would make
+    // ids collide.
+    if huge && id_like {
+        let base = lo.unwrap_or(1.0).max(1.0);
+        let top = hi.unwrap_or(f64::INFINITY).min(base + ID_WINDOW as f64);
+        if top >= base {
+            let span = (top - base) as i64;
+            return Value::from(base as i64 + rng.random_range(0..=span));
+        }
+    }
+    let county = field.is_some_and(|f| {
+        let f = f.to_ascii_lowercase();
+        COUNT_SUFFIXES.iter().any(|suffix| f.ends_with(suffix))
+    });
+    let wide = match (lo, hi) {
+        (Some(l), Some(h)) => h - l > window,
+        _ => true,
+    };
+    let (w_lo, w_hi) = if huge || (county && wide) {
+        let base = lo.unwrap_or(0.0).max(0.0);
+        match hi {
+            Some(h) if h < base => (lo.map_or(h - window, |l| l.max(h - window)), h),
+            Some(h) => (base, h.min(base + window)),
+            None => (base, base + window),
+        }
+    } else {
+        (lo.unwrap_or(0.0), hi.unwrap_or(0.0))
+    };
     let step = s
         .get("multipleOf")
         .and_then(Value::as_f64)
         .filter(|m| *m > 0.0)
         .unwrap_or(1.0);
-    // Candidate multiples k*step within the bounds.
-    let mut k_lo = (b.lo / step).ceil();
-    if b.lo_exclusive && k_lo * step <= b.lo {
-        k_lo += 1.0;
-    }
-    let mut k_hi = (b.hi / step).floor();
-    if b.hi_exclusive && k_hi * step >= b.hi {
-        k_hi -= 1.0;
-    }
-    // Keep the choice inside i64 and a modest window for readable output.
-    let k_hi = k_hi.min(k_lo + 1000.0);
+    // Candidate multiples k*step within the window.
+    let k_lo = (w_lo / step).ceil();
+    let k_hi = (w_hi / step).floor();
     let k = if k_hi >= k_lo {
         let span = (k_hi - k_lo) as i64;
         k_lo + rng.random_range(0..=span) as f64

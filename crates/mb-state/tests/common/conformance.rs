@@ -32,6 +32,39 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     sessions_lists_with_counts(&store, ws).await;
     export_then_seed_round_trips(&store, ws).await;
     session_count_default_matches_sessions(&store, ws).await;
+    insert_seeded_keeps_an_existing_resource(&store, ws).await;
+}
+
+/// Seeding stores a resource only when absent, quietly.
+async fn insert_seeded_keeps_an_existing_resource(st: &Arc<dyn StateStore>, ws: &str) {
+    let s = key(ws, "seeding", "a");
+    let mut changes = st.subscribe();
+    assert!(
+        st.insert_seeded(&s, res("order", "1", json!({"v": 1})))
+            .await
+            .expect("seed")
+    );
+    assert_eq!(
+        st.get(&s, "order", "1").await.expect("get").map(|r| r.data),
+        Some(json!({"v": 1}))
+    );
+    assert!(
+        !st.insert_seeded(&s, res("order", "1", json!({"v": 2})))
+            .await
+            .expect("seed again")
+    );
+    assert_eq!(
+        st.get(&s, "order", "1").await.expect("get").map(|r| r.data),
+        Some(json!({"v": 1}))
+    );
+    assert!(
+        matches!(
+            changes.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ),
+        "seeding publishes nothing"
+    );
+    assert_eq!(st.sessions(ws, "seeding").await.expect("sessions").len(), 1);
 }
 
 /// `session_count` counts exactly the live sessions `sessions` lists, per

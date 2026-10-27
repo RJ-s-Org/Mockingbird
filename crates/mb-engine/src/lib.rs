@@ -17,6 +17,7 @@ use tracing::field::Empty;
 use crate::guards::Checked;
 
 pub mod compact;
+pub mod consistency;
 pub mod extract;
 pub mod faker;
 pub mod guards;
@@ -29,7 +30,7 @@ pub mod stream;
 pub mod validate;
 
 pub use extract::extract_json;
-pub use faker::{Costs, Faker};
+pub use faker::{Costs, Faker, FakerHints};
 pub use guards::{EngineGuards, GenerationLimiter, TokenBudget};
 pub use message::{GeneratedMessage, MessageContext};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
@@ -88,6 +89,10 @@ pub enum Source {
     Llm,
     Repaired,
     Fallback,
+    /// Served from the session's stored resource, without the LLM.
+    State,
+    /// A repeat of an earlier answer in the same session.
+    Cache,
 }
 
 impl Source {
@@ -102,7 +107,7 @@ impl Source {
 
     fn rank(self) -> u8 {
         match self {
-            Source::Llm => 0,
+            Source::Llm | Source::State | Source::Cache => 0,
             Source::Repaired => 1,
             Source::Fallback => 2,
         }
@@ -113,6 +118,8 @@ impl Source {
             Source::Llm => "llm",
             Source::Repaired => "repaired",
             Source::Fallback => "fallback",
+            Source::State => "state",
+            Source::Cache => "cache",
         }
     }
 }
@@ -298,8 +305,14 @@ impl Engine {
         let mut usage = Usage::default();
         let mut response = match &self.provider {
             None => {
-                let mut fake =
-                    self.fake_response(bundle, variant, status, schema, Some(&validator));
+                let mut fake = self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    Some(&validator),
+                    &FakerHints::from_call(op, call),
+                );
                 fake.fallback_reason = Some(OFFLINE_REASON.to_string());
                 fake
             }
@@ -333,8 +346,14 @@ impl Engine {
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
-                        let mut fake =
-                            self.fake_response(bundle, variant, status, schema, Some(&validator));
+                        let mut fake = self.fake_response(
+                            bundle,
+                            variant,
+                            status,
+                            schema,
+                            Some(&validator),
+                            &FakerHints::from_call(op, call),
+                        );
                         fake.fallback_reason = Some(reason);
                         fake
                     }
@@ -342,7 +361,7 @@ impl Engine {
             }
         };
         response.usage = usage;
-        Ok(finish(&validator, op, call, &ctx, response))
+        Ok(self.finish(&validator, bundle, schema, op, call, &ctx, response))
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
@@ -438,7 +457,14 @@ impl Engine {
                 usage: if i == 0 { usage } else { Usage::default() },
                 fallback_reason: None,
             };
-            responses.push(finish(&validator, part.op, part.call, &part.ctx, response));
+            let schema = part
+                .ctx
+                .response_schema
+                .or(variant.schema.as_ref())
+                .unwrap_or(&Value::Null);
+            responses.push(self.finish(
+                &validator, bundle, schema, part.op, part.call, &part.ctx, response,
+            ));
         }
         Some(responses)
     }
@@ -468,15 +494,213 @@ impl Engine {
         };
         match self.validator(bundle, op, status, schema) {
             Ok(validator) => {
-                let response =
-                    self.fake_response(bundle, variant, status, schema, Some(&validator));
-                finish(&validator, op, call, ctx, response)
+                let response = self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    Some(&validator),
+                    &FakerHints::from_call(op, call),
+                );
+                self.finish(&validator, bundle, schema, op, call, ctx, response)
             }
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
-                self.fake_response(bundle, variant, status, schema, None)
+                self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    None,
+                    &FakerHints::from_call(op, call),
+                )
             }
         }
+    }
+
+    /// `stored` served as `op`'s success answer, tagged `State`, when the
+    /// success variant has a schema (the narrowed `response_schema` when
+    /// given) and `stored` validates against it. `None` otherwise: a partial
+    /// resource stored by a create is generated and overlaid instead.
+    pub fn serve_stored(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        stored: &Value,
+        response_schema: Option<&Value>,
+    ) -> Option<GeneratedResponse> {
+        let variant = op.success_output()?;
+        let status = success_status(variant.status);
+        let schema = variant.schema.as_ref()?;
+        let validator = match response_schema {
+            Some(narrowed) => Arc::new(
+                SchemaValidator::new(&bundle.with_reachable_defs(narrowed))
+                    .inspect_err(|e| {
+                        tracing::warn!(operation = %op.id, error = %e, "narrowed schema cannot be validated");
+                    })
+                    .ok()?,
+            ),
+            None => self
+                .validator(bundle, op, status, schema)
+                .inspect_err(|e| {
+                    tracing::warn!(operation = %op.id, error = %e, "response schema cannot be validated");
+                })
+                .ok()?,
+        };
+        validator.validate(stored).ok()?;
+        Some(GeneratedResponse {
+            status,
+            content_type: variant.content_type.clone(),
+            body: Some(stored.clone()),
+            source: Source::State,
+            usage: Usage::default(),
+            fallback_reason: None,
+        })
+    }
+
+    /// A `404` for a resource the session does not hold: the operation's
+    /// declared `404` response, faker-filled, else a problem+json body with
+    /// `detail`. Always tagged `State`.
+    pub fn not_found(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        detail: &str,
+    ) -> GeneratedResponse {
+        let declared = op.output_for_status(404).map(|variant| {
+            let ctx = GenerationContext {
+                forced_status: Some(404),
+                ..GenerationContext::default()
+            };
+            self.fallback(bundle, op, variant, 404, call, &ctx)
+        });
+        let mut response = declared.unwrap_or_else(|| GeneratedResponse {
+            status: 404,
+            content_type: Some("application/problem+json".into()),
+            body: Some(serde_json::json!({
+                "type": "about:blank",
+                "title": "Not Found",
+                "status": 404,
+                "detail": detail,
+            })),
+            source: Source::State,
+            usage: Usage::default(),
+            fallback_reason: None,
+        });
+        response.source = Source::State;
+        response.fallback_reason = None;
+        response
+    }
+
+    /// Post-process a generated response: reflect request and state, give a
+    /// list read unique item ids, then apply the scenario's `set` patch.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        validator: &SchemaValidator,
+        bundle: &Bundle,
+        schema: &Value,
+        op: &Operation,
+        call: &OperationCall,
+        ctx: &GenerationContext<'_>,
+        response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        let response = reflect(validator, op, call, ctx, response);
+        let response = if matches!(op.kind, OperationKind::Query)
+            && ctx.target.is_none()
+            && (200..300).contains(&response.status)
+        {
+            self.unique_list_ids(bundle, schema, op, validator, response)
+        } else {
+            response
+        };
+        apply_scenario(validator, op, call, ctx, response)
+    }
+
+    /// A list body whose items share an identity gets a fresh value for
+    /// each later duplicate, kept only if the whole body still validates.
+    fn unique_list_ids(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        op: &Operation,
+        validator: &SchemaValidator,
+        mut response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        let Some(body) = &response.body else {
+            return response;
+        };
+        let field = consistency::list_identity(bundle, op);
+        let Some(items) = consistency::list_items(body) else {
+            return response;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let duplicate = items
+            .iter()
+            .filter_map(|item| item.get(&field))
+            .any(|id| !seen.insert(id.to_string()));
+        if !duplicate {
+            return response;
+        }
+        let Some(id_schema) = consistency::item_schema(bundle, schema, body)
+            .and_then(|item| consistency::property_schema(bundle, &item, &field))
+        else {
+            return response;
+        };
+        let mut fixed = body.clone();
+        let Some(items) = consistency::list_items_mut(&mut fixed) else {
+            return response;
+        };
+        let mut used: std::collections::HashSet<String> = items
+            .iter()
+            .filter_map(|item| item.get(&field))
+            .map(Value::to_string)
+            .collect();
+        let mut kept = std::collections::HashSet::new();
+        for item in items.iter_mut() {
+            let Some(id) = item.get(&field) else {
+                continue;
+            };
+            if kept.insert(id.to_string()) {
+                continue;
+            }
+            let fresh = (0..IDENTITY_DRAWS)
+                .map(|_| self.fake_field(bundle, &field, &id_schema))
+                .find(|v| !v.is_null() && !used.contains(&v.to_string()));
+            if let (Some(fresh), Value::Object(obj)) = (fresh, &mut *item) {
+                used.insert(fresh.to_string());
+                kept.insert(fresh.to_string());
+                obj.insert(field.clone(), fresh);
+            }
+        }
+        if validator.validate(&fixed).is_ok() {
+            response.body = Some(fixed);
+        }
+        response
+    }
+
+    /// `body` (a create's answer) with its identity field (`op`'s, else
+    /// `id`) replaced by a different faker value that keeps it valid
+    /// against `op`'s success schema; `None` when none is found.
+    pub fn fresh_identity(&self, bundle: &Bundle, op: &Operation, body: &Value) -> Option<Value> {
+        let variant = op.success_output()?;
+        let schema = variant.schema.as_ref()?;
+        let validator = self
+            .validator(bundle, op, success_status(variant.status), schema)
+            .ok()?;
+        let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+        let current = body.get(field)?;
+        let id_schema = consistency::property_schema(bundle, schema, field)?;
+        (0..IDENTITY_DRAWS).find_map(|_| {
+            let fresh = self.fake_field(bundle, field, &id_schema);
+            if fresh.is_null() || &fresh == current {
+                return None;
+            }
+            let mut candidate = body.clone();
+            candidate.as_object_mut()?.insert(field.to_string(), fresh);
+            validator.validate(&candidate).is_ok().then_some(candidate)
+        })
     }
 
     fn fake_response(
@@ -486,15 +710,30 @@ impl Engine {
         status: u16,
         schema: &Value,
         validator: Option<&SchemaValidator>,
+        hints: &FakerHints,
     ) -> GeneratedResponse {
         GeneratedResponse {
             status,
             content_type: variant.content_type.clone(),
-            body: Some(self.fake_value(bundle, schema, validator)),
+            body: Some(self.fake_value(bundle, schema, validator, hints)),
             source: Source::Fallback,
             usage: Usage::default(),
             fallback_reason: None,
         }
+    }
+
+    /// A faker value for object member `field` of schema `schema`, so the
+    /// faker's name-based rules (id ranges) apply.
+    fn fake_field(&self, bundle: &Bundle, field: &str, schema: &Value) -> Value {
+        let wrapper = serde_json::json!({
+            "type": "object",
+            "required": [field],
+            "properties": {field: schema},
+        });
+        self.fake_value(bundle, &wrapper, None, &FakerHints::default())
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Null)
     }
 
     /// A faker value for `schema`, validated by `validator` when given:
@@ -505,9 +744,10 @@ impl Engine {
         bundle: &Bundle,
         schema: &Value,
         validator: Option<&SchemaValidator>,
+        hints: &FakerHints,
     ) -> Value {
         let schema = bundle.with_reachable_defs(schema);
-        let faker = Faker::new(self.config.faker_depth);
+        let faker = Faker::new(self.config.faker_depth).with_hints(hints.clone());
         // One cost table for every attempt: computing it walks the schema.
         let costs = Costs::compute(&schema);
         let mut rng = rand::rng();
@@ -656,6 +896,9 @@ pub(crate) fn record_usage(span: &tracing::Span, usage: Usage) {
 }
 
 /// The status a success variant is served with.
+/// Faker draws tried for an unused identity value.
+const IDENTITY_DRAWS: usize = 8;
+
 fn success_status(status: StatusSelector) -> u16 {
     match status {
         StatusSelector::Code(c) => c,
@@ -681,19 +924,6 @@ pub(crate) fn format_name(id: &str) -> String {
     } else {
         name
     }
-}
-
-/// Post-process a generated response: reflect request and state, then apply
-/// the scenario's `set` patch.
-fn finish(
-    validator: &SchemaValidator,
-    op: &Operation,
-    call: &OperationCall,
-    ctx: &GenerationContext<'_>,
-    response: GeneratedResponse,
-) -> GeneratedResponse {
-    let response = reflect(validator, op, call, ctx, response);
-    apply_scenario(validator, op, call, ctx, response)
 }
 
 /// For a 2xx object body, apply the scenario's `set` merge patch, re-apply

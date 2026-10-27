@@ -75,6 +75,7 @@ async fn hosted_registry(host: &str) -> Arc<MockRegistry> {
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 hosts: vec![host.into()],
+                behavior: Default::default(),
             },
         )
         .await

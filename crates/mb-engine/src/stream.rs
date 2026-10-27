@@ -406,8 +406,12 @@ impl StreamState {
     }
 
     fn fake(&self) -> Value {
-        self.engine
-            .fake_value(&self.bundle, &self.schema, Some(&self.validator))
+        self.engine.fake_value(
+            &self.bundle,
+            &self.schema,
+            Some(&self.validator),
+            &crate::FakerHints::default(),
+        )
     }
 
     /// Apply the scenario's `set` merge patch to an object item, keeping the
