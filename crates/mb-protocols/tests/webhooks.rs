@@ -3,6 +3,11 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use mb_engine::{Engine, EngineConfig};
+use mb_import::compile;
 use mb_protocols::webhooks::deliver::{
     DispatchSettings, MAX_RETRIES, OutboundEvent, ResolvedTarget, SecretBytes, WebhookDispatcher,
     retry_delay,
@@ -11,6 +16,10 @@ use mb_protocols::webhooks::log::{
     DeliveryLog, DeliveryRecord, DeliveryStatus, SharedDeliveryLog, redacted_url,
 };
 use mb_protocols::webhooks::sign::{Signing, stripe_signature};
+use mb_protocols::{MockRuntime, http_rest};
+use mb_state::MemoryStore;
+use serde_json::{Value, json};
+use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -278,4 +287,216 @@ fn log_is_bounded_newest_first_and_redacted() {
         format!("{:?}", SecretBytes::new("whsec_test_secret".into())),
         "<redacted>"
     );
+}
+
+// ---- the post-write hook, end to end on a REST mock ----
+
+async fn receiver(status: u16) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    server
+}
+
+fn to(server: &MockServer, events: &[&str]) -> ResolvedTarget {
+    ResolvedTarget {
+        events: events.iter().map(|e| e.to_string()).collect(),
+        ..target(&format!("{}/hook", server.uri()), Signing::None, Ok(None))
+    }
+}
+
+fn rest(fixture: &str, targets: Vec<ResolvedTarget>) -> (Router, SharedDeliveryLog) {
+    let path = format!(
+        "{}/../../fixtures/openapi/{fixture}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bundle = Arc::new(compile(&std::fs::read(path).unwrap()).unwrap());
+    let mut rt = MockRuntime::new(
+        "m",
+        bundle,
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let (d, log) = dispatcher_with(targets, fast());
+    rt.webhooks = Some(d);
+    (http_rest::router(Arc::new(rt)), log)
+}
+
+fn post_json_with(uri: &str, body: Value, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut req = Request::post(uri).header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    req.body(Body::from(body.to_string())).unwrap()
+}
+
+fn post_json(uri: &str, body: Value) -> Request<Body> {
+    post_json_with(uri, body, &[])
+}
+
+fn get(uri: &str) -> Request<Body> {
+    Request::get(uri).body(Body::empty()).unwrap()
+}
+
+fn delete(uri: &str) -> Request<Body> {
+    Request::delete(uri).body(Body::empty()).unwrap()
+}
+
+async fn body_json(resp: axum::response::Response) -> Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn sent(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn create_posts_envelope() {
+    let server = receiver(200).await;
+    let (router, log) = rest("orders-3.0.yaml", vec![to(&server, &["*"])]);
+    let resp = router
+        .oneshot(post_json(
+            "/orders",
+            json!({"customerId": "c1", "total": 5}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let r = wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    assert_eq!(
+        (r.operation.as_str(), r.event_type.as_str()),
+        ("createOrder", "order.created")
+    );
+    let sent = sent(&server).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["type"], "order.created");
+    assert_eq!(sent[0]["object"], "event");
+    assert_eq!(sent[0]["data"]["object"], created);
+    assert_eq!(sent[0]["id"], json!(r.event_id));
+    assert!(sent[0]["id"].as_str().unwrap().starts_with("evt_"));
+    assert!(sent[0]["created"].as_i64().unwrap() > 1_700_000_000);
+}
+
+#[tokio::test]
+async fn reads_errors_and_forced_failures_fire_nothing() {
+    let server = receiver(200).await;
+    let (router, log) = rest("orders-3.0.yaml", vec![to(&server, &["*"])]);
+    // A list seeds its items into state: still no event.
+    let list = router.clone().oneshot(get("/orders")).await.unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    router.clone().oneshot(get("/orders/o1")).await.unwrap();
+    let invalid = router
+        .clone()
+        .oneshot(post_json("/orders", json!({"bad": true})))
+        .await
+        .unwrap();
+    assert!(invalid.status().is_client_error(), "{}", invalid.status());
+    let forced = router
+        .clone()
+        .oneshot(post_json_with(
+            "/orders",
+            json!({"customerId": "c1", "total": 5}),
+            &[("x-mockingbird-status", "500")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(log.list("default", "m", 10).is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_without_body_carries_id() {
+    let server = receiver(200).await;
+    let (router, log) = rest("orders-3.0.yaml", vec![to(&server, &["deleteOrder"])]);
+    let resp = router.oneshot(delete("/orders/o42")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    let sent = sent(&server).await;
+    assert_eq!(sent[0]["type"], "order.deleted");
+    assert_eq!(
+        sent[0]["data"]["object"],
+        json!({"id": "o42", "deleted": true})
+    );
+}
+
+#[tokio::test]
+async fn events_filter_by_operation_or_type() {
+    let server = receiver(200).await;
+    let (router, log) = rest(
+        "orders-3.0.yaml",
+        vec![
+            to(&server, &["order.updated"]),
+            to(&server, &["deleteOrder"]),
+        ],
+    );
+    router
+        .clone()
+        .oneshot(post_json(
+            "/orders",
+            json!({"customerId": "c1", "total": 5}),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(log.list("default", "m", 10).is_empty());
+    let req = Request::put("/orders/o1")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"customerId": "c1", "total": 6}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let r = wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    assert_eq!(r.event_type, "order.updated");
+    assert_eq!(log.list("default", "m", 10).len(), 1);
+}
+
+#[tokio::test]
+async fn openapi_webhook_payload_used_when_present() {
+    let server = receiver(200).await;
+    let (router, log) = rest("webhooks-3.1.yaml", vec![to(&server, &["*"])]);
+    let resp = router
+        .oneshot(post_json("/pets", json!({"name": "Rex"})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    let sent = sent(&server).await;
+    // createPet declares a callback, which wins over the `pet.created` webhook.
+    assert_eq!(sent[0]["adopted"], json!(true));
+    assert!(sent[0].get("data").is_none());
+}
+
+#[tokio::test]
+async fn slow_receiver_does_not_delay_the_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3)))
+        .mount(&server)
+        .await;
+    let (router, _log) = rest("orders-3.0.yaml", vec![to(&server, &["*"])]);
+    let started = std::time::Instant::now();
+    let resp = router
+        .oneshot(post_json(
+            "/orders",
+            json!({"customerId": "c1", "total": 5}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
