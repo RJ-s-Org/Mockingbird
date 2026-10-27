@@ -442,6 +442,51 @@ fn mcp_drives_a_background_server() {
 }
 
 #[test]
+fn server_tools_find_the_server_from_another_folder() {
+    let project = tempdir();
+    std::fs::copy(fixture(), project.path().join("orders.yaml")).unwrap();
+    run_json(
+        project.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let config = project.path().join("mockingbird.yaml");
+    let config = config.to_str().unwrap();
+    let other = tempdir();
+    let (port, admin, grpc) = (free_port(), free_port(), free_port());
+    let admin_url = format!("http://127.0.0.1:{admin}");
+    let mut mcp = McpClient::start(other.path(), &admin_url);
+    let started = mcp.tool(
+        "start_server",
+        json!({ "config": config, "port": port, "admin_port": admin, "grpc_port": grpc }),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        let logs = mcp.tool("server_logs", json!({}));
+        let log = logs["log"].as_str().unwrap();
+        assert!(!log.is_empty(), "{logs}");
+        assert!(!log.contains('\x1b'), "{log}");
+        drop(mcp);
+        let mut mcp = McpClient::start(other.path(), &admin_url);
+        let status = mcp.tool("server_status", json!({ "config": config }));
+        assert_eq!(status["running"], true, "{status}");
+        let stopped = mcp.tool("stop_server", json!({ "config": config }));
+        assert_eq!(stopped["stopped"], true, "{stopped}");
+    }));
+    if result.is_err() {
+        let mut cleanup = McpClient::start(other.path(), &admin_url);
+        let _ = cleanup.rpc(
+            "tools/call",
+            json!({ "name": "stop_server", "arguments": { "config": config } }),
+        );
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(project.path().join(".mockingbird/server.json").exists());
+    assert!(!other.path().join(".mockingbird").exists());
+}
+
+#[test]
 fn init_writes_server_ports() {
     let dir = tempdir();
     run_json(

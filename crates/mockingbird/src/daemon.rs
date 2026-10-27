@@ -372,13 +372,69 @@ pub fn tail(path: &Path, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// `server logs`.
+/// `text` without terminal escape sequences: CSI (`ESC [` parameters,
+/// intermediates, final byte) and OSC (`ESC ]` … BEL or `ESC \\`); any other
+/// `ESC` is dropped on its own.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                while chars.next_if(|c| ('\x30'..='\x3f').contains(c)).is_some() {}
+                while chars.next_if(|c| ('\x20'..='\x2f').contains(c)).is_some() {}
+                chars.next_if(|c| ('\x40'..='\x7e').contains(c));
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.next_if_eq(&'\\').is_some() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `server logs`, as plain text.
 pub fn logs(args: &StateArgs, lines: usize) -> anyhow::Result<String> {
     let path = log_file(&args.state_dir);
     if !path.exists() {
         return Err(anyhow!("no log at {}", path.display()));
     }
-    Ok(tail(&path, lines))
+    Ok(strip_ansi(&tail(&path, lines)))
+}
+
+/// The state directory of a background server: `state_dir` when absolute;
+/// otherwise the first `<ancestor>/<state_dir>` holding a `server.json`,
+/// walking up from the config file's directory and then from `cwd`; with
+/// none, next to the config (or in `cwd` without one).
+pub fn resolve_state_dir(state_dir: &Path, config: Option<&Path>, cwd: &Path) -> PathBuf {
+    if state_dir.is_absolute() {
+        return state_dir.to_path_buf();
+    }
+    let config_dir = config.map(|c| {
+        let c = cwd.join(c);
+        c.parent().map(Path::to_path_buf).unwrap_or(c)
+    });
+    let found = config_dir
+        .iter()
+        .flat_map(|d| d.ancestors())
+        .chain(cwd.ancestors())
+        .map(|a| a.join(state_dir))
+        .find(|d| info_file(d).is_file());
+    found.unwrap_or_else(|| config_dir.unwrap_or_else(|| cwd.to_path_buf()).join(state_dir))
 }
 
 /// `mockingbird doctor`.
@@ -481,4 +537,53 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
         "shell_env": shell_env.map(|names| json!({ "imported": names })),
         "problems": problems,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(
+            strip_ansi("\x1b[2m2026\x1b[0m \x1b[32m INFO\x1b[0m ready"),
+            "2026  INFO ready"
+        );
+        assert_eq!(strip_ansi("a\x1b]8;;http://x\x07link\x1b]8;;\x1b\\b"), "alinkb");
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("lone\x1b"), "lone");
+    }
+
+    #[test]
+    fn state_dir_is_found_next_to_the_config() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("app/sub");
+        std::fs::create_dir_all(root.path().join("app/.mockingbird")).unwrap();
+        std::fs::write(root.path().join("app/.mockingbird/server.json"), "{}").unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let rel = Path::new(".mockingbird");
+        assert_eq!(
+            resolve_state_dir(
+                rel,
+                Some(&project.join("mockingbird.yaml")),
+                elsewhere.path()
+            ),
+            root.path().join("app/.mockingbird")
+        );
+        let fresh = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_state_dir(rel, Some(&fresh.path().join("m.yaml")), elsewhere.path()),
+            fresh.path().join(".mockingbird")
+        );
+        assert_eq!(
+            resolve_state_dir(rel, None, elsewhere.path()),
+            elsewhere.path().join(".mockingbird")
+        );
+        assert_eq!(
+            resolve_state_dir(Path::new("/abs/state"), None, elsewhere.path()),
+            PathBuf::from("/abs/state")
+        );
+    }
 }

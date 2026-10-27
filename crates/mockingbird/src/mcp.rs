@@ -84,6 +84,9 @@ pub struct McpServer {
     /// [`LOCAL_TOOLS`]).
     local_tools: bool,
     state_dir: PathBuf,
+    /// The absolute config path of the last successful `start_server`: the
+    /// server tools find its state next to it.
+    started_config: std::sync::Mutex<Option<PathBuf>>,
 }
 
 /// Tools that read or write this machine's files or environment, or run
@@ -338,7 +341,7 @@ fn tools() -> Vec<Tool> {
             name: "server_status",
             title: "Background server status",
             description: "Whether the background server runs, and its /readyz (ready, degraded reasons).",
-            schema: obj(json!({}), &[]),
+            schema: obj(json!({ "config": s("Config file the server was started with; default: the one start_server used.") }), &[]),
             read_only: true,
             destructive: false,
         },
@@ -346,7 +349,10 @@ fn tools() -> Vec<Tool> {
             name: "server_logs",
             title: "Background server log",
             description: "The last lines of the background server's log.",
-            schema: obj(json!({ "lines": n("Lines; default 100.") }), &[]),
+            schema: obj(
+                json!({ "lines": n("Lines; default 100."), "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
             read_only: true,
             destructive: false,
         },
@@ -354,7 +360,7 @@ fn tools() -> Vec<Tool> {
             name: "stop_server",
             title: "Stop the background server",
             description: "Stop the server started with start_server.",
-            schema: obj(json!({}), &[]),
+            schema: obj(json!({ "config": s("Config file the server was started with; default: the one start_server used.") }), &[]),
             read_only: false,
             destructive: true,
         },
@@ -737,6 +743,7 @@ impl McpServer {
             read_only: args.read_only,
             local_tools: args.transport == Transport::Stdio || args.allow_local_tools,
             state_dir: args.state_dir.clone(),
+            started_config: std::sync::Mutex::new(None),
         }
     }
 
@@ -776,10 +783,28 @@ impl McpServer {
         Ok(out.unwrap_or_else(|| json!({ "ok": true })))
     }
 
-    fn state(&self) -> daemon::StateArgs {
+    /// The background server's state for `config` (else the config the
+    /// last `start_server` used): found next to the config, not in this
+    /// process's working folder.
+    fn state_for(&self, config: Option<&std::path::Path>) -> daemon::StateArgs {
+        let recorded = self
+            .started_config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        let cwd = std::env::current_dir().unwrap_or_default();
         daemon::StateArgs {
-            state_dir: self.state_dir.clone(),
+            state_dir: daemon::resolve_state_dir(
+                &self.state_dir,
+                config.or(recorded.as_deref()),
+                &cwd,
+            ),
         }
+    }
+
+    /// [`Self::state_for`] the tool's `config` argument.
+    fn server_state(&self, a: &Value) -> daemon::StateArgs {
+        self.state_for(opt_str(a, "config").map(PathBuf::from).as_deref())
     }
 
     /// Runs tool `name`.
@@ -792,9 +817,10 @@ impl McpServer {
         }
         match name {
             "doctor" => {
+                let config = opt_str(a, "config").map(PathBuf::from);
                 let args = daemon::DoctorArgs {
-                    config: opt_str(a, "config").map(PathBuf::from),
-                    state: self.state(),
+                    state: self.state_for(config.as_deref()),
+                    config,
                 };
                 Ok(daemon::doctor(&args, &self.admin_url).await)
             }
@@ -850,9 +876,11 @@ impl McpServer {
                 a, "path",
             )?))?),
             "start_server" => {
+                let config = opt_str(a, "config")
+                    .map(|c| std::env::current_dir().unwrap_or_default().join(c));
                 let args = daemon::StartArgs {
-                    state: self.state(),
-                    config: opt_str(a, "config").map(PathBuf::from),
+                    state: self.state_for(config.as_deref()),
+                    config,
                     host: None,
                     port: opt_port(a, "port")?,
                     admin_port: opt_port(a, "admin_port")?,
@@ -877,15 +905,21 @@ impl McpServer {
                         )));
                     }
                 }
-                Ok(daemon::start(&args).await?)
+                let started = daemon::start(&args).await?;
+                if let (Some(config), Ok(mut recorded)) = (&args.config, self.started_config.lock())
+                {
+                    *recorded = Some(config.clone());
+                }
+                Ok(started)
             }
-            "server_status" => Ok(daemon::status(&self.state()).await?),
+            "server_status" => Ok(daemon::status(&self.server_state(a)).await?),
             "server_logs" => {
                 let lines = opt_u64(a, "lines").unwrap_or(100);
-                let text = daemon::logs(&self.state(), usize::try_from(lines).unwrap_or(100))?;
+                let text =
+                    daemon::logs(&self.server_state(a), usize::try_from(lines).unwrap_or(100))?;
                 Ok(json!({ "log": text }))
             }
-            "stop_server" => Ok(daemon::stop(&self.state()).await?),
+            "stop_server" => Ok(daemon::stop(&self.server_state(a)).await?),
             "list_mocks" => self.ws(Method::GET, &["mocks"], &[], None).await,
             "get_mock" => {
                 self.ws(Method::GET, &["mocks", str_arg(a, "name")?], &[], None)
@@ -1184,7 +1218,7 @@ impl McpServer {
             .filter(|_| self.local_tools)
             .or_else(|| std::env::var("MB_DATA_URL").ok())
             .or_else(|| {
-                std::fs::read(self.state_dir.join("server.json"))
+                std::fs::read(self.state_for(None).state_dir.join("server.json"))
                     .ok()
                     .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                     .and_then(|v| v["data_plane"].as_str().map(String::from))
@@ -1631,6 +1665,7 @@ mod tests {
             read_only,
             local_tools: true,
             state_dir: std::env::temp_dir().join("mb-mcp-test-none"),
+            started_config: std::sync::Mutex::new(None),
         }
     }
 
