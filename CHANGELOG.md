@@ -28,9 +28,20 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Migration `0650_import_drafts` adds `contract_versions.warnings` and `import_jobs.mode`.
 - Mocks take `hosts:` (config, Admin API, console client). Dispatch filters by `Host`, then takes the longest prefix, so mocks on different hosts may share a route prefix (GitHub REST at `/` and GraphQL at `/graphql` on `api.github.com`). A GraphQL mock also answers at its own mount point (`POST /graphql` for a mock at `/graphql`). Migration `0600_mock_hosts` adds `mocks.hosts`.
 - `mockingbird proxy` (and `serve --proxy` / `proxy.enabled`): an HTTP proxy that intercepts HTTPS to mapped hosts with a local CA (`~/.mockingbird/ca`, `MB_CA_DIR`, `proxy.ca_dir`; never installed system-wide); `proxy.unmapped: pass | block` (default `pass`); placeholder PNGs for `proxy.images`; `mockingbird ca path` and `mockingbird proxy env`; `GET /proxy/hosts` on the ops port. See [docs/proxy.md](docs/proxy.md).
+- MCP draft tools: `get_draft` (operations with confidence and warnings, one operation's definition on request), `edit_draft` (JSON merge patch on one operation or the whole draft; a patch that breaks it changes nothing) and `approve_draft` (activates by default). `import_contract` takes `urls` and `mode`.
+- Request log: Admin API `GET …/mocks/{mock}/requests/{id}` and `?fields=summary` (entries without bodies, with `request_bytes` / `response_bytes`); MCP `get_request`.
+- MCP `proxy_env` (the proxy variables and CA path, with `export` lines) and `start_server {proxy: true}`; `mockingbird server start --proxy`.
+- `mockingbird agent install` passes the default profile's key variables (names only) through to the agent's MCP config in each agent's syntax; `--config`, `--pass-env`.
+- `mockingbird keys setup` and MCP `open_key_setup`: a one-shot local page that stores an LLM key in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it, returning only the name. `doctor` reports the store under `key_store`.
+- `mb-ext`: `check_secret_file` and `in_key_store` (additive).
 
 ### Changed
 
+- MCP `list_requests` returns summaries (method, path, status, source, fallback reason, sizes) unless `include_bodies: true`; `validate_contract` returns counts by protocol and the first 20 operations and channels (`operations_truncated`, `channels_truncated`).
+- Background-server logs carry no ANSI codes (colour only on a terminal; `server_logs` strips any left), and the MCP server tools find the server's state next to the config `start_server` used (or the `config` argument), not in the MCP process's folder.
+- The mock-api and testing skills recommend proxy mode over editing an app's base URL.
+- A `file:` secret reference into `~/.mockingbird/secrets` is refused when the file is readable by group or others; other `file:` paths (container mounts) are unchanged.
+- `server start` drops `HTTP(S)_PROXY` variables that point at the server's own proxy from the server's environment.
 - Faker integers without tight bounds (and count-like fields) are drawn from 0..=100 (id-like fields such as `id`, `owner_id`, `userId` from 1..=1 000 000), ignoring bounds wider than ±2^31; nullable arrays are never `null`; strings without a `maxLength` are at most 64 characters.
 - An LLM string over 2 000 characters where the schema sets no `maxLength` is cut to 200 (`repaired`); the prompt asks for free text under 200 characters.
 - `pattern`, `maxLength`, `minLength`, `enum`, `format` and `const` errors in an LLM answer are patched locally without a repair call.

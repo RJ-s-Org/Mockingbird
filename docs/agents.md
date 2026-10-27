@@ -30,7 +30,27 @@ irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | ie
 
 The scripts install the release binary for the platform into `~/.mockingbird/bin` after checking its SHA-256 (`MOCKINGBIRD_VERSION` pins a release, `MOCKINGBIRD_INSTALL_DIR` changes the directory), and build from source with `cargo install` when no release binary fits.
 
-`mockingbird agent install <agent>` merges a `mockingbird` server entry into the agent's MCP config, leaving other entries alone, and writes the skills where that agent reads them (`.claude/skills`, `.agents/skills`, `.cursor/skills`, `.gemini/skills`, `.github/skills`, or Kiro steering files). The entry runs this binary by its absolute path. Options: `--scope user` (home directory instead of the project), `--no-skills`, `--no-mcp`, `--dry-run`, `--command <path>`. `mockingbird agent skills <dir>` writes just the skills.
+`mockingbird agent install <agent>` merges a `mockingbird` server entry into the agent's MCP config, leaving other entries alone, and writes the skills where that agent reads them (`.claude/skills`, `.agents/skills`, `.cursor/skills`, `.gemini/skills`, `.github/skills`, or Kiro steering files). The entry runs this binary by its absolute path. Options: `--scope user` (home directory instead of the project), `--no-skills`, `--no-mcp`, `--dry-run`, `--command <path>`, `--config <file>` and `--pass-env <NAME>`. `mockingbird agent skills <dir>` writes just the skills.
+
+### Key passthrough
+
+Desktop agents and IDEs often start MCP servers without the user's shell environment. `agent install` therefore adds the **names** of the variables the default LLM profile of `--config` (default `./mockingbird.yaml`) references (`api_key: env:NAME`, `${env:NAME}` in headers), plus any `--pass-env NAME`, to the entry in each agent's own interpolation syntax, so the agent hands its value to the server. Values are never written. The output lists the names under `passthrough`.
+
+| Agent | What `agent install` writes |
+| --- | --- |
+| Claude Code (project `.mcp.json`) | `"env": {"NAME": "${NAME}"}` |
+| Claude Code (`--scope user`, a printed `claude mcp add`) | nothing (a shell would expand the value into `~/.claude.json`) |
+| Codex | `env_vars = ["NAME"]` in `[mcp_servers.mockingbird]` |
+| Cursor, VS Code, Windsurf | `"env": {"NAME": "${env:NAME}"}` |
+| Gemini CLI | `"env": {"NAME": "${NAME}"}` |
+| Kiro | `"env": {"NAME": "${NAME}"}`; Kiro expands only names approved in its settings (Mcp Approved Env Vars), which the output's next steps list |
+| Claude Desktop | nothing: it cannot reference variables, and the output's `passthrough_unsupported` points to the key setup page |
+
+An existing Codex `[mcp_servers.mockingbird]` table is left as it is.
+
+### Key setup page
+
+When the agent cannot see the key at all, `mockingbird keys setup [name]` (MCP `open_key_setup`) opens a one-shot page on `127.0.0.1:<random port>` whose URL carries a random token. The user types the key there; Mockingbird writes it to `~/.mockingbird/secrets/<name>` (file `0600`, directory `0700`; an owner-only ACL on Windows) and sets the profile's `api_key` to `file:<that path>` (`-c`, `--profile`; default the default profile, and its name as the key name). The page accepts one submission from its own origin, refuses other `Host` and `Origin` headers, and closes after 10 minutes (`--timeout`). The MCP tool waits for the key and returns only `{"saved": name}`; with `open: false`, or when no browser opens, it returns the URL for the user instead. `doctor` lists the stored keys under `key_store` (names and paths, never values), and a `file:` reference into the store is refused when the file is readable by group or others.
 
 ## What an agent can do
 
@@ -97,5 +117,6 @@ Then add `https://<host>/mcp` as a connector (in ChatGPT: Settings → Apps & Co
 ## Security notes
 
 - The MCP server has the Admin API rights of its token. Give remote agents an API key with the least role they need (`viewer` for `--read-only` use).
+- API keys never pass through the agent: profiles hold `env:` or `file:` references, `agent install` writes variable names only, and the key setup page sends nothing back.
 - `call_mock` and `import_contract` with a URL make requests from the machine the MCP server runs on; URL imports go through the server's [URL fetching](../README.md#url-fetching) guards.
 - Over the Admin API, an LLM profile's secret references must match `server.api_secret_refs`, and only a sysadmin may point them at a new `base_url`; this applies to `${…}` references in headers too.
