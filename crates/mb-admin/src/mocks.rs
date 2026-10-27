@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_store::{
     ChaosSettings, Consistency, DataPlaneAuthConfig, Mock, MockBehavior, MockLimits, NewMock,
-    ResourceSource, StoreError, UnknownIds, routes_collide, validate_hosts, validate_route_prefix,
+    ResourceSource, StoreError, UnknownIds, WebhookTarget, routes_collide, validate_hosts,
+    validate_route_prefix, validate_webhooks,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
@@ -16,7 +17,66 @@ use uuid::Uuid;
 use crate::access::WsAccess;
 use crate::audit::snapshot;
 use crate::problem::{ApiResult, Json, Path, Problem};
-use crate::{AdminState, Source, ensure_api_managed};
+use crate::profiles::accepted_secret_refs;
+use crate::{AdminState, Source, ensure_api_managed, glob_match};
+
+/// The OpenAPI schema of [`WebhookTarget`] (which lives in `mb-store`).
+#[derive(ToSchema)]
+#[schema(as = WebhookTarget)]
+#[allow(dead_code)]
+pub struct WebhookTargetSchema {
+    /// Absolute `http` or `https` URL events are POSTed to.
+    url: String,
+    /// Operation ids, event types (`customer.created`) or `*`.
+    #[schema(default = json!(["*"]))]
+    events: Option<Vec<String>>,
+    /// A secret reference (`env:NAME`, `file:/path`, `vault:path#key`)
+    /// matching `server.api_webhook_secret_refs`; never a value.
+    secret: Option<String>,
+    /// `stripe`, `hmac-sha256` or `none`; default `hmac-sha256` with a
+    /// secret, else `none`.
+    signing: Option<WebhookSigningSchema>,
+    /// Wait before the first attempt, 0–60000.
+    #[schema(default = 0, minimum = 0, maximum = 60000)]
+    delay_ms: Option<u64>,
+}
+
+/// How a webhook delivery is signed.
+#[derive(ToSchema)]
+#[schema(as = WebhookSigning)]
+#[allow(dead_code)]
+pub enum WebhookSigningSchema {
+    #[schema(rename = "stripe")]
+    Stripe,
+    #[schema(rename = "hmac-sha256")]
+    HmacSha256,
+    #[schema(rename = "none")]
+    None,
+}
+
+/// 422 `Invalid webhooks` for an out-of-range target, then 422 `Secret
+/// reference not allowed` for a secret no `allowed` glob
+/// (`server.api_webhook_secret_refs`) matches. Neither echoes a secret.
+fn check_webhooks(targets: &[WebhookTarget], allowed: &[String]) -> ApiResult<()> {
+    validate_webhooks(targets).map_err(|e| Problem::invalid("Invalid webhooks", e))?;
+    for (i, t) in targets.iter().enumerate() {
+        let Some(secret) = &t.secret else { continue };
+        if !allowed.iter().any(|g| glob_match(g, secret)) {
+            let accepted = if allowed.is_empty() {
+                "none (server.api_webhook_secret_refs is empty)".to_string()
+            } else {
+                accepted_secret_refs(allowed)
+            };
+            return Err(Problem::invalid(
+                "Secret reference not allowed",
+                format!(
+                    "webhooks[{i}].secret not allowed by server.api_webhook_secret_refs; accepted: {accepted}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The OpenAPI schema of [`DataPlaneAuthConfig`] (which lives in `mb-store`).
 #[derive(ToSchema)]
@@ -138,6 +198,11 @@ pub struct MockView {
     pub default_scenario: Option<String>,
     /// Host names the mock answers for; empty answers for any host.
     pub hosts: Vec<String>,
+    /// Where the mock POSTs events after successful writes; absent when
+    /// none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<WebhookTargetSchema>)]
+    pub webhooks: Vec<WebhookTarget>,
     pub source: Source,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -163,6 +228,7 @@ impl MockView {
             unknown_ids: m.behavior.unknown_ids,
             default_scenario: m.behavior.default_scenario,
             hosts: m.hosts,
+            webhooks: m.webhooks,
             created_at: m.created_at,
             updated_at: m.updated_at,
             active_version,
@@ -207,6 +273,10 @@ pub struct CreateMock {
     /// share a route prefix.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Webhook targets; none by default.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<WebhookTargetSchema>>)]
+    pub webhooks: Vec<WebhookTarget>,
 }
 
 fn default_true() -> bool {
@@ -248,6 +318,9 @@ pub struct PatchMock {
     pub default_scenario: Option<Option<String>>,
     /// Replaces the host list; `[]` clears it.
     pub hosts: Option<Vec<String>>,
+    /// Replaces the webhook targets; `[]` clears them.
+    #[schema(value_type = Option<Vec<WebhookTargetSchema>>)]
+    pub webhooks: Option<Vec<WebhookTarget>>,
 }
 
 /// Distinguishes an explicit `null` (`Some(None)`) from an absent field (`None`).
@@ -333,7 +406,7 @@ pub async fn list(
     responses(
         (status = 201, body = MockView),
         (status = 409, description = "The mock already exists (title \"Mock already exists\"), or another mock has its route prefix on an overlapping host set", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid name, route prefix, hosts, chaos or limits", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid name, route prefix, hosts, chaos, limits or webhooks (titles \"Invalid webhooks\", \"Secret reference not allowed\")", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn create(
@@ -352,6 +425,7 @@ pub async fn create(
         .clone()
         .unwrap_or_else(|| format!("/{}", body.name));
     validate_hosts(&body.hosts)?;
+    check_webhooks(&body.webhooks, &st.api_webhook_secret_refs)?;
     ensure_route_free(&st, &prefix, &body.hosts, None).await?;
     let name = body.name.clone();
     let created = st
@@ -374,7 +448,7 @@ pub async fn create(
                     default_scenario: None,
                 },
                 hosts: body.hosts,
-                webhooks: Vec::new(),
+                webhooks: body.webhooks,
             },
         )
         .await
@@ -434,7 +508,7 @@ pub async fn get_one(
         (status = 409, description = "Managed by config file, or another mock has the route prefix", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid route prefix, chaos or limits, or a default scenario the mock does not have", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Managed by config file, or another mock has its route prefix on an overlapping host set", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid route prefix, hosts, chaos or limits", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid route prefix, hosts, chaos, limits or webhooks (titles \"Invalid webhooks\", \"Secret reference not allowed\")", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn patch(
@@ -450,6 +524,9 @@ pub async fn patch(
     if let Some(hosts) = &body.hosts {
         validate_hosts(hosts)?;
     }
+    if let Some(webhooks) = &body.webhooks {
+        check_webhooks(webhooks, &st.api_webhook_secret_refs)?;
+    }
     if let Some(prefix) = &body.route_prefix {
         validate_route_prefix(prefix)?;
     }
@@ -463,6 +540,9 @@ pub async fn patch(
     }
     if let Some(hosts) = body.hosts {
         m.hosts = hosts;
+    }
+    if let Some(webhooks) = body.webhooks {
+        m.webhooks = webhooks;
     }
     if let Some(persona) = body.persona {
         m.persona = persona;

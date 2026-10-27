@@ -547,6 +547,10 @@ pub struct ServerConfig {
     /// Admin API. Profiles in this file are not restricted. Read at
     /// startup.
     pub api_secret_refs: Vec<String>,
+    /// Globs a mock's webhook `secret` reference must match when set
+    /// through the Admin API. Mocks in this file are not restricted. Read
+    /// at startup.
+    pub api_webhook_secret_refs: Vec<String>,
     /// Which planes this node serves.
     pub role: Role,
     /// Whether `X-Forwarded-*` request headers are trusted (only behind a
@@ -575,6 +579,10 @@ impl Default for ServerConfig {
             grpc_port: 50051,
             insecure_no_auth: false,
             api_secret_refs: mb_admin::DEFAULT_API_SECRET_REFS
+                .iter()
+                .map(|r| r.to_string())
+                .collect(),
+            api_webhook_secret_refs: mb_admin::DEFAULT_API_WEBHOOK_SECRET_REFS
                 .iter()
                 .map(|r| r.to_string())
                 .collect(),

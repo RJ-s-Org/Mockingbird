@@ -91,4 +91,4 @@ The newest 200 deliveries per mock are kept in memory (not across restarts):
 
 Each record has its `status` (`pending`, `delivered`, `failed`, `dropped`), `attempts`, the last `response_status` and `error`, and the target URL without userinfo or query.
 
-On a split deployment (`server.role: control` and `data`), deliveries happen and are listed on the data nodes; a control node lists none.
+Deliveries are made and recorded by the node that served the write. On a split deployment (`server.role: control` and `data`) the data nodes deliver but do not serve the Admin API, and a control node lists none, so the list is only useful with `server.role: all`.

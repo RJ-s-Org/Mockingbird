@@ -701,6 +701,7 @@ async fn build_app_on(
     let prometheus = telemetry::install_prometheus()?;
     let admin_state = mb_admin::AdminState {
         api_secret_refs: Arc::new(cfg.server.api_secret_refs.clone()),
+        api_webhook_secret_refs: Arc::new(cfg.server.api_webhook_secret_refs.clone()),
         live: Some({
             let recorder = recorder.clone();
             Arc::new(move || recorder.live())
@@ -759,7 +760,8 @@ async fn build_app_on(
                         registry: registry.clone(),
                         brokers: brokers.clone(),
                     },
-                )));
+                )))
+                .layer(axum::Extension(deps.webhook_log.clone()));
             if let Some(routes) = ext.admin_hooks.routes() {
                 // Extension routes get the same authentication as the Admin API.
                 admin = admin.merge(routes.layer(axum::middleware::from_fn_with_state(

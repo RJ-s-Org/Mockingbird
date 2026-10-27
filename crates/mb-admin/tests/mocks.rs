@@ -412,3 +412,90 @@ async fn patch_consistency_settings() {
         .await;
     assert!(view.get("default_scenario").is_none());
 }
+
+#[tokio::test]
+async fn webhooks_round_trip_through_the_api() {
+    let h = harness().await;
+    let (status, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/workspaces/default/mocks",
+            Some(json!({
+                "name": "shop",
+                "webhooks": [{"url": "https://hooks.test/stripe", "events": ["*"],
+                    "secret": "env:SHOP_WEBHOOK_SECRET", "signing": "stripe", "delay_ms": 10}]
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["webhooks"][0]["signing"], "stripe");
+    assert_eq!(body["webhooks"][0]["secret"], "env:SHOP_WEBHOOK_SECRET");
+    let stored = h
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "shop")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.webhooks[0].delay_ms, 10);
+    let (status, body) = h
+        .send(
+            Method::PATCH,
+            "/api/v1/workspaces/default/mocks/shop",
+            Some(json!({"webhooks": [{"url": "http://localhost:4242/hook"}]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["webhooks"][0]["events"], json!(["*"]));
+    let (status, body) = h.patch("shop", json!({"webhooks": []})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("webhooks").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn webhook_secret_refs_are_restricted() {
+    let h = harness().await;
+    for (secret, title) in [
+        ("env:OPENROUTER_API_KEY", "Secret reference not allowed"),
+        ("whsec_pasted_value", "Invalid webhooks"),
+    ] {
+        let (status, body) = h
+            .send(
+                Method::POST,
+                "/api/v1/workspaces/default/mocks",
+                Some(json!({"name": "shop",
+                    "webhooks": [{"url": "https://hooks.test/h", "secret": secret}]})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["title"], title, "{body}");
+        assert!(!body.to_string().contains("whsec_pasted_value"), "{body}");
+    }
+    h.create("shop").await;
+    let (status, body) = h
+        .patch(
+            "shop",
+            json!({"webhooks": [{"url": "https://hooks.test/h", "secret": "env:OPENROUTER_API_KEY"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["title"], "Secret reference not allowed", "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("webhooks[0].secret"),
+        "{body}"
+    );
+    let (status, body) = h
+        .patch("shop", json!({"webhooks": [{"url": "nope"}]}))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["title"], "Invalid webhooks", "{body}");
+    let (status, _) = h
+        .patch(
+            "shop",
+            json!({"webhooks": [{"url": "https://hooks.test/h", "secret": "env:MB_WEBHOOK_SHOP"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}

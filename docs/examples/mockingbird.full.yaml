@@ -14,6 +14,7 @@ server:
   grpc_port: 50051
   insecure_no_auth: false
   api_secret_refs: ["env:MB_LLM_*", "env:*_API_KEY", "vault:secret/mockingbird/*"]
+  api_webhook_secret_refs: ["env:*_WEBHOOK_SECRET", "env:MB_WEBHOOK_*"]
   role: all
   trust_forwarded_headers: true
   tls:

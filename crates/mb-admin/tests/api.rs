@@ -1698,6 +1698,7 @@ async fn openapi_lists_all_paths() {
         ("/api/v1/mocks/{mock}/requests/stream", &["get"]),
         ("/api/v1/mocks/{mock}/imports", &["get", "post"]),
         ("/api/v1/mocks/{mock}/imports/{job}", &["get", "delete"]),
+        ("/api/v1/mocks/{mock}/webhooks/deliveries", &["get"]),
     ];
     for (path, methods) in expected {
         let item = &doc["paths"][*path];
@@ -1729,6 +1730,8 @@ async fn openapi_lists_all_paths() {
         "ChannelView",
         "ChannelDetail",
         "BrokerView",
+        "WebhookDeliveryView",
+        "WebhookTarget",
     ] {
         assert!(schemas.contains_key(name), "schema {name} missing");
     }
