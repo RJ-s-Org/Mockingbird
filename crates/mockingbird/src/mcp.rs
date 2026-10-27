@@ -311,7 +311,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "validate_contract",
             title: "Validate a contract file",
-            description: "Compile a contract (OpenAPI, Swagger, GraphQL, protobuf, WSDL, AsyncAPI, archive) locally and list its operations and channels. Needs no server.",
+            description: "Compile a contract (OpenAPI, Swagger, GraphQL, protobuf, WSDL, AsyncAPI, archive) locally: counts by protocol and the first 20 operations and channels (operations_truncated says how many more). Needs no server.",
             schema: obj(json!({ "path": s("Contract file path.") }), &["path"]),
             read_only: true,
             destructive: false,
@@ -519,7 +519,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "list_requests",
             title: "Read the request log",
-            description: "Recorded calls to a mock, newest first, with redacted bodies, matched operation, status, source (llm, repaired, fallback) and latency.",
+            description: "Recorded calls to a mock, newest first: method, path, status, matched operation, source (llm, repaired, fallback), fallback reason, latency, sizes; bodies with include_bodies or get_request.",
             schema: obj(
                 json!({
                     "mock": mock(),
@@ -528,8 +528,20 @@ fn tools() -> Vec<Tool> {
                     "operation": s("Only this operation id."),
                     "source": s("llm, repaired or fallback."),
                     "kind": s("http, graphql, grpc, soap or event."),
+                    "include_bodies": b("Return request and response bodies; default false (sizes only)."),
                 }),
                 &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "get_request",
+            title: "Show one recorded request",
+            description: "One entry of a mock's request log with its redacted request and response bodies.",
+            schema: obj(
+                json!({ "mock": mock(), "id": n("Request log id (list_requests).") }),
+                &["mock", "id"],
             ),
             read_only: true,
             destructive: false,
@@ -1000,10 +1012,25 @@ impl McpServer {
                         query.push((key, v));
                     }
                 }
+                if !opt_bool(a, "include_bodies") {
+                    query.push(("fields", "summary".into()));
+                }
                 self.ws(
                     Method::GET,
                     &["mocks", str_arg(a, "mock")?, "requests"],
                     &query,
+                    None,
+                )
+                .await
+            }
+            "get_request" => {
+                let id = opt_u64(a, "id")
+                    .ok_or_else(|| ToolError("missing integer argument \"id\"".into()))?
+                    .to_string();
+                self.ws(
+                    Method::GET,
+                    &["mocks", str_arg(a, "mock")?, "requests", &id],
+                    &[],
                     None,
                 )
                 .await
@@ -1592,6 +1619,7 @@ async fn http_post(State(st): State<HttpState>, headers: HeaderMap, body: String
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1604,6 +1632,81 @@ mod tests {
             local_tools: true,
             state_dir: std::env::temp_dir().join("mb-mcp-test-none"),
         }
+    }
+
+    /// Calls tool `name`; asserts it succeeded and parses its JSON text.
+    async fn call_tool(s: &McpServer, name: &str, args: Value) -> Value {
+        let r = s
+            .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}))
+            .await
+            .unwrap_or_default();
+        let text = r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert_eq!(r["result"]["isError"], false, "{name}: {text}");
+        serde_json::from_str(text).unwrap()
+    }
+
+    /// Calls tool `name`; asserts it failed and returns the error text.
+    async fn call_tool_error(s: &McpServer, name: &str, args: Value) -> String {
+        let r = s
+            .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}))
+            .await
+            .unwrap_or_default();
+        assert_eq!(r["result"]["isError"], true, "{name} succeeded: {r}");
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// A server whose Admin API is `admin`.
+    fn against(admin: &wiremock::MockServer) -> McpServer {
+        McpServer {
+            admin_url: admin.uri(),
+            ..server(false)
+        }
+    }
+
+    const WS: &str = "/api/v1/workspaces/default";
+
+    #[tokio::test]
+    async fn list_requests_asks_for_summaries_unless_bodies_are_wanted() {
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = wiremock::MockServer::start().await;
+        let requests = format!("{WS}/mocks/m/requests");
+        Mock::given(method("GET"))
+            .and(path(requests.as_str()))
+            .and(query_param("fields", "summary"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1}])))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(requests.as_str()))
+            .and(query_param_is_missing("fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"request":{}}])))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{requests}/7")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id":7,"response":{"ok":true}})),
+            )
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let r = call_tool(&s, "list_requests", json!({"mock":"m"})).await;
+        assert_eq!(r, json!([{"id":1}]));
+        let r = call_tool(&s, "get_request", json!({"mock":"m","id":7})).await;
+        assert_eq!(r["response"]["ok"], true);
+        let r = call_tool(
+            &s,
+            "list_requests",
+            json!({"mock":"m","include_bodies":true}),
+        )
+        .await;
+        assert_eq!(r, json!([{"id":1,"request":{}}]));
     }
 
     #[tokio::test]

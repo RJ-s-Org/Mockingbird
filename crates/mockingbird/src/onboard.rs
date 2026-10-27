@@ -436,13 +436,34 @@ pub fn test_profile(args: &TestArgs) -> anyhow::Result<FileProfile> {
         .ok_or_else(|| anyhow!("{} has no LLM profile {name:?}", config.display()))
 }
 
-/// `mockingbird validate` as JSON: the contract's title, version,
-/// operations and channels.
+/// How many operations and channels [`contract_summary`] lists.
+pub const SUMMARY_OPERATIONS: usize = 20;
+
+/// The first [`SUMMARY_OPERATIONS`] items, and how many were left out.
+fn capped(items: Vec<Value>) -> (Vec<Value>, usize) {
+    let left_out = items.len().saturating_sub(SUMMARY_OPERATIONS);
+    (items.into_iter().take(SUMMARY_OPERATIONS).collect(), left_out)
+}
+
+/// `mockingbird validate` as JSON: the contract's title, version, counts
+/// by protocol, and the first [`SUMMARY_OPERATIONS`] operations and
+/// channels (`operations_truncated` / `channels_truncated` say how many
+/// more there are).
 pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
     let bytes =
         mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
     let bundle =
         mb_import::compile(&bytes).with_context(|| format!("cannot compile {}", path.display()))?;
+    let mut counts = Map::new();
+    for op in &bundle.operations {
+        let protocol = serde_json::to_value(op.protocol)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "other".into());
+        let n = counts.get(&protocol).and_then(Value::as_u64).unwrap_or(0);
+        counts.insert(protocol, json!(n + 1));
+    }
+    counts.insert("channels".into(), json!(bundle.channels.len()));
     let operations: Vec<Value> = bundle
         .operations
         .iter()
@@ -464,11 +485,16 @@ pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
             })
         })
         .collect();
+    let (operations, operations_truncated) = capped(operations);
+    let (channels, channels_truncated) = capped(channels);
     Ok(json!({
         "title": bundle.title,
         "version": bundle.version,
+        "counts": counts,
         "operations": operations,
+        "operations_truncated": operations_truncated,
         "channels": channels,
+        "channels_truncated": channels_truncated,
     }))
 }
 
@@ -487,6 +513,30 @@ pub fn configure_api_body(args: &ConfigureArgs) -> anyhow::Result<(String, Value
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_summary_caps_the_operation_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = String::from(
+            "openapi: 3.0.3\ninfo: {title: Many, version: '1'}\npaths:\n",
+        );
+        for i in 0..25 {
+            doc.push_str(&format!(
+                "  /r{i}:\n    get:\n      operationId: r{i}\n      responses:\n        '200': {{description: ok}}\n"
+            ));
+        }
+        let path = dir.path().join("many.yaml");
+        std::fs::write(&path, doc).unwrap();
+        let s = contract_summary(&path).unwrap();
+        assert_eq!(
+            s["operations"].as_array().unwrap().len(),
+            SUMMARY_OPERATIONS
+        );
+        assert_eq!(s["operations_truncated"], 5);
+        assert_eq!(s["counts"]["http"], 25);
+        assert_eq!(s["counts"]["channels"], 0);
+        assert_eq!(s["channels_truncated"], 0);
+    }
 
     #[test]
     fn mock_names_from_stems() {

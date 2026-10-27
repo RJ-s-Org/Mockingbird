@@ -412,6 +412,13 @@ fn mcp_drives_a_background_server() {
             json!({ "mock": "orders", "session": "t", "limit": 5 }),
         );
         assert_eq!(log.as_array().unwrap().len(), 2);
+        assert!(log[0].get("response").is_none(), "{log}");
+        assert!(log[0]["response_bytes"].as_u64().unwrap() > 0, "{log}");
+        let one = mcp.tool(
+            "get_request",
+            json!({ "mock": "orders", "id": log[0]["id"] }),
+        );
+        assert!(one["response"].is_object(), "{one}");
 
         let imported = mcp.tool(
             "import_contract",
