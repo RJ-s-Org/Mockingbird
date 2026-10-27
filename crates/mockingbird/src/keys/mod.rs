@@ -15,7 +15,7 @@ use page::{PageOptions, ProfileTarget};
 #[derive(Subcommand, Debug)]
 pub enum KeysCommand {
     /// Open a local page to type an LLM key into; it is stored in
-    /// ~/.mockingbird/secrets/<name> (mode 0600) and the profile is pointed
+    /// `~/.mockingbird/secrets/<name>` (mode 0600) and the profile is pointed
     /// at the file.
     Setup(SetupArgs),
 }
