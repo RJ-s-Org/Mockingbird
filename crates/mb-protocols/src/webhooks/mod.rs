@@ -2,5 +2,7 @@
 //! to each configured target, retrying failures, and keeps a bounded log of
 //! the deliveries.
 
+pub mod deliver;
 pub mod event;
+pub mod log;
 pub mod sign;

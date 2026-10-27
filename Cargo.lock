@@ -3601,6 +3601,7 @@ dependencies = [
  "reqwest",
  "rumqttc",
  "rumqttd",
+ "serde",
  "serde_json",
  "serde_urlencoded",
  "sha2 0.10.9",
@@ -3654,6 +3655,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
 ]
 

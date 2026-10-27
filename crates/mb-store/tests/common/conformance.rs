@@ -113,14 +113,14 @@ async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
     let m = store
         .create_mock(DEFAULT_WORKSPACE, nm.clone())
         .await
-        .unwrap();
+        .expect("webhooks");
     assert_eq!(m.webhooks, nm.webhooks);
     assert_eq!(
         store
             .get_mock(DEFAULT_WORKSPACE, "hooks")
             .await
-            .unwrap()
-            .unwrap()
+            .expect("webhooks")
+            .expect("webhooks")
             .webhooks,
         nm.webhooks
     );
@@ -130,7 +130,7 @@ async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
         store
             .update_mock(&cleared)
             .await
-            .unwrap()
+            .expect("webhooks")
             .webhooks
             .is_empty()
     );
@@ -138,12 +138,12 @@ async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
     let stored = store
         .get_mock(DEFAULT_WORKSPACE, "hooks")
         .await
-        .unwrap()
-        .unwrap();
+        .expect("webhooks")
+        .expect("webhooks");
     assert!(stored.webhooks.is_empty());
     assert!(
         serde_json::to_value(&stored)
-            .unwrap()
+            .expect("webhooks")
             .get("webhooks")
             .is_none()
     );
@@ -165,7 +165,10 @@ async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
         store.update_mock(&stored).await,
         Err(StoreError::Invalid(_))
     ));
-    store.delete_mock(DEFAULT_WORKSPACE, "hooks").await.unwrap();
+    store
+        .delete_mock(DEFAULT_WORKSPACE, "hooks")
+        .await
+        .expect("webhooks");
 }
 
 async fn mock_hosts_round_trip(store: &Arc<dyn ControlStore>) {
