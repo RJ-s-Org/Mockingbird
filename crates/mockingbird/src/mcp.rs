@@ -418,13 +418,15 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "import_contract",
             title: "Import a contract into a mock",
-            description: "Import a contract (OpenAPI, Swagger, GraphQL, .proto, WSDL, AsyncAPI, zip/tar.gz, a directory) as a new version of a mock, creating the mock if missing. API documentation (Markdown, HTML, PDF, text), HAR recordings and Postman collections become a draft: pass approve to accept it when there are no warnings. Give a local path or http(s) URL in source, or the file text in content with a filename.",
+            description: "Import a contract (OpenAPI, Swagger, GraphQL, .proto, WSDL, AsyncAPI, zip/tar.gz, a directory) as a new version of a mock, creating the mock if missing. API documentation (Markdown, HTML, PDF, text), HAR recordings and Postman collections become a draft: pass approve to accept it when there are no warnings. Give a local path or http(s) URL in source, several documentation URLs in urls, or the file text in content with a filename. Review a draft with get_draft, fix it with edit_draft, accept it with approve_draft.",
             schema: obj(
                 json!({
                     "mock": mock(),
                     "source": s("File path, directory, or http(s) URL."),
                     "content": s("The contract or document text, when there is no file."),
                     "content_base64": s("Binary content (zip, PDF, descriptor set), base64."),
+                    "urls": { "type": "array", "items": { "type": "string" }, "description": "Documentation pages to import together (http(s))." },
+                    "mode": { "type": "string", "enum": ["merge", "replace"], "description": "With an existing draft or active contract: merge (default) adds and replaces operations by method+path; replace starts over." },
                     "filename": s("Name for content, with its extension, e.g. api.yaml."),
                     "activate": b("Activate the new version (the first is always activated)."),
                     "approve": b("Approve a draft import that reported no warnings."),
@@ -450,6 +452,52 @@ fn tools() -> Vec<Tool> {
             schema: obj(
                 json!({ "mock": mock(), "version": n("Version number.") }),
                 &["mock", "version"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "get_draft",
+            title: "Review a draft contract",
+            description: "Review a draft import: operations with confidence and warnings; pass operation for its full definition. Without version, the newest draft.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Draft version; default the newest draft."),
+                    "operation": s("Operation id: return its full OpenAPI definition."),
+                }),
+                &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "edit_draft",
+            title: "Edit a draft contract",
+            description: "Apply a JSON merge patch (RFC 7396: null removes a key) to one operation of a draft (operation given: its OpenAPI operation object) or to the whole OpenAPI document, and save it. Returns the get_draft summary; a patch that breaks the document changes nothing and names the problem.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Draft version; default the newest draft."),
+                    "operation": s("Operation id to patch; default the whole document."),
+                    "patch": o("JSON merge patch."),
+                }),
+                &["mock", "patch"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "approve_draft",
+            title: "Approve a draft contract",
+            description: "Approve a reviewed draft; it is activated (served) unless activate is false.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Draft version; default the newest draft."),
+                    "activate": b("Serve the approved version; default true."),
+                }),
+                &["mock"],
             ),
             read_only: false,
             destructive: false,
@@ -734,6 +782,119 @@ fn paths(args: &Value, key: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// The operation `id` of a draft view, or an error listing known ids.
+fn draft_operation<'a>(view: &'a Value, id: &str) -> Result<&'a Value, ToolError> {
+    let ops = view["operations"].as_array().map(Vec::as_slice).unwrap_or_default();
+    ops.iter().find(|o| o["id"] == id).ok_or_else(|| {
+        let known: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).take(20).collect();
+        ToolError(format!(
+            "the draft has no operation {id:?}; known: {}",
+            known.join(", ")
+        ))
+    })
+}
+
+/// A draft view (`GET …/draft`) without its document: each operation with
+/// its confidence and warnings, plus the warnings tied to no operation; or,
+/// with `operation`, that operation with its OpenAPI definition.
+fn draft_summary(view: &Value, operation: Option<&str>) -> ToolResult {
+    let warnings = view["meta"]["warnings"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let target = |op: &Value| {
+        format!(
+            "{} {}",
+            op["method"].as_str().unwrap_or_default(),
+            op["path"].as_str().unwrap_or_default()
+        )
+    };
+    let warnings_of = |t: &str| -> Vec<Value> {
+        warnings
+            .iter()
+            .filter(|w| w["operation"].as_str() == Some(t))
+            .map(|w| w["message"].clone())
+            .collect()
+    };
+    let ops = view["operations"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if let Some(id) = operation {
+        let op = draft_operation(view, id)?;
+        let method = op["method"].as_str().unwrap_or_default().to_ascii_lowercase();
+        let path = op["path"].as_str().unwrap_or_default();
+        return Ok(json!({
+            "version": view["version"],
+            "id": op["id"],
+            "method": op["method"],
+            "path": op["path"],
+            "confidence": op["confidence"],
+            "warnings": warnings_of(&target(op)),
+            "definition": view["document"]["paths"][path][method],
+        }));
+    }
+    let targets: Vec<String> = ops.iter().map(target).collect();
+    let general: Vec<Value> = warnings
+        .iter()
+        .filter(|w| {
+            w["operation"]
+                .as_str()
+                .is_none_or(|t| !targets.iter().any(|x| x == t))
+        })
+        .map(|w| {
+            let mut out = json!({ "code": w["code"], "message": w["message"] });
+            if let Some(t) = w["operation"].as_str() {
+                out["operation"] = json!(t);
+            }
+            out
+        })
+        .collect();
+    let operations: Vec<Value> = ops
+        .iter()
+        .map(|op| {
+            json!({
+                "id": op["id"],
+                "method": op["method"],
+                "path": op["path"],
+                "confidence": op["confidence"],
+                "warnings": warnings_of(&target(op)),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "version": view["version"],
+        "status": view["status"],
+        "source_kind": view["meta"]["source_kind"],
+        "operations": operations,
+        "warnings": general,
+        "diff": view["diff"],
+    }))
+}
+
+/// The tool error for a 422 from `PUT …/draft`: the detail and each
+/// `pointer: message`.
+fn invalid_draft(body: &str) -> String {
+    let problem: Value = serde_json::from_str(body).unwrap_or_default();
+    let detail = problem["detail"]
+        .as_str()
+        .or(problem["title"].as_str())
+        .unwrap_or("invalid draft");
+    let errors: Vec<String> = problem["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            format!(
+                "{}: {}",
+                e["pointer"].as_str().unwrap_or_default(),
+                e["message"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    format!(
+        "the patched draft does not compile ({detail}); nothing was saved: {}",
+        errors.join("; ")
+    )
+}
+
 impl McpServer {
     pub fn new(admin_url: &str, token: Option<&str>, workspace: &str, args: &McpArgs) -> Self {
         Self {
@@ -949,6 +1110,28 @@ impl McpServer {
                     .await
             }
             "import_contract" => self.import(a).await,
+            "get_draft" => {
+                let mock = str_arg(a, "mock")?;
+                let version = self.draft_version(mock, opt_u64(a, "version")).await?;
+                let view = self.get_draft(mock, version).await?;
+                draft_summary(&view, opt_str(a, "operation").as_deref())
+            }
+            "edit_draft" => self.edit_draft(a).await,
+            "approve_draft" => {
+                let mock = str_arg(a, "mock")?;
+                let version = self
+                    .draft_version(mock, opt_u64(a, "version"))
+                    .await?
+                    .to_string();
+                let activate = a.get("activate").and_then(Value::as_bool).unwrap_or(true);
+                self.ws(
+                    Method::POST,
+                    &["mocks", mock, "contracts", &version, "approve"],
+                    &[],
+                    Some(json!({ "activate": activate })),
+                )
+                .await
+            }
             "list_contract_versions" => {
                 self.ws(
                     Method::GET,
@@ -1141,14 +1324,135 @@ impl McpServer {
         }
     }
 
+    /// `version`, else the mock's newest draft version.
+    async fn draft_version(&self, mock: &str, version: Option<u64>) -> Result<u64, ToolError> {
+        if let Some(v) = version {
+            return Ok(v);
+        }
+        let versions = self
+            .ws(Method::GET, &["mocks", mock, "contracts"], &[], None)
+            .await?;
+        versions
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|v| v["status"] == "draft")
+            .filter_map(|v| v["version"].as_u64())
+            .max()
+            .ok_or_else(|| {
+                ToolError(format!(
+                    "mock {mock:?} has no draft; import documentation, HAR or Postman with import_contract first"
+                ))
+            })
+    }
+
+    async fn get_draft(&self, mock: &str, version: u64) -> ToolResult {
+        let version = version.to_string();
+        self.ws(
+            Method::GET,
+            &["mocks", mock, "contracts", &version, "draft"],
+            &[],
+            None,
+        )
+        .await
+    }
+
+    async fn edit_draft(&self, a: &Value) -> ToolResult {
+        let mock = str_arg(a, "mock")?;
+        let patch = a
+            .get("patch")
+            .filter(|p| p.is_object())
+            .ok_or_else(|| ToolError("patch must be a JSON object".into()))?;
+        let version = self.draft_version(mock, opt_u64(a, "version")).await?;
+        let view = self.get_draft(mock, version).await?;
+        let mut document = view["document"].clone();
+        match opt_str(a, "operation") {
+            None => json_patch::merge(&mut document, patch),
+            Some(id) => {
+                let op = draft_operation(&view, &id)?;
+                let (path, method) = (
+                    op["path"].as_str().unwrap_or_default(),
+                    op["method"].as_str().unwrap_or_default().to_ascii_lowercase(),
+                );
+                let target = document
+                    .get_mut("paths")
+                    .and_then(|p| p.get_mut(path))
+                    .and_then(|p| p.get_mut(&method))
+                    .ok_or_else(|| {
+                        ToolError(format!(
+                            "the draft document has no {method} {path} for operation {id:?}"
+                        ))
+                    })?;
+                json_patch::merge(target, patch);
+            }
+        }
+        let version = version.to_string();
+        let saved = client::api(
+            &self.admin_url,
+            self.token.as_deref(),
+            Some(&self.workspace),
+            Method::PUT,
+            &["mocks", mock, "contracts", &version, "draft"],
+            &[],
+            Some(json!({ "document": document })),
+        )
+        .await;
+        match saved {
+            Ok(view) => draft_summary(&view.unwrap_or_default(), None),
+            Err(ClientError::Api { status, body })
+                if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                Err(ToolError(invalid_draft(&body)))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn import(&self, a: &Value) -> ToolResult {
         let mock = str_arg(a, "mock")?.to_string();
+        let mode = match opt_str(a, "mode").as_deref() {
+            None => None,
+            Some("merge") => Some(client::ImportMode::Merge),
+            Some("replace") => Some(client::ImportMode::Replace),
+            Some(other) => {
+                return Err(ToolError(format!(
+                    "mode {other:?}: use merge or replace"
+                )));
+            }
+        };
+        let urls: Vec<String> = a
+            .get("urls")
+            .and_then(Value::as_array)
+            .map(|u| u.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        let given = [
+            a.get("source").is_some(),
+            a.get("content").is_some(),
+            a.get("content_base64").is_some(),
+            !urls.is_empty(),
+        ];
+        if given.iter().filter(|g| **g).count() != 1 {
+            return Err(ToolError(
+                "give exactly one of source, content, content_base64 or urls".into(),
+            ));
+        }
+        let mut more_urls = Vec::new();
         let mut scratch = None;
         let source = match (
             opt_str(a, "source"),
             opt_str(a, "content"),
             opt_str(a, "content_base64"),
         ) {
+            (None, None, None) if !urls.is_empty() => {
+                if let Some(bad) = urls.iter().find(|u| {
+                    let u = u.to_ascii_lowercase();
+                    !u.starts_with("http://") && !u.starts_with("https://")
+                }) {
+                    return Err(ToolError(format!("urls: {bad:?} is not an http(s) URL")));
+                }
+                more_urls = urls[1..].to_vec();
+                urls[0].clone()
+            }
             (Some(source), None, None) => {
                 let remote = ["http://", "https://"]
                     .iter()
@@ -1188,15 +1492,15 @@ impl McpServer {
             }
             _ => {
                 return Err(ToolError(
-                    "give exactly one of source, content or content_base64".into(),
+                    "give exactly one of source, content, content_base64 or urls".into(),
                 ));
             }
         };
         let cmd = client::ClientCommand::Import(client::ImportArgs {
             source,
-            more_urls: Vec::new(),
+            more_urls,
             no_activate: false,
-            mode: None,
+            mode,
             mock,
             activate: opt_bool(a, "activate"),
             approve: opt_bool(a, "approve"),
@@ -1744,6 +2048,194 @@ mod tests {
         assert_eq!(r, json!([{"id":1,"request":{}}]));
     }
 
+    fn draft_view() -> Value {
+        json!({
+            "version": 2,
+            "status": "draft",
+            "document": {
+                "openapi": "3.1.0",
+                "info": { "title": "Pets", "version": "1" },
+                "paths": {
+                    "/pets": { "get": { "operationId": "listPets", "responses": { "200": { "description": "ok" } } } },
+                    "/pets/{id}": { "get": { "operationId": "getPet", "responses": { "200": { "description": "ok" } } } }
+                }
+            },
+            "meta": {
+                "source_kind": "documentation",
+                "warnings": [
+                    { "code": "invalid_schema", "message": "x", "operation": "GET /pets/{id}" },
+                    { "code": "chunk_skipped", "message": "y", "operation": null }
+                ]
+            },
+            "operations": [
+                { "id": "listPets", "method": "GET", "path": "/pets", "summary": null, "confidence": 0.9, "edited": false, "provenance": [] },
+                { "id": "getPet", "method": "GET", "path": "/pets/{id}", "summary": null, "confidence": 0.5, "edited": false, "provenance": [] }
+            ],
+            "diff": null
+        })
+    }
+
+    /// An Admin API with mock `pets` whose versions are `versions`, and
+    /// version 2's draft.
+    async fn draft_admin(versions: Value) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pets/contracts")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(versions))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/draft")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(draft_view()))
+            .mount(&admin)
+            .await;
+        admin
+    }
+
+    fn two_versions() -> Value {
+        json!([{"version":1,"status":"active"},{"version":2,"status":"draft"}])
+    }
+
+    #[tokio::test]
+    async fn get_draft_summarises_and_expands_one_operation() {
+        let admin = draft_admin(two_versions()).await;
+        let s = against(&admin);
+        let r = call_tool(&s, "get_draft", json!({"mock":"pets"})).await;
+        assert_eq!(r["version"], 2);
+        assert_eq!(r["source_kind"], "documentation");
+        assert_eq!(
+            r["operations"][1],
+            json!({"id":"getPet","method":"GET","path":"/pets/{id}","confidence":0.5,"warnings":["x"]})
+        );
+        assert_eq!(r["operations"][0]["warnings"], json!([]));
+        assert_eq!(r["warnings"], json!([{"code":"chunk_skipped","message":"y"}]));
+        assert!(r.get("document").is_none());
+        let one = call_tool(
+            &s,
+            "get_draft",
+            json!({"mock":"pets","operation":"getPet"}),
+        )
+        .await;
+        assert!(one["definition"]["responses"].is_object(), "{one}");
+        assert_eq!(one["warnings"], json!(["x"]));
+        let text = call_tool_error(
+            &s,
+            "get_draft",
+            json!({"mock":"pets","operation":"nope"}),
+        )
+        .await;
+        assert!(text.contains("listPets") && text.contains("getPet"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn edit_draft_merges_into_one_operation() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = draft_admin(two_versions()).await;
+        Mock::given(method("PUT"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/draft")))
+            .and(body_partial_json(json!({"document":{"paths":{"/pets/{id}":{"get":{"summary":"Fetch","operationId":"getPet"}}}}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(draft_view()))
+            .expect(1)
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let r = call_tool(
+            &s,
+            "edit_draft",
+            json!({"mock":"pets","operation":"getPet","patch":{"summary":"Fetch"}}),
+        )
+        .await;
+        assert_eq!(r["version"], 2);
+        assert!(r["operations"].is_array() && r.get("document").is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_draft_surfaces_an_invalid_patch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = draft_admin(two_versions()).await;
+        Mock::given(method("PUT"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/draft")))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .insert_header("content-type", "application/problem+json")
+                    .set_body_json(json!({
+                        "type": "about:blank", "title": "Invalid draft", "status": 422, "detail": "the draft does not compile",
+                        "errors": [{ "pointer": "/paths/~1pets/get/responses", "message": "required" }]
+                    })),
+            )
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let text = call_tool_error(
+            &s,
+            "edit_draft",
+            json!({"mock":"pets","operation":"listPets","patch":{"responses":null}}),
+        )
+        .await;
+        assert!(
+            text.contains("does not compile")
+                && text.contains("/paths/~1pets/get/responses")
+                && text.contains("required"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_draft_activates_by_default() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = draft_admin(two_versions()).await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/approve")))
+            .and(body_json(json!({"activate": true})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"version":2,"status":"active"})),
+            )
+            .mount(&admin)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/approve")))
+            .and(body_json(json!({"activate": false})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"version":2,"status":"approved"})),
+            )
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let r = call_tool(&s, "approve_draft", json!({"mock":"pets"})).await;
+        assert_eq!(r["status"], "active");
+        let r = call_tool(
+            &s,
+            "approve_draft",
+            json!({"mock":"pets","version":2,"activate":false}),
+        )
+        .await;
+        assert_eq!(r["status"], "approved");
+    }
+
+    #[tokio::test]
+    async fn draft_tools_without_a_draft_say_so() {
+        let admin = draft_admin(json!([{"version":1,"status":"active"}])).await;
+        let s = against(&admin);
+        let text = call_tool_error(&s, "get_draft", json!({"mock":"pets"})).await;
+        assert!(text.contains("has no draft"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn import_contract_takes_one_kind_of_source() {
+        let text = call_tool_error(
+            &server(false),
+            "import_contract",
+            json!({"mock":"m","source":"a.yaml","urls":["https://example.com/docs"]}),
+        )
+        .await;
+        assert!(text.contains("urls"), "{text}");
+    }
+
     #[tokio::test]
     async fn initialize_negotiates_the_version() {
         let s = server(false);
@@ -1803,6 +2295,9 @@ mod tests {
         let names: Vec<&str> = remote.tools().iter().map(|t| t.name).collect();
         assert!(!names.contains(&"test_llm") && !names.contains(&"init_config"));
         assert!(names.contains(&"import_contract") && names.contains(&"list_mocks"));
+        for remote_tool in ["get_draft", "edit_draft", "approve_draft", "get_request"] {
+            assert!(names.contains(&remote_tool), "{remote_tool}");
+        }
         let r = remote
             .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"import_contract","arguments":{"mock":"m","source":"/etc/passwd"}}}))
             .await
