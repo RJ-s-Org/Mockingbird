@@ -3366,7 +3366,6 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.23.1",
  "chrono",
- "hmac 0.12.1",
  "http-body-util",
  "mb-auth",
  "mb-engine",
@@ -3382,7 +3381,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "tokio",
@@ -3580,6 +3578,7 @@ dependencies = [
  "chrono",
  "cron",
  "futures",
+ "hmac 0.12.1",
  "http 1.5.0",
  "http-body 1.1.0",
  "humantime",
@@ -3604,6 +3603,7 @@ dependencies = [
  "rumqttd",
  "serde_json",
  "serde_urlencoded",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -3616,6 +3616,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

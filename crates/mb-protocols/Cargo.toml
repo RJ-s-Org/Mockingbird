@@ -40,6 +40,7 @@ base64.workspace = true
 chrono = { workspace = true, optional = true }
 cron = { workspace = true, optional = true }
 futures.workspace = true
+hmac.workspace = true
 http.workspace = true
 http-body = { workspace = true, optional = true }
 humantime.workspace = true
@@ -58,9 +59,11 @@ prost-types = { workspace = true, optional = true }
 quick-xml = { workspace = true, optional = true }
 rand.workspace = true
 rdkafka = { workspace = true, optional = true }
+reqwest.workspace = true
 rumqttc = { workspace = true, optional = true }
 serde_json.workspace = true
 serde_urlencoded = { workspace = true, optional = true }
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, optional = true }
@@ -74,12 +77,12 @@ uuid = { workspace = true, optional = true }
 [dev-dependencies]
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
-reqwest.workspace = true
 rumqttd.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 tower.workspace = true
 tracing-subscriber.workspace = true
+wiremock.workspace = true
 
 [[test]]
 name = "events_mqtt"

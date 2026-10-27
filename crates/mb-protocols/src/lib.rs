@@ -47,6 +47,7 @@ pub mod limits;
 mod record;
 #[cfg(feature = "soap")]
 pub mod soap;
+pub mod webhooks;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
