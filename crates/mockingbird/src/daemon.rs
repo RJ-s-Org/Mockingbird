@@ -67,6 +67,10 @@ pub struct StartArgs {
     /// Faker only, no LLM.
     #[arg(long)]
     pub offline: bool,
+    /// Also run the HTTP(S) proxy (`proxy.enabled`); see `mockingbird proxy
+    /// env`.
+    #[arg(long)]
+    pub proxy: bool,
     /// Do not watch the config file for changes.
     #[arg(long)]
     pub no_watch: bool,
@@ -91,6 +95,20 @@ fn log_file(dir: &Path) -> PathBuf {
 
 fn info_file(dir: &Path) -> PathBuf {
     dir.join("server.json")
+}
+
+/// The variables `mockingbird proxy env` sets that route HTTP traffic.
+const PROXY_VARS: &[&str] = &["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
+
+/// `http://<proxy.host>:<proxy.port>` of `config` (with `MB_*` applied).
+fn proxy_url(config: Option<&Path>) -> anyhow::Result<String> {
+    let opts = crate::proxy::env::options_for(config, None)?;
+    let host = if opts.host.contains(':') {
+        format!("[{}]", opts.host)
+    } else {
+        opts.host
+    };
+    Ok(format!("http://{host}:{}", opts.port))
 }
 
 fn env_port(name: &str) -> Option<u16> {
@@ -213,6 +231,18 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     if args.insecure_no_auth {
         cmd.arg("--insecure-no-auth");
     }
+    // The proxy's own URL: from `proxy.port` / `proxy.host`, or the
+    // defaults. A shell that exported `proxy env` would otherwise send the
+    // server's own LLM calls back through its proxy.
+    let proxy_url = proxy_url(args.config.as_deref())?;
+    for (name, value) in std::env::vars() {
+        if PROXY_VARS.contains(&name.as_str()) && value.trim_end_matches('/') == proxy_url {
+            cmd.env_remove(name);
+        }
+    }
+    if args.proxy {
+        cmd.arg("--proxy");
+    }
     cmd.args(&args.contracts);
     let log_path = log_file(dir);
     let log = OpenOptions::new()
@@ -229,7 +259,7 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     let pid = child.id();
     std::fs::write(pid_file(dir), pid.to_string())?;
     let admin_url = url(host, admin);
-    let info = json!({
+    let mut info = json!({
         "pid": pid,
         "data_plane": url(host, port),
         "admin": admin_url,
@@ -238,6 +268,9 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
         "contracts": args.contracts,
         "log": log_path,
     });
+    if args.proxy {
+        info["proxy"] = json!(proxy_url);
+    }
     std::fs::write(info_file(dir), serde_json::to_vec_pretty(&info)?)?;
 
     let deadline = Instant::now() + Duration::from(args.wait);

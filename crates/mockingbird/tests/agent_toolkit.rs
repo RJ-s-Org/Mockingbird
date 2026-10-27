@@ -487,6 +487,69 @@ fn server_tools_find_the_server_from_another_folder() {
 }
 
 #[test]
+fn start_server_with_the_proxy_returns_its_variables() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    run_json(
+        dir.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let ca = dir.path().join("ca");
+    let (port, admin, grpc, proxy) = (free_port(), free_port(), free_port(), free_port());
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        format!(
+            "{}\nproxy:\n  port: {proxy}\n",
+            read(&dir.path().join("mockingbird.yaml"))
+        ),
+    )
+    .unwrap();
+    let admin_url = format!("http://127.0.0.1:{admin}");
+    let mut mcp = McpClient::start_with(dir.path(), &admin_url, |cmd| {
+        cmd.env("MB_NO_SHELL_ENV", "1").env("MB_CA_DIR", &ca);
+    });
+    let started = mcp.tool(
+        "start_server",
+        json!({ "config": "mockingbird.yaml", "proxy": true, "port": port, "admin_port": admin, "grpc_port": grpc }),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        assert_eq!(
+            started["proxy"],
+            format!("http://127.0.0.1:{proxy}"),
+            "{started}"
+        );
+        assert_eq!(
+            started["proxy_env"]["vars"]["HTTPS_PROXY"],
+            format!("http://127.0.0.1:{proxy}")
+        );
+        assert!(ca.join("ca.pem").exists());
+        let env = mcp.tool("proxy_env", json!({ "config": "mockingbird.yaml" }));
+        assert_eq!(env["vars"], started["proxy_env"]["vars"]);
+        // The proxy answers: a plain request for an unmocked host through it.
+        std::net::TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+    }));
+    let stopped = mcp.tool("stop_server", json!({}));
+    assert_eq!(stopped["stopped"], true);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn skills_recommend_proxy_mode() {
+    for name in ["mockingbird-mock-api", "mockingbird-testing"] {
+        let skill = SKILLS.iter().find(|s| s.name == name).unwrap();
+        assert!(skill.text.contains("proxy_env"), "{name}");
+        assert!(skill.text.contains("mockingbird proxy env"), "{name}");
+    }
+    let entry = SKILLS.iter().find(|s| s.name == "mockingbird").unwrap();
+    for tool in ["get_draft", "edit_draft", "approve_draft", "get_request", "proxy_env"] {
+        assert!(entry.text.contains(tool), "{tool}");
+    }
+}
+
+#[test]
 fn init_writes_server_ports() {
     let dir = tempdir();
     run_json(

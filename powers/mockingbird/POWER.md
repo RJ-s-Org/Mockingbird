@@ -24,7 +24,7 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 
 **Serve.** `start_server {config: "mockingbird.yaml"}` (background, config watched), `server_status`, `server_logs`, `stop_server`. Data plane `http://127.0.0.1:8080`, console and Admin API `http://127.0.0.1:9090`, gRPC `127.0.0.1:50051`.
 
-**Mock an API.** `import_contract {mock, source}` for OpenAPI, Swagger, GraphQL, .proto, WSDL or AsyncAPI files; documentation, HAR and Postman inputs become drafts (`approve: true` to take them). Then `call_mock {method, path, body, session}`; the result shows `x-mockingbird-source: llm | repaired | fallback`.
+**Mock an API.** `import_contract {mock, source}` for OpenAPI, Swagger, GraphQL, .proto, WSDL or AsyncAPI files; documentation, HAR and Postman inputs become drafts (`approve: true` to take them, or review with `get_draft`, fix with `edit_draft`, accept with `approve_draft`). To run an app unchanged, `start_server {proxy: true}` and export `proxy_env` where the app runs. Then `call_mock {method, path, body, session}`; the result shows `x-mockingbird-source: llm | repaired | fallback`.
 
 **Shape behaviour.** `put_scenario` (forced status, latency, fields, instructions; selected with the `X-Mockingbird-Scenario` header), `update_mock` (persona, LLM profile, chaos, limits), `seed_session` / `export_session` / `reset_session` (fixtures and state), `list_requests` (what clients sent).
 

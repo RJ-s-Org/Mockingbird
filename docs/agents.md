@@ -39,12 +39,13 @@ Ask in plain words: "mock the API in openapi.yaml", "use OpenRouter for Mockingb
 | Area | Tools | CLI |
 | --- | --- | --- |
 | Setup | `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract` | `doctor`, `llm providers`, `init`, `llm configure`, `llm test`, `validate` |
-| Server | `start_server`, `server_status`, `server_logs`, `stop_server` | `server start/status/logs/stop` |
+| Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env` | `server start/status/logs/stop`, `proxy env` |
 | Mocks | `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version` | `mocks …`, `import` |
+| Drafts | `get_draft`, `edit_draft`, `approve_draft` | `import --approve` |
 | Behaviour | `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile` | `scenarios …`, `profiles …` |
-| Traffic and state | `call_mock`, `list_requests`, `list_sessions`, `export_session`, `seed_session`, `reset_session` | `sessions …`, `export-fixtures`, `seed-fixtures` |
+| Traffic and state | `call_mock`, `list_requests` (summaries; `include_bodies` for bodies), `get_request`, `list_sessions`, `export_session`, `seed_session`, `reset_session` | `sessions …`, `export-fixtures`, `seed-fixtures` |
 | Events | `list_channels`, `publish_event` | `channels …` |
-| Everything else | `admin_api` (any `/api/v1` request: workspaces, API keys, audit, drafts, imports) | |
+| Everything else | `admin_api` (any `/api/v1` request: workspaces, API keys, audit, imports) | |
 
 Tools carry MCP annotations (`readOnlyHint`, `destructiveHint`), so agents can ask before destructive calls. The server also offers each skill as a resource (`mockingbird://skills/<name>`), the provider catalogue as `mockingbird://providers`, and four prompts (`setup`, `mock-api`, `self-host`, `testing`).
 

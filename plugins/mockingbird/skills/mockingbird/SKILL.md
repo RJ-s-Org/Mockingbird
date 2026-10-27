@@ -32,12 +32,13 @@ Every response carries `X-Mockingbird-Source: llm | repaired | fallback` (`fallb
 
 When the `mockingbird` MCP server is connected, prefer its tools over shell commands; they return JSON. All of them work against the Admin API at `MB_ADMIN_URL` (default `http://127.0.0.1:9090`) in workspace `MB_WORKSPACE` (default `default`).
 
-- Setup and lifecycle: `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`
+- Setup and lifecycle: `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`, `proxy_env`
 - Mocks: `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version`
+- Drafts (imported documentation, HAR, Postman): `get_draft`, `edit_draft`, `approve_draft`
 - Behaviour: `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile`
-- State and traffic: `call_mock`, `list_requests`, `list_sessions`, `export_session`, `seed_session`, `reset_session`
+- State and traffic: `call_mock`, `list_requests`, `get_request`, `list_sessions`, `export_session`, `seed_session`, `reset_session`
 - Events: `list_channels`, `publish_event`
-- Anything else in the Admin API (API keys, workspaces, audit, drafts): `admin_api`
+- Anything else in the Admin API (API keys, workspaces, audit): `admin_api`
 
 Without MCP, the same operations are CLI subcommands (`mockingbird --help`); each prints JSON.
 

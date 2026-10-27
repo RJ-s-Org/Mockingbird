@@ -37,7 +37,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 /// Largest body `call_mock` returns inline.
 const MAX_INLINE_BODY: usize = 64 * 1024;
 
-const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports. The `mockingbird://skills/…` resources hold the full guides.";
+const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -102,6 +102,7 @@ const LOCAL_TOOLS: &[&str] = &[
     "server_status",
     "server_logs",
     "stop_server",
+    "proxy_env",
 ];
 
 /// Why a tool call failed: shown to the model as an error result.
@@ -322,7 +323,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs.",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env.",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -331,10 +332,25 @@ fn tools() -> Vec<Tool> {
                     "port": n("Data-plane port; default 8080."),
                     "admin_port": n("Admin API port; default 9090."),
                     "grpc_port": n("gRPC port; default 50051."),
+                    "proxy": b("Also start the HTTP(S) proxy; the result carries proxy_env."),
                 }),
                 &[],
             ),
             read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "proxy_env",
+            title: "Proxy variables for an app",
+            description: "The environment variables that send an app's HTTP(S) traffic through Mockingbird's proxy (start_server with proxy: true) and make it trust the local CA: vars, ca_path, bundle_path, and export (shell lines). Mocks with hosts: [api.example.com] then answer for those hosts with no change to the app.",
+            schema: obj(
+                json!({
+                    "config": s("Config file (proxy.host, proxy.port, proxy.ca_dir); default: the one start_server used, else defaults."),
+                    "port": n("Proxy port; default proxy.port (8888)."),
+                }),
+                &[],
+            ),
+            read_only: true,
             destructive: false,
         },
         Tool {
@@ -963,6 +979,15 @@ impl McpServer {
         }
     }
 
+    /// `proxy env` as JSON, with the shell lines under `export`.
+    fn proxy_env(&self, config: Option<&std::path::Path>, port: Option<u16>) -> ToolResult {
+        let opts = crate::proxy::env::options_for(config, port)?;
+        let env = crate::proxy::env::proxy_env(&opts)?;
+        let mut out = serde_json::to_value(&env).map_err(anyhow::Error::from)?;
+        out["export"] = json!(env.to_shell());
+        Ok(out)
+    }
+
     /// [`Self::state_for`] the tool's `config` argument.
     fn server_state(&self, a: &Value) -> daemon::StateArgs {
         self.state_for(opt_str(a, "config").map(PathBuf::from).as_deref())
@@ -1047,6 +1072,7 @@ impl McpServer {
                     admin_port: opt_port(a, "admin_port")?,
                     grpc_port: opt_port(a, "grpc_port")?,
                     offline: opt_bool(a, "offline"),
+                    proxy: opt_bool(a, "proxy"),
                     no_watch: false,
                     insecure_no_auth: false,
                     wait: std::time::Duration::from_secs(60).into(),
@@ -1066,12 +1092,24 @@ impl McpServer {
                         )));
                     }
                 }
-                let started = daemon::start(&args).await?;
+                let mut started = daemon::start(&args).await?;
+                if args.proxy {
+                    started["proxy_env"] = self.proxy_env(args.config.as_deref(), None)?;
+                }
                 if let (Some(config), Ok(mut recorded)) = (&args.config, self.started_config.lock())
                 {
                     *recorded = Some(config.clone());
                 }
                 Ok(started)
+            }
+            "proxy_env" => {
+                let config = opt_str(a, "config").map(PathBuf::from).or_else(|| {
+                    self.started_config
+                        .lock()
+                        .map(|c| c.clone())
+                        .unwrap_or_default()
+                });
+                self.proxy_env(config.as_deref(), opt_port(a, "port")?)
             }
             "server_status" => Ok(daemon::status(&self.server_state(a)).await?),
             "server_logs" => {
@@ -2234,6 +2272,42 @@ mod tests {
         )
         .await;
         assert!(text.contains("urls"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn proxy_env_is_local_and_lists_the_variables() {
+        let remote = McpServer {
+            local_tools: false,
+            ..server(false)
+        };
+        let names: Vec<&str> = remote.tools().iter().map(|t| t.name).collect();
+        assert!(!names.contains(&"proxy_env"));
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(
+            &config,
+            format!("proxy:\n  ca_dir: {}\n", dir.path().join("ca").display()),
+        )
+        .unwrap();
+        let r = call_tool(
+            &server(false),
+            "proxy_env",
+            json!({"config": config, "port": 8899}),
+        )
+        .await;
+        assert_eq!(r["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8899");
+        assert_eq!(r["vars"]["NO_PROXY"], "localhost,127.0.0.1");
+        assert_eq!(
+            PathBuf::from(r["ca_path"].as_str().unwrap()),
+            dir.path().join("ca/ca.pem")
+        );
+        assert!(
+            r["export"]
+                .as_str()
+                .unwrap()
+                .contains("export NODE_USE_ENV_PROXY='1'"),
+            "{r}"
+        );
     }
 
     #[tokio::test]
