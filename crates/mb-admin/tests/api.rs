@@ -1467,6 +1467,81 @@ async fn request_log_query() {
 }
 
 #[tokio::test]
+async fn request_log_summary_and_single_entry() {
+    let h = harness().await;
+    let mock = h.create_mock("orders").await;
+    let mock_id = mock["id"].as_str().unwrap().parse().unwrap();
+    let mut ids = Vec::new();
+    for (op, response) in [
+        ("listOrders", Some(json!({ "ok": true }))),
+        ("getOrder", None),
+    ] {
+        let id = h
+            .store
+            .append_request_log(
+                NewRequestLogEntry {
+                    mock_id,
+                    operation_id: Some(op.into()),
+                    session: "a".into(),
+                    method: "GET".into(),
+                    path: "/orders".into(),
+                    status: 200,
+                    source: Some("llm".into()),
+                    fallback_reason: None,
+                    latency_ms: 12,
+                    prompt_tokens: 3,
+                    completion_tokens: 4,
+                    request: json!({ "query": {} }),
+                    response,
+                    at: Utc::now(),
+                    kind: RequestKind::Http,
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    let r = h.get("/api/v1/mocks/orders/requests?fields=summary").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let all = r.json();
+    let newest = &all[0];
+    assert!(
+        newest.get("request").is_none() && newest.get("response").is_none(),
+        "{newest}"
+    );
+    assert_eq!(newest["id"], ids[1]);
+    assert_eq!(newest["response_bytes"], 0);
+    assert_eq!(newest["fallback_reason"], Value::Null);
+    let oldest = &all[1];
+    assert_eq!(
+        oldest["request_bytes"],
+        json!({ "query": {} }).to_string().len()
+    );
+    assert_eq!(
+        oldest["response_bytes"],
+        json!({ "ok": true }).to_string().len()
+    );
+    h.get("/api/v1/mocks/orders/requests?fields=bodies")
+        .await
+        .assert_problem(StatusCode::BAD_REQUEST);
+
+    let one = h
+        .get(&format!("/api/v1/mocks/orders/requests/{}", ids[0]))
+        .await;
+    assert_eq!(one.status, StatusCode::OK, "{}", one.text);
+    assert_eq!(one.json()["id"], ids[0]);
+    assert_eq!(one.json()["response"], json!({ "ok": true }));
+    h.get("/api/v1/mocks/orders/requests/999999")
+        .await
+        .assert_problem(StatusCode::NOT_FOUND);
+    h.get(&format!("/api/v1/mocks/nope/requests/{}", ids[0]))
+        .await
+        .assert_problem(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn request_log_kind_query() {
     let h = harness().await;
     let mock = h.create_mock("orders").await;
@@ -1689,6 +1764,7 @@ async fn openapi_lists_all_paths() {
             &["get", "put", "delete"],
         ),
         ("/api/v1/mocks/{mock}/requests", &["get"]),
+        ("/api/v1/mocks/{mock}/requests/{id}", &["get"]),
         ("/api/v1/mocks/{mock}/channels", &["get"]),
         ("/api/v1/mocks/{mock}/channels/{channel}", &["get", "put"]),
         ("/api/v1/mocks/{mock}/channels/{channel}/publish", &["post"]),
