@@ -124,7 +124,9 @@ mod tests {
             "stripe-signature"
         );
         assert_eq!(
-            signature_header(Signing::HmacSha256, b"k", 1, b"{}").unwrap().0,
+            signature_header(Signing::HmacSha256, b"k", 1, b"{}")
+                .unwrap()
+                .0,
             "x-mockingbird-signature"
         );
     }
