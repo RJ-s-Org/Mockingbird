@@ -461,6 +461,7 @@ fn resolve(reference: &str) -> anyhow::Result<String> {
             .ok_or_else(|| anyhow!("environment variable {name} is not set"));
     }
     if let Some(path) = reference.strip_prefix("file:") {
+        mb_ext::check_secret_file(std::path::Path::new(path))?;
         return std::fs::read_to_string(path)
             .map(|s| s.trim().to_string())
             .with_context(|| format!("reading {path}"));
@@ -595,6 +596,23 @@ fn hint_for(error: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn key_store_files_readable_by_others_are_not_set() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let store = home.path().join(".mockingbird/secrets");
+        std::fs::create_dir_all(&store).unwrap();
+        let key = store.join("openrouter");
+        std::fs::write(&key, "sk-test").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let mut profile = args("openrouter").profile().unwrap();
+        profile.api_key = Some(format!("file:{}", key.display()));
+        assert_eq!(secret_status(&profile)[0]["set"], false);
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(secret_status(&profile)[0]["set"], true);
+    }
 
     fn args(provider: &str) -> ProviderArgs {
         ProviderArgs {

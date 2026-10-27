@@ -237,3 +237,41 @@ fn usage_event_new_defaults() {
     assert_eq!(e.prompt_tokens, 0);
     assert_eq!(e.completion_tokens, 0);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn key_store_files_must_be_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().expect("tempdir");
+    let store = home.path().join(".mockingbird/secrets");
+    std::fs::create_dir_all(&store).expect("mkdir");
+    let key = store.join("openrouter");
+    std::fs::write(&key, "sk-test\n").expect("write");
+    assert!(mb_ext::in_key_store(&key));
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let r = EnvFileSecrets
+        .resolve(&format!("file:{}", key.display()))
+        .await;
+    let err = r.expect_err("0644 must be refused").to_string();
+    assert!(err.contains("chmod 600") && !err.contains("sk-test"), "{err}");
+    assert!(mb_ext::check_secret_file(&key).is_err());
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    assert_eq!(
+        EnvFileSecrets
+            .resolve(&format!("file:{}", key.display()))
+            .await
+            .expect("0600"),
+        "sk-test"
+    );
+    let shared = home.path().join("mounted");
+    std::fs::write(&shared, "v").expect("write");
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    assert!(!mb_ext::in_key_store(&shared));
+    assert_eq!(
+        EnvFileSecrets
+            .resolve(&format!("file:{}", shared.display()))
+            .await
+            .expect("outside the store"),
+        "v"
+    );
+}
