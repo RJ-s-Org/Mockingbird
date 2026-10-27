@@ -631,6 +631,33 @@ fn skills_recommend_proxy_mode() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_reports_the_key_store() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir();
+    let home = dir.path().join("home");
+    let store = home.join(".mockingbird/secrets");
+    let key = mockingbird::keys::store::write_secret(&store, "openrouter", "sk-or-test").unwrap();
+    let doctor = |dir: &Path| -> Value {
+        let out = bin()
+            .args(["doctor"])
+            .current_dir(dir)
+            .env("HOME", &home)
+            .env("MB_ADMIN_URL", "http://127.0.0.1:9")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let report = doctor(dir.path());
+    assert_eq!(report["key_store"]["keys"][0]["name"], "openrouter", "{report}");
+    assert_eq!(report["key_store"]["keys"][0]["private"], true);
+    assert!(!report.to_string().contains("sk-or-test"));
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let report = doctor(dir.path());
+    assert!(report["problems"].to_string().contains("chmod 600"), "{report}");
+}
+
 #[test]
 fn init_writes_server_ports() {
     let dir = tempdir();

@@ -524,7 +524,7 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
                     for s in &secrets {
                         if s["set"] == false {
                             problems.push(format!(
-                                "LLM profile {name:?} needs {} ({not_set_here})",
+                                "LLM profile {name:?} needs {} ({not_set_here}), or store the key with `mockingbird keys setup` (MCP open_key_setup)",
                                 s["ref"].as_str().unwrap_or_default()
                             ));
                         }
@@ -579,6 +579,19 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
     if config_path.is_none() {
         problems.push("no mockingbird.yaml here: create one with `mockingbird init`".into());
     }
+    let key_store = match crate::keys::store::default_store_dir() {
+        Ok(dir) => {
+            let keys = crate::keys::store::list(&dir);
+            for k in keys.iter().filter(|k| k["private"] == false) {
+                let file = k["file"].as_str().unwrap_or_default();
+                problems.push(format!(
+                    "key file {file} is readable by other users: chmod 600 {file}"
+                ));
+            }
+            json!({ "dir": dir, "keys": keys })
+        }
+        Err(_) => Value::Null,
+    };
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "binary": std::env::current_exe().ok(),
@@ -590,6 +603,7 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
         "background_server": background,
         "docker": docker,
         "shell_env": shell_env.map(|names| json!({ "imported": names })),
+        "key_store": key_store,
         "problems": problems,
     })
 }
