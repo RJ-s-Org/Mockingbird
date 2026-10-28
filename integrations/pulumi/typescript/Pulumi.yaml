@@ -1,0 +1,15 @@
+name: mockingbird-staging-ts
+description: A mocked staging environment (Stripe and GitHub) with the Mockingbird provider, from TypeScript
+runtime:
+  name: nodejs
+  options:
+    packagemanager: npm
+packages:
+  # The Terraform provider through Pulumi's Terraform bridge. Until it is on
+  # the registry this is the locally built binary (see ../README.md); then:
+  #   pulumi package add terraform-provider RJ-s-Org/mockingbird
+  mockingbird:
+    source: terraform-provider
+    version: 1.4.0
+    parameters:
+      - ../../terraform-provider/bin/terraform-provider-mockingbird
