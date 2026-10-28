@@ -38,14 +38,14 @@ stops the server) when the tests fail.
 | `record` | the config's LLM profile; every answer is appended to `snapshot` | the profile's key as a step env var |
 | `llm` | the config's LLM profile | the profile's key as a step env var |
 
-An LLM profile reads its key from the environment (`api_key: env:DEEPSEEK_API_KEY`
+An LLM profile reads its key from the environment (`api_key: env:OPENROUTER_API_KEY`
 in `mockingbird.yaml`); pass the secret on the step and the server inherits it:
 
 ```yaml
       - uses: RJ-s-Org/Mockingbird/integrations/github-action@v0
         with: { config: mockingbird.yaml, mode: llm }
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
 ## Setup inputs (`integrations/github-action`)

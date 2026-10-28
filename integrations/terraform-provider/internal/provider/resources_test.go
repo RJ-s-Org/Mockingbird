@@ -217,7 +217,7 @@ resource "mockingbird_mock" "test" {
 		ProtoV6ProviderFactories: testAccProviders,
 		Steps: []resource.TestStep{
 			{
-				Config: cfg("deepseek/deepseek-chat"),
+				Config: cfg("deepseek/deepseek-v4.1-flash"),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("mockingbird_llm_profile.test", "secret_ref", "env:MB_LLM_API_KEY"),
 					resource.TestCheckResourceAttr("mockingbird_llm_profile.test", "temperature", "0.2"),
@@ -248,8 +248,8 @@ func TestAccLLMProfile_rawKeyRejected(t *testing.T) {
 				Config: `
 resource "mockingbird_llm_profile" "test" {
   name       = "raw"
-  base_url   = "https://api.deepseek.com"
-  model      = "deepseek-chat"
+  base_url   = "https://openrouter.ai/api/v1"
+  model      = "deepseek/deepseek-v4.1-flash"
   secret_ref = "sk-not-a-reference"
 }
 `,
