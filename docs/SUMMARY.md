@@ -4,6 +4,7 @@
 
 # Getting started
 
+- [Install](install.md)
 - [Quickstart](quickstart.md)
 - [Concepts](concepts.md)
 

@@ -28,6 +28,8 @@ Install (macOS and Linux; Windows: `irm https://raw.githubusercontent.com/rj-s-o
 curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh
 ```
 
+Or from npm, with nothing to install: `npx @mockingbird/cli run --offline -- npm test` ([Install](docs/install.md)).
+
 Run your app against mocks of the APIs it calls. Map each mock to the host it replaces in `mockingbird.yaml`:
 
 ```yaml

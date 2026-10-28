@@ -29,6 +29,11 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
 ## 2. Decide (you)
 
 - [ ] **The crates.io name.** `mockingbird` on crates.io belongs to another project, so `cargo install mockingbird` and `cargo binstall mockingbird` would install the wrong thing. The docs use `cargo binstall --git https://github.com/RJ-s-Org/Mockingbird mockingbird` and `cargo install --git …`. To publish the binary to crates.io, pick a free name (for example `mockingbird-cli` with `[[bin]] name = "mockingbird"`) and add a `cargo publish -p <name>` step next to `publish-crate` in `release.yml`.
+- [ ] **The npm scope.** The unscoped `mockingbird` and `mockingbird-cli` on npm belong to other projects, so the npm packages are scoped. The plan is `@mockingbird/cli` (with `@mockingbird/cli-<platform>-<arch>` beside it), which needs the npm organization `mockingbird` (section 4). If that name is taken, use `@rj-s-org/mockingbird` instead: the scope lives only in `name` in [`npm/cli/package.json`](../../npm/cli/package.json) (the platform package names derive from it); then update the docs with
+  ```sh
+  grep -rl '@mockingbird/cli' README.md docs npm | xargs sed -i.bak 's#@mockingbird/cli#@rj-s-org/mockingbird#g'
+  find README.md docs npm -name '*.bak' -delete
+  ```
 - [ ] **The comparison table** in the README describes WireMock, Prism, Mockoon and Microcks from their docs as of October 2026. Read it once more before posting.
 
 ## 3. Cut 0.1.0 (you, with an agent preparing the PR)
@@ -73,6 +78,28 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
 
 The files are ready in [`packaging/`](https://github.com/RJ-s-Org/Mockingbird/tree/main/packaging), rendered from a release's `SHA256SUMS` by `scripts/render-packaging.sh` (the committed copies are for 0.1.0-rc.1).
 
+- [ ] **npm** (`npx @mockingbird/cli`). The `npm-pack` job of `release.yml` builds the launcher and the five platform packages from the release archives on every run, dry runs included; `npm-publish` publishes them, with provenance, after the GitHub release, but only once the `NPM_PUBLISH` repository variable is `true`. npm attaches a trusted publisher to a package that already exists, so the first version goes out with a short-lived token:
+  1. Create the organization: [npmjs.com](https://www.npmjs.com) → your avatar → **Add Organization** → name `mockingbird`, the free plan (public packages). Enable two-factor authentication on your npm account if it is not on.
+  2. Create a granular access token: **Access Tokens → Generate New Token → Granular Access Token**, expiry 7 days, **Packages and scopes: Read and write** on the `@mockingbird` scope, **Bypass two-factor authentication** checked (CI cannot answer a 2FA prompt). Then give it to the workflow and turn publishing on:
+     ```sh
+     gh secret set NPM_TOKEN --repo RJ-s-Org/Mockingbird
+     gh variable set NPM_PUBLISH --repo RJ-s-Org/Mockingbird --body true
+     ```
+  3. Publish 0.1.0. If these are set before the tag is pushed (section 3), the release run publishes it. If the tag went out first, `npm-publish` was skipped with a notice; re-run that job of the release run (the packed tarballs are kept as the `npm-packages` artifact):
+     ```sh
+     run=$(gh run list --repo RJ-s-Org/Mockingbird --workflow release.yml --branch v0.1.0 --limit 1 --json databaseId -q '.[0].databaseId')
+     job=$(gh run view "$run" --repo RJ-s-Org/Mockingbird --json jobs -q '.jobs[] | select(.name == "npm-publish") | .databaseId')
+     gh run rerun "$run" --repo RJ-s-Org/Mockingbird --job "$job"
+     ```
+  4. Switch to trusted publishing. For each of `@mockingbird/cli`, `@mockingbird/cli-darwin-arm64`, `-darwin-x64`, `-linux-x64`, `-linux-arm64` and `-win32-x64`: the package page → **Settings → Trusted Publisher → GitHub Actions**, organization `RJ-s-Org`, repository `Mockingbird`, workflow `release.yml`, no environment. On the same page set **Publishing access** to *Require two-factor authentication and disallow tokens*. Then remove the token: `gh secret delete NPM_TOKEN --repo RJ-s-Org/Mockingbird`, and revoke it under **Access Tokens**. Later releases publish through OIDC alone.
+  5. Verify:
+     ```sh
+     npm view @mockingbird/cli version dist-tags optionalDependencies
+     npx --yes @mockingbird/cli@0.1.0 --version
+     cd "$(mktemp -d)" && npm init -y > /dev/null && npm i -D @mockingbird/cli && npm audit signatures
+     # the download fallback, without the platform package:
+     cd "$(mktemp -d)" && npm init -y > /dev/null && npm i -D --omit=optional @mockingbird/cli && npx mockingbird --version
+     ```
 - [ ] **Homebrew tap.** Create the tap, give the release workflow a token for it, and seed it:
   ```sh
   gh repo create RJ-s-Org/homebrew-tap --public --description "Homebrew formulae for Mockingbird"

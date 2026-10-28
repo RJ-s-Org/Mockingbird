@@ -506,3 +506,116 @@ jobs:
             exit 0
           fi
           cargo publish -p mb-ext --locked
+
+  # The npm packages (npm/): the launcher and one package per target, built
+  # from the archives the `binaries` job made. A dry run stops after packing
+  # and validating them.
+  npm-pack:
+    needs: [verify, binaries]
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: npm test
+        working-directory: npm/cli
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - name: Build the packages from the release archives
+        run: node npm/scripts/build-packages.mjs --version "$VERSION" --assets dist --out npm/dist
+      - name: Pack and check them
+        run: |
+          # Tarballs are named after their directory (cli.tgz, linux-x64.tgz,
+          # ...), whatever the npm scope.
+          mkdir npm/tarballs
+          for dir in npm/dist/*/; do
+            key=$(basename "$dir")
+            file=$(cd "$dir" && npm pack --json --pack-destination "$GITHUB_WORKSPACE/npm/tarballs" | jq -r '.[0].filename')
+            mv "npm/tarballs/$file" "npm/tarballs/$key.tgz"
+            [ "$key" = cli ] && continue
+            # Every platform package carries its binary, executable.
+            listing=$(tar -tvzf "npm/tarballs/$key.tgz")
+            echo "$listing"
+            echo "$listing" | grep -Eq '^-rwx.* package/bin/mockingbird(\.exe)?$' \
+              || { echo "::error::$key has no executable bin/mockingbird"; exit 1; }
+          done
+          # The launcher runs the linux-x64 binary from its package.
+          dir=$(mktemp -d)
+          (cd "$dir" && npm init -y > /dev/null && npm install --no-audit --no-fund \
+            "$GITHUB_WORKSPACE/npm/tarballs/cli.tgz" "$GITHUB_WORKSPACE/npm/tarballs/linux-x64.tgz")
+          out=$(cd "$dir" && MOCKINGBIRD_NO_DOWNLOAD=1 npx --no-install mockingbird --version)
+          echo "$out"
+          [ "$out" = "mockingbird $VERSION" ] || { echo "::error::expected 'mockingbird $VERSION'"; exit 1; }
+          ls -l npm/tarballs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-packages
+          path: npm/tarballs/*.tgz
+          if-no-files-found: error
+
+  # Publishes to npm after the GitHub release exists (the launcher's download
+  # fallback reads its assets). Skipped, with a notice, until the NPM_PUBLISH
+  # repository variable is `true`: the npm org and the trusted publisher (or
+  # the NPM_TOKEN secret) come first. See docs/launch/checklist.md.
+  npm-publish:
+    needs: [verify, npm-pack, release]
+    if: needs.verify.outputs.publish == 'true' && github.ref_type == 'tag'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+      NPM_PUBLISH: ${{ vars.NPM_PUBLISH }}
+    steps:
+      - name: Check that npm publishing is set up
+        id: gate
+        run: |
+          if [ "$NPM_PUBLISH" != true ]; then
+            echo "::notice::the NPM_PUBLISH repository variable is not 'true'; nothing was published to npm"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.go == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC) needs npm 11.5.1 or later.
+      - if: steps.gate.outputs.go == 'true'
+        run: npm install -g npm@11
+      - if: steps.gate.outputs.go == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-packages
+          path: tarballs
+      - name: Publish the platform packages, then the launcher
+        if: steps.gate.outputs.go == 'true'
+        env:
+          # Empty when the packages use a trusted publisher instead.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          tag=latest
+          [ "$PRERELEASE" = true ] && tag=next
+          publish() {
+            name=$(tar -xzOf "$1" package/package.json | jq -r .name)
+            # A re-run skips what an earlier attempt published.
+            if npm view "$name@$VERSION" version > /dev/null 2>&1; then
+              echo "::notice::$name@$VERSION is already on npm; skipping"
+              return
+            fi
+            npm publish "$1" --provenance --access public --tag "$tag"
+          }
+          # The launcher goes last, so it never points at a missing package.
+          for tgz in tarballs/*.tgz; do
+            [ "$tgz" = tarballs/cli.tgz ] || publish "$tgz"
+          done
+          publish tarballs/cli.tgz

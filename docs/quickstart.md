@@ -4,7 +4,13 @@ This page takes you from nothing to a running mock. For what a mock, a session a
 
 ## Install
 
-The release binary (macOS, Linux; on Windows use `install.ps1`, see [Coding agents](agents.md#install)):
+In a Node.js project, run it through npm with nothing to install (see [Install](install.md) for every channel):
+
+```sh
+npx @mockingbird/cli run --offline -- npm test
+```
+
+Or the release binary (macOS, Linux; on Windows use `install.ps1`, see [Coding agents](agents.md#install)):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh
