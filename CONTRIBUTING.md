@@ -13,8 +13,8 @@ and report security issues privately as described in [SECURITY.md](SECURITY.md).
   `pg_ctl` on `PATH`) and `redis-server`. Kafka and AMQP tests run in CI against
   service containers and are skipped locally unless `MB_TEST_KAFKA_URL` /
   `MB_TEST_AMQP_URL` are set.
-- Building with `--features kafka` (or `full`) compiles librdkafka and needs `cmake`, a
-  C/C++ toolchain, `libssl-dev`, `zlib1g-dev` and `libcurl4-openssl-dev`.
+- Building with `--features kafka` (or `full`) compiles librdkafka and a vendored OpenSSL and needs
+  `cmake`, a C/C++ toolchain, `perl`, `make`, `zlib1g-dev` and `libcurl4-openssl-dev`.
 
 ## Local gates
 
