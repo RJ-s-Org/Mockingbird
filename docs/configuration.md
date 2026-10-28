@@ -8,6 +8,8 @@ Mockingbird reads one YAML file, `mockingbird.yaml`, passed with `mockingbird se
 
 **Secrets** never appear in the file. A key that takes a secret takes a *reference*: `env:NAME` (an environment variable), `file:/path` (a file's contents, whitespace trimmed) or `vault:<mount>/<path>#<field>` (a HashiCorp Vault KV v2 field, enabled when `VAULT_ADDR` is set; see [Kubernetes secrets](deploy/kubernetes.md#secrets)). A `file:` reference into the key store (`~/.mockingbird/secrets/`, written by `mockingbird keys setup`) is refused when the file is readable by group or others.
 
+**Relative paths** in the file (`mocks.<name>.contract`, `sqlite:` paths in `storage.url` and `storage.state_url`, `server.tls`, `outbound.ca_file`, `brokers.<name>.ca_file`, `proxy.ca_dir`) are relative to the file's directory, so `mockingbird run -c elsewhere/mockingbird.yaml` and `cd elsewhere && mockingbird run` use the same files. Relative paths in environment variables and flags are relative to the working directory.
+
 **Durations** are written as `250ms`, `30s`, `5m`, `12h` or `1d`.
 
 [`examples/mockingbird.full.yaml`](examples/mockingbird.full.yaml) sets every key below; [`examples/mockingbird.yaml`](examples/mockingbird.yaml) is a commented starting point. A test (`crates/mockingbird/tests/docs_reference.rs`) checks that the full example loads and that this page names every key the code accepts.

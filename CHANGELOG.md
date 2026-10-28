@@ -75,6 +75,7 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 
 ### Changed
 
+- Relative `sqlite:` paths in `storage.url` / `storage.state_url`, and relative `server.tls`, `outbound.ca_file` and `brokers.<name>.ca_file` paths, are resolved against the config file's directory, like `contract:` paths (were the working directory). Flags, environment variables and runs without a config file keep the working directory. See [Upgrading](docs/upgrading.md#relative-paths-in-the-config-file-follow-the-file).
 - GraphQL mutations generate only their selection, like queries (GitHub `createIssue`: 38.8k → 745 prompt tokens, no fallback).
 - `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `users.list`, `_search`) are imported as reads: cached, seeded, and generated knowing the lists other reads stored; a webhook target fires for such a read only when it names its operation.
 - `mockingbird verify` prints a short text summary by default (`--format text`): the totals and one line per failed check, naming the most frequent reasons; `--format json` keeps the whole report.

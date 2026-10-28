@@ -53,7 +53,6 @@ Five more open-source apps in other stacks, unmodified, under `mockingbird run` 
 
 ### From the proxy trials (2026-10-28)
 
-- `storage.url: sqlite://./…` is relative to the working directory, while `contract:` paths are relative to the config file, so `mockingbird run -c elsewhere/mockingbird.yaml` opens a different database than `cd elsewhere && mockingbird run`. Resolve relative SQLite paths against the config's directory (a behaviour change; needs a decision).
 - Go binaries built with Go < 1.27 on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux, OpenSSL Rubies and Go 1.27+ (with the `GODEBUG` that `proxy env` now sets) work. A documented opt-in keychain install would close the rest.
 
 ### From the examples catalog (2026-10-28)
@@ -116,6 +115,7 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 
 ## Done
 
+- Relative `sqlite:` paths in `storage.url` / `storage.state_url`, and `server.tls`, `outbound.ca_file` and `brokers.<name>.ca_file`, are relative to the config file's directory, like `contract:` (were the working directory), so `mockingbird run -c elsewhere/mockingbird.yaml` opens the same database as `cd elsewhere && mockingbird run`. The Stripe Java trial hit `unable to open database file` running from a subdirectory.
 - Engine items from field trials 2.0, re-run with the same apps, configs and model ([gh CLI](trials/gh-cli.md#after-the-engine-fixes), [Next.js Commerce](trials/nextjs-commerce.md#after-the-engine-fixes), [plaid/quickstart](trials/plaid-quickstart.md#after-the-engine-fixes)):
   - GraphQL mutations generate only their selection, like queries. `gh issue create`: `createIssue` 38.8k prompt tokens, 16 s and a fallback with a `null` payload (the command printed nothing) → 745 prompt tokens, 1.0 s, `llm`, and the issue URL printed. The gh run's GraphQL prompt tokens fell from 74.7k to 25.9k, with 10/10 commands working (was 8/10) and 0 fallbacks (was 2).
   - GraphQL answers store every object with an `id` under its type (`Cart` → `cart`): a mutation's are merged into the session, a query's added when new. A mutation is generated knowing what its `<x>Id` arguments and `gid://…/<Type>/…` ids name, including inside input objects and lists, and a stored object read inside another (a variant inside its product) links back to it through the field of that type. Next.js Commerce: `cart(id:)` after `cartCreate` was a fresh 13.9 s invention with three random lines; now it is served from state in 1–2 ms, and `cartLinesAdd` answers the variant sent ("Fern Tee, M / Heather Moss", quantity 1, then 2), which the drawer shows. Subscriptions check a stored item against their selection, not the whole type.
