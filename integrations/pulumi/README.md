@@ -23,7 +23,7 @@ pulumi preview
 pulumi up
 ```
 
-The contracts default to the Stripe and GitHub subsets of the [examples catalog](../../examples/apis); `pulumi config set stripeContract path/to/openapi.yaml` (and `githubContract`) picks others.
+The contracts default to the Stripe and GitHub subsets of the examples catalog (`examples/apis` in the repository root); `pulumi config set stripeContract path/to/openapi.yaml` (and `githubContract`) picks others.
 
 Once the provider is in the OpenTofu Registry, replace the local path in `Pulumi.yaml` with the registry reference, or start a new project with:
 

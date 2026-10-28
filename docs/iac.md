@@ -46,7 +46,7 @@ output "stripe_api_base" { value = mockingbird_mock.stripe.url }
 output "github_api_url" { value = mockingbird_mock.github.url }
 ```
 
-The two contracts are the hand-written Stripe and GitHub subsets of the [examples catalog](../examples/apis): `mockingbird examples init stripe --dir stripe` writes `stripe/stripe.openapi.yaml`, and `github-rest` likewise. Any OpenAPI, GraphQL, protobuf, WSDL or AsyncAPI document works the same way, and `contract = { url = "…" }` takes a published one.
+The two contracts are the hand-written Stripe and GitHub subsets of the examples catalog (`examples/apis`): `mockingbird examples init stripe --dir stripe` writes `stripe/stripe.openapi.yaml`, and `github-rest` likewise. Any OpenAPI, GraphQL, protobuf, WSDL or AsyncAPI document works the same way, and `contract = { url = "…" }` takes a published one.
 
 ```sh
 export MB_ADMIN_URL=https://mockingbird.staging.example.com:9090
