@@ -278,7 +278,7 @@ pub async fn run_evals(
                 Source::Repaired => stats.repaired += 1,
                 Source::Fallback => stats.fallback += 1,
                 // `Engine::generate` never answers from state or the cache.
-                Source::State | Source::Cache => {}
+                Source::State | Source::Cache | Source::Rejected => {}
             }
             usage = usage + call_usage;
             contract_latencies.push(elapsed);

@@ -34,6 +34,7 @@ mod batch;
 mod resolve;
 mod schema;
 mod select;
+mod state;
 mod subscription;
 
 pub(crate) use schema::build_schema;

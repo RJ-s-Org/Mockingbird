@@ -20,6 +20,7 @@ use crate::guards::{Checked, Fill};
 pub mod budget;
 pub mod compact;
 pub mod consistency;
+mod encoded;
 pub mod extract;
 pub mod faker;
 pub mod guards;
@@ -96,6 +97,9 @@ pub enum Source {
     State,
     /// A repeat of an earlier answer in the same session.
     Cache,
+    /// The request failed validation: the contract's error shape (or a
+    /// problem) answered it, without the LLM.
+    Rejected,
 }
 
 impl Source {
@@ -110,7 +114,7 @@ impl Source {
 
     fn rank(self) -> u8 {
         match self {
-            Source::Llm | Source::State | Source::Cache => 0,
+            Source::Llm | Source::State | Source::Cache | Source::Rejected => 0,
             Source::Repaired => 1,
             Source::Fallback => 2,
         }
@@ -123,6 +127,7 @@ impl Source {
             Source::Fallback => "fallback",
             Source::State => "state",
             Source::Cache => "cache",
+            Source::Rejected => "rejected",
         }
     }
 }
@@ -359,7 +364,7 @@ impl Engine {
                 });
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
-                    schema: compact::prompt_schema(bundle, written),
+                    schema: compact::response_prompt_schema(bundle, written),
                 };
                 let hints = FakerHints::from_call(op, call);
                 let fill = shaped.as_deref().map(|shaped| Fill {
@@ -464,7 +469,7 @@ impl Engine {
             "required": keys,
         });
         let validator = SchemaValidator::new(&bundle.with_reachable_defs(&combined)).ok()?;
-        let prompt_schema = compact::prompt_schema(bundle, &combined);
+        let prompt_schema = compact::response_prompt_schema(bundle, &combined);
         let messages = tracing::info_span!("mb.prompt").in_scope(|| {
             prompt::build_joint_messages(
                 bundle,
@@ -655,6 +660,7 @@ impl Engine {
         ctx: &GenerationContext<'_>,
         response: GeneratedResponse,
     ) -> GeneratedResponse {
+        let response = encode_base64(validator, bundle, schema, response);
         let response = reflect(validator, op, call, ctx, response);
         let response = self.keep_persona_formats(validator, call, response);
         let response = if matches!(op.kind, OperationKind::Query)
@@ -706,7 +712,7 @@ impl Engine {
         let Some(body) = &response.body else {
             return response;
         };
-        let field = consistency::list_identity(bundle, op);
+        let field = consistency::item_identity(bundle, op, body);
         let Some(items) = consistency::list_items(body) else {
             return response;
         };
@@ -1123,6 +1129,30 @@ fn apply_scenario(
         }
         None => response,
     }
+}
+
+/// A 2xx body whose base64 fields do not decode, with those fields
+/// encoded from their text (see [`encoded`]), kept only if it still
+/// validates.
+fn encode_base64(
+    validator: &SchemaValidator,
+    bundle: &Bundle,
+    schema: &Value,
+    mut response: GeneratedResponse,
+) -> GeneratedResponse {
+    if !(200..300).contains(&response.status) {
+        return response;
+    }
+    let Some(body) = &response.body else {
+        return response;
+    };
+    if let Some(patched) = encoded::patch(bundle, schema, body)
+        && validator.validate(&patched).is_ok()
+    {
+        tracing::info!("encoded base64 fields from their text");
+        response.body = Some(patched);
+    }
+    response
 }
 
 /// Make a 2xx body consistent with the request and state (spec §1.2,

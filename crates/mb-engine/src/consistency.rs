@@ -65,8 +65,54 @@ pub fn list_identity(bundle: &Bundle, op: &Operation) -> String {
         .unwrap_or_else(|| "id".to_string())
 }
 
+/// The field identifying the items of `op`'s list answer `body`:
+/// [`list_identity`] when an item carries it, else the list member's name
+/// made singular with `_id` or `Id` (`accounts` → `account_id`) when an
+/// item carries that.
+pub fn item_identity(bundle: &Bundle, op: &Operation, body: &Value) -> String {
+    let field = list_identity(bundle, op);
+    let first = list_items(body).and_then(|items| items.iter().find(|i| i.is_object()));
+    let Some(first) = first else {
+        return field;
+    };
+    if first.get(&field).is_some() {
+        return field;
+    }
+    let singular = match body {
+        Value::Object(obj) => list_key(obj).map(|k| k.strip_suffix('s').unwrap_or(k)),
+        _ => None,
+    };
+    singular
+        .into_iter()
+        .flat_map(|s| [format!("{s}_id"), format!("{s}Id")])
+        .find(|candidate| first.get(candidate).is_some())
+        .unwrap_or(field)
+}
+
+/// The members of object `schema` (`$ref`s followed) that hold lists of
+/// objects: `accounts` in Plaid's `{accounts: [...], item: {...}}`.
+pub fn list_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
+    let schema = deref(bundle, schema);
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    props
+        .iter()
+        .filter(|(_, p)| {
+            deref(bundle, p)
+                .get("items")
+                .map(|item| deref(bundle, item))
+                .is_some_and(|item| {
+                    item.get("properties").is_some()
+                        || item.get("type").and_then(Value::as_str) == Some("object")
+                })
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// `schema` with `$ref`s to `#/$defs/...` followed (bounded).
-fn deref<'a>(bundle: &'a Bundle, mut schema: &'a Value) -> &'a Value {
+pub(crate) fn deref<'a>(bundle: &'a Bundle, mut schema: &'a Value) -> &'a Value {
     for _ in 0..16 {
         let Some(name) = schema
             .get("$ref")

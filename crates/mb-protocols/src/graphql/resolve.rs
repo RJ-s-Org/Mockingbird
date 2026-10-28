@@ -12,7 +12,7 @@ use async_graphql::{Error, ErrorExtensions, Name};
 use axum::http::{HeaderMap, StatusCode};
 use mb_engine::{EngineError, OperationCall, Source};
 use mb_ext::{Rejection, Tenancy};
-use mb_mcm::{Effect, OperationKind};
+use mb_mcm::OperationKind;
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -382,17 +382,13 @@ async fn generate_in(
                         body: Some(Value::Object(args)),
                         ..Default::default()
                     };
-                    // A create or update stores its answer as the session's
-                    // resource, which other reads expect whole: generate it
-                    // in full. Everything else gets only the selected fields.
-                    let stores = matches!(
-                        op.kind,
-                        OperationKind::Command(Effect::Create | Effect::Update)
-                    );
+                    // Only the selected fields are generated, mutations
+                    // included: a whole return type (GitHub's `Issue`) is
+                    // tens of thousands of prompt tokens and an answer no
+                    // model finishes. What the answer holds is stored below.
                     let narrowed = op
                         .success_output()
                         .and_then(|o| o.schema.as_ref())
-                        .filter(|_| !stores)
                         .map(|schema| super::select::narrow(schema, &rt.bundle.defs, selection));
                     let was_narrowed = narrowed.is_some();
                     // The engine overlays a read's stored target by field
@@ -467,6 +463,13 @@ async fn generate_in(
                                 .map_err(engine_failure)
                         }
                     };
+                    let generated = match generated {
+                        Ok(generated) => {
+                            store_answer(rt, &plan, op, selection, &call, &generated).await;
+                            Ok(generated)
+                        }
+                        Err(e) => Err(e),
+                    };
                     generated.map(|generated| {
                         report.usage = generated.usage;
                         report.source = Some(generated.source);
@@ -520,6 +523,37 @@ async fn generate_in(
         call::report(rt, &http.headers, report).await;
     }
     outcome.map_err(|f| f.error)
+}
+
+/// Stores the objects a generated 2xx answer holds (see [`super::state`]):
+/// a mutation's always, a query's under consistency unless the faker stood
+/// in for a failed LLM call. Answers from state or the cache are already
+/// stored.
+async fn store_answer(
+    rt: &MockRuntime,
+    plan: &call::CallPlan<'_>,
+    op: &mb_mcm::Operation,
+    selection: &super::select::Selection,
+    call: &OperationCall,
+    generated: &mb_engine::GeneratedResponse,
+) {
+    let Some(mode) = super::state::mode(op) else {
+        return;
+    };
+    let seeding = mode == super::state::Store::Seed;
+    if !(200..300).contains(&generated.status)
+        || matches!(generated.source, Source::State | Source::Cache)
+        || (seeding && (!rt.consistency || call::transient_fallback(generated)))
+    {
+        return;
+    }
+    let (Some(body), Some(Value::Object(args))) = (&generated.body, &call.body) else {
+        return;
+    };
+    let objects = super::state::objects(&rt.bundle, op, selection, body, args);
+    if !objects.is_empty() {
+        call::store_resources(rt, &plan.session, objects, !seeding).await;
+    }
 }
 
 /// The one request-log record of an HTTP request's root fields: a single

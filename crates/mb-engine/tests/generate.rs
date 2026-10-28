@@ -1299,3 +1299,72 @@ paths:
         .count();
     assert!(big >= 15, "{big} of 20 fresh ids above 100");
 }
+
+const CONTENTS: &str = r#"
+openapi: 3.0.3
+info: {title: contents, version: "1"}
+paths:
+  /readme:
+    get:
+      operationId: getReadme
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, encoding, content, avatar]
+                properties:
+                  name: {type: string}
+                  encoding: {type: string}
+                  content: {type: string}
+                  avatar: {type: string, format: byte}
+"#;
+
+fn decode64(s: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let compact: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(compact)
+        .unwrap()
+}
+
+/// Base64 fields are asked for as text and encoded locally: a model's
+/// plain text is encoded, and corrupt base64 (here: valid base64 of invalid
+/// UTF-8) keeps its readable text, so the README decodes as UTF-8.
+#[tokio::test]
+async fn base64_fields_are_encoded_locally() {
+    use base64::Engine as _;
+    let bundle = compile(CONTENTS.as_bytes()).unwrap();
+    let op = bundle.operation("getReadme").unwrap();
+    let mut corrupt = b"# Trellis\n".to_vec();
+    corrupt.extend([0xc3, 0x28, 0xa0]);
+    let corrupt = base64::engine::general_purpose::STANDARD.encode(&corrupt);
+    let (provider, engine) = scripted(vec![
+        Ok(json!({"name": "README.md", "encoding": "base64", "content": "# Trellis\n\nA router.", "avatar": "PNG bytes"}).to_string()),
+        Ok(json!({"name": "README.md", "encoding": "base64", "content": corrupt, "avatar": "aGk="}).to_string()),
+    ]);
+    let out = engine
+        .generate(&bundle, op, &call("getReadme"), ctx())
+        .await
+        .unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(
+        decode64(body["content"].as_str().unwrap()),
+        b"# Trellis\n\nA router."
+    );
+    assert_eq!(decode64(body["avatar"].as_str().unwrap()), b"PNG bytes");
+    let prompt = &provider.requests()[0].messages[0].content;
+    assert!(prompt.contains("plain decoded text"), "{prompt}");
+
+    let out = engine
+        .generate(&bundle, op, &call("getReadme"), ctx())
+        .await
+        .unwrap();
+    let body = out.body.unwrap();
+    let readme = String::from_utf8(decode64(body["content"].as_str().unwrap())).unwrap();
+    assert!(readme.starts_with("# Trellis\n"), "{readme:?}");
+    // Valid base64 is kept as it is.
+    assert_eq!(body["avatar"], "aGk=");
+}

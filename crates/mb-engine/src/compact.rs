@@ -30,6 +30,12 @@ pub fn prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
     fit(doc, PROMPT_SCHEMA_BUDGET)
 }
 
+/// [`prompt_schema`] for a response the engine finishes (see
+/// [`crate::encoded`]): base64 fields ask for their plain text.
+pub(crate) fn response_prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
+    crate::encoded::hint(prompt_schema(bundle, schema))
+}
+
 /// `doc` (a schema carrying `$defs`) fitted to `budget` bytes of compact
 /// JSON: unchanged when it fits; else with descriptions cut to
 /// [`MAX_DESCRIPTION`] characters; else also with the definitions more than
