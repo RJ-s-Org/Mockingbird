@@ -269,7 +269,8 @@ async fn invalid_body_returns_400_without_llm() {
 
     let resp = send(&h, post_json("/orders", r#"{"total":-1}"#)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(header_str(&resp, "x-mockingbird-source"), "fallback");
+    // A client error, not a generation that fell back.
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "rejected");
     assert!(error.validate(&body_json(resp).await).is_ok());
 
     assert!(h.provider.as_ref().unwrap().requests().is_empty());
@@ -1135,6 +1136,10 @@ async fn validation_failures_stay_visible() {
         records[0].request["body"],
         json!({"amount": "lots", "currency": "eur", "metadata": {"k": "v"}})
     );
+    // Logged as a rejection, so `verify --no-fallbacks` does not blame
+    // generation for it.
+    assert_eq!(records[0].source.as_deref(), Some("rejected"));
+    assert_eq!(records[0].fallback_reason, None);
     let validation = records[0].request["validation"].as_array().unwrap();
     assert!(
         validation[0].as_str().unwrap().contains("/amount"),
@@ -1469,4 +1474,124 @@ paths:
     let router = http_rest::router(Arc::new(rt));
     let resp = router.oneshot(get("/users/octocat")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+const PLAID_LIKE: &str = r##"
+openapi: 3.0.3
+info: {title: plaid-like, version: "1"}
+paths:
+  /accounts/get:
+    post:
+      operationId: accountsGet
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Request"}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, request_id]
+                properties:
+                  accounts: {type: array, items: {$ref: "#/components/schemas/Account"}}
+                  request_id: {type: string}
+  /auth/get:
+    post:
+      operationId: authGet
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Request"}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, request_id]
+                properties:
+                  accounts: {type: array, items: {$ref: "#/components/schemas/Account"}}
+                  request_id: {type: string}
+components:
+  schemas:
+    Request:
+      type: object
+      properties:
+        access_token: {type: string}
+    Account:
+      type: object
+      required: [account_id, name]
+      properties:
+        account_id: {type: string}
+        name: {type: string}
+"##;
+
+/// RPC-style `POST` reads (Plaid's `/accounts/get`) are reads: a repeat is
+/// served from the cache, and their items are seeded, so `/auth/get` is
+/// generated knowing the accounts `/accounts/get` answered.
+#[tokio::test]
+async fn rpc_style_post_reads_are_cached_and_seeded() {
+    let bundle = compile(PLAID_LIKE.as_bytes()).unwrap();
+    assert_eq!(
+        bundle.operation("accountsGet").unwrap().kind,
+        mb_mcm::OperationKind::Query
+    );
+    let accounts = json!({
+        "accounts": [
+            {"account_id": "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp", "name": "Plaid Checking"},
+            {"account_id": "dVzbVMLjrxTnLjX4G66XUp5GLklm4oiZy88yK", "name": "Plaid Saving"},
+        ],
+        "request_id": "r1",
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(accounts.to_string()),
+        Ok(json!({"accounts": accounts["accounts"], "request_id": "r2"}).to_string()),
+    ]));
+    let rt = Arc::new(MockRuntime::new(
+        "plaid",
+        Arc::new(bundle),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        cached_state(),
+    ));
+    let router = http_rest::router(Arc::clone(&rt));
+    let body = r#"{"access_token":"access-sandbox-1"}"#;
+    let first = router
+        .clone()
+        .oneshot(post_json("/accounts/get", body))
+        .await
+        .unwrap();
+    assert_eq!(header_str(&first, "x-mockingbird-source"), "llm");
+    let first = body_json(first).await;
+    let again = router
+        .clone()
+        .oneshot(post_json("/accounts/get", body))
+        .await
+        .unwrap();
+    assert_eq!(header_str(&again, "x-mockingbird-source"), "cache");
+    assert_eq!(body_json(again).await, first);
+
+    let auth = router
+        .clone()
+        .oneshot(post_json("/auth/get", body))
+        .await
+        .unwrap();
+    assert_eq!(auth.status(), StatusCode::OK);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let prompt: String = requests[1]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(
+        prompt.contains("BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp"),
+        "{prompt}"
+    );
 }

@@ -830,10 +830,14 @@ fn invalid_input(
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            log.generated(filled_error(rt, op, variant, status, &reasons))
+            let mut rejected = filled_error(rt, op, variant, status, &reasons);
+            rejected.source = Source::Rejected;
+            log.generated(rejected)
         }
         None => log.problem(400, "Invalid request", reasons.clone()),
     };
+    // A client error, not a generation that fell back.
+    log.source = Some(Source::Rejected);
     if let Ok(v) = HeaderValue::from_str(&header_text(&reasons, MAX_VALIDATION_HEADER)) {
         resp.headers_mut().insert(VALIDATION_HEADER, v);
     }

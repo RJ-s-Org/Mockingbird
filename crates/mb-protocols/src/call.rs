@@ -9,7 +9,7 @@ use std::time::Duration;
 use axum::http::HeaderMap;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
-use mb_engine::consistency::{list_identity, list_items};
+use mb_engine::consistency::{ENVELOPE_KEYS, item_identity, list_items, list_members};
 use mb_engine::{
     EngineError, GeneratedResponse, GenerationContext, OFFLINE_REASON, OperationCall, Source,
     StreamContext, StreamItem,
@@ -38,6 +38,9 @@ const MAX_LATENCY: Duration = Duration::from_secs(30);
 const MAX_SESSION_LEN: usize = 128;
 const MAX_STREAM_ITEMS: usize = 10_000;
 const LIST_CONTEXT_LIMIT: usize = 20;
+
+/// List members of a read's answer whose stored items join its context.
+const MAX_LIST_MEMBERS: usize = 3;
 /// Usage-event source (the `source` label of `mb_requests_total`) for calls
 /// answered without generating a body: refused (auth, quota, rate limit,
 /// invalid request or override, unknown scenario) or answered natively (a
@@ -858,7 +861,7 @@ pub(crate) async fn complete(
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
 /// answers are its real ones).
-fn transient_fallback(generated: &GeneratedResponse) -> bool {
+pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
     generated.source == Source::Fallback
         && generated
             .fallback_reason
@@ -1006,15 +1009,20 @@ pub(crate) async fn open_stream(
         .generate_stream(Arc::clone(&rt.bundle), op, call, ctx, plan.stream_items)
 }
 
+/// Whether a stored resource can be sent as a stream item, when the
+/// caller reads less than the whole item (a GraphQL selection).
+pub(crate) type ItemCheck = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
+
 /// The data of every resource of `op`'s resource type upserted in
-/// `session` from now on, when it is a valid stream item of `op`. Events
-/// missed because the receiver lagged are skipped. Empty when `op` has no
-/// resource type.
+/// `session` from now on, when it is a valid stream item of `op` (or
+/// passes `check`). Events missed because the receiver lagged are skipped.
+/// Empty when `op` has no resource type.
 #[cfg_attr(not(feature = "sse"), allow(dead_code))] // also used by the GraphQL adapter
 pub(crate) fn change_feed(
     rt: &Arc<MockRuntime>,
     session: SessionKey,
     op: &Operation,
+    check: Option<ItemCheck>,
 ) -> BoxStream<'static, Value> {
     let Some(resource_type) = op.resource_type.clone() else {
         return stream::empty().boxed();
@@ -1024,6 +1032,7 @@ pub(crate) fn change_feed(
         op: op.clone(),
         session,
         resource_type,
+        check,
         rx: rt.state.subscribe(),
     };
     stream::unfold(feed, |mut feed| async move {
@@ -1045,11 +1054,14 @@ pub(crate) fn change_feed(
                 .get(&feed.session, &feed.resource_type, &event.id)
                 .await;
             let Ok(Some(resource)) = found else { continue };
-            if feed
-                .rt
-                .engine
-                .conform_item(&feed.rt.bundle, &feed.op, &resource.data)
-            {
+            let sendable = match &feed.check {
+                Some(check) => check(&resource.data),
+                None => feed
+                    .rt
+                    .engine
+                    .conform_item(&feed.rt.bundle, &feed.op, &resource.data),
+            };
+            if sendable {
                 return Some((resource.data, feed));
             }
         }
@@ -1062,6 +1074,7 @@ struct Feed {
     op: Operation,
     session: SessionKey,
     resource_type: String,
+    check: Option<ItemCheck>,
     rx: tokio::sync::broadcast::Receiver<mb_state::StateChanged>,
 }
 
@@ -1420,6 +1433,45 @@ impl<'a> StateAccess<'a> {
     }
 }
 
+/// Stores `resources` in the session: merged over what it holds
+/// (`merge`), else only those it does not hold yet. Keeps the session
+/// alive.
+#[cfg(feature = "graphql")]
+pub(crate) async fn store_resources(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    resources: Vec<StoredResource>,
+    merge: bool,
+) {
+    let mut state = StateAccess::new(rt);
+    async {
+        for mut resource in resources {
+            if !merge {
+                state.insert_seeded(session, resource).await;
+                continue;
+            }
+            if let Some(held) = state
+                .get(session, &resource.resource_type, &resource.id)
+                .await
+                && let (Value::Object(held), Value::Object(new)) = (held.data, &resource.data)
+            {
+                let mut merged = held.clone();
+                merged.extend(new.clone());
+                // Already stored as it is (a create's own write): no
+                // second change event.
+                if merged == held {
+                    continue;
+                }
+                resource.data = Value::Object(merged);
+            }
+            state.upsert(session, resource).await;
+        }
+        state.touch(session).await;
+    }
+    .instrument(state_span())
+    .await;
+}
+
 /// Resources the response should stay consistent with: recent items for a
 /// list query, plus anything referenced by `<x>Id` fields.
 async fn related(
@@ -1436,14 +1488,37 @@ async fn related(
         && let Some(t) = op.resource_type.as_deref()
     {
         out = state.list(session, t, LIST_CONTEXT_LIMIT).await;
+        // Lists the answer holds that other reads stored: Plaid's
+        // `/auth/get` answers the `accounts` that `/accounts/get` seeded.
+        let bundle = state.rt.bundle();
+        let members = op
+            .success_output()
+            .and_then(|o| o.schema.as_ref())
+            .map(|schema| list_members(bundle, schema))
+            .unwrap_or_default();
+        let others = members
+            .iter()
+            .filter(|m| m.as_str() != t && !ENVELOPE_KEYS.contains(&m.as_str()));
+        for member in others.take(MAX_LIST_MEMBERS) {
+            if out.len() >= LIST_CONTEXT_LIMIT {
+                break;
+            }
+            let room = LIST_CONTEXT_LIMIT - out.len();
+            out.extend(state.list(session, member, room).await);
+        }
     }
-    let body_fields = body.and_then(Value::as_object).into_iter().flatten();
-    for (field, value) in query.iter().chain(body_fields) {
-        let (Some(prefix), Some(id)) = (reference_prefix(field), value.as_str()) else {
-            continue;
-        };
-        for t in [format!("{prefix}s"), prefix.to_string()] {
-            if let Some(hit) = state.get(session, &t, id).await {
+    let mut references = Vec::new();
+    for (field, value) in query {
+        references_in(field, value, 0, &mut references);
+    }
+    if let Some(Value::Object(fields)) = body {
+        for (field, value) in fields {
+            references_in(field, value, 0, &mut references);
+        }
+    }
+    for (types, id) in references.into_iter().take(MAX_REFERENCES) {
+        for t in types {
+            if let Some(hit) = state.get(session, &t, &id).await {
                 if !out
                     .iter()
                     .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
@@ -1455,6 +1530,50 @@ async fn related(
         }
     }
     out
+}
+
+/// Reference lookups per call, at most.
+const MAX_REFERENCES: usize = 16;
+
+/// The resources `value` (under member `field`) refers to, as the types to
+/// look in and the id: a `<x>Id`/`<x>_id` member (types `<x>s`, `<x>`), or
+/// a global id `gid://<app>/<Type>/…` (type `<type>`), here or in nested
+/// objects and lists (GraphQL input objects, `lines: [{merchandiseId}]`).
+fn references_in(field: &str, value: &Value, depth: usize, out: &mut Vec<(Vec<String>, String)>) {
+    if depth > 4 || out.len() >= MAX_REFERENCES {
+        return;
+    }
+    match value {
+        Value::String(id) => {
+            if let Some(t) = global_id_type(id) {
+                out.push((vec![t], id.clone()));
+            } else if let Some(prefix) = reference_prefix(field) {
+                out.push((vec![format!("{prefix}s"), prefix.to_string()], id.clone()));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                references_in(field, item, depth + 1, out);
+            }
+        }
+        Value::Object(obj) => {
+            for (k, v) in obj {
+                references_in(k, v, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The type of a global id (`gid://shopify/ProductVariant/42` →
+/// `productvariant`), as GraphQL answers are stored.
+fn global_id_type(id: &str) -> Option<String> {
+    let rest = id.strip_prefix("gid://")?;
+    let mut parts = rest.split('/');
+    let _app = parts.next()?;
+    let t = parts.next().filter(|t| !t.is_empty())?;
+    parts.next()?;
+    Some(t.to_lowercase())
 }
 
 /// Who made a state write: the client's call, or list seeding.
@@ -1496,7 +1615,11 @@ async fn write_state(
         let Some(items) = generated.body.as_ref().and_then(list_items) else {
             return writes;
         };
-        let field = list_identity(state.rt.bundle(), op);
+        let field = item_identity(
+            state.rt.bundle(),
+            op,
+            generated.body.as_ref().unwrap_or(&Value::Null),
+        );
         for item in items {
             let Some(id) = item.get(&field).and_then(id_string) else {
                 continue;
@@ -1755,7 +1878,7 @@ paths:
     async fn change_feed_emits_upserts_for_resource_type() {
         let rt = stream_runtime();
         let op = rt.bundle.operations[0].clone();
-        let mut feed = change_feed(&rt, session("a"), &op);
+        let mut feed = change_feed(&rt, session("a"), &op, None);
         let tick = |id: &str| StoredResource {
             resource_type: "ticks".into(),
             id: id.into(),
@@ -1788,7 +1911,7 @@ paths:
         let rt = stream_runtime();
         let mut op = rt.bundle.operations[0].clone();
         op.resource_type = None;
-        let mut feed = change_feed(&rt, session("a"), &op);
+        let mut feed = change_feed(&rt, session("a"), &op, None);
         assert_eq!(feed.next().await, None);
     }
 

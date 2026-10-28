@@ -43,11 +43,9 @@ Five more open-source apps in other stacks, unmodified, under `mockingbird run` 
 
 ### From field trials 2.0 (2026-10-28)
 
-- **RPC-style reads are neither cached nor seeded.** Plaid reads are all `POST` (`/accounts/get`, `/auth/get`, `/identity/get`, `/transactions/sync`, `/accounts/balance/get`), so each call invents its own `account_id`s and balances, and a repeated `/accounts/get` differs from the first. Let a contract (or a heuristic: `POST …/get`, `…/list`, `…/sync` with no side effect) mark an operation as a read, and seed accounts from the first answer.
-- **Create and update mutations generate their whole return type.** GitHub's `createIssue { issue { id url } }` asked for every field of `Issue`: 36–39k prompt tokens, 16–20 s, an invalid answer and a `null` payload; `gh issue create` printed nothing and exited 0. Generate the selection plus the type's scalar fields and fill the rest of the stored object with the faker.
-- **Stateful GraphQL flows do not hold together** (with the existing "mutation results are not stored" item): in Next.js Commerce, `cartCreate` returned an empty cart, `cart(id:)` for it invented three lines, and `cartLinesAdd` answered a different product than the variant sent. The cart id ignored the persona's format.
-- **LLM-written base64 is corrupt.** GitHub's README `content` (`encoding: base64`) decoded to a garbled line, then to invalid UTF-8 (`gh repo view` fails). Ask for text and encode locally when a sibling says `encoding: base64` or the schema says `contentEncoding: base64`.
-- **Request-validation rejections are logged as source `fallback`** with no reason (healthchecks' Telegram and Opsgenie calls against strict hand-written contracts), so `verify --no-fallbacks` blames generation for a client error. Give them their own source.
+- Persona id formats with a query part (`gid://shopify/Cart/<26 chars>?key=<32 hex>`) are not kept: the cart id came back as `gid://shopify/Cart/8f3a1c6d9b2e4f70a5c8d13e6b`.
+- Cart totals are the model's arithmetic: after the engine fixes (Done) the Next.js Commerce cart holds the right variant and quantity, but its line price ($28.00) differs from the product page's ($32.00). Compute `cost` from the stored lines' prices.
+- In Next.js Commerce the first "Add to cart" after the cart is created takes about 10 s to reach the mock (the server action waits on the app side, not on Mockingbird); a second click goes through at once.
 - An answer with only one possible value (Slack's literal `"ok"`) is labelled `llm` with 0 tokens and 0 ms.
 - **Catalog:** GitHub REST has no GitHub Apps operations (`POST /app/installations/{id}/access_tokens`, used by healthchecks).
 - github-readme-stats' torvalds/linux pin still gets `user` and `organization` both null (17 completion tokens), which the card reports as an error.
@@ -75,7 +73,6 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 **State and consistency**
 
 - **Path ids that are not `id`-like are not state keys.** `issue_number`/`pull_number` (GitHub), `{issueIdOrKey}` (Jira) and `{MessageSid}.json` (Twilio, the `.json` suffix is part of the segment) miss the created resource, so create-then-read returns a generated stranger. Treat `*_number`, `*Key`, `*Sid` path params as ids, strip a `.json`/`.xml` suffix before matching, and allocate list numbers above the ones already listed.
-- **GraphQL mutation results are not stored**, so `product(id:)` after `productCreate` generates anew. Store a mutation payload's object by its `id` (and global id) like a REST create.
 - **A list read after a create omits the created item** when the list was cached earlier in the session (Twilio, Slack history). Invalidate or append on create.
 - **Timestamps are not recent.** The LLM has no clock: Stripe `created` came back as 2025-01-15 every time, Slack `ts` values from 2024–2025; offline, `date-time` values spread over 2000–2033. Put the current time in the prompt and bias the faker to the last few days.
 
@@ -118,6 +115,13 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 - The `kafka` broker kind is not in the default build (`this build has no kafka support`), so the Kafka example runs on the memory broker unless you use the full image.
 
 ## Done
+
+- Engine items from field trials 2.0, re-run with the same apps, configs and model ([gh CLI](trials/gh-cli.md#after-the-engine-fixes), [Next.js Commerce](trials/nextjs-commerce.md#after-the-engine-fixes), [plaid/quickstart](trials/plaid-quickstart.md#after-the-engine-fixes)):
+  - GraphQL mutations generate only their selection, like queries. `gh issue create`: `createIssue` 38.8k prompt tokens, 16 s and a fallback with a `null` payload (the command printed nothing) → 745 prompt tokens, 1.0 s, `llm`, and the issue URL printed. The gh run's GraphQL prompt tokens fell from 74.7k to 25.9k, with 10/10 commands working (was 8/10) and 0 fallbacks (was 2).
+  - GraphQL answers store every object with an `id` under its type (`Cart` → `cart`): a mutation's are merged into the session, a query's added when new. A mutation is generated knowing what its `<x>Id` arguments and `gid://…/<Type>/…` ids name, including inside input objects and lists, and a stored object read inside another (a variant inside its product) links back to it through the field of that type. Next.js Commerce: `cart(id:)` after `cartCreate` was a fresh 13.9 s invention with three random lines; now it is served from state in 1–2 ms, and `cartLinesAdd` answers the variant sent ("Fern Tee, M / Heather Moss", quantity 1, then 2), which the drawer shows. Subscriptions check a stored item against their selection, not the whole type.
+  - `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `/institutions/get_by_id`, `users.list`, `_search`) are reads: cached, seeded (items keyed by `<singular>_id` when they have no `id`), and generated knowing the lists other reads stored under their list members' names. plaid/quickstart: six reads invented six sets of `account_id`s, and the repeated `/accounts/get` took 2.0 s and differed; now all six share the first answer's accounts and balances, and the repeat is a `cache` hit in 0 ms. A webhook target that names such a read's operation still gets its event (Plaid's `transactionsSync`).
+  - Base64 fields (`format: byte`, `contentEncoding: base64`, or `content` beside `encoding: "base64"`) are asked for as plain text and encoded locally; a value that does not decode is encoded from its text (corrupt base64 keeps what decodes as readable text). `gh repo view` failed with `invalid UTF-8 string` twice; now it prints the README.
+  - Request-validation rejections are logged and labelled with source `rejected`, not `fallback`, so `verify --no-fallbacks` no longer counts a client error as a generation failure.
 
 - Field trials 2.0, developer experience (trials2-dx):
   - `verify --no-unmatched` fails on requests no contract operation matches (Plaid's `POST /accounts/balance/get` passed `--no-fallbacks --no-unmapped`); `report` lists those routes;

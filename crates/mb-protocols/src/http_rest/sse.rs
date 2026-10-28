@@ -60,7 +60,7 @@ pub(crate) fn sse_response(
         .interval(rt.protocols.sse_keepalive)
         .text(KEEPALIVE_TEXT);
     // Subscribe now, so changes made while the stream opens are not missed.
-    let feed = call::change_feed(&rt, plan.session.clone(), &op).map(Piece::Changed);
+    let feed = call::change_feed(&rt, plan.session.clone(), &op, None).map(Piece::Changed);
     let report = ReportOnDrop {
         rt: Arc::clone(&rt),
         span: Span::current(),

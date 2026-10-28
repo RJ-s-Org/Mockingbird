@@ -12,9 +12,45 @@ fn is_param(seg: &str) -> bool {
     seg.starts_with('{') && seg.ends_with('}')
 }
 
+/// Verbs that make a `POST` a read in RPC-style APIs (Plaid's
+/// `/accounts/get`, `/transactions/sync`; Elasticsearch's `_search`; Slack's
+/// `users.list`).
+const READ_VERBS: [&str; 13] = [
+    "get", "list", "search", "sync", "query", "find", "fetch", "retrieve", "lookup", "read",
+    "count", "info", "history",
+];
+
+/// The resource and the read verb of an RPC-style last segment: `get` and
+/// no resource for `get_by_id`, `users` and `list` for `users.list`.
+fn rpc_read(segment: &str) -> Option<(Option<&str>, &str)> {
+    let (resource, action) = match segment.rsplit_once('.') {
+        Some((resource, action)) => (Some(resource).filter(|r| !r.is_empty()), action),
+        None => (None, segment),
+    };
+    let action = action.trim_start_matches(['_', '$']);
+    let end = action
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| c.is_ascii_uppercase() || matches!(c, '_' | '-'))
+        .map_or(action.len(), |(i, _)| i);
+    let verb = &action[..end];
+    READ_VERBS
+        .iter()
+        .find(|v| verb.eq_ignore_ascii_case(v))
+        .map(|v| (resource, *v))
+}
+
+/// Whether `path` ends in an RPC-style read (see [`READ_VERBS`]).
+fn ends_in_read(path: &str) -> bool {
+    segments(path)
+        .last()
+        .is_some_and(|s| !is_param(s) && rpc_read(s).is_some())
+}
+
 pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
     match method {
         HttpMethod::Get | HttpMethod::Head | HttpMethod::Options => OperationKind::Query,
+        HttpMethod::Post if ends_in_read(path) => OperationKind::Query,
         HttpMethod::Post => {
             let ends_static = segments(path).last().is_none_or(|s| !is_param(s));
             OperationKind::Command(if ends_static {
@@ -28,13 +64,24 @@ pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
     }
 }
 
-/// The last static segment before any trailing `{param}`.
+/// The last static segment before any trailing `{param}`; for an
+/// RPC-style read (`/accounts/get`, `users.list`), what it reads.
 pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
-    segments(path)
-        .into_iter()
-        .rev()
-        .find(|s| !is_param(s))
-        .map(str::to_owned)
+    let segs = segments(path);
+    let mut statics = segs.iter().rev().filter(|s| !is_param(s));
+    let last = statics.next()?;
+    if ends_in_read(path) {
+        match rpc_read(last) {
+            Some((Some(resource), _)) => return Some(resource.to_owned()),
+            Some((None, _)) => {
+                if let Some(before) = statics.next() {
+                    return Some((*before).to_owned());
+                }
+            }
+            None => {}
+        }
+    }
+    Some((*last).to_owned())
 }
 
 fn trailing_param(path: &str) -> Option<&str> {
@@ -137,6 +184,50 @@ pub(crate) fn resource_from_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_style_posts_that_read_are_queries() {
+        for (path, resource) in [
+            ("/accounts/get", "accounts"),
+            ("/accounts/balance/get", "balance"),
+            ("/transactions/sync", "transactions"),
+            ("/institutions/get_by_id", "institutions"),
+            ("/api/users.list", "users"),
+            ("/{index}/_search", "_search"),
+            ("/v1/customers/search", "customers"),
+            ("/getAccounts", "getAccounts"),
+        ] {
+            assert_eq!(
+                infer_kind(HttpMethod::Post, path),
+                OperationKind::Query,
+                "{path}"
+            );
+            assert_eq!(
+                infer_resource_type(path).as_deref(),
+                Some(resource),
+                "{path}"
+            );
+        }
+        for path in [
+            "/link/token/create",
+            "/item/public_token/exchange",
+            "/v1/payment_intents",
+            "/chat.postMessage",
+            "/listings",
+            "/getaway",
+        ] {
+            assert_eq!(
+                infer_kind(HttpMethod::Post, path),
+                OperationKind::Command(Effect::Create),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            infer_resource_type("/orders/{id}").as_deref(),
+            Some("orders")
+        );
+        assert_eq!(infer_resource_type("/search").as_deref(), Some("search"));
+    }
 
     #[test]
     fn heuristics_kind_and_resource_from_name() {

@@ -144,6 +144,16 @@ impl WebhookDispatcher {
             .collect()
     }
 
+    /// The targets whose `events` name `operation` itself.
+    pub fn naming(&self, operation: &str) -> Vec<usize> {
+        self.targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.events.iter().any(|e| e == operation))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Records one `Pending` delivery per listed target and spawns it;
     /// never awaits the network. Must run inside a Tokio runtime.
     pub fn send(self: &Arc<Self>, event: OutboundEvent, targets: &[usize]) {

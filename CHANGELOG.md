@@ -58,12 +58,16 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 - `mockingbird keys setup` and MCP `open_key_setup`: a one-shot local page that stores an LLM key in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it, returning only the name and profile (the URL when the user takes longer than 45 s). `doctor` reports the store under `key_store`.
 - `mb-ext`: `check_secret_file` and `in_key_store` (additive).
 - Webhooks: mocks POST an event after each successful write to the URLs in `mocks.<name>.webhooks` (or the Admin API), signed Stripe-style (`Stripe-Signature`) or with `X-Mockingbird-Signature`, retried 3 times (1 s, 2 s, 4 s); the payload is the contract's OpenAPI `webhooks`/`callbacks` body when defined, else a Stripe-shaped `<resource>.<created|updated|deleted>` event. Deliveries: `GET …/mocks/{mock}/webhooks/deliveries`, `mockingbird webhooks deliveries`, MCP `list_webhook_deliveries`; `mockingbird webhooks sign` prints a signature for tests. `server.api_webhook_secret_refs` limits secret references set through the API. Migration `0700_mock_webhooks` adds `mocks.webhooks`. See [docs/webhooks.md](docs/webhooks.md).
+- GraphQL answers store every object with an `id` under its type (`Cart` → `cart`): a mutation's are merged into the session, a query's added when new, so `cartCreate` → `cart(id:)` → `cartLinesAdd` reads and updates one cart. Mutations are generated knowing what their `<x>Id` arguments and `gid://…/<Type>/…` ids name (in nested inputs too).
+- Base64 fields (`format: byte`, `contentEncoding: base64`, `content` beside `encoding: "base64"`) are asked for as plain text and encoded locally; values that do not decode are re-encoded from their text.
+- Request-validation rejections have their own source, `rejected` (header, request log, metrics and `report`), instead of `fallback`.
 - `mockingbird verify --no-unmatched`: fails when a request matched no operation of its mock's contract; `report` lists those routes.
 - `mocks.<name>.graphql_path`: one GraphQL mock's endpoint below its route prefix (Shopify's `/graphql.json`), instead of the server-wide `protocols.graphql.path`.
 
 ### Changed
 
-- The default LLM is OpenRouter: `MB_LLM_BASE_URL` defaults to `https://openrouter.ai/api/v1` and `MB_LLM_MODEL` to `deepseek/deepseek-v4.1-flash` (DeepSeek V4.1 Flash), so `MB_LLM_API_KEY` is an OpenRouter key. Set both variables to keep using DeepSeek directly (`https://api.deepseek.com`, `deepseek-chat`). The example configs and tests use an `openrouter` default profile.
+- GraphQL mutations generate only their selection, like queries (GitHub `createIssue`: 38.8k → 745 prompt tokens, no fallback).
+- `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `users.list`, `_search`) are imported as reads: cached, seeded, and generated knowing the lists other reads stored; a webhook target fires for such a read only when it names its operation.
 - `mockingbird verify` prints a short text summary by default (`--format text`): the totals and one line per failed check, naming the most frequent reasons; `--format json` keeps the whole report.
 - Validation errors (fallback reasons, logs, repair prompts, request-validation 400s) read `<pointer>: <keyword>: <message>`, follow a failed `anyOf`/`oneOf` into its closest branch and mask long quoted values.
 - The GitHub GraphQL example's `--full` downloads GitHub's own `schema.docs.graphql` (github/docs, CC-BY-4.0) instead of octokit/graphql-schema, so current `gh` queries validate.
@@ -98,6 +102,7 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 - The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
 - An LLM answer whose only errors are nulls the schema does not allow is patched instead of sent back for a repair call: an optional property is dropped, a required one gets a faker value. The response's source is `repaired`. Real APIs return null where their docs never say so (TMDB's `belongs_to_collection`), and models copy them; this saved a 20–40 s repair call on 4 of 8 TMDB detail pages.
 - An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
+- The default LLM is OpenRouter: `MB_LLM_BASE_URL` defaults to `https://openrouter.ai/api/v1` and `MB_LLM_MODEL` to `deepseek/deepseek-v4.1-flash` (DeepSeek V4.1 Flash), so `MB_LLM_API_KEY` is an OpenRouter key. Set both variables to keep using DeepSeek directly (`https://api.deepseek.com`, `deepseek-chat`). The example configs and tests use an `openrouter` default profile.
 
 ### Fixed
 

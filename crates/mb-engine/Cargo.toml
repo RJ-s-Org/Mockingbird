@@ -33,6 +33,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 async-trait.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
 proptest.workspace = true
