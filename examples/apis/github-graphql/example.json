@@ -1,0 +1,46 @@
+{
+  "name": "github-graphql",
+  "title": "GitHub GraphQL",
+  "category": "developer-tools",
+  "protocol": "graphql",
+  "summary": "The GitHub GraphQL API on api.github.com/graphql: viewer, users, repositories with issues, pull requests and stargazers, search, rateLimit, and the createIssue and addComment mutations.",
+  "contracts": [
+    "github.graphql"
+  ],
+  "hosts": [
+    "api.github.com"
+  ],
+  "scenarios": [
+    "rate-limited",
+    "slow",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://github.com/octokit/graphql-schema",
+    "license": "MIT",
+    "commit": "503d8f18a265230ec224669241c2f1957811faf8",
+    "url": "https://raw.githubusercontent.com/octokit/graphql-schema/503d8f18a265230ec224669241c2f1957811faf8/schema.graphql",
+    "sha256": "4dea7bd74e69637bd55795157eef5bfd89af3a32a6f05e8ac69004f223896415",
+    "replaces": "github.graphql",
+    "notes": "GitHub's public schema as published by octokit (about 1.2 MB). Pinned to the 2024-07-08 commit: the newest one (597478f, 2025-02-27) declares EnterpriseOwnerInfo.repositoryDeployKeySetting twice, which `mockingbird serve` cannot load. The subset keeps its type, field and argument names, so the scenarios' Query.rateLimit applies to both."
+  },
+  "sdk": {
+    "language": "node",
+    "package": "@octokit/graphql",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/graphql",
+    "host": "api.github.com",
+    "headers": {
+      "authorization": "bearer ghp_test123"
+    },
+    "body": {
+      "query": "{ viewer { login name } rateLimit { limit remaining } }"
+    },
+    "status": 200,
+    "expect": "\"viewer\""
+  }
+}

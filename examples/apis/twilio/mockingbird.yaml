@@ -1,0 +1,78 @@
+# Twilio: send, list and fetch SMS, place calls, and look up phone numbers, with
+# status callbacks to your app.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/2010-04-01/Accounts/ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/Messages.json -H 'Host: api.twilio.com' \
+#     -u ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test_token --data-urlencode To=+15558675310 --data-urlencode From=+15017122661 -d Body=Hi
+# Contracts: twilio.openapi.yaml and twilio-lookups.openapi.yaml, hand-written
+# subsets (see their headers). The full upstream Api v2010 spec (MIT) is pinned in
+# example.json; fetch it with `mockingbird examples init twilio --full`.
+proxy:
+  enabled: true          # apps reach https://api.twilio.com through http://127.0.0.1:8888
+mocks:
+  twilio:
+    contract: twilio.openapi.yaml
+    route_prefix: /
+    hosts: [api.twilio.com]
+    persona: >-
+      Twilio REST API (2010-04-01) for "Harbor Lane Dental", a three-chair dental
+      practice in Providence, Rhode Island, that texts appointment reminders and
+      places reminder calls from its Twilio number +14015550142. SIDs are a two-letter
+      prefix (AC account, SM message, CA call, MG messaging service, PN phone number)
+      followed by 32 lowercase hex characters; the account SID is the one in the
+      request path. Phone numbers are US E.164 (+1...). Dates are RFC 2822 strings
+      such as "Tue, 28 Oct 2026 17:04:11 +0000". A new message is "queued" with
+      direction "outbound-api", num_segments "1", price null and price_unit "USD";
+      To, From and Body are copied from the request. Bodies read like reminders:
+      "Hi Dana, this is Harbor Lane Dental reminding you of your cleaning on Thu
+      Oct 30 at 9:30 AM. Reply C to confirm." A new call is "queued", direction
+      "outbound-api", with to_formatted/from_formatted like "(401) 555-0142".
+    webhooks:
+      # Twilio POSTs status changes to the StatusCallback URL of each message or call.
+      # Mockingbird sends them as JSON signed X-Mockingbird-Signature (hmac-sha256),
+      # not as Twilio's form-encoded X-Twilio-Signature (see README).
+      - url: http://127.0.0.1:4242/twilio/status
+        events: [CreateMessage, CreateCall]
+        secret: env:TWILIO_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      invalid-to-number:
+        status: 400
+        operations: [CreateMessage, CreateCall]
+        set:
+          code: 21211
+          message: "Invalid 'To' Phone Number: +1555123"
+          more_info: https://www.twilio.com/docs/errors/21211
+          status: 400
+      rate-limited:
+        status: 429
+        set:
+          code: 20429
+          message: Too Many Requests
+          more_info: https://www.twilio.com/docs/errors/20429
+          status: 429
+      outage:
+        status: 503
+        set:
+          code: 20503
+          message: Service Unavailable
+          more_info: https://www.twilio.com/docs/errors/20503
+          status: 503
+  twilio-lookups:
+    contract: twilio-lookups.openapi.yaml
+    route_prefix: /
+    hosts: [lookups.twilio.com]
+    persona: >-
+      Twilio Lookups v2 for "Harbor Lane Dental" in Providence, RI, checking patient
+      phone numbers before texting them. phone_number is the looked-up number in
+      E.164; national_format is "(401) 555-0199"; calling_country_code "1",
+      country_code "US". caller_name and line_type_intelligence are filled only when
+      the Fields query names them, else null. Carriers are US carriers
+      (e.g. "T-Mobile USA, Inc.", "Verizon Wireless").
+    scenarios:
+      rate-limited:
+        status: 429
+        set:
+          code: 20429
+          message: Too Many Requests
+          more_info: https://www.twilio.com/docs/errors/20429
+          status: 429

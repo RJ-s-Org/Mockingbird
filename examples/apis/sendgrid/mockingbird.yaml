@@ -1,0 +1,58 @@
+# Twilio SendGrid v3: Mail Send, transactional templates, bounces and stats, with
+# Event Webhook batches to your app.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -si localhost:8080/v3/mail/send -H 'Host: api.sendgrid.com' -H 'Authorization: Bearer SG.test' \
+#     -H 'content-type: application/json' \
+#     -d '{"personalizations":[{"to":[{"email":"ana@example.com"}]}],"from":{"email":"orders@fernandfable.example"},"subject":"Your order","content":[{"type":"text/plain","value":"Thanks!"}]}'
+# Contract: sendgrid.openapi.yaml, a hand-written subset (see its header). The
+# upstream specs (MIT) are split per product in twilio/sendgrid-oai; the commit is
+# recorded in example.json.
+proxy:
+  enabled: true          # apps reach https://api.sendgrid.com through http://127.0.0.1:8888
+mocks:
+  sendgrid:
+    contract: sendgrid.openapi.yaml
+    route_prefix: /
+    hosts: [api.sendgrid.com]
+    persona: >-
+      Twilio SendGrid v3 for "Fern & Fable Books", an independent bookshop in
+      Edinburgh that sends order confirmations, shipping notices and a monthly
+      newsletter from orders@fernandfable.example and news@fernandfable.example.
+      Dynamic template ids are "d-" plus 32 lowercase hex characters; template
+      names are "Order confirmation", "Shipped", "Monthly newsletter" and
+      "Password reset", each with an active "code" version. Timestamps are
+      "YYYY-MM-DD HH:MM:SS" (templates) or unix seconds (bounces, events). Bounced
+      addresses are realistic customer emails at gmail.com, outlook.com and
+      btinternet.com with SMTP reasons. Daily stats show roughly 1,500 requests,
+      97% delivered, 40% unique opens.
+    webhooks:
+      # The SendGrid Event Webhook: Mockingbird sends a [processed, delivered] batch
+      # after each Mail Send, signed X-Mockingbird-Signature (hmac-sha256), not with
+      # SendGrid's ECDSA X-Twilio-Email-Event-Webhook-Signature (see README).
+      - url: http://127.0.0.1:4242/sendgrid/events
+        events: [SendMail]
+        secret: env:SENDGRID_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      invalid-recipient:
+        status: 400
+        operations: [SendMail]
+        set:
+          errors:
+            - message: Does not contain a valid address.
+              field: personalizations.0.to.0.email
+              help: http://sendgrid.com/docs/API_Reference/Web_API_v3/Mail/errors.html#message.personalizations.to
+      rate-limited:
+        status: 429
+        set:
+          errors:
+            - message: too many requests
+              field: null
+              help: null
+      outage:
+        status: 500
+        set:
+          errors:
+            - message: Internal server error. Please try again later.
+              field: null
+              help: null

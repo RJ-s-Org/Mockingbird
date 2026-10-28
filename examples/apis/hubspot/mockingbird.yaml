@@ -1,0 +1,66 @@
+# HubSpot CRM v3: contacts (list, create, get, update, archive, search), companies and deals.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/crm/v3/objects/contacts -H 'Host: api.hubapi.com' -H 'Authorization: Bearer pat-na1-test' \
+#     -H 'content-type: application/json' -d '{"properties":{"email":"dana.whitfield@example.com","firstname":"Dana","lastname":"Whitfield"}}'
+# Contract: hubspot.openapi.yaml, a hand-written subset (see its header). HubSpot's
+# own specs are proprietary, so no upstream spec is pinned and there is no `--full` variant.
+proxy:
+  enabled: true          # apps reach https://api.hubapi.com through http://127.0.0.1:8888
+mocks:
+  hubspot:
+    contract: hubspot.openapi.yaml
+    route_prefix: /
+    hosts: [api.hubapi.com]
+    persona: >-
+      HubSpot CRM of "Brightwater Analytics", a Boston B2B analytics start-up
+      (portal 24681357, en-US, America/New_York). Contacts are buyers at US
+      mid-market companies, with realistic names, @example.com emails, +1 617 555
+      phone numbers, job titles like "VP Operations" and lifecycle stages from lead
+      to customer. Companies are fictional US firms in logistics, fintech and
+      healthcare with plausible domains (.example), cities and employee counts.
+      Deals are annual subscriptions named "<Company> - Analytics Pro" between 8000
+      and 120000 USD in the default pipeline. Object ids are numeric strings (contacts
+      5 to 12 digits, companies and deals 10 to 11), and properties.hs_object_id
+      equals id. All property values are strings, timestamps are ISO 8601 UTC with
+      milliseconds, a create copies the request's properties and sets createdate =
+      lastmodifieddate = createdAt. Error answers carry a random correlationId uuid.
+    webhooks:
+      # HubSpot signs with X-HubSpot-Signature-v3; the mock signs with
+      # X-Mockingbird-Signature (see the README).
+      - url: http://127.0.0.1:3000/hubspot/webhook
+        events: [contact.created, contact.updated, deal.created]
+        secret: env:HUBSPOT_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      contact-exists:
+        status: 409
+        operations:
+          - "post-/crm/v3/objects/contacts_create"
+          - "patch-/crm/v3/objects/contacts/{contactId}_update"
+        set:
+          status: error
+          message: "Contact already exists. Existing ID: 74981"
+          category: CONFLICT
+      invalid-email:
+        status: 400
+        operations:
+          - "post-/crm/v3/objects/contacts_create"
+          - "patch-/crm/v3/objects/contacts/{contactId}_update"
+        set:
+          status: error
+          message: "Property values were not valid: [{\"isValid\":false,\"message\":\"Email address dana@@example is invalid\",\"error\":\"INVALID_EMAIL\",\"name\":\"email\"}]"
+          category: VALIDATION_ERROR
+      rate-limited:
+        status: 429
+        set:
+          status: error
+          message: You have reached your ten_secondly_rolling limit.
+          errorType: RATE_LIMIT
+          policyName: TEN_SECONDLY_ROLLING
+          groupName: "publicapi:private-app:24681357"
+      outage:
+        status: 503
+        set:
+          status: error
+          message: Service Unavailable
+          category: INTERNAL_ERROR

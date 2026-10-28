@@ -1,0 +1,48 @@
+# GitHub GraphQL API v4: viewer, users, repositories (issues, pull requests,
+# stargazers), search and rate limit, plus the createIssue and addComment mutations.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/graphql -H 'Host: api.github.com' -H 'Authorization: bearer ghp_test123' \
+#     -H 'content-type: application/json' -d '{"query":"{ viewer { login name } }"}'
+# Contract: github.graphql, a hand-written subset (see its header). The full
+# public schema (MIT, octokit/graphql-schema) is pinned in example.json;
+# fetch it with `mockingbird examples init github-graphql --full`.
+proxy:
+  enabled: true          # apps reach https://api.github.com/graphql through http://127.0.0.1:8888
+mocks:
+  github-graphql:
+    contract: github.graphql
+    # GitHub serves GraphQL at POST https://api.github.com/graphql: the mock is
+    # mounted at / and answers protocols.graphql.path (/graphql) below it.
+    route_prefix: /
+    hosts: [api.github.com]
+    persona: >-
+      GitHub.com GraphQL API v4 as seen by Mira Okafor (login "mira-okafor",
+      databaseId 58213947), a maintainer at "Fernwood Labs" (organization
+      "fernwood-labs"), a small Berlin open-source company. viewer is mira-okafor.
+      Her repositories include fernwood-labs/trellis (a Rust HTTP router, about
+      4.2k stargazers, MIT), fernwood-labs/trellis-docs (TypeScript) and
+      mira-okafor/dotfiles. Node ids use GitHub's prefixes (U_kgDO, R_kgDO, I_kwDO,
+      PR_kwDO, IC_kwDO, LA_kwDO) followed by base64-like characters. url values are
+      https://github.com/<owner>/<repo>[/issues/<n>|/pull/<n>]. Timestamps are ISO 8601
+      UTC. Counts are plausible and internally consistent: totalCount matches the
+      size of the full list, merged pull requests <= all pull requests, nodes holds
+      at most the requested `first` items. rateLimit reports limit 5000 with a
+      small cost. Mutations copy title, body and subject from the input.
+    scenarios:
+      rate-limited:
+        # GitHub answers an exhausted GraphQL limit with HTTP 200 (or 403) and
+        # errors[].type RATE_LIMITED; a 5xx-free scenario can only steer the data,
+        # so this one tells the LLM to report an exhausted budget.
+        instructions: >-
+          The caller has exhausted its GraphQL rate limit: rateLimit.remaining is 0,
+          rateLimit.used equals rateLimit.limit (5000) and resetAt is within the next hour.
+        set:
+          remaining: 0
+          used: 5000
+          limit: 5000
+        operations: [Query.rateLimit]
+      slow:
+        # Search and big repository queries are slow on GitHub; exercise timeouts.
+        latency: 4s
+      outage:
+        status: 502

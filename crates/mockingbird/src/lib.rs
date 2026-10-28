@@ -7,6 +7,7 @@ pub mod config;
 pub mod daemon;
 pub mod dp_keys;
 pub mod events;
+pub mod examples;
 pub mod file_config;
 pub mod ha;
 pub mod host_guard;

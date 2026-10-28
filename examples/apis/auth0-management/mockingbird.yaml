@@ -1,0 +1,56 @@
+# Auth0 Management API v2: client-credentials token, users (list, search,
+# create, update, delete), users by email, roles and role assignment.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/api/v2/users-by-email?email=ana@example.com -H 'Host: juniper.us.auth0.com' -H 'Authorization: Bearer test-token'
+# Contract: auth0-management.openapi.yaml, a hand-written subset (see its
+# header). Auth0 publishes no openly licensed OpenAPI description to pin.
+proxy:
+  enabled: true          # apps reach https://juniper.us.auth0.com through http://127.0.0.1:8888
+mocks:
+  auth0:
+    contract: auth0-management.openapi.yaml
+    route_prefix: /
+    hosts: [juniper.us.auth0.com]
+    persona: >-
+      Auth0 tenant juniper (US region, juniper.us.auth0.com) of "Juniper & Co",
+      a small online plant shop in Portland, Oregon. Users sign in with the
+      Username-Password-Authentication database connection or google-oauth2;
+      user_id is "auth0|" + 24 hex characters (or "google-oauth2|" + 21 digits
+      for Google users) and identities[0].user_id is the part after the "|".
+      Staff use @juniper.example emails (Ana Ruiz, Theo Park, Mia Okafor);
+      customers have realistic US names and @example.com emails. nickname is the
+      email's local part; picture is a Gravatar URL. Roles: admin, support-agent,
+      warehouse, customer, with one-line descriptions. A created user copies
+      email, name, connection and metadata from the request, has
+      logins_count 0 and email_verified false unless the request says
+      otherwise. Timestamps are recent ISO 8601 UTC with milliseconds.
+    scenarios:
+      rate-limited:
+        status: 429
+        set:
+          statusCode: 429
+          error: Too Many Requests
+          message: Global limit has been reached
+          errorCode: too_many_requests
+      user-exists:
+        status: 409
+        operations: [post_users]
+        set:
+          statusCode: 409
+          error: Conflict
+          message: The user already exists.
+          errorCode: auth0_idp_error
+      user-not-found:
+        status: 404
+        operations: [get_users_by_id, patch_users_by_id, delete_users_by_id, get_user_roles, post_user_roles]
+        set:
+          statusCode: 404
+          error: Not Found
+          message: The user does not exist.
+          errorCode: inexistent_user
+      outage:
+        status: 503
+        set:
+          statusCode: 503
+          error: Service Unavailable
+          message: The service is unavailable. Please try again later.

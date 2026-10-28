@@ -1,0 +1,43 @@
+{
+  "name": "grpc",
+  "title": "OpenTelemetry OTLP (gRPC)",
+  "category": "observability",
+  "protocol": "grpc",
+  "summary": "An OpenTelemetry collector's OTLP/gRPC trace receiver (TraceService/Export) from the upstream Apache-2.0 protos, with partial-success, unavailable and deadline scenarios for testing exporters.",
+  "contracts": [
+    "otlp_trace_service.proto"
+  ],
+  "hosts": [],
+  "scenarios": [
+    "partial-success",
+    "collector-unavailable",
+    "deadline-exceeded"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://github.com/open-telemetry/opentelemetry-proto",
+    "license": "Apache-2.0",
+    "commit": "40cb2e516c60dd91796d909c7277e36a20c38b55",
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "The embedded contract is the upstream trace_service.proto, trace.proto, resource.proto and common.proto at this commit, merged into one file (one package, same field numbers and service path) because a config contract is a single .proto. The upstream set spans several files with imports, so there is no single file for `init --full` to fetch."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "opentelemetry-exporter-otlp-proto-grpc",
+    "verified": true
+  },
+  "smoke": {
+    "kind": "grpc",
+    "method": "opentelemetry.proto.collector.trace.v1.TraceService/Export",
+    "body": {
+      "resourceSpans": [
+        {
+          "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}]},
+          "scopeSpans": [{"spans": [{"traceId": "W47lZ5pQ0xGgrt0rYyLfSw==", "spanId": "AAAAAAAAAAE=", "name": "POST /cart", "kind": "SPAN_KIND_SERVER"}]}]
+        }
+      ]
+    }
+  }
+}

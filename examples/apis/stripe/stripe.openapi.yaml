@@ -1,0 +1,357 @@
+# A hand-written subset of the Stripe API (customers, PaymentIntents, refunds,
+# events), written for Mockingbird's examples and covered by its license.
+# Shapes follow Stripe's published OpenAPI description, which is MIT-licensed:
+#   https://github.com/stripe/openapi (spec3.json)
+# `mockingbird examples init stripe --full` swaps this file for that spec at the
+# commit pinned in example.json.
+openapi: 3.1.0
+info:
+  title: Stripe API (Mockingbird example subset)
+  version: "2024-06-20"
+servers:
+  - url: https://api.stripe.com
+security:
+  - basicAuth: []
+  - bearerAuth: []
+paths:
+  /v1/customers:
+    get:
+      operationId: GetCustomers
+      summary: List customers, newest first.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: email, in: query, schema: { type: string } }
+        - { name: starting_after, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of customers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data, has_more, url]
+                properties:
+                  object: { type: string, const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/customer" } }
+                  has_more: { type: boolean }
+                  url: { type: string, const: /v1/customers }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        default: { $ref: "#/components/responses/error" }
+    post:
+      operationId: PostCustomers
+      summary: Create a customer.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email: { type: string, maxLength: 512 }
+                name: { type: string, maxLength: 256 }
+                description: { type: string }
+                phone: { type: string }
+                metadata: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200":
+          description: The new customer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/customer" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        default: { $ref: "#/components/responses/error" }
+  /v1/customers/{customer}:
+    parameters:
+      - { name: customer, in: path, required: true, schema: { type: string, maxLength: 5000 } }
+    get:
+      operationId: GetCustomersCustomer
+      responses:
+        "200":
+          description: The customer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/customer" }
+        "404": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+    post:
+      operationId: PostCustomersCustomer
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                name: { type: string }
+                description: { type: string }
+                metadata: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200":
+          description: The updated customer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/customer" }
+        default: { $ref: "#/components/responses/error" }
+    delete:
+      operationId: DeleteCustomersCustomer
+      responses:
+        "200":
+          description: The deleted customer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, object, deleted]
+                properties:
+                  id: { type: string }
+                  object: { type: string, const: customer }
+                  deleted: { type: boolean, const: true }
+        default: { $ref: "#/components/responses/error" }
+  /v1/payment_intents:
+    get:
+      operationId: GetPaymentIntents
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: customer, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of PaymentIntents.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data, has_more, url]
+                properties:
+                  object: { type: string, const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/payment_intent" } }
+                  has_more: { type: boolean }
+                  url: { type: string, const: /v1/payment_intents }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        default: { $ref: "#/components/responses/error" }
+    post:
+      operationId: PostPaymentIntents
+      summary: Create a PaymentIntent.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [amount, currency]
+              properties:
+                amount: { type: integer, minimum: 50 }
+                currency: { type: string, minLength: 3, maxLength: 3 }
+                customer: { type: string }
+                description: { type: string }
+                receipt_email: { type: string }
+                confirm: { type: boolean }
+                payment_method: { type: string }
+                payment_method_types: { type: array, items: { type: string } }
+                automatic_payment_methods:
+                  type: object
+                  properties:
+                    enabled: { type: boolean }
+                metadata: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200":
+          description: The new PaymentIntent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/payment_intent" }
+        "402": { $ref: "#/components/responses/card_error" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        default: { $ref: "#/components/responses/error" }
+  /v1/payment_intents/{intent}:
+    parameters:
+      - { name: intent, in: path, required: true, schema: { type: string, maxLength: 5000 } }
+    get:
+      operationId: GetPaymentIntentsIntent
+      responses:
+        "200":
+          description: The PaymentIntent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/payment_intent" }
+        "404": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /v1/payment_intents/{intent}/confirm:
+    parameters:
+      - { name: intent, in: path, required: true, schema: { type: string, maxLength: 5000 } }
+    post:
+      operationId: PostPaymentIntentsIntentConfirm
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                payment_method: { type: string }
+                return_url: { type: string }
+      responses:
+        "200":
+          description: The confirmed PaymentIntent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/payment_intent" }
+        "402": { $ref: "#/components/responses/card_error" }
+        default: { $ref: "#/components/responses/error" }
+  /v1/refunds:
+    post:
+      operationId: PostRefunds
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                payment_intent: { type: string }
+                charge: { type: string }
+                amount: { type: integer }
+                reason: { type: string, enum: [duplicate, fraudulent, requested_by_customer] }
+      responses:
+        "200":
+          description: The new refund.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/refund" }
+        default: { $ref: "#/components/responses/error" }
+webhooks:
+  payment_intent.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/payment_intent_event" }
+      responses:
+        "200": { description: Acknowledged. }
+  customer.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/customer_event" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    basicAuth: { type: http, scheme: basic }
+    bearerAuth: { type: http, scheme: bearer }
+  responses:
+    error:
+      description: An API error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+    card_error:
+      description: The card was declined.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+    rate_limited:
+      description: Too many requests hit the API too quickly.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+  schemas:
+    customer:
+      type: object
+      required: [id, object, created, livemode, email, name, balance, currency, delinquent, metadata, invoice_prefix]
+      properties:
+        id: { type: string, pattern: "^cus_[A-Za-z0-9]{14}$" }
+        object: { type: string, const: customer }
+        created: { type: integer, description: Unix seconds. }
+        livemode: { type: boolean, const: false }
+        email: { type: [string, "null"], format: email }
+        name: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        phone: { type: [string, "null"] }
+        balance: { type: integer }
+        currency: { type: [string, "null"] }
+        delinquent: { type: boolean }
+        invoice_prefix: { type: string, pattern: "^[A-Z0-9]{8}$" }
+        metadata: { type: object, additionalProperties: { type: string } }
+    payment_intent:
+      type: object
+      required: [id, object, amount, amount_received, currency, status, client_secret, created, livemode, capture_method, confirmation_method, payment_method_types, metadata]
+      properties:
+        id: { type: string, pattern: "^pi_[A-Za-z0-9]{24}$" }
+        object: { type: string, const: payment_intent }
+        amount: { type: integer }
+        amount_received: { type: integer }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        customer: { type: [string, "null"] }
+        description: { type: [string, "null"] }
+        receipt_email: { type: [string, "null"] }
+        status:
+          type: string
+          enum: [requires_payment_method, requires_confirmation, requires_action, processing, requires_capture, canceled, succeeded]
+        client_secret: { type: string, pattern: "^pi_[A-Za-z0-9]{24}_secret_[A-Za-z0-9]{24}$" }
+        created: { type: integer }
+        livemode: { type: boolean, const: false }
+        capture_method: { type: string, enum: [automatic, automatic_async, manual] }
+        confirmation_method: { type: string, enum: [automatic, manual] }
+        payment_method: { type: [string, "null"] }
+        payment_method_types: { type: array, items: { type: string } }
+        latest_charge: { type: [string, "null"] }
+        last_payment_error: { oneOf: [{ $ref: "#/components/schemas/api_error" }, { type: "null" }] }
+        metadata: { type: object, additionalProperties: { type: string } }
+    refund:
+      type: object
+      required: [id, object, amount, currency, status, created]
+      properties:
+        id: { type: string, pattern: "^re_[A-Za-z0-9]{24}$" }
+        object: { type: string, const: refund }
+        amount: { type: integer }
+        currency: { type: string }
+        payment_intent: { type: [string, "null"] }
+        charge: { type: [string, "null"] }
+        reason: { type: [string, "null"] }
+        status: { type: string, enum: [pending, requires_action, succeeded, failed, canceled] }
+        created: { type: integer }
+    api_error:
+      type: object
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [api_error, card_error, idempotency_error, invalid_request_error, rate_limit_error] }
+        code: { type: string }
+        decline_code: { type: string }
+        message: { type: string }
+        param: { type: string }
+        doc_url: { type: string }
+        request_log_url: { type: string }
+    error:
+      type: object
+      required: [error]
+      properties:
+        error: { $ref: "#/components/schemas/api_error" }
+    payment_intent_event:
+      type: object
+      required: [id, object, type, created, livemode, api_version, data]
+      properties:
+        id: { type: string, pattern: "^evt_[A-Za-z0-9]{24}$" }
+        object: { type: string, const: event }
+        type: { type: string, const: payment_intent.created }
+        created: { type: integer }
+        livemode: { type: boolean, const: false }
+        api_version: { type: string, const: "2024-06-20" }
+        pending_webhooks: { type: integer }
+        data:
+          type: object
+          required: [object]
+          properties:
+            object: { $ref: "#/components/schemas/payment_intent" }
+    customer_event:
+      type: object
+      required: [id, object, type, created, livemode, api_version, data]
+      properties:
+        id: { type: string, pattern: "^evt_[A-Za-z0-9]{24}$" }
+        object: { type: string, const: event }
+        type: { type: string, const: customer.created }
+        created: { type: integer }
+        livemode: { type: boolean, const: false }
+        api_version: { type: string, const: "2024-06-20" }
+        pending_webhooks: { type: integer }
+        data:
+          type: object
+          required: [object]
+          properties:
+            object: { $ref: "#/components/schemas/customer" }
