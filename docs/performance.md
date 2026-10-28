@@ -61,7 +61,7 @@ Compare runs on the same machine only, with nothing else busy. When you change t
 [`scripts/trial-bench.py`](../scripts/trial-bench.py) measures what an app waits for: it serves the field-trial contracts (GitHub REST and GraphQL, TMDB, Stripe) with `mockingbird serve` and a real provider, sends each case in fresh sessions (no cache), then once more as a repeat, and prints p50, max, sources and per-case checks. It needs the `mockingbird-trials` checkout and `OPENROUTER_API_KEY`:
 
 ```sh
-cargo build --release -p mockingbird
+cargo build --release -p mockingbird-cli
 scripts/trial-bench.py --trials ../mockingbird-trials --runs 5
 ```
 

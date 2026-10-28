@@ -63,7 +63,7 @@ func startServer() (func(), error) {
 		bin = filepath.Join("..", "..", "..", "..", "target", "debug", "mockingbird")
 	}
 	if _, err := os.Stat(bin); err != nil {
-		return nil, fmt.Errorf("no mockingbird binary at %s (build it with `cargo build -p mockingbird` or set MOCKINGBIRD_BIN): %w", bin, err)
+		return nil, fmt.Errorf("no mockingbird binary at %s (build it with `cargo build -p mockingbird-cli` or set MOCKINGBIRD_BIN): %w", bin, err)
 	}
 	dir, err := os.MkdirTemp("", "mb-acc-")
 	if err != nil {

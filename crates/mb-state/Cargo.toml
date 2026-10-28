@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Mockingbird session-scoped state stores (memory, SQLite, Postgres, Redis)"
 
 [lints]
 workspace = true

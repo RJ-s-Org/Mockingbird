@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Mockingbird Contract Model: a protocol-neutral description of an API contract"
 
 [lints]
 workspace = true

@@ -27,11 +27,11 @@ macro_rules! example {
     ($name:literal, [$($file:literal),* $(,)?]) => {
         Example {
             name: $name,
-            meta: include_str!(concat!("../../../examples/apis/", $name, "/example.json")),
+            meta: include_str!(concat!(env!("MB_EXAMPLES_DIR"), "/", $name, "/example.json")),
             files: &[
-                ("mockingbird.yaml", include_str!(concat!("../../../examples/apis/", $name, "/mockingbird.yaml"))),
-                ("README.md", include_str!(concat!("../../../examples/apis/", $name, "/README.md"))),
-                $(($file, include_str!(concat!("../../../examples/apis/", $name, "/", $file))),)*
+                ("mockingbird.yaml", include_str!(concat!(env!("MB_EXAMPLES_DIR"), "/", $name, "/mockingbird.yaml"))),
+                ("README.md", include_str!(concat!(env!("MB_EXAMPLES_DIR"), "/", $name, "/README.md"))),
+                $(($file, include_str!(concat!(env!("MB_EXAMPLES_DIR"), "/", $name, "/", $file))),)*
             ],
         }
     };

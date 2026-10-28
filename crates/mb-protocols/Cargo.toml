@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Mockingbird protocol adapters: REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka, AMQP and MQTT"
 
 [lints]
 workspace = true

@@ -191,7 +191,7 @@ export TF_CLI_CONFIG_FILE=~/.mockingbird.tfrc
 The provider lives in [`integrations/terraform-provider`](../integrations/terraform-provider/README.md), a Go module with no dependency on the Rust workspace. Its acceptance tests start `mockingbird serve --offline` on free ports and drive every resource through real `terraform` (or `tofu`) runs:
 
 ```sh
-cargo build -p mockingbird                      # the server the tests start
+cargo build -p mockingbird-cli                      # the server the tests start
 cd integrations/terraform-provider
 make testacc                                    # Terraform (downloaded if not installed)
 make testacc-tofu                               # OpenTofu

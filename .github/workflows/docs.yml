@@ -95,7 +95,7 @@ jobs:
       - name: Build the site with the Admin API reference
         run: |
           mdbook build
-          cargo run -q --locked -p mockingbird -- openapi > target/book/api/admin-openapi.json
+          cargo run -q --locked -p mockingbird-cli -- openapi > target/book/api/admin-openapi.json
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:

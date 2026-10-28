@@ -41,7 +41,7 @@ RUN for manifest in crates/*/Cargo.toml; do \
           | while read -r name; do touch "$dir/tests/$name.rs"; done; \
     done \
  && echo 'fn main() {}' > crates/mockingbird/src/main.rs \
- && cargo build --release --locked -p mockingbird $FEATURES \
+ && cargo build --release --locked -p mockingbird-cli $FEATURES \
  && rm -rf crates
 COPY crates crates
 # The agent skills the binary embeds (`mockingbird agent`, the MCP server).
@@ -52,7 +52,7 @@ COPY --from=console /src/crates/mb-console/dist crates/mb-console/dist
 # COPY keeps the context's timestamps, which can be older than the stub
 # build; touch the sources so Cargo rebuilds the workspace crates.
 RUN find crates -name '*.rs' -exec touch {} + \
- && cargo build --release --locked -p mockingbird $FEATURES \
+ && cargo build --release --locked -p mockingbird-cli $FEATURES \
  && mkdir -p "/runtime/lib/$(gcc -print-multiarch)" \
  && cp "$(gcc -print-file-name=libgcc_s.so.1)" "/runtime/lib/$(gcc -print-multiarch)/"
 

@@ -24,7 +24,7 @@ export default defineConfig({
   ],
   webServer: {
     command:
-      "cargo run -q --manifest-path ../../../Cargo.toml -p mockingbird -- serve -c e2e/mockingbird.e2e.yaml --offline",
+      "cargo run -q --manifest-path ../../../Cargo.toml -p mockingbird-cli -- serve -c e2e/mockingbird.e2e.yaml --offline",
     url: `${baseURL}/readyz`,
     timeout: 600_000,
     reuseExistingServer: !process.env.CI,

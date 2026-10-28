@@ -20,7 +20,7 @@ async-trait.workspace = true
 clap.workspace = true
 dashmap.workspace = true
 mb-ext.workspace = true
-mockingbird = { path = "../../crates/mockingbird" }
+mockingbird = { package = "mockingbird-cli", path = "../../crates/mockingbird" }
 tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
