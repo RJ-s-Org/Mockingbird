@@ -28,12 +28,8 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
 
 ### From the proxy trials (2026-10-28)
 
-- **Huge response schemas time out.** GitHub REST `GET /search/commits` falls back to faker after 60 s every time. A fallback answer is not cached either, so the identical repeat waits another 60 s. Cache fallbacks under consistency (or fail fast on a repeat), and generate fewer, shorter items for list/search envelopes.
-- **Large TMDB detail answers are still slow:** 17–37 s pages, about 5k completion tokens per call. Candidates: stream the answer, trim `append_to_response` sub-objects to the requested ones, or cache per resource across sessions.
-- GraphQL queries with several root fields (pin cards) still skip state, cache and seeding, and are logged once per root field (accepted deviation of [#41](https://github.com/RJ-s-Org/Mockingbird/pull/41)).
 - `storage.url: sqlite://./…` is relative to the working directory, while `contract:` paths are relative to the config file, so `mockingbird run -c elsewhere/mockingbird.yaml` opens a different database than `cd elsewhere && mockingbird run`. Resolve relative SQLite paths against the config's directory (a behaviour change; needs a decision).
 - Go on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux and OpenSSL Rubies work. A per-runtime preload (as for Node.js) or a documented opt-in keychain install would close it.
-- Persona details are not always kept: a few Stripe `client_secret` suffixes were shorter than the 24 characters the persona asks for.
 
 ### From the examples catalog (2026-10-28)
 
@@ -97,6 +93,12 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 
 ## Done
 
+- Launch L1, engine speed and fidelity, [#57](https://github.com/RJ-s-Org/Mockingbird/pull/57) (numbers: [performance](performance.md#latency-against-a-real-llm)):
+  - huge response schemas: an output budget (`limits.output_budget_tokens`, 1500) shapes what the LLM writes (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker), and OpenRouter requests send `reasoning: {enabled: false}`; GitHub `search/commits` p50 29.8 s → 9.4 s with no fallback, and a fallback answer is now cached under consistency (the repeat is answered at once and still reported as a fallback);
+  - large TMDB details: movie detail with every `append_to_response` part p50 51 s → 6.2 s (about 5–8k completion tokens, mostly hidden reasoning, down to ~1k);
+  - persona formats: templates (`client_secret = "<id>_secret_<24 random chars>"`) and id prefixes (`(pi_, cus_) followed by 24 random alphanumeric chars`) are checked and patched after generation; Stripe `client_secret` format 2/3 → 5/5;
+  - GraphQL queries with several root fields read state, the cache and stored resources per field, seed and cache per field, and are logged as one request (each field is still metered);
+  - `scripts/trial-bench.py`: a repeatable latency bench over the trial contracts.
 - Phase 1, [#31](https://github.com/RJ-s-Org/Mockingbird/pull/31):
   - the MCP server imports keys from the login shell;
   - `doctor` names the process that lacks a key, and `start_server` refuses a profile whose key is missing;

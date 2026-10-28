@@ -257,8 +257,9 @@ async fn admit_request(
     Err(resp)
 }
 
-/// Runs `request`, then sleeps the largest injected latency of its root
-/// fields (they have all been reported by then) and answers `200` JSON.
+/// Runs `request`, records it (one request-log entry for all its root
+/// fields; each is metered on its own), then sleeps the largest injected
+/// latency of its root fields and answers `200` JSON.
 async fn execute(
     st: &GraphqlState,
     request: Request,
@@ -274,7 +275,11 @@ async fn execute(
         admitted,
     ));
     let mut response = st.schema.execute(request.data(Arc::clone(&call))).await;
-    let collected = call.collected();
+    let mut collected = call.collected();
+    let reports = std::mem::take(&mut collected.reports);
+    if let Some(record) = resolve::merged_record(reports, || serde_json::to_value(&response).ok()) {
+        call::record_request(&st.rt, record);
+    }
     let fallback_reason = collected
         .fallback_reasons
         .values()

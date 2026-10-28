@@ -402,3 +402,92 @@ async fn merges_extra_body_under_its_own_fields() {
     assert_eq!(body["provider"]["order"][0], "atlas-cloud");
     assert_eq!(body["model"], "m", "the client's own fields win");
 }
+
+#[tokio::test]
+async fn reasoning_off_is_sent_unless_extra_body_sets_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, false).reasoning_off(true);
+    c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        wire_body(&server).await["reasoning"],
+        json!({"enabled": false})
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = OpenAiCompatible::new(OpenAiConfig {
+        base_url: server.uri(),
+        api_key: None,
+        model: "m".into(),
+        json_schema: false,
+        headers: Vec::new(),
+        extra_body: json!({"reasoning": {"effort": "high"}})
+            .as_object()
+            .unwrap()
+            .clone(),
+        http: HttpOptions::default(),
+    })
+    .unwrap()
+    .reasoning_off(true);
+    c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        wire_body(&server).await["reasoning"],
+        json!({"effort": "high"})
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_reasoning_switch_is_dropped() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v.get("reasoning").is_some()
+        })
+        .respond_with(
+            ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"Reasoning is mandatory for this endpoint"}}"#,
+            ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, false).reasoning_off(true);
+    for _ in 0..2 {
+        let resp = c
+            .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "{\"a\":1}");
+    }
+    // Rejected once, then never sent again.
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn other_endpoints_get_no_reasoning_switch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    client(&server, false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert!(wire_body(&server).await.get("reasoning").is_none());
+}

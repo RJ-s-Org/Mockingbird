@@ -64,6 +64,9 @@ pub(crate) struct HttpCall {
     /// (admission runs before the key check); root fields are then not
     /// admitted again.
     admitted: Option<Tenancy>,
+    /// Whether the root fields are recorded as one request (an HTTP
+    /// request) rather than one each (WebSocket operations).
+    one_record: bool,
     collected: Mutex<Collected>,
     /// The query's shared LLM call, set up by the first root resolver.
     pub(crate) batch: std::sync::OnceLock<Option<Arc<super::batch::Batch>>>,
@@ -80,6 +83,9 @@ pub(crate) struct Collected {
     pub fallback_reasons: Map<String, Value>,
     /// The largest injected latency among the root fields.
     pub delay: Option<Duration>,
+    /// Over HTTP, each root field's report (by response key), recorded as
+    /// one request once execution is done.
+    pub reports: Vec<(String, Report)>,
 }
 
 impl HttpCall {
@@ -97,6 +103,7 @@ impl HttpCall {
             method,
             variables,
             admitted,
+            one_record: true,
             collected: Mutex::new(Collected::default()),
             batch: std::sync::OnceLock::new(),
         }
@@ -116,6 +123,7 @@ impl HttpCall {
             auth_headers: Some(auth_headers),
             query,
             key_verified,
+            one_record: false,
             ..Self::new(headers, "GET".into(), variables, None)
         }
     }
@@ -144,6 +152,16 @@ impl HttpCall {
         c.sources.insert(key, json!(source.as_str()));
         c.worst = Some(c.worst.map_or(source, |w| w.worst(source)));
     }
+}
+
+/// How a root field that will generate gets its answer.
+enum Route<'a, 'b> {
+    /// With the query's other root fields, in one LLM call.
+    Join(&'b super::batch::Batch, call::Pending<'a>),
+    /// Without generating: an unknown id, a stored resource, a cached answer.
+    Answered(mb_engine::GeneratedResponse),
+    /// On its own.
+    Alone,
 }
 
 /// A root field failure: the HTTP status it stands for and the field error.
@@ -385,45 +403,69 @@ async fn generate_in(
                         && plan.scenario.is_none()
                         && selection.aliased();
                     let mut stored = None;
-                    let joined = match batch.take() {
-                        Some(b) => {
-                            let (target, related) = call::read_state(rt, &plan, &call).await;
-                            if rekeys_target {
-                                stored = target.as_ref().map(|t| t.data.clone());
+                    let engine_failure = |e: EngineError| match e {
+                        EngineError::UndeclaredStatus(code) => Failure::new(
+                            400,
+                            format!("operation {} declares no response for status {code}", op.id),
+                        ),
+                        e => Failure::new(500, e.to_string()),
+                    };
+                    // A root field of a batch reads its state, cache and
+                    // stored resource like any call; only what is left to
+                    // generate joins the shared LLM call, and its answer
+                    // is seeded and cached per field.
+                    let route = match batch.take() {
+                        Some(b) => match call::prepare(rt, &plan, &call, narrowed.as_ref()).await {
+                            call::Prepared::Answered(answer) => {
+                                // Not generating: give up the batch place.
+                                *batch = Some(b);
+                                Route::Answered(answer)
                             }
+                            call::Prepared::Pending(pending) => Route::Join(b, pending),
+                        },
+                        None => Route::Alone,
+                    };
+                    if rekeys_target {
+                        stored = match &route {
+                            Route::Join(_, pending) => {
+                                pending.target.as_ref().map(|t| t.data.clone())
+                            }
+                            _ => call::read_state(rt, &plan, &call).await.0.map(|t| t.data),
+                        };
+                    }
+                    let generated = match route {
+                        Route::Join(b, pending) => {
                             let part = super::batch::Part {
                                 key: key.clone(),
                                 op_id: op.id.clone(),
                                 call: call.clone(),
                                 schema: narrowed.clone(),
-                                target,
-                                related,
+                                target: pending.target.clone(),
+                                related: pending.related.clone(),
                                 scenario: plan.scenario.map(|s| s.spec.clone()),
                             };
-                            b.join(rt, part).await
-                        }
-                        None => {
-                            if rekeys_target {
-                                let (target, _) = call::read_state(rt, &plan, &call).await;
-                                stored = target.map(|t| t.data);
+                            match b.join(rt, part).await {
+                                Some(Ok(joined)) => {
+                                    Ok(call::complete(rt, &plan, &call, pending, joined).await)
+                                }
+                                Some(Err(reason)) => Err(Failure::new(500, reason)),
+                                None => call::generate_pending(
+                                    rt,
+                                    &plan,
+                                    &call,
+                                    pending,
+                                    narrowed.as_ref(),
+                                )
+                                .await
+                                .map_err(engine_failure),
                             }
-                            None
                         }
-                    };
-                    let generated = match joined {
-                        Some(joined) => joined.map_err(|reason| Failure::new(500, reason)),
-                        None => call::generate_narrowed(rt, &plan, &call, narrowed.as_ref())
-                            .await
-                            .map_err(|e| match e {
-                                EngineError::UndeclaredStatus(code) => Failure::new(
-                                    400,
-                                    format!(
-                                        "operation {} declares no response for status {code}",
-                                        op.id
-                                    ),
-                                ),
-                                e => Failure::new(500, e.to_string()),
-                            }),
+                        Route::Answered(answer) => Ok(answer),
+                        Route::Alone => {
+                            call::generate_narrowed(rt, &plan, &call, narrowed.as_ref())
+                                .await
+                                .map_err(engine_failure)
+                        }
                     };
                     generated.map(|generated| {
                         report.usage = generated.usage;
@@ -447,6 +489,7 @@ async fn generate_in(
     };
 
     let span = tracing::Span::current();
+    let record_key = key.clone();
     match &outcome {
         Ok(body) => {
             if let Some(source) = report.source {
@@ -470,8 +513,64 @@ async fn generate_in(
     span.record("status", report.status);
     http.add_delay(delay);
     report.latency = started.elapsed() + delay.unwrap_or_default();
-    call::report(rt, &http.headers, report).await;
+    if http.one_record {
+        call::report_usage(rt, &http.headers, report.clone()).await;
+        http.lock().reports.push((record_key, report));
+    } else {
+        call::report(rt, &http.headers, report).await;
+    }
     outcome.map_err(|f| f.error)
+}
+
+/// The one request-log record of an HTTP request's root fields: a single
+/// field's own; for several, their operations (comma-separated, by
+/// response key), the highest status, the worst source, the summed tokens,
+/// the longest latency, `request.args` keyed by response key and the whole
+/// GraphQL `response`.
+pub(crate) fn merged_record(
+    mut reports: Vec<(String, Report)>,
+    response: impl FnOnce() -> Option<Value>,
+) -> Option<Report> {
+    if reports.len() <= 1 {
+        return reports.pop().map(|(_, r)| r);
+    }
+    reports.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut args = Map::new();
+    let mut operations: Vec<String> = Vec::new();
+    let (_, first) = reports.first()?;
+    let mut merged = first.clone();
+    merged.source = None;
+    merged.fallback_reason = None;
+    merged.usage = Default::default();
+    for (key, r) in &reports {
+        if let Some(op) = &r.operation_id
+            && !operations.contains(op)
+        {
+            operations.push(op.clone());
+        }
+        args.insert(
+            key.clone(),
+            r.request.get("args").cloned().unwrap_or(Value::Null),
+        );
+        merged.status = merged.status.max(r.status);
+        merged.source = match (merged.source, r.source) {
+            (Some(a), Some(b)) => Some(a.worst(b)),
+            (a, b) => a.or(b),
+        };
+        if merged.fallback_reason.is_none() {
+            merged.fallback_reason = r.fallback_reason.clone();
+        }
+        merged.usage = merged.usage + r.usage;
+        merged.latency = merged.latency.max(r.latency);
+    }
+    merged.operation_id = Some(operations.join(","));
+    if let Value::Object(request) = &mut merged.request {
+        request.insert("args".into(), Value::Object(args));
+    }
+    if merged.response.is_some() {
+        merged.response = response();
+    }
+    Some(merged)
 }
 
 pub(crate) fn forced_message(status: u16) -> String {

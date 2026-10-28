@@ -21,6 +21,7 @@ fn answer(n: i64) -> CachedResponse {
         status: 200,
         content_type: None,
         body: Some(json!({"n": n})),
+        fallback_reason: None,
     }
 }
 

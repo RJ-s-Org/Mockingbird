@@ -17,7 +17,7 @@ use mb_engine::{
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
 use mb_mcm::{Binding, Effect, Operation, OperationKind, Protocol};
-use mb_state::{CachedResponse, ChangeKind, SessionKey, StateError, StoredResource};
+use mb_state::{CacheEpoch, CachedResponse, ChangeKind, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::Instrument;
@@ -635,6 +635,59 @@ pub(crate) async fn generate_narrowed(
     call: &OperationCall,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
+    match prepare(rt, plan, call, response_schema).await {
+        Prepared::Answered(answer) => Ok(answer),
+        Prepared::Pending(pending) => {
+            generate_pending(rt, plan, call, pending, response_schema).await
+        }
+    }
+}
+
+/// Generates the answer of a [`prepare`]d call, then [`complete`]s it.
+pub(crate) async fn generate_pending(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    pending: Pending<'_>,
+    response_schema: Option<&Value>,
+) -> Result<GeneratedResponse, EngineError> {
+    let ctx = GenerationContext {
+        related: &pending.related,
+        target: pending.target.as_ref(),
+        forced_status: plan.forced_status,
+        scenario: plan.scenario.map(|s| &s.spec),
+        response_schema,
+    };
+    let generated = rt.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    Ok(complete(rt, plan, call, pending, generated).await)
+}
+
+/// What [`prepare`] found: an answer that needs no generation, or the
+/// state a generation must take into account.
+pub(crate) enum Prepared<'a> {
+    Answered(GeneratedResponse),
+    Pending(Pending<'a>),
+}
+
+/// A call to generate, then hand to [`complete`].
+pub(crate) struct Pending<'a> {
+    state: StateAccess<'a>,
+    target_id: Option<String>,
+    pub(crate) target: Option<StoredResource>,
+    pub(crate) related: Vec<StoredResource>,
+    /// The cache epoch before any state was read, and the answer's key,
+    /// when the answer is cached.
+    cache: Option<(CacheEpoch, String)>,
+}
+
+/// Reads the call's state and answers what needs no generation: an unknown
+/// id (404), a stored resource, a cached answer.
+pub(crate) async fn prepare<'a>(
+    rt: &'a MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
+) -> Prepared<'a> {
     let op = plan.op;
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
@@ -657,7 +710,7 @@ pub(crate) async fn generate_narrowed(
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Ok(rt.engine.not_found(&rt.bundle, op, call, &detail));
+        return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
     }
 
     if matches!(op.kind, OperationKind::Query)
@@ -668,7 +721,7 @@ pub(crate) async fn generate_narrowed(
             .serve_stored(&rt.bundle, op, &stored.data, response_schema)
     {
         state.touch(session).instrument(state_span()).await;
-        return Ok(served);
+        return Prepared::Answered(served);
     }
 
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -686,29 +739,57 @@ pub(crate) async fn generate_narrowed(
     if let (Some(cache), Some(key)) = (cache, &key)
         && let Some(hit) = cache.get(session, key)
     {
+        // A repeat of a fallback is answered at once, and still told apart.
+        let (source, fallback_reason) = match hit.fallback_reason {
+            Some(reason) => (
+                Source::Fallback,
+                Some(format!("repeat of an earlier fallback: {reason}")),
+            ),
+            None => (Source::Cache, None),
+        };
         let served = GeneratedResponse {
             status: hit.status,
             content_type: hit.content_type,
             body: hit.body,
-            source: Source::Cache,
+            source,
             usage: Usage::default(),
-            fallback_reason: None,
+            fallback_reason,
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
         state.touch(session).instrument(state_span()).await;
-        return Ok(served);
+        return Prepared::Answered(served);
     }
 
-    let ctx = GenerationContext {
-        related: &related,
-        target: target.as_ref(),
-        forced_status: plan.forced_status,
-        scenario: plan.scenario.map(|s| &s.spec),
-        response_schema,
-    };
-    let mut generated = rt.engine.generate(&rt.bundle, op, call, ctx).await?;
+    Prepared::Pending(Pending {
+        state,
+        target_id,
+        target,
+        related,
+        cache: since.zip(key),
+    })
+}
 
+/// Writes a generated answer's state (a 2xx command's resource, a list
+/// read's seeded items), keeps the session alive, sends webhooks and caches
+/// a read's answer.
+pub(crate) async fn complete(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    pending: Pending<'_>,
+    mut generated: GeneratedResponse,
+) -> GeneratedResponse {
+    let Pending {
+        mut state,
+        target_id,
+        cache,
+        ..
+    } = pending;
+    let op = plan.op;
+    let session = &plan.session;
+    let resource_type = op.resource_type.as_deref();
+    let is_query = matches!(op.kind, OperationKind::Query);
     let writes = async {
         let mut writes = Vec::new();
         if (200..300).contains(&generated.status)
@@ -717,7 +798,12 @@ pub(crate) async fn generate_narrowed(
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
             }
-            let seeding = is_query && rt.consistency && target_id.is_none();
+            // A faker list standing in for a failed LLM call seeds nothing,
+            // or its items would join the session's later LLM lists.
+            let seeding = is_query
+                && rt.consistency
+                && target_id.is_none()
+                && !transient_fallback(&generated);
             if !is_query || seeding {
                 let origin = if is_query {
                     WriteOrigin::Seeded
@@ -747,11 +833,12 @@ pub(crate) async fn generate_narrowed(
     crate::webhooks::emit::emit(rt, op, call, &generated, target_id.as_deref(), session);
 
     // Seeded first, then cached: a later list never clears a cached one.
-    if let (Some(cache), Some(key), Some(since)) = (cache, key, since)
+    // A fallback is cached too: a schema the LLM cannot answer in time
+    // would otherwise make every identical repeat wait as long again.
+    if let (Some(response_cache), Some((since, key))) = (rt.state.response_cache(), cache)
         && (200..300).contains(&generated.status)
-        && !transient_fallback(&generated)
     {
-        cache.put_if_current(
+        response_cache.put_if_current(
             session,
             key,
             resource_type,
@@ -759,15 +846,18 @@ pub(crate) async fn generate_narrowed(
                 status: generated.status,
                 content_type: generated.content_type.clone(),
                 body: generated.body.clone(),
+                fallback_reason: transient_fallback(&generated)
+                    .then(|| generated.fallback_reason.clone())
+                    .flatten(),
             },
             since,
         );
     }
-    Ok(generated)
+    generated
 }
 
-/// A faker answer standing in for a failed LLM call: not worth repeating.
-/// An offline mock's answers are its real ones.
+/// A faker answer standing in for a failed LLM call (an offline mock's
+/// answers are its real ones).
 fn transient_fallback(generated: &GeneratedResponse) -> bool {
     generated.source == Source::Fallback
         && generated
@@ -977,6 +1067,7 @@ struct Feed {
 
 /// One served call, as reported to the usage sink and the request
 /// recorder.
+#[derive(Clone)]
 pub(crate) struct Report {
     /// `None` when no operation matched.
     pub operation_id: Option<String>,
@@ -1006,19 +1097,41 @@ pub(crate) struct Report {
 /// Report a served call to the usage sink and the request recorder. Calls
 /// that never reached admission are still attributed to a tenant.
 pub(crate) async fn report(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
-    report_with(rt, headers, r, true).await;
+    report_with(rt, headers, r, true, true).await;
+}
+
+/// [`report`] to the usage sink only: the call is recorded as part of a
+/// larger request (see [`record_request`]).
+#[cfg(feature = "graphql")]
+pub(crate) async fn report_usage(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
+    report_with(rt, headers, r, true, false).await;
+}
+
+/// Hands one request, whose calls were metered on their own, to the
+/// request recorder.
+#[cfg(feature = "graphql")]
+pub(crate) fn record_request(rt: &MockRuntime, r: Report) {
+    record(rt, r);
 }
 
 /// [`report`] to the request recorder only: the call's usage was already
 /// recorded item by item (see [`meter`]).
 #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
 pub(crate) async fn report_unmetered(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
-    report_with(rt, headers, r, false).await;
+    report_with(rt, headers, r, false, true).await;
 }
 
-async fn report_with(rt: &MockRuntime, headers: &HeaderMap, mut r: Report, metered: bool) {
+async fn report_with(
+    rt: &MockRuntime,
+    headers: &HeaderMap,
+    mut r: Report,
+    metered: bool,
+    recorded: bool,
+) {
     if !metered {
-        record(rt, r);
+        if recorded {
+            record(rt, r);
+        }
         return;
     }
     let operation_id = r.operation_id.clone().unwrap_or_default();
@@ -1042,7 +1155,9 @@ async fn report_with(rt: &MockRuntime, headers: &HeaderMap, mut r: Report, meter
         event.completion_tokens = r.usage.completion_tokens;
         rt.ext.usage.record(&event);
     }
-    record(rt, r);
+    if recorded {
+        record(rt, r);
+    }
 }
 
 /// Hands one call to the request recorder, when one is set.

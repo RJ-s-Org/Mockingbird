@@ -672,6 +672,22 @@ async fn array_wrapped_in_an_object_is_unwrapped() {
     assert_eq!(provider.requests().len(), 1, "no repair call");
 }
 
+/// Asked for a list, models sometimes answer one item: it is the list's
+/// only item, not a reason to repair.
+#[tokio::test]
+async fn a_single_item_for_a_list_is_wrapped() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(json!([valid_order()])));
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+}
+
 #[tokio::test]
 async fn fallback_records_its_reason() {
     let bundle = orders();

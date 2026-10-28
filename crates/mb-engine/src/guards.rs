@@ -145,8 +145,14 @@ impl Engine {
         }
     }
 
-    /// Parse LLM output, enforce the size cap, scrub PII, then validate.
-    pub(crate) fn check_output(&self, validator: &SchemaValidator, text: &str) -> Checked {
+    /// Parse LLM output, enforce the size cap, scrub PII, fill what the
+    /// output budget left out (see [`crate::budget`]), then validate.
+    pub(crate) fn check_output(
+        &self,
+        validator: &SchemaValidator,
+        text: &str,
+        fill: Option<&Fill<'_>>,
+    ) -> Checked {
         let Some(mut value) = crate::extract_json(text) else {
             return Checked::Invalid(vec!["output is not valid JSON".to_string()]);
         };
@@ -163,6 +169,11 @@ impl Engine {
                 metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)
                     .increment(n as u64);
             }
+        }
+        if let Some(fill) = fill
+            && let Some(filled) = self.fill(validator, &value, fill)
+        {
+            value = filled;
         }
         match self.check_value(validator, value) {
             Checked::Valid(v) => match validator.truncate_runaway(&v) {
@@ -182,7 +193,9 @@ impl Engine {
     fn check_value(&self, validator: &SchemaValidator, value: Value) -> Checked {
         match validator.validate(&value) {
             Ok(()) => Checked::Valid(value),
-            Err(errors) => match unwrap_envelope(validator, &value) {
+            Err(errors) => match unwrap_envelope(validator, &value)
+                .or_else(|| wrap_single_item(validator, &value))
+            {
                 Some(inner) => Checked::Valid(inner),
                 None => match self.patch(validator, &value) {
                     Some(patched) => {
@@ -196,12 +209,43 @@ impl Engine {
     }
 }
 
+/// What an answer shaped to the output budget needs filled.
+pub(crate) struct Fill<'a> {
+    pub shaped: &'a crate::budget::Shaped,
+    pub hints: &'a crate::FakerHints,
+}
+
 impl Engine {
+    /// `value` with the required members the output budget left out filled
+    /// by the faker from the full schema; `None` when nothing was missing.
+    fn fill(&self, validator: &SchemaValidator, value: &Value, fill: &Fill<'_>) -> Option<Value> {
+        if !fill.shaped.fills_any() {
+            return None;
+        }
+        let faker = crate::Faker::new(self.config.faker_depth).with_hints(fill.hints.clone());
+        let mut rng = rand::rng();
+        validator.fill_required(
+            value,
+            |location, property| fill.shaped.fills(location, property),
+            |schema| faker.fake(schema, &mut rng),
+        )
+    }
+
     fn patch(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
         let mut rng = rand::rng();
         validator.patch(value, |schema| faker.fake(schema, &mut rng))
     }
+}
+
+/// `[value]` when that is valid: asked for a list (a top-level array),
+/// models sometimes answer with its one item.
+fn wrap_single_item(validator: &SchemaValidator, value: &Value) -> Option<Value> {
+    if !value.is_object() {
+        return None;
+    }
+    let wrapped = Value::Array(vec![value.clone()]);
+    validator.validate(&wrapped).is_ok().then_some(wrapped)
 }
 
 /// The value inside one or two nested one-key objects, when it is valid and

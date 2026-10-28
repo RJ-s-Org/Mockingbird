@@ -326,7 +326,7 @@ impl StreamState {
     /// A candidate line as an item: valid → `Llm`; otherwise one repair
     /// call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
-        let errors = match self.engine.check_output(&self.validator, line) {
+        let errors = match self.engine.check_output(&self.validator, line, None) {
             Checked::Valid(value) => return (value, Source::Llm),
             Checked::Patched(value) => return (value, Source::Repaired),
             Checked::Rejected(reason) => {
@@ -398,7 +398,7 @@ impl StreamState {
             Ok(Err(e)) => return Err(e.to_string()),
             Err(_) => return Err("LLM repair timed out".into()),
         };
-        match engine.check_output(&self.validator, &text) {
+        match engine.check_output(&self.validator, &text, None) {
             Checked::Valid(value) | Checked::Patched(value) => Ok(value),
             Checked::Rejected(reason) => Err(reason),
             Checked::Invalid(errors) => Err(errors.join("; ")),

@@ -229,6 +229,9 @@ pub struct LimitsConfig {
     pub max_request_bytes: u64,
     /// Largest response body generated, in bytes.
     pub max_response_bytes: u64,
+    /// Completion tokens the LLM is asked to write per answer: a larger
+    /// response is generated shorter and completed by the faker (0: off).
+    pub output_budget_tokens: u32,
 }
 
 impl Default for LimitsConfig {
@@ -237,6 +240,7 @@ impl Default for LimitsConfig {
             max_concurrent_generations: 64,
             max_request_bytes: 1_048_576,
             max_response_bytes: 1_048_576,
+            output_budget_tokens: mb_engine::budget::DEFAULT_OUTPUT_BUDGET,
         }
     }
 }
@@ -337,6 +341,10 @@ fn serialize_custom_patterns<S: serde::Serializer>(
 
 /// Accepted `import.workers`.
 pub const IMPORT_WORKERS: std::ops::RangeInclusive<usize> = 1..=16;
+
+/// Accepted `limits.output_budget_tokens` other than 0 (off).
+const MIN_OUTPUT_BUDGET: u32 = 100;
+const MAX_OUTPUT_BUDGET: u32 = 100_000;
 
 /// Smallest accepted `import.max_tokens`.
 pub const MIN_IMPORT_TOKENS: u64 = 1000;
@@ -1499,7 +1507,15 @@ impl FileConfig {
             "limits.max_response_bytes",
             l.max_response_bytes,
             MockLimits::MIN_BYTES..=MockLimits::MAX_RESPONSE_BYTES,
-        )
+        )?;
+        if l.output_budget_tokens != 0 {
+            in_range(
+                "limits.output_budget_tokens",
+                l.output_budget_tokens,
+                MIN_OUTPUT_BUDGET..=MAX_OUTPUT_BUDGET,
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_protocols(&self) -> Result<(), String> {
