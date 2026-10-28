@@ -154,8 +154,8 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles` | map | `{}` | | | LLM profiles by name. The `MB_LLM_*` variables configure the profile named `default`. |
 | `llm.profiles.<name>` | section | | | | One profile. |
 | `llm.profiles.<name>.workspace` | string | `default` | | | Workspace the profile belongs to (created if missing). |
-| `llm.profiles.<name>.base_url` | URL | required | | `MB_LLM_BASE_URL` (default `https://api.deepseek.com`) | OpenAI-compatible base URL. |
-| `llm.profiles.<name>.model` | string | required | | `MB_LLM_MODEL` (default `deepseek-chat`) | Model name. |
+| `llm.profiles.<name>.base_url` | URL | required | | `MB_LLM_BASE_URL` (default `https://openrouter.ai/api/v1`) | OpenAI-compatible base URL. |
+| `llm.profiles.<name>.model` | string | required | | `MB_LLM_MODEL` (default `deepseek/deepseek-v4.1-flash`, DeepSeek V4.1 Flash on OpenRouter) | Model name. |
 | `llm.profiles.<name>.api_key` | secret reference | unset | | `MB_LLM_API_KEY` (stored as `env:MB_LLM_API_KEY`) | Provider API key. |
 | `llm.profiles.<name>.json_schema` | bool | `false` | | `MB_LLM_JSON_SCHEMA` | Request JSON Schema structured output instead of JSON mode. |
 | `llm.profiles.<name>.timeout` | duration | `60s` | | `--llm-timeout` (profile `default`) | Time before the call falls back to the faker. |

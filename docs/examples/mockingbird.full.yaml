@@ -58,7 +58,7 @@ pii:
 import:
   workers: 2
   max_tokens: 200000
-  llm_profile: deepseek
+  llm_profile: openrouter
   url_allowlist: [docs.internal, "*.corp.example", 10.20.0.0/16]
   max_active_jobs_per_mock: 10
 
@@ -83,13 +83,13 @@ audit:
   webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET
 
 llm:
-  default_profile: deepseek
+  default_profile: openrouter
   profiles:
-    deepseek:
+    openrouter:
       workspace: default
-      base_url: https://api.deepseek.com
-      model: deepseek-chat
-      api_key: env:DEEPSEEK_API_KEY
+      base_url: https://openrouter.ai/api/v1
+      model: deepseek/deepseek-v4.1-flash
+      api_key: env:OPENROUTER_API_KEY
       json_schema: false
       timeout: 60s
       temperature: 0.7
@@ -109,7 +109,7 @@ llm:
       timeout: 10s
       temperature: 0.2
       max_tokens: 1024
-      fallback: deepseek
+      fallback: openrouter
       headers:
         x-api-gateway-key: ${env:GATEWAY_API_KEY}
 
@@ -161,7 +161,7 @@ mocks:
     route_prefix: /orders-api
     hosts: [orders.example.test]
     persona: A small online shop selling hiking gear.
-    llm_profile: deepseek
+    llm_profile: openrouter
     header_overrides: true
     consistency: on
     unknown_ids: generate

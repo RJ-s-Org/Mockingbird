@@ -124,12 +124,12 @@ fn loads_full_example_config() {
     assert_eq!(cfg.storage.state_url.as_deref(), Some("memory"));
     assert_eq!(cfg.storage.session_ttl, Duration::from_secs(24 * 3600));
 
-    assert_eq!(cfg.llm.default_profile.as_deref(), Some("deepseek"));
+    assert_eq!(cfg.llm.default_profile.as_deref(), Some("openrouter"));
     assert_eq!(cfg.llm.profiles.len(), 2);
-    let p = &cfg.llm.profiles["deepseek"];
-    assert_eq!(p.base_url, "https://api.deepseek.com");
-    assert_eq!(p.model, "deepseek-chat");
-    assert_eq!(p.api_key.as_deref(), Some("env:DEEPSEEK_API_KEY"));
+    let p = &cfg.llm.profiles["openrouter"];
+    assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
+    assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
+    assert_eq!(p.api_key.as_deref(), Some("env:OPENROUTER_API_KEY"));
     assert!(!p.json_schema);
     assert_eq!(p.timeout, Duration::from_secs(3));
     assert!((p.temperature - 0.7).abs() < f32::EPSILON);
@@ -159,7 +159,7 @@ fn loads_full_example_config() {
     assert!(m.contract.exists(), "{}", m.contract.display());
     assert_eq!(m.route_prefix.as_deref(), Some("/orders-api"));
     assert!(m.persona.as_deref().unwrap().contains("hiking"));
-    assert_eq!(m.llm_profile.as_deref(), Some("deepseek"));
+    assert_eq!(m.llm_profile.as_deref(), Some("openrouter"));
     assert!(m.header_overrides);
     let s = &m.scenarios["out-of-stock"];
     assert_eq!(s.status, Some(400));
@@ -549,7 +549,7 @@ fn env_llm_vars_create_default_profile() {
     .unwrap();
     let p = &cfg.llm.profiles["default"];
     assert_eq!(p.base_url, "http://env");
-    assert_eq!(p.model, "deepseek-chat");
+    assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
     assert_eq!(cfg.llm.default_profile.as_deref(), Some("default"));
 }
 
@@ -1329,9 +1329,9 @@ async fn zero_config_prefixes_use_sanitized_names() {
 
 const RENAMED_DEFAULT: &str = r#"
 llm:
-  default_profile: deepseek
+  default_profile: openrouter
   profiles:
-    deepseek:
+    openrouter:
       base_url: http://127.0.0.1:1
       model: m
 mocks:
@@ -1362,14 +1362,14 @@ async fn watch_reload_changes_default_profile() {
     assert_eq!(mounted(&app), ["orders"]);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    ws.write(&RENAMED_DEFAULT.replace("deepseek", "ds"));
+    ws.write(&RENAMED_DEFAULT.replace("openrouter", "ds"));
 
     let http = reqwest::Client::new();
     let admin = &app.admin;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let old = http
-            .get(format!("{admin}/api/v1/llm-profiles/deepseek"))
+            .get(format!("{admin}/api/v1/llm-profiles/openrouter"))
             .send()
             .await
             .unwrap()

@@ -38,6 +38,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Changed
 
+- The default LLM is OpenRouter: `MB_LLM_BASE_URL` defaults to `https://openrouter.ai/api/v1` and `MB_LLM_MODEL` to `deepseek/deepseek-v4.1-flash` (DeepSeek V4.1 Flash), so `MB_LLM_API_KEY` is an OpenRouter key. Set both variables to keep using DeepSeek directly (`https://api.deepseek.com`, `deepseek-chat`). The example configs and tests use an `openrouter` default profile.
 - MCP `list_requests` returns summaries (method, path, status, source, fallback reason, sizes) unless `include_bodies: true`; `validate_contract` returns counts by protocol and the first 20 operations and channels (`operations_truncated`, `channels_truncated`).
 - Background-server logs carry no ANSI codes (colour only on a terminal; `server_logs` strips any left), and the MCP server tools find the server's state next to the config `start_server` used (or the `config` argument), not in the MCP process's folder.
 - The mock-api and testing skills recommend proxy mode over editing an app's base URL.

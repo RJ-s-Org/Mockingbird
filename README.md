@@ -49,7 +49,7 @@ mockingbird server start -c mockingbird.yaml                     # status, logs,
 Serve a contract (OpenAPI 3.x, Swagger 2.0, GraphQL, protobuf or WSDL 1.1; see [Protocols](#protocols)) with an LLM behind it:
 
 ```sh
-MB_LLM_API_KEY=sk-... mockingbird serve orders.yaml
+MB_LLM_API_KEY=sk-or-... mockingbird serve orders.yaml   # an OpenRouter key; MB_LLM_BASE_URL and MB_LLM_MODEL pick another endpoint
 ```
 
 Or serve with the built-in faker only, no LLM:
@@ -107,12 +107,12 @@ For anything beyond a quick look, declare the server, storage, LLM profiles and 
 storage:
   url: sqlite://./mockingbird.db      # or sqlite::memory: (default), postgres://…
 llm:
-  default_profile: deepseek
+  default_profile: openrouter
   profiles:
-    deepseek:
-      base_url: https://api.deepseek.com
-      model: deepseek-chat
-      api_key: env:DEEPSEEK_API_KEY   # a secret reference: env:NAME, file:/path or vault:…
+    openrouter:
+      base_url: https://openrouter.ai/api/v1
+      model: deepseek/deepseek-v4.1-flash
+      api_key: env:OPENROUTER_API_KEY # a secret reference: env:NAME, file:/path or vault:…
 mocks:
   orders:
     contract: ./orders.yaml           # relative to this file
@@ -463,7 +463,7 @@ The same binary drives the Admin API. It prints JSON on stdout and problem detai
 ```sh
 mockingbird mocks list
 mockingbird mocks get orders
-mockingbird mocks create billing --prefix /bill --persona "Formal" --profile deepseek
+mockingbird mocks create billing --prefix /bill --persona "Formal" --profile openrouter
 mockingbird mocks delete billing
 
 # Upload a contract as a new version (creating the mock if missing).
