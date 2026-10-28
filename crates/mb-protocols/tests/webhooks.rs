@@ -500,3 +500,53 @@ async fn slow_receiver_does_not_delay_the_response() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+/// An RPC-style read (Plaid's `POST /transactions/sync`) fires for targets
+/// that name its operation, as Plaid sends `SYNC_UPDATES_AVAILABLE`, but
+/// not for `*`.
+#[tokio::test]
+async fn a_read_fires_only_for_targets_naming_it() {
+    let contract = r#"
+openapi: 3.0.3
+info: {title: sync, version: "1"}
+paths:
+  /transactions/sync:
+    post:
+      operationId: transactionsSync
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  next_cursor: {type: string}
+"#;
+    let named = receiver(200).await;
+    let star = receiver(200).await;
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let (d, log) = dispatcher_with(
+        vec![to(&named, &["transactionsSync"]), to(&star, &["*"])],
+        fast(),
+    );
+    rt.webhooks = Some(d);
+    let router = http_rest::router(Arc::new(rt));
+    let resp = router
+        .oneshot(post_json("/transactions/sync", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    assert_eq!(
+        (r.operation.as_str(), r.event_type.as_str()),
+        ("transactionsSync", "transaction.updated")
+    );
+    assert_eq!(sent(&named).await.len(), 1);
+    assert!(sent(&star).await.is_empty());
+}

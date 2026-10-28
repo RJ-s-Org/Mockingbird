@@ -5,12 +5,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mb_engine::{GeneratedResponse, MessageContext, OperationCall};
-use mb_mcm::{Channel, ChannelBinding, Direction, Operation, WebhookDef};
+use mb_mcm::{Channel, ChannelBinding, Direction, Operation, OperationKind, WebhookDef};
 use mb_state::SessionKey;
 use serde_json::{Map, json};
 
 use super::deliver::OutboundEvent;
-use super::event::{envelope, envelope_object, event_type, new_event_id};
+use super::event::{envelope, envelope_object, event_type, new_event_id, read_event_type};
 use crate::MockRuntime;
 
 /// Sends `op`'s webhook event when the mock has targets for it and the
@@ -30,10 +30,15 @@ pub(crate) fn emit(
     if !(200..300).contains(&generated.status) {
         return;
     }
-    let Some(event_type) = event_type(op) else {
-        return;
+    // A read sends only to targets that name it.
+    let (event_type, targets) = match event_type(op) {
+        Some(t) => {
+            let targets = dispatcher.matching(&op.id, &t);
+            (t, targets)
+        }
+        None if op.kind == OperationKind::Query => (read_event_type(op), dispatcher.naming(&op.id)),
+        None => return,
     };
-    let targets = dispatcher.matching(&op.id, &event_type);
     if targets.is_empty() {
         return;
     }
