@@ -24,12 +24,43 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
 | `github-readme-stats`: stats, top-langs, 5 pin cards, stats again | `api.github.com`, REST at `/` and GraphQL at `/graphql` on one host; axios honours `HTTPS_PROXY` | every card renders; the repeated stats query is a `cache` hit | GraphQL 12 `llm`, 2 `cache`; REST 2 `fallback` (`/search/commits`, timeout) | 10k | GraphQL 1.3–3.9 s; cards with `include_all_commits` wait 60 s (below) |
 | `nuxt/movies`: 5 SSR pages incl. 2 detail pages | `movies-proxy.vercel.app` (the app's hosted proxy, see below); Node `fetch` with `NODE_USE_ENV_PROXY` | 5/5 pages render with real titles, cast and figures; detail pages agree with the list they came from (seeded from state) | 10 `llm`, 3 `repaired`, 0 fallbacks | 20k (69k completion) | 6.6–37 s per call, median 19.8 s |
 
+## Field trials 2.0, 2026-10-28
+
+Five more open-source apps in other stacks, unmodified, under `mockingbird run` on a local merge of L1, L2, L3 and L6, plus the three earlier trials re-run on the same build. Case studies with configs, commands and per-call numbers: [trials](trials/README.md).
+
+| Trial | Stack | APIs | Result | Calls | Fallbacks |
+|---|---|---|---|---|---|
+| [plaid/quickstart](trials/plaid-quickstart.md) | Python, Flask | Plaid | Bypassed the proxy (plaid-python's plain `urllib3.PoolManager`) until the Python preload; then 9/9 routes after two catalog operations were added | 10 | 0 |
+| [healthchecks](trials/healthchecks.md) | Python, Django, pycurl | Twilio, GitHub App, Slack webhooks, Telegram, Opsgenie | 6/6 channels; Twilio and Telegram answers echoed request fields until the fix | 7 | 0 |
+| [`gh` CLI](trials/gh-cli.md) | Go 1.27 | GitHub REST + GraphQL | 8/10 commands; `issue create` null payload, `repo view` corrupt base64 | 15 | 2 |
+| [Next.js Commerce](trials/nextjs-commerce.md) | Next.js 15 | Shopify Storefront GraphQL | Build and catalog pages work; the cart is invented | 37 | 0 |
+| [Stripe accept-a-payment, Java](trials/stripe-java.md) | Java, Spark | Stripe | 8/8 creates (1.0–2.9 s), 4/4 retrieves | 12 | 0 |
+| Stripe accept-a-payment, Node (re-run) | Node | Stripe | 8/8 creates 1.3–2.9 s (was 3.2–7.6 s), 8/8 webhooks verified | 12 | 0 |
+| github-readme-stats (re-run) | Node | GitHub REST + GraphQL | 8/9 cards; `search/commits` answers in 11 s (was a 60 s fallback) | 10 | 0 |
+| nuxt/movies (re-run) | Nuxt 3 | TMDB | 6/6 pages; median call 9.7 s (was 19.8 s), cold home page 53 s | 11 | 0 |
+
 ## Open
+
+### From field trials 2.0 (2026-10-28)
+
+- **RPC-style reads are neither cached nor seeded.** Plaid reads are all `POST` (`/accounts/get`, `/auth/get`, `/identity/get`, `/transactions/sync`, `/accounts/balance/get`), so each call invents its own `account_id`s and balances, and a repeated `/accounts/get` differs from the first. Let a contract (or a heuristic: `POST …/get`, `…/list`, `…/sync` with no side effect) mark an operation as a read, and seed accounts from the first answer.
+- **Create and update mutations generate their whole return type.** GitHub's `createIssue { issue { id url } }` asked for every field of `Issue`: 36–39k prompt tokens, 16–20 s, an invalid answer and a `null` payload; `gh issue create` printed nothing and exited 0. Generate the selection plus the type's scalar fields and fill the rest of the stored object with the faker.
+- **Stateful GraphQL flows do not hold together** (with the existing "mutation results are not stored" item): in Next.js Commerce, `cartCreate` returned an empty cart, `cart(id:)` for it invented three lines, and `cartLinesAdd` answered a different product than the variant sent. The cart id ignored the persona's format.
+- **LLM-written base64 is corrupt.** GitHub's README `content` (`encoding: base64`) decoded to a garbled line, then to invalid UTF-8 (`gh repo view` fails). Ask for text and encode locally when a sibling says `encoding: base64` or the schema says `contentEncoding: base64`.
+- **Validation errors hide the cause.** A nullable object's `anyOf` reports only `is not valid under any of the schemas listed in the 'anyOf' keyword`, and the fallback reason carries the whole answer (kilobytes); `verify` prints those reasons in full (about 10 KB for the gh run). Report the deepest branch's errors and cap the quoted answer.
+- **The `verify` bar misses contract gaps.** A path the contract lacks (`no operation matches POST /accounts/balance/get`) is a 4xx, so `--no-fallbacks --no-unmapped` passes; add `--no-unmatched` (or count it under unmapped).
+- **Request-validation rejections are logged as source `fallback`** with no reason (healthchecks' Telegram and Opsgenie calls against strict hand-written contracts), so `verify --no-fallbacks` blames generation for a client error. Give them their own source.
+- An answer with only one possible value (Slack's literal `"ok"`) is labelled `llm` with 0 tokens and 0 ms.
+- **Catalog:** octokit's GraphQL schema (pinned July 2024; still on main in July 2026) lacks `Issue.issueType`, `blockedBy` and `blocking`, which current `gh` queries on github.com; GitHub's own `schema.docs.graphql` has them (check its licence before pinning it). GitHub REST has no GitHub Apps operations (`POST /app/installations/{id}/access_tokens`, used by healthchecks).
+- **GraphQL contracts from introspection JSON** (Shopify publishes the Storefront schema only that way) need converting to SDL first; accept them directly.
+- **`protocols.graphql.path` is global**: Shopify's `graphql.json` and GitHub's `/graphql` cannot be served by one config. Make it per mock.
+- github-readme-stats' torvalds/linux pin still gets `user` and `organization` both null (17 completion tokens), which the card reports as an error.
+- TMDB list endpoints stay slow: `/movie/popular` took 28 s for 1.8k completion tokens (about 65 tokens/s from the routed provider), so the cold home page took 53 s. A smaller default list size or streaming would help. Facts drift too: TMDB id 94997 came back as "Game of Thrones" (it is House of the Dragon).
 
 ### From the proxy trials (2026-10-28)
 
 - `storage.url: sqlite://./…` is relative to the working directory, while `contract:` paths are relative to the config file, so `mockingbird run -c elsewhere/mockingbird.yaml` opens a different database than `cd elsewhere && mockingbird run`. Resolve relative SQLite paths against the config's directory (a behaviour change; needs a decision).
-- Go on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux and OpenSSL Rubies work. A per-runtime preload (as for Node.js) or a documented opt-in keychain install would close it.
+- Go binaries built with Go < 1.27 on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux, OpenSSL Rubies and Go 1.27+ (with the `GODEBUG` that `proxy env` now sets) work. A documented opt-in keychain install would close the rest.
 
 ### From the examples catalog (2026-10-28)
 
@@ -80,18 +111,25 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 
 **Generated data**
 
-- **Request fields are echoed into responses**, including secrets: Plaid `secret`/`client_id`, Auth0 `/oauth/token` `client_secret` and `post_users` `password`, a token endpoint's `grant_type`, Twilio's `To`/`From`/`Body` in request casing beside the schema's `to`/`from`/`body`. Echo only properties the response schema defines, and never fields named like secrets. The examples close their response objects with `additionalProperties: false` meanwhile.
 - **Offline faker**: optional fields are always filled (a `cursor` or `next_page_uri: "cedar"` sends SDK pagers into endless loops or `GET /cedar`; a healthy OTLP export gets a random `partialSuccess`); GraphQL `ID` and custom scalars (`DateTime`, `URI`, `Decimal`) are random words; a union member is picked ignoring arguments (`search(type: REPOSITORY)` returned a `User`); `format: uri` wins over `pattern`; patterns like `^[\S\s]*$` produce non-ASCII ids; path and query params are not reflected (`account_sid`, `channel_id`, the queried email); a nested request object (HubSpot/Notion `properties`) is not copied on create. An offline 202 without a body is labelled `x-mockingbird-source: llm`.
 - With an LLM, a 200 whose schema is `anyOf [success, error]` sometimes gets the error branch (Slack); prefer the first branch unless a scenario applies.
 - Large list schemas are still slow or fall back: GitHub `GET /pulls` (10 pull objects) fell back after 29 s; GitHub issue lists and Twilio message lists took 18–19 s.
 
 **Proxy and SDKs**
 
-- SDKs that ignore the proxy variables or the CA bundle need explicit settings in the snippets: stripe-python (`stripe.ca_bundle_path`), plaid-python and hubspot-api-client (`proxy`, `ssl_ca_cert`), Go on macOS (ignores `SSL_CERT_FILE`). `mockingbird proxy env --python`/`--go` hints, or a doc table per SDK, would help.
+- SDKs that ignore the proxy variables or the CA bundle need explicit settings in the snippets: stripe-python (`stripe.ca_bundle_path`, its own bundled roots), Go binaries built before Go 1.27 on macOS. plaid-python and other OpenAPI-generated clients built on a plain `urllib3.PoolManager` and certifi are covered by the Python preload since field trials 2.0.
 - An unresolved webhook secret logs a WARN for every delivery; once per target is enough.
 - The `kafka` broker kind is not in the default build (`this build has no kafka support`), so the Kafka example runs on the memory broker unless you use the full image.
 
 ## Done
+
+- Field trials 2.0 (launch-b1-trials), from the [trials](trials/README.md):
+  - `proxy env` sets `PYTHONPATH` to a `sitecustomize` preload: `certifi.where()` names the bundle and a plain `urllib3.PoolManager` goes through `HTTPS_PROXY` (plaid-python reached the real Plaid sandbox before);
+  - `proxy env` sets `GODEBUG=x509sslcertoverrideplatform=1`, so Go 1.27+ binaries on macOS and Windows trust the bundle (`gh` works on a Mac);
+  - a create or update copies only the request members the response schema declares (Twilio's `To`/`Body`/`RiskCheck`/`StatusCallback` and Telegram's `chat_id`/`parse_mode` were echoed, as were the catalog's Plaid and Auth0 credentials before their objects were closed);
+  - `{"data": …, "errors": null}` answers are unwrapped like `{"data": …}`;
+  - `minimum`/`maximum`/`multipleOf` violations are patched locally instead of costing a repair call;
+  - examples: Plaid gains `/accounts/balance/get` and `/institutions/get_by_id`; GitHub GraphQL mounts at `/graphql` so it combines with GitHub REST on one host, and a test checks that no two catalog mocks collide.
 
 - Launch L1, engine speed and fidelity, [#57](https://github.com/RJ-s-Org/Mockingbird/pull/57) (numbers: [performance](performance.md#latency-against-a-real-llm)):
   - huge response schemas: an output budget (`limits.output_budget_tokens`, 1500) shapes what the LLM writes (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker), and OpenRouter requests send `reasoning: {enabled: false}`; GitHub `search/commits` p50 29.8 s → 9.4 s with no fallback, and a fallback answer is now cached under consistency (the repeat is answered at once and still reported as a fallback);

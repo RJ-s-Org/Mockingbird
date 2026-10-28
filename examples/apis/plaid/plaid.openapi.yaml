@@ -1,8 +1,9 @@
 # A hand-written subset of the Plaid API (Link tokens, token exchange, accounts,
-# Auth, Identity, Transactions sync), written for Mockingbird's examples and
-# covered by its license. Shapes and operation ids follow Plaid's published
-# OpenAPI description (https://github.com/plaid/plaid-openapi, 2020-09-14.yml),
-# which carries no license file, so nothing from it is copied wholesale here.
+# balances, institutions, Auth, Identity, Transactions sync), written for
+# Mockingbird's examples and covered by its license. Shapes and operation ids
+# follow Plaid's published OpenAPI description
+# (https://github.com/plaid/plaid-openapi, 2020-09-14.yml), which carries no
+# license file, so nothing from it is copied wholesale here.
 # Top-level response objects are closed (additionalProperties: false) so the
 # mock does not copy request fields such as `secret` into its answers.
 openapi: 3.1.0
@@ -178,6 +179,80 @@ paths:
                 properties:
                   accounts: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/AccountBase" } }
                   item: { $ref: "#/components/schemas/Item" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /accounts/balance/get:
+    post:
+      operationId: accountsBalanceGet
+      summary: Retrieve real-time balances of an Item's accounts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessTokenRequest" }
+      responses:
+        "200":
+          description: The Item's accounts with balances fetched from the institution now.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, item, request_id]
+                additionalProperties: false
+                properties:
+                  accounts: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/AccountBase" } }
+                  item: { $ref: "#/components/schemas/Item" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /institutions/get_by_id:
+    post:
+      operationId: institutionsGetById
+      summary: Retrieve an institution by its id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [institution_id, country_codes]
+              properties:
+                client_id: { type: string }
+                secret: { type: string }
+                institution_id: { type: string }
+                country_codes: { type: array, items: { $ref: "#/components/schemas/CountryCode" } }
+                options:
+                  type: object
+                  properties:
+                    include_optional_metadata: { type: boolean }
+                    include_status: { type: boolean }
+      responses:
+        "200":
+          description: The institution.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [institution, request_id]
+                additionalProperties: false
+                properties:
+                  institution:
+                    type: object
+                    required: [institution_id, name, products, country_codes, routing_numbers, oauth, connection_availability]
+                    properties:
+                      institution_id: { type: string, description: "Echoes the requested id, e.g. ins_109508." }
+                      name: { type: string }
+                      products: { type: array, items: { $ref: "#/components/schemas/Products" } }
+                      country_codes: { type: array, items: { type: string } }
+                      url: { type: [string, "null"] }
+                      primary_color: { type: [string, "null"], description: "Hex colour such as #1f1f1f." }
+                      logo: { type: [string, "null"], description: "Base64 PNG; null unless include_optional_metadata." }
+                      routing_numbers: { type: array, items: { type: string, pattern: "^[0-9]{9}$" } }
+                      oauth: { type: boolean }
+                      connection_availability: { type: string, enum: [SUPPORTED, NOT_SUPPORTED] }
                   request_id: { $ref: "#/components/schemas/RequestID" }
         "400": { $ref: "#/components/responses/PlaidError" }
         "429": { $ref: "#/components/responses/RateLimitExceeded" }

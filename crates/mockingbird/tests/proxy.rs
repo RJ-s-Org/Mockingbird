@@ -623,6 +623,67 @@ const get = (mod, url, agent) => new Promise((resolve, reject) => {
     }
 }
 
+/// `python3` (or `MB_TEST_PYTHON`) when it can import urllib3 and certifi.
+fn python_with_urllib3() -> Option<PathBuf> {
+    let python = std::env::var_os("MB_TEST_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    let out = std::process::Command::new(&python)
+        .args(["-c", "import urllib3, certifi"])
+        .output()
+        .ok()?;
+    out.status.success().then_some(python)
+}
+
+/// A plain `urllib3.PoolManager` pinned to certifi's roots (as
+/// OpenAPI-generated SDKs such as plaid-python build it) reaches the mock
+/// through the preload; without it the request would go direct and fail,
+/// since the host does not resolve.
+#[tokio::test(flavor = "multi_thread")]
+async fn python_preload_routes_plain_urllib3_pool_managers() {
+    let Some(python) = python_with_urllib3() else {
+        eprintln!("skipped: python3 with urllib3 and certifi is not installed");
+        return;
+    };
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let port: u16 = proxy.rsplit(':').next().unwrap().parse().unwrap();
+    let env = mockingbird::proxy::env::proxy_env_with(
+        &mockingbird::proxy::env::ProxyEnvOptions {
+            host: "127.0.0.1".into(),
+            port,
+            ca_dir: ca_dir.path().into(),
+        },
+        |_| None,
+    )
+    .unwrap();
+    let script = r#"
+import certifi, urllib3
+pool = urllib3.PoolManager(cert_reqs="CERT_REQUIRED", ca_certs=certifi.where())
+r = pool.request("GET", "https://api.orders.test/orders")
+print("pool=%d" % r.status)
+"#;
+    let vars = env.vars.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .envs(&vars)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "pool=200",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn proxy_browser_prints_the_chromium_flags() {
     let dir = tempfile::tempdir().unwrap();
