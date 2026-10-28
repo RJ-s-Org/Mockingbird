@@ -35,3 +35,8 @@ crates/mb-console/web/playwright-report/
 
 # `mockingbird server start` state (the docs demo, local runs)
 .mockingbird/
+
+# npm/scripts/build-packages.mjs and npm/scripts/smoke.sh output
+npm/dist/
+npm/.build-packages-*/
+npm/cli/lib/checksums.json

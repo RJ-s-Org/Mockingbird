@@ -1,0 +1,24 @@
+{
+  "name": "@mockingbird-cli/mockingbird",
+  "version": "0.0.0",
+  "description": "Mockingbird, LLM-backed API mocks, as an npm package: run it with npx or from npm scripts without installing Rust",
+  "keywords": ["api-mocking", "mock-server", "openapi", "graphql", "grpc", "llm", "mcp", "testing"],
+  "homepage": "https://github.com/RJ-s-Org/Mockingbird#readme",
+  "bugs": "https://github.com/RJ-s-Org/Mockingbird/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RJ-s-Org/Mockingbird.git",
+    "directory": "npm/cli"
+  },
+  "license": "MIT OR Apache-2.0",
+  "bin": {
+    "mockingbird": "bin/mockingbird.js"
+  },
+  "files": ["bin", "lib", "LICENSE-MIT", "LICENSE-APACHE"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

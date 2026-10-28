@@ -1,0 +1,71 @@
+name: npm
+
+# The npm packages (npm/): the launcher's unit tests on each OS, and a smoke
+# test that packs the packages around a locally built binary, installs the
+# tarballs into a new project and runs `npx mockingbird` there. Runs only
+# when npm/ (or the example it uses) changes; release.yml builds and
+# publishes the real packages.
+on:
+  push:
+    branches: [main]
+    paths:
+      - npm/**
+      - examples/apis/github-rest/**
+      - .github/workflows/npm.yml
+  pull_request:
+    paths:
+      - npm/**
+      - examples/apis/github-rest/**
+      - .github/workflows/npm.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, node: 18 }
+          - { os: ubuntu-latest, node: 22 }
+          - { os: macos-latest, node: 22 }
+          - { os: windows-latest, node: 22 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+        working-directory: npm/cli
+
+  smoke:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      # The Examples workflow builds the same binary; share its cache.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: examples
+          save-if: false
+      - run: cargo build -p mockingbird --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Pack, install and run npx mockingbird
+        run: npm/scripts/smoke.sh target/debug/mockingbird
