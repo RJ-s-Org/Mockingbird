@@ -1148,10 +1148,12 @@ fn reflect(
             Some(target) => overlay_target(validator, target, body),
             None => body,
         },
-        OperationKind::Command(Effect::Create) => overlay(validator, body, call.body.as_ref()),
+        OperationKind::Command(Effect::Create) => {
+            overlay_request(validator, body, call.body.as_ref())
+        }
         OperationKind::Command(Effect::Update) => {
             let body = overlay(validator, body, ctx.target.map(|t| &t.data));
-            overlay(validator, body, call.body.as_ref())
+            overlay_request(validator, body, call.body.as_ref())
         }
         OperationKind::Command(_) => body,
         // Streams have no stored target to reflect.
@@ -1176,12 +1178,28 @@ fn reassert_request(
     };
     let body = match op.kind {
         OperationKind::Command(Effect::Create | Effect::Update) => {
-            overlay(validator, body, call.body.as_ref())
+            overlay_request(validator, body, call.body.as_ref())
         }
         _ => body,
     };
     response.body = Some(force_identity(validator, op, call, body));
     response
+}
+
+/// Overlay the request body's members that the response schema declares
+/// (all of them when it declares none): an undeclared member, such as a
+/// credential or a field in another casing, is never echoed.
+fn overlay_request(validator: &SchemaValidator, base: Value, body: Option<&Value>) -> Value {
+    let (Some(Value::Object(fields)), Some(declared)) = (body, validator.declared_properties())
+    else {
+        return overlay(validator, base, body);
+    };
+    let kept: Map<String, Value> = fields
+        .iter()
+        .filter(|(k, _)| declared.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    overlay(validator, base, Some(&Value::Object(kept)))
 }
 
 /// Overlay `fields`' top-level members onto an object `base`: all at once if

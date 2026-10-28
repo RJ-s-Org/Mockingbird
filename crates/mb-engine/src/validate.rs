@@ -37,7 +37,9 @@ impl SchemaValidator {
     /// `instance` with the errors a fresh value can fix patched locally: a
     /// `null` the schema forbids is removed where it is an optional property,
     /// else replaced by `fill` of the expected schema; a value failing
-    /// `pattern`, `maxLength`, `minLength`, `enum`, `format` or `const` is
+    /// `pattern`, `maxLength`, `minLength`, `enum`, `format`, `const` or a
+    /// numeric range (`minimum`, `maximum`, their exclusive forms,
+    /// `multipleOf`) is
     /// replaced by `fill` of the schema holding that keyword. `fill` gets the
     /// schema with the root's `$defs`. `None` unless such errors are all that
     /// is wrong and the patched value is valid.
@@ -56,7 +58,12 @@ impl SchemaValidator {
                 | ValidationErrorKind::MinLength { .. }
                 | ValidationErrorKind::Enum { .. }
                 | ValidationErrorKind::Format { .. }
-                | ValidationErrorKind::Constant { .. } => refills.push((pointer, expected()?)),
+                | ValidationErrorKind::Constant { .. }
+                | ValidationErrorKind::Minimum { .. }
+                | ValidationErrorKind::Maximum { .. }
+                | ValidationErrorKind::ExclusiveMinimum { .. }
+                | ValidationErrorKind::ExclusiveMaximum { .. }
+                | ValidationErrorKind::MultipleOf { .. } => refills.push((pointer, expected()?)),
                 _ => return None,
             }
         }
@@ -180,6 +187,38 @@ impl SchemaValidator {
             }
         }
         Some(location)
+    }
+
+    /// The property names the root object schema declares, following
+    /// `$ref`s and the branches of `allOf`/`anyOf`/`oneOf`; `None` when it
+    /// declares none (a free-form object).
+    pub fn declared_properties(&self) -> Option<HashSet<String>> {
+        let mut names = HashSet::new();
+        let mut pending = vec![&self.schema];
+        let mut hops = 0;
+        while let Some(node) = pending.pop() {
+            hops += 1;
+            if hops > MAX_SCHEMA_HOPS {
+                break;
+            }
+            if let Some(target) = node
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.strip_prefix('#'))
+                .and_then(|pointer| self.schema.pointer(pointer))
+            {
+                pending.push(target);
+            }
+            if let Some(Value::Object(props)) = node.get("properties") {
+                names.extend(props.keys().cloned());
+            }
+            for keyword in ["allOf", "anyOf", "oneOf"] {
+                if let Some(Value::Array(branches)) = node.get(keyword) {
+                    pending.extend(branches.iter());
+                }
+            }
+        }
+        (!names.is_empty()).then_some(names)
     }
 
     /// The schema at `location`, with the root's `$defs`.

@@ -252,17 +252,19 @@ fn wrap_single_item(validator: &SchemaValidator, value: &Value) -> Option<Value>
 /// the object is not. JSON-object output mode only allows an object at the
 /// top level, so models wrap the array (or scalar) an operation returns:
 /// `{"orders": [...]}`; asked for a GraphQL field they answer like a GraphQL
-/// server: `{"data": {"user": {...}}}`.
+/// server: `{"data": {"user": {...}}}`, sometimes with `"errors": null`
+/// beside it. Members that are `null` do not count as keys.
 fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> {
     let mut value = value;
     for _ in 0..2 {
         let Value::Object(map) = value else {
             return None;
         };
-        if map.len() != 1 {
+        let mut present = map.values().filter(|v| !v.is_null());
+        let (Some(inner), None) = (present.next(), present.next()) else {
             return None;
-        }
-        value = map.values().next()?;
+        };
+        value = inner;
         if validator.validate(value).is_ok() {
             return Some(value.clone());
         }
