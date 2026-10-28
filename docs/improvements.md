@@ -14,50 +14,28 @@ Three fresh Claude Code sessions, each with only the Mockingbird plugin, mocked 
 
 Total spend was about $1. When the LLM answered, the data was excellent; the problems are around it.
 
-### Phase 1: works out of the box for an agent
+## Trials through the proxy, 2026-10-28
 
-- `agent install` could still write the provider key's passthrough into `.mcp.json` for agents that start the MCP server without a login shell (the server now imports missing variables from `$SHELL -l -i`, which covers macOS and Linux desktops).
+The three trial apps ran again on `main` with the backlog merged, unmodified (`git diff` empty), with their API hosts mapped to mocks and the apps started under `eval "$(mockingbird proxy env)"`. Same model and routing as before; full upstream contracts.
 
-### Phase 2: real-world contracts load
+| Trial | Reached the mock | Result | Sources | Prompt tokens | Latency |
+|---|---|---|---|---|---|
+| Stripe `accept-a-payment`: 8 creates, 4 retrieves, webhooks | `api.stripe.com`; stripe-node needs `global-agent` (below) | 12/12 calls answered, 0 fallbacks; 9/9 `payment_intent.created` webhooks verified by `stripe.webhooks.constructEvent` | 6 `llm`, 2 `repaired`, 4 `state` | 140k (17k per create) | creates 3.2–7.6 s (median 3.7 s); retrieves 0–25 ms |
+| `github-readme-stats`: stats, top-langs, 5 pin cards, stats again | `api.github.com`, REST at `/` and GraphQL at `/graphql` on one host; axios honours `HTTPS_PROXY` | every card renders; the repeated stats query is a `cache` hit | GraphQL 12 `llm`, 2 `cache`; REST 2 `fallback` (`/search/commits`, timeout) | 10k | GraphQL 1.3–3.9 s; cards with `include_all_commits` wait 60 s (below) |
+| `nuxt/movies`: 5 SSR pages incl. 2 detail pages | `movies-proxy.vercel.app` (the app's hosted proxy, see below); Node `fetch` with `NODE_USE_ENV_PROXY` | 5/5 pages render with real titles, cast and figures; detail pages agree with the list they came from (seeded from state) | 10 `llm`, 3 `repaired`, 0 fallbacks | 20k (69k completion) | 6.6–37 s per call, median 19.8 s |
 
-- `$ref`s inside `x-*` extensions are reported unresolvable (Stripe, GitHub REST).
-- GraphQL implementation check rejects `String!` implementing `String` (GitHub GraphQL).
-- OpenAPI 3 form-encoded and multipart bodies are dropped before generation; bracket keys (`a[b][0]`) are not decoded.
-- Validation failures are hidden behind a faker-filled `default` error.
-- One host cannot serve two APIs (GraphQL at `/graphql` and REST at `/`): mocks cannot share a prefix.
+## Open
 
-### Phase 3: cheaper, faster, consistent generation
+### From the proxy trials (2026-10-28)
 
-- Warn at import when an operation's schema is huge (the prompt now fits it to a budget, see Done).
-- GraphQL aliases of one field with different arguments still share one generated value.
-- TMDB movie and TV detail pages (with `append_to_response`) take 15–66 s: the answer is large. Nulls no longer cost a repair call (see Done); the remaining repairs come from a `pattern` the trial agent wrote (`file_path` must be exactly 27 characters).
-- GETs of a stored resource still call the LLM; serve them from session state.
-- No consistency across calls: an opt-in response cache keyed by operation and parameters, list → detail entity seeding, server-side unique ids, optional 404 for unknown ids.
-- Faker output breaks clients: int32-minimum counts, `null` lists, random words for ids and logins. Echo path and argument values into same-named fields, keep counts small and non-negative, prefer non-null lists, honour `format` and `pattern`.
-- Unconstrained strings can run away (a 5 KB `address.city`): default `maxLength`.
-
-### Phase 4: documentation import and review from MCP
-
-- No MCP tools to view, edit or approve a draft; `approve` does not activate; each import replaces the contract instead of merging; a list of URLs or a docs folder is not accepted.
-- Drafts have no `required` lists, so `{"page":1}` is a valid answer; operationIds from the docs are replaced; invented `default`s; low-confidence operations kept.
-- Drafts mark fields non-nullable that the real API returns as null: TMDB's `iso_639_1`, `logo_path` and `belongs_to_collection` are `null` for many movies. TMDB's own docs and examples never show it, so import cannot tell; the engine now patches such nulls instead of asking for a repair. Import should still make a field nullable when an example shows `null` or the docs call it optional or nullable.
-- Embedded OpenAPI blocks in documentation pages (ReadMe-hosted docs such as TMDB) are ignored and re-derived by the LLM.
-- MCP output sizes: `validate_contract` lists every operation, `list_requests` returns full bodies, `server_logs` keeps ANSI codes; `server_logs`/`stop_server` resolve state from the MCP process's folder instead of the server.
-
-### Phase 5: no source edits to reach the mock
-
-- Apps hardcode `api.github.com`, `api.themoviedb.org`; every trial edited source to point at the mock. A `mockingbird proxy` mode (HTTP(S) proxy with a local CA, routing hosts to mocks) or host-based routing would avoid it. Image hosts (`image.tmdb.org`) could get placeholder images.
-
-### Smaller items
-
-- Chaos errors use problem+json instead of the contract's error schema, so SDKs treat them as success.
-- Scenarios need request headers that SDK clients cannot send: a mock-level default scenario and per-operation instructions.
-- Config hot reloads are not logged; `/readyz` and the log can disagree after a failed reload.
-- Signed webhooks (Stripe) need a signing helper; Stripe's spec has no webhook definitions to drive events from.
-
-## Ideas
-
-- **Key setup page.** A small local web page that `mockingbird` opens (or that an agent opens in the browser for the user, from Claude, ChatGPT, Codex…) with a form for provider API keys. The keys go straight from the browser to Mockingbird, never through the agent's context, and are stored outside the project: the OS keychain, or a `0600` secrets file referenced as `${file:…}`. It also removes the "MCP process can't see my shell's key" problem, since the server reads the key from the store rather than from its environment. Expose it as an MCP tool (`open_key_setup`) that returns the URL and waits for the user to finish.
+- **SDKs with their own HTTP agent ignore the proxy variables.** stripe-node creates its own `https.Agent`, so `NODE_USE_ENV_PROXY` does not apply and its calls went to the real `api.stripe.com` (the dummy key was rejected; nothing else was sent). `node -r global-agent/bootstrap` with `GLOBAL_AGENT_HTTP_PROXY` fixed it. Ship this: `mockingbird proxy env --node` could add a `NODE_OPTIONS=--require <preload>` that installs the proxy on every agent (and undici's dispatcher), with no package to install.
+- **Huge response schemas time out.** GitHub REST `GET /search/commits` falls back to faker after 60 s every time. A fallback answer is not cached either, so the identical repeat waits another 60 s. Cache fallbacks under consistency (or fail fast on a repeat), and generate fewer, shorter items for list/search envelopes.
+- **Large TMDB detail answers are still slow:** 17–37 s pages, about 5k completion tokens per call. Candidates: stream the answer, trim `append_to_response` sub-objects to the requested ones, or cache per resource across sessions.
+- **One contract under another host and path.** The movies app calls its hosted proxy (`movies-proxy.vercel.app/tmdb/<path>`), not TMDB, so the trial exported the TMDB contract and stripped `/3` from its paths to mount it there. A per-mock path rewrite (`strip_prefix`/`add_prefix`), or letting a mock reuse another mock's contract with a different base path, would avoid the copy.
+- **Browser traffic does not go through the proxy.** Server-side rendering reaches the mocks; images (`movies-proxy.vercel.app/ipx/…`) and client-side navigation are fetched by the browser from the real host. Document browser setups (a PAC file or `--proxy-server` for Playwright/Chrome with the CA) or serve the images via `proxy.images` once the browser uses the proxy.
+- **Adding a `mocks:` block to a running server's config did not take effect** (no reload line in the log, `/readyz` stayed `ready`); a restart did. Check whether a mock defined only in the database plus a new config `mocks:` section is a reload the watcher skips.
+- GraphQL queries with several root fields (pin cards) still skip state, cache and seeding, and are logged once per root field (accepted deviation of [#41](https://github.com/RJ-s-Org/Mockingbird/pull/41)).
+- Persona details are not always kept: a few Stripe `client_secret` suffixes were shorter than the 24 characters the persona asks for.
 
 ## Done
 
@@ -88,3 +66,15 @@ Total spend was about $1. When the LLM answered, the data was excellent; the pro
   | `nuxt/movies`, 5 pages | 28% fallbacks, 20–80 s pages | 4/5 pages real, 1/9 fallbacks (timeout), 9–121 s pages | 5/5 pages real, 0/9 fallbacks, 16–68 s pages |
   | `github-readme-stats`, stats, top-langs, pin cards | trimmed schemas, 33% GraphQL fallbacks | every card errors: 347k prompt tokens, truncated or timed out | stats and top-langs render, 0/8 fallbacks, 750–1,350 prompt tokens, 2.5–7 s; pin card fails (sibling root fields contradict each other) |
 - Phase 3 (part), [#35](https://github.com/RJ-s-Org/Mockingbird/pull/35): a GraphQL query's root fields are generated in one LLM call, so they agree; GraphQL-style `{"data": …}` answers are unwrapped. github-readme-stats pin cards: 0/6 → 10/10 render, one call each, ~1.5k prompt tokens, 1.6–3.5 s, no repairs.
+- Phase 2, [#32](https://github.com/RJ-s-Org/Mockingbird/pull/32): `$ref`s inside `x-*` extensions resolve; GraphQL `String!` may implement `String`; OpenAPI form-encoded and multipart bodies (with bracket keys such as `a[b][0]`) reach generation; validation failures are reported instead of a faker-filled `default` error.
+- [#36](https://github.com/RJ-s-Org/Mockingbird/pull/36): disallowed nulls are patched locally instead of costing a repair call.
+- Improvements backlog, one pass ([spec](superpowers/specs/2026-10-22-improvements-backlog-design.md), [plans](superpowers/plans/2026-10-22-improvements-backlog.md)):
+  - [#37](https://github.com/RJ-s-Org/Mockingbird/pull/37) (protocols): GraphQL aliases of one field get their own values; chaos errors use the contract's error schema (`default` shape at 503).
+  - [#38](https://github.com/RJ-s-Org/Mockingbird/pull/38) (routing and proxy): `mocks.<name>.hosts`, so two APIs share one host (REST at `/`, GraphQL at `/graphql`); `mockingbird proxy` with a local CA, `proxy env`, `ca path`, `proxy.unmapped: pass|block`; placeholder images (`proxy.images`); config reloads are logged and a failed one shows in `/readyz`.
+  - [#39](https://github.com/RJ-s-Org/Mockingbird/pull/39) (import and drafts): drafts get `required` lists and nullable fields, keep the docs' operationIds, drop operations below 0.4 confidence; embedded OpenAPI blocks are compiled directly; imports take `urls`/`documents` and `mode: merge|replace`; approving activates; huge-schema and version warnings.
+  - [#41](https://github.com/RJ-s-Org/Mockingbird/pull/41) (engine): reads of a stored resource are served from session state; consistency is on by default (per-session cache, list items stored and seeded into detail reads); server-side unique ids; opt-in `unknown_ids: 404`; faker keeps counts small and non-negative, lists non-null, echoes path and argument values, honours `pattern`; runaway strings are capped; `default_scenario` and per-operation scenario instructions.
+  - [#43](https://github.com/RJ-s-Org/Mockingbird/pull/43) (agent and MCP): MCP tools to view, edit and approve drafts, `get_request`, `proxy_env`; the key setup page (`open_key_setup`), storing keys in a `0600` file under `~/.mockingbird/secrets` referenced as `file:`; `agent install` writes the key passthrough; smaller MCP outputs and ANSI-free logs.
+  - [#44](https://github.com/RJ-s-Org/Mockingbird/pull/44) (webhooks): `mocks.<name>.webhooks` POST an event after each successful write, signed Stripe-style or HMAC-SHA256, retried after 1, 2 and 4 s; `mockingbird webhooks sign|deliveries`; MCP `list_webhook_deliveries`.
+  - CI: [#45](https://github.com/RJ-s-Org/Mockingbird/pull/45) (OpenSSL vendored into the binary, distroless `base-nossl` image; crypto-bigint advisories ignored with reasons), [#47](https://github.com/RJ-s-Org/Mockingbird/pull/47) (pulldown-cmark 0.13.5).
+
+  Measured afterwards: the three trials through the proxy (table above).
