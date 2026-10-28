@@ -75,6 +75,32 @@ async fn post(base: &str, body: Value, headers: &[(&str, &str)]) -> Answer {
     answer(req.send().await.unwrap()).await
 }
 
+/// Sends only the head of a POST declaring a `len`-byte body and returns the
+/// answer's status and its lowercased head. The server refuses an oversized body from its
+/// `Content-Length` and closes the connection, so a client still uploading the
+/// body can get a reset instead of the 413.
+async fn post_oversized_head(base: &str, len: usize) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /graphql HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {len}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut buf = vec![0u8; 1024];
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("no answer to an oversized request head")
+        .unwrap();
+    let head = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    (status, head)
+}
+
 fn get_url(base: &str, params: &[(&str, &str)]) -> reqwest::Url {
     reqwest::Url::parse_with_params(&format!("{base}/graphql"), params).unwrap()
 }
@@ -638,11 +664,12 @@ async fn http_errors_are_problems() {
     assert_eq!(r.status, 400);
     assert_eq!(r.headers["content-type"], "application/problem+json");
 
-    let big =
-        json!({"query": "{ viewer { login } }", "variables": {"pad": "x".repeat(1024 * 1024)}});
-    let r = post(&base, big, &[]).await;
-    assert_eq!(r.status, 413);
-    assert_eq!(r.headers["content-type"], "application/problem+json");
+    let (status, head) = post_oversized_head(&base, 2 * 1024 * 1024).await;
+    assert_eq!(status, 413);
+    assert!(
+        head.contains("\r\ncontent-type: application/problem+json\r\n"),
+        "{head}"
+    );
 }
 
 #[tokio::test]
@@ -1185,9 +1212,7 @@ async fn rejections_are_recorded() {
     // 413: an oversized body.
     let (records, rt) = recorded();
     let base = serve(rt).await;
-    let big =
-        json!({"query": "{ viewer { login } }", "variables": {"pad": "x".repeat(1024 * 1024)}});
-    assert_eq!(post(&base, big, &[]).await.status, 413);
+    assert_eq!(post_oversized_head(&base, 2 * 1024 * 1024).await.0, 413);
     let recs = records.wait(1).await;
     assert_eq!(recs.len(), 1, "413: {recs:?}");
     assert_eq!(recs[0].status, 413);
