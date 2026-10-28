@@ -117,13 +117,13 @@ pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
         Ok(()) => run_command(&args.command, &opts).await,
         Err(error) => Err(error),
     };
-    if args.keep {
-        if let Some((state, _child)) = started.server.take() {
-            eprintln!(
-                "mockingbird: the server keeps running (stop it with `mockingbird server stop --state-dir {}`)",
-                state.state_dir.display()
-            );
-        }
+    if args.keep
+        && let Some((state, _child)) = started.server.take()
+    {
+        eprintln!(
+            "mockingbird: the server keeps running (stop it with `mockingbird server stop --state-dir {}`)",
+            state.state_dir.display()
+        );
     }
     started.stop().await;
     code

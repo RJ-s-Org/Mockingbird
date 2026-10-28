@@ -233,6 +233,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.workspace` | string | `default` | | | Workspace (created if missing). |
 | `mocks.<name>.contract` | path | required | Relative to the config file | | OpenAPI 3.x, Swagger 2.0, GraphQL SDL, protobuf, WSDL 1.1 or AsyncAPI 2.x/3.0 contract. |
 | `mocks.<name>.route_prefix` | path | `/<name>` | | | Where the mock is mounted on the data plane. |
+| `mocks.<name>.path_rewrite` | map | unset | `strip_prefix`, `add_prefix` | | Rewrites the path below `route_prefix` before it is matched against the contract (see [the proxy guide](proxy.md#one-contract-under-another-host-and-path)). |
 | `mocks.<name>.path_rewrite.strip_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Removed from the front of the path below `route_prefix` (at a segment boundary) before the contract sees it. |
 | `mocks.<name>.path_rewrite.add_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Put in front of the path below `route_prefix` (after `strip_prefix`). Mounts a contract under another base path: TMDB's `/3/...` contract at `movies-proxy.vercel.app/tmdb/...` with `route_prefix: /tmdb` and `add_prefix: /3`. |
 | `mocks.<name>.hosts` | list of strings | `[]` | Lowercase host names, no port | | Hosts the mock answers for (by `Host`, e.g. through `mockingbird proxy`). With hosts, two mocks may share a route prefix; a mock with hosts is not reached under other hosts. |
