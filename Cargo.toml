@@ -83,7 +83,7 @@ redis = { version = "1.7.1", default-features = false, features = ["tokio-comp",
 pdf-extract = "0.12.1"
 weezl = "0.1.12"
 scraper = "0.27"
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13.5", default-features = false }
 url = "2.5"
 ipnet = "2.12"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
