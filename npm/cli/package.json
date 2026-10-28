@@ -1,5 +1,5 @@
 {
-  "name": "@mockingbird/cli",
+  "name": "@mockingbird-cli/mockingbird",
   "version": "0.0.0",
   "description": "Mockingbird, LLM-backed API mocks, as an npm package: run it with npx or from npm scripts without installing Rust",
   "keywords": ["api-mocking", "mock-server", "openapi", "graphql", "grpc", "llm", "mcp", "testing"],

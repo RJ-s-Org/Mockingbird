@@ -1,17 +1,17 @@
-# @mockingbird/cli
+# @mockingbird-cli/mockingbird
 
 [Mockingbird](https://github.com/RJ-s-Org/Mockingbird) serves LLM-backed mocks of the APIs your app calls (OpenAPI, GraphQL, gRPC, SOAP, AsyncAPI), with state, scenarios and a zero-edit HTTPS proxy. This package runs it from npm: no Rust toolchain, no separate install.
 
 Run your tests against mocks, with no install at all:
 
 ```sh
-npx @mockingbird/cli run --offline -- npm test
+npx @mockingbird-cli/mockingbird run --offline -- npm test
 ```
 
 Or add it to a project and call `mockingbird` from npm scripts:
 
 ```sh
-npm i -D @mockingbird/cli
+npm i -D @mockingbird-cli/mockingbird
 ```
 
 ```json
@@ -26,7 +26,7 @@ npm i -D @mockingbird/cli
 
 ## How it installs
 
-npm installs one platform package next to this one (`@mockingbird/cli-<platform>-<arch>`), holding the release binary for macOS (arm64, x64), Linux (x64, arm64; static, so glibc and musl alike) or Windows (x64; Arm64 through emulation). If that package is missing, because optional dependencies were skipped (`--omit=optional`) or the lockfile came from another platform, the launcher downloads the same binary from the GitHub release once, checks it against the sha256 published in this package, and caches it.
+npm installs one platform package next to this one (`@mockingbird-cli/<platform>-<arch>`), holding the release binary for macOS (arm64, x64), Linux (x64, arm64; static, so glibc and musl alike) or Windows (x64; Arm64 through emulation). If that package is missing, because optional dependencies were skipped (`--omit=optional`) or the lockfile came from another platform, the launcher downloads the same binary from the GitHub release once, checks it against the sha256 published in this package, and caches it.
 
 | Variable | Effect |
 | --- | --- |

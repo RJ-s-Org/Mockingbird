@@ -4,8 +4,8 @@ Every channel installs the same `mockingbird` binary, built by the release workf
 
 | Channel | Command | Needs |
 | --- | --- | --- |
-| npm, no install | `npx @mockingbird/cli run -- npm test` | Node.js 18+ |
-| npm, per project | `npm i -D @mockingbird/cli` | Node.js 18+ |
+| npm, no install | `npx @mockingbird-cli/mockingbird run -- npm test` | Node.js 18+ |
+| npm, per project | `npm i -D @mockingbird-cli/mockingbird` | Node.js 18+ |
 | [Install script](#install-script) | `install.sh` (macOS, Linux), `install.ps1` (Windows) | curl or wget; PowerShell |
 | Docker | `docker run --rm ghcr.io/rj-s-org/mockingbird:latest --version` | Docker |
 | From source | `cargo install --git https://github.com/RJ-s-Org/Mockingbird mockingbird` | Rust |
@@ -17,14 +17,14 @@ For a JavaScript or TypeScript project, the npm package is the shortest way in: 
 Run your tests against mocks, with nothing installed:
 
 ```sh
-npx @mockingbird/cli run --offline -- npm test   # the built-in faker answers; no key, no network
-npx @mockingbird/cli run -- npm test             # an LLM writes the answers (`mockingbird init` lists providers)
+npx @mockingbird-cli/mockingbird run --offline -- npm test   # the built-in faker answers; no key, no network
+npx @mockingbird-cli/mockingbird run -- npm test             # an LLM writes the answers (`mockingbird init` lists providers)
 ```
 
 Or add it to the project, so `mockingbird` is on the path of every npm script:
 
 ```sh
-npm i -D @mockingbird/cli
+npm i -D @mockingbird-cli/mockingbird
 ```
 
 ```json
@@ -36,13 +36,13 @@ npm i -D @mockingbird/cli
 }
 ```
 
-`npx mockingbird …` then runs the project's copy. pnpm (`pnpm add -D @mockingbird/cli`, `pnpm exec mockingbird`), Yarn and Bun install it the same way.
+`npx mockingbird …` then runs the project's copy. pnpm (`pnpm add -D @mockingbird-cli/mockingbird`, `pnpm exec mockingbird`), Yarn and Bun install it the same way.
 
 ### How the package works
 
-`@mockingbird/cli` is a small Node.js launcher. It lists one package per platform as an optional dependency (`@mockingbird/cli-darwin-arm64`, `-darwin-x64`, `-linux-x64`, `-linux-arm64`, `-win32-x64`), and npm installs only the one whose `os` and `cpu` match the machine. The launcher runs that package's binary with your arguments, stdio, exit code and signals passed through, so `mockingbird run` behaves exactly as the installed binary does.
+`@mockingbird-cli/mockingbird` is a small Node.js launcher. It lists one package per platform as an optional dependency (`@mockingbird-cli/darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`), and npm installs only the one whose `os` and `cpu` match the machine. The launcher runs that package's binary with your arguments, stdio, exit code and signals passed through, so `mockingbird run` behaves exactly as the installed binary does.
 
-When the platform package is missing (optional dependencies skipped with `--omit=optional`, or a lockfile written on another platform), the launcher downloads the same release archive from GitHub once, checks it against the sha256 that was published inside `@mockingbird/cli`, and caches the binary (`~/.cache/mockingbird`, `~/Library/Caches/mockingbird` or `%LOCALAPPDATA%\mockingbird\cache`). Windows on Arm uses the x64 build through emulation, by the same download. Any other platform fails with the list of supported ones; build from source there.
+When the platform package is missing (optional dependencies skipped with `--omit=optional`, or a lockfile written on another platform), the launcher downloads the same release archive from GitHub once, checks it against the sha256 that was published inside `@mockingbird-cli/mockingbird`, and caches the binary (`~/.cache/mockingbird`, `~/Library/Caches/mockingbird` or `%LOCALAPPDATA%\mockingbird\cache`). Windows on Arm uses the x64 build through emulation, by the same download. Any other platform fails with the list of supported ones; build from source there.
 
 | Variable | Effect |
 | --- | --- |

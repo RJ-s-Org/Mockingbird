@@ -32,7 +32,8 @@ test('Windows on Arm uses the x64 build; other platforms have none', () => {
 });
 
 test('names follow the release assets', () => {
-  assert.equal(platformPackage('@scope/cli', 'linux-x64'), '@scope/cli-linux-x64');
+  assert.equal(platformPackage('@scope/cli', 'linux-x64'), '@scope/linux-x64');
+  assert.equal(platformPackage('plain', 'linux-x64'), 'plain-linux-x64');
   assert.equal(binaryName('win32-x64'), 'mockingbird.exe');
   assert.equal(binaryName('darwin-arm64'), 'mockingbird');
   assert.equal(archiveName('1.2.3', 'linux-arm64'), 'mockingbird-1.2.3-aarch64-unknown-linux-musl.tar.gz');
@@ -52,8 +53,8 @@ test('the platform package is used when it is installed', async () => {
     },
     download: noDownload,
   });
-  assert.deepEqual(asked, ['@scope/cli-darwin-arm64/bin/mockingbird']);
-  assert.equal(found, '/nm/@scope/cli-darwin-arm64/bin/mockingbird');
+  assert.deepEqual(asked, ['@scope/darwin-arm64/bin/mockingbird']);
+  assert.equal(found, '/nm/@scope/darwin-arm64/bin/mockingbird');
 });
 
 test('MOCKINGBIRD_BINARY wins over everything', async () => {
@@ -115,7 +116,7 @@ test('a missing platform package and a failed download explain both', async () =
     }),
     (err) => {
       assert.ok(err instanceof LauncherError);
-      assert.match(err.message, /@scope\/cli-linux-arm64@1\.2\.3 is not installed/);
+      assert.match(err.message, /@scope\/linux-arm64@1\.2\.3 is not installed/);
       assert.match(err.message, /--omit=optional/);
       assert.match(err.message, /HTTP 404/);
       return true;
@@ -133,7 +134,7 @@ test('MOCKINGBIRD_NO_DOWNLOAD turns the fallback off', async () => {
       resolve: notFound,
       download: noDownload,
     }),
-    /cli-win32-x64@.* is not installed[\s\S]*MOCKINGBIRD_NO_DOWNLOAD/,
+    /@scope\/win32-x64@.* is not installed[\s\S]*MOCKINGBIRD_NO_DOWNLOAD/,
   );
 });
 

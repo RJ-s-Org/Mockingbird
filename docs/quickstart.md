@@ -7,7 +7,7 @@ This page takes you from nothing to a running mock. For what a mock, a session a
 In a Node.js project, run it through npm with nothing to install (see [Install](install.md) for every channel):
 
 ```sh
-npx @mockingbird/cli run --offline -- npm test
+npx @mockingbird-cli/mockingbird run --offline -- npm test
 ```
 
 Or the release binary (macOS, Linux; on Windows use `install.ps1`, see [Coding agents](agents.md#install)):

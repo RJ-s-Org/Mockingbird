@@ -2,7 +2,8 @@
 
 // The release targets `.github/workflows/release.yml` builds, keyed by
 // `${process.platform}-${process.arch}`. Each one is published as the
-// platform package `<main package name>-<key>`.
+// platform package `<scope>/<key>`, in the main package's scope (the way
+// esbuild publishes `@esbuild/darwin-arm64`).
 //
 // The Linux binaries are static musl builds, so one package serves glibc
 // and musl systems alike and the packages carry no `libc` field.
@@ -28,8 +29,9 @@ function targetKey(platform, arch) {
   return ALIASES[key] || null;
 }
 
-/** The platform package for a target key. */
+/** The platform package for a target key: `@scope/<key>` (or `<name>-<key>` unscoped). */
 function platformPackage(mainName, key) {
+  if (mainName.startsWith('@')) return `${mainName.split('/')[0]}/${key}`;
   return `${mainName}-${key}`;
 }
 
