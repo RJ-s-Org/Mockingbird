@@ -383,9 +383,13 @@ impl MockBehavior {
     pub fn validate(&self) -> Result<(), String> {
         self.path_rewrite.validate()?;
         if let Some(path) = &self.graphql_path
-            && (!path.starts_with('/') || path.contains(['?', '#']) || path.chars().any(char::is_whitespace))
+            && (!path.starts_with('/')
+                || path.contains(['?', '#'])
+                || path.chars().any(char::is_whitespace))
         {
-            return Err(format!("graphql_path {path:?} must be a path starting with '/'"));
+            return Err(format!(
+                "graphql_path {path:?} must be a path starting with '/'"
+            ));
         }
         Ok(())
     }

@@ -641,9 +641,7 @@ impl ControlStore for SqliteControlStore {
         validate_hosts(&m.hosts)?;
         validate_header_name(&m.data_plane_auth.header)?;
         validate_mock_settings(m.chaos.as_ref(), &m.limits, &m.webhooks)?;
-        m.behavior
-            .validate()
-            .map_err(StoreError::Invalid)?;
+        m.behavior.validate().map_err(StoreError::Invalid)?;
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
         let limits = serde_json::to_string(&m.limits)?;
@@ -710,9 +708,7 @@ impl ControlStore for SqliteControlStore {
         validate_hosts(&m.hosts)?;
         validate_header_name(&m.data_plane_auth.header)?;
         validate_mock_settings(m.chaos.as_ref(), &m.limits, &m.webhooks)?;
-        m.behavior
-            .validate()
-            .map_err(StoreError::Invalid)?;
+        m.behavior.validate().map_err(StoreError::Invalid)?;
         let data_plane_auth = serde_json::to_string(&m.data_plane_auth)?;
         let chaos = m.chaos.as_ref().map(serde_json::to_string).transpose()?;
         let limits = serde_json::to_string(&m.limits)?;

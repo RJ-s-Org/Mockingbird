@@ -497,11 +497,7 @@ pub fn render(
 
 fn totals(report: &Report) -> String {
     let t = &report.totals;
-    let unmatched: u64 = report
-        .mocks
-        .iter()
-        .flat_map(|m| m.unmatched.values())
-        .sum();
+    let unmatched: u64 = report.mocks.iter().flat_map(|m| m.unmatched.values()).sum();
     format!(
         "{} requests, {} fallbacks, {} unmatched, {} 4xx, {} 5xx, {} unmapped hosts",
         t.requests,
@@ -822,8 +818,14 @@ mod tests {
         let f = check(&r, &args).unwrap();
         let out = render(&r, Some(&f), args.format).unwrap();
         assert!(out.len() < 1_000, "{out}");
-        assert!(out.starts_with("verify failed: 1 check (6 requests, 6 fallbacks"), "{out}");
-        assert!(out.contains("no-fallbacks: github: 6 fallback answers"), "{out}");
+        assert!(
+            out.starts_with("verify failed: 1 check (6 requests, 6 fallbacks"),
+            "{out}"
+        );
+        assert!(
+            out.contains("no-fallbacks: github: 6 fallback answers"),
+            "{out}"
+        );
         assert!(out.contains("; 3 more"), "{out}");
         assert!(out.contains("--format json"), "{out}");
         let json = render(&r, Some(&f), Format::Json).unwrap();

@@ -685,7 +685,12 @@ async fn graphql_path_is_per_mock() {
     let mut shop = create_mock(&store, "shop", "/api/2024-10", None).await;
     shop.behavior.graphql_path = Some("/graphql.json".into());
     let shop = store.update_mock(&shop).await.unwrap();
-    activate(&store, &shop, &fixture_text("graphql/starwars-introspection.json")).await;
+    activate(
+        &store,
+        &shop,
+        &fixture_text("graphql/starwars-introspection.json"),
+    )
+    .await;
     let gh = create_mock(&store, "gh", "/gh", None).await;
     activate(&store, &gh, &fixture_text("graphql/github.graphql")).await;
     let registry = MockRegistry::new();
@@ -693,7 +698,11 @@ async fn graphql_path_is_per_mock() {
     let base = serve(registry.router()).await;
     let http = reqwest::Client::new();
     for (path, query, pointer) in [
-        ("/api/2024-10/graphql.json", "{ hero { name } }", "/data/hero/name"),
+        (
+            "/api/2024-10/graphql.json",
+            "{ hero { name } }",
+            "/data/hero/name",
+        ),
         ("/gh/graphql", "{ viewer { login } }", "/data/viewer/login"),
     ] {
         let r = http
@@ -704,7 +713,10 @@ async fn graphql_path_is_per_mock() {
             .unwrap();
         assert_eq!(r.status(), 200, "{path}");
         let body: Value = r.json().await.unwrap();
-        assert!(body.pointer(pointer).is_some_and(Value::is_string), "{path}: {body}");
+        assert!(
+            body.pointer(pointer).is_some_and(Value::is_string),
+            "{path}: {body}"
+        );
     }
     assert_eq!(status_of(&base, "/api/2024-10/graphql").await, 404);
 }

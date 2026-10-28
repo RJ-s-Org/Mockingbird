@@ -270,7 +270,11 @@ async fn record_then_replay_answers_without_an_llm() {
         "{stderr}"
     );
     // A route the contract lacks: verify's default text names it briefly.
-    let missing = http.get(ports.data_url("/refunds/r1")).send().await.unwrap();
+    let missing = http
+        .get(ports.data_url("/refunds/r1"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(missing.status(), 404);
     let mut unmatched = mockingbird(&["--admin-url", &admin, "verify", "--no-unmatched"], &[]);
     for _ in 0..50 {
@@ -284,10 +288,15 @@ async fn record_then_replay_answers_without_an_llm() {
     let stdout = String::from_utf8_lossy(&unmatched.stdout);
     assert!(
         stdout.starts_with("verify failed: 1 check")
-            && stdout.contains("no-unmatched: orders-3-0: 1 requests matched no operation (1× GET /refunds/r1)"),
+            && stdout.contains(
+                "no-unmatched: orders-3-0: 1 requests matched no operation (1× GET /refunds/r1)"
+            ),
         "{stdout}"
     );
-    assert!(unmatched.stderr.is_empty(), "text on stdout is not repeated");
+    assert!(
+        unmatched.stderr.is_empty(),
+        "text on stdout is not repeated"
+    );
     let junit = mockingbird(&["--admin-url", &admin, "report", "--format", "junit"], &[]);
     assert!(
         String::from_utf8_lossy(&junit.stdout).contains(

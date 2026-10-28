@@ -602,7 +602,10 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         let e = &errors[0];
         assert!(e.starts_with("/owner: anyOf: "), "{e}");
-        assert!(e.contains("/owner/login: type: 7 is not of type \"string\""), "{e}");
+        assert!(
+            e.contains("/owner/login: type: 7 is not of type \"string\""),
+            "{e}"
+        );
         assert!(e.len() < 400, "{e}");
     }
 
