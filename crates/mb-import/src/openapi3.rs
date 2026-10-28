@@ -6,7 +6,7 @@ use crate::schema::{collect_refs, defs_name, normalize_schema};
 use crate::security::compile_security;
 use mb_mcm::{
     Binding, Bundle, HttpMethod, InputSchemas, Operation, OperationKind, OutputVariant, Protocol,
-    StatusSelector,
+    StatusSelector, WebhookDef,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -444,6 +444,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
 
     let mut ids = OperationIds::new(doc)?;
     let mut operations = Vec::new();
+    let mut callbacks = Vec::new();
     let empty = Map::new();
     let paths = doc
         .get("paths")
@@ -501,6 +502,9 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
             }
 
             check_operation_refs(&op_out, &defs)?;
+            if let Some(cbs) = op.get("callbacks") {
+                callbacks.push((op_out.id.clone(), cbs, format!("{at}/callbacks")));
+            }
             operations.push(op_out);
         }
     }
@@ -513,6 +517,8 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
         )?;
     }
 
+    let webhooks = compile_webhooks(doc, &defs, &callbacks)?;
+
     let digest = Sha256::digest(bytes);
     let source_digest = digest.iter().map(|b| format!("{b:02x}")).collect();
     Ok(Bundle {
@@ -524,5 +530,78 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
         defs,
         protocol_payload: None,
         channels: Vec::new(),
+        webhooks,
     })
+}
+
+/// The contract's outbound events: each top-level `webhooks` entry (3.1),
+/// then each callback of the operations in `callbacks` (operation id, its
+/// `callbacks` object, and that object's pointer). A path item contributes
+/// its first method with a JSON (or form) request body; a callback its
+/// first expression. Callback URL expressions are not kept.
+fn compile_webhooks(
+    doc: &Value,
+    defs: &Map<String, Value>,
+    callbacks: &[(String, &Value, String)],
+) -> Result<Vec<WebhookDef>, ImportError> {
+    let mut out = Vec::new();
+    if let Some(hooks) = doc.get("webhooks").and_then(Value::as_object) {
+        for (name, item) in hooks {
+            let at = format!("/webhooks/{}", escape(name));
+            if let Some((payload_schema, summary)) = path_item_payload(doc, item, &at)? {
+                check_refs(&payload_schema, defs, &format!("webhook {name}"), "")?;
+                out.push(WebhookDef {
+                    name: name.clone(),
+                    operation: None,
+                    payload_schema,
+                    summary,
+                });
+            }
+        }
+    }
+    for (op_id, cbs, at) in callbacks {
+        let cbs = deref(doc, cbs, at)?;
+        let Some(cbs) = cbs.as_object() else { continue };
+        for (cb_name, cb) in cbs {
+            let at = format!("{at}/{}", escape(cb_name));
+            let cb = deref(doc, cb, &at)?;
+            let Some((expr, item)) = cb.as_object().and_then(|o| o.iter().next()) else {
+                continue;
+            };
+            let at = format!("{at}/{}", escape(expr));
+            if let Some((payload_schema, summary)) = path_item_payload(doc, item, &at)? {
+                let name = format!("{op_id}.{cb_name}");
+                check_refs(&payload_schema, defs, &format!("callback {name}"), "")?;
+                out.push(WebhookDef {
+                    name,
+                    operation: Some(op_id.clone()),
+                    payload_schema,
+                    summary,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The request body schema and summary of the first method of a path
+/// item that has a body.
+fn path_item_payload(
+    doc: &Value,
+    item: &Value,
+    at: &str,
+) -> Result<Option<(Value, Option<String>)>, ImportError> {
+    let item = deref(doc, item, at)?;
+    for (key, _) in METHODS {
+        let Some(op) = item.get(key) else { continue };
+        if let (Some(schema), _) = compile_body(doc, op, &format!("{at}/{key}"))? {
+            let summary = op
+                .get("summary")
+                .or_else(|| item.get("summary"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            return Ok(Some((schema, summary)));
+        }
+    }
+    Ok(None)
 }

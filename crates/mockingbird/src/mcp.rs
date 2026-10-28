@@ -644,6 +644,20 @@ fn tools() -> Vec<Tool> {
             destructive: false,
         },
         Tool {
+            name: "list_webhook_deliveries",
+            title: "Read webhook deliveries",
+            description: "A mock's recent webhook deliveries, newest first: event id and type, operation, target URL (without credentials), status (pending, delivered, failed, dropped), attempts, last response status and error.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "limit": n("1-200; default 20."),
+                }),
+                &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
             name: "call_mock",
             title: "Call a mock",
             description: "Send an HTTP request to the data plane (REST, GraphQL at <prefix>/graphql, SOAP) and return status, x-mockingbird-* headers and body. Override fields map to X-Mockingbird-* headers.",
@@ -1377,6 +1391,16 @@ impl McpServer {
                     Method::GET,
                     &["mocks", str_arg(a, "mock")?, "requests", &id],
                     &[],
+                    None,
+                )
+                .await
+            }
+            "list_webhook_deliveries" => {
+                let query = [("limit", opt_u64(a, "limit").unwrap_or(20).to_string())];
+                self.ws(
+                    Method::GET,
+                    &["mocks", str_arg(a, "mock")?, "webhooks", "deliveries"],
+                    &query,
                     None,
                 )
                 .await
@@ -2439,6 +2463,19 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn list_webhook_deliveries_tool() {
+        let Some(tool) = tools()
+            .into_iter()
+            .find(|t| t.name == "list_webhook_deliveries")
+        else {
+            panic!("no list_webhook_deliveries tool");
+        };
+        assert!(tool.read_only && !tool.destructive);
+        assert_eq!(tool.schema["required"], json!(["mock"]));
+        assert!(tool.schema["properties"]["limit"].is_object());
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use mb_protocols::ProtocolSettings;
 use mb_protocols::events::{BrokerConfig, BrokerKind, MQTT_TLS_UNSUPPORTED, SaslConfig};
 use mb_store::{
     ChaosSettings, Consistency, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
-    LatencyJitter, MockLimits, RateLimit, UnknownIds,
+    LatencyJitter, MockLimits, RateLimit, UnknownIds, WebhookSigning, WebhookTarget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -547,6 +547,10 @@ pub struct ServerConfig {
     /// Admin API. Profiles in this file are not restricted. Read at
     /// startup.
     pub api_secret_refs: Vec<String>,
+    /// Globs a mock's webhook `secret` reference must match when set
+    /// through the Admin API. Mocks in this file are not restricted. Read
+    /// at startup.
+    pub api_webhook_secret_refs: Vec<String>,
     /// Which planes this node serves.
     pub role: Role,
     /// Whether `X-Forwarded-*` request headers are trusted (only behind a
@@ -575,6 +579,10 @@ impl Default for ServerConfig {
             grpc_port: 50051,
             insecure_no_auth: false,
             api_secret_refs: mb_admin::DEFAULT_API_SECRET_REFS
+                .iter()
+                .map(|r| r.to_string())
+                .collect(),
+            api_webhook_secret_refs: mb_admin::DEFAULT_API_WEBHOOK_SECRET_REFS
                 .iter()
                 .map(|r| r.to_string())
                 .collect(),
@@ -1035,6 +1043,42 @@ pub struct FileMock {
     /// host. With hosts, two mocks may share a route prefix.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Where the mock POSTs an event after each successful write.
+    #[serde(default)]
+    pub webhooks: Vec<FileWebhook>,
+}
+
+/// One entry of a mock's `webhooks:`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileWebhook {
+    /// Absolute `http`/`https` URL the events are POSTed to.
+    pub url: String,
+    /// Operation ids, event types (`customer.created`) or `"*"`.
+    #[serde(default = "WebhookTarget::all_events")]
+    pub events: Vec<String>,
+    /// A secret reference (`env:NAME`, `file:/path`, `vault:path#key`).
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// `stripe`, `hmac-sha256` or `none`; default `hmac-sha256` with a
+    /// secret, `none` without.
+    #[serde(default)]
+    pub signing: Option<WebhookSigning>,
+    /// Wait before the first attempt (at most 60 000).
+    #[serde(default)]
+    pub delay_ms: u64,
+}
+
+impl FileWebhook {
+    pub fn to_store(&self) -> WebhookTarget {
+        WebhookTarget {
+            url: self.url.clone(),
+            events: self.events.clone(),
+            secret: self.secret.clone(),
+            signing: self.signing,
+            delay_ms: self.delay_ms,
+        }
+    }
 }
 
 /// A mock's (or scenario's) `chaos:`.
@@ -1176,6 +1220,7 @@ impl FileMock {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             hosts: Vec::new(),
+            webhooks: Vec::new(),
         }
     }
 
@@ -1389,6 +1434,8 @@ impl FileConfig {
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
+            let webhooks: Vec<_> = mock.webhooks.iter().map(FileWebhook::to_store).collect();
+            mb_store::validate_webhooks(&webhooks).map_err(|e| format!("{prefix}{e}"))?;
             if let Some(chaos) = &mock.chaos {
                 chaos.validate(&prefix)?;
             }

@@ -101,6 +101,7 @@ async fn setup() -> Setup {
                 },
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -142,6 +143,7 @@ async fn setup() -> Setup {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
@@ -340,6 +342,7 @@ async fn orders_mock(store: &Arc<dyn ControlStore>, ws: &str, prefix: &str) -> M
                 data_plane_auth: DataPlaneAuthConfig::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -437,6 +440,7 @@ async fn twins() -> Twins {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     };
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();

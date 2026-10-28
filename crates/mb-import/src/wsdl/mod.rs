@@ -134,6 +134,7 @@ pub(crate) fn compile_upload(
             wsdl: text.strip_prefix('\u{feff}').unwrap_or(text).to_owned(),
         }),
         channels: Vec::new(),
+        webhooks: Vec::new(),
     })
 }
 

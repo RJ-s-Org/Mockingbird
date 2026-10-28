@@ -520,6 +520,11 @@ fn mcp_drives_a_background_server() {
             json!({ "mock": "orders", "id": log[0]["id"] }),
         );
         assert!(one["response"].is_object(), "{one}");
+        let deliveries = mcp.tool(
+            "list_webhook_deliveries",
+            json!({ "mock": "orders", "limit": 5 }),
+        );
+        assert_eq!(deliveries, json!([]), "{deliveries}");
 
         let imported = mcp.tool(
             "import_contract",

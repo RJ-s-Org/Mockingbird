@@ -26,6 +26,7 @@ Listeners and the node's role. Read at startup.
 | `server.admin_port` | port | `9090` | Must be free when set explicitly | `MB_ADMIN_PORT`, `--admin-port` | Admin API, console and ops endpoints. When it is not set explicitly and 9090 is taken, the node starts without it and logs a warning. |
 | `server.grpc_port` | port | `50051` | Must be free when set explicitly | `MB_GRPC_PORT`, `--grpc-port` | gRPC (h2c, or h2 over TLS with `server.tls`), shared by every gRPC mock. Skipped with a warning like `admin_port`. |
 | `server.insecure_no_auth` | bool | `false` | | `--insecure-no-auth` | Allow a non-loopback `server.host` with `auth.mode: none`. Everyone who reaches the admin port is then a sysadmin. |
+| `server.api_webhook_secret_refs` | list of globs | `["env:*_WEBHOOK_SECRET", "env:MB_WEBHOOK_*"]` | `*` matches any run of characters | | Secret references a mock's webhook target may use when it is set through the Admin API; anything else is a 422. Mocks in this file are not restricted. |
 | `server.api_secret_refs` | list of globs | `["env:MB_LLM_*", "env:*_API_KEY"]` | `*` matches any run of characters | | Secret references an LLM profile may use when it is created or updated through the Admin API; anything else is a 422. Profiles in this file are not restricted. |
 | `server.role` | `all`, `control`, `data` | `all` | `control` and `data` need a `postgres://` `storage.url` and a `postgres://` or `redis(s)://` effective state URL and a shared bus; SQLite, `memory` and `bus.url: local` are refused | `MB_ROLE`, `--role` | Which planes the node serves; see [roles](architecture.md#roles). |
 | `server.trust_forwarded_headers` | bool | `false` | | | Trust `X-Forwarded-Proto`/`X-Forwarded-Host` (and RFC 7239 `Forwarded`) when building SOAP `?wsdl` addresses. Turn it on only behind a reverse proxy that sets them. |
@@ -258,6 +259,20 @@ Fault injection. Absent injects nothing. A request with `X-Mockingbird-Chaos: of
 | `mocks.<name>.chaos.drop_stream_rate` | number | `0` | 0.0..=1.0 | | Share of streamed responses cut short. |
 
 `MB_CHAOS_SEED` (an integer) seeds the random choices, for repeatable test runs.
+
+### `mocks.<name>.webhooks`
+
+Where the mock POSTs an event after each successful (2xx) write: a create, update, delete or other command, never a read. The body is the contract's OpenAPI `webhooks`/`callbacks` payload when it defines one, else a Stripe-shaped event `{id, object: "event", type: "<resource>.<created|updated|deleted>", created, data: {object: <response>}}`. Each delivery is retried 3 times (after 1 s, 2 s, 4 s) on a non-2xx answer or transport error and never delays the response. See [the webhooks guide](webhooks.md).
+
+| Key | Type | Default | Range / rule | Env / flag | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `mocks.<name>.webhooks` | list | `[]` | At most 16 | | The mock's webhook targets. |
+| `mocks.<name>.webhooks[]` | section | | | | One target. |
+| `mocks.<name>.webhooks[].url` | URL | required | Absolute `http`/`https`, no `user:password@` | | Where events are POSTed. Redirects are not followed (a 3xx is a failed attempt). The query is shown as `?<redacted>` by the Admin API and in audit events, and is kept off the delivery log. |
+| `mocks.<name>.webhooks[].events` | list of strings | `["*"]` | Not empty | | Which events go to this target: operation ids (`createCustomer`), event types (`customer.created`) or `*`. |
+| `mocks.<name>.webhooks[].secret` | secret reference | unset | `env:`, `file:` or `vault:` | | Signing key. A reference that does not resolve keeps the mock serving; that target's deliveries are recorded `failed` and nothing is sent unsigned. |
+| `mocks.<name>.webhooks[].signing` | `stripe`, `hmac-sha256`, `none` | `hmac-sha256` with a secret, else `none` | `stripe` and `hmac-sha256` need `secret` | | `stripe`: `Stripe-Signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`. `hmac-sha256`: `X-Mockingbird-Signature: sha256=<hex HMAC-SHA256(secret, body)>`. |
+| `mocks.<name>.webhooks[].delay_ms` | integer (ms) | `0` | 0..=60000 | | Wait before the first attempt. |
 
 ### `mocks.<name>.limits`
 

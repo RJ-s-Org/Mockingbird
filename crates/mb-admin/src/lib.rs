@@ -38,6 +38,7 @@ mod requests;
 mod scenarios;
 mod sessions;
 mod webhook;
+pub mod webhook_deliveries;
 mod workspaces;
 
 pub use access::{CurrentPrincipal, WsAccess, authenticate};
@@ -71,6 +72,10 @@ pub const OPENAPI_PATH: &str = "/api/openapi.json";
 /// created or updated through the API may use.
 pub const DEFAULT_API_SECRET_REFS: [&str; 2] = ["env:MB_LLM_*", "env:*_API_KEY"];
 
+/// Default `server.api_webhook_secret_refs`: the secret references a mock's
+/// webhook target set through the API may use.
+pub const DEFAULT_API_WEBHOOK_SECRET_REFS: [&str; 2] = ["env:*_WEBHOOK_SECRET", "env:MB_WEBHOOK_*"];
+
 /// Default [`AdminState::live_recheck`].
 pub const DEFAULT_LIVE_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -81,6 +86,9 @@ pub struct AdminState {
     /// Globs (`*` matches any run of characters) a profile's `secret_ref`
     /// must match when written through the API (`server.api_secret_refs`).
     pub api_secret_refs: Arc<Vec<String>>,
+    /// Globs a webhook target's `secret` must match when written through
+    /// the API (`server.api_webhook_secret_refs`).
+    pub api_webhook_secret_refs: Arc<Vec<String>>,
     /// Resolves the caller of every `/api/v1` request.
     pub auth: Arc<dyn Authenticate>,
     /// Records every successful mutation.
@@ -118,6 +126,12 @@ impl AdminState {
             state,
             api_secret_refs: Arc::new(
                 DEFAULT_API_SECRET_REFS
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect(),
+            ),
+            api_webhook_secret_refs: Arc::new(
+                DEFAULT_API_WEBHOOK_SECRET_REFS
                     .iter()
                     .map(|r| r.to_string())
                     .collect(),
@@ -259,7 +273,8 @@ pub fn router(st: AdminState) -> Router {
             "/mocks/{mock}/imports/{job}",
             get(imports::get_one).delete(imports::cancel),
         )
-        .merge(channels::routes());
+        .merge(channels::routes())
+        .merge(webhook_deliveries::routes());
     // Workspace-only resources: no P2 alias for `default`.
     let workspace_only: Router<AdminState> = resources
         .clone()

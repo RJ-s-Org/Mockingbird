@@ -477,6 +477,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mocks/{mock}/webhooks/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["webhooks_list_deliveries_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces": {
         parameters: {
             query?: never;
@@ -942,6 +959,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/webhooks/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["webhooks_list_deliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1196,6 +1229,8 @@ export interface components {
             route_prefix?: string | null;
             /** @description `generate` (default) or `404`. */
             unknown_ids?: string | null;
+            /** @description Webhook targets; none by default. */
+            webhooks?: components["schemas"]["WebhookTarget"][] | null;
         };
         /** @description A new workspace. */
         CreateWorkspace: {
@@ -1535,6 +1570,11 @@ export interface components {
             unknown_ids: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description Where the mock POSTs events after successful writes; absent when
+             *     none.
+             */
+            webhooks?: components["schemas"]["WebhookTarget"][];
             workspace: string;
         };
         /** @description One operation of a compiled contract. */
@@ -1574,6 +1614,8 @@ export interface components {
             route_prefix?: string | null;
             /** @description `generate` or `404`. */
             unknown_ids?: string | null;
+            /** @description Replaces the webhook targets; `[]` clears them. */
+            webhooks?: components["schemas"]["WebhookTarget"][] | null;
         };
         /** @description The editable fields of a workspace. */
         PatchWorkspace: {
@@ -1935,6 +1977,65 @@ export interface components {
          * @enum {string}
          */
         VersionStatus: "draft" | "approved" | "active" | "archived";
+        /** @description One event sent (or to be sent) to one webhook target. */
+        WebhookDeliveryView: {
+            /**
+             * Format: int32
+             * @description Attempts made so far (at most 4).
+             */
+            attempts: number;
+            /** Format: date-time */
+            created_at: string;
+            /** @description Why the last attempt (or the delivery) failed. */
+            error?: string | null;
+            event_id: string;
+            /** @description e.g. `customer.created`. */
+            event_type: string;
+            /** Format: date-time */
+            finished_at?: string | null;
+            id: string;
+            /** @description The operation whose call fired the event. */
+            operation: string;
+            /**
+             * Format: int32
+             * @description The last attempt's HTTP status.
+             */
+            response_status?: number | null;
+            session: string;
+            /** @description `pending`, `delivered`, `failed` or `dropped`. */
+            status: string;
+            /** @description The target URL without userinfo, query or fragment. */
+            url: string;
+        };
+        /**
+         * @description How a webhook delivery is signed.
+         * @enum {string}
+         */
+        WebhookSigning: "stripe" | "hmac-sha256" | "none";
+        /** @description The OpenAPI schema of [`WebhookTarget`] (which lives in `mb-store`). */
+        WebhookTarget: {
+            /**
+             * Format: int64
+             * @description Wait before the first attempt, 0–60000.
+             * @default 0
+             */
+            delay_ms: number | null;
+            /**
+             * @description Operation ids, event types (`customer.created`) or `*`.
+             * @default [
+             *       "*"
+             *     ]
+             */
+            events: string[] | null;
+            /**
+             * @description A secret reference (`env:NAME`, `file:/path`, `vault:path#key`)
+             *     matching `server.api_webhook_secret_refs`; never a value.
+             */
+            secret?: string | null;
+            signing?: components["schemas"]["WebhookSigning"] | null;
+            /** @description Absolute `http` or `https` URL events are POSTed to. */
+            url: string;
+        };
         /** @description A workspace and the caller's role in it. */
         WorkspaceView: {
             /** Format: date-time */
@@ -2255,7 +2356,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name, route prefix, hosts, chaos or limits */
+            /** @description Invalid name, route prefix, hosts, chaos, limits or webhooks (titles "Invalid webhooks", "Secret reference not allowed") */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2384,7 +2485,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid route prefix, hosts, chaos or limits */
+            /** @description Invalid route prefix, hosts, chaos, limits or webhooks (titles "Invalid webhooks", "Secret reference not allowed") */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3884,6 +3985,49 @@ export interface operations {
             };
         };
     };
+    webhooks_list_deliveries_default: {
+        parameters: {
+            query?: {
+                /** @description 1–200; default 50. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest first; kept in memory on the node that delivered them */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookDeliveryView"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description limit outside 1–200 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     workspaces_list: {
         parameters: {
             query?: never;
@@ -4483,7 +4627,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name, route prefix, hosts, chaos or limits */
+            /** @description Invalid name, route prefix, hosts, chaos, limits or webhooks (titles "Invalid webhooks", "Secret reference not allowed") */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4618,7 +4762,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid route prefix, hosts, chaos or limits */
+            /** @description Invalid route prefix, hosts, chaos, limits or webhooks (titles "Invalid webhooks", "Secret reference not allowed") */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -6167,6 +6311,51 @@ export interface operations {
             };
             /** @description State store unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    webhooks_list_deliveries: {
+        parameters: {
+            query?: {
+                /** @description 1–200; default 50. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest first; kept in memory on the node that delivered them */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookDeliveryView"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description limit outside 1–200 */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

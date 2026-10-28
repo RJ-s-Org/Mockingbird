@@ -51,6 +51,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     }
 }
 
@@ -76,6 +77,7 @@ async fn hosted_registry(host: &str) -> Arc<MockRegistry> {
                 data_plane_auth: Default::default(),
                 hosts: vec![host.into()],
                 behavior: Default::default(),
+                webhooks: Vec::new(),
             },
         )
         .await

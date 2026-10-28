@@ -1,6 +1,6 @@
 //! Admin API client subcommands: `mocks`, `import`, `sessions`,
-//! `export-fixtures`, `seed-fixtures`, `channels`, `scenarios`, `profiles`
-//! and `brokers`.
+//! `export-fixtures`, `seed-fixtures`, `channels`, `scenarios`, `profiles`,
+//! `brokers` and `webhooks` (whose `sign` runs locally).
 //!
 //! Every mock- and workspace-scoped call goes to
 //! `/api/v1/workspaces/<ws>/…` of the `--workspace` (`MB_WORKSPACE`)
@@ -50,6 +50,43 @@ pub enum ClientCommand {
     /// List the configured message brokers.
     #[command(subcommand)]
     Brokers(BrokersCommand),
+    /// Sign webhook bodies and list a mock's webhook deliveries.
+    #[command(subcommand)]
+    Webhooks(WebhooksCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebhooksCommand {
+    /// Print the signature header a mock would send for a body (for tests).
+    /// Runs locally; the secret is never printed.
+    Sign {
+        /// env:NAME, file:/path or vault:path#key.
+        #[arg(long)]
+        secret_ref: String,
+        /// The exact body bytes (`-` reads stdin).
+        #[arg(long)]
+        body: PathBuf,
+        #[arg(long, value_enum, default_value = "hmac-sha256")]
+        signing: SignArg,
+        /// Unix seconds for Stripe's `t` [default: now].
+        #[arg(long)]
+        timestamp: Option<i64>,
+    },
+    /// List a mock's recent webhook deliveries, newest first.
+    Deliveries {
+        mock: String,
+        /// 1-200.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+}
+
+/// A signing scheme `webhooks sign` produces.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignArg {
+    Stripe,
+    #[value(name = "hmac-sha256")]
+    HmacSha256,
 }
 
 #[derive(Subcommand, Debug)]
@@ -272,6 +309,18 @@ pub async fn run(
     workspace: &str,
     cmd: ClientCommand,
 ) -> Result<Option<Value>, ClientError> {
+    if let ClientCommand::Webhooks(WebhooksCommand::Sign {
+        secret_ref,
+        body,
+        signing,
+        timestamp,
+    }) = cmd
+    {
+        return sign_webhook(&secret_ref, &body, signing, timestamp)
+            .await
+            .map(Some)
+            .map_err(ClientError::Other);
+    }
     let api = AdminClient::new(admin_url, token, workspace)?;
     match cmd {
         ClientCommand::Mocks(MocksCommand::List) => api.send(Method::GET, &["mocks"], None).await,
@@ -322,6 +371,15 @@ pub async fn run(
         ClientCommand::Profiles(cmd) => profiles(&api, cmd).await,
         ClientCommand::Brokers(BrokersCommand::List) => {
             api.request(Method::GET, api.url(&["brokers"]), None).await
+        }
+        ClientCommand::Webhooks(WebhooksCommand::Deliveries { mock, limit }) => {
+            let mut url = api.ws_url(&["mocks", &mock, "webhooks", "deliveries"]);
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+            api.request(Method::GET, url, None).await
+        }
+        ClientCommand::Webhooks(WebhooksCommand::Sign { .. }) => {
+            Err(ClientError::Other(anyhow!("webhooks sign runs locally")))
         }
         ClientCommand::SeedFixtures(SeedArgs { target, file }) => {
             let fixtures = read_json(&file)?;
@@ -879,6 +937,46 @@ fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
 
 fn read(path: &Path) -> anyhow::Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// `{"header", "value"}` of the signature a mock sends for the bytes of
+/// `body` (`-` reads stdin). Errors name the secret reference, never the
+/// value.
+async fn sign_webhook(
+    secret_ref: &str,
+    body: &Path,
+    signing: SignArg,
+    timestamp: Option<i64>,
+) -> anyhow::Result<Value> {
+    use mb_ext::SecretStore;
+    use mb_protocols::webhooks::sign::{Signing, signature_header};
+
+    let bytes = if body == Path::new("-") {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+            .context("cannot read stdin")?;
+        bytes
+    } else {
+        read(body)?
+    };
+    let secret = mb_ext::DefaultSecrets::from_env()
+        .resolve(secret_ref)
+        .await
+        .map_err(|_| anyhow!("secret reference {secret_ref} could not be resolved"))?;
+    let timestamp = match timestamp {
+        Some(t) => t,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .context("the system clock is before 1970")?,
+    };
+    let signing = match signing {
+        SignArg::Stripe => Signing::Stripe,
+        SignArg::HmacSha256 => Signing::HmacSha256,
+    };
+    let (header, value) = signature_header(signing, secret.as_bytes(), timestamp, &bytes)
+        .ok_or_else(|| anyhow!("no signature for this scheme"))?;
+    Ok(json!({"header": header, "value": value}))
 }
 
 /// Reads a JSON document from `path`, or from stdin when `path` is `-`.

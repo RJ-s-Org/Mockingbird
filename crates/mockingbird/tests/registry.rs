@@ -72,6 +72,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     }
 }
 
@@ -96,6 +97,7 @@ async fn create_mock(
                 data_plane_auth: Default::default(),
                 hosts: vec![],
                 behavior: Default::default(),
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -123,6 +125,7 @@ async fn create_hosted(
                 data_plane_auth: Default::default(),
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 behavior: Default::default(),
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -817,6 +820,7 @@ async fn grpc_service_holder_survives_cross_workspace_newcomer() {
                 data_plane_auth: Default::default(),
                 hosts: vec![],
                 behavior: Default::default(),
+                webhooks: Vec::new(),
             },
         )
         .await

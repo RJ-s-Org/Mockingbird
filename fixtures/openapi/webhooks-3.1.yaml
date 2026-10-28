@@ -1,0 +1,77 @@
+openapi: 3.1.0
+info:
+  title: Pets API
+  version: 1.0.0
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      summary: Create a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+      callbacks:
+        onAdopted:
+          "{$request.body#/callbackUrl}":
+            post:
+              requestBody:
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      required: [adopted]
+                      properties:
+                        adopted:
+                          const: true
+              responses:
+                "200":
+                  description: Received
+webhooks:
+  pet.created:
+    post:
+      summary: A pet was created
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PetEvent"
+      responses:
+        "200":
+          description: Received
+components:
+  schemas:
+    NewPet:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        callbackUrl:
+          type: string
+          format: uri
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    PetEvent:
+      type: object
+      required: [event, pet]
+      properties:
+        event:
+          const: pet.created
+        pet:
+          $ref: "#/components/schemas/Pet"

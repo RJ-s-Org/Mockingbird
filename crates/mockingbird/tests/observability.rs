@@ -452,6 +452,7 @@ async fn orders_mock(store: &Arc<dyn ControlStore>) -> Mock {
                 data_plane_auth: Default::default(),
                 behavior: Default::default(),
                 hosts: vec![],
+                webhooks: Vec::new(),
             },
         )
         .await
@@ -498,6 +499,7 @@ fn deps(
         limits: Default::default(),
         http: Default::default(),
         mode: mockingbird::runtime::ServeMode::Full,
+        webhook_log: Default::default(),
     }
 }
 

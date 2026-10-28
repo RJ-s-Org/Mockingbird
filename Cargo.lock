@@ -1303,7 +1303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.9",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3366,7 +3366,6 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.23.1",
  "chrono",
- "hmac 0.12.1",
  "http-body-util",
  "mb-auth",
  "mb-engine",
@@ -3382,7 +3381,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "tokio",
@@ -3580,6 +3578,7 @@ dependencies = [
  "chrono",
  "cron",
  "futures",
+ "hmac 0.12.1",
  "http 1.5.0",
  "http-body 1.1.0",
  "humantime",
@@ -3602,8 +3601,10 @@ dependencies = [
  "reqwest",
  "rumqttc",
  "rumqttd",
+ "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -3616,6 +3617,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -3653,6 +3655,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
 ]
 

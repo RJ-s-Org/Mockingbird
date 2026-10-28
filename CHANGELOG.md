@@ -34,6 +34,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - `mockingbird agent install` passes the default profile's key variables (names only) through to the agent's MCP config in each agent's syntax; `--config`, `--pass-env`.
 - `mockingbird keys setup` and MCP `open_key_setup`: a one-shot local page that stores an LLM key in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it, returning only the name and profile (the URL when the user takes longer than 45 s). `doctor` reports the store under `key_store`.
 - `mb-ext`: `check_secret_file` and `in_key_store` (additive).
+- Webhooks: mocks POST an event after each successful write to the URLs in `mocks.<name>.webhooks` (or the Admin API), signed Stripe-style (`Stripe-Signature`) or with `X-Mockingbird-Signature`, retried 3 times (1 s, 2 s, 4 s); the payload is the contract's OpenAPI `webhooks`/`callbacks` body when defined, else a Stripe-shaped `<resource>.<created|updated|deleted>` event. Deliveries: `GET …/mocks/{mock}/webhooks/deliveries`, `mockingbird webhooks deliveries`, MCP `list_webhook_deliveries`; `mockingbird webhooks sign` prints a signature for tests. `server.api_webhook_secret_refs` limits secret references set through the API. Migration `0700_mock_webhooks` adds `mocks.webhooks`. See [docs/webhooks.md](docs/webhooks.md).
 
 ### Changed
 

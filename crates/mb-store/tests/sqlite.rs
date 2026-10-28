@@ -33,6 +33,7 @@ async fn sqlite_file_url_creates_db() {
                     data_plane_auth: Default::default(),
                     behavior: Default::default(),
                     hosts: vec![],
+                    webhooks: Vec::new(),
                 },
             )
             .await
@@ -126,6 +127,7 @@ fn cancel_mock(name: String) -> NewMock {
         data_plane_auth: Default::default(),
         behavior: Default::default(),
         hosts: vec![],
+        webhooks: Vec::new(),
     }
 }
 

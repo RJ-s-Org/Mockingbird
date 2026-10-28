@@ -47,6 +47,7 @@ pub mod limits;
 mod record;
 #[cfg(feature = "soap")]
 pub mod soap;
+pub mod webhooks;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
@@ -285,6 +286,8 @@ pub struct MockRuntime {
     pub unknown_ids: UnknownIds,
     /// The scenario applied when a call names none.
     pub default_scenario: Option<String>,
+    /// Sends webhook events after successful writes; `None` sends none.
+    pub webhooks: Option<Arc<webhooks::deliver::WebhookDispatcher>>,
     /// The credential header and query names derived from
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
@@ -360,6 +363,7 @@ impl MockRuntime {
             consistency: true,
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
+            webhooks: None,
             credential_names,
         }
     }
