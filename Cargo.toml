@@ -7,7 +7,7 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rj-s-org/mockingbird"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }
@@ -111,17 +111,17 @@ rumqttd = { version = "0.20.0", default-features = false }
 
 # Internal crates, published as mockingbird-<name> in lock-step with the
 # workspace version (scripts/check-version.sh checks these requirements).
-mb-mcm = { package = "mockingbird-mcm", path = "crates/mb-mcm", version = "=0.1.0-rc.1" }
-mb-import = { package = "mockingbird-import", path = "crates/mb-import", version = "=0.1.0-rc.1" }
-mb-llm = { package = "mockingbird-llm", path = "crates/mb-llm", version = "=0.1.0-rc.1" }
-mb-engine = { package = "mockingbird-engine", path = "crates/mb-engine", version = "=0.1.0-rc.1" }
-mb-state = { package = "mockingbird-state", path = "crates/mb-state", version = "=0.1.0-rc.1" }
-mb-protocols = { package = "mockingbird-protocols", path = "crates/mb-protocols", version = "=0.1.0-rc.1" }
+mb-mcm = { package = "mockingbird-mcm", path = "crates/mb-mcm", version = "=0.1.0" }
+mb-import = { package = "mockingbird-import", path = "crates/mb-import", version = "=0.1.0" }
+mb-llm = { package = "mockingbird-llm", path = "crates/mb-llm", version = "=0.1.0" }
+mb-engine = { package = "mockingbird-engine", path = "crates/mb-engine", version = "=0.1.0" }
+mb-state = { package = "mockingbird-state", path = "crates/mb-state", version = "=0.1.0" }
+mb-protocols = { package = "mockingbird-protocols", path = "crates/mb-protocols", version = "=0.1.0" }
 mb-ext = { path = "crates/mb-ext", version = "1.0.0" }
-mb-store = { package = "mockingbird-store", path = "crates/mb-store", version = "=0.1.0-rc.1" }
-mb-admin = { package = "mockingbird-admin", path = "crates/mb-admin", version = "=0.1.0-rc.1" }
-mb-auth = { package = "mockingbird-auth", path = "crates/mb-auth", version = "=0.1.0-rc.1" }
-mb-console = { package = "mockingbird-console", path = "crates/mb-console", version = "=0.1.0-rc.1" }
+mb-store = { package = "mockingbird-store", path = "crates/mb-store", version = "=0.1.0" }
+mb-admin = { package = "mockingbird-admin", path = "crates/mb-admin", version = "=0.1.0" }
+mb-auth = { package = "mockingbird-auth", path = "crates/mb-auth", version = "=0.1.0" }
+mb-console = { package = "mockingbird-console", path = "crates/mb-console", version = "=0.1.0" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

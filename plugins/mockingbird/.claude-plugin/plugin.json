@@ -1,6 +1,6 @@
 {
   "name": "mockingbird",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0",
   "description": "Mock any API from its contract (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) with LLM-generated, schema-valid responses: install, LLM onboarding (OpenRouter, Google AI Studio, Cloudflare AI Gateway, BYOK), self-hosting and the full Admin API as MCP tools and skills.",
   "author": { "name": "Mockingbird contributors", "url": "https://github.com/rj-s-org/mockingbird" },
   "homepage": "https://github.com/rj-s-org/mockingbird",
