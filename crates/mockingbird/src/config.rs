@@ -21,8 +21,8 @@ use crate::client::ClientCommand;
 use crate::dp_keys::StoreDataPlaneKeys;
 use crate::events::{RegistryChannels, StoreLease};
 use crate::file_config::{
-    self, AuthConfig, AuthMode, ENV_API_KEY_REF, ENV_PROFILE, FileConfig, FileMock, FileProfile,
-    Role,
+    self, AuthConfig, AuthMode, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, ENV_API_KEY_REF,
+    ENV_PROFILE, FileConfig, FileMock, FileProfile, Role,
 };
 use crate::ha::Ha;
 use crate::host_guard::HostPolicy;
@@ -215,8 +215,8 @@ impl LlmEnv {
     pub fn from_env() -> Self {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         Self {
-            base_url: get("MB_LLM_BASE_URL").unwrap_or_else(|| "https://api.deepseek.com".into()),
-            model: get("MB_LLM_MODEL").unwrap_or_else(|| "deepseek-chat".into()),
+            base_url: get("MB_LLM_BASE_URL").unwrap_or_else(|| DEFAULT_LLM_BASE_URL.into()),
+            model: get("MB_LLM_MODEL").unwrap_or_else(|| DEFAULT_LLM_MODEL.into()),
             api_key: get("MB_LLM_API_KEY"),
             json_schema: get("MB_LLM_JSON_SCHEMA")
                 .map(|v| v.eq_ignore_ascii_case("true"))

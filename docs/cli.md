@@ -5,7 +5,7 @@ The same binary drives the Admin API. It prints JSON on stdout and problem detai
 ```sh
 mockingbird mocks list
 mockingbird mocks get orders
-mockingbird mocks create billing --prefix /bill --persona "Formal" --profile deepseek
+mockingbird mocks create billing --prefix /bill --persona "Formal" --profile openrouter
 mockingbird mocks delete billing
 
 # Upload a contract as a new version (creating the mock if missing).

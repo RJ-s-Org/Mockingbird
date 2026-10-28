@@ -30,10 +30,10 @@ pub const ENV_PROFILE: &str = "default";
 pub const ENV_API_KEY_REF: &str = "env:MB_LLM_API_KEY";
 
 /// Default `MB_LLM_BASE_URL`.
-pub const DEFAULT_LLM_BASE_URL: &str = "https://api.deepseek.com";
+pub const DEFAULT_LLM_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// Default `MB_LLM_MODEL`.
-pub const DEFAULT_LLM_MODEL: &str = "deepseek-chat";
+pub const DEFAULT_LLM_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]

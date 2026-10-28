@@ -14,9 +14,9 @@ spec:
               valueFrom:
                 secretKeyRef: {name: mockingbird-llm, key: api-key}
             - name: MB_LLM_BASE_URL
-              value: https://api.deepseek.com
+              value: https://openrouter.ai/api/v1
             - name: MB_LLM_MODEL
-              value: deepseek-chat
+              value: deepseek/deepseek-v4.1-flash
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {memory: 512Mi}

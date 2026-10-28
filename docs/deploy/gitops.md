@@ -50,8 +50,8 @@ To give the mocks an LLM (richer, persona-driven answers), create the Secret in 
 ```yaml
 llm:
   existingSecret: mockingbird-llm   # key api-key
-  baseUrl: https://api.deepseek.com
-  model: deepseek-chat
+  baseUrl: https://openrouter.ai/api/v1
+  model: deepseek/deepseek-v4.1-flash
 ```
 
 Each mock can cap its spend with `limits.daily_token_budget`; once it is spent, the mock falls back to the faker.

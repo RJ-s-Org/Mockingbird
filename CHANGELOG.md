@@ -102,6 +102,7 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 - The root fields of a GraphQL query are generated in one LLM call, as one object keyed by response key, so they agree with each other (GitHub's `user(login:)` and `organization(login:)` no longer both answer). A nullable field may be left out of that answer; one that stays invalid after the repair is answered field by field as before. Mutations, subscriptions and queries with root-level fragments or directives are unchanged.
 - An LLM answer whose only errors are nulls the schema does not allow is patched instead of sent back for a repair call: an optional property is dropped, a required one gets a faker value. The response's source is `repaired`. Real APIs return null where their docs never say so (TMDB's `belongs_to_collection`), and models copy them; this saved a 20–40 s repair call on 4 of 8 TMDB detail pages.
 - An answer wrapped like a GraphQL response (`{"data": {"user": {...}}}`) is unwrapped like an array envelope.
+- The default LLM is OpenRouter: `MB_LLM_BASE_URL` defaults to `https://openrouter.ai/api/v1` and `MB_LLM_MODEL` to `deepseek/deepseek-v4.1-flash` (DeepSeek V4.1 Flash), so `MB_LLM_API_KEY` is an OpenRouter key. Set both variables to keep using DeepSeek directly (`https://api.deepseek.com`, `deepseek-chat`). The example configs and tests use an `openrouter` default profile.
 
 ### Fixed
 

@@ -26,12 +26,12 @@ mocks:
 
 llm:
   existingSecret: mockingbird-llm
-  baseUrl: https://api.deepseek.com
-  model: deepseek-chat
+  baseUrl: https://openrouter.ai/api/v1
+  model: deepseek/deepseek-v4.1-flash
   profiles:
     openrouter:
       base_url: https://openrouter.ai/api/v1
-      model: deepseek/deepseek-chat
+      model: deepseek/deepseek-v4.1-flash
       apiKeySecret:
         name: openrouter
         key: api-key

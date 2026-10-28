@@ -77,13 +77,13 @@ audit:
   webhook_secret: env:MB_AUDIT_WEBHOOK_SECRET          # secret reference; signs X-Mockingbird-Signature
 
 llm:
-  default_profile: deepseek   # used by mocks that name no profile; MB_LLM_* override profile "default"
+  default_profile: openrouter # used by mocks that name no profile; MB_LLM_* override profile "default"
   profiles:
-    deepseek:
+    openrouter:
       workspace: default              # workspace the profile belongs to (created if missing)
-      base_url: https://api.deepseek.com
-      model: deepseek-chat
-      api_key: env:DEEPSEEK_API_KEY   # a secret reference (env:NAME or file:/path), never the key itself
+      base_url: https://openrouter.ai/api/v1
+      model: deepseek/deepseek-v4.1-flash
+      api_key: env:OPENROUTER_API_KEY # a secret reference (env:NAME or file:/path), never the key itself
       json_schema: false
       timeout: 3s
       temperature: 0.7
@@ -158,7 +158,7 @@ mocks:
     contract: ../../fixtures/openapi/orders-3.0.yaml   # relative to this file
     route_prefix: /orders-api                          # default: /<name>
     persona: A small online shop selling hiking gear.
-    llm_profile: deepseek                              # default: llm.default_profile
+    llm_profile: openrouter                            # default: llm.default_profile
     header_overrides: true                             # honour X-Mockingbird-* request headers
     data_plane_auth:
       mode: none                                       # none | api_key | passthrough_validate
