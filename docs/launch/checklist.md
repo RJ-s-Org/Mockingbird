@@ -76,21 +76,28 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
 
 The files are ready in [`packaging/`](https://github.com/RJ-s-Org/Mockingbird/tree/main/packaging), rendered from a release's `SHA256SUMS` by `scripts/render-packaging.sh` (the committed copies are for 0.1.0-rc.1).
 
-- [ ] **npm** (`npx @mockingbird-cli/mockingbird`). The `npm-pack` job of `release.yml` builds the launcher and the five platform packages from the release archives on every run, dry runs included; `npm-publish` publishes them, with provenance, after the GitHub release, but only once the `NPM_PUBLISH` repository variable is `true`. npm attaches a trusted publisher to a package that already exists, so the first version goes out with a short-lived token:
+- [ ] **npm** (`npx @mockingbird-cli/mockingbird`). The `npm-pack` job of `release.yml` builds the launcher and the five platform packages from the release archives on every run, dry runs included, and keeps the tarballs as the run's `npm-packages` artifact. `npm-publish` publishes them after the GitHub release through [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC, with provenance) and never with a token, but only once the `NPM_PUBLISH` repository variable is `true`. npm attaches a trusted publisher only to a package that already exists, so you publish 0.1.0 by hand, once, and CI publishes every later version. No npm token is created at any point (npm is retiring granular tokens that bypass 2FA).
   1. ~~Create the organization~~ `mockingbird-cli`: done.
-  2. Create a granular access token: **Access Tokens → Generate New Token → Granular Access Token**, expiry 7 days, **Packages and scopes: Read and write** on the `@mockingbird-cli` scope, **Bypass two-factor authentication** checked (CI cannot answer a 2FA prompt). Then give it to the workflow and turn publishing on:
+  2. Turn on two-factor authentication for your npm account (**Account → Two-Factor Authentication**, *Authorization and writes*), and leave `NPM_PUBLISH` unset, so the v0.1.0 run packs the packages and skips `npm-publish` with a notice:
      ```sh
-     gh secret set NPM_TOKEN --repo RJ-s-Org/Mockingbird
+     gh variable list --repo RJ-s-Org/Mockingbird   # NPM_PUBLISH must not be listed
+     ```
+  3. Push the v0.1.0 tag (section 3). When the release run is done, publish its tarballs from your machine, platform packages first and the launcher last (so it never points at a missing package). npm asks for a one-time password (or a browser confirmation) on each publish:
+     ```sh
+     npm login
+     run=$(gh run list --repo RJ-s-Org/Mockingbird --workflow release.yml --branch v0.1.0 --limit 1 --json databaseId -q '.[0].databaseId')
+     dir=$(mktemp -d) && gh run download "$run" --repo RJ-s-Org/Mockingbird --name npm-packages --dir "$dir" && cd "$dir"
+     for tgz in *.tgz; do tar -xzOf "$tgz" package/package.json | jq -r '"\(.name)@\(.version)"'; done   # six packages, all 0.1.0
+     for tgz in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64; do npm publish "./$tgz.tgz" --access public; done
+     npm publish ./cli.tgz --access public
+     ```
+     If one publish fails, re-run only the ones that did not go out (`npm view @mockingbird-cli/<name>@0.1.0 version` says which are there). The artifact is kept for the repository's artifact retention (90 days by default).
+  4. Add the trusted publisher. For each of `@mockingbird-cli/mockingbird`, `@mockingbird-cli/darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64` and `win32-x64`: the package page → **Settings → Trusted Publisher → GitHub Actions**, organization `RJ-s-Org`, repository `Mockingbird`, workflow `release.yml`, no environment. On the same page set **Publishing access** to *Require two-factor authentication and disallow tokens*; trusted publishing still works with that setting.
+  5. Turn CI publishing on. From the next tag, `npm-publish` publishes through OIDC alone (the job has `id-token: write` and no token):
+     ```sh
      gh variable set NPM_PUBLISH --repo RJ-s-Org/Mockingbird --body true
      ```
-  3. Publish 0.1.0. If these are set before the tag is pushed (section 3), the release run publishes it. If the tag went out first, `npm-publish` was skipped with a notice; re-run that job of the release run (the packed tarballs are kept as the `npm-packages` artifact):
-     ```sh
-     run=$(gh run list --repo RJ-s-Org/Mockingbird --workflow release.yml --branch v0.1.0 --limit 1 --json databaseId -q '.[0].databaseId')
-     job=$(gh run view "$run" --repo RJ-s-Org/Mockingbird --json jobs -q '.jobs[] | select(.name == "npm-publish") | .databaseId')
-     gh run rerun "$run" --repo RJ-s-Org/Mockingbird --job "$job"
-     ```
-  4. Switch to trusted publishing. For each of `@mockingbird-cli/mockingbird`, `@mockingbird-cli/darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64` and `win32-x64`: the package page → **Settings → Trusted Publisher → GitHub Actions**, organization `RJ-s-Org`, repository `Mockingbird`, workflow `release.yml`, no environment. On the same page set **Publishing access** to *Require two-factor authentication and disallow tokens*. Then remove the token: `gh secret delete NPM_TOKEN --repo RJ-s-Org/Mockingbird`, and revoke it under **Access Tokens**. Later releases publish through OIDC alone.
-  5. Verify:
+  6. Verify:
      ```sh
      npm view @mockingbird-cli/mockingbird version dist-tags optionalDependencies
      npx --yes @mockingbird-cli/mockingbird@0.1.0 --version
@@ -98,6 +105,7 @@ The files are ready in [`packaging/`](https://github.com/RJ-s-Org/Mockingbird/tr
      # the download fallback, without the platform package:
      cd "$(mktemp -d)" && npm init -y > /dev/null && npm i -D --omit=optional @mockingbird-cli/mockingbird && npx mockingbird --version
      ```
+     0.1.0 has registry signatures but **no provenance attestation**: npm creates provenance only when a supported CI provider publishes with its OIDC identity, which ties the package to the workflow run and commit, and a publish from your machine has no such identity. So `npm audit signatures` reports 0.1.0's signatures as verified and no attestation for it. Every version CI publishes from then on carries provenance. The 0.1.0 tarballs are byte for byte what the release run packed, and the binaries in them are the release archives, which have their own build provenance (`gh attestation verify`, see [Verifying images and binaries](../deploy/kubernetes.md#verifying-images-and-binaries)).
 - [ ] **Homebrew tap.** Create the tap, give the release workflow a token for it, and seed it:
   ```sh
   gh repo create RJ-s-Org/homebrew-tap --public --description "Homebrew formulae for Mockingbird"

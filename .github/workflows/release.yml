@@ -602,9 +602,11 @@ jobs:
           if-no-files-found: error
 
   # Publishes to npm after the GitHub release exists (the launcher's download
-  # fallback reads its assets). Skipped, with a notice, until the NPM_PUBLISH
-  # repository variable is `true`: the npm org and the trusted publisher (or
-  # the NPM_TOKEN secret) come first. See docs/launch/checklist.md.
+  # fallback reads its assets), through trusted publishing (OIDC) only: no
+  # token. Skipped, with a notice, until the NPM_PUBLISH repository variable
+  # is `true`, which is set once every package has its trusted publisher. The
+  # first version is published by hand from the npm-packages artifact. See
+  # docs/launch/checklist.md.
   npm-publish:
     needs: [verify, npm-pack, release]
     if: needs.verify.outputs.publish == 'true' && github.ref_type == 'tag'
@@ -633,7 +635,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       # Trusted publishing (OIDC) needs npm 11.5.1 or later.
       - if: steps.gate.outputs.go == 'true'
-        run: npm install -g npm@11
+        run: npm install -g 'npm@>=11.5.1 <12' && npm --version
       - if: steps.gate.outputs.go == 'true'
         uses: actions/download-artifact@v8
         with:
@@ -641,9 +643,8 @@ jobs:
           path: tarballs
       - name: Publish the platform packages, then the launcher
         if: steps.gate.outputs.go == 'true'
-        env:
-          # Empty when the packages use a trusted publisher instead.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No token: npm exchanges this job's OIDC token (id-token: write) for
+        # a short-lived publish token through each package's trusted publisher.
         run: |
           tag=latest
           [ "$PRERELEASE" = true ] && tag=next
