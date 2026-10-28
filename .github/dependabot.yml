@@ -16,6 +16,15 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+    ignore:
+      # openapi-typescript and typescript-eslint do not accept TypeScript 7 as
+      # a peer yet, so `npm ci` fails with ERESOLVE.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # The console builds and runs on Node 22 (engines, CI, Dockerfile); the
+      # types follow the runtime, not the latest Node.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
