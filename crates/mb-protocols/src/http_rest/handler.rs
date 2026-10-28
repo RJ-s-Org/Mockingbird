@@ -21,11 +21,11 @@ use tracing::field::Empty;
 use super::form;
 use super::problem::{problem, problem_body, render};
 use super::routing::{RouteError, RouteTable};
-use crate::MockRuntime;
 use crate::call::{
     self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
     public_query, recorded_headers,
 };
+use crate::{MockRuntime, ScenarioRuntime};
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const FALLBACK_REASON_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-fallback-reason");
@@ -400,6 +400,7 @@ async fn serve(
                     Some(generated) => {
                         let mut resp = log.generated(generated);
                         set_retry_after(&mut resp, r.retry_after);
+                        add_headers(&mut resp, rt, op, None);
                         resp
                     }
                     None => log.rejected(r),
@@ -483,7 +484,7 @@ async fn serve(
                 .ok()
                 .and_then(|s| s.canonical_reason())
                 .unwrap_or("Server Error");
-            return log.problem(
+            let mut resp = log.problem(
                 code,
                 title,
                 format!(
@@ -491,6 +492,8 @@ async fn serve(
                     op.id
                 ),
             );
+            add_headers(&mut resp, rt, op, plan.scenario);
+            return resp;
         }
         Err(EngineError::UndeclaredStatus(code)) => {
             return log.problem(
@@ -505,10 +508,41 @@ async fn serve(
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
     let mut resp = tracing::info_span!("mb.encode").in_scope(|| log.generated(generated));
+    add_headers(&mut resp, rt, op, plan.scenario);
     if plan.chaos.inject_error {
         mark_chaos(&mut resp);
     }
     resp
+}
+
+/// The headers the contract declares for the response's status (each
+/// unless already set, as a rate limiter's `Retry-After` is), then the
+/// scenario's, which replace them.
+fn add_headers(
+    resp: &mut Response,
+    rt: &MockRuntime,
+    op: &Operation,
+    scenario: Option<&ScenarioRuntime>,
+) {
+    let status = resp.status().as_u16();
+    let headers = resp.headers_mut();
+    for (name, value) in mb_engine::headers::declared_headers(&rt.bundle, op, status) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) && !headers.contains_key(&name)
+        {
+            headers.insert(name, value);
+        }
+    }
+    for (name, value) in scenario.map(|s| s.headers.as_slice()).unwrap_or_default() {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
 }
 
 /// Marks a response as an error injected by chaos.

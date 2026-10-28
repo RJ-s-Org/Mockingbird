@@ -240,6 +240,7 @@ fn identity(method: &MethodDescriptor, resource_type: Option<&str>) -> Option<Id
         path_param: None,
         field: "id".into(),
         input_field,
+        path_field: None,
     })
 }
 
@@ -267,6 +268,7 @@ fn operation(id: String, service: &ServiceDescriptor, method: &MethodDescriptor)
             status: StatusSelector::Code(200),
             content_type: Some("application/grpc".into()),
             schema: Some(def_ref(output.full_name())),
+            headers: Default::default(),
         }],
         identity: identity(method, resource_type.as_deref()),
         resource_type,

@@ -197,7 +197,11 @@ impl Engine {
                 .or_else(|| wrap_single_item(validator, &value))
             {
                 Some(inner) => Checked::Valid(inner),
-                None => match self.patch(validator, &value) {
+                None => match sole_list(&value)
+                    .and_then(|list| self.patch(validator, list))
+                    .filter(Value::is_array)
+                    .or_else(|| self.patch(validator, &value))
+                {
                     Some(patched) => {
                         tracing::info!(errors = %errors.join("; "), "patched the answer locally");
                         Checked::Patched(patched)
@@ -235,6 +239,19 @@ impl Engine {
         let faker = crate::Faker::new(self.config.faker_depth);
         let mut rng = rand::rng();
         validator.patch(value, |schema| faker.fake(schema, &mut rng))
+    }
+}
+
+/// The list a one-member object wraps (`{"orders": [...]}`), which a
+/// patch may make valid where the wrapper never is.
+fn sole_list(value: &Value) -> Option<&Value> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+    let mut present = map.values().filter(|v| !v.is_null());
+    match (present.next(), present.next()) {
+        (Some(list @ Value::Array(_)), None) => Some(list),
+        _ => None,
     }
 }
 

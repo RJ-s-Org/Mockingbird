@@ -24,6 +24,7 @@ mod encoded;
 pub mod extract;
 pub mod faker;
 pub mod guards;
+pub mod headers;
 pub mod message;
 pub mod ndjson;
 pub mod persona;

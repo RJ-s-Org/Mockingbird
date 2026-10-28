@@ -25,6 +25,7 @@ fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
             path_param: Some("id".into()),
             field: "id".into(),
             input_field: None,
+            path_field: None,
         }),
         semantic_hints: vec!["orders".into()],
         security: Vec::new(),
@@ -36,6 +37,7 @@ fn out(status: StatusSelector) -> OutputVariant {
         status,
         content_type: Some("application/json".into()),
         schema: None,
+        headers: Default::default(),
     }
 }
 
@@ -345,6 +347,7 @@ fn operation_target_and_stream_item_schema() {
             status: StatusSelector::Code(200),
             content_type: None,
             schema: Some(json!({"type": "string"})),
+            headers: Default::default(),
         }],
     );
     assert_eq!(o.target(), "GET /orders/{id}");

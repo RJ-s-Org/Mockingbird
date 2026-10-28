@@ -265,6 +265,112 @@ paths:
         "422": { $ref: "#/components/responses/validation_failed" }
         "503": { $ref: "#/components/responses/service_unavailable" }
         "403": { $ref: "#/components/responses/forbidden" }
+  /app:
+    get:
+      operationId: apps/get-authenticated
+      summary: Get the authenticated app (authenticated with the app's JWT).
+      responses:
+        "200":
+          description: The GitHub App.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/integration" }
+        "401": { $ref: "#/components/responses/requires_authentication" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /app/installations:
+    get:
+      operationId: apps/list-installations
+      summary: List installations of the authenticated app.
+      parameters:
+        - { $ref: "#/components/parameters/per-page" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200":
+          description: The app's installations.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/installation" } }
+        "401": { $ref: "#/components/responses/requires_authentication" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /app/installations/{installation_id}:
+    parameters:
+      - { $ref: "#/components/parameters/installation-id" }
+    get:
+      operationId: apps/get-installation
+      summary: Get an installation of the authenticated app.
+      responses:
+        "200":
+          description: The installation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/installation" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /app/installations/{installation_id}/access_tokens:
+    parameters:
+      - { $ref: "#/components/parameters/installation-id" }
+    post:
+      operationId: apps/create-installation-access-token
+      summary: Create an installation access token for an app (valid for one hour).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                repositories: { type: array, items: { type: string } }
+                repository_ids: { type: array, items: { type: integer } }
+                permissions: { $ref: "#/components/schemas/app-permissions" }
+      responses:
+        "201":
+          description: The new installation access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/installation-token" }
+        "401": { $ref: "#/components/responses/requires_authentication" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}/installation:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+    get:
+      operationId: apps/get-repo-installation
+      summary: Get the authenticated app's installation on a repository.
+      responses:
+        "200":
+          description: The installation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/installation" }
+        "301": { description: Moved permanently }
+        "404": { $ref: "#/components/responses/not_found" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /installation/repositories:
+    get:
+      operationId: apps/list-repos-accessible-to-installation
+      summary: List repositories an installation access token can reach.
+      parameters:
+        - { $ref: "#/components/parameters/per-page" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200":
+          description: The installation's repositories.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_count, repositories]
+                properties:
+                  total_count: { type: integer, minimum: 0 }
+                  repository_selection: { type: string, enum: [all, selected] }
+                  repositories: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/repository" } }
+        "401": { $ref: "#/components/responses/requires_authentication" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
 webhooks:
   # GitHub's `issues` event (action "opened"), which a successful issues/create triggers.
   issue.created:
@@ -295,6 +401,7 @@ components:
     repo: { name: repo, in: path, required: true, schema: { type: string } }
     per-page: { name: per_page, in: query, schema: { type: integer, default: 30, maximum: 100 } }
     page: { name: page, in: query, schema: { type: integer, default: 1 } }
+    installation-id: { name: installation_id, in: path, required: true, schema: { type: integer } }
   responses:
     not_found:
       description: Resource not found
@@ -562,3 +669,61 @@ components:
         pull_request: { $ref: "#/components/schemas/pull-request" }
         repository: { $ref: "#/components/schemas/repository" }
         sender: { $ref: "#/components/schemas/simple-user" }
+    app-permissions:
+      type: object
+      description: The permissions granted to a token, by permission name.
+      properties:
+        contents: { type: string, enum: [read, write] }
+        issues: { type: string, enum: [read, write] }
+        metadata: { type: string, enum: [read, write] }
+        pull_requests: { type: string, enum: [read, write] }
+        checks: { type: string, enum: [read, write] }
+        statuses: { type: string, enum: [read, write] }
+      additionalProperties: { type: string, enum: [read, write, admin] }
+    integration:
+      type: object
+      required: [id, slug, node_id, owner, name, description, external_url, html_url, created_at, updated_at, permissions, events]
+      properties:
+        id: { type: integer, minimum: 100000, maximum: 9999999 }
+        slug: { type: string, pattern: "^[a-z][a-z0-9-]{2,30}$" }
+        client_id: { type: string, pattern: "^Iv23[A-Za-z0-9]{16}$" }
+        node_id: { type: string, pattern: "^A_kwDO[A-Za-z0-9]{8}$" }
+        owner: { $ref: "#/components/schemas/simple-user" }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        external_url: { type: string, format: uri }
+        html_url: { type: string, pattern: "^https://github\\.com/apps/[a-z][a-z0-9-]{2,30}$" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        permissions: { $ref: "#/components/schemas/app-permissions" }
+        events: { type: array, maxItems: 6, items: { type: string, enum: [issues, issue_comment, pull_request, push, check_run, release] } }
+        installations_count: { type: integer, minimum: 0, maximum: 500 }
+    installation:
+      type: object
+      required: [id, account, repository_selection, access_tokens_url, repositories_url, html_url, app_id, app_slug, target_id, target_type, permissions, events, created_at, updated_at, single_file_name, suspended_at]
+      properties:
+        id: { type: integer, minimum: 10000000, maximum: 99999999 }
+        account: { $ref: "#/components/schemas/simple-user" }
+        repository_selection: { type: string, enum: [all, selected] }
+        access_tokens_url: { type: string, pattern: "^https://api\\.github\\.com/app/installations/[0-9]{8}/access_tokens$" }
+        repositories_url: { type: string, const: "https://api.github.com/installation/repositories" }
+        html_url: { type: string, pattern: "^https://github\\.com/organizations/[a-z][a-z0-9-]{2,15}/settings/installations/[0-9]{8}$" }
+        app_id: { type: integer, minimum: 100000, maximum: 9999999 }
+        app_slug: { type: string, pattern: "^[a-z][a-z0-9-]{2,30}$" }
+        target_id: { type: integer, minimum: 1000, maximum: 199999999 }
+        target_type: { type: string, enum: [Organization, User] }
+        permissions: { $ref: "#/components/schemas/app-permissions" }
+        events: { type: array, maxItems: 6, items: { type: string, enum: [issues, issue_comment, pull_request, push, check_run, release] } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        single_file_name: { type: "null" }
+        suspended_at: { type: [string, "null"], format: date-time }
+    installation-token:
+      type: object
+      required: [token, expires_at, permissions, repository_selection]
+      properties:
+        token: { type: string, pattern: "^ghs_[A-Za-z0-9]{36}$" }
+        expires_at: { type: string, format: date-time }
+        permissions: { $ref: "#/components/schemas/app-permissions" }
+        repository_selection: { type: string, enum: [all, selected] }
+        repositories: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/repository" } }

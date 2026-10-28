@@ -556,7 +556,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "put_scenario",
             title: "Create or replace a scenario",
-            description: "A named set of overrides, selected per request with X-Mockingbird-Scenario. Fields: instructions, status (declared by the operations, or any 5xx), latency_ms, set (fields forced into the body), operations (ids; empty = all), stream_items, stream_item_interval_ms, chaos.",
+            description: "A named set of overrides, selected per request with X-Mockingbird-Scenario. Fields: instructions, status (declared by the operations, or any 5xx), latency_ms, set (fields forced into the body), operations (ids; empty = all), stream_items, stream_item_interval_ms, chaos, headers (response headers by name, e.g. Retry-After).",
             schema: obj(
                 json!({ "mock": mock(), "name": s("Scenario name."), "scenario": o("The scenario.") }),
                 &["mock", "name", "scenario"],

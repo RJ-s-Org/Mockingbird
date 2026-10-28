@@ -1744,3 +1744,94 @@ async fn a_create_mutation_generates_only_its_selection() {
         json!({"id": "I_1", "title": "Crash on start", "body": "Trace", "url": "https://github.com/o/r/issues/1"})
     );
 }
+
+#[tokio::test]
+async fn scenario_headers_are_sent() {
+    let mut rt = runtime(Some(scripted(vec![json!(repository("one"))])));
+    rt.header_overrides = true;
+    rt.scenarios.insert(
+        "throttled".into(),
+        mb_protocols::ScenarioRuntime {
+            spec: mb_engine::ScenarioSpec {
+                name: "throttled".into(),
+                ..mb_engine::ScenarioSpec::default()
+            },
+            headers: vec![("X-RateLimit-Remaining".into(), "0".into())],
+            ..mb_protocols::ScenarioRuntime::default()
+        },
+    );
+    let base = serve(rt).await;
+    let q = json!({"query": r#"{ repository(owner: "o", name: "one") { name } }"#});
+    let r = post(&base, q.clone(), &[("x-mockingbird-scenario", "throttled")]).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.headers["x-ratelimit-remaining"], "0");
+    let r = post(&base, q, &[]).await;
+    assert!(r.headers.get("x-ratelimit-remaining").is_none());
+}
+
+const PRICED_STOREFRONT: &str = r#"
+type MoneyV2 { amount: String! currencyCode: String! }
+type ProductVariant { id: ID! title: String! price: MoneyV2! }
+type Product { id: ID! title: String! variants: [ProductVariant!]! }
+type CartLineCost { totalAmount: MoneyV2! }
+type CartLine { id: ID! quantity: Int! merchandise: ProductVariant! cost: CartLineCost! }
+type CartLineEdge { node: CartLine! }
+type CartLineConnection { edges: [CartLineEdge!]! }
+type CartCost { subtotalAmount: MoneyV2! totalAmount: MoneyV2! }
+type Cart { id: ID! totalQuantity: Int! lines: CartLineConnection! cost: CartCost! }
+type CartLinesAddPayload { cart: Cart }
+input CartLineInput { merchandiseId: ID! quantity: Int }
+type Query { product(handle: String): Product }
+type Mutation { cartLinesAdd(cartId: ID!, lines: [CartLineInput!]!): CartLinesAddPayload }
+"#;
+
+/// A cart line takes the price of the variant it names as the session
+/// stored it, and the line and cart totals add up.
+#[tokio::test]
+async fn cart_costs_come_from_stored_prices() {
+    let money =
+        |amount: &str| json!({"__typename": "MoneyV2", "amount": amount, "currencyCode": "USD"});
+    let provider = scripted(vec![
+        json!({"__typename": "Product", "id": "gid://shopify/Product/7", "title": "Fern Tee",
+               "variants": [{"__typename": "ProductVariant", "id": "gid://shopify/ProductVariant/42", "title": "M", "price": money("32.00")}]}),
+        json!({"__typename": "CartLinesAddPayload", "cart": {"__typename": "Cart", "id": "gid://shopify/Cart/c1", "totalQuantity": 1,
+            "lines": {"__typename": "CartLineConnection", "edges": [{"__typename": "CartLineEdge", "node": {"__typename": "CartLine", "id": "gid://shopify/CartLine/1", "quantity": 2,
+                "merchandise": {"__typename": "ProductVariant", "id": "gid://shopify/ProductVariant/42", "title": "M", "price": money("28.00")},
+                "cost": {"__typename": "CartLineCost", "totalAmount": money("28.00")}}}]},
+            "cost": {"__typename": "CartCost", "subtotalAmount": money("28.00"), "totalAmount": money("30.50")}}}),
+    ]);
+    let rt = MockRuntime::new(
+        "shop",
+        Arc::new(compile(PRICED_STOREFRONT.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let base = serve(rt).await;
+    let product = post(
+        &base,
+        json!({"query": r#"{ product(handle: "fern-tee") { id title variants { id title price { amount currencyCode } } } }"#}),
+        &[],
+    )
+    .await;
+    assert!(product.body.get("errors").is_none(), "{}", product.body);
+    let added = post(
+        &base,
+        json!({
+            "query": "mutation($lines: [CartLineInput!]!) { cartLinesAdd(cartId: \"gid://shopify/Cart/c1\", lines: $lines) { cart { id totalQuantity lines { edges { node { id quantity merchandise { id title price { amount currencyCode } } cost { totalAmount { amount currencyCode } } } } } cost { subtotalAmount { amount currencyCode } totalAmount { amount currencyCode } } } } }",
+            "variables": {"lines": [{"merchandiseId": "gid://shopify/ProductVariant/42", "quantity": 2}]},
+        }),
+        &[],
+    )
+    .await;
+    assert!(added.body.get("errors").is_none(), "{}", added.body);
+    let cart = &added.body["data"]["cartLinesAdd"]["cart"];
+    let line = &cart["lines"]["edges"][0]["node"];
+    assert_eq!(line["merchandise"]["price"]["amount"], "32.00", "{cart}");
+    assert_eq!(line["cost"]["totalAmount"]["amount"], "64.00", "{cart}");
+    assert_eq!(cart["cost"]["subtotalAmount"]["amount"], "64.00", "{cart}");
+    assert_eq!(cart["cost"]["totalAmount"]["amount"], "64.00", "{cart}");
+    assert_eq!(cart["totalQuantity"], 2, "{cart}");
+}

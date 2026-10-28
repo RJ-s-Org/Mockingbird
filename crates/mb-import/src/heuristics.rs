@@ -8,8 +8,29 @@ fn segments(path: &str) -> Vec<&str> {
     path.split('/').filter(|s| !s.is_empty()).collect()
 }
 
+/// Format suffixes some APIs put on every path (Twilio's `Messages.json`,
+/// `{Sid}.json`).
+const FORMAT_SUFFIXES: [&str; 2] = [".json", ".xml"];
+
+/// `seg` without a [`FORMAT_SUFFIXES`] suffix.
+fn without_format(seg: &str) -> &str {
+    FORMAT_SUFFIXES
+        .iter()
+        .find_map(|suffix| seg.strip_suffix(suffix))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(seg)
+}
+
+/// The parameter a segment is: `{id}`, or `{Sid}.json`.
+fn param_name(seg: &str) -> Option<&str> {
+    without_format(seg)
+        .strip_prefix('{')?
+        .strip_suffix('}')
+        .filter(|name| !name.contains(['{', '}']))
+}
+
 fn is_param(seg: &str) -> bool {
-    seg.starts_with('{') && seg.ends_with('}')
+    param_name(seg).is_some()
 }
 
 /// Verbs that make a `POST` a read in RPC-style APIs (Plaid's
@@ -67,7 +88,7 @@ pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
 /// The last static segment before any trailing `{param}`; for an
 /// RPC-style read (`/accounts/get`, `users.list`), what it reads.
 pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
-    let segs = segments(path);
+    let segs: Vec<&str> = segments(path).into_iter().map(without_format).collect();
     let mut statics = segs.iter().rev().filter(|s| !is_param(s));
     let last = statics.next()?;
     if ends_in_read(path) {
@@ -85,10 +106,45 @@ pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
 }
 
 fn trailing_param(path: &str) -> Option<&str> {
-    segments(path)
-        .last()
-        .filter(|s| is_param(s))
-        .map(|s| &s[1..s.len() - 1])
+    segments(path).last().and_then(|s| param_name(s))
+}
+
+/// Endings of id-like path parameters and the response field each names,
+/// most specific first: `issueIdOrKey` → `key`, `issue_number` → `number`,
+/// `MessageSid` → `sid`.
+const PARAM_FIELDS: [(&[&str], &str); 5] = [
+    (&["IdOrKey", "_id_or_key"], "key"),
+    (&["Number", "_number"], "number"),
+    (&["Sid", "_sid"], "sid"),
+    (&["Key", "_key"], "key"),
+    (&["Uuid", "_uuid"], "uuid"),
+];
+
+/// Fields that identify a created resource without an `id` (Twilio's
+/// `sid`).
+const ID_FALLBACKS: [&str; 2] = ["sid", "uuid"];
+
+/// The member of `props` named `name`, ASCII case-insensitively.
+fn property<'a>(props: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    props
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(name))
+        .map(String::as_str)
+}
+
+/// The response field path parameter `param` names: the property of that
+/// name, else the one its ending names (see [`PARAM_FIELDS`]).
+fn param_field<'a>(param: &str, props: &'a Map<String, Value>) -> Option<&'a str> {
+    property(props, param).or_else(|| {
+        PARAM_FIELDS
+            .iter()
+            .filter(|(endings, _)| {
+                endings
+                    .iter()
+                    .any(|e| param.len() > e.len() && param.ends_with(e))
+            })
+            .find_map(|(_, field)| property(props, field))
+    })
 }
 
 /// Follow `$ref` chains through `defs` (bounded, so ref cycles terminate).
@@ -114,17 +170,21 @@ pub(crate) fn infer_identity(
         .and_then(|s| resolve(s, defs))
         .and_then(|s| s.get("properties"))
         .and_then(Value::as_object)?;
+    let named = path_param.and_then(|p| param_field(p, props));
     let field = if props.contains_key("id") {
-        "id".to_owned()
+        "id"
+    } else if let Some(named) = named {
+        named
+    } else if path_param.is_none() {
+        ID_FALLBACKS.iter().find_map(|f| property(props, f))?
     } else {
-        path_param
-            .filter(|p| props.contains_key(*p))
-            .map(str::to_owned)?
+        return None;
     };
     Some(Identity {
         path_param: path_param.map(str::to_owned),
-        field,
+        field: field.to_owned(),
         input_field: None,
+        path_field: named.filter(|n| *n != field).map(str::to_owned),
     })
 }
 

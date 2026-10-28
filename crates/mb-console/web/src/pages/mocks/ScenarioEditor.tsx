@@ -72,6 +72,8 @@ export function ScenarioEditor({
       set: parsed.value as PutScenario["set"],
       operations,
     };
+    // Not edited here: kept as they are.
+    if (scenario?.headers) body.headers = scenario.headers;
     // An empty override is left out, which removes the scenario's chaos.
     const override = chaosFromDraft(chaos);
     if (override) body.chaos = override;

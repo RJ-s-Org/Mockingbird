@@ -967,6 +967,10 @@ components:
 "##;
 
 fn contract_harness(src: &str, script: Vec<Value>) -> Harness {
+    contract_harness_with(src, script, memory_state())
+}
+
+fn contract_harness_with(src: &str, script: Vec<Value>, state: Arc<dyn StateStore>) -> Harness {
     let provider = Arc::new(ScriptedProvider::new(
         script.into_iter().map(|v| Ok(v.to_string())).collect(),
     ));
@@ -977,7 +981,7 @@ fn contract_harness(src: &str, script: Vec<Value>) -> Harness {
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        state,
     ));
     Harness {
         router: http_rest::router(Arc::clone(&rt)),
@@ -1594,4 +1598,312 @@ async fn rpc_style_post_reads_are_cached_and_seeded() {
         prompt.contains("BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp"),
         "{prompt}"
     );
+}
+
+/// Path ids that are not `id`: GitHub's `issue_number`, Twilio's
+/// `{Sid}.json`, Jira's `issueIdOrKey`.
+const PATH_IDS: &str = r##"
+openapi: 3.0.3
+info: {title: Ids, version: "1"}
+components:
+  schemas:
+    Issue:
+      type: object
+      properties: {id: {type: integer}, number: {type: integer}, title: {type: string}, url: {type: string}}
+    Message:
+      type: object
+      properties: {sid: {type: string}, body: {type: string}}
+    JiraIssue:
+      type: object
+      properties: {id: {type: string}, key: {type: string}, summary: {type: string}}
+paths:
+  /repos/{owner}/{repo}/issues:
+    parameters:
+      - {name: owner, in: path, required: true, schema: {type: string}}
+      - {name: repo, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: listIssues
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}
+    post:
+      operationId: createIssue
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /Accounts/{AccountSid}/Messages.json:
+    parameters:
+      - {name: AccountSid, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: ListMessage
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {messages: {type: array, items: {$ref: "#/components/schemas/Message"}}}}}}}
+    post:
+      operationId: CreateMessage
+      requestBody: {content: {application/x-www-form-urlencoded: {schema: {type: object}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /Accounts/{AccountSid}/Messages/{Sid}.json:
+    get:
+      operationId: FetchMessage
+      parameters:
+        - {name: AccountSid, in: path, required: true, schema: {type: string}}
+        - {name: Sid, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /rest/api/3/issue:
+    post:
+      operationId: createJiraIssue
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/JiraIssue"}}}}
+  /rest/api/3/issue/{issueIdOrKey}:
+    get:
+      operationId: getJiraIssue
+      parameters:
+        - {name: issueIdOrKey, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/JiraIssue"}}}}
+  /chat.postMessage:
+    post:
+      operationId: chat_postMessage
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {ok: {type: boolean}, ts: {type: string}}}}}}
+  /conversations.history:
+    get:
+      operationId: conversations_history
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {messages: {type: array, items: {type: object, properties: {ts: {type: string}, text: {type: string}}}}}}}}}
+"##;
+
+#[tokio::test]
+async fn created_issue_gets_a_new_number_and_reads_back_by_it() {
+    let issue = |id: u64, number: u64, title: &str| {
+        json!({"id": id, "number": number, "title": title,
+               "url": format!("https://api.github.com/repos/o/r/issues/{number}")})
+    };
+    let h = contract_harness(
+        PATH_IDS,
+        vec![
+            json!([issue(1, 411, "a"), issue(2, 412, "b")]),
+            issue(3, 412, "new"),
+            issue(9, 999, "stranger"),
+        ],
+    );
+    send(&h, get("/repos/o/r/issues")).await;
+    let created =
+        body_json(send(&h, post_json("/repos/o/r/issues", r#"{"title":"new"}"#)).await).await;
+    assert_eq!(created["number"], 413, "{created}");
+    assert_eq!(
+        created["url"],
+        "https://api.github.com/repos/o/r/issues/413"
+    );
+
+    let resp = send(&h, get("/repos/o/r/issues/413")).await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await["title"], "new");
+    let resp = send(&h, get("/repos/o/r/issues/411")).await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await["title"], "a");
+}
+
+#[tokio::test]
+async fn twilio_and_jira_reads_find_the_created_resource() {
+    let h = contract_harness(
+        PATH_IDS,
+        vec![
+            json!({"sid": "SM0123", "body": "Hi Dana"}),
+            json!({"id": "10001", "key": "PROJ-7", "summary": "Fix login"}),
+        ],
+    );
+    send(
+        &h,
+        post_form(
+            "/Accounts/AC1/Messages.json",
+            FORM,
+            "To=%2B15550100&Body=Hi+Dana",
+        ),
+    )
+    .await;
+    let resp = send(&h, get("/Accounts/AC1/Messages/SM0123.json")).await;
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(resp).await["body"], "Hi Dana");
+
+    send(&h, post_json("/rest/api/3/issue", r#"{"fields":{}}"#)).await;
+    for path in ["/rest/api/3/issue/PROJ-7", "/rest/api/3/issue/10001"] {
+        let resp = send(&h, get(path)).await;
+        assert_eq!(header_str(&resp, "x-mockingbird-source"), "state", "{path}");
+        assert_eq!(body_json(resp).await["summary"], "Fix login", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_write_clears_cached_lists_of_other_resource_types() {
+    let h = contract_harness_with(
+        PATH_IDS,
+        vec![
+            json!({"messages": [{"ts": "1.1", "text": "old"}]}),
+            json!({"ok": true, "ts": "2.2"}),
+            json!({"messages": [{"ts": "2.2", "text": "new"}, {"ts": "1.1", "text": "old"}]}),
+            json!({"messages": [{"sid": "SM1", "body": "old"}]}),
+            json!({"sid": "SM2", "body": "Hi"}),
+            json!({"messages": [{"sid": "SM2", "body": "Hi"}, {"sid": "SM1", "body": "old"}]}),
+        ],
+        cached_state(),
+    );
+    send(&h, get("/conversations.history")).await;
+    let cached = send(&h, get("/conversations.history")).await;
+    assert_eq!(header_str(&cached, "x-mockingbird-source"), "cache");
+    send(
+        &h,
+        post_json("/chat.postMessage", r#"{"channel":"C1","text":"new"}"#),
+    )
+    .await;
+    let after = send(&h, get("/conversations.history")).await;
+    assert_eq!(header_str(&after, "x-mockingbird-source"), "llm");
+
+    // Twilio: the list after a create is generated knowing the message.
+    send(&h, get("/Accounts/AC1/Messages.json")).await;
+    send(
+        &h,
+        post_form("/Accounts/AC1/Messages.json", FORM, "Body=Hi"),
+    )
+    .await;
+    let after = send(&h, get("/Accounts/AC1/Messages.json")).await;
+    assert_eq!(header_str(&after, "x-mockingbird-source"), "llm");
+    let requests = h.provider.as_ref().unwrap().requests();
+    let prompt = &requests.last().unwrap().messages[1].content;
+    assert!(prompt.contains("\"sid\":\"SM2\""), "{prompt}");
+}
+
+const THROTTLED: &str = r##"
+openapi: 3.0.3
+info: {title: Throttled, version: "1"}
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        "200":
+          description: ok
+          headers:
+            X-RateLimit-Remaining: {schema: {type: integer}}
+          content: {application/json: {schema: {type: array, items: {type: string}}}}
+        "429":
+          description: slow down
+          headers:
+            Retry-After: {schema: {type: integer}}
+          content: {application/json: {schema: {type: object, properties: {error: {type: string}}}}}
+"##;
+
+#[tokio::test]
+async fn declared_and_scenario_headers_are_sent() {
+    let scenario = |name: &str, status: u16| ScenarioRuntime {
+        spec: ScenarioSpec {
+            name: name.into(),
+            status: Some(status),
+            ..ScenarioSpec::default()
+        },
+        status: Some(status),
+        headers: vec![
+            ("Retry-After".into(), "30".into()),
+            ("X-Request-Id".into(), "req-1".into()),
+        ],
+        ..ScenarioRuntime::default()
+    };
+    let mut rt = MockRuntime::new(
+        "inline",
+        Arc::new(compile(THROTTLED.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        memory_state(),
+    );
+    rt.header_overrides = true;
+    rt.scenarios
+        .insert("throttled".into(), scenario("throttled", 429));
+    rt.scenarios
+        .insert("outage".into(), scenario("outage", 503));
+    let rt = Arc::new(rt);
+    let h = Harness {
+        router: http_rest::router(Arc::clone(&rt)),
+        rt,
+        provider: None,
+    };
+
+    let ok = send(&h, get("/things")).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    header_str(&ok, "x-ratelimit-remaining")
+        .parse::<u64>()
+        .unwrap();
+
+    let limited = send(&h, with_status("/things", "429")).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = header_str(&limited, "retry-after").parse().unwrap();
+    assert!((1..=60).contains(&retry));
+
+    for (name, status) in [("throttled", 429), ("outage", 503)] {
+        let req = Request::get("/things")
+            .header("x-mockingbird-scenario", name)
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&h, req).await;
+        assert_eq!(resp.status().as_u16(), status, "{name}");
+        assert_eq!(header_str(&resp, "retry-after"), "30", "{name}");
+        assert_eq!(header_str(&resp, "x-request-id"), "req-1", "{name}");
+    }
+}
+
+/// Slack's `chat.postMessage` answers `{ok, ts, message: {...}}`: the
+/// message is stored where `conversations.history` lists `messages`, so the
+/// history read after it is generated knowing the message.
+#[tokio::test]
+async fn a_wrapped_created_object_joins_the_list_it_belongs_to() {
+    let h = contract_harness(
+        &PATH_IDS.replace(
+            "properties: {ok: {type: boolean}, ts: {type: string}}",
+            "properties: {ok: {type: boolean}, ts: {type: string}, message: {type: object, properties: {ts: {type: string}, text: {type: string}}}}",
+        ),
+        vec![
+            json!({"ok": true, "ts": "2.2", "message": {"ts": "2.2", "text": "Deploy finished"}}),
+            json!({"messages": [{"ts": "2.2", "text": "Deploy finished"}]}),
+        ],
+    );
+    send(
+        &h,
+        post_json(
+            "/chat.postMessage",
+            r#"{"channel":"C1","text":"Deploy finished"}"#,
+        ),
+    )
+    .await;
+    let stored =
+        h.rt.state
+            .get(&session_of(&h, "default"), "messages", "2.2")
+            .await
+            .unwrap();
+    assert!(stored.is_some());
+    send(&h, get("/conversations.history")).await;
+    let requests = h.provider.as_ref().unwrap().requests();
+    let prompt = &requests[1].messages[1].content;
+    let related = prompt
+        .split("<related_resources>")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(related.contains("Deploy finished"), "{prompt}");
+}
+
+fn session_of(h: &Harness, id: &str) -> SessionKey {
+    SessionKey {
+        workspace: "default".into(),
+        mock: h.rt.name.clone(),
+        session: id.into(),
+    }
 }

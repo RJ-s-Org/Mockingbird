@@ -44,7 +44,7 @@ paths:
                   token_type: { type: string, const: Bearer }
                   app_id: { type: string, pattern: "^APP-[0-9A-Z]{17}$" }
                   expires_in: { type: integer, const: 32400 }
-                  nonce: { type: string, pattern: "^2026-(0[1-9]|1[0-2])-(0[1-9]|1[0-9]|2[0-8])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z[A-Za-z0-9_-]{43}$" }
+                  nonce: { type: string, pattern: "^20[2-3][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z[A-Za-z0-9_-]{43}$" }
         "401":
           description: Client authentication failed.
           content:

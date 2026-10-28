@@ -89,14 +89,34 @@ pub fn item_identity(bundle: &Bundle, op: &Operation, body: &Value) -> String {
         .unwrap_or(field)
 }
 
-/// The members of object `schema` (`$ref`s followed) that hold lists of
-/// objects: `accounts` in Plaid's `{accounts: [...], item: {...}}`.
+/// The members of object `schema` (`$ref`s followed, and the branches of
+/// an `anyOf`/`oneOf`/`allOf`, Slack's `anyOf [success, error]`) that hold
+/// lists of objects: `accounts` in Plaid's `{accounts: [...], item: {...}}`.
 pub fn list_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_list_members(bundle, schema, 0, &mut out);
+    out
+}
+
+fn collect_list_members(bundle: &Bundle, schema: &Value, depth: usize, out: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
     let schema = deref(bundle, schema);
+    for key in ["anyOf", "oneOf", "allOf"] {
+        for branch in schema
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            collect_list_members(bundle, branch, depth + 1, out);
+        }
+    }
     let Some(props) = schema.get("properties").and_then(Value::as_object) else {
-        return Vec::new();
+        return;
     };
-    props
+    let found = props
         .iter()
         .filter(|(_, p)| {
             deref(bundle, p)
@@ -110,8 +130,12 @@ pub fn list_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
                             .any(|k| item.get(*k).is_some())
                 })
         })
-        .map(|(name, _)| name.clone())
-        .collect()
+        .map(|(name, _)| name.clone());
+    for name in found {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
 }
 
 /// `schema` with `$ref`s to `#/$defs/...` followed (bounded).
