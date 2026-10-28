@@ -1,0 +1,16 @@
+# The base config: one mock of a third-party payments API, answered by the
+# faker (no LLM profile), so the base runs offline.
+server:
+  host: 0.0.0.0
+  # A cluster-internal mock environment: the Admin API has no login. Do not
+  # expose the admin port; set `auth` (OIDC) for anything shared more widely.
+  insecure_no_auth: true
+mocks:
+  payments:
+    contract: payments.yaml
+    route_prefix: /payments
+    persona: A European card processor; amounts in cents.
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [createCharge]

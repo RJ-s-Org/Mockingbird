@@ -1,0 +1,20 @@
+# Replaces the base's mockingbird.yaml; payments.yaml stays from the base.
+# The `default` LLM profile comes from MB_LLM_* (deployment-llm.yaml).
+server:
+  host: 0.0.0.0
+  insecure_no_auth: true
+mocks:
+  payments:
+    contract: payments.yaml
+    route_prefix: /payments
+    persona: >-
+      A European card processor used by online shops in Portugal, Spain and
+      Germany. Amounts are in cents; descriptions are short order references.
+    limits:
+      daily_token_budget: 2000000
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [createCharge]
+      slow-provider:
+        latency: 2s

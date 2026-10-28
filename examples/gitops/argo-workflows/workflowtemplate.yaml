@@ -1,0 +1,111 @@
+# Start Mockingbird, run a test container against it, collect what the tests
+# sent (the request log), and tear down: Mockingbird runs as a daemon step, so
+# Argo stops it when the workflow ends, pass or fail.
+#
+#   kubectl apply -f mocks-configmap.yaml -f workflowtemplate.yaml
+#   argo submit --from workflowtemplate/mocked-integration-test \
+#     -p test-image=ghcr.io/example/shop-tests:pr-42
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: mocked-integration-test
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: test-image
+        value: curlimages/curl:8.10.1
+      # The test container gets the mock's base URL in PAYMENTS_BASE_URL.
+      - name: test-command
+        value: >-
+          curl -fsS -X POST -H 'Content-Type: application/json'
+          --data '{"amount":1999,"currency":"eur"}'
+          "$PAYMENTS_BASE_URL/v1/charges"
+      # A ConfigMap holding mockingbird.yaml and its contracts.
+      - name: mocks-configmap
+        value: mocks
+      - name: mock
+        value: payments
+      - name: mockingbird-image
+        value: ghcr.io/rj-s-org/mockingbird:0.1.0
+  volumes:
+    - name: mocks
+      configMap:
+        name: "{{workflow.parameters.mocks-configmap}}"
+  templates:
+    - name: main
+      steps:
+        - - name: mockingbird
+            template: mockingbird
+        - - name: test
+            template: test
+            # Go on to collect the request log; `verdict` fails the run after.
+            continueOn:
+              failed: true
+            arguments:
+              parameters:
+                - name: mocks-ip
+                  value: "{{steps.mockingbird.ip}}"
+        - - name: collect-requests
+            template: collect-requests
+            arguments:
+              parameters:
+                - name: mocks-ip
+                  value: "{{steps.mockingbird.ip}}"
+        - - name: verdict
+            template: tests-failed
+            when: "{{steps.test.status}} != Succeeded"
+
+    - name: mockingbird
+      daemon: true
+      container:
+        image: "{{workflow.parameters.mockingbird-image}}"
+        # The image is distroless; name the binary so the executor can wrap it.
+        command: [mockingbird]
+        args: ["serve", "-c", "/etc/mockingbird/mockingbird.yaml", "--host", "0.0.0.0"]
+        env:
+          - {name: MB_STORAGE_URL, value: "sqlite::memory:"}
+          - {name: MB_STATE_URL, value: memory}
+        readinessProbe:
+          httpGet: {path: /readyz, port: 9090}
+          periodSeconds: 2
+        volumeMounts:
+          - {name: mocks, mountPath: /etc/mockingbird, readOnly: true}
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+
+    - name: test
+      inputs:
+        parameters:
+          - name: mocks-ip
+      container:
+        image: "{{workflow.parameters.test-image}}"
+        command: [sh, -c]
+        args: ["{{workflow.parameters.test-command}}"]
+        env:
+          - name: PAYMENTS_BASE_URL
+            value: "http://{{inputs.parameters.mocks-ip}}:8080/{{workflow.parameters.mock}}"
+
+    - name: collect-requests
+      inputs:
+        parameters:
+          - name: mocks-ip
+      container:
+        image: curlimages/curl:8.10.1
+        command: [sh, -ec]
+        args:
+          - >-
+            curl -fsS "http://{{inputs.parameters.mocks-ip}}:9090/api/v1/mocks/{{workflow.parameters.mock}}/requests"
+            | tee /tmp/requests.json
+      # With an artifact repository configured, keep the log as an artifact:
+      # outputs:
+      #   artifacts:
+      #     - {name: requests, path: /tmp/requests.json, archive: {none: {}}}
+
+    - name: tests-failed
+      container:
+        image: curlimages/curl:8.10.1
+        command: [sh, -c]
+        args: ["echo 'the tests failed; the request log is in collect-requests'; exit 1"]

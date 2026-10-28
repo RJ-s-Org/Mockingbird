@@ -1,0 +1,82 @@
+openapi: 3.0.3
+info:
+  title: Payments API
+  version: 1.0.0
+  description: A third-party payment provider, as the app under test sees it.
+paths:
+  /v1/charges:
+    get:
+      operationId: listCharges
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Charge"}
+    post:
+      operationId: createCharge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, currency]
+              properties:
+                amount: {type: integer, minimum: 1}
+                currency: {type: string, enum: [eur, usd, gbp]}
+                description: {type: string}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Charge"}
+        "402":
+          description: Card declined
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /v1/charges/{chargeId}:
+    get:
+      operationId: getCharge
+      parameters:
+        - {name: chargeId, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Charge"}
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+components:
+  schemas:
+    Charge:
+      type: object
+      required: [id, amount, currency, status]
+      properties:
+        id: {type: string, example: ch_3PqR5s}
+        amount: {type: integer}
+        currency: {type: string, enum: [eur, usd, gbp]}
+        status: {type: string, enum: [succeeded, pending, failed]}
+        description: {type: string}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}

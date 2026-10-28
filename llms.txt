@@ -15,5 +15,5 @@
 
 - [README](README.md): protocols, overrides, scenarios, Admin API, smart import, auth
 - [Configuration reference](docs/configuration.md): every `mockingbird.yaml` key
-- [Running locally](docs/deploy/local.md), [Docker Compose](docs/deploy/compose.md), [Kubernetes](docs/deploy/kubernetes.md)
+- [Running locally](docs/deploy/local.md), [Docker Compose](docs/deploy/compose.md), [Kubernetes](docs/deploy/kubernetes.md), [GitOps and preview environments](docs/deploy/gitops.md)
 - [Operations runbook](docs/operations/runbook.md)

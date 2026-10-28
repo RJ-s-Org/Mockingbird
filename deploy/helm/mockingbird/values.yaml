@@ -24,6 +24,33 @@ mode: allInOne
 # `server.role` comes from `mode` (`--role`); do not set it here.
 config: {}
 
+# Mocks by name, merged into config.mocks (these win). Each entry is a
+# `mocks.<name>` section of mockingbird.yaml (hosts, persona, llm_profile,
+# scenarios, webhooks, ...: docs/configuration.md), except that `contract`
+# also takes an object:
+#   contract: {inline: "<the contract>", fileName: openapi.yaml}
+#   contract: {configMap: {name: stripe-openapi, key: openapi.yaml}}
+#   contract: {url: https://example.com/openapi.yaml, sha256: "<hex>"}
+# A string stays a path (relative to /etc/mockingbird, or absolute).
+mocks: {}
+#  petstore:
+#    contract:
+#      inline: |
+#        openapi: 3.0.3
+#        ...
+#    persona: A pet shop in Lisbon; Portuguese names.
+#    scenarios:
+#      out-of-stock: {status: 409, operations: [createOrder]}
+
+# How a config change (mocks, contracts, config) reaches the pods.
+#   rollout: the ConfigMap's checksum is a pod annotation, so `helm upgrade`
+#     rolls the pods. ConfigMaps named by `contract.configMap` are not part
+#     of the checksum: restart the pods after changing one.
+#   watch: `serve --watch` on the all-in-one (or control) pods reconciles in
+#     place once the kubelet syncs the ConfigMaps (usually within a minute);
+#     the pods keep their sessions. Keys read at startup still need a restart.
+reload: rollout
+
 # Control-plane store -> MB_STORAGE_URL (required in split mode). Either a
 # URL in the values, or a key of an existing Secret.
 storage:
@@ -44,10 +71,22 @@ bus:
   existingSecret: ""
   existingSecretKey: url
 
-# The LLM API key -> MB_LLM_API_KEY, from an existing Secret.
+# The `default` LLM profile: its key (MB_LLM_API_KEY) from an existing
+# Secret, and its provider (MB_LLM_BASE_URL, MB_LLM_MODEL; empty keeps the
+# built-in defaults). Without a key the mocks answer from the faker, offline.
 llm:
   existingSecret: ""
   apiKeyKey: api-key
+  baseUrl: ""
+  model: ""
+  # More profiles, merged into config.llm.profiles. Each is an
+  # `llm.profiles.<name>` section of mockingbird.yaml; `apiKeySecret` puts the
+  # key in MB_PROFILE_KEY_<NAME> and sets `api_key: env:MB_PROFILE_KEY_<NAME>`.
+  profiles: {}
+  #  openrouter:
+  #    base_url: https://openrouter.ai/api/v1
+  #    model: deepseek/deepseek-chat
+  #    apiKeySecret: {name: openrouter, key: api-key}
 
 # Extra environment variables and sources for every container.
 env: []
@@ -163,3 +202,20 @@ securityContext:
       - ALL
   seccompProfile:
     type: RuntimeDefault
+
+# `helm test`: a pod that checks /readyz on the admin service, then sends each
+# request to the mocks service and expects its status.
+tests:
+  enabled: true
+  requests: []
+  #  - path: /petstore/pets
+  #    method: GET
+  #    status: 200
+  #    headers: {X-Mockingbird-Session: helm-test}
+
+# An image with sh and curl, for the fetch-contracts init container
+# (`contract.url`) and the test pod.
+curlImage:
+  repository: curlimages/curl
+  tag: "8.10.1"
+  pullPolicy: IfNotPresent
