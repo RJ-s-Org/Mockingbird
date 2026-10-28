@@ -11,9 +11,10 @@ proxy:
 mocks:
   github-graphql:
     contract: github.graphql
-    # GitHub serves GraphQL at POST https://api.github.com/graphql: the mock is
-    # mounted at / and answers protocols.graphql.path (/graphql) below it.
-    route_prefix: /
+    # GitHub serves GraphQL at POST https://api.github.com/graphql. Mounted at
+    # /graphql (it answers POST /graphql there), so it shares api.github.com
+    # with the github-rest example, which takes /.
+    route_prefix: /graphql
     hosts: [api.github.com]
     persona: >-
       GitHub.com GraphQL API v4 as seen by Mira Okafor (login "mira-okafor",

@@ -567,6 +567,36 @@ mod tests {
         }
     }
 
+    /// Any examples can be combined in one config: no two mocks of the
+    /// catalog claim the same route prefix on the same host (GitHub's REST
+    /// and GraphQL examples share api.github.com).
+    #[test]
+    fn examples_combine_without_route_collisions() {
+        let mut mocks: Vec<(String, String, Vec<String>)> = Vec::new();
+        for example in EXAMPLES {
+            let text = example.file("mockingbird.yaml").unwrap();
+            let cfg: crate::file_config::FileConfig = serde_saphyr::from_str(text).unwrap();
+            for (name, mock) in &cfg.mocks {
+                let prefix = mock
+                    .route_prefix
+                    .clone()
+                    .unwrap_or_else(|| format!("/{name}"));
+                for (other, other_prefix, other_hosts) in &mocks {
+                    assert!(
+                        !mb_store::routes_collide(&prefix, &mock.hosts, other_prefix, other_hosts),
+                        "{}/{name} and {other} share route prefix {prefix}",
+                        example.name
+                    );
+                }
+                mocks.push((
+                    format!("{}/{name}", example.name),
+                    prefix,
+                    mock.hosts.clone(),
+                ));
+            }
+        }
+    }
+
     #[test]
     fn full_file_names_come_from_the_url() {
         assert_eq!(

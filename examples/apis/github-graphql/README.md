@@ -11,7 +11,7 @@ both APIs on one host.
 | --- | --- |
 | Contract | [`github.graphql`](github.graphql), a hand-written SDL subset (6 queries, 2 mutations) that keeps GitHub's type, field and argument names |
 | Upstream | [octokit/graphql-schema](https://github.com/octokit/graphql-schema) `schema.graphql` (MIT), pinned in [`example.json`](example.json); `mockingbird examples init github-graphql --full` downloads it |
-| Hosts | `api.github.com` (path `/graphql`) |
+| Hosts | `api.github.com` (path `/graphql`; route prefix `/graphql`, so the [`github-rest`](../github-rest/README.md) mock can serve the rest of the host from `/` in the same config) |
 | Scenarios | `rate-limited` (`rateLimit.remaining` 0), `slow` (4 s), `outage` (502 field error) |
 | Webhooks | none (GitHub's webhooks are in the REST example) |
 

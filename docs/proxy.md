@@ -57,7 +57,7 @@ eval "$(mockingbird proxy env)"
 
 Pass `--watch` to `serve` so edits to the config (a new `mocks:` block, new `hosts`) apply without a restart; `server start` and `mockingbird run` watch by default. A server without `--watch` says at startup that it reads the file once. The `proxy:` section itself is read at startup only: a reload that changes it logs a warning asking for a restart.
 
-`mockingbird proxy env --json` prints the same variables as JSON, with the CA, bundle, truststore and Node.js preload paths and the CA's SPKI hash. `-c <config>` and `--port` pick up a non-default `server.host`, `proxy.port` or `proxy.ca_dir`.
+`mockingbird proxy env --json` prints the same variables as JSON, with the CA, bundle, truststore, Node.js preload and Python preload paths and the CA's SPKI hash. `-c <config>` and `--port` pick up a non-default `server.host`, `proxy.port` or `proxy.ca_dir`.
 
 To put the proxy in front of a server that runs without `proxy.enabled` (for example one started elsewhere), run it on its own:
 
@@ -91,14 +91,16 @@ It reads the hosts the server's mocks claim from `GET /proxy/hosts` on the admin
 | `NODE_USE_ENV_PROXY` | `1` | Node.js ≥ 24.5 / 22.21 built-in proxy support |
 | `NODE_OPTIONS` | `--require <ca_dir>/node-proxy.cjs`, then any `NODE_OPTIONS` you had | Node.js: every agent and `fetch` (below) |
 | `JAVA_TOOL_OPTIONS` | `-Dhttp(s).proxyHost/-Port`, `-Dhttp.nonProxyHosts=localhost\|127.0.0.1`, `-Djavax.net.ssl.trustStore=<ca_dir>/truststore.jks` (JKS, password `changeit`), then any options you had | Java |
+| `PYTHONPATH` | `<ca_dir>/python`, then any `PYTHONPATH` you had | Python: the `sitecustomize` preload (below) |
+| `GODEBUG` | `x509sslcertoverrideplatform=1`, then any `GODEBUG` you had | Go ≥ 1.27 on macOS and Windows: verify with `SSL_CERT_FILE` |
 
-The files live next to the CA (`~/.mockingbird/ca` by default) and are rewritten each time the variables are printed. Running `eval "$(mockingbird proxy env)"` twice does not add the preload or the Java options twice.
+The files live next to the CA (`~/.mockingbird/ca` by default) and are rewritten each time the variables are printed. Running `eval "$(mockingbird proxy env)"` twice does not add the preloads, the Java options or the Go setting twice.
 
 ## Per runtime
 
 - **Node.js:** nothing to install. The preload in `NODE_OPTIONS` sends every `http`/`https` agent through the proxy, including agents an SDK creates itself (stripe-node, `got`, the AWS SDK), and replaces undici's global dispatcher, which `fetch` and the `undici` package share. It honours `NO_PROXY`, trusts the local CA also when a client passes its own `ca`, and does nothing when no proxy variable is set. `axios` reads the proxy variables itself and works too. On Node ≥ 24.5 (or 22.21) `NODE_USE_ENV_PROXY=1` covers `fetch` natively and the preload covers the agents.
-- **Python:** `requests` and `httpx` read `HTTPS_PROXY` and `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`; `urllib.request` reads `HTTPS_PROXY` and `SSL_CERT_FILE`. Bare `urllib3.PoolManager` ignores proxy variables (use `urllib3.ProxyManager(os.environ["HTTPS_PROXY"])`).
-- **Go `net/http`:** `HTTPS_PROXY`; on Linux `SSL_CERT_FILE`. On macOS Go verifies with the system keychain and ignores `SSL_CERT_FILE`, so HTTPS to mocked hosts fails there unless the CA is trusted in the keychain (Mockingbird never does that for you); run Go apps in a Linux container or CI.
+- **Python:** `requests` and `httpx` read `HTTPS_PROXY` and `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`; `urllib.request` reads `HTTPS_PROXY` and `SSL_CERT_FILE`; `pycurl` (libcurl) reads `https_proxy`. The preload that `PYTHONPATH` names covers the rest: Python imports it at startup as `sitecustomize`, and it points `certifi.where()` at the bundle (for clients that pin certifi's roots) and sends a plain `urllib3.PoolManager` through `HTTPS_PROXY` for hosts outside `NO_PROXY`, as OpenAPI-generated SDKs such as `plaid-python` build one. It leaves `ProxyManager` and other subclasses alone, then runs the next `sitecustomize` on the path if the environment has one. `aiohttp` ignores the proxy variables unless the session is created with `trust_env=True`.
+- **Go `net/http`:** `HTTPS_PROXY`; on Linux `SSL_CERT_FILE`. On macOS (and Windows), binaries built with Go 1.27 or later verify with `SSL_CERT_FILE` when `GODEBUG=x509sslcertoverrideplatform=1`, which `proxy env` sets (it is already the default for modules that declare `go 1.27`). Binaries built with an older Go verify with the system keychain and ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails there unless the CA is trusted in the keychain (Mockingbird never does that for you); rebuild with Go 1.27, or run them in a Linux container or CI.
 - **Ruby `Net::HTTP`** (and gems built on it): `https_proxy` and `SSL_CERT_FILE` with Ruby linked against OpenSSL (rbenv, asdf, Homebrew, Linux). macOS's system Ruby (`/usr/bin/ruby`, LibreSSL) ignores `SSL_CERT_FILE`.
 - **Java:** `JAVA_TOOL_OPTIONS` covers `HttpURLConnection`, `java.net.http.HttpClient` and OkHttp. Apache HttpClient reads the system properties only when built with `useSystemProperties()`. The JVM prints `Picked up JAVA_TOOL_OPTIONS` on stderr.
 - **.NET `HttpClient`:** `HTTPS_PROXY`/`NO_PROXY`; on Linux the CA through `SSL_CERT_FILE`. On macOS and Windows .NET trusts the system store only.
