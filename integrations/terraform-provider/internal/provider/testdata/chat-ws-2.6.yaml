@@ -1,0 +1,41 @@
+asyncapi: 2.6.0
+info:
+  title: Chat
+  version: 0.1.0
+servers:
+  local:
+    url: ws://localhost:8080
+    protocol: ws
+channels:
+  /chat:
+    description: The chat room.
+    subscribe:
+      operationId: chatMessage
+      summary: A message posted to the room.
+      message:
+        name: ChatMessage
+        payload:
+          type: object
+          required: [user, text, at]
+          properties:
+            user:
+              type: string
+            text:
+              type: string
+            at:
+              type: string
+              format: date-time
+    publish:
+      operationId: sendMessage
+      summary: Post a message to the room.
+      x-mockingbird-reply: chatMessage
+      message:
+        name: SendMessage
+        payload:
+          type: object
+          required: [user, text]
+          properties:
+            user:
+              type: string
+            text:
+              type: string

@@ -1,0 +1,94 @@
+"""The episodes in the Star Wars trilogy."""
+enum Episode {
+  """Star Wars Episode IV: A New Hope, released in 1977."""
+  NEWHOPE
+  """Star Wars Episode V: The Empire Strikes Back, released in 1980."""
+  EMPIRE
+  """Star Wars Episode VI: Return of the Jedi, released in 1983."""
+  JEDI
+}
+
+"""Units of height."""
+enum LengthUnit {
+  METER
+  FOOT
+}
+
+"""A character in the Star Wars Trilogy."""
+interface Character {
+  """The id of the character."""
+  id: ID!
+  """The name of the character."""
+  name: String!
+  """The friends of the character, or an empty list if they have none."""
+  friends: [Character]
+  """Which movies they appear in."""
+  appearsIn: [Episode]!
+}
+
+"""A humanoid creature in the Star Wars universe."""
+type Human implements Character {
+  """The id of the human."""
+  id: ID!
+  """The name of the human."""
+  name: String!
+  """The friends of the human, or an empty list if they have none."""
+  friends: [Character]
+  """Which movies they appear in."""
+  appearsIn: [Episode]!
+  """The home planet of the human, or null if unknown."""
+  homePlanet: String
+  """Height in the preferred unit."""
+  height(unit: LengthUnit = METER): Float
+}
+
+"""A mechanical creature in the Star Wars universe."""
+type Droid implements Character {
+  """The id of the droid."""
+  id: ID!
+  """The name of the droid."""
+  name: String!
+  """The friends of the droid, or an empty list if they have none."""
+  friends: [Character]
+  """Which movies they appear in."""
+  appearsIn: [Episode]!
+  """The primary function of the droid."""
+  primaryFunction: String
+}
+
+"""Represents a review for a movie."""
+type Review {
+  """The movie."""
+  episode: Episode
+  """The number of stars this review gave, 1-5."""
+  stars: Int!
+  """Comment about the movie."""
+  commentary: String
+}
+
+"""The input object sent when someone is creating a new review."""
+input ReviewInput {
+  """0-5 stars."""
+  stars: Int!
+  """Comment about the movie, optional."""
+  commentary: String
+}
+
+type Query {
+  """The hero of the given episode, or of the whole saga."""
+  hero(episode: Episode): Character
+  """A human by id."""
+  human("""id of the human""" id: ID!): Human
+  """A droid by id."""
+  droid("""id of the droid""" id: ID!): Droid
+}
+
+type Mutation {
+  """Create a review for an episode."""
+  createReview(episode: Episode, review: ReviewInput!): Review
+}
+
+type Subscription {
+  """A review was added for an episode."""
+  reviewAdded(episode: Episode): Review
+}
