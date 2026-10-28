@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Mockingbird importers: OpenAPI, Swagger, GraphQL, protobuf, WSDL and AsyncAPI into the contract model, and smart import"
 
 [lints]
 workspace = true

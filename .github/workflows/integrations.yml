@@ -45,7 +45,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The slim binary (no MQTT, AMQP or Kafka) builds fastest and has every
       # command the action uses.
-      - run: cargo build -p mockingbird --no-default-features
+      - run: cargo build -p mockingbird-cli --no-default-features
       - name: Start Mockingbird (the action under test)
         id: mockingbird
         uses: ./integrations/github-action

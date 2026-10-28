@@ -22,11 +22,7 @@ macro_rules! skill {
     ($name:literal) => {
         Skill {
             name: $name,
-            text: include_str!(concat!(
-                "../../../plugins/mockingbird/skills/",
-                $name,
-                "/SKILL.md"
-            )),
+            text: include_str!(concat!(env!("MB_SKILLS_DIR"), "/", $name, "/SKILL.md")),
         }
     };
 }

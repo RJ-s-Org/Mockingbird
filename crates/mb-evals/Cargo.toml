@@ -25,7 +25,7 @@ mb-engine.workspace = true
 mb-import.workspace = true
 mb-llm.workspace = true
 mb-mcm.workspace = true
-mockingbird = { path = "../mockingbird" }
+mockingbird = { package = "mockingbird-cli", path = "../mockingbird" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

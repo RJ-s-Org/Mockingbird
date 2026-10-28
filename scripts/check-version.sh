@@ -9,6 +9,9 @@
 #     Cargo.toml ([workspace.package]);
 #   - deploy/helm/mockingbird/Chart.yaml has `appVersion: "<version>"`
 #     (skipped with a notice while the chart does not exist);
+#   - every internal crate requirement in Cargo.toml's
+#     [workspace.dependencies] (`mb-* = { path = …, version = "=…" }`) pins
+#     <version>, so the published crates depend on each other exactly;
 #   - the agent plugin manifests (plugins/mockingbird, gemini-extension.json)
 #     have `"version": "<version>"`;
 #   - scripts/changelog-section.sh <version> finds a CHANGELOG.md section.
@@ -42,6 +45,12 @@ WORKSPACE_VERSION=$(awk '
 [[ -n $WORKSPACE_VERSION ]] || fail "no version in [workspace.package] of Cargo.toml"
 [[ $VERSION == "$WORKSPACE_VERSION" ]] ||
     fail "tag $TAG does not match the workspace version $WORKSPACE_VERSION"
+
+# Internal path dependencies pinned with `=`; mb-ext has its own version.
+while IFS= read -r line; do
+    [[ $line == *"version = \"=$VERSION\""* ]] ||
+        fail "Cargo.toml: internal dependency does not pin =$VERSION: $line"
+done < <(grep -E '^mb-[a-z]+ = \{ path = "crates/' "$ROOT/Cargo.toml" | grep -v '^mb-ext ')
 
 CHART=$ROOT/deploy/helm/mockingbird/Chart.yaml
 if [[ -f $CHART ]]; then

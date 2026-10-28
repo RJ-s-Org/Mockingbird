@@ -25,6 +25,8 @@ rustc-ice-*.txt
 
 # Console: the Vite build (embedded by mb-console), dependencies and test output
 crates/mb-console/dist/
+# The example catalog and skills copied into the mockingbird-cli package at release
+crates/mockingbird/embedded/
 crates/mb-console/web/node_modules/
 crates/mb-console/web/openapi.json
 crates/mb-console/web/test-results/

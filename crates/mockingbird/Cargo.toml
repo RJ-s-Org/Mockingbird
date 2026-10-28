@@ -1,17 +1,24 @@
 [package]
-name = "mockingbird"
+name = "mockingbird-cli"
+description = "LLM-backed API mocks from contracts: stateful, every protocol, a zero-edit HTTPS proxy and an MCP server. Installs the `mockingbird` command."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+keywords = ["mock", "openapi", "llm", "testing", "mcp"]
+categories = ["command-line-utilities", "development-tools::testing"]
+# `embedded/` (the example catalog and agent skills, see build.rs) is not in
+# git; the release workflow copies it in before publishing.
+include = ["/src/**", "/build.rs", "/embedded/**", "/Cargo.toml"]
 
-# `cargo binstall --git https://github.com/RJ-s-Org/Mockingbird mockingbird`
-# downloads the release archive instead of building. (The `mockingbird` name
-# on crates.io belongs to another project, hence `--git`.)
+# `cargo binstall mockingbird-cli` downloads the release archive instead of
+# building. The archives are named after the binary (`mockingbird-…`), not the
+# package. (`mockingbird` on crates.io belongs to another project.)
 [package.metadata.binstall]
-pkg-url = "https://github.com/RJ-s-Org/Mockingbird/releases/download/v{ version }/{ name }-{ version }-{ target }{ archive-suffix }"
-bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-url = "https://github.com/RJ-s-Org/Mockingbird/releases/download/v{ version }/mockingbird-{ version }-{ target }{ archive-suffix }"
+bin-dir = "mockingbird-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
@@ -19,6 +26,11 @@ pkg-fmt = "zip"
 
 [lints]
 workspace = true
+
+# The library keeps the name `mockingbird` (`use mockingbird::…`).
+[lib]
+name = "mockingbird"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mockingbird"

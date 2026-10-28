@@ -57,7 +57,7 @@ function Install-Source {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { return $false }
     Say 'building from source with cargo (a few minutes)'
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid())
-    $cargoArgs = @('install', '--locked', '--git', "https://github.com/$Repo", '--root', $tmp, 'mockingbird')
+    $cargoArgs = @('install', '--locked', '--git', "https://github.com/$Repo", '--root', $tmp, 'mockingbird-cli')
     if ($env:MOCKINGBIRD_VERSION) { $cargoArgs += @('--tag', $env:MOCKINGBIRD_VERSION) }
     & cargo @cargoArgs
     if ($LASTEXITCODE -ne 0) { return $false }

@@ -109,18 +109,19 @@ tempfile = "3"
 tokio-tungstenite = "0.30"
 rumqttd = { version = "0.20.0", default-features = false }
 
-# internal
-mb-mcm = { path = "crates/mb-mcm" }
-mb-import = { path = "crates/mb-import" }
-mb-llm = { path = "crates/mb-llm" }
-mb-engine = { path = "crates/mb-engine" }
-mb-state = { path = "crates/mb-state" }
-mb-protocols = { path = "crates/mb-protocols" }
+# Internal crates are published in lock-step with the workspace version
+# (scripts/check-version.sh checks these requirements).
+mb-mcm = { path = "crates/mb-mcm", version = "=0.1.0-rc.1" }
+mb-import = { path = "crates/mb-import", version = "=0.1.0-rc.1" }
+mb-llm = { path = "crates/mb-llm", version = "=0.1.0-rc.1" }
+mb-engine = { path = "crates/mb-engine", version = "=0.1.0-rc.1" }
+mb-state = { path = "crates/mb-state", version = "=0.1.0-rc.1" }
+mb-protocols = { path = "crates/mb-protocols", version = "=0.1.0-rc.1" }
 mb-ext = { path = "crates/mb-ext", version = "1.0.0" }
-mb-store = { path = "crates/mb-store" }
-mb-admin = { path = "crates/mb-admin" }
-mb-auth = { path = "crates/mb-auth" }
-mb-console = { path = "crates/mb-console" }
+mb-store = { path = "crates/mb-store", version = "=0.1.0-rc.1" }
+mb-admin = { path = "crates/mb-admin", version = "=0.1.0-rc.1" }
+mb-auth = { path = "crates/mb-auth", version = "=0.1.0-rc.1" }
+mb-console = { path = "crates/mb-console", version = "=0.1.0-rc.1" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

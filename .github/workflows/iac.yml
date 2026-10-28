@@ -52,7 +52,7 @@ jobs:
       # The slim binary: no MQTT/AMQP clients to compile, same Admin API.
       - name: Build mockingbird
         working-directory: .
-        run: cargo build -p mockingbird --no-default-features
+        run: cargo build -p mockingbird-cli --no-default-features
       - uses: actions/setup-go@v7
         with:
           go-version-file: integrations/terraform-provider/go.mod

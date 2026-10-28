@@ -45,7 +45,7 @@ async function findBinary({
     throw new LauncherError(
       `${name} has no mockingbird binary for ${platform}-${arch}.\n` +
         `Supported platforms: ${supported()}.\n` +
-        'Build from source instead: cargo install --git https://github.com/RJ-s-Org/Mockingbird mockingbird',
+        'Build from source instead: cargo install mockingbird-cli',
     );
   }
 

@@ -5,7 +5,7 @@
 //! Redis bus, so leader election uses the Redis lease) and served with
 //! `server::serve_app` on ephemeral ports. Gated on both
 //! `MB_TEST_POSTGRES_URL` and `MB_TEST_REDIS_URL`; run with
-//! `MB_TEST_RUNNER=scripts/test-postgres.sh scripts/test-redis.sh -p mockingbird --test ha_cluster`.
+//! `MB_TEST_RUNNER=scripts/test-postgres.sh scripts/test-redis.sh -p mockingbird-cli --test ha_cluster`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
