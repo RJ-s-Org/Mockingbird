@@ -43,15 +43,11 @@ Five more open-source apps in other stacks, unmodified, under `mockingbird run` 
 
 ### From field trials 2.0 (2026-10-28)
 
-- **Validation errors hide the cause.** A nullable object's `anyOf` reports only `is not valid under any of the schemas listed in the 'anyOf' keyword`, and the fallback reason carries the whole answer (kilobytes); `verify` prints those reasons in full (about 10 KB for the gh run). Report the deepest branch's errors and cap the quoted answer.
-- **The `verify` bar misses contract gaps.** A path the contract lacks (`no operation matches POST /accounts/balance/get`) is a 4xx, so `--no-fallbacks --no-unmapped` passes; add `--no-unmatched` (or count it under unmapped).
 - Persona id formats with a query part (`gid://shopify/Cart/<26 chars>?key=<32 hex>`) are not kept: the cart id came back as `gid://shopify/Cart/8f3a1c6d9b2e4f70a5c8d13e6b`.
 - Cart totals are the model's arithmetic: after the engine fixes (Done) the Next.js Commerce cart holds the right variant and quantity, but its line price ($28.00) differs from the product page's ($32.00). Compute `cost` from the stored lines' prices.
 - In Next.js Commerce the first "Add to cart" after the cart is created takes about 10 s to reach the mock (the server action waits on the app side, not on Mockingbird); a second click goes through at once.
 - An answer with only one possible value (Slack's literal `"ok"`) is labelled `llm` with 0 tokens and 0 ms.
-- **Catalog:** octokit's GraphQL schema (pinned July 2024; still on main in July 2026) lacks `Issue.issueType`, `blockedBy` and `blocking`, which current `gh` queries on github.com; GitHub's own `schema.docs.graphql` has them (check its licence before pinning it). GitHub REST has no GitHub Apps operations (`POST /app/installations/{id}/access_tokens`, used by healthchecks).
-- **GraphQL contracts from introspection JSON** (Shopify publishes the Storefront schema only that way) need converting to SDL first; accept them directly.
-- **`protocols.graphql.path` is global**: Shopify's `graphql.json` and GitHub's `/graphql` cannot be served by one config. Make it per mock.
+- **Catalog:** GitHub REST has no GitHub Apps operations (`POST /app/installations/{id}/access_tokens`, used by healthchecks).
 - github-readme-stats' torvalds/linux pin still gets `user` and `organization` both null (17 completion tokens), which the card reports as an error.
 - TMDB list endpoints stay slow: `/movie/popular` took 28 s for 1.8k completion tokens (about 65 tokens/s from the routed provider), so the cold home page took 53 s. A smaller default list size or streaming would help. Facts drift too: TMDB id 94997 came back as "Game of Thrones" (it is House of the Dragon).
 
@@ -98,7 +94,7 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 
 **Contracts and validation**
 
-- **`serve` panics on a schema `validate` accepts**: octokit/graphql-schema at `597478f` declares `EnterpriseOwnerInfo.repositoryDeployKeySetting` twice, and async-graphql panics with ``Field `repositoryDeployKeySetting` already exists`` (`dynamic/object.rs:88`). Reject or de-duplicate at compile time. The example pins `503d8f1`.
+- **`serve` panics on a schema `validate` accepts**: octokit/graphql-schema at `597478f` declares `EnterpriseOwnerInfo.repositoryDeployKeySetting` twice, and async-graphql panics with ``Field `repositoryDeployKeySetting` already exists`` (`dynamic/object.rs:88`). Reject or de-duplicate at compile time. (The example now pins GitHub's own schema, which loads.)
 - **Dangling `$ref`s fail compilation**: Square's `api.json` (every release since 2025-10) references undefined `AppFeeAllocation`/`CurrencyExchange`: `unresolvable $ref referenced from schema CreatePaymentRequest`. Treat an unresolvable ref as an open schema with a warning.
 - **Form booleans are case-sensitive**: stripe-python sends `automatic_payment_methods[enabled]=True`, which fails with `body/automatic_payment_methods/enabled: "True" is not of type "boolean"`; `true` passes. Accept `True`/`False`.
 - **Required header parameters are not checked** (a request without `Notion-Version` gets 200).
@@ -126,6 +122,15 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
   - `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `/institutions/get_by_id`, `users.list`, `_search`) are reads: cached, seeded (items keyed by `<singular>_id` when they have no `id`), and generated knowing the lists other reads stored under their list members' names. plaid/quickstart: six reads invented six sets of `account_id`s, and the repeated `/accounts/get` took 2.0 s and differed; now all six share the first answer's accounts and balances, and the repeat is a `cache` hit in 0 ms. A webhook target that names such a read's operation still gets its event (Plaid's `transactionsSync`).
   - Base64 fields (`format: byte`, `contentEncoding: base64`, or `content` beside `encoding: "base64"`) are asked for as plain text and encoded locally; a value that does not decode is encoded from its text (corrupt base64 keeps what decodes as readable text). `gh repo view` failed with `invalid UTF-8 string` twice; now it prints the README.
   - Request-validation rejections are logged and labelled with source `rejected`, not `fallback`, so `verify --no-fallbacks` no longer counts a client error as a generation failure.
+
+- Field trials 2.0, developer experience (trials2-dx):
+  - `verify --no-unmatched` fails on requests no contract operation matches (Plaid's `POST /accounts/balance/get` passed `--no-fallbacks --no-unmapped`); `report` lists those routes;
+  - `verify` prints the totals and one short line per failed check by default (the three most frequent reasons, cut to 120 characters); `--format json` keeps every reason in full (the gh run printed about 10 KB);
+  - validation errors name the JSON pointer and keyword, follow a failed `anyOf`/`oneOf` into its closest branch (`/owner: anyOf: no branch matches; closest: /owner/login: type: …`) and mask quoted values over 160 characters, in fallback reasons, logs, repair prompts and request-validation 400s;
+  - `mocks.<name>.graphql_path`: Shopify's `/graphql.json` and GitHub's `/graphql` in one config;
+  - GraphQL introspection JSON was already accepted as a contract: Shopify's `storefront.schema.json` (`@shopify/hydrogen-react` 2025.7.0) compiles to 72 operations and serves unconverted; the protocols guide says so;
+  - the GitHub GraphQL example's `--full` pins GitHub's own `schema.docs.graphql` (github/docs `c6f68e2`, CC-BY-4.0, 309 operations), which has `Issue.issueType`, `blockedBy` and `blocking`;
+  - `mb-protocols` SOAP test: the oversized request sends only its head, as #50 did for GraphQL (a client still uploading saw a reset now and then).
 
 - Field trials 2.0 (launch-b1-trials), from the [trials](trials/README.md):
   - `proxy env` sets `PYTHONPATH` to a `sitecustomize` preload: `certifi.where()` names the bundle and a plain `urllib3.PoolManager` goes through `HTTPS_PROXY` (plaid-python reached the real Plaid sandbox before);

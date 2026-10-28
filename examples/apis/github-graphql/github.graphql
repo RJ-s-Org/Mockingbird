@@ -3,8 +3,9 @@
 # addComment), written for Mockingbird's examples and covered by its license.
 # Type, field and argument names follow GitHub's public schema as published by
 # octokit/graphql-schema (MIT): https://github.com/octokit/graphql-schema (schema.graphql)
-# `mockingbird examples init github-graphql --full` swaps this file for that
-# schema at the commit pinned in example.json.
+# `mockingbird examples init github-graphql --full` swaps this file for GitHub's
+# own schema.docs.graphql (github/docs, CC-BY-4.0) at the commit pinned in
+# example.json.
 
 """An object with an ID."""
 interface Node {

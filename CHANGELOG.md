@@ -61,11 +61,16 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 - GraphQL answers store every object with an `id` under its type (`Cart` → `cart`): a mutation's are merged into the session, a query's added when new, so `cartCreate` → `cart(id:)` → `cartLinesAdd` reads and updates one cart. Mutations are generated knowing what their `<x>Id` arguments and `gid://…/<Type>/…` ids name (in nested inputs too).
 - Base64 fields (`format: byte`, `contentEncoding: base64`, `content` beside `encoding: "base64"`) are asked for as plain text and encoded locally; values that do not decode are re-encoded from their text.
 - Request-validation rejections have their own source, `rejected` (header, request log, metrics and `report`), instead of `fallback`.
+- `mockingbird verify --no-unmatched`: fails when a request matched no operation of its mock's contract; `report` lists those routes.
+- `mocks.<name>.graphql_path`: one GraphQL mock's endpoint below its route prefix (Shopify's `/graphql.json`), instead of the server-wide `protocols.graphql.path`.
 
 ### Changed
 
 - GraphQL mutations generate only their selection, like queries (GitHub `createIssue`: 38.8k → 745 prompt tokens, no fallback).
 - `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `users.list`, `_search`) are imported as reads: cached, seeded, and generated knowing the lists other reads stored; a webhook target fires for such a read only when it names its operation.
+- `mockingbird verify` prints a short text summary by default (`--format text`): the totals and one line per failed check, naming the most frequent reasons; `--format json` keeps the whole report.
+- Validation errors (fallback reasons, logs, repair prompts, request-validation 400s) read `<pointer>: <keyword>: <message>`, follow a failed `anyOf`/`oneOf` into its closest branch and mask long quoted values.
+- The GitHub GraphQL example's `--full` downloads GitHub's own `schema.docs.graphql` (github/docs, CC-BY-4.0) instead of octokit/graphql-schema, so current `gh` queries validate.
 - Requests to OpenRouter send `reasoning: {enabled: false}` unless the profile's `extra_body` sets `reasoning`; a model that rejects it is asked again without it.
 - A single object answered for a top-level array schema is taken as the list's one item instead of costing a repair; a faker list standing in for a failed LLM call no longer seeds session state.
 - A fallback answer to a read is cached under consistency: the identical repeat is answered at once and still reported as `fallback`.

@@ -25,6 +25,9 @@ pub enum Format {
     Json,
     Markdown,
     Junit,
+    /// A few lines: the totals and each failed check (`verify` only;
+    /// `report` prints JSON instead).
+    Text,
 }
 
 #[derive(Args, Debug)]
@@ -51,6 +54,10 @@ pub struct VerifyArgs {
     /// Fail when the proxy blocked a host no mock claims.
     #[arg(long)]
     pub no_blocked: bool,
+    /// Fail when a request reached a mock but matched no operation of its
+    /// contract (404 or 405: a route the contract lacks).
+    #[arg(long)]
+    pub no_unmatched: bool,
     /// Fail on 5xx responses.
     #[arg(long)]
     pub no_errors: bool,
@@ -65,8 +72,9 @@ pub struct VerifyArgs {
     /// operation id) was called at least N times (default 1). Repeatable.
     #[arg(long, value_name = "OP[=N]")]
     pub called: Vec<String>,
-    /// How to print the result.
-    #[arg(long, value_enum, default_value_t = Format::Json)]
+    /// How to print the result: `text` names the failed checks in a few
+    /// lines; `json` carries the whole report.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
     /// Write the result to this file instead of stdout.
     #[arg(long, short = 'o')]
@@ -120,6 +128,9 @@ pub struct MockReport {
     pub operations: BTreeMap<String, Counts>,
     /// Distinct fallback reasons with their counts.
     pub fallback_reasons: BTreeMap<String, u64>,
+    /// Requests that matched no operation of the contract (`METHOD path`,
+    /// answered 404 or 405) with their counts.
+    pub unmatched: BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -240,6 +251,14 @@ fn add_entry(m: &mut MockReport, e: &Value) {
             .or_default() += 1;
     }
     let op = e["operation_id"].as_str().unwrap_or("-").to_string();
+    if e["operation_id"].is_null() && matches!(status, 404 | 405) {
+        let route = format!(
+            "{} {}",
+            e["method"].as_str().unwrap_or("?"),
+            e["path"].as_str().unwrap_or("?")
+        );
+        *m.unmatched.entry(route).or_default() += 1;
+    }
     m.counts.add(source, status);
     m.operations.entry(op).or_default().add(source, status);
 }
@@ -328,18 +347,24 @@ pub fn check(report: &Report, args: &VerifyArgs) -> anyhow::Result<Vec<Failure>>
     };
     for m in &report.mocks {
         if args.no_fallbacks && m.counts.fallbacks > 0 {
-            let reasons: Vec<String> = m
-                .fallback_reasons
-                .iter()
-                .map(|(r, n)| format!("{n}× {r}"))
-                .collect();
             fail(
                 "no-fallbacks",
                 format!(
                     "{}: {} fallback answers ({})",
                     m.mock,
                     m.counts.fallbacks,
-                    reasons.join("; ")
+                    top(&m.fallback_reasons)
+                ),
+            );
+        }
+        if args.no_unmatched && !m.unmatched.is_empty() {
+            let n: u64 = m.unmatched.values().sum();
+            fail(
+                "no-unmatched",
+                format!(
+                    "{}: {n} requests matched no operation ({})",
+                    m.mock,
+                    top(&m.unmatched)
                 ),
             );
         }
@@ -400,6 +425,37 @@ pub fn check(report: &Report, args: &VerifyArgs) -> anyhow::Result<Vec<Failure>>
     Ok(failures)
 }
 
+/// Entries named in a failure's detail; the rest are counted.
+const TOP_ENTRIES: usize = 3;
+
+/// Characters of one entry (a fallback reason) kept in a failure's detail.
+const ENTRY_CHARS: usize = 120;
+
+/// The most frequent entries of `counts` as `N× entry`, each shortened, and
+/// how many more there are; `--format json` has them all in full.
+fn top(counts: &BTreeMap<String, u64>) -> String {
+    let mut entries: Vec<(&String, &u64)> = counts.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut parts: Vec<String> = entries
+        .iter()
+        .take(TOP_ENTRIES)
+        .map(|(entry, n)| format!("{n}× {}", shorten(entry, ENTRY_CHARS)))
+        .collect();
+    if entries.len() > TOP_ENTRIES {
+        parts.push(format!("{} more", entries.len() - TOP_ENTRIES));
+    }
+    parts.join("; ")
+}
+
+/// `s` cut to `max` characters, with `…` when cut.
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "…"
+    }
+}
+
 /// `OP[=N]` → `(OP, N)`, N defaulting to 1.
 fn parse_called(spec: &str) -> anyhow::Result<(&str, u64)> {
     match spec.split_once('=') {
@@ -433,7 +489,43 @@ pub fn render(
         }
         Format::Markdown => markdown(report, failures),
         Format::Junit => junit(report, failures),
+        Format::Text => match failures {
+            Some(failures) => text(report, failures),
+            None => serde_json::to_string_pretty(report)?,
+        },
     })
+}
+
+fn totals(report: &Report) -> String {
+    let t = &report.totals;
+    let unmatched: u64 = report.mocks.iter().flat_map(|m| m.unmatched.values()).sum();
+    format!(
+        "{} requests, {} fallbacks, {} unmatched, {} 4xx, {} 5xx, {} unmapped hosts",
+        t.requests,
+        t.fallbacks,
+        unmatched,
+        t.client_errors,
+        t.errors,
+        report.unmapped_hosts.len()
+    )
+}
+
+/// `verify`'s default output: the totals and one line per failed check.
+fn text(report: &Report, failures: &[Failure]) -> String {
+    if failures.is_empty() {
+        return format!("verify passed ({})\n", totals(report));
+    }
+    let mut s = format!(
+        "verify failed: {} check{} ({})\n",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" },
+        totals(report)
+    );
+    for f in failures {
+        let _ = writeln!(s, "  {}: {}", f.check, f.detail);
+    }
+    s.push_str("Details: mockingbird verify --format json (or mockingbird report)\n");
+    s
 }
 
 fn sources(c: &Counts) -> String {
@@ -507,7 +599,23 @@ fn markdown(report: &Report, failures: Option<&[Failure]>) -> String {
     if !reasons.is_empty() {
         s.push_str("**Fallback reasons**\n\n");
         for (mock, reason, n) in reasons {
-            let _ = writeln!(s, "- {mock}: {n}× {}", cell(reason));
+            let _ = writeln!(s, "- {mock}: {n}× {}", cell(&shorten(reason, 300)));
+        }
+        s.push('\n');
+    }
+    let unmatched: Vec<(&str, &str, u64)> = report
+        .mocks
+        .iter()
+        .flat_map(|m| {
+            m.unmatched
+                .iter()
+                .map(|(r, n)| (m.mock.as_str(), r.as_str(), *n))
+        })
+        .collect();
+    if !unmatched.is_empty() {
+        s.push_str("**Unmatched routes** (no contract operation)\n\n| Mock | Route | Requests |\n|---|---|---:|\n");
+        for (mock, route, n) in unmatched {
+            let _ = writeln!(s, "| {} | `{}` | {n} |", cell(mock), cell(route));
         }
         s.push('\n');
     }
@@ -616,7 +724,7 @@ mod tests {
             json!({"operation_id": "getOrder", "status": 200, "source": "llm"}),
             json!({"operation_id": "getOrder", "status": 200, "source": "fallback", "fallback_reason": "LLM request timed out"}),
             json!({"operation_id": "listOrders", "status": 200, "source": "fallback", "fallback_reason": mb_engine::OFFLINE_REASON}),
-            json!({"operation_id": null, "status": 404, "source": null}),
+            json!({"operation_id": null, "method": "POST", "path": "/accounts/balance/get", "status": 404, "source": null}),
         ] {
             add_entry(&mut m, &e);
         }
@@ -671,6 +779,60 @@ mod tests {
         assert_eq!(checks, ["no-fallbacks", "no-blocked", "called"], "{f:?}");
         assert!(f[2].detail.contains("createOrder: called 0 times"));
         assert!(check(&r, &verify(&["--called", "getOrder=x"])).is_err());
+    }
+
+    #[test]
+    fn unmatched_routes_fail_no_unmatched() {
+        let r = report();
+        assert_eq!(r.mocks[0].unmatched["POST /accounts/balance/get"], 1);
+        let f = check(&r, &verify(&["--no-unmatched"])).unwrap();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].check, "no-unmatched");
+        assert!(
+            f[0].detail
+                .contains("1 requests matched no operation (1× POST /accounts/balance/get)"),
+            "{}",
+            f[0].detail
+        );
+        let md = render(&r, None, Format::Markdown).unwrap();
+        assert!(md.contains("`POST /accounts/balance/get`"), "{md}");
+    }
+
+    #[test]
+    fn text_output_is_short_with_long_reasons() {
+        let mut m = MockReport {
+            mock: "github".into(),
+            ..MockReport::default()
+        };
+        for i in 0..6 {
+            let reason = format!("{i}: {}", "x".repeat(10_000));
+            add_entry(
+                &mut m,
+                &json!({"operation_id": "repo", "status": 200, "source": "fallback", "fallback_reason": reason}),
+            );
+        }
+        let mut r = Report::default();
+        r.totals.merge(&m.counts);
+        r.mocks.push(m);
+        let args = verify(&["--no-fallbacks"]);
+        assert_eq!(args.format, Format::Text);
+        let f = check(&r, &args).unwrap();
+        let out = render(&r, Some(&f), args.format).unwrap();
+        assert!(out.len() < 1_000, "{out}");
+        assert!(
+            out.starts_with("verify failed: 1 check (6 requests, 6 fallbacks"),
+            "{out}"
+        );
+        assert!(
+            out.contains("no-fallbacks: github: 6 fallback answers"),
+            "{out}"
+        );
+        assert!(out.contains("; 3 more"), "{out}");
+        assert!(out.contains("--format json"), "{out}");
+        let json = render(&r, Some(&f), Format::Json).unwrap();
+        assert!(json.len() > 60_000, "the JSON keeps the full reasons");
+        let ok = render(&r, Some(&[]), Format::Text).unwrap();
+        assert!(ok.starts_with("verify passed (6 requests"), "{ok}");
     }
 
     #[test]
