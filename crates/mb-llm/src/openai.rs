@@ -1,6 +1,7 @@
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, Provider, ResponseFormat,
@@ -26,12 +27,51 @@ pub struct OpenAiConfig {
 pub struct OpenAiCompatible {
     client: reqwest::Client,
     config: OpenAiConfig,
+    /// Whether requests ask for no reasoning (see [`Self::reasoning_off`]);
+    /// cleared when the endpoint rejects that.
+    reasoning_off: AtomicBool,
 }
 
 impl OpenAiCompatible {
+    /// OpenRouter endpoints ask for no reasoning by default.
     pub fn new(config: OpenAiConfig) -> Result<Self, LlmError> {
         let client = crate::http_client(&config.http, None)?;
-        Ok(Self { client, config })
+        let reasoning_off = is_openrouter(&config.base_url);
+        Ok(Self {
+            client,
+            config,
+            reasoning_off: AtomicBool::new(reasoning_off),
+        })
+    }
+
+    /// Whether to send `reasoning: {"enabled": false}` (OpenRouter's switch)
+    /// unless `extra_body` sets `reasoning`. Mock answers are data, not
+    /// problems to think through, and hidden reasoning tokens were most of
+    /// the completion of a large answer (DeepSeek: 2–5k tokens, 10–30 s).
+    /// An endpoint that rejects the switch (a model that always reasons) is
+    /// asked once more without it, and then never again.
+    pub fn reasoning_off(self, on: bool) -> Self {
+        self.reasoning_off.store(on, Ordering::Relaxed);
+        self
+    }
+
+    fn sends_reasoning_off(&self) -> bool {
+        self.reasoning_off.load(Ordering::Relaxed)
+            && !self.config.extra_body.contains_key("reasoning")
+    }
+
+    /// Whether `e` rejects the reasoning switch this client sent; if so the
+    /// switch is turned off for good.
+    fn rejected_reasoning_off(&self, e: &LlmError) -> bool {
+        let rejected = self.sends_reasoning_off()
+            && matches!(e, LlmError::Http { status: 400 | 404 | 422, body } if body.to_ascii_lowercase().contains("reasoning"));
+        if rejected {
+            tracing::info!(
+                "the endpoint rejects reasoning: {{enabled: false}}; not sending it again"
+            );
+            self.reasoning_off.store(false, Ordering::Relaxed);
+        }
+        rejected
     }
 
     fn url(&self) -> String {
@@ -76,6 +116,9 @@ impl OpenAiCompatible {
                     obj.insert(key.clone(), value.clone());
                 }
             }
+            if self.sends_reasoning_off() {
+                obj.insert("reasoning".to_string(), json!({"enabled": false}));
+            }
         }
         body
     }
@@ -99,6 +142,13 @@ impl OpenAiCompatible {
     /// success status. A non-2xx status is an [`LlmError::Http`] carrying the
     /// response body.
     async fn open_stream(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
+        match self.open_stream_once(req).await {
+            Err(e) if self.rejected_reasoning_off(&e) => self.open_stream_once(req).await,
+            other => other,
+        }
+    }
+
+    async fn open_stream_once(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
         let mut body = self.body(req);
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), Value::Bool(true));
@@ -119,6 +169,13 @@ impl OpenAiCompatible {
     }
 
     async fn send(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        match self.send_once(req).await {
+            Err(e) if self.rejected_reasoning_off(&e) => self.send_once(req).await,
+            other => other,
+        }
+    }
+
+    async fn send_once(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         let resp = self.post(&self.body(req)).await?;
         let status = resp.status();
         let text = resp
@@ -151,6 +208,14 @@ impl OpenAiCompatible {
             other => other,
         }
     }
+}
+
+/// Whether `base_url` is OpenRouter's API.
+fn is_openrouter(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "openrouter.ai" || h.ends_with(".openrouter.ai"))
 }
 
 /// The content of a chat completion, or why there is none. Handles what

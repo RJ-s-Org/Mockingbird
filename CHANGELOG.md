@@ -10,6 +10,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Added
 
+- Output budget (`limits.output_budget_tokens`, default 1500): a response whose estimated answer is larger is written shorter by the LLM (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker). GitHub `search/commits` p50 29.8 s → 9.4 s, TMDB movie detail 51 s → 6.2 s ([performance](docs/performance.md#latency-against-a-real-llm)).
+- Formats a persona declares (`field = "<id>_secret_<24 random chars>"` templates, `(pi_, cus_) followed by 24 random alphanumeric chars` id prefixes) are checked and patched after generation.
+- `scripts/trial-bench.py`: latency bench over the field-trial contracts against a real provider.
 - `X-Mockingbird-Fallback-Reason` on every `fallback` response says why the LLM answer was not used (GraphQL: `extensions.mockingbird.fallbackReasons`); the request log records it. Migration `0500_llm_diagnostics` adds `request_log.fallback_reason` and `llm_profiles.extra_body`.
 - LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
@@ -38,6 +41,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Changed
 
+- Requests to OpenRouter send `reasoning: {enabled: false}` unless the profile's `extra_body` sets `reasoning`; a model that rejects it is asked again without it.
+- A fallback answer to a read is cached under consistency: the identical repeat is answered at once and still reported as `fallback`.
+- GraphQL queries with several root fields read state, the response cache and stored resources per field, seed and cache per field, and are recorded as one request (operations comma-separated, `request.args` keyed by response key); each field is still metered.
 - MCP `list_requests` returns summaries (method, path, status, source, fallback reason, sizes) unless `include_bodies: true`; `validate_contract` returns counts by protocol and the first 20 operations and channels (`operations_truncated`, `channels_truncated`).
 - Background-server logs carry no ANSI codes (colour only on a terminal; `server_logs` strips any left), and the MCP server tools find the server's state next to the config `start_server` used (or the `config` argument), not in the MCP process's folder.
 - The mock-api and testing skills recommend proxy mode over editing an app's base URL.

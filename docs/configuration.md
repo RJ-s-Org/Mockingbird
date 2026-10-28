@@ -87,6 +87,7 @@ Global admission limits. Per-mock limits are under [`mocks.<name>.limits`](#mock
 | `limits.max_concurrent_generations` | integer | `64` | 1..=4096 | | LLM generations running at once across every mock on the node. A call that gets no slot within its LLM timeout is served by the faker (`mb_generation_queue_timeouts_total`). |
 | `limits.max_request_bytes` | integer (bytes) | `1048576` | 1024..=67108864 | | Larger request bodies are answered 413 and recorded. |
 | `limits.max_response_bytes` | integer (bytes) | `1048576` | 1024..=16777216 | | Larger generated responses are replaced by faker output. |
+| `limits.output_budget_tokens` | integer (tokens) | `1500` | 0, or 100..=100000 | | Completion tokens the LLM is asked to write per answer. When a response schema's estimated answer is larger, the LLM writes a shorter one: optional object and array members the request does not name (such as `append_to_response` sub-resources it did not ask for) are left out, arrays get a `maxItems`, and then required objects below the top level are left out and filled by the faker. Output tokens set latency, so this trades a little fidelity on big pages (GitHub search, TMDB details) for answers in seconds. `0` turns it off. |
 
 ## `pii`
 
@@ -164,7 +165,7 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles.<name>.fallback` | string | unset | A profile name | | Profile tried when this one's provider fails. |
 | `llm.profiles.<name>.headers` | map | `{}` | Lowercase header names; not `authorization`, `content-type`, `content-length`, `host` or `transfer-encoding` | | Extra request headers sent to the provider, such as Cloudflare AI Gateway's `cf-aig-authorization` or Azure OpenAI's `api-key`. A value may embed secret references as `${env:NAME}` or `${file:/path}` (`Bearer ${env:CF_AIG_API_KEY}`); a header whose name contains `auth`, `key`, `token`, `secret`, `password` or `cookie` must use one. Through the Admin API each reference must match `server.api_secret_refs`, and only a sysadmin may set them. |
 | `llm.profiles.<name>.headers.<name>` | string | | | | One header value. |
-| `llm.profiles.<name>.extra_body` | map | `{}` | Not `model`, `messages`, `response_format`, `temperature`, `max_tokens` or `stream`; at most 8 KiB as JSON | | JSON merged into every request body, such as OpenRouter's `provider` routing or `reasoning` settings (`{reasoning: {enabled: false}}`). |
+| `llm.profiles.<name>.extra_body` | map | `{}` | Not `model`, `messages`, `response_format`, `temperature`, `max_tokens` or `stream`; at most 8 KiB as JSON | | JSON merged into every request body, such as OpenRouter's `provider` routing or `reasoning` settings. Requests to `openrouter.ai` send `reasoning: {enabled: false}` unless this sets `reasoning` (hidden reasoning was most of a large answer's tokens and latency); a model that rejects it is asked again without it. |
 
 `--offline` serves every mock with the faker and makes no LLM calls.
 

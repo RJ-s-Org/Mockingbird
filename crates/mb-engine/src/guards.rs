@@ -145,8 +145,14 @@ impl Engine {
         }
     }
 
-    /// Parse LLM output, enforce the size cap, scrub PII, then validate.
-    pub(crate) fn check_output(&self, validator: &SchemaValidator, text: &str) -> Checked {
+    /// Parse LLM output, enforce the size cap, scrub PII, fill what the
+    /// output budget left out (see [`crate::budget`]), then validate.
+    pub(crate) fn check_output(
+        &self,
+        validator: &SchemaValidator,
+        text: &str,
+        fill: Option<&Fill<'_>>,
+    ) -> Checked {
         let Some(mut value) = crate::extract_json(text) else {
             return Checked::Invalid(vec!["output is not valid JSON".to_string()]);
         };
@@ -163,6 +169,11 @@ impl Engine {
                 metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)
                     .increment(n as u64);
             }
+        }
+        if let Some(fill) = fill
+            && let Some(filled) = self.fill(validator, &value, fill)
+        {
+            value = filled;
         }
         match self.check_value(validator, value) {
             Checked::Valid(v) => match validator.truncate_runaway(&v) {
@@ -196,7 +207,28 @@ impl Engine {
     }
 }
 
+/// What an answer shaped to the output budget needs filled.
+pub(crate) struct Fill<'a> {
+    pub shaped: &'a crate::budget::Shaped,
+    pub hints: &'a crate::FakerHints,
+}
+
 impl Engine {
+    /// `value` with the required members the output budget left out filled
+    /// by the faker from the full schema; `None` when nothing was missing.
+    fn fill(&self, validator: &SchemaValidator, value: &Value, fill: &Fill<'_>) -> Option<Value> {
+        if !fill.shaped.fills_any() {
+            return None;
+        }
+        let faker = crate::Faker::new(self.config.faker_depth).with_hints(fill.hints.clone());
+        let mut rng = rand::rng();
+        validator.fill_required(
+            value,
+            |location, property| fill.shaped.fills(location, property),
+            |schema| faker.fake(schema, &mut rng),
+        )
+    }
+
     fn patch(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
         let mut rng = rand::rng();

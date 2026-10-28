@@ -18,9 +18,16 @@ pub use mb_import::PROMPT_SCHEMA_BUDGET;
 /// Longest description kept once the schema is over budget.
 pub const MAX_DESCRIPTION: usize = 160;
 
-/// `schema` with its reachable definitions, fitted to the prompt budget.
+/// `schema` with its reachable definitions, fitted to the prompt budget. A
+/// schema that carries its own `$defs` (one shaped to the output budget) is
+/// taken as complete.
 pub fn prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
-    fit(bundle.with_reachable_defs(schema), PROMPT_SCHEMA_BUDGET)
+    let doc = if schema.get("$defs").is_some() {
+        schema.clone()
+    } else {
+        bundle.with_reachable_defs(schema)
+    };
+    fit(doc, PROMPT_SCHEMA_BUDGET)
 }
 
 /// `doc` (a schema carrying `$defs`) fitted to `budget` bytes of compact

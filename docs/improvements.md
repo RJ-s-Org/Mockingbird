@@ -29,16 +29,18 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
 ### From the proxy trials (2026-10-28)
 
 - **SDKs with their own HTTP agent ignore the proxy variables.** stripe-node creates its own `https.Agent`, so `NODE_USE_ENV_PROXY` does not apply and its calls went to the real `api.stripe.com` (the dummy key was rejected; nothing else was sent). `node -r global-agent/bootstrap` with `GLOBAL_AGENT_HTTP_PROXY` fixed it. Ship this: `mockingbird proxy env --node` could add a `NODE_OPTIONS=--require <preload>` that installs the proxy on every agent (and undici's dispatcher), with no package to install.
-- **Huge response schemas time out.** GitHub REST `GET /search/commits` falls back to faker after 60 s every time. A fallback answer is not cached either, so the identical repeat waits another 60 s. Cache fallbacks under consistency (or fail fast on a repeat), and generate fewer, shorter items for list/search envelopes.
-- **Large TMDB detail answers are still slow:** 17–37 s pages, about 5k completion tokens per call. Candidates: stream the answer, trim `append_to_response` sub-objects to the requested ones, or cache per resource across sessions.
 - **One contract under another host and path.** The movies app calls its hosted proxy (`movies-proxy.vercel.app/tmdb/<path>`), not TMDB, so the trial exported the TMDB contract and stripped `/3` from its paths to mount it there. A per-mock path rewrite (`strip_prefix`/`add_prefix`), or letting a mock reuse another mock's contract with a different base path, would avoid the copy.
 - **Browser traffic does not go through the proxy.** Server-side rendering reaches the mocks; images (`movies-proxy.vercel.app/ipx/…`) and client-side navigation are fetched by the browser from the real host. Document browser setups (a PAC file or `--proxy-server` for Playwright/Chrome with the CA) or serve the images via `proxy.images` once the browser uses the proxy.
 - **Adding a `mocks:` block to a running server's config did not take effect** (no reload line in the log, `/readyz` stayed `ready`); a restart did. Check whether a mock defined only in the database plus a new config `mocks:` section is a reload the watcher skips.
-- GraphQL queries with several root fields (pin cards) still skip state, cache and seeding, and are logged once per root field (accepted deviation of [#41](https://github.com/RJ-s-Org/Mockingbird/pull/41)).
-- Persona details are not always kept: a few Stripe `client_secret` suffixes were shorter than the 24 characters the persona asks for.
 
 ## Done
 
+- Launch L1, engine speed and fidelity, [#51](https://github.com/RJ-s-Org/Mockingbird/pull/51) (numbers: [performance](performance.md#latency-against-a-real-llm)):
+  - huge response schemas: an output budget (`limits.output_budget_tokens`, 1500) shapes what the LLM writes (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker), and OpenRouter requests send `reasoning: {enabled: false}`; GitHub `search/commits` p50 29.8 s → 9.4 s with no fallback, and a fallback answer is now cached under consistency (the repeat is answered at once and still reported as a fallback);
+  - large TMDB details: movie detail with every `append_to_response` part p50 51 s → 6.2 s (about 5–8k completion tokens, mostly hidden reasoning, down to ~1k);
+  - persona formats: templates (`client_secret = "<id>_secret_<24 random chars>"`) and id prefixes (`(pi_, cus_) followed by 24 random alphanumeric chars`) are checked and patched after generation; Stripe `client_secret` format 2/3 → 5/5;
+  - GraphQL queries with several root fields read state, the cache and stored resources per field, seed and cache per field, and are logged as one request (each field is still metered);
+  - `scripts/trial-bench.py`: a repeatable latency bench over the trial contracts.
 - Phase 1, [#31](https://github.com/RJ-s-Org/Mockingbird/pull/31):
   - the MCP server imports keys from the login shell;
   - `doctor` names the process that lacks a key, and `start_server` refuses a profile whose key is missing;

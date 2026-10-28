@@ -103,6 +103,94 @@ impl SchemaValidator {
         self.validate(&out).ok().map(|()| out)
     }
 
+    /// `instance` with every missing required property that `wanted`
+    /// accepts set to `fill` of its schema (with the root's `$defs`).
+    /// `wanted` gets the location of the object schema (a JSON pointer where
+    /// a `$ref` restarts at its target, e.g. `/$defs/user`) and the
+    /// property. `None` when nothing was filled.
+    pub fn fill_required(
+        &self,
+        instance: &Value,
+        mut wanted: impl FnMut(&str, &str) -> bool,
+        mut fill: impl FnMut(&Value) -> Value,
+    ) -> Option<Value> {
+        let mut out = instance.clone();
+        let mut filled = false;
+        // A filled value may itself lack a member the next round fills.
+        for _ in 0..4 {
+            let mut missing = Vec::new();
+            for e in self.inner.iter_errors(&out) {
+                let ValidationErrorKind::Required { property } = e.kind() else {
+                    continue;
+                };
+                let Some(property) = property.as_str() else {
+                    continue;
+                };
+                let Some(location) = self.location(e.evaluation_path().as_str()) else {
+                    continue;
+                };
+                if !wanted(&location, property) {
+                    continue;
+                }
+                let Some(schema) = self.at(&format!("{location}/properties/{}", escape(property)))
+                else {
+                    continue;
+                };
+                missing.push((
+                    e.instance_path().as_str().to_string(),
+                    property.to_string(),
+                    schema,
+                ));
+            }
+            if missing.is_empty() {
+                break;
+            }
+            for (pointer, property, schema) in missing {
+                if let Some(Value::Object(map)) = out.pointer_mut(&pointer)
+                    && !map.contains_key(&property)
+                {
+                    map.insert(property, fill(&schema));
+                    filled = true;
+                }
+            }
+        }
+        filled.then_some(out)
+    }
+
+    /// The location of the schema holding the keyword that failed at
+    /// `evaluation_path`: a JSON pointer into the schema that restarts at a
+    /// `$ref`'s target.
+    fn location(&self, evaluation_path: &str) -> Option<String> {
+        let segments: Vec<String> = evaluation_path.split('/').skip(1).map(unescape).collect();
+        let (_keyword, path) = segments.split_last()?;
+        let mut location = String::new();
+        let mut node = &self.schema;
+        for segment in path {
+            if segment == "$ref" {
+                let target = node.get("$ref")?.as_str()?.strip_prefix('#')?;
+                location = target.to_string();
+                node = self.schema.pointer(target)?;
+            } else {
+                node = match node {
+                    Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+                    _ => node.get(segment)?,
+                };
+                location.push('/');
+                location.push_str(&escape(segment));
+            }
+        }
+        Some(location)
+    }
+
+    /// The schema at `location`, with the root's `$defs`.
+    fn at(&self, location: &str) -> Option<Value> {
+        let mut node = self.schema.pointer(location)?.clone();
+        if let (Value::Object(map), Some(defs)) = (&mut node, self.schema.get("$defs")) {
+            map.insert("$defs".into(), defs.clone());
+        }
+        Some(node)
+    }
+
     /// The schema whose keyword failed at `evaluation_path` (which follows
     /// `$ref`s), with the root's `$defs`.
     fn subschema(&self, evaluation_path: &str) -> Option<Value> {
@@ -305,6 +393,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(out, json!({"c": {"id": 1}}));
+    }
+
+    #[test]
+    fn wanted_missing_members_are_filled_through_refs() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "required": ["items"],
+            "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/Item"}}},
+            "$defs": {
+                "Item": {"type": "object", "required": ["sha", "author"], "properties": {
+                    "sha": {"type": "string"},
+                    "author": {"$ref": "#/$defs/User"}
+                }},
+                "User": {"type": "object", "required": ["login"], "properties": {"login": {"type": "string"}}}
+            }
+        }))
+        .unwrap();
+        let mut seen = Vec::new();
+        let out = v
+            .fill_required(
+                &json!({"items": [{"sha": "a"}, {"sha": "b"}]}),
+                |loc, p| {
+                    seen.push(format!("{loc}#{p}"));
+                    loc == "/$defs/Item" && p == "author"
+                },
+                |s| {
+                    assert!(s.get("$defs").is_some());
+                    json!({"login": "x"})
+                },
+            )
+            .unwrap();
+        assert_eq!(out["items"][1]["author"], json!({"login": "x"}));
+        assert!(v.validate(&out).is_ok());
+        assert!(seen.contains(&"/$defs/Item#author".to_string()), "{seen:?}");
+        // Members the caller did not leave out stay missing.
+        assert!(
+            v.fill_required(
+                &json!({"items": [{"author": {"login": "x"}}]}),
+                |_, p| p == "author",
+                |_| json!(1)
+            )
+            .is_none()
+        );
     }
 
     #[test]

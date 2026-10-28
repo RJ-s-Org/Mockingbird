@@ -1,6 +1,7 @@
 //! Mock response engine: prompt building, LLM generation with
 //! validate → repair → fallback, schema validation and schema-driven faking.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,8 +15,9 @@ use tokio::time::Instant;
 use tracing::Instrument;
 use tracing::field::Empty;
 
-use crate::guards::Checked;
+use crate::guards::{Checked, Fill};
 
+pub mod budget;
 pub mod compact;
 pub mod consistency;
 pub mod extract;
@@ -23,6 +25,7 @@ pub mod faker;
 pub mod guards;
 pub mod message;
 pub mod ndjson;
+pub mod persona;
 pub mod pii;
 pub mod prompt;
 pub mod scenario;
@@ -153,6 +156,9 @@ pub struct EngineConfig {
     pub persona: Option<String>,
     pub faker_depth: usize,
     pub stream: StreamConfig,
+    /// Completion tokens an answer is shaped to (see [`budget`]); 0 turns
+    /// shaping off.
+    pub output_budget: u32,
 }
 
 /// Limits and pacing for [`Engine::generate_stream`].
@@ -217,6 +223,7 @@ impl Default for EngineConfig {
             persona: None,
             faker_depth: 6,
             stream: StreamConfig::default(),
+            output_budget: budget::DEFAULT_OUTPUT_BUDGET,
         }
     }
 }
@@ -229,15 +236,35 @@ pub struct Engine {
     config: EngineConfig,
     /// Keyed by (`<source digest>/<operation id>`, status).
     validators: DashMap<(String, u16), Arc<SchemaValidator>>,
+    /// Keyed like `validators`, plus the narrowed schema and the requested
+    /// words that name a member.
+    shapes: DashMap<ShapeKey, Option<Arc<budget::Shaped>>>,
+    /// The member names of each (`<source digest>/<operation id>`, status)
+    /// schema, which decide which requested words matter for its shape.
+    member_names: DashMap<(String, u16), Arc<HashSet<String>>>,
+    /// The formats the persona declares, kept on every generated body.
+    persona_formats: persona::PersonaFormats,
     guards: EngineGuards,
 }
 
+/// (`<source digest>/<operation id>`, status, narrowed schema digest,
+/// requested member names).
+type ShapeKey = (String, u16, Option<u64>, Vec<String>);
+
 impl Engine {
     pub fn new(provider: Option<Arc<dyn Provider>>, config: EngineConfig) -> Self {
+        let persona_formats = config
+            .persona
+            .as_deref()
+            .map(persona::PersonaFormats::parse)
+            .unwrap_or_default();
         Self {
+            persona_formats,
             provider,
             config,
             validators: DashMap::new(),
+            shapes: DashMap::new(),
+            member_names: DashMap::new(),
             guards: EngineGuards::default(),
         }
     }
@@ -317,12 +344,14 @@ impl Engine {
                 fake
             }
             Some(provider) => {
+                let shaped = self.shaped(bundle, op, status, schema, narrowed.is_some(), call);
+                let written = shaped.as_ref().map_or(schema, |s| &s.schema);
                 let messages = tracing::info_span!("mb.prompt").in_scope(|| {
                     build_messages(
                         bundle,
                         op,
                         status,
-                        schema,
+                        written,
                         call,
                         &ctx,
                         self.config.persona.as_deref(),
@@ -330,10 +359,22 @@ impl Engine {
                 });
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
-                    schema: compact::prompt_schema(bundle, schema),
+                    schema: compact::prompt_schema(bundle, written),
                 };
+                let hints = FakerHints::from_call(op, call);
+                let fill = shaped.as_deref().map(|shaped| Fill {
+                    shaped,
+                    hints: &hints,
+                });
                 match self
-                    .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)
+                    .generate_with_llm(
+                        provider.as_ref(),
+                        &validator,
+                        messages,
+                        &format,
+                        fill.as_ref(),
+                        &mut usage,
+                    )
                     .await
                 {
                     Ok((body, source)) => GeneratedResponse {
@@ -438,7 +479,14 @@ impl Engine {
         };
         let mut usage = Usage::default();
         let (value, source) = match self
-            .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)
+            .generate_with_llm(
+                provider.as_ref(),
+                &validator,
+                messages,
+                &format,
+                None,
+                &mut usage,
+            )
             .await
         {
             Ok(answer) => answer,
@@ -593,8 +641,9 @@ impl Engine {
         response
     }
 
-    /// Post-process a generated response: reflect request and state, give a
-    /// list read unique item ids, then apply the scenario's `set` patch.
+    /// Post-process a generated response: reflect request and state, keep
+    /// the persona's formats, give a list read unique item ids, then apply
+    /// the scenario's `set` patch.
     #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
@@ -607,6 +656,7 @@ impl Engine {
         response: GeneratedResponse,
     ) -> GeneratedResponse {
         let response = reflect(validator, op, call, ctx, response);
+        let response = self.keep_persona_formats(validator, call, response);
         let response = if matches!(op.kind, OperationKind::Query)
             && ctx.target.is_none()
             && (200..300).contains(&response.status)
@@ -616,6 +666,31 @@ impl Engine {
             response
         };
         apply_scenario(validator, op, call, ctx, response)
+    }
+
+    /// A 2xx body whose values break a format the persona declares, patched
+    /// (values the path or request body set are kept).
+    fn keep_persona_formats(
+        &self,
+        validator: &SchemaValidator,
+        call: &OperationCall,
+        mut response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        if self.persona_formats.is_empty() || !(200..300).contains(&response.status) {
+            return response;
+        }
+        let Some(body) = &response.body else {
+            return response;
+        };
+        let mut protected: Vec<&Value> = call.path_params.values().collect();
+        if let Some(Value::Object(request)) = &call.body {
+            protected.extend(request.values());
+        }
+        if let Some(patched) = self.persona_formats.apply(validator, body, &protected) {
+            tracing::info!(operation = %call.operation_id, "patched values to the persona's formats");
+            response.body = Some(patched);
+        }
+        response
     }
 
     /// A list body whose items share an identity gets a fresh value for
@@ -765,6 +840,62 @@ impl Engine {
         first.unwrap_or(Value::Null)
     }
 
+    /// `schema` (a response of `op` with `status`) shaped to the output
+    /// budget for `call`, or `None` when its answer fits as it is.
+    fn shaped(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        status: u16,
+        schema: &Value,
+        selected: bool,
+        call: &OperationCall,
+    ) -> Option<Arc<budget::Shaped>> {
+        if self.config.output_budget == 0 {
+            return None;
+        }
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let id = format!("{}/{}", bundle.source_digest, op.id);
+        let names_key = (id.clone(), status);
+        let selection = selected.then(|| {
+            let mut hasher = DefaultHasher::new();
+            schema.to_string().hash(&mut hasher);
+            hasher.finish()
+        });
+        let doc = std::cell::OnceCell::new();
+        let doc = || doc.get_or_init(|| bundle.with_reachable_defs(schema));
+        let names = match (selection, self.member_names.get(&names_key)) {
+            (None, Some(names)) => Arc::clone(&names),
+            _ => {
+                let mut names = HashSet::new();
+                collect_member_names(doc(), &mut names);
+                let names = Arc::new(names);
+                if selection.is_none() {
+                    self.member_names.insert(names_key, Arc::clone(&names));
+                }
+                names
+            }
+        };
+        let mut requested: Vec<String> = budget::requested_words(call)
+            .into_iter()
+            .filter(|w| names.contains(w))
+            .collect();
+        requested.sort();
+        let key = (id, status, selection, requested);
+        if let Some(hit) = self.shapes.get(&key) {
+            return hit.clone();
+        }
+        let words: HashSet<String> = key.3.iter().cloned().collect();
+        let shaped = tracing::info_span!("mb.shape")
+            .in_scope(|| budget::shape(doc(), &words, selected, self.config.output_budget))
+            .map(Arc::new);
+        // Narrowed schemas vary per query: bound what they keep.
+        if selection.is_none() || self.shapes.len() < MAX_SELECTION_SHAPES {
+            self.shapes.insert(key, shaped.clone());
+        }
+        shaped
+    }
+
     pub(crate) fn validator(
         &self,
         bundle: &Bundle,
@@ -796,6 +927,7 @@ impl Engine {
         validator: &SchemaValidator,
         mut messages: Vec<ChatMessage>,
         format: &ResponseFormat,
+        fill: Option<&Fill<'_>>,
         usage: &mut Usage,
     ) -> Result<(Value, Source), String> {
         // A fallback chain gets every hop's timeout, not just the first's.
@@ -805,8 +937,8 @@ impl Engine {
         let first = self
             .complete(provider, &messages, format, usage, deadline)
             .await?;
-        let checked =
-            tracing::info_span!("mb.validate").in_scope(|| self.check_output(validator, &first));
+        let checked = tracing::info_span!("mb.validate")
+            .in_scope(|| self.check_output(validator, &first, fill));
         let errors = match checked {
             Checked::Valid(value) => return Ok((value, Source::Llm)),
             Checked::Patched(value) => return Ok((value, Source::Repaired)),
@@ -833,7 +965,7 @@ impl Engine {
                 .complete(provider, &messages, format, usage, Instant::now() + limit)
                 .await?;
             let checked = tracing::info_span!("mb.validate")
-                .in_scope(|| self.check_output(validator, &second));
+                .in_scope(|| self.check_output(validator, &second, fill));
             match checked {
                 Checked::Valid(value) | Checked::Patched(value) => Ok((value, Source::Repaired)),
                 Checked::Rejected(reason) => Err(reason),
@@ -893,6 +1025,23 @@ pub(crate) fn llm_span() -> tracing::Span {
 pub(crate) fn record_usage(span: &tracing::Span, usage: Usage) {
     span.record("llm.tokens.prompt", usage.prompt_tokens);
     span.record("llm.tokens.completion", usage.completion_tokens);
+}
+
+/// Shapes cached in all, past which a narrowed schema's is not kept.
+const MAX_SELECTION_SHAPES: usize = 4096;
+
+/// Every object member name in `value` (a schema).
+fn collect_member_names(value: &Value, out: &mut HashSet<String>) {
+    match value {
+        Value::Object(obj) => {
+            if let Some(Value::Object(props)) = obj.get("properties") {
+                out.extend(props.keys().cloned());
+            }
+            obj.values().for_each(|v| collect_member_names(v, out));
+        }
+        Value::Array(items) => items.iter().for_each(|v| collect_member_names(v, out)),
+        _ => {}
+    }
 }
 
 /// The status a success variant is served with.

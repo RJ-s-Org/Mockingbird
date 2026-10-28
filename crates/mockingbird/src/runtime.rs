@@ -202,6 +202,7 @@ async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<En
     let mut config = EngineConfig {
         persona: mock.persona.clone(),
         stream: deps.stream.clone(),
+        output_budget: deps.limits.output_budget_tokens,
         ..EngineConfig::default()
     };
     let provider = match profile_name(deps, mock)? {
