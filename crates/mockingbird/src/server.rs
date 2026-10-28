@@ -86,7 +86,7 @@ pub async fn run_with(
     cfg.server
         .check_bind(&cfg.auth)
         .map_err(ServeError::Usage)?;
-    if missing_env_api_key(&cfg, args.offline) {
+    if missing_env_api_key(&cfg, args.offline || crate::config::replay_only(&args)) {
         return Err(ServeError::Usage(
             "MB_LLM_API_KEY is not set (use --offline for faker-only mode)".into(),
         ));

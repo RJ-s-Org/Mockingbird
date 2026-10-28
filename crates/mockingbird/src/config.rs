@@ -118,6 +118,17 @@ pub enum Command {
     /// the profile at it.
     #[command(subcommand)]
     Keys(crate::keys::KeysCommand),
+    /// Copy contracts and session state between a running server and a
+    /// snapshot directory (`serve --record` / `--replay` use the same one).
+    #[command(subcommand)]
+    Snapshot(crate::snapshot::SnapshotCommand),
+    /// Summarise what the running server answered: requests per mock and
+    /// operation, response sources and fallbacks, error statuses, unmapped
+    /// proxy hosts.
+    Report(crate::report::ReportArgs),
+    /// Check the report against assertions (no fallbacks, no unmapped
+    /// hosts, operations called); exits 1 when one fails.
+    Verify(crate::report::VerifyArgs),
     #[command(flatten)]
     Client(ClientCommand),
 }
@@ -169,6 +180,15 @@ pub struct ServeArgs {
     /// The proxy's port [default: 8888].
     #[arg(long)]
     pub proxy_port: Option<u16>,
+    /// Append every LLM answer to `<DIR>/answers.jsonl` for a later
+    /// `--replay`.
+    #[arg(long, value_name = "DIR")]
+    pub record: Option<PathBuf>,
+    /// Answer from the snapshot in `<DIR>` and never call an LLM (a prompt
+    /// it holds no answer for falls back to the faker); with `--record` on
+    /// the same directory, misses go to the LLM and are recorded.
+    #[arg(long, value_name = "DIR")]
+    pub replay: Option<PathBuf>,
     #[arg(required_unless_present = "config")]
     pub contracts: Vec<PathBuf>,
 }
@@ -271,6 +291,26 @@ impl App {
             self.recorder.shutdown(SHUTDOWN_DRAIN_TIMEOUT)
         );
     }
+}
+
+/// The snapshot `--record` / `--replay` name; both must name the same
+/// directory.
+fn open_snapshot(args: &ServeArgs) -> anyhow::Result<Option<Arc<crate::snapshot::Snapshot>>> {
+    let dir = match (&args.replay, &args.record) {
+        (None, None) => return Ok(None),
+        (Some(a), Some(b)) if a != b => {
+            bail!("--replay and --record must name the same directory")
+        }
+        (Some(dir), _) | (None, Some(dir)) => dir,
+    };
+    let snapshot =
+        crate::snapshot::Snapshot::open(dir, args.replay.is_some(), args.record.is_some())?;
+    Ok(Some(Arc::new(snapshot)))
+}
+
+/// Whether `serve` replays without recording: it then calls no LLM.
+pub fn replay_only(args: &ServeArgs) -> bool {
+    args.replay.is_some() && args.record.is_none()
 }
 
 /// The zero-config [`FileConfig`] for `serve a.yaml [b.yaml]`: SQLite in
@@ -620,7 +660,7 @@ async fn build_app_on(
         state: state.clone(),
         ext: ext.clone(),
         recorder: Some(recorder.clone()),
-        offline: args.offline,
+        offline: args.offline || replay_only(args),
         default_profile: DefaultProfile::new(cfg.llm.default_profile.clone()),
         data_plane_keys: Some(StoreDataPlaneKeys::new(store.clone())),
         protocols,
@@ -643,12 +683,27 @@ async fn build_app_on(
         },
         webhook_log: Default::default(),
     };
+    let snapshot = open_snapshot(args)?;
+    crate::snapshot::install(snapshot.clone());
     let brokers = deps.events.brokers.clone();
     let registry = MockRegistry::new();
     // Subscribe before the first load, so no change after it is missed.
     let changes = ha.changes();
     registry.reload_all(&deps).await?;
     registry.spawn_watcher(deps.clone(), changes);
+    if let Some(snapshot) = snapshot.as_deref().filter(|s| s.replays()) {
+        let workspace = crate::snapshot::workspace_of(snapshot.dir());
+        let seeded = snapshot.seed_sessions(state.as_ref(), &workspace).await?;
+        tracing::info!(
+            "replaying {} ({seeded} sessions seeded); no LLM is called{}",
+            snapshot.dir().display(),
+            if snapshot.records() {
+                " except to record misses"
+            } else {
+                ""
+            }
+        );
+    }
     for (workspace, name, prefix) in registry.mounted() {
         let name = mock_label(&workspace, &name);
         tracing::info!(

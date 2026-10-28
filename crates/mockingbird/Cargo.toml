@@ -30,6 +30,7 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 flate2.workspace = true
+futures.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -75,7 +76,6 @@ webpki-root-certs.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 assert_cmd.workspace = true
-futures.workspace = true
 mb-auth = { workspace = true, features = ["testing"] }
 prost-reflect.workspace = true
 redis.workspace = true

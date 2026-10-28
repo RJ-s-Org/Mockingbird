@@ -77,7 +77,16 @@ pub struct StartArgs {
     /// Allow a non-loopback --host without authentication.
     #[arg(long)]
     pub insecure_no_auth: bool,
-    /// How long to wait for readiness.
+    /// Record every LLM answer into this snapshot directory (`serve
+    /// --record`).
+    #[arg(long, value_name = "DIR")]
+    pub record: Option<PathBuf>,
+    /// Answer from this snapshot directory without calling an LLM (`serve
+    /// --replay`).
+    #[arg(long, value_name = "DIR")]
+    pub replay: Option<PathBuf>,
+    /// How long to wait for readiness; the command fails (exit 1) when the
+    /// server is not ready by then.
     #[arg(long, default_value = "60s")]
     pub wait: humantime::Duration,
     /// Contracts to serve without a config file.
@@ -264,6 +273,12 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     }
     if args.proxy {
         cmd.arg("--proxy");
+    }
+    if let Some(dir) = &args.record {
+        cmd.arg("--record").arg(dir);
+    }
+    if let Some(dir) = &args.replay {
+        cmd.arg("--replay").arg(dir);
     }
     cmd.args(&args.contracts);
     let log_path = log_file(dir);

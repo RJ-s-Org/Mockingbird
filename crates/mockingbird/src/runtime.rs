@@ -34,6 +34,7 @@ use mb_store::{
 
 use crate::budget::StoreTokenBudget;
 use crate::file_config::LimitsConfig;
+use crate::registry::mock_label;
 
 /// Fallback hops followed from a mock's profile before the chain is rejected.
 pub const MAX_FALLBACK_DEPTH: usize = 3;
@@ -219,6 +220,7 @@ async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<En
         }
         _ => None,
     };
+    let provider = crate::snapshot::wrap(&mock_label(&mock.workspace, &mock.name), provider);
     Ok(Engine::new(provider, config))
 }
 

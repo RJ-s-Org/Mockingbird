@@ -10,6 +10,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Added
 
+- Deterministic CI without an LLM key: `serve --record DIR` appends every LLM answer to `DIR/answers.jsonl`; `serve --replay DIR` answers from it (exact prompt, then same operation), never calls an LLM and falls back to the faker on a miss (`fallback_reason` says so); `mockingbird snapshot export|import` copies mocks, contracts and session state, which `--replay` seeds. `mb_snapshot_answers_total` counts hits and misses. See [docs/ci.md](docs/ci.md).
+- `mockingbird report` (`--format json|markdown|junit`): requests per mock and operation, response sources, fallbacks and their reasons, 4xx/5xx, and proxied hosts no mock claims (`mb_proxy_unmapped_requests_total`). `mockingbird verify` fails (exit 1) on `--no-fallbacks`, `--no-unmapped`, `--no-blocked`, `--no-errors`, `--no-client-errors`, `--exact-replay` and `--called OP[=N]`.
+- `mockingbird server start` exits 1 when the server is not ready within `--wait`, and passes `--record` / `--replay` through.
+- A GitHub Action (`RJ-s-Org/Mockingbird/integrations/github-action@v0`, with a `report` step) and a GitLab CI template (`integrations/gitlab/mockingbird.yml`); recipes for CircleCI, Jenkins, Buildkite and Azure Pipelines in [docs/ci.md](docs/ci.md).
 - `X-Mockingbird-Fallback-Reason` on every `fallback` response says why the LLM answer was not used (GraphQL: `extensions.mockingbird.fallbackReasons`); the request log records it. Migration `0500_llm_diagnostics` adds `request_log.fallback_reason` and `llm_profiles.extra_body`.
 - LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.

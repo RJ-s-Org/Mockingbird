@@ -13,6 +13,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 | [Configuration reference](docs/configuration.md) | Every `mockingbird.yaml` key, with its default, range, environment variable and flag |
 | [Webhooks](docs/webhooks.md) | Signed events (Stripe-style or HMAC) POSTed after writes, retries, `webhooks sign` and the delivery log |
 | [Proxy](docs/proxy.md) | `mockingbird proxy`: reaching mocks by real host names (`hosts:`) over HTTPS with a local CA, per runtime |
+| [CI](docs/ci.md) | The GitHub Action, GitLab template and other CI recipes; record once, replay without an LLM key; `report` and `verify` |
 | [Running locally](docs/deploy/local.md) | The binary, `serve`, offline mode and TLS |
 | [Docker Compose](docs/deploy/compose.md) | The Compose stack and its `ha`, `kafka`, `amqp` and `mqtt` profiles |
 | [Kubernetes](docs/deploy/kubernetes.md) | The Helm chart, external stores, OIDC, ingress, secrets and verifying releases |

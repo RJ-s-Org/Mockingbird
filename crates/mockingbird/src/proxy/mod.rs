@@ -38,6 +38,10 @@ impl HostClaims for MockRegistry {
     }
 }
 
+/// Prometheus counter of proxied requests to hosts no mock claims, by
+/// `host` and `mode` (`pass` or `block`); `mockingbird report` reads it.
+pub const UNMAPPED_METRIC: &str = "mb_proxy_unmapped_requests_total";
+
 /// What the proxy serves with.
 pub struct ProxyState {
     pub(crate) claims: Arc<dyn HostClaims>,
@@ -98,8 +102,11 @@ impl ProxyState {
         self.is_image_host(host) || self.claims.claims(host)
     }
 
-    /// Logs `host` once as unmapped.
+    /// Logs `host` once as unmapped and counts the request in
+    /// [`UNMAPPED_METRIC`].
     pub(crate) fn note_unmapped(&self, host: &str) {
+        metrics::counter!(UNMAPPED_METRIC, "host" => host.to_owned(), "mode" => self.unmapped.as_str())
+            .increment(1);
         if self.first_sighting(host) {
             tracing::info!(
                 host,
