@@ -10,7 +10,7 @@
 #   - deploy/helm/mockingbird/Chart.yaml has `appVersion: "<version>"`
 #     (skipped with a notice while the chart does not exist);
 #   - every internal crate requirement in Cargo.toml's
-#     [workspace.dependencies] (`mb-* = { path = …, version = "=…" }`) pins
+#     [workspace.dependencies] (`mb-* = { package = …, path = …, version = "=…" }`) pins
 #     <version>, so the published crates depend on each other exactly;
 #   - the agent plugin manifests (plugins/mockingbird, gemini-extension.json)
 #     have `"version": "<version>"`;
@@ -50,7 +50,7 @@ WORKSPACE_VERSION=$(awk '
 while IFS= read -r line; do
     [[ $line == *"version = \"=$VERSION\""* ]] ||
         fail "Cargo.toml: internal dependency does not pin =$VERSION: $line"
-done < <(grep -E '^mb-[a-z]+ = \{ path = "crates/' "$ROOT/Cargo.toml" | grep -v '^mb-ext ')
+done < <(grep -E '^mb-[a-z]+ = \{ (package = "[a-z-]+", )?path = "crates/' "$ROOT/Cargo.toml" | grep -v '^mb-ext ')
 
 CHART=$ROOT/deploy/helm/mockingbird/Chart.yaml
 if [[ -f $CHART ]]; then

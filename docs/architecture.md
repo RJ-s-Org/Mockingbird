@@ -4,6 +4,8 @@ Mockingbird turns an API contract into a running mock. Each call is decoded agai
 
 ## Crates and boundaries
 
+The library crates live in `crates/mb-*` and are named `mb_*` in code; on crates.io they are published as `mockingbird-<name>` (`mb-engine` → `mockingbird-engine`) for `mockingbird-cli`, with no API stability guarantee. `mb-ext` is the exception: the public extension API, published under its own name and semver.
+
 | Crate | Role |
 | --- | --- |
 | `mb-mcm` | The Mockingbird Contract Model: operations, channels, per-operation JSON Schemas. No internal dependencies; every other crate exchanges MCM types. |
