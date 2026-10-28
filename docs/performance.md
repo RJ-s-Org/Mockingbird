@@ -65,7 +65,7 @@ cargo build --release -p mockingbird
 scripts/trial-bench.py --trials ../mockingbird-trials --runs 5
 ```
 
-OpenRouter `deepseek/deepseek-v4.1-flash`, 2026-10-28, 3 runs before and 5 after the output budget, cached fallbacks, per-field GraphQL state and reasoning off ([#51](https://github.com/RJ-s-Org/Mockingbird/pull/51)):
+OpenRouter `deepseek/deepseek-v4.1-flash`, 2026-10-28, 3 runs before and 5 after the output budget, cached fallbacks, per-field GraphQL state and reasoning off ([#57](https://github.com/RJ-s-Org/Mockingbird/pull/57)):
 
 | Case | p50 before | p50 after | max after | Sources after | Repeat after |
 | --- | ---: | ---: | ---: | --- | --- |

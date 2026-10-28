@@ -35,7 +35,7 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
 
 ## Done
 
-- Launch L1, engine speed and fidelity, [#51](https://github.com/RJ-s-Org/Mockingbird/pull/51) (numbers: [performance](performance.md#latency-against-a-real-llm)):
+- Launch L1, engine speed and fidelity, [#57](https://github.com/RJ-s-Org/Mockingbird/pull/57) (numbers: [performance](performance.md#latency-against-a-real-llm)):
   - huge response schemas: an output budget (`limits.output_budget_tokens`, 1500) shapes what the LLM writes (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker), and OpenRouter requests send `reasoning: {enabled: false}`; GitHub `search/commits` p50 29.8 s → 9.4 s with no fallback, and a fallback answer is now cached under consistency (the repeat is answered at once and still reported as a fallback);
   - large TMDB details: movie detail with every `append_to_response` part p50 51 s → 6.2 s (about 5–8k completion tokens, mostly hidden reasoning, down to ~1k);
   - persona formats: templates (`client_secret = "<id>_secret_<24 random chars>"`) and id prefixes (`(pi_, cus_) followed by 24 random alphanumeric chars`) are checked and patched after generation; Stripe `client_secret` format 2/3 → 5/5;
