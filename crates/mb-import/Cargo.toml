@@ -1,11 +1,15 @@
 [package]
-name = "mb-import"
+name = "mockingbird-import"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mockingbird importers: OpenAPI, Swagger, GraphQL, protobuf, WSDL and AsyncAPI into the contract model, and smart import"
+description = "Internal crate of Mockingbird (contract importers and smart import), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_import::…`).
+[lib]
+name = "mb_import"
 
 [lints]
 workspace = true

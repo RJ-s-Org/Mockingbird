@@ -110,12 +110,12 @@ jobs:
           key: protocols
       # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
-      - name: cargo check -p mb-protocols, each feature on its own
+      - name: cargo check -p mockingbird-protocols, each feature on its own
         run: |
-          cargo check -p mb-protocols --no-default-features
+          cargo check -p mockingbird-protocols --no-default-features
           for features in http-rest sse websocket graphql grpc soap events mqtt amqp kafka; do
             echo "::group::--features $features"
-            cargo check -p mb-protocols --no-default-features --features "$features"
+            cargo check -p mockingbird-protocols --no-default-features --features "$features"
             echo "::endgroup::"
           done
 

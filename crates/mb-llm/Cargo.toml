@@ -1,11 +1,15 @@
 [package]
-name = "mb-llm"
+name = "mockingbird-llm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mockingbird: LLM provider abstraction and an OpenAI-compatible client"
+description = "Internal crate of Mockingbird (the LLM provider client), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_llm::…`).
+[lib]
+name = "mb_llm"
 
 [lints]
 workspace = true

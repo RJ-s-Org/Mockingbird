@@ -1,11 +1,15 @@
 [package]
-name = "mb-state"
+name = "mockingbird-state"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mockingbird session-scoped state stores (memory, SQLite, Postgres, Redis)"
+description = "Internal crate of Mockingbird (session state stores), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_state::…`).
+[lib]
+name = "mb_state"
 
 [lints]
 workspace = true

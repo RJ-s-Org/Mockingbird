@@ -1,11 +1,15 @@
 [package]
-name = "mb-auth"
+name = "mockingbird-auth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Roles, principals, claim mapping, API keys, admin sessions, OIDC login and bearer JWTs"
+description = "Internal crate of Mockingbird (auth, roles and API keys), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_auth::…`).
+[lib]
+name = "mb_auth"
 
 [lints]
 workspace = true
