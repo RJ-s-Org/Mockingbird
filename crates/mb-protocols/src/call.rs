@@ -695,13 +695,17 @@ pub(crate) async fn prepare<'a>(
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
     let resource_type = op.resource_type.as_deref();
-    let target_id = target_id(op, call);
+    let mut target_id = target_id(op, call);
     // Before any state is read: an answer generated from older state must
     // not be cached after a write that lands meanwhile.
     let since = rt.state.response_cache().map(|c| c.epoch(session));
     let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call)
         .instrument(state_span())
         .await;
+    // Found by another field (an issue's `number`): writes go to its id.
+    if let Some(found) = &target {
+        target_id = Some(found.id.clone());
+    }
 
     if rt.unknown_ids == UnknownIds::NotFound
         && matches!(op.kind, OperationKind::Query)
@@ -800,6 +804,7 @@ pub(crate) async fn complete(
         {
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
+                next_numbers(rt, &mut state, session, t, &mut generated).await;
             }
             // A faker list standing in for a failed LLM call seeds nothing,
             // or its items would join the session's later LLM lists.
@@ -826,6 +831,11 @@ pub(crate) async fn complete(
                 .await;
             }
         }
+        if matches!(op.kind, OperationKind::Command(Effect::Create))
+            && (200..300).contains(&generated.status)
+        {
+            store_wrapped(&mut state, session, &generated).await;
+        }
         state.touch(session).await;
         writes
     }
@@ -833,6 +843,15 @@ pub(crate) async fn complete(
     .await;
     // Seeded writes come from reads, which send no webhooks.
     drop(writes);
+    // Any successful command may change what a cached read would answer,
+    // even one that stored nothing or stored another resource type (Slack's
+    // `chat.postMessage` and `conversations.history`).
+    if !is_query
+        && (200..300).contains(&generated.status)
+        && let Some(response_cache) = rt.state.response_cache()
+    {
+        response_cache.clear_session(session);
+    }
     crate::webhooks::emit::emit(rt, op, call, &generated, target_id.as_deref(), session);
 
     // Seeded first, then cached: a later list never clears a cached one.
@@ -911,6 +930,125 @@ async fn unique_create_id(
     }
 }
 
+/// Stored resources scanned for a read by another field, or for the
+/// numbers in use.
+const MAX_SCAN: usize = 500;
+
+/// Numbers a create's answer must take above those the session holds: each
+/// integer field a read of the resource type takes from its path (GitHub's
+/// issue `number`). A clashing number moves past the highest stored one,
+/// and URLs naming it (`…/issues/412`) follow.
+async fn next_numbers(
+    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    resource_type: &str,
+    generated: &mut GeneratedResponse,
+) {
+    let mut fields: Vec<&str> = rt
+        .bundle
+        .operations
+        .iter()
+        .filter(|o| o.resource_type.as_deref() == Some(resource_type))
+        .filter_map(|o| o.identity.as_ref()?.path_field.as_deref())
+        .collect();
+    fields.sort_unstable();
+    fields.dedup();
+    if fields.is_empty() {
+        return;
+    }
+    let Some(body) = generated.body.as_mut() else {
+        return;
+    };
+    let stored = state.list(session, resource_type, MAX_SCAN).await;
+    for field in fields {
+        let Some(number) = body.get(field).and_then(Value::as_i64) else {
+            continue;
+        };
+        let highest = stored
+            .iter()
+            .filter_map(|r| r.data.get(field).and_then(Value::as_i64))
+            .max();
+        let Some(highest) = highest.filter(|h| number <= *h) else {
+            continue;
+        };
+        let next = highest + 1;
+        body[field] = Value::from(next);
+        let (old, new) = (
+            format!("/{resource_type}/{number}"),
+            format!("/{resource_type}/{next}"),
+        );
+        renumber_urls(body, &old, &new);
+    }
+}
+
+/// Replaces path `old` with `new` in every string of `value` where it ends
+/// a path segment (`…/issues/412`, `…/issues/412/comments`).
+fn renumber_urls(value: &mut Value, old: &str, new: &str) {
+    match value {
+        Value::String(text) => {
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(old) {
+                let after = &rest[at + old.len()..];
+                let ends = after.is_empty() || after.starts_with(['/', '?', '#']);
+                out.push_str(&rest[..at]);
+                out.push_str(if ends { new } else { old });
+                rest = after;
+            }
+            out.push_str(rest);
+            *text = out;
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| renumber_urls(v, old, new)),
+        Value::Object(obj) => obj.values_mut().for_each(|v| renumber_urls(v, old, new)),
+        _ => {}
+    }
+}
+
+/// Fields that identify a wrapped created object, in order: Slack's
+/// message is keyed by `ts`, Twilio's resources by `sid`.
+const WRAPPED_IDS: [&str; 4] = ["id", "ts", "sid", "uuid"];
+
+/// Stores each object a create's answer wraps under a member `<x>` (Slack's
+/// `chat.postMessage` → `{ok, ts, message: {...}}`) as a resource of type
+/// `<x>s` when a read lists `<x>s` (`conversations.history`'s `messages`),
+/// so that read is generated knowing it.
+async fn store_wrapped(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    generated: &GeneratedResponse,
+) {
+    let Some(Value::Object(body)) = generated.body.as_ref() else {
+        return;
+    };
+    let bundle = state.rt.bundle();
+    let listed: Vec<String> = bundle
+        .operations
+        .iter()
+        .filter(|o| matches!(o.kind, OperationKind::Query))
+        .filter_map(|o| o.success_output()?.schema.as_ref())
+        .flat_map(|schema| list_members(bundle, schema))
+        .collect();
+    for (member, value) in body {
+        let plural = format!("{member}s");
+        if !value.is_object() || !listed.contains(&plural) {
+            continue;
+        }
+        let Some(id) = WRAPPED_IDS
+            .iter()
+            .find_map(|f| value.get(*f).and_then(id_string))
+        else {
+            continue;
+        };
+        let resource = StoredResource {
+            resource_type: plural,
+            id,
+            data: value.clone(),
+        };
+        state.upsert(session, resource).await;
+    }
+}
+
 /// The response cache key of a read: its operation, path parameters,
 /// query (sorted), a query operation's body and the narrowed selection.
 fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Value>) -> String {
@@ -961,6 +1099,7 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
         return false;
     };
     param == identity.field
+        || identity.path_field.is_some()
         || param.eq_ignore_ascii_case("id")
         || param.ends_with("Id")
         || param.ends_with("_id")
@@ -1282,7 +1421,17 @@ async fn read_context(
     call: &OperationCall,
 ) -> (Option<StoredResource>, Vec<StoredResource>) {
     let target = match (op.resource_type.as_deref(), target_id) {
-        (Some(t), Some(id)) => state.get(session, t, id).await,
+        (Some(t), Some(id)) => match state.get(session, t, id).await {
+            Some(hit) => Some(hit),
+            None => match op.identity.as_ref().and_then(|i| i.path_field.as_deref()) {
+                Some(field) => state
+                    .list(session, t, MAX_SCAN)
+                    .await
+                    .into_iter()
+                    .find(|r| r.data.get(field).and_then(id_string).as_deref() == Some(id)),
+                None => None,
+            },
+        },
         _ => None,
     };
     let related = related(
@@ -1529,6 +1678,38 @@ async fn related(
             }
         }
     }
+    out
+}
+
+/// The stored resources `args` refers to by `<x>Id` members and global
+/// ids (see [`references_in`]), for a GraphQL answer to agree with them.
+#[cfg(feature = "graphql")]
+pub(crate) async fn referenced(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    args: &Map<String, Value>,
+) -> Vec<StoredResource> {
+    let mut references = Vec::new();
+    for (field, value) in args {
+        references_in(field, value, 0, &mut references);
+    }
+    let mut state = StateAccess::new(rt);
+    let mut out: Vec<StoredResource> = Vec::new();
+    async {
+        for (types, id) in references.into_iter().take(MAX_REFERENCES) {
+            for t in types {
+                if let Some(hit) = state.get(session, &t, &id).await {
+                    if !out.iter().any(|r| r.id == hit.id) {
+                        out.push(hit);
+                    }
+                    break;
+                }
+            }
+        }
+        state.touch(session).await;
+    }
+    .instrument(state_span())
+    .await;
     out
 }
 
@@ -1860,6 +2041,7 @@ paths:
             path_param: None,
             field: "id".into(),
             input_field: Some("tickId".into()),
+            path_field: None,
         });
         let call = OperationCall {
             operation_id: op.id.clone(),

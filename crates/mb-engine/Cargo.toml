@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Mockingbird response engine: prompts, LLM generation with validate, repair and fallback, schema validation and faking"
 
 [lints]
 workspace = true

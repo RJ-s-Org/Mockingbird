@@ -3466,7 +3466,7 @@ dependencies = [
  "mb-import",
  "mb-llm",
  "mb-mcm",
- "mockingbird",
+ "mockingbird-cli",
  "reqwest",
  "serde",
  "serde_json",
@@ -3837,7 +3837,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mockingbird"
+name = "mockingbird-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3914,7 +3914,7 @@ dependencies = [
  "clap",
  "dashmap",
  "mb-ext",
- "mockingbird",
+ "mockingbird-cli",
  "reqwest",
  "tempfile",
  "tokio",

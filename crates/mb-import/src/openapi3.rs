@@ -319,9 +319,30 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
             status: selector,
             content_type,
             schema,
+            headers: response_headers(doc, resp, &rat),
         });
     }
     Ok(outputs)
+}
+
+/// The headers a response object declares, each with its schema (a string
+/// when it gives none). A header whose `$ref` does not resolve is left out.
+fn response_headers(doc: &Value, resp: &Value, at: &str) -> Map<String, Value> {
+    let Some(headers) = resp.get("headers").and_then(Value::as_object) else {
+        return Map::new();
+    };
+    headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("content-type"))
+        .filter_map(|(name, header)| {
+            let header = deref(doc, header, &format!("{at}/headers/{name}")).ok()?;
+            let schema = header
+                .get("schema")
+                .map(|s| normalize_schema(s, REF_PREFIX, true))
+                .unwrap_or_else(|| json!({"type": "string"}));
+            Some((name.clone(), schema))
+        })
+        .collect()
 }
 
 /// The request body schema and whether the body is required: the JSON

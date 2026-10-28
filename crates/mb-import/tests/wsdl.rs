@@ -182,6 +182,7 @@ fn rpc_wrappers_and_identity() {
             path_param: None,
             field: "id".into(),
             input_field: Some("id".into()),
+            path_field: None,
         })
     );
     let create = a.operation("CreateAccount").unwrap();
@@ -192,6 +193,7 @@ fn rpc_wrappers_and_identity() {
             path_param: None,
             field: "id".into(),
             input_field: None,
+            path_field: None,
         })
     );
     let delete = a.operation("DeleteAccount").unwrap();
@@ -500,6 +502,7 @@ fn external_import_requires_upload() {
             path_param: None,
             field: "id".into(),
             input_field: Some("id".into()),
+            path_field: None,
         })
     );
     // Order-independent and nested paths resolve relative to the importer.

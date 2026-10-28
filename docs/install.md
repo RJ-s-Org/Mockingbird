@@ -8,7 +8,7 @@ Every channel installs the same `mockingbird` binary, built by the release workf
 | npm, per project | `npm i -D @mockingbird-cli/mockingbird` | Node.js 18+ |
 | [Install script](#install-script) | `install.sh` (macOS, Linux), `install.ps1` (Windows) | curl or wget; PowerShell |
 | Docker | `docker run --rm ghcr.io/rj-s-org/mockingbird:latest --version` | Docker |
-| From source | `cargo install --git https://github.com/RJ-s-Org/Mockingbird mockingbird` | Rust |
+| [Cargo](#cargo) | `cargo binstall mockingbird-cli` (release binary) or `cargo install mockingbird-cli` (builds it) | Rust |
 
 ## npm and npx
 
@@ -69,12 +69,15 @@ irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | ie
 
 See [Coding agents](agents.md#install) for wiring it into an agent. To check the signatures and provenance of a binary or image, see [Verifying images and binaries](deploy/kubernetes.md#verifying-images-and-binaries).
 
-## From source
+## Cargo
+
+The crate is `mockingbird-cli` (`mockingbird` on crates.io is another project); it installs the `mockingbird` command.
 
 ```sh
-cargo install --git https://github.com/RJ-s-Org/Mockingbird mockingbird
-# or, from a checkout:
-cargo install --path crates/mockingbird
+cargo binstall mockingbird-cli    # downloads the release binary (cargo-binstall)
+cargo install mockingbird-cli     # builds it, with the web console, catalog and skills embedded
 ```
+
+`cargo binstall` fetches the same archive as the install script from the GitHub release. From a checkout, `cargo install --path crates/mockingbird` builds the working tree (run `npm --prefix crates/mb-console/web ci && npm --prefix crates/mb-console/web run build` first for the real console; without it the console is a placeholder page).
 
 Next: [Quickstart](quickstart.md).

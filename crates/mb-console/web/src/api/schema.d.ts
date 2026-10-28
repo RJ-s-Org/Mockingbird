@@ -1793,6 +1793,15 @@ export interface components {
         /** @description The full scenario; absent fields are cleared. */
         PutScenario: {
             chaos?: components["schemas"]["ChaosSettings"] | null;
+            /**
+             * @description Response headers the scenario sets, by name (`Retry-After: "30"`);
+             *     they replace any the contract declares. Not `Content-Type`,
+             *     `Content-Length`, `Transfer-Encoding`, `Connection` or
+             *     `X-Mockingbird-*`.
+             */
+            headers?: {
+                [key: string]: string;
+            };
             instructions?: string | null;
             /** Format: int64 */
             latency_ms?: number | null;
@@ -1911,6 +1920,10 @@ export interface components {
         /** @description A named scenario of a mock. */
         ScenarioView: {
             chaos?: components["schemas"]["ChaosSettings"] | null;
+            /** @description Response headers the scenario sets, by name; absent when none. */
+            headers?: {
+                [key: string]: string;
+            };
             /** @description Extra instructions for the LLM. */
             instructions?: string | null;
             /**

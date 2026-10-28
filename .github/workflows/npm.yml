@@ -63,7 +63,7 @@ jobs:
         with:
           shared-key: examples
           save-if: false
-      - run: cargo build -p mockingbird --locked
+      - run: cargo build -p mockingbird-cli --locked
       - uses: actions/setup-node@v7
         with:
           node-version: 22

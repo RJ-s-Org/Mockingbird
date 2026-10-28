@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "The embedded Mockingbird web console"
 build = "build.rs"
+# `dist/` is the Vite build (not in git); the release workflow builds it
+# before publishing.
+include = ["/src/**", "/build.rs", "/dist/**", "/Cargo.toml"]
 
 [lints]
 workspace = true

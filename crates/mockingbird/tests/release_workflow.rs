@@ -64,6 +64,7 @@ fn release_jobs_present() {
         "manifest",
         "chart",
         "publish-crate",
+        "publish-cli",
         "release",
     ] {
         assert!(ids.contains(job), "missing job {job}; have {ids:?}");

@@ -596,17 +596,20 @@ impl<'a> Wsdl<'a> {
             path_param: None,
             field,
             input_field: id_field(input.as_ref(), defs),
+            path_field: None,
         });
         let mut outputs = vec![OutputVariant {
             status: StatusSelector::Code(200),
             content_type: Some(CONTENT_TYPE.into()),
             schema: output,
+            headers: Default::default(),
         }];
         if let Some(fault) = self.fault(xsd, op)? {
             outputs.push(OutputVariant {
                 status: StatusSelector::Code(500),
                 content_type: Some(CONTENT_TYPE.into()),
                 schema: Some(fault),
+                headers: Default::default(),
             });
         }
         Ok(Operation {

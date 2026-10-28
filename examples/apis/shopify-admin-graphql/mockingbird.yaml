@@ -28,7 +28,7 @@ mocks:
       Orders are named "#1001" upward, with US customers and @example.com emails.
       Locations are "Portland Greenhouse" and "Seattle Warehouse". Money amounts are
       decimal strings and currencyCode is USD. DateTime values are ISO 8601 UTC
-      ("2024-10-14T17:03:22Z"). Connections return at most the requested `first`
+      ("YYYY-MM-DDThh:mm:ssZ"). Connections return at most the requested `first`
       items, with matching edges, nodes and cursors. Mutations copy their input into
       the created object and return userErrors as an empty list.
     webhooks:

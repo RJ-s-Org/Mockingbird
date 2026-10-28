@@ -636,3 +636,32 @@ fn integer_ids_are_positive_and_spread_out() {
         "{values:?}"
     );
 }
+
+#[test]
+fn dates_and_timestamps_are_recent() {
+    let now = chrono::Utc::now();
+    let month_ago = now - chrono::Duration::days(31);
+    let schema = json!({"type": "object", "required": ["at", "on", "created", "updated_at", "n"], "properties": {
+        "at": {"type": "string", "format": "date-time"},
+        "on": {"type": "string", "format": "date"},
+        "created": {"type": "integer"},
+        "updated_at": {"type": "integer", "format": "int64"},
+        "n": {"type": "integer"}}});
+    for v in draws(schema, 50) {
+        let at = chrono::DateTime::parse_from_rfc3339(v["at"].as_str().unwrap()).unwrap();
+        assert!(at >= month_ago && at <= now, "{v}");
+        let on = chrono::NaiveDate::parse_from_str(v["on"].as_str().unwrap(), "%Y-%m-%d").unwrap();
+        assert!(
+            on >= month_ago.date_naive() && on <= now.date_naive(),
+            "{v}"
+        );
+        for k in ["created", "updated_at"] {
+            let secs = v[k].as_i64().unwrap();
+            assert!(
+                secs >= month_ago.timestamp() && secs <= now.timestamp(),
+                "{k}: {v}"
+            );
+        }
+        assert!(v["n"].as_i64().unwrap() < 1_000_000, "{v}");
+    }
+}

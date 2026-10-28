@@ -26,7 +26,7 @@ is merged only when all of them pass.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-cargo check -p mockingbird --no-default-features   # the slim binary
+cargo check -p mockingbird-cli --no-default-features   # the slim binary
 
 # Postgres- and Redis-gated tests, against throwaway local servers
 scripts/test-postgres.sh

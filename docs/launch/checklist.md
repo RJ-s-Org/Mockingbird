@@ -20,7 +20,7 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
   - check that the README quickstart matches `mockingbird run --help` (flag names, `--offline`).
 - [ ] Re-record the terminal demo with `mockingbird run` (needs `vhs`: `brew install vhs`):
   ```sh
-  cargo build --release -p mockingbird
+  cargo build --release -p mockingbird-cli
   PATH="$PWD/target/release:$PATH" vhs docs/assets/demo.tape
   ```
 - [ ] Extend the summary at the top of `CHANGELOG.md`'s `[Unreleased]` section with what L1–L6 added.
@@ -28,7 +28,8 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
 
 ## 2. Decide (you)
 
-- [ ] **The crates.io name.** `mockingbird` on crates.io belongs to another project, so `cargo install mockingbird` and `cargo binstall mockingbird` would install the wrong thing. The docs use `cargo binstall --git https://github.com/RJ-s-Org/Mockingbird mockingbird` and `cargo install --git …`. To publish the binary to crates.io, pick a free name (for example `mockingbird-cli` with `[[bin]] name = "mockingbird"`) and add a `cargo publish -p <name>` step next to `publish-crate` in `release.yml`.
+- [x] **The crates.io name: `mockingbird-cli`** (`mockingbird` belongs to another project). The package is `mockingbird-cli`, the command stays `mockingbird`, and the `publish-cli` job of `release.yml` publishes it with the internal crates it depends on (`mb-mcm`, `mb-llm`, `mb-engine`, `mb-state`, `mb-store`, `mb-import`, `mb-protocols`, `mb-admin`, `mb-auth`, `mb-console`, pinned to the same version) after `publish-crate` publishes `mb-ext`, on final releases only. A dry run packages and verifies all of them.
+- [ ] **A crates.io token**, if `CARGO_REGISTRY_TOKEN` is not set yet: create one at <https://crates.io/settings/tokens> with the `publish-new` and `publish-update` scopes, then `gh secret set CARGO_REGISTRY_TOKEN --repo RJ-s-Org/Mockingbird`. Without it `publish-crate` and `publish-cli` fail; nothing else does.
 - [x] **The npm scope.** The unscoped `mockingbird` and `mockingbird-cli` on npm belong to other projects, and `@mockingbird` was taken, so the packages live in the npm organization `mockingbird-cli`: `@mockingbird-cli/mockingbird` (the launcher; its command is `mockingbird`) and `@mockingbird-cli/<platform>-<arch>` beside it. The scope is only `name` in [`npm/cli/package.json`](../../npm/cli/package.json); the platform package names derive from it.
 - [ ] **The comparison table** in the README describes WireMock, Prism, Mockoon and Microcks from their docs as of October 2026. Read it once more before posting.
 
@@ -36,7 +37,8 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
 
 - [ ] Bump the version everywhere `scripts/check-version.sh` checks (agent, in one PR):
   ```sh
-  sed -i.bak 's/^version = "0.1.0-rc.1"/version = "0.1.0"/' Cargo.toml && rm Cargo.toml.bak
+  sed -i.bak -e 's/^version = "0.1.0-rc.1"/version = "0.1.0"/' \
+    -e 's/version = "=0.1.0-rc.1"/version = "=0.1.0"/' Cargo.toml && rm Cargo.toml.bak
   sed -i.bak 's/"version": "0.1.0-rc.1"/"version": "0.1.0"/' \
     plugins/mockingbird/.claude-plugin/plugin.json plugins/mockingbird/plugin.json \
     plugins/mockingbird/.cursor-plugin/plugin.json gemini-extension.json
@@ -66,7 +68,7 @@ The repository itself is already public (`gh repo view RJ-s-Org/Mockingbird --js
   curl -fsSL https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.sh | sh && mockingbird --version
   docker run --rm ghcr.io/rj-s-org/mockingbird:0.1.0 --version
   helm pull oci://ghcr.io/rj-s-org/charts/mockingbird --version 0.1.0
-  cargo binstall --git https://github.com/RJ-s-Org/Mockingbird mockingbird
+  cargo binstall mockingbird-cli && cargo install mockingbird-cli --version 0.1.0 --root /tmp/mb-cargo
   ```
   Check the signatures and provenance with the commands in [Verifying images and binaries](../deploy/kubernetes.md#verifying-images-and-binaries). On Windows: `irm https://raw.githubusercontent.com/rj-s-org/mockingbird/main/install.ps1 | iex`.
 

@@ -175,6 +175,7 @@ fn streaming_flags_map_to_kinds() {
             status: StatusSelector::Code(200),
             content_type: Some("application/grpc".into()),
             schema: Some(json!({"$ref": "#/$defs/routeguide.Feature"})),
+            headers: Default::default(),
         }]
     );
     assert_eq!(get.resource_type.as_deref(), Some("feature"));
@@ -288,6 +289,7 @@ fn multi_file_imports_resolve() {
             path_param: None,
             field: "id".into(),
             input_field: Some("orderId".into()),
+            path_field: None,
         })
     );
     assert_eq!(get.resource_type.as_deref(), Some("order"));

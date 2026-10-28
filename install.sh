@@ -112,7 +112,7 @@ install_source() {
     else
         set --
     fi
-    cargo install --locked --git "https://github.com/$REPO" "$@" --root "$tmp" mockingbird >&2 ||
+    cargo install --locked --git "https://github.com/$REPO" "$@" --root "$tmp" mockingbird-cli >&2 ||
         { rm -rf "$tmp"; return 1; }
     mkdir -p "$INSTALL_DIR"
     cp "$tmp/bin/mockingbird" "$INSTALL_DIR/mockingbird"
