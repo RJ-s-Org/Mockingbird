@@ -329,13 +329,15 @@ impl SchemaValidator {
         out
     }
 
-    /// Returns up to 10 violations formatted as `"<instance path>: <message>"`.
+    /// Returns up to 10 violations formatted as `"<instance path>:
+    /// <keyword>: <message>"`. A failed `anyOf`/`oneOf` names the errors of
+    /// its closest branch; quoted values are capped.
     pub fn validate(&self, instance: &Value) -> Result<(), Vec<String>> {
         let errors: Vec<String> = self
             .inner
             .iter_errors(instance)
             .take(MAX_ERRORS)
-            .map(|e| format!("{}: {e}", e.instance_path()))
+            .map(|e| describe(&e, 0))
             .collect();
         if errors.is_empty() {
             Ok(())
@@ -343,6 +345,57 @@ impl SchemaValidator {
             Err(errors)
         }
     }
+}
+
+/// Longest message quoted for one violation; a longer one (it quotes a big
+/// value) is told with the value masked.
+const MAX_MESSAGE_CHARS: usize = 160;
+
+/// Branch errors named for a failed `anyOf`/`oneOf`.
+const MAX_BRANCH_ERRORS: usize = 3;
+
+/// Nesting of `anyOf`/`oneOf` followed into a branch.
+const MAX_BRANCH_DEPTH: usize = 4;
+
+/// `"<pointer>: <keyword>: <message>"`; for a failed `anyOf`/`oneOf`, the
+/// errors of the branch that got furthest into the value (the deepest
+/// pointer, then the fewest errors).
+fn describe(e: &jsonschema::ValidationError<'_>, depth: usize) -> String {
+    let pointer = e.instance_path().as_str();
+    let keyword = e.kind().keyword();
+    if let ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } =
+        e.kind()
+        && depth < MAX_BRANCH_DEPTH
+        && let Some(branch) = context.iter().filter(|b| !b.is_empty()).max_by_key(|b| {
+            let deepest = b
+                .iter()
+                .map(|e| e.instance_path().as_str().matches('/').count())
+                .max()
+                .unwrap_or(0);
+            (deepest, std::cmp::Reverse(b.len()))
+        })
+    {
+        let mut parts: Vec<String> = branch
+            .iter()
+            .take(MAX_BRANCH_ERRORS)
+            .map(|e| describe(e, depth + 1))
+            .collect();
+        if branch.len() > MAX_BRANCH_ERRORS {
+            parts.push(format!("{} more", branch.len() - MAX_BRANCH_ERRORS));
+        }
+        return format!(
+            "{pointer}: {keyword}: no branch matches; closest: {}",
+            parts.join(", ")
+        );
+    }
+    let mut message = e.to_string();
+    if message.chars().count() > MAX_MESSAGE_CHARS {
+        message = e.masked().to_string();
+    }
+    if message.chars().count() > MAX_MESSAGE_CHARS {
+        message = message.chars().take(MAX_MESSAGE_CHARS).collect::<String>() + "…";
+    }
+    format!("{pointer}: {keyword}: {message}")
 }
 
 /// Pointers of every string in `value` longer than [`RUNAWAY_CHARS`].
@@ -524,5 +577,43 @@ mod tests {
             out,
             json!({"path": "/x", "code": "ok", "kind": "a", "v": 1})
         );
+    }
+
+    #[test]
+    fn errors_name_the_deepest_branch_pointer_and_keyword() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "owner": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/User"}]}
+            },
+            "$defs": {
+                "User": {
+                    "type": "object",
+                    "required": ["login"],
+                    "properties": {"login": {"type": "string"}, "id": {"type": "integer"}}
+                }
+            }
+        }))
+        .unwrap();
+        let big = "x".repeat(5_000);
+        let errors = v
+            .validate(&json!({"owner": {"login": 7, "id": 1, "bio": big}}))
+            .unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let e = &errors[0];
+        assert!(e.starts_with("/owner: anyOf: "), "{e}");
+        assert!(
+            e.contains("/owner/login: type: 7 is not of type \"string\""),
+            "{e}"
+        );
+        assert!(e.len() < 400, "{e}");
+    }
+
+    #[test]
+    fn long_values_are_not_quoted() {
+        let v = SchemaValidator::new(&json!({"type": "integer"})).unwrap();
+        let errors = v.validate(&json!({"text": "y".repeat(5_000)})).unwrap_err();
+        assert!(errors[0].starts_with(": type: "), "{errors:?}");
+        assert!(errors[0].len() < 300, "{errors:?}");
     }
 }

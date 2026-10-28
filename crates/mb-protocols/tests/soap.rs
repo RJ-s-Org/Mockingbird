@@ -86,6 +86,48 @@ async fn post(
     }
 }
 
+/// Sends only the head of a POST declaring a `len`-byte body and returns the
+/// answer's status and the whole answer (head and body). The server refuses
+/// an oversized body from its `Content-Length` and closes the connection, so
+/// a client still uploading the body can get a reset instead of the 413.
+async fn post_oversized_head(
+    base: &str,
+    path: &str,
+    content_type: &str,
+    len: usize,
+) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: {content_type}\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let mut buf = vec![0u8; 4096];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("no answer to an oversized request head")
+            .unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        answer.extend_from_slice(&buf[..n]);
+        let text = String::from_utf8_lossy(&answer);
+        if text.contains("</env:Envelope>") || text.contains("</soap:Envelope>") {
+            break;
+        }
+    }
+    let answer = String::from_utf8_lossy(&answer).into_owned();
+    let status = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    (status, answer)
+}
+
 fn envelope11(body: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="{SOAP11_NS}"><soap:Header/><soap:Body>{body}</soap:Body></soap:Envelope>"#
@@ -277,10 +319,15 @@ async fn invalid_input_returns_client_fault_without_llm() {
     assert!(r.body.contains("soap:Client"), "{}", r.body);
 
     // An oversized body: 413, in the request's version.
-    let huge = envelope12(&"x".repeat(4 * 1024 * 1024));
-    let r = post(&base, "/calculator.asmx", "application/soap+xml", &[], huge).await;
-    assert_eq!(r.status, 413, "{}", r.body);
-    assert!(r.body.contains("env:Sender"), "{}", r.body);
+    let (status, answer) = post_oversized_head(
+        &base,
+        "/calculator.asmx",
+        "application/soap+xml",
+        5 * 1024 * 1024,
+    )
+    .await;
+    assert_eq!(status, 413, "{answer}");
+    assert!(answer.contains("env:Sender"), "{answer}");
     assert!(provider.requests().is_empty());
 }
 

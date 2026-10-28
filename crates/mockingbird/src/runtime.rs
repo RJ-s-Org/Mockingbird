@@ -338,6 +338,9 @@ pub async fn build_runtime_with_budget(
     rt.ext = deps.ext.clone();
     rt.recorder = deps.recorder.clone();
     rt.protocols = deps.protocols.clone();
+    if let Some(path) = &mock.behavior.graphql_path {
+        rt.protocols.graphql_path = path.clone();
+    }
     rt.limits = runtime_limits(deps, mock);
     rt.chaos = mock
         .chaos

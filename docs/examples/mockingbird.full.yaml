@@ -206,6 +206,10 @@ mocks:
         operations:
           - id: getOrder
             instructions: Orders belong to returning customers.
+  storefront:
+    contract: ../../fixtures/graphql/starwars.graphql
+    route_prefix: /api/2024-10
+    graphql_path: /graphql.json
   order-events:
     workspace: default
     contract: ../../fixtures/asyncapi/orders-amqp-2.6.yaml

@@ -795,7 +795,7 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
         ))
     };
     let ws = events.as_ref().and_then(|events| events.ws_router());
-    let root = (protocol == Protocol::Graphql).then(|| deps.protocols.graphql_path.clone());
+    let root = (protocol == Protocol::Graphql).then(|| runtime.protocols.graphql_path.clone());
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
         hosts: mock.hosts.clone(),

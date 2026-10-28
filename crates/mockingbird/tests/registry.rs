@@ -676,6 +676,51 @@ async fn graphql_mock_served_at_prefix() {
     assert_eq!(status_of(&base, "/gh/other").await, 404);
 }
 
+/// `graphql_path` moves one mock's endpoint (Shopify's `graphql.json`,
+/// whose schema is published as introspection JSON) while the others keep
+/// `protocols.graphql.path`.
+#[tokio::test]
+async fn graphql_path_is_per_mock() {
+    let store = store().await;
+    let mut shop = create_mock(&store, "shop", "/api/2024-10", None).await;
+    shop.behavior.graphql_path = Some("/graphql.json".into());
+    let shop = store.update_mock(&shop).await.unwrap();
+    activate(
+        &store,
+        &shop,
+        &fixture_text("graphql/starwars-introspection.json"),
+    )
+    .await;
+    let gh = create_mock(&store, "gh", "/gh", None).await;
+    activate(&store, &gh, &fixture_text("graphql/github.graphql")).await;
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps(store)).await.unwrap();
+    let base = serve(registry.router()).await;
+    let http = reqwest::Client::new();
+    for (path, query, pointer) in [
+        (
+            "/api/2024-10/graphql.json",
+            "{ hero { name } }",
+            "/data/hero/name",
+        ),
+        ("/gh/graphql", "{ viewer { login } }", "/data/viewer/login"),
+    ] {
+        let r = http
+            .post(format!("{base}{path}"))
+            .json(&json!({ "query": query }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{path}");
+        let body: Value = r.json().await.unwrap();
+        assert!(
+            body.pointer(pointer).is_some_and(Value::is_string),
+            "{path}: {body}"
+        );
+    }
+    assert_eq!(status_of(&base, "/api/2024-10/graphql").await, 404);
+}
+
 #[tokio::test]
 async fn soap_wsdl_uses_mount_prefix() {
     let store = store().await;

@@ -17,13 +17,13 @@
   ],
   "webhooks": null,
   "upstream": {
-    "source": "https://github.com/octokit/graphql-schema",
-    "license": "MIT",
-    "commit": "503d8f18a265230ec224669241c2f1957811faf8",
-    "url": "https://raw.githubusercontent.com/octokit/graphql-schema/503d8f18a265230ec224669241c2f1957811faf8/schema.graphql",
-    "sha256": "4dea7bd74e69637bd55795157eef5bfd89af3a32a6f05e8ac69004f223896415",
+    "source": "https://github.com/github/docs/blob/main/src/graphql/data/fpt/schema.docs.graphql",
+    "license": "CC-BY-4.0",
+    "commit": "c6f68e2527c324d52226d7de8bc49cf8e5c0e954",
+    "url": "https://raw.githubusercontent.com/github/docs/c6f68e2527c324d52226d7de8bc49cf8e5c0e954/src/graphql/data/fpt/schema.docs.graphql",
+    "sha256": "0d71ca68a4e951599b2ea541a81cc259a843608fc22b8eb1713a1d03551b149e",
     "replaces": "github.graphql",
-    "notes": "GitHub's public schema as published by octokit (about 1.2 MB). Pinned to the 2024-07-08 commit: the newest one (597478f, 2025-02-27) declares EnterpriseOwnerInfo.repositoryDeployKeySetting twice, which `mockingbird serve` cannot load. The subset keeps its type, field and argument names, so the scenarios' Query.rateLimit applies to both."
+    "notes": "GitHub's own public schema for github.com (about 1.5 MB, 309 operations) from the github/docs repository, pinned to its 2026-10-27 commit; github/docs is dual-licensed, CC-BY-4.0 for its data and content (this schema; attribution: GitHub) and MIT for code. It replaces octokit/graphql-schema (MIT), whose newest commit (597478f, 2025-02-27) declares EnterpriseOwnerInfo.repositoryDeployKeySetting twice and whose last loadable one (503d8f1, 2024-07-08) lacks Issue.issueType, blockedBy and blocking, which current `gh` queries. The subset keeps its type, field and argument names, so the scenarios' Query.rateLimit applies to both."
   },
   "sdk": {
     "language": "node",
