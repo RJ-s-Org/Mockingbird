@@ -22,7 +22,7 @@
 
 - [Integrations](integrations.md)
 - [CI]()
-- [Infrastructure as code]()
+- [Infrastructure as code](iac.md)
 - [Kubernetes GitOps]()
 - [Examples catalog]()
 

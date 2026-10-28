@@ -76,7 +76,7 @@ Choose WireMock or Mockoon when you want exact, hand-authored responses; Prism w
 | | |
 | --- | --- |
 | **CI** | [GitHub Action](https://github.com/RJ-s-Org/Mockingbird/tree/main/integrations/github-action), GitLab CI, snapshot replay without an LLM key: [CI guide](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/ci.md) |
-| **Infrastructure as code** | Terraform / OpenTofu provider and Pulumi: [IaC guide](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/iac.md) |
+| **Infrastructure as code** | Terraform / OpenTofu provider and Pulumi: [IaC guide](docs/iac.md) |
 | **Kubernetes** | [Helm chart](deploy/helm/mockingbird) (`oci://ghcr.io/rj-s-org/charts/mockingbird`), Argo CD and Flux: [Kubernetes](docs/deploy/kubernetes.md), [GitOps](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/deploy/gitops.md) |
 | **Tests** | Testcontainers: [GitOps and Testcontainers](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/deploy/gitops.md); fixtures with `export-fixtures` / `seed-fixtures`: [CLI](docs/cli.md) |
 | **Coding agents** | `/plugin marketplace add rj-s-org/mockingbird` in Claude Code, or `mockingbird agent install <codex\|cursor\|gemini\|kiro\|vscode\|windsurf\|claude-desktop>`: [Coding agents](docs/agents.md) |
@@ -109,6 +109,7 @@ The documentation is an [mdBook](docs/README.md) built from `docs/` (`scripts/do
 | [Docker](docs/deploy/docker.md) | Building and running the image |
 | [Docker Compose](docs/deploy/compose.md) | The Compose stack and its `ha`, `kafka`, `amqp` and `mqtt` profiles |
 | [Kubernetes](docs/deploy/kubernetes.md) | The Helm chart, external stores, OIDC, ingress, secrets and verifying releases |
+| [Infrastructure as code](docs/iac.md) | The Terraform/OpenTofu provider and Pulumi: mocks, contracts, scenarios and keys from code; a mocked staging environment in 20 lines |
 | [Running in production](docs/operations/production.md) | Ops endpoints, storage, high availability and hardening |
 | [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |
 | [Upgrading](docs/upgrading.md) | Upgrade notes, migrations and the `mb-ext` 1.0 changes |
