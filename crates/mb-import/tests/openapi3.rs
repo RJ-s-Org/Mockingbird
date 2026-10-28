@@ -391,3 +391,54 @@ fn compile_with_warnings_flags_schemas_over_the_prompt_budget() {
             .is_empty()
     );
 }
+
+#[test]
+fn compiles_31_webhooks_and_callbacks() {
+    let b = compile(&fixture("webhooks-3.1.yaml")).unwrap();
+    assert_eq!(b.webhooks.len(), 2);
+    let hook = b.webhooks.iter().find(|w| w.name == "pet.created").unwrap();
+    assert_eq!(hook.operation, None);
+    assert_eq!(hook.summary.as_deref(), Some("A pet was created"));
+    assert_eq!(hook.payload_schema, json!({"$ref": "#/$defs/PetEvent"}));
+    let cb = b
+        .webhooks
+        .iter()
+        .find(|w| w.name == "createPet.onAdopted")
+        .unwrap();
+    assert_eq!(cb.operation.as_deref(), Some("createPet"));
+    assert_eq!(
+        cb.payload_schema["properties"]["adopted"]["const"],
+        json!(true)
+    );
+    // Callback first, then name match.
+    assert_eq!(
+        b.webhook_for("createPet", "pet.created").unwrap().name,
+        "createPet.onAdopted"
+    );
+    assert_eq!(
+        b.webhook_for("other", "PET.CREATED").unwrap().name,
+        "pet.created"
+    );
+    assert!(b.webhook_for("other", "pet.deleted").is_none());
+}
+
+#[test]
+fn contracts_without_webhooks_serialise_unchanged() {
+    let b = orders30();
+    assert!(b.webhooks.is_empty());
+    assert!(serde_json::to_value(&b).unwrap().get("webhooks").is_none());
+}
+
+#[test]
+fn webhook_payload_refs_are_checked() {
+    let src = std::str::from_utf8(&fixture("webhooks-3.1.yaml"))
+        .unwrap()
+        .replace(
+            "$ref: \"#/components/schemas/PetEvent\"",
+            "$ref: \"#/components/schemas/Missing\"",
+        );
+    assert!(matches!(
+        compile(src.as_bytes()),
+        Err(ImportError::Invalid { .. })
+    ));
+}

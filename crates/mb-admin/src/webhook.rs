@@ -9,9 +9,7 @@
 
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
 use mb_store::AuditEvent;
-use sha2::Sha256;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -89,20 +87,7 @@ impl WebhookSink {
 
 /// `sha256=<lowercase hex HMAC-SHA256(secret, body)>`.
 pub fn signature(secret: &[u8], body: &[u8]) -> String {
-    use std::fmt::Write;
-    // HMAC accepts keys of any length, so this never fails.
-    let mut mac = match Hmac::<Sha256>::new_from_slice(secret) {
-        Ok(mac) => mac,
-        Err(_) => return String::new(),
-    };
-    mac.update(body);
-    let digest = mac.finalize().into_bytes();
-    let mut out = String::with_capacity(7 + digest.len() * 2);
-    out.push_str("sha256=");
-    for b in digest {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
+    mb_protocols::webhooks::sign::mockingbird_signature(secret, body)
 }
 
 struct Delivery {

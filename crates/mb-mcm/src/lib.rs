@@ -28,6 +28,26 @@ pub struct Bundle {
     /// Event-driven channels (AsyncAPI); absent for request/response contracts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<Channel>,
+    /// Outbound events the contract describes (OpenAPI `webhooks` and
+    /// `callbacks`); used as webhook payloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<WebhookDef>,
+}
+
+/// An outbound event the contract describes: OpenAPI 3.1 `webhooks` or an
+/// operation's `callbacks`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct WebhookDef {
+    /// The `webhooks` key, or `<operationId>.<callbackName>`.
+    pub name: String,
+    /// For a callback, the operation that declares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// JSON Schema 2020-12 of the request body (refs as in `defs`).
+    pub payload_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Protocol-native material carried next to the operations.
@@ -304,6 +324,20 @@ pub struct Identity {
 }
 
 impl Bundle {
+    /// The payload definition of the webhook `op_id` fires as `event_type`:
+    /// a callback of the operation, else a webhook named (ASCII
+    /// case-insensitively) after the event type or the operation id.
+    pub fn webhook_for(&self, op_id: &str, event_type: &str) -> Option<&WebhookDef> {
+        self.webhooks
+            .iter()
+            .find(|w| w.operation.as_deref() == Some(op_id))
+            .or_else(|| {
+                self.webhooks.iter().find(|w| {
+                    w.name.eq_ignore_ascii_case(event_type) || w.name.eq_ignore_ascii_case(op_id)
+                })
+            })
+    }
+
     /// The first operation's protocol; [`Protocol::Http`] when there are none.
     pub fn protocol(&self) -> Protocol {
         self.operations

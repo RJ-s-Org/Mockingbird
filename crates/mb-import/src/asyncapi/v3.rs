@@ -331,6 +331,7 @@ pub(crate) fn compile_v3(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportErro
         defs,
         protocol_payload: None,
         channels,
+        webhooks: Vec::new(),
     })
 }
 

@@ -63,6 +63,7 @@ fn bundle_round_trips_through_json() {
         defs,
         protocol_payload: None,
         channels: Vec::new(),
+        webhooks: Vec::new(),
     };
     let value = serde_json::to_value(&bundle).unwrap();
     let back: Bundle = serde_json::from_value(value).unwrap();
@@ -152,6 +153,7 @@ fn with_defs_attaches_definitions() {
         defs,
         protocol_payload: None,
         channels: Vec::new(),
+        webhooks: Vec::new(),
     };
     let v = bundle.with_defs(&json!({"$ref":"#/$defs/Order"}));
     assert_eq!(v["$defs"]["Order"], order);
@@ -184,6 +186,7 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
         defs,
         protocol_payload: None,
         channels: Vec::new(),
+        webhooks: Vec::new(),
     };
 
     let v = bundle.with_reachable_defs(&json!({"$ref": "#/$defs/Order"}));
@@ -644,6 +647,7 @@ fn grpc_services_lists_full_service_names() {
         defs: serde_json::Map::new(),
         protocol_payload: None,
         channels: vec![],
+        webhooks: Vec::new(),
     };
     let services: Vec<String> = bundle.grpc_services().into_iter().collect();
     assert_eq!(services, ["Bare", "routeguide.RouteGuide"]);

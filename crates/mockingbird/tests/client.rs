@@ -1033,3 +1033,95 @@ async fn several_sources_must_be_urls() {
         out.stderr
     );
 }
+
+#[tokio::test]
+async fn webhooks_sign_prints_stripe_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = dir.path().join("body.json");
+    std::fs::write(&body, br#"{"id":"evt_1","type":"customer.created"}"#).unwrap();
+    let out = run_with(
+        "http://127.0.0.1:9",
+        &[
+            "webhooks",
+            "sign",
+            "--secret-ref",
+            "env:WS6_CLI_WEBHOOK_SECRET",
+            "--body",
+            body.to_str().unwrap(),
+            "--signing",
+            "stripe",
+            "--timestamp",
+            "1700000000",
+        ],
+        &[("WS6_CLI_WEBHOOK_SECRET", "whsec_test_secret")],
+        None,
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        out.json(),
+        json!({"header": "stripe-signature",
+            "value": "t=1700000000,v1=2146c3ca883db3d5b33f638513d4322fcf955eeb8624ee63937a742c023fe30b"})
+    );
+    assert!(!out.stdout.contains("whsec_test_secret"));
+    // The default scheme, the body read from stdin.
+    let out = run_with(
+        "http://127.0.0.1:9",
+        &[
+            "webhooks",
+            "sign",
+            "--secret-ref",
+            "env:WS6_CLI_WEBHOOK_SECRET",
+            "--body",
+            "-",
+        ],
+        &[("WS6_CLI_WEBHOOK_SECRET", "whsec_test_secret")],
+        Some(r#"{"id":"evt_1","type":"customer.created"}"#),
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        out.json(),
+        json!({"header": "x-mockingbird-signature",
+            "value": "sha256=fd41b171babb49da71ea3fab7b7da430fd8fc07d35a82924971cc9d6d758d58a"})
+    );
+}
+
+#[tokio::test]
+async fn webhooks_sign_reports_missing_secret_by_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = dir.path().join("body.json");
+    std::fs::write(&body, b"{}").unwrap();
+    let out = run_with(
+        "http://127.0.0.1:9",
+        &[
+            "webhooks",
+            "sign",
+            "--secret-ref",
+            "env:WS6_UNSET_WEBHOOK_SECRET",
+            "--body",
+            body.to_str().unwrap(),
+        ],
+        &[],
+        None,
+    )
+    .await;
+    assert_ne!(out.code, 0);
+    assert!(
+        out.stderr.contains("env:WS6_UNSET_WEBHOOK_SECRET"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[tokio::test]
+async fn webhooks_deliveries_lists_json() {
+    let admin = admin_url().await;
+    let out = run(&admin, &["mocks", "create", "shop"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let out = run(&admin, &["webhooks", "deliveries", "shop", "--limit", "5"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json(), json!([]));
+    let out = run(&admin, &["webhooks", "deliveries", "nope"]).await;
+    assert_ne!(out.code, 0);
+}

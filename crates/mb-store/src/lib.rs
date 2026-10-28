@@ -477,15 +477,17 @@ pub fn validate_extra_body(body: &serde_json::Map<String, Value>) -> Result<(), 
     Ok(())
 }
 
-/// `Invalid` when a mock's chaos or limits are out of range.
+/// `Invalid` when a mock's chaos, limits or webhooks are out of range.
 pub(crate) fn validate_mock_settings(
     chaos: Option<&ChaosSettings>,
     limits: &MockLimits,
+    webhooks: &[WebhookTarget],
 ) -> Result<(), StoreError> {
     if let Some(c) = chaos {
         c.validate().map_err(StoreError::Invalid)?;
     }
-    limits.validate().map_err(StoreError::Invalid)
+    limits.validate().map_err(StoreError::Invalid)?;
+    validate_webhooks(webhooks).map_err(StoreError::Invalid)
 }
 
 /// Error for a write into a workspace that does not exist.
@@ -633,6 +635,54 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_target_validation() {
+        let ok = WebhookTarget {
+            url: "https://example.test/hook".into(),
+            events: vec!["*".into()],
+            secret: Some("env:STRIPE_WEBHOOK_SECRET".into()),
+            signing: Some(WebhookSigning::Stripe),
+            delay_ms: 0,
+        };
+        assert_eq!(validate_webhooks(std::slice::from_ref(&ok)), Ok(()));
+        let bad = |f: &dyn Fn(&mut WebhookTarget)| {
+            let mut t = ok.clone();
+            f(&mut t);
+            validate_webhooks(&[t]).unwrap_err()
+        };
+        assert!(bad(&|t| t.url = "ftp://x/y".into()).contains("webhooks[0].url"));
+        assert!(bad(&|t| t.url = "/relative".into()).contains("webhooks[0].url"));
+        assert!(bad(&|t| t.events.clear()).contains("webhooks[0].events"));
+        assert!(bad(&|t| t.secret = Some("whsec_plainvalue".into())).contains("secret reference"));
+        // The rejection never echoes a pasted value.
+        assert!(!bad(&|t| t.secret = Some("whsec_plainvalue".into())).contains("whsec_plainvalue"));
+        assert!(bad(&|t| t.secret = Some("env: ".into())).contains("secret reference"));
+        assert!(bad(&|t| t.secret = None).contains("webhooks[0].signing"));
+        assert!(bad(&|t| t.delay_ms = 60_001).contains("webhooks[0].delay_ms"));
+        assert!(
+            validate_webhooks(&vec![ok.clone(); 17])
+                .unwrap_err()
+                .contains("at most 16")
+        );
+        assert_eq!(
+            WebhookTarget {
+                secret: None,
+                signing: None,
+                ..ok.clone()
+            }
+            .effective_signing(),
+            WebhookSigning::None
+        );
+        assert_eq!(
+            WebhookTarget {
+                signing: None,
+                ..ok
+            }
+            .effective_signing(),
+            WebhookSigning::HmacSha256
+        );
+    }
 
     #[test]
     fn header_secret_refs_parse() {

@@ -729,7 +729,7 @@ pub(crate) async fn generate_narrowed(
                     session,
                     op,
                     t,
-                    target_id,
+                    target_id.clone(),
                     &generated,
                     call.body.as_ref(),
                     origin,
@@ -742,9 +742,9 @@ pub(crate) async fn generate_narrowed(
     }
     .instrument(state_span())
     .await;
-    // Post-write hooks go here: `WriteOrigin::Call` writes are what the
-    // client changed.
+    // Seeded writes come from reads, which send no webhooks.
     drop(writes);
+    crate::webhooks::emit::emit(rt, op, call, &generated, target_id.as_deref(), session);
 
     // Seeded first, then cached: a later list never clears a cached one.
     if let (Some(cache), Some(key), Some(since)) = (cache, key, since)
