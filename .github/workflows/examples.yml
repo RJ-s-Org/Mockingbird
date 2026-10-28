@@ -33,7 +33,7 @@ jobs:
   build:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97"
@@ -43,7 +43,7 @@ jobs:
       # The slim binary: no Kafka (librdkafka) needed, and the console's
       # placeholder page is enough here.
       - run: cargo build -p mockingbird --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mockingbird
           path: target/debug/mockingbird
@@ -56,8 +56,8 @@ jobs:
     env:
       GRPCURL_VERSION: 1.9.3
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: mockingbird
           path: bin
@@ -74,13 +74,13 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: mockingbird
           path: bin
       - run: chmod +x bin/mockingbird && echo "MOCKINGBIRD_BIN=$PWD/bin/mockingbird" >> "$GITHUB_ENV"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: fastapi-stripe
@@ -88,14 +88,14 @@ jobs:
         run: |
           python -m pip install -q -r requirements.txt
           python -m pytest -q
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.23"
           cache-dependency-path: examples/apps/go-github/go.sum
       - name: go-github
         working-directory: examples/apps/go-github
         run: go test -v ./...
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: node-shopify-stripe

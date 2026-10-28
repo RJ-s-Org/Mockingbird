@@ -40,7 +40,7 @@ jobs:
       publish: ${{ steps.version.outputs.publish }}
       image: ${{ steps.version.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Resolve the release version
         id: version
         env:
@@ -78,14 +78,14 @@ jobs:
     needs: verify
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: crates/mb-console/web/package-lock.json
       - run: npm --prefix crates/mb-console/web ci && npm --prefix crates/mb-console/web run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: console-dist
           path: crates/mb-console/dist
@@ -126,9 +126,9 @@ jobs:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The binary embeds the console build instead of its placeholder page.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: console-dist
           path: crates/mb-console/dist
@@ -170,12 +170,12 @@ jobs:
           fi
           cat "$archive.sha256"
       - if: needs.verify.outputs.publish == 'true'
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
           path: dist/*
@@ -187,7 +187,7 @@ jobs:
     env:
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - run: cargo install cargo-cyclonedx --version 0.5.9 --locked
       - name: Write the CycloneDX SBOM
@@ -200,7 +200,7 @@ jobs:
             exit 1
           fi
           cp "$bom" "mockingbird-$VERSION.cdx.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: mockingbird-${{ needs.verify.outputs.version }}.cdx.json
@@ -223,17 +223,17 @@ jobs:
       IMAGE: ${{ needs.verify.outputs.image }}
       PUBLISH: ${{ needs.verify.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - if: needs.verify.outputs.publish == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
@@ -248,7 +248,7 @@ jobs:
       # daemon instead (the build above is cached).
       - name: Load the image for scanning (dry run)
         if: needs.verify.outputs.publish != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
@@ -262,7 +262,7 @@ jobs:
       # A digest pushed by this job is a single-platform index; without a
       # platform Trivy looks for linux/amd64 in it and fails on arm64.
       - name: Scan the image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/${{ matrix.platform.arch }}
         with:
@@ -277,7 +277,7 @@ jobs:
         run: |
           mkdir -p digests
           touch "digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.flavor }}-${{ matrix.platform.arch }}
           path: digests/*
@@ -297,21 +297,21 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       PRERELEASE: ${{ needs.verify.outputs.prerelease }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: digests-full-*
           path: digests/full
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: digests-slim-*
           path: digests/slim
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sbom
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -342,26 +342,26 @@ jobs:
           cosign sign --yes "$IMAGE@$FULL"
           cosign sign --yes "$IMAGE@$SLIM"
       - name: Build provenance (full)
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ needs.verify.outputs.image }}
           subject-digest: ${{ steps.manifests.outputs.full }}
           push-to-registry: true
       - name: Build provenance (slim)
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ needs.verify.outputs.image }}
           subject-digest: ${{ steps.manifests.outputs.slim }}
           push-to-registry: true
       - name: SBOM attestation (full)
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@v4
         with:
           subject-name: ${{ needs.verify.outputs.image }}
           subject-digest: ${{ steps.manifests.outputs.full }}
           sbom-path: mockingbird-${{ needs.verify.outputs.version }}.cdx.json
           push-to-registry: true
       - name: SBOM attestation (slim)
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@v4
         with:
           subject-name: ${{ needs.verify.outputs.image }}
           subject-digest: ${{ steps.manifests.outputs.slim }}
@@ -379,7 +379,7 @@ jobs:
     env:
       OWNER: ${{ github.repository_owner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Look for the chart
         id: chart
         run: |
@@ -390,11 +390,11 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.chart.outputs.exists == 'true'
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - if: steps.chart.outputs.exists == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -426,13 +426,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: sbom
           path: dist
@@ -458,7 +458,7 @@ jobs:
     if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.prerelease == 'false'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Render the formula and push it to the tap
         env:
           GH_TOKEN: ${{ github.token }}
@@ -491,7 +491,7 @@ jobs:
     if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.prerelease == 'false'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - name: Publish mb-ext unless this version is on crates.io
         env:
