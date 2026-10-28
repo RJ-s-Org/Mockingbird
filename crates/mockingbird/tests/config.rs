@@ -3302,3 +3302,101 @@ async fn watch_applies_a_mocks_block_added_later() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// Relative file paths in a config file are relative to the file's
+/// directory, like `contract:`, not to the working directory.
+#[test]
+fn relative_paths_resolve_against_the_config_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("elsewhere");
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("mockingbird.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+storage:
+  url: sqlite://./data/mockingbird.db?mode=rwc
+  state_url: sqlite:state.db
+server:
+  tls:
+    cert_file: certs/cert.pem
+    key_file: ./certs/key.pem
+outbound:
+  ca_file: corp-ca.pem
+brokers:
+  events:
+    kind: kafka
+    bootstrap_servers: localhost:9092
+    ca_file: kafka-ca.pem
+mocks:
+  orders:
+    contract: {}
+"#,
+            fixture().display()
+        ),
+    )
+    .unwrap();
+    let dir = std::path::absolute(&dir).unwrap();
+    let cfg = file_config::load(&path).unwrap();
+    assert_eq!(
+        cfg.storage.url,
+        format!(
+            "sqlite://{}?mode=rwc",
+            dir.join("data/mockingbird.db").display()
+        )
+    );
+    assert_eq!(
+        cfg.storage.state_url.as_deref(),
+        Some(format!("sqlite://{}", dir.join("state.db").display()).as_str())
+    );
+    let tls = cfg.server.tls.as_ref().unwrap();
+    assert_eq!(tls.cert_file, dir.join("certs/cert.pem"));
+    assert_eq!(tls.key_file, dir.join("certs/key.pem"));
+    assert_eq!(cfg.outbound.ca_file, Some(dir.join("corp-ca.pem")));
+    assert_eq!(
+        cfg.brokers["events"].ca_file,
+        Some(dir.join("kafka-ca.pem"))
+    );
+}
+
+/// In-memory and absolute stores, and non-SQLite URLs, are left alone.
+#[test]
+fn absolute_and_memory_store_urls_are_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("mockingbird.yaml");
+    let abs = tmp.path().join("abs.db");
+    for url in [
+        "sqlite::memory:".to_string(),
+        format!("sqlite://{}", abs.display()),
+        "postgres://mb@db.internal/mockingbird".to_string(),
+    ] {
+        std::fs::write(
+            &path,
+            format!("storage:\n  url: \"{url}\"\n  state_url: memory\n"),
+        )
+        .unwrap();
+        let cfg = file_config::load(&path).unwrap();
+        assert_eq!(cfg.storage.url, url);
+        assert_eq!(cfg.storage.state_url.as_deref(), Some("memory"));
+    }
+}
+
+/// A relative `--storage-url` is typed in the shell, so it stays relative to
+/// the working directory, with or without a config file.
+#[test]
+fn storage_url_flag_stays_relative() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("mockingbird.yaml");
+    std::fs::write(&path, "storage:\n  url: sqlite://./from-file.db\n").unwrap();
+    for config in [None, Some(path)] {
+        let args = ServeArgs {
+            config,
+            offline: true,
+            storage_url: Some("sqlite://./mockingbird.db".into()),
+            ..ServeArgs::default()
+        };
+        let cfg = resolve_config(&args, None).unwrap();
+        assert_eq!(cfg.storage.url, "sqlite://./mockingbird.db");
+    }
+}

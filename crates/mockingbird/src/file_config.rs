@@ -1710,15 +1710,68 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
             mock.contract = dir.join(&mock.contract);
         }
     }
-    if let Some(ca_dir) = &mut cfg.proxy.ca_dir
-        && ca_dir.is_relative()
-    {
-        *ca_dir = dir.join(&*ca_dir);
-    }
+    resolve_relative_paths(&mut cfg, &dir);
     cfg.validate_file()
         .map_err(|e| anyhow!(e))
         .with_context(|| format!("invalid config file {}", path.display()))?;
     Ok(cfg)
+}
+
+/// Makes the relative file paths of a loaded config file relative to its
+/// directory `dir`: `proxy.ca_dir`, `sqlite:` paths in `storage.url` and
+/// `storage.state_url`, `server.tls`, `outbound.ca_file` and the brokers'
+/// `ca_file`. Values from flags and environment variables are applied later
+/// and stay relative to the working directory.
+fn resolve_relative_paths(cfg: &mut FileConfig, dir: &Path) {
+    let join = |p: &mut PathBuf| {
+        if p.is_relative() && !p.as_os_str().is_empty() {
+            *p = dir.join(p.strip_prefix(".").unwrap_or(p));
+        }
+    };
+    if let Some(ca_dir) = &mut cfg.proxy.ca_dir {
+        join(ca_dir);
+    }
+    if let Some(tls) = &mut cfg.server.tls {
+        join(&mut tls.cert_file);
+        join(&mut tls.key_file);
+    }
+    if let Some(ca) = &mut cfg.outbound.ca_file {
+        join(ca);
+    }
+    for broker in cfg.brokers.values_mut() {
+        if let Some(ca) = &mut broker.ca_file {
+            join(ca);
+        }
+    }
+    cfg.storage.url = resolve_sqlite_url(&cfg.storage.url, dir);
+    if let Some(url) = &mut cfg.storage.state_url {
+        *url = resolve_sqlite_url(url, dir);
+    }
+}
+
+/// `sqlite://<relative path>` (or `sqlite:<relative path>`) as
+/// `sqlite://<dir>/<path>`, keeping any `?` options; other URLs, absolute
+/// paths and `sqlite::memory:` unchanged.
+fn resolve_sqlite_url(url: &str, dir: &Path) -> String {
+    let Some(rest) = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))
+    else {
+        return url.to_string();
+    };
+    let (file, query) = match rest.split_once('?') {
+        Some((file, query)) => (file, Some(query)),
+        None => (rest, None),
+    };
+    let path = Path::new(file);
+    if file.is_empty() || file.starts_with(':') || file.starts_with("file:") || path.is_absolute() {
+        return url.to_string();
+    }
+    let path = dir.join(path.strip_prefix(".").unwrap_or(path));
+    match query {
+        Some(query) => format!("sqlite://{}?{query}", path.display()),
+        None => format!("sqlite://{}", path.display()),
+    }
 }
 
 /// Which optional ports a config document sets.
