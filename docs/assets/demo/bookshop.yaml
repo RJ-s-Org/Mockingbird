@@ -1,0 +1,100 @@
+openapi: 3.0.3
+info:
+  title: Bookshop API
+  version: 1.0.0
+  description: The demo in the README. A small online bookshop.
+paths:
+  /books:
+    get:
+      operationId: listBooks
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 20}
+      responses:
+        "200":
+          description: Books in stock
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Book"}
+                  has_more: {type: boolean}
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewOrder"}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+  /orders/{orderId}:
+    parameters:
+      - name: orderId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      operationId: getOrder
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "404":
+          description: No such order
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+components:
+  schemas:
+    Book:
+      type: object
+      required: [id, title, author, isbn, price]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        author: {type: string}
+        isbn: {type: string, pattern: "^97[89][0-9]{10}$"}
+        price: {$ref: "#/components/schemas/Money"}
+    NewOrder:
+      type: object
+      required: [bookId, quantity, customerEmail]
+      properties:
+        bookId: {type: string}
+        quantity: {type: integer, minimum: 1}
+        customerEmail: {type: string, format: email}
+    Order:
+      type: object
+      required: [id, bookId, quantity, customerEmail, status, total, createdAt]
+      properties:
+        id: {type: string}
+        bookId: {type: string}
+        quantity: {type: integer}
+        customerEmail: {type: string, format: email}
+        status: {type: string, enum: [pending, paid, shipped]}
+        total: {$ref: "#/components/schemas/Money"}
+        createdAt: {type: string, format: date-time}
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: {type: number}
+        currency: {type: string, enum: [EUR]}
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}

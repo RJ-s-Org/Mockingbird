@@ -59,7 +59,7 @@ Ask in plain words: "mock the API in openapi.yaml", "use OpenRouter for Mockingb
 | Area | Tools | CLI |
 | --- | --- | --- |
 | Setup | `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract` | `doctor`, `llm providers`, `init`, `llm configure`, `llm test`, `validate` |
-| Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env` | `server start/status/logs/stop`, `proxy env` |
+| Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env` | `server start/status/logs/stop`, `proxy env`, `run -- <command>` |
 | Mocks | `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version` | `mocks …`, `import` |
 | Drafts | `get_draft`, `edit_draft`, `approve_draft` | `import --approve` |
 | Behaviour | `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile` | `scenarios …`, `profiles …` |
@@ -118,5 +118,5 @@ Then add `https://<host>/mcp` as a connector (in ChatGPT: Settings → Apps & Co
 
 - The MCP server has the Admin API rights of its token. Give remote agents an API key with the least role they need (`viewer` for `--read-only` use).
 - API keys never pass through the agent: profiles hold `env:` or `file:` references, `agent install` writes variable names only, and the key setup page sends nothing back.
-- `call_mock` and `import_contract` with a URL make requests from the machine the MCP server runs on; URL imports go through the server's [URL fetching](../README.md#url-fetching) guards.
+- `call_mock` and `import_contract` with a URL make requests from the machine the MCP server runs on; URL imports go through the server's [URL fetching](import.md#url-fetching) guards.
 - Over the Admin API, an LLM profile's secret references must match `server.api_secret_refs`, and only a sysadmin may point them at a new `base_url`; this applies to `${…}` references in headers too.

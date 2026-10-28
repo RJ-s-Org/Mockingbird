@@ -47,6 +47,10 @@ pub enum ProxyCommand {
     /// Print the variables that send an app through the proxy and make it
     /// trust the local CA: `eval "$(mockingbird proxy env)"`.
     Env(ProxyEnvArgs),
+    /// Start Chrome, Chromium or Edge through the proxy, trusting the local
+    /// CA in a profile of its own (`--print` shows the flags, e.g. for
+    /// Playwright).
+    Browser(super::browser::ProxyBrowserArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -83,8 +87,8 @@ pub struct ProxyRunArgs {
     /// pass].
     #[arg(long, value_enum)]
     pub unmapped: Option<Unmapped>,
-    /// A host answered with placeholder images (repeatable; adds to
-    /// proxy.images).
+    /// A host (or `host/path-prefix`) answered with placeholder images
+    /// (repeatable; adds to proxy.images).
     #[arg(long = "image-host")]
     pub image_host: Vec<String>,
 }
@@ -213,6 +217,9 @@ pub fn ca_command(cmd: CaCommand) -> anyhow::Result<()> {
 /// `mockingbird proxy …`: prints the environment (`env`), or runs the
 /// proxy in front of the server at `admin_url` until SIGINT/SIGTERM.
 pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
+    if let Some(ProxyCommand::Browser(browser)) = args.cmd {
+        return super::browser::run(browser).await;
+    }
     if let Some(ProxyCommand::Env(env)) = args.cmd {
         let vars = proxy_env(&options_for(env.config.as_deref(), env.port)?)?;
         if env.json {
@@ -241,8 +248,8 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
     let data_url =
         reqwest::Url::parse(&data_url).with_context(|| format!("--data-url {data_url}"))?;
     let mut images = cfg.proxy.images.clone();
-    images.extend(run.image_host.iter().map(|h| h.to_ascii_lowercase()));
-    mb_store::validate_hosts(&images).map_err(|e| anyhow!("--image-host: {e}"))?;
+    images.extend(run.image_host.iter().cloned());
+    super::images::validate_image_entries(&images).map_err(|e| anyhow!("--image-host: {e}"))?;
     let unmapped = run.unmapped.unwrap_or(cfg.proxy.unmapped);
     crate::file_config::ProxyConfig {
         unmapped,

@@ -763,6 +763,7 @@ fn behavior(mock: &FileMock) -> mb_store::MockBehavior {
         consistency: mock.consistency,
         unknown_ids: mock.unknown_ids,
         default_scenario: mock.default_scenario.clone(),
+        path_rewrite: mock.path_rewrite.clone(),
     }
 }
 

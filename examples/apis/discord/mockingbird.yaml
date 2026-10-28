@@ -1,0 +1,44 @@
+# Discord HTTP API v10: the bot's user, a guild and its channels, messages and
+# interaction responses.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/api/v10/users/@me -H 'Host: discord.com' -H 'Authorization: Bot test-token'
+# Contract: discord.openapi.yaml, a hand-written subset (see its header). The full
+# upstream spec (MIT) is pinned in example.json; fetch it with
+# `mockingbird examples init discord --full`.
+proxy:
+  enabled: true          # apps reach https://discord.com/api/v10 through http://127.0.0.1:8888
+mocks:
+  discord:
+    contract: discord.openapi.yaml
+    route_prefix: /api/v10
+    hosts: [discord.com]
+    persona: >-
+      Discord HTTP API v10 seen by "Quillbot", the helper bot of "Inkwell
+      Writers' Guild", a 1,800-member community server for fiction writers
+      (preferred locale en-US). Ids are Discord snowflakes: 18-19 digit strings
+      starting with 1. The guild has #welcome, #announcements, #general, #help,
+      #show-and-tell and #events text channels under "Community" and "Workshops"
+      categories, plus a "Lounge" voice channel. Members have lowercase usernames
+      (discriminator "0") and display names like "Mara Okafor". Messages talk
+      about word counts, critique swaps and the weekly writing sprint. Timestamps
+      are ISO 8601 with "+00:00". A created message copies content, embeds and
+      message_reference from the request; its author is Quillbot (bot: true).
+    scenarios:
+      unknown-channel:
+        status: 404
+        operations: [list_messages, create_message, get_message, delete_message]
+        set:
+          code: 10003
+          message: Unknown Channel
+      rate-limited:
+        status: 429
+        set:
+          code: 0
+          message: You are being rate limited.
+          retry_after: 1.337
+          global: false
+      outage:
+        status: 502
+        set:
+          code: 0
+          message: "502: Bad Gateway"

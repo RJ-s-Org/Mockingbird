@@ -1,0 +1,16 @@
+{
+  "name": "mockingbird-example-node-shopify-stripe",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "A Node storefront backend: Shopify Admin GraphQL products and verified Stripe webhooks, tested against Mockingbird.",
+  "engines": { "node": ">=22.21" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@shopify/admin-api-client": "1.0.4",
+    "stripe": "17.4.0"
+  }
+}

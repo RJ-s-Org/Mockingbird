@@ -1,0 +1,50 @@
+# Stripe: customers, PaymentIntents and refunds, with Stripe-signed webhooks.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/v1/payment_intents -H 'Host: api.stripe.com' -u sk_test_123: -d amount=2000 -d currency=usd
+# Contract: stripe.openapi.yaml, a hand-written subset (see its header). The full
+# upstream spec (MIT) is pinned in example.json; fetch it with
+# `mockingbird examples init stripe --full`.
+proxy:
+  enabled: true          # apps reach https://api.stripe.com through http://127.0.0.1:8888
+mocks:
+  stripe:
+    contract: stripe.openapi.yaml
+    route_prefix: /
+    hosts: [api.stripe.com]
+    persona: >-
+      Stripe API in test mode for "Juniper & Co", a small online plant shop in
+      Portland that charges in USD. Ids use Stripe prefixes (cus_, pi_, re_, evt_)
+      followed by random alphanumerics. livemode is always false. A PaymentIntent's
+      client_secret is "<id>_secret_<24 chars>"; amount, currency, customer and
+      description are copied from the request. Customers have realistic US names
+      and @example.com emails. Timestamps are recent unix seconds.
+    webhooks:
+      # `stripe listen --forward-to localhost:4242/webhook` uses the same port.
+      - url: http://127.0.0.1:4242/webhook
+        events: [payment_intent.created, customer.created]
+        secret: env:STRIPE_WEBHOOK_SECRET
+        signing: stripe
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [PostPaymentIntents, PostPaymentIntentsIntentConfirm]
+        set:
+          error:
+            type: card_error
+            code: card_declined
+            decline_code: insufficient_funds
+            message: Your card has insufficient funds.
+            doc_url: https://stripe.com/docs/error-codes/card-declined
+      rate-limited:
+        status: 429
+        set:
+          error:
+            type: rate_limit_error
+            code: rate_limit
+            message: Too many requests hit the API too quickly. We recommend an exponential backoff of your requests.
+      outage:
+        status: 500
+        set:
+          error:
+            type: api_error
+            message: An unknown error occurred while processing your request.

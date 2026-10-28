@@ -1,0 +1,43 @@
+# The config the workflow's Mockingbird serves. Generate it from files in CI:
+#   kubectl create configmap mocks --from-file=mockingbird.yaml \
+#     --from-file=payments.yaml=contracts/payments.yaml --dry-run=client -o yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mocks
+data:
+  mockingbird.yaml: |
+    server:
+      # Reached only by this workflow's pods.
+      insecure_no_auth: true
+    mocks:
+      payments:
+        contract: payments.yaml
+  payments.yaml: |
+    openapi: 3.0.3
+    info: {title: Payments API, version: 1.0.0}
+    paths:
+      /v1/charges:
+        post:
+          operationId: createCharge
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  type: object
+                  required: [amount, currency]
+                  properties:
+                    amount: {type: integer}
+                    currency: {type: string}
+          responses:
+            "201":
+              description: Created
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    required: [id, status]
+                    properties:
+                      id: {type: string}
+                      status: {type: string, enum: [succeeded, pending]}

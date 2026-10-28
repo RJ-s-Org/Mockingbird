@@ -52,6 +52,102 @@
       "type": "object",
       "description": "mockingbird.yaml, merged over files/default-config.yaml"
     },
+    "mocks": {
+      "type": "object",
+      "description": "Mocks by name, merged into config.mocks; each is a mocks.<name> section whose contract may also be {inline}, {configMap} or {url}",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "contract"
+        ],
+        "properties": {
+          "contract": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "required": [
+                  "inline"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "inline": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "fileName": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]+$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "configMap"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "configMap": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "key"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "key": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9._-]+$"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https?://"
+                  },
+                  "fileName": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]+$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "reload": {
+      "type": "string",
+      "enum": [
+        "rollout",
+        "watch"
+      ],
+      "description": "rollout: a config checksum rolls the pods; watch: serve --watch reconciles in place"
+    },
     "storage": {
       "type": "object",
       "properties": {
@@ -112,6 +208,46 @@
         "apiKeyKey": {
           "type": "string",
           "minLength": 1
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "profiles": {
+          "type": "object",
+          "description": "LLM profiles merged into config.llm.profiles",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "apiKeySecret": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "api_key": {
+                "type": "string",
+                "pattern": "^(env|file|vault):",
+                "description": "a secret reference, never the key"
+              }
+            }
+          }
         }
       },
       "additionalProperties": false
@@ -535,6 +671,77 @@
     "global": {
       "type": "object",
       "description": "Set by a parent chart; unused."
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "method": {
+                "type": "string",
+                "enum": [
+                  "GET",
+                  "POST",
+                  "PUT",
+                  "PATCH",
+                  "DELETE",
+                  "HEAD",
+                  "OPTIONS"
+                ]
+              },
+              "status": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "body": {}
+            }
+          }
+        }
+      }
+    },
+    "curlImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
     }
   },
   "required": [

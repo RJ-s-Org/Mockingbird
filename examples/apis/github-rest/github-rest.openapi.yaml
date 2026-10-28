@@ -1,0 +1,564 @@
+# A hand-written subset of the GitHub REST API v3 (repositories, issues, pull
+# requests, users, search), written for Mockingbird's examples and covered by
+# its license. Paths, operation ids and shapes follow GitHub's published
+# OpenAPI description, which is MIT-licensed:
+#   https://github.com/github/rest-api-description (descriptions/api.github.com/api.github.com.json)
+# `mockingbird examples init github-rest --full` swaps this file for that spec
+# at the commit pinned in example.json.
+openapi: 3.1.0
+info:
+  title: GitHub v3 REST API (Mockingbird example subset)
+  version: "2022-11-28"
+servers:
+  - url: https://api.github.com
+security:
+  - bearerAuth: []
+  - {}
+paths:
+  /user:
+    get:
+      operationId: users/get-authenticated
+      summary: Get the authenticated user.
+      responses:
+        "200":
+          description: The signed-in user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/private-user" }
+        "401": { $ref: "#/components/responses/requires_authentication" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /users/{username}:
+    parameters:
+      - { name: username, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: users/get-by-username
+      summary: Get a user.
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/public-user" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /user/repos:
+    get:
+      operationId: repos/list-for-authenticated-user
+      summary: List repositories for the authenticated user.
+      parameters:
+        - { name: visibility, in: query, schema: { type: string, enum: [all, public, private] } }
+        - { name: sort, in: query, schema: { type: string, enum: [created, updated, pushed, full_name] } }
+        - { $ref: "#/components/parameters/per-page" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200":
+          description: The user's repositories.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/repository" } }
+        "401": { $ref: "#/components/responses/requires_authentication" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+    get:
+      operationId: repos/get
+      summary: Get a repository.
+      responses:
+        "200":
+          description: The repository.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/repository" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}/issues:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+    get:
+      operationId: issues/list-for-repo
+      summary: List repository issues (pull requests included, as on GitHub).
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [open, closed, all], default: open } }
+        - { name: labels, in: query, schema: { type: string } }
+        - { name: sort, in: query, schema: { type: string, enum: [created, updated, comments] } }
+        - { $ref: "#/components/parameters/per-page" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200":
+          description: A page of issues.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/issue" } }
+        "404": { $ref: "#/components/responses/not_found" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+    post:
+      operationId: issues/create
+      summary: Create an issue.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                body: { type: string }
+                assignees: { type: array, items: { type: string } }
+                milestone: { type: [integer, "null"] }
+                labels: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: The new issue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/issue" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "410": { $ref: "#/components/responses/gone" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+      - { name: issue_number, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: issues/get
+      summary: Get an issue.
+      responses:
+        "200":
+          description: The issue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/issue" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "410": { $ref: "#/components/responses/gone" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}/issues/{issue_number}/comments:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+      - { name: issue_number, in: path, required: true, schema: { type: integer } }
+    post:
+      operationId: issues/create-comment
+      summary: Create an issue comment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string }
+      responses:
+        "201":
+          description: The new comment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/issue-comment" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "410": { $ref: "#/components/responses/gone" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}/pulls:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+    get:
+      operationId: pulls/list
+      summary: List pull requests.
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [open, closed, all], default: open } }
+        - { name: base, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/per-page" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200":
+          description: A page of pull requests.
+          content:
+            application/json:
+              schema: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/pull-request" } }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+    post:
+      operationId: pulls/create
+      summary: Create a pull request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [head, base]
+              properties:
+                title: { type: string }
+                head: { type: string }
+                base: { type: string }
+                body: { type: string }
+                draft: { type: boolean }
+                maintainer_can_modify: { type: boolean }
+      responses:
+        "201":
+          description: The new pull request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/pull-request" }
+        "403": { $ref: "#/components/responses/forbidden" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /repos/{owner}/{repo}/pulls/{pull_number}:
+    parameters:
+      - { $ref: "#/components/parameters/owner" }
+      - { $ref: "#/components/parameters/repo" }
+      - { name: pull_number, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: pulls/get
+      summary: Get a pull request.
+      responses:
+        "200":
+          description: The pull request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/pull-request" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "500": { $ref: "#/components/responses/internal_error" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+        "403": { $ref: "#/components/responses/forbidden" }
+  /search/repositories:
+    get:
+      operationId: search/repos
+      summary: Search repositories.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: sort, in: query, schema: { type: string, enum: [stars, forks, help-wanted-issues, updated] } }
+        - { name: order, in: query, schema: { type: string, enum: [desc, asc], default: desc } }
+        - { $ref: "#/components/parameters/per-page" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200":
+          description: Matching repositories.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_count, incomplete_results, items]
+                properties:
+                  total_count: { type: integer, minimum: 0 }
+                  incomplete_results: { type: boolean }
+                  items: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/repository" } }
+        "422": { $ref: "#/components/responses/validation_failed" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+        "403": { $ref: "#/components/responses/forbidden" }
+webhooks:
+  # GitHub's `issues` event (action "opened"), which a successful issues/create triggers.
+  issue.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/webhook-issues-opened" }
+      responses:
+        "200": { description: Acknowledged. }
+  # GitHub's `pull_request` event (action "opened"), which a successful pulls/create triggers.
+  pull.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/webhook-pull-request-opened" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "A personal access token (ghp_...) or app token, sent as Authorization: Bearer <token>."
+  parameters:
+    owner: { name: owner, in: path, required: true, schema: { type: string } }
+    repo: { name: repo, in: path, required: true, schema: { type: string } }
+    per-page: { name: per_page, in: query, schema: { type: integer, default: 30, maximum: 100 } }
+    page: { name: page, in: query, schema: { type: integer, default: 1 } }
+  responses:
+    not_found:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/basic-error" }
+    forbidden:
+      description: Forbidden (also GitHub's primary rate limit answer)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/basic-error" }
+    requires_authentication:
+      description: Requires authentication
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/basic-error" }
+    gone:
+      description: Gone
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/basic-error" }
+    internal_error:
+      description: Internal Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/basic-error" }
+    validation_failed:
+      description: Validation failed, or the endpoint has been spammed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/validation-error" }
+    service_unavailable:
+      description: Service unavailable
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: { type: string }
+              message: { type: string }
+              documentation_url: { type: string }
+  schemas:
+    basic-error:
+      type: object
+      required: [message, documentation_url]
+      properties:
+        message: { type: string }
+        documentation_url: { type: string, format: uri }
+        url: { type: string }
+        status: { type: string }
+    validation-error:
+      type: object
+      required: [message, documentation_url]
+      properties:
+        message: { type: string }
+        documentation_url: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [code]
+            properties:
+              resource: { type: string }
+              field: { type: string }
+              message: { type: string }
+              code: { type: string, enum: [missing, missing_field, invalid, already_exists, unprocessable, custom] }
+    simple-user:
+      type: object
+      required: [login, id, node_id, avatar_url, gravatar_id, url, html_url, type, site_admin]
+      properties:
+        login: { type: string, pattern: "^[a-z][a-z0-9-]{2,15}$" }
+        id: { type: integer, minimum: 1000, maximum: 199999999 }
+        node_id: { type: string, pattern: "^U_kgDO[A-Za-z0-9]{8}$" }
+        avatar_url: { type: string, pattern: "^https://avatars\\.githubusercontent\\.com/u/[0-9]{6,9}\\?v=4$" }
+        gravatar_id: { type: string, const: "" }
+        url: { type: string, pattern: "^https://api\\.github\\.com/users/[a-z][a-z0-9-]{2,15}$" }
+        html_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}$" }
+        type: { type: string, enum: [User, Organization, Bot] }
+        site_admin: { type: boolean, const: false }
+    public-user:
+      allOf:
+        - { $ref: "#/components/schemas/simple-user" }
+        - type: object
+          required: [name, company, blog, location, email, bio, public_repos, public_gists, followers, following, created_at, updated_at]
+          properties:
+            name: { type: [string, "null"] }
+            company: { type: [string, "null"] }
+            blog: { type: [string, "null"] }
+            location: { type: [string, "null"] }
+            email: { type: [string, "null"], format: email }
+            hireable: { type: [boolean, "null"] }
+            bio: { type: [string, "null"] }
+            twitter_username: { type: [string, "null"] }
+            public_repos: { type: integer, minimum: 0, maximum: 400 }
+            public_gists: { type: integer, minimum: 0, maximum: 80 }
+            followers: { type: integer, minimum: 0, maximum: 20000 }
+            following: { type: integer, minimum: 0, maximum: 500 }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    private-user:
+      allOf:
+        - { $ref: "#/components/schemas/public-user" }
+        - type: object
+          required: [private_gists, total_private_repos, owned_private_repos, two_factor_authentication]
+          properties:
+            private_gists: { type: integer, minimum: 0 }
+            total_private_repos: { type: integer, minimum: 0 }
+            owned_private_repos: { type: integer, minimum: 0 }
+            two_factor_authentication: { type: boolean }
+    license-simple:
+      type: object
+      required: [key, name, spdx_id, url, node_id]
+      properties:
+        key: { type: string, enum: [mit, apache-2.0, mpl-2.0, bsd-3-clause] }
+        name: { type: string }
+        spdx_id: { type: string, enum: [MIT, Apache-2.0, MPL-2.0, BSD-3-Clause] }
+        url: { type: [string, "null"], format: uri }
+        node_id: { type: string }
+    repository:
+      type: object
+      required: [id, node_id, name, full_name, private, owner, html_url, description, fork, url, created_at, updated_at, pushed_at, homepage, size, stargazers_count, watchers_count, language, forks_count, open_issues_count, default_branch, visibility, topics, archived, disabled, license]
+      properties:
+        id: { type: integer, minimum: 100000000, maximum: 999999999 }
+        node_id: { type: string, pattern: "^R_kgDO[A-Za-z0-9]{6}$" }
+        name: { type: string, pattern: "^[a-z][a-z0-9-]{2,20}$" }
+        full_name: { type: string, pattern: "^[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}$" }
+        private: { type: boolean }
+        owner: { $ref: "#/components/schemas/simple-user" }
+        html_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}$" }
+        description: { type: [string, "null"] }
+        fork: { type: boolean }
+        url: { type: string, pattern: "^https://api\\.github\\.com/repos/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}$" }
+        clone_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}\\.git$" }
+        ssh_url: { type: string, pattern: "^git@github\\.com:[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}\\.git$" }
+        homepage: { type: [string, "null"], format: uri }
+        size: { type: integer, minimum: 0 }
+        stargazers_count: { type: integer, minimum: 0, maximum: 50000 }
+        watchers_count: { type: integer, minimum: 0, maximum: 50000 }
+        subscribers_count: { type: integer, minimum: 0 }
+        language: { type: [string, "null"], enum: [Rust, TypeScript, Go, Python, null] }
+        forks_count: { type: integer, minimum: 0, maximum: 5000 }
+        open_issues_count: { type: integer, minimum: 0, maximum: 300 }
+        default_branch: { type: string, const: main }
+        visibility: { type: string, enum: [public, private, internal] }
+        topics: { type: array, maxItems: 5, items: { type: string, pattern: "^[a-z][a-z0-9-]{2,20}$" } }
+        has_issues: { type: boolean }
+        has_wiki: { type: boolean }
+        archived: { type: boolean }
+        disabled: { type: boolean }
+        license: { oneOf: [{ $ref: "#/components/schemas/license-simple" }, { type: "null" }] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        pushed_at: { type: string, format: date-time }
+    label:
+      type: object
+      required: [id, node_id, url, name, description, color, default]
+      properties:
+        id: { type: integer }
+        node_id: { type: string, pattern: "^LA_kwDO[A-Za-z0-9]{12}$" }
+        url: { type: string, format: uri }
+        name: { type: string, enum: [bug, enhancement, documentation, good first issue, help wanted, question] }
+        description: { type: [string, "null"] }
+        color: { type: string, pattern: "^[0-9a-f]{6}$" }
+        default: { type: boolean }
+    issue:
+      type: object
+      required: [id, node_id, url, repository_url, html_url, number, state, title, body, user, labels, assignee, assignees, locked, comments, created_at, updated_at, closed_at, author_association]
+      properties:
+        id: { type: integer, minimum: 1000000000, maximum: 3999999999 }
+        node_id: { type: string, pattern: "^I_kwDO[A-Za-z0-9]{12}$" }
+        url: { type: string, pattern: "^https://api\\.github\\.com/repos/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}/issues/[0-9]{1,4}$" }
+        repository_url: { type: string, pattern: "^https://api\\.github\\.com/repos/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}$" }
+        html_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}/issues/[0-9]{1,4}$" }
+        number: { type: integer, minimum: 1, maximum: 2000 }
+        state: { type: string, enum: [open, closed] }
+        state_reason: { type: [string, "null"], enum: [completed, reopened, not_planned, null] }
+        title: { type: string }
+        body: { type: [string, "null"] }
+        user: { $ref: "#/components/schemas/simple-user" }
+        labels: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/label" } }
+        assignee: { oneOf: [{ $ref: "#/components/schemas/simple-user" }, { type: "null" }] }
+        assignees: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/simple-user" } }
+        locked: { type: boolean }
+        comments: { type: integer, minimum: 0, maximum: 60 }
+        pull_request:
+          type: object
+          description: Present when the issue is a pull request.
+          properties:
+            url: { type: string, format: uri }
+            html_url: { type: string, format: uri }
+            diff_url: { type: string, format: uri }
+            patch_url: { type: string, format: uri }
+        closed_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        author_association: { type: string, enum: [OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE] }
+    issue-comment:
+      type: object
+      required: [id, node_id, url, html_url, issue_url, body, user, created_at, updated_at, author_association]
+      properties:
+        id: { type: integer, minimum: 1000000000, maximum: 3999999999 }
+        node_id: { type: string, pattern: "^IC_kwDO[A-Za-z0-9]{14}$" }
+        url: { type: string, format: uri }
+        html_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}/issues/[0-9]{1,4}#issuecomment-[0-9]{10}$" }
+        issue_url: { type: string, format: uri }
+        body: { type: string }
+        user: { $ref: "#/components/schemas/simple-user" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        author_association: { type: string, enum: [OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE] }
+    pull-request:
+      type: object
+      required: [id, node_id, url, html_url, diff_url, number, state, locked, title, body, user, labels, created_at, updated_at, closed_at, merged_at, merge_commit_sha, draft, head, base, author_association]
+      properties:
+        id: { type: integer, minimum: 1000000000, maximum: 2999999999 }
+        node_id: { type: string, pattern: "^PR_kwDO[A-Za-z0-9]{12}$" }
+        url: { type: string, pattern: "^https://api\\.github\\.com/repos/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}/pulls/[0-9]{1,4}$" }
+        html_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}/pull/[0-9]{1,4}$" }
+        diff_url: { type: string, pattern: "^https://github\\.com/[a-z][a-z0-9-]{2,15}/[a-z][a-z0-9-]{2,20}/pull/[0-9]{1,4}\\.diff$" }
+        number: { type: integer, minimum: 1, maximum: 2000 }
+        state: { type: string, enum: [open, closed] }
+        locked: { type: boolean }
+        title: { type: string }
+        body: { type: [string, "null"] }
+        user: { $ref: "#/components/schemas/simple-user" }
+        labels: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/label" } }
+        draft: { type: boolean }
+        merged: { type: boolean }
+        mergeable: { type: [boolean, "null"] }
+        merge_commit_sha: { type: [string, "null"], pattern: "^[0-9a-f]{40}$" }
+        head: { $ref: "#/components/schemas/pull-request-ref" }
+        base: { $ref: "#/components/schemas/pull-request-ref" }
+        comments: { type: integer, minimum: 0 }
+        commits: { type: integer, minimum: 1, maximum: 40 }
+        additions: { type: integer, minimum: 0 }
+        deletions: { type: integer, minimum: 0 }
+        changed_files: { type: integer, minimum: 1 }
+        author_association: { type: string, enum: [OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE] }
+        closed_at: { type: [string, "null"], format: date-time }
+        merged_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    pull-request-ref:
+      type: object
+      required: [label, ref, sha, user]
+      properties:
+        label: { type: string, pattern: "^[a-z][a-z0-9-]{2,15}:[a-z][a-z0-9/-]{2,30}$" }
+        ref: { type: string, pattern: "^[a-z][a-z0-9/-]{2,30}$" }
+        sha: { type: string, pattern: "^[0-9a-f]{40}$" }
+        user: { $ref: "#/components/schemas/simple-user" }
+    webhook-issues-opened:
+      type: object
+      required: [action, issue, repository, sender]
+      properties:
+        action: { type: string, const: opened }
+        issue: { $ref: "#/components/schemas/issue" }
+        repository: { $ref: "#/components/schemas/repository" }
+        sender: { $ref: "#/components/schemas/simple-user" }
+    webhook-pull-request-opened:
+      type: object
+      required: [action, number, pull_request, repository, sender]
+      properties:
+        action: { type: string, const: opened }
+        number: { type: integer }
+        pull_request: { $ref: "#/components/schemas/pull-request" }
+        repository: { $ref: "#/components/schemas/repository" }
+        sender: { $ref: "#/components/schemas/simple-user" }

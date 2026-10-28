@@ -18,7 +18,7 @@ Configure OIDC under config.auth (see examples/rauthy-values.yaml).
 Console and Admin API:
 {{- if .Values.adminIngress.enabled }}
 {{- range .Values.adminIngress.hosts }}
-  http{{ if $.Values.adminIngress.tls }}s{{ end }}://{{ .host }}/
+  http{{ if $.Values.adminIngress.tls }}s{{ end }}://{{ tpl .host $ }}/
 {{- end }}
 {{- else }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "mockingbird.fullname" . }}-admin {{ .Values.service.ports.admin }}
@@ -28,8 +28,20 @@ Console and Admin API:
 Mocks (HTTP):
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}
-  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/<mock route prefix>
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ tpl .host $ }}/<mock route prefix>
 {{- end }}
 {{- else }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "mockingbird.fullname" . }} {{ .Values.service.ports.http }}
+{{- end }}
+
+{{- with .Values.mocks }}
+
+Declared mocks ({{ $.Values.reload }}):
+{{- range $name, $mock := . }}
+  {{ $name }}: http://{{ include "mockingbird.fullname" $ }}.{{ $.Release.Namespace }}:{{ $.Values.service.ports.http }}{{ default (printf "/%s" $name) $mock.route_prefix }}
+{{- end }}
+{{- end }}
+{{- if .Values.tests.enabled }}
+
+Check them: helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
 {{- end }}

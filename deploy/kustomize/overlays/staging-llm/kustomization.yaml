@@ -1,0 +1,17 @@
+# Staging: LLM-backed answers (the key from the existing Secret
+# `mockingbird-llm`, key `api-key`), a richer persona, a token budget and an
+# ingress.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mocks-staging
+resources:
+  - namespace.yaml
+  - ../../base
+  - ingress.yaml
+configMapGenerator:
+  - name: mockingbird-config
+    behavior: merge
+    files:
+      - mockingbird.yaml
+patches:
+  - path: deployment-llm.yaml

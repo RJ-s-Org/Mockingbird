@@ -6,6 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# `cargo binstall --git https://github.com/RJ-s-Org/Mockingbird mockingbird`
+# downloads the release archive instead of building. (The `mockingbird` name
+# on crates.io belongs to another project, hence `--git`.)
+[package.metadata.binstall]
+pkg-url = "https://github.com/RJ-s-Org/Mockingbird/releases/download/v{ version }/{ name }-{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [lints]
 workspace = true
 
@@ -44,6 +55,7 @@ notify-debouncer-full.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 sha2.workspace = true
+sha1.workspace = true
 mb-engine.workspace = true
 mb-ext.workspace = true
 mb-import = { workspace = true, features = ["smart"] }
@@ -64,7 +76,7 @@ rustls-native-certs.workspace = true
 json-patch.workspace = true
 serde_json.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["signal", "io-std", "io-util"] }
+tokio = { workspace = true, features = ["signal", "io-std", "io-util", "process"] }
 tokio-rustls.workspace = true
 tower.workspace = true
 tracing.workspace = true

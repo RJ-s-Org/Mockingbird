@@ -1,0 +1,47 @@
+# Slack Web API: auth.test, chat.postMessage, conversations, users and reactions.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/api/chat.postMessage -H 'Host: slack.com' -H 'Authorization: Bearer xoxb-test' \
+#     -H 'content-type: application/json' -d '{"channel":"C08ABC1DEFG","text":"Deploy finished"}'
+# Contract: slack.openapi.yaml, a hand-written subset (see its header). The full
+# upstream spec (MIT) is pinned in example.json; fetch it with
+# `mockingbird examples init slack --full`.
+proxy:
+  enabled: true          # apps reach https://slack.com/api through http://127.0.0.1:8888
+mocks:
+  slack:
+    contract: slack.openapi.yaml
+    route_prefix: /api
+    hosts: [slack.com]
+    persona: >-
+      Slack Web API for the "Lantern Labs" workspace (lanternlabs.slack.com, team
+      T07LANTRN01), a 40-person developer-tools startup in Berlin and New York.
+      The token belongs to the bot user "deploybot" (U07DPLYBOT1, bot B07DPLYBOT1).
+      Ids are Slack-style: C0 + 9 uppercase alphanumerics for channels, U0... users,
+      T0... teams, B0... bots. Message ts values are "<unix seconds>.<6 digits>"
+      from the last few days. Channels are #general, #engineering, #deploys,
+      #incidents, #random and #design; people have realistic English and German
+      names with @lanternlabs.dev emails. chat.postMessage echoes the channel and
+      text it was sent, from user U07DPLYBOT1 with subtype bot_message. Calls
+      succeed: answer the "ok": true shape unless a scenario asks for an error
+      (Slack reports errors as HTTP 200 with {"ok": false, "error": "<code>"}).
+    scenarios:
+      channel-not-found:
+        # Slack reports most errors as HTTP 200 with ok:false.
+        # No status: the 200 answer is kept and `set` turns it into the error shape.
+        operations: [chat_postMessage, conversations_history, reactions_add]
+        set:
+          ok: false
+          error: channel_not_found
+          message: null      # a merge patch: null drops the success fields
+          messages: null
+          ts: null
+      ratelimited:
+        status: 429
+        set:
+          ok: false
+          error: ratelimited
+      outage:
+        status: 503
+        set:
+          ok: false
+          error: service_unavailable

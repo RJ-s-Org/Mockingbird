@@ -1,0 +1,64 @@
+# Notion: pages, blocks, data source and database queries, search and the bot user.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/v1/users/me -H 'Host: api.notion.com' -H 'Authorization: Bearer ntn_test_123' -H 'Notion-Version: 2025-09-03'
+# Contract: notion.openapi.yaml, a hand-written subset (see its header). Notion's
+# own OpenAPI description (MIT) is pinned in example.json; fetch it
+# with `mockingbird examples init notion --full` (its page and block answers are
+# untyped objects, so offline answers for them are empty).
+proxy:
+  enabled: true          # apps reach https://api.notion.com through http://127.0.0.1:8888
+mocks:
+  notion:
+    contract: notion.openapi.yaml
+    route_prefix: /
+    hosts: [api.notion.com]
+    persona: >-
+      Notion API for the "Ferngrove Studio" workspace, a small design agency in
+      Melbourne (en-AU), reached by an internal integration bot named "Ferngrove
+      Sync". The workspace has a "Launch Tracker" database (one data source of the
+      same name) whose pages have Name (title), Status (Not started, In progress,
+      Blocked, Done), Due (date) and Priority (P0 to P2), and project pages such as
+      "Brand refresh – Wattle & Co" and "Client kickoff – Harbourline Ferries".
+      Ids are UUIDs with dashes; url is "https://www.notion.so/<Title-With-Dashes>-<id
+      without dashes>". created_time and last_edited_time are recent ISO 8601 UTC
+      times with seconds and milliseconds at zero (e.g. 2026-10-21T03:14:00.000Z).
+      A created page copies parent, properties and icon from the request; appended
+      blocks echo the children sent, with ids assigned. Every answer carries a fresh
+      request_id uuid.
+    webhooks:
+      # Notion signs with X-Notion-Signature; the mock signs with
+      # X-Mockingbird-Signature (same HMAC, see the README).
+      - url: http://127.0.0.1:3000/notion/webhook
+        events: [page.created, page.updated]
+        secret: env:NOTION_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      object-not-found:
+        status: 404
+        set:
+          object: error
+          status: 404
+          code: object_not_found
+          message: "Could not find page with ID: 59833787-2cf9-4fdf-8782-e53db20768a5. Make sure the relevant pages and databases are shared with your integration."
+      validation-error:
+        status: 400
+        operations: [post-page, patch-page, patch-block-children, query-data-source]
+        set:
+          object: error
+          status: 400
+          code: validation_error
+          message: "body failed validation. Fix one: body.parent.page_id should be defined, instead was `undefined`. body.parent.database_id should be defined, instead was `undefined`."
+      rate-limited:
+        status: 429
+        set:
+          object: error
+          status: 429
+          code: rate_limited
+          message: "You have been rate limited. Please try again in a few minutes."
+      outage:
+        status: 503
+        set:
+          object: error
+          status: 503
+          code: service_unavailable
+          message: "Notion is unavailable, please try again later. This can occur when the time to respond to a request takes longer than 60 seconds, the maximum request timeout."

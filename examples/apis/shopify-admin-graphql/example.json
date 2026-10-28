@@ -1,0 +1,46 @@
+{
+  "name": "shopify-admin-graphql",
+  "title": "Shopify Admin GraphQL",
+  "category": "commerce",
+  "protocol": "graphql",
+  "summary": "The Shopify Admin GraphQL API 2026-10 for a myshopify.com store: shop, products and variants, inventory, orders and customers, productCreate with userErrors, and product and customer webhooks.",
+  "contracts": [
+    "shopify-admin.graphql"
+  ],
+  "hosts": [
+    "juniper-plants.myshopify.com"
+  ],
+  "scenarios": [
+    "invalid-product",
+    "slow",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://shopify.dev/docs/api/admin-graphql/2026-10",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Shopify publishes no Admin API schema file under an open licence: the full schema is served by introspection to authenticated apps (and the shopify.dev proxy) under Shopify's API terms, so the hand-written subset is the only contract."
+  },
+  "sdk": {
+    "language": "node",
+    "package": "@shopify/admin-api-client",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/admin/api/2026-10/graphql.json",
+    "host": "juniper-plants.myshopify.com",
+    "headers": {
+      "x-shopify-access-token": "shpat_test123"
+    },
+    "body": {
+      "query": "{ shop { name myshopifyDomain currencyCode } products(first: 3) { nodes { id title status } } }"
+    },
+    "status": 200,
+    "expect": "\"myshopifyDomain\""
+  }
+}

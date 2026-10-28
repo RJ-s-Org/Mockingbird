@@ -1,0 +1,51 @@
+{
+  "name": "hubspot",
+  "title": "HubSpot CRM",
+  "category": "crm",
+  "protocol": "openapi",
+  "summary": "CRM v3 contacts (list, create, get, update, archive, search), companies and deals with HubSpot's error bodies, contact webhooks, and conflict, validation, rate-limit and outage scenarios.",
+  "contracts": [
+    "hubspot.openapi.yaml"
+  ],
+  "hosts": [
+    "api.hubapi.com"
+  ],
+  "scenarios": [
+    "contact-exists",
+    "invalid-email",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/HubSpot/HubSpot-public-api-spec-collection",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "HubSpot's OpenAPI specs are published for its Postman workspace; the repository README states they are proprietary and not licensed for external use, so none is pinned. The contract keeps HubSpot's operation ids for the contacts and companies endpoints."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "hubspot-api-client",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/crm/v3/objects/contacts",
+    "host": "api.hubapi.com",
+    "headers": {
+      "Authorization": "Bearer pat-na1-test"
+    },
+    "body": {
+      "properties": {
+        "email": "dana.whitfield@example.com",
+        "firstname": "Dana",
+        "lastname": "Whitfield"
+      }
+    },
+    "status": 201,
+    "expect": "\"hs_object_id\""
+  }
+}

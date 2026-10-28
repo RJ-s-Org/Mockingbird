@@ -1,0 +1,556 @@
+# A hand-written subset of the Square API (Payments, Refunds, Customers,
+# Locations, Catalog), written for Mockingbird's examples and covered by its
+# license. Shapes and operation ids follow Square's published OpenAPI
+# description, which is Apache-2.0:
+#   https://github.com/square/connect-api-specification (api.json)
+# That spec is pinned in example.json for reference only: it has
+# dangling $refs that Mockingbird cannot compile. The 4xx/429/5xx responses are not
+# in the upstream file (it declares only 200); their bodies follow
+# https://developer.squareup.com/docs/build-basics/handling-errors.
+openapi: 3.1.0
+info:
+  title: Square Connect API (Mockingbird example subset)
+  version: "2.0"
+servers:
+  - url: https://connect.squareupsandbox.com
+  - url: https://connect.squareup.com
+security:
+  - oauth2: []
+paths:
+  /v2/payments:
+    get:
+      operationId: ListPayments
+      summary: List payments taken by the account, newest first.
+      parameters:
+        - { name: begin_time, in: query, schema: { type: string } }
+        - { name: end_time, in: query, schema: { type: string } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [ASC, DESC] } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: location_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: A page of payments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/Payment" } }
+                  cursor: { type: [string, "null"], pattern: "^[A-Za-z0-9]{40}$", description: "Absent on the last page (null here, so SDK pagers stop offline)." }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: CreatePayment
+      summary: Create a payment from a card nonce, card on file or other source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_id, idempotency_key]
+              properties:
+                source_id: { type: string, description: "A payment token such as cnon:card-nonce-ok, or a card on file id." }
+                idempotency_key: { type: string, minLength: 1, maxLength: 45 }
+                amount_money: { $ref: "#/components/schemas/Money" }
+                tip_money: { $ref: "#/components/schemas/Money" }
+                autocomplete: { type: boolean }
+                order_id: { type: string }
+                customer_id: { type: string }
+                location_id: { type: string }
+                reference_id: { type: string, maxLength: 40 }
+                verification_token: { type: string }
+                buyer_email_address: { type: string }
+                note: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: The new payment.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  payment: { $ref: "#/components/schemas/Payment" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "402": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/payments/{payment_id}:
+    parameters:
+      - { name: payment_id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: GetPayment
+      summary: Retrieve a payment.
+      responses:
+        "200":
+          description: The payment.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payment: { $ref: "#/components/schemas/Payment" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/payments/{payment_id}/complete:
+    parameters:
+      - { name: payment_id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: CompletePayment
+      summary: Complete (capture) an APPROVED payment.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version_token: { type: string }
+      responses:
+        "200":
+          description: The completed payment.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  payment: { $ref: "#/components/schemas/Payment" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/refunds:
+    post:
+      operationId: RefundPayment
+      summary: Refund a payment, in full or in part.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotency_key, amount_money]
+              properties:
+                idempotency_key: { type: string, minLength: 1, maxLength: 45 }
+                amount_money: { $ref: "#/components/schemas/Money" }
+                payment_id: { type: string }
+                reason: { type: string, maxLength: 192 }
+      responses:
+        "200":
+          description: The new refund.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  refund: { $ref: "#/components/schemas/PaymentRefund" }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/customers:
+    get:
+      operationId: ListCustomers
+      summary: List customer profiles.
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: sort_field, in: query, schema: { type: string, enum: [DEFAULT, CREATED_AT] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [ASC, DESC] } }
+      responses:
+        "200":
+          description: A page of customers.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customers: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/Customer" } }
+                  cursor: { type: [string, "null"], pattern: "^[A-Za-z0-9]{40}$", description: "Absent on the last page (null here, so SDK pagers stop offline)." }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: CreateCustomer
+      summary: Create a customer profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                idempotency_key: { type: string }
+                given_name: { type: string }
+                family_name: { type: string }
+                company_name: { type: string }
+                nickname: { type: string }
+                email_address: { type: string }
+                address: { $ref: "#/components/schemas/Address" }
+                phone_number: { type: string }
+                reference_id: { type: string }
+                note: { type: string }
+                birthday: { type: string }
+      responses:
+        "200":
+          description: The new customer.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  customer: { $ref: "#/components/schemas/Customer" }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/customers/{customer_id}:
+    parameters:
+      - { name: customer_id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: RetrieveCustomer
+      summary: Retrieve a customer profile.
+      responses:
+        "200":
+          description: The customer.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customer: { $ref: "#/components/schemas/Customer" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/locations:
+    get:
+      operationId: ListLocations
+      summary: List the seller's locations.
+      responses:
+        "200":
+          description: The locations.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  locations: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/Location" } }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /v2/catalog/list:
+    get:
+      operationId: ListCatalog
+      summary: List catalog objects of the given types.
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: types, in: query, schema: { type: string }, description: "Comma-separated CatalogObjectType values, e.g. ITEM,CATEGORY." }
+        - { name: catalog_version, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          description: A page of catalog objects.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  objects: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/CatalogObject" } }
+                  cursor: { type: [string, "null"], pattern: "^[A-Za-z0-9]{40}$", description: "Absent on the last page (null here, so SDK pagers stop offline)." }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+webhooks:
+  payment.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/EventEnvelope" }
+                - type: object
+                  properties:
+                    type: { type: string, const: payment.created }
+                    data:
+                      type: object
+                      required: [type, id, object]
+                      properties:
+                        type: { type: string, const: payment }
+                        id: { $ref: "#/components/schemas/PaymentId" }
+                        object:
+                          type: object
+                          required: [payment]
+                          properties:
+                            payment: { $ref: "#/components/schemas/Payment" }
+      responses:
+        "200": { description: Acknowledged. }
+  customer.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/EventEnvelope" }
+                - type: object
+                  properties:
+                    type: { type: string, const: customer.created }
+                    data:
+                      type: object
+                      required: [type, id, object]
+                      properties:
+                        type: { type: string, const: customer }
+                        id: { $ref: "#/components/schemas/CustomerId" }
+                        object:
+                          type: object
+                          required: [customer]
+                          properties:
+                            customer: { $ref: "#/components/schemas/Customer" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      description: "Personal access token or OAuth token as Authorization: Bearer <token>, with a Square-Version header."
+      flows:
+        authorizationCode:
+          authorizationUrl: https://connect.squareupsandbox.com/oauth2/authorize
+          tokenUrl: https://connect.squareupsandbox.com/oauth2/token
+          scopes:
+            PAYMENTS_READ: Read payments and refunds.
+            PAYMENTS_WRITE: Take payments and refunds.
+            CUSTOMERS_READ: Read customer profiles.
+            CUSTOMERS_WRITE: Write customer profiles.
+            MERCHANT_PROFILE_READ: Read business and location information.
+            ITEMS_READ: Read the product catalog.
+  responses:
+    Error:
+      description: Square errors (PAYMENT_METHOD_ERROR, INVALID_REQUEST_ERROR, RATE_LIMIT_ERROR, API_ERROR, ...).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+  schemas:
+    PaymentId: { type: string, pattern: "^[A-Za-z0-9]{29}$" }
+    CustomerId: { type: string, pattern: "^[A-Z0-9]{26}$" }
+    LocationId: { type: string, pattern: "^L[A-Z0-9]{12}$" }
+    Timestamp: { type: string, format: date-time }
+    Money:
+      type: object
+      properties:
+        amount: { type: integer, minimum: 0, maximum: 50000, description: Smallest currency unit (cents). }
+        currency: { type: string, enum: [USD] }
+    Address:
+      type: object
+      properties:
+        address_line_1: { type: string }
+        address_line_2: { type: string }
+        locality: { type: string }
+        administrative_district_level_1: { type: string, pattern: "^[A-Z]{2}$" }
+        postal_code: { type: string, pattern: "^[0-9]{5}$" }
+        country: { type: string, const: US }
+    Payment:
+      type: object
+      required: [id, created_at, updated_at, amount_money, total_money, status, source_type, location_id, order_id, receipt_number, version_token]
+      properties:
+        id: { $ref: "#/components/schemas/PaymentId" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        amount_money: { $ref: "#/components/schemas/Money" }
+        tip_money: { $ref: "#/components/schemas/Money" }
+        total_money: { $ref: "#/components/schemas/Money" }
+        approved_money: { $ref: "#/components/schemas/Money" }
+        processing_fee:
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            properties:
+              effective_at: { $ref: "#/components/schemas/Timestamp" }
+              type: { type: string, const: INITIAL }
+              amount_money: { $ref: "#/components/schemas/Money" }
+        status: { type: string, enum: [APPROVED, PENDING, COMPLETED, CANCELED, FAILED] }
+        delay_duration: { type: string, const: PT168H }
+        delay_action: { type: string, enum: [CANCEL, COMPLETE] }
+        source_type: { type: string, enum: [CARD, BANK_ACCOUNT, WALLET, BUY_NOW_PAY_LATER, SQUARE_ACCOUNT, CASH, EXTERNAL] }
+        card_details:
+          type: object
+          properties:
+            status: { type: string, enum: [AUTHORIZED, CAPTURED, VOIDED, FAILED] }
+            card:
+              type: object
+              properties:
+                card_brand: { type: string, enum: [VISA, MASTERCARD, AMERICAN_EXPRESS, DISCOVER, JCB] }
+                last_4: { type: string, pattern: "^[0-9]{4}$" }
+                exp_month: { type: integer, minimum: 1, maximum: 12 }
+                exp_year: { type: integer, minimum: 2027, maximum: 2032 }
+                fingerprint: { type: string, pattern: "^sq-1-[A-Za-z0-9_-]{40}$" }
+                card_type: { type: string, enum: [UNKNOWN_CARD_TYPE, CREDIT, DEBIT] }
+                prepaid_type: { type: string, enum: [UNKNOWN_PREPAID_TYPE, NOT_PREPAID, PREPAID] }
+                bin: { type: string, pattern: "^[0-9]{6}$" }
+            entry_method: { type: string, enum: [KEYED, SWIPED, EMV, ON_FILE, CONTACTLESS] }
+            cvv_status: { type: string, enum: [CVV_ACCEPTED, CVV_REJECTED, CVV_NOT_CHECKED] }
+            avs_status: { type: string, enum: [AVS_ACCEPTED, AVS_REJECTED, AVS_NOT_CHECKED] }
+            auth_result_code: { type: string, pattern: "^[A-Za-z0-9]{6}$" }
+            statement_description: { type: string, pattern: "^SQ \\*[A-Z ]{4,18}$" }
+            card_payment_timeline:
+              type: object
+              properties:
+                authorized_at: { $ref: "#/components/schemas/Timestamp" }
+                captured_at: { $ref: "#/components/schemas/Timestamp" }
+        location_id: { $ref: "#/components/schemas/LocationId" }
+        order_id: { type: string, pattern: "^[A-Za-z0-9]{29}$" }
+        reference_id: { type: string }
+        customer_id: { $ref: "#/components/schemas/CustomerId" }
+        refund_ids: { type: array, maxItems: 1, items: { type: string } }
+        refunded_money: { $ref: "#/components/schemas/Money" }
+        risk_evaluation:
+          type: object
+          properties:
+            created_at: { $ref: "#/components/schemas/Timestamp" }
+            risk_level: { type: string, enum: [PENDING, NORMAL, MODERATE, HIGH] }
+        buyer_email_address: { type: string, format: email }
+        note: { type: string }
+        receipt_number: { type: string, pattern: "^[A-Za-z0-9]{4}$" }
+        receipt_url: { type: string, format: uri }
+        application_details:
+          type: object
+          properties:
+            square_product: { type: string, enum: [ECOMMERCE_API, VIRTUAL_TERMINAL, SQUARE_POS, INVOICES] }
+            application_id: { type: string, pattern: "^sandbox-sq0idb-[A-Za-z0-9_-]{22}$" }
+        version_token: { type: string, pattern: "^[A-Za-z0-9]{43}$" }
+    PaymentRefund:
+      type: object
+      required: [id, status, amount_money, payment_id, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: "^[A-Za-z0-9]{29}_[A-Za-z0-9]{50}$" }
+        status: { type: string, enum: [PENDING, COMPLETED, REJECTED, FAILED] }
+        location_id: { $ref: "#/components/schemas/LocationId" }
+        amount_money: { $ref: "#/components/schemas/Money" }
+        payment_id: { $ref: "#/components/schemas/PaymentId" }
+        order_id: { type: string, pattern: "^[A-Za-z0-9]{29}$" }
+        reason: { type: string }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    Customer:
+      type: object
+      required: [id, created_at, updated_at, given_name, family_name, email_address, preferences, creation_source, version]
+      properties:
+        id: { $ref: "#/components/schemas/CustomerId" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        given_name: { type: string }
+        family_name: { type: string }
+        nickname: { type: string }
+        company_name: { type: string }
+        email_address: { type: string, format: email }
+        address: { $ref: "#/components/schemas/Address" }
+        phone_number: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        birthday: { type: string, format: date }
+        reference_id: { type: string }
+        note: { type: string }
+        preferences:
+          type: object
+          properties:
+            email_unsubscribed: { type: boolean }
+        creation_source: { type: string, enum: [OTHER, APPOINTMENTS, DIRECTORY, FEEDBACK, INVOICES, LOYALTY, MARKETING, MERGE, ONLINE_STORE, THIRD_PARTY, TERMINAL] }
+        group_ids: { type: array, maxItems: 2, items: { type: string } }
+        segment_ids: { type: array, maxItems: 2, items: { type: string } }
+        version: { type: integer, minimum: 0, maximum: 20 }
+    Location:
+      type: object
+      required: [id, name, status, merchant_id, country, currency, timezone, capabilities, type, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/LocationId" }
+        name: { type: string }
+        address: { $ref: "#/components/schemas/Address" }
+        timezone: { type: string, enum: [America/Los_Angeles, America/New_York, America/Chicago] }
+        capabilities: { type: array, items: { type: string, enum: [CREDIT_CARD_PROCESSING, AUTOMATIC_TRANSFERS] } }
+        status: { type: string, enum: [ACTIVE, INACTIVE] }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        merchant_id: { type: string, pattern: "^ML[A-Z0-9]{11}$" }
+        country: { type: string, const: US }
+        language_code: { type: string, const: en-US }
+        currency: { type: string, const: USD }
+        phone_number: { type: string }
+        business_name: { type: string }
+        type: { type: string, enum: [PHYSICAL, MOBILE] }
+        website_url: { type: string, format: uri }
+        business_email: { type: string, format: email }
+        mcc: { type: string, pattern: "^[0-9]{4}$" }
+    CatalogObject:
+      type: object
+      required: [type, id, updated_at, version, is_deleted, present_at_all_locations]
+      properties:
+        type: { type: string, enum: [ITEM, CATEGORY] }
+        id: { type: string, pattern: "^[A-Z0-9]{24}$" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        version: { type: integer, minimum: 1600000000000, maximum: 1800000000000 }
+        is_deleted: { type: boolean, const: false }
+        present_at_all_locations: { type: boolean }
+        item_data:
+          type: object
+          properties:
+            name: { type: string }
+            description: { type: string }
+            is_taxable: { type: boolean }
+            product_type: { type: string, enum: [REGULAR, APPOINTMENTS_SERVICE] }
+            categories:
+              type: array
+              maxItems: 1
+              items:
+                type: object
+                properties:
+                  id: { type: string, pattern: "^[A-Z0-9]{24}$" }
+                  ordinal: { type: integer }
+            variations:
+              type: array
+              maxItems: 2
+              items:
+                type: object
+                required: [type, id]
+                properties:
+                  type: { type: string, const: ITEM_VARIATION }
+                  id: { type: string, pattern: "^[A-Z0-9]{24}$" }
+                  version: { type: integer }
+                  item_variation_data:
+                    type: object
+                    properties:
+                      item_id: { type: string, pattern: "^[A-Z0-9]{24}$" }
+                      name: { type: string }
+                      sku: { type: string }
+                      pricing_type: { type: string, enum: [FIXED_PRICING, VARIABLE_PRICING] }
+                      price_money: { $ref: "#/components/schemas/Money" }
+        category_data:
+          type: object
+          properties:
+            name: { type: string }
+            category_type: { type: string, enum: [REGULAR_CATEGORY, MENU_CATEGORY] }
+            is_top_level: { type: boolean }
+    Error:
+      type: object
+      required: [category, code]
+      properties:
+        category: { type: string, enum: [API_ERROR, AUTHENTICATION_ERROR, INVALID_REQUEST_ERROR, RATE_LIMIT_ERROR, PAYMENT_METHOD_ERROR, REFUND_ERROR, MERCHANT_SUBSCRIPTION_ERROR, EXTERNAL_VENDOR_ERROR] }
+        code: { type: string, pattern: "^[A-Z_]{6,40}$", description: "An ErrorCode: CARD_DECLINED, GENERIC_DECLINE, CVV_FAILURE, NOT_FOUND, INVALID_VALUE, RATE_LIMITED, INTERNAL_SERVER_ERROR, ..." }
+        detail: { type: string }
+        field: { type: string }
+    ErrorResponse:
+      type: object
+      required: [errors]
+      properties:
+        errors: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/Error" } }
+    EventEnvelope:
+      type: object
+      required: [merchant_id, type, event_id, created_at, data]
+      properties:
+        merchant_id: { type: string, pattern: "^ML[A-Z0-9]{11}$" }
+        type: { type: string }
+        event_id: { type: string, format: uuid }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        data: { type: object }

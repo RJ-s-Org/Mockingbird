@@ -239,6 +239,10 @@ async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
         consistency: Consistency::Off,
         unknown_ids: UnknownIds::NotFound,
         default_scenario: Some("calm".into()),
+        path_rewrite: mb_store::PathRewrite {
+            strip_prefix: Some("/api".into()),
+            add_prefix: Some("/3".into()),
+        },
     };
     store.update_mock(&mock).await.expect("update");
     let got = store

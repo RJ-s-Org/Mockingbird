@@ -3,6 +3,7 @@
 //! them from the data plane, passes other hosts through or blocks them,
 //! and answers placeholder images for `proxy.images` hosts ([`images`]).
 
+pub mod browser;
 pub mod ca;
 pub mod env;
 pub mod forward;
@@ -16,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use crate::file_config::Unmapped;
 use crate::registry::MockRegistry;
 
-pub use server::serve;
+pub use server::{PAC_PATH, pac_script, serve};
 pub use standalone::{
     CaCommand, ProxyArgs, ProxyCommand, ProxyEnvArgs, ProxyRunArgs, StandaloneOptions, ca_command,
     run, run_standalone,
@@ -49,8 +50,8 @@ pub struct ProxyState {
     pub(crate) upstream: axum::Router,
     pub(crate) ca: Arc<ca::LocalCa>,
     pub(crate) unmapped: Unmapped,
-    /// Hosts answered with placeholder images.
-    pub(crate) images: Vec<String>,
+    /// What is answered with placeholder images.
+    pub(crate) images: Vec<images::ImageRule>,
     /// Forwards plain requests to unmapped hosts.
     pub(crate) client: reqwest::Client,
     seen: Mutex<HashSet<String>>,
@@ -67,6 +68,10 @@ impl ProxyState {
         // No fallback to a default client: it would read `HTTP_PROXY`,
         // which may point back at this proxy.
         let client = forward::forward_client()?;
+        let images = images
+            .iter()
+            .map(|entry| images::ImageRule::parse(entry).map_err(|e| anyhow::anyhow!(e)))
+            .collect::<anyhow::Result<_>>()?;
         Ok(Arc::new(ProxyState {
             claims,
             upstream,
@@ -92,14 +97,15 @@ impl ProxyState {
         self.ca.cert_path()
     }
 
-    /// Whether `host` gets placeholder images.
-    pub(crate) fn is_image_host(&self, host: &str) -> bool {
-        self.images.iter().any(|h| h == host)
+    /// Whether a request for `path` on `host` gets a placeholder image.
+    pub(crate) fn is_image(&self, host: &str, path: &str) -> bool {
+        self.images.iter().any(|rule| rule.matches(host, path))
     }
 
-    /// Whether `host` is intercepted: an image host or one a mock claims.
+    /// Whether `host` is intercepted: a `proxy.images` host or one a mock
+    /// claims.
     pub(crate) fn is_mapped(&self, host: &str) -> bool {
-        self.is_image_host(host) || self.claims.claims(host)
+        self.images.iter().any(|rule| rule.host == host) || self.claims.claims(host)
     }
 
     /// Logs `host` once as unmapped and counts the request in
