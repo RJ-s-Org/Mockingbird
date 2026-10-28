@@ -1,0 +1,102 @@
+name: Mockingbird
+description: Start a Mockingbird mock server (offline, snapshot replay or LLM) and route the job's HTTP(S) traffic through it.
+author: RJ-s-Org
+branding:
+  icon: radio
+  color: blue
+
+inputs:
+  version:
+    description: Release tag to install, or `latest`. Ignored when `binary` is set.
+    default: v0.1.0
+  binary:
+    description: Path to a mockingbird binary to use instead of installing a release (a source build).
+    default: ""
+  config:
+    description: Config file (`mockingbird.yaml`).
+    default: ""
+  contracts:
+    description: Contract files to serve without a config file, separated by spaces.
+    default: ""
+  mode:
+    description: "`offline` (faker only), `replay` (answers from `snapshot`, never an LLM), `record` (LLM answers are appended to `snapshot`) or `llm` (the config's LLM profile; pass its key as a step env var)."
+    default: offline
+  snapshot:
+    description: Snapshot directory for `replay` and `record`.
+    default: .mockingbird/snapshot
+  proxy:
+    description: Start the intercepting proxy and export HTTPS_PROXY, HTTP_PROXY, NO_PROXY and the CA variables to the job's later steps.
+    default: "true"
+  port:
+    description: Data-plane port (default from the config, else 8080).
+    default: ""
+  admin-port:
+    description: Admin API port (default from the config, else 9090).
+    default: ""
+  wait:
+    description: How long to wait for the server to be ready before failing.
+    default: 60s
+  state-dir:
+    description: Where the server's pid, log and reports go.
+    default: ${{ runner.temp }}/mockingbird
+
+outputs:
+  data-plane:
+    description: Data-plane URL, e.g. http://127.0.0.1:8080.
+    value: ${{ steps.start.outputs.data-plane }}
+  admin:
+    description: Admin API URL, e.g. http://127.0.0.1:9090.
+    value: ${{ steps.start.outputs.admin }}
+  proxy:
+    description: Proxy URL when `proxy` is true, e.g. http://127.0.0.1:8888.
+    value: ${{ steps.start.outputs.proxy }}
+  version:
+    description: The installed version (`mockingbird --version`).
+    value: ${{ steps.start.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the Mockingbird version
+      id: version
+      if: inputs.binary == ''
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [ "$VERSION" = latest ]; then
+          VERSION=$(gh release view --repo RJ-s-Org/Mockingbird --json tagName --jq .tagName)
+        fi
+        case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
+        echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+    - name: Cache the Mockingbird binary
+      id: cache
+      if: inputs.binary == ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.tool_cache }}/mockingbird/${{ steps.version.outputs.tag }}
+        key: mockingbird-${{ steps.version.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
+    - name: Install Mockingbird
+      if: inputs.binary == '' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        TAG: ${{ steps.version.outputs.tag }}
+        DEST: ${{ runner.tool_cache }}/mockingbird/${{ steps.version.outputs.tag }}
+      run: '"$GITHUB_ACTION_PATH/install.sh"'
+    - name: Start Mockingbird
+      id: start
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        BIN_DIR: ${{ runner.tool_cache }}/mockingbird/${{ steps.version.outputs.tag }}
+        CONFIG: ${{ inputs.config }}
+        CONTRACTS: ${{ inputs.contracts }}
+        MODE: ${{ inputs.mode }}
+        SNAPSHOT: ${{ inputs.snapshot }}
+        PROXY: ${{ inputs.proxy }}
+        PORT: ${{ inputs.port }}
+        ADMIN_PORT: ${{ inputs.admin-port }}
+        WAIT: ${{ inputs.wait }}
+        STATE_DIR: ${{ inputs.state-dir }}
+      run: '"$GITHUB_ACTION_PATH/start.sh"'

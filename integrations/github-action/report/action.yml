@@ -1,0 +1,52 @@
+name: Mockingbird report
+description: Write the Mockingbird report to the job summary, upload the request log, optionally fail on fallbacks, and stop the server.
+author: RJ-s-Org
+branding:
+  icon: radio
+  color: blue
+
+inputs:
+  fail-on-fallback:
+    description: Fail when an answer fell back to the faker because the LLM call or the snapshot replay failed.
+    default: "false"
+  verify:
+    description: More `mockingbird verify` flags, e.g. `--no-unmapped --called getOrder=2`; the step fails when a check fails.
+    default: ""
+  junit:
+    description: Also write the report as JUnit XML (`<state-dir>/report/mockingbird.junit.xml`, uploaded with the artifact).
+    default: "true"
+  artifact:
+    description: Name of the uploaded artifact (report, request log, server log); empty uploads nothing.
+    default: mockingbird
+  stop:
+    description: Stop the server afterwards.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Write the Mockingbird report
+      id: report
+      shell: bash
+      env:
+        FAIL_ON_FALLBACK: ${{ inputs.fail-on-fallback }}
+        VERIFY: ${{ inputs.verify }}
+        JUNIT: ${{ inputs.junit }}
+      run: '"$GITHUB_ACTION_PATH/report.sh"'
+    - name: Upload the request log
+      if: always() && inputs.artifact != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ env.MB_STATE_DIR }}/report
+        if-no-files-found: ignore
+    - name: Stop Mockingbird
+      if: always() && inputs.stop == 'true'
+      shell: bash
+      run: mockingbird server stop --state-dir "$MB_STATE_DIR" || true
+    - name: Fail on the checks
+      if: steps.report.outputs.failed == 'true'
+      shell: bash
+      run: |
+        echo "::error::mockingbird verify failed; see the job summary"
+        exit 1

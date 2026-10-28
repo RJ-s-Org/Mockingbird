@@ -1,0 +1,11 @@
+# The action's self-test (.github/workflows/integrations.yml): one offline
+# mock that claims api.orders.test, and a proxy that blocks every other host.
+mocks:
+  orders:
+    contract: ../../../fixtures/openapi/orders-3.0.yaml
+    route_prefix: /
+    hosts: [api.orders.test]
+
+proxy:
+  enabled: true
+  unmapped: block

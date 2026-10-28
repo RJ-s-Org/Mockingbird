@@ -9,7 +9,7 @@ mockingbird run -c mockingbird.yaml -- npm test
 ## `mockingbird run`
 
 ```text
-mockingbird run [-c <config>] [--offline] [--wait <duration>] [--keep] [--state-dir <dir>] -- <command> [args…]
+mockingbird run [-c <config>] [--offline] [--record <dir> | --replay <dir>] [--wait <duration>] [--keep] [--state-dir <dir>] -- <command> [args…]
 ```
 
 1. Starts the server with its proxy (`server start --proxy`, watching the config) unless something already answers on the config's admin port. A running server without its proxy gets one in front of it for the duration of the command.
@@ -21,6 +21,8 @@ mockingbird run [-c <config>] [--offline] [--wait <duration>] [--keep] [--state-
 | --- | --- | --- |
 | `-c`, `--config` | `./mockingbird.yaml` | The config to serve; its `server.*` ports and `proxy.*` settings apply. |
 | `--offline` | off | Faker only, no LLM (for a server `run` starts). |
+| `--record` | none | Record every LLM answer into this snapshot directory (see [CI](ci.md)). |
+| `--replay` | none | Answer from this snapshot directory without calling an LLM; the faker answers a miss. |
 | `--wait` | `60s` | How long to wait for readiness. |
 | `--keep` | off | Leave a server `run` started running (stop it with `mockingbird server stop`). |
 | `--state-dir` | `.mockingbird` (`MB_STATE_DIR`) | Where the pid and `server.log` of the server `run` starts are kept. |
