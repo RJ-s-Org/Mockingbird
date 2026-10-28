@@ -55,7 +55,7 @@ mod vault;
 pub use hooks::{AdminHooks, NoHooks};
 pub use policy::{ConfiguredProfile, ProviderPolicy};
 pub use quota::{AllowAll, QuotaGuard};
-pub use secrets::{EnvFileSecrets, SecretStore};
+pub use secrets::{EnvFileSecrets, SecretStore, check_secret_file, in_key_store};
 pub use tenancy::{CallInfo, SingleTenant, Tenancy, TenantResolver};
 pub use usage::{PrometheusUsage, UsageEvent, UsageSink};
 pub use vault::{DefaultSecrets, VaultSecrets};

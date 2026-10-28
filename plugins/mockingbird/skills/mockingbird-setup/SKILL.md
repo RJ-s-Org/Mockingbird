@@ -74,6 +74,8 @@ MCP equivalents: `init_config`, `configure_llm` (`target: "file"` or `"server"`)
 
 > Please run `export OPENROUTER_API_KEY=…` in the shell that starts Mockingbird (or add it to your shell profile). I will not handle the key itself.
 
+If the agent's MCP server cannot see the variable (desktop agents), run `open_key_setup` (CLI `mockingbird keys setup`): the user types the key into a local page, Mockingbird stores it in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it. The tool returns only the key's name. `mockingbird agent install` also passes the profile's key variable through to agents whose MCP config can reference it.
+
 Never ask the user to paste a key into the chat, and never write it into a file or argument.
 
 ## 4. Test

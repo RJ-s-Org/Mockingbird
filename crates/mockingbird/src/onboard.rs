@@ -329,6 +329,50 @@ pub fn configure_file(args: &ConfigureArgs) -> anyhow::Result<Value> {
         return Ok(json!({ "profile": name, "yaml": { name.clone(): entry }, "secrets": secrets }));
     }
     let path = &args.config;
+    let mut make_default = false;
+    let backup = rewrite_config(path, |root| {
+        let llm = root
+            .entry("llm")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("llm: is not a mapping"))?;
+        llm.entry("profiles")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("llm.profiles is not a mapping"))?
+            .insert(name.clone(), entry);
+        make_default = args.default || !llm.contains_key("default_profile");
+        if make_default {
+            llm.insert("default_profile".into(), json!(name));
+        }
+        Ok(())
+    })?;
+    next.push(format!(
+        "check it: mockingbird llm test -c {} --profile {name}",
+        path.display()
+    ));
+    next.push(
+        "a server started with --watch picks the change up; otherwise restart it (mockingbird server stop && mockingbird server start -c …)".into(),
+    );
+    Ok(json!({
+        "written": path,
+        "profile": name,
+        "default_profile": make_default,
+        "backup": backup,
+        "secrets": secrets,
+        "next_steps": next,
+    }))
+}
+
+/// Rewrites the config at `path` (a new one when missing) with `edit`
+/// applied to its root mapping. The leading comment block is kept; other
+/// comments are lost in the rewrite, so the original is then kept as
+/// `.yaml.bak` (returned). A result that does not load is rolled back.
+/// Nothing is written when `edit` fails.
+fn rewrite_config(
+    path: &Path,
+    edit: impl FnOnce(&mut Map<String, Value>) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<PathBuf>> {
     let existed = path.exists();
     let original = if existed {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
@@ -344,22 +388,7 @@ pub fn configure_file(args: &ConfigureArgs) -> anyhow::Result<Value> {
     let root = doc
         .as_object_mut()
         .ok_or_else(|| anyhow!("{} is not a YAML mapping", path.display()))?;
-    let llm = root
-        .entry("llm")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("llm: is not a mapping"))?;
-    llm.entry("profiles")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("llm.profiles is not a mapping"))?
-        .insert(name.clone(), entry);
-    let make_default = args.default || !llm.contains_key("default_profile");
-    if make_default {
-        llm.insert("default_profile".into(), json!(name));
-    }
-    // The leading comment block is kept; other comments are lost in the
-    // rewrite, so the original is then kept next to it.
+    edit(root)?;
     let header: String = original
         .lines()
         .take_while(|l| l.trim_start().starts_with('#'))
@@ -385,21 +414,51 @@ pub fn configure_file(args: &ConfigureArgs) -> anyhow::Result<Value> {
             path.display()
         )));
     }
-    next.push(format!(
-        "check it: mockingbird llm test -c {} --profile {name}",
-        path.display()
-    ));
-    next.push(
-        "a server started with --watch picks the change up; otherwise restart it (mockingbird server stop && mockingbird server start -c …)".into(),
-    );
-    Ok(json!({
-        "written": path,
-        "profile": name,
-        "default_profile": make_default,
-        "backup": backup,
-        "secrets": secrets,
-        "next_steps": next,
-    }))
+    Ok(backup)
+}
+
+/// The LLM profile of `config` to update: `profile` (which must exist),
+/// else `llm.default_profile`, else the only profile.
+pub fn resolve_profile(config: &Path, profile: Option<&str>) -> anyhow::Result<String> {
+    let cfg = file_config::load(config)?;
+    if let Some(name) = profile {
+        if cfg.llm.profiles.contains_key(name) {
+            return Ok(name.to_string());
+        }
+        bail!("{} has no LLM profile {name:?}", config.display());
+    }
+    if let Some(name) = cfg
+        .llm
+        .default_profile
+        .filter(|n| cfg.llm.profiles.contains_key(n))
+    {
+        return Ok(name);
+    }
+    if cfg.llm.profiles.len() == 1
+        && let Some(name) = cfg.llm.profiles.keys().next()
+    {
+        return Ok(name.clone());
+    }
+    bail!(
+        "{} has no LLM profile to update; create one with `mockingbird llm configure` (MCP configure_llm)",
+        config.display()
+    )
+}
+
+/// Points `llm.profiles.<profile>.api_key` of `config` at `reference` (a
+/// secret reference, never a value). A missing profile writes nothing.
+pub fn set_profile_api_key(config: &Path, profile: &str, reference: &str) -> anyhow::Result<Value> {
+    let backup = rewrite_config(config, |root| {
+        let entry = root
+            .get_mut("llm")
+            .and_then(|l| l.get_mut("profiles"))
+            .and_then(|p| p.get_mut(profile))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("{} has no LLM profile {profile:?}", config.display()))?;
+        entry.insert("api_key".into(), json!(reference));
+        Ok(())
+    })?;
+    Ok(json!({ "config": config, "profile": profile, "backup": backup }))
 }
 
 fn mb_admin_identifier(name: &str) -> bool {
@@ -436,13 +495,37 @@ pub fn test_profile(args: &TestArgs) -> anyhow::Result<FileProfile> {
         .ok_or_else(|| anyhow!("{} has no LLM profile {name:?}", config.display()))
 }
 
-/// `mockingbird validate` as JSON: the contract's title, version,
-/// operations and channels.
+/// How many operations and channels [`contract_summary`] lists.
+pub const SUMMARY_OPERATIONS: usize = 20;
+
+/// The first [`SUMMARY_OPERATIONS`] items, and how many were left out.
+fn capped(items: Vec<Value>) -> (Vec<Value>, usize) {
+    let left_out = items.len().saturating_sub(SUMMARY_OPERATIONS);
+    (
+        items.into_iter().take(SUMMARY_OPERATIONS).collect(),
+        left_out,
+    )
+}
+
+/// `mockingbird validate` as JSON: the contract's title, version, counts
+/// by protocol, and the first [`SUMMARY_OPERATIONS`] operations and
+/// channels (`operations_truncated` / `channels_truncated` say how many
+/// more there are).
 pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
     let bytes =
         mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
     let bundle =
         mb_import::compile(&bytes).with_context(|| format!("cannot compile {}", path.display()))?;
+    let mut counts = Map::new();
+    for op in &bundle.operations {
+        let protocol = serde_json::to_value(op.protocol)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "other".into());
+        let n = counts.get(&protocol).and_then(Value::as_u64).unwrap_or(0);
+        counts.insert(protocol, json!(n + 1));
+    }
+    counts.insert("channels".into(), json!(bundle.channels.len()));
     let operations: Vec<Value> = bundle
         .operations
         .iter()
@@ -464,11 +547,16 @@ pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
             })
         })
         .collect();
+    let (operations, operations_truncated) = capped(operations);
+    let (channels, channels_truncated) = capped(channels);
     Ok(json!({
         "title": bundle.title,
         "version": bundle.version,
+        "counts": counts,
         "operations": operations,
+        "operations_truncated": operations_truncated,
         "channels": channels,
+        "channels_truncated": channels_truncated,
     }))
 }
 
@@ -487,6 +575,81 @@ pub fn configure_api_body(args: &ConfigureArgs) -> anyhow::Result<(String, Value
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_summary_caps_the_operation_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = String::from("openapi: 3.0.3\ninfo: {title: Many, version: '1'}\npaths:\n");
+        for i in 0..25 {
+            doc.push_str(&format!(
+                "  /r{i}:\n    get:\n      operationId: r{i}\n      responses:\n        '200': {{description: ok}}\n"
+            ));
+        }
+        let path = dir.path().join("many.yaml");
+        std::fs::write(&path, doc).unwrap();
+        let s = contract_summary(&path).unwrap();
+        assert_eq!(
+            s["operations"].as_array().unwrap().len(),
+            SUMMARY_OPERATIONS
+        );
+        assert_eq!(s["operations_truncated"], 5);
+        assert_eq!(s["counts"]["http"], 25);
+        assert_eq!(s["counts"]["channels"], 0);
+        assert_eq!(s["channels_truncated"], 0);
+    }
+
+    /// A config written by `init --provider openrouter` in a tempdir.
+    fn openrouter_config(dir: &Path) -> PathBuf {
+        let output = dir.join("mockingbird.yaml");
+        init(&InitArgs {
+            provider: ProviderArgs {
+                provider: Some("openrouter".into()),
+                ..ProviderArgs::default()
+            },
+            offline: false,
+            profile_name: None,
+            contracts: Vec::new(),
+            storage_url: None,
+            port: None,
+            admin_port: None,
+            grpc_port: None,
+            output: output.clone(),
+            force: false,
+        })
+        .unwrap();
+        output
+    }
+
+    #[test]
+    fn set_profile_api_key_points_the_profile_at_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = openrouter_config(dir.path());
+        assert_eq!(resolve_profile(&cfg, None).unwrap(), "openrouter");
+        assert_eq!(
+            resolve_profile(&cfg, Some("openrouter")).unwrap(),
+            "openrouter"
+        );
+        let out = set_profile_api_key(
+            &cfg,
+            "openrouter",
+            "file:/home/u/.mockingbird/secrets/openrouter",
+        )
+        .unwrap();
+        assert_eq!(out["profile"], "openrouter");
+        let loaded = file_config::load(&cfg).unwrap();
+        assert_eq!(
+            loaded.llm.profiles["openrouter"].api_key.as_deref(),
+            Some("file:/home/u/.mockingbird/secrets/openrouter")
+        );
+        assert!(resolve_profile(&cfg, Some("nope")).is_err());
+        let before = std::fs::read_to_string(&cfg).unwrap();
+        assert!(set_profile_api_key(&cfg, "nope", "file:/x").is_err());
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
+        let empty = dir.path().join("offline.yaml");
+        std::fs::write(&empty, "storage:\n  url: sqlite://./x.db\n").unwrap();
+        let err = resolve_profile(&empty, None).unwrap_err().to_string();
+        assert!(err.contains("no LLM profile"), "{err}");
+    }
 
     #[test]
     fn mock_names_from_stems() {

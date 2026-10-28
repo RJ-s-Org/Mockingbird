@@ -269,6 +269,107 @@ fn agent_install_writes_mcp_config_and_skills() {
     assert!(steering.starts_with("---\ninclusion: manual\n---"));
 }
 
+// Unix: Claude Desktop's config lives under HOME there (APPDATA on Windows).
+#[cfg(unix)]
+#[test]
+fn agent_install_passes_key_names_not_values() {
+    let dir = tempdir();
+    run_json(dir.path(), &["init", "--provider", "openrouter"]);
+    let run = |dir: &Path, args: &[&str]| -> Value {
+        let out = bin()
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", dir)
+            .env("OPENROUTER_API_KEY", "sk-or-secret-value")
+            .env("MB_NO_SHELL_ENV", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let out = run(dir.path(), &["agent", "install", "cursor", "--no-skills"]);
+    assert_eq!(out["passthrough"], json!(["OPENROUTER_API_KEY"]), "{out}");
+    let cursor: Value = serde_json::from_str(&read(&dir.path().join(".cursor/mcp.json"))).unwrap();
+    assert_eq!(
+        cursor["mcpServers"]["mockingbird"]["env"]["OPENROUTER_API_KEY"],
+        "${env:OPENROUTER_API_KEY}"
+    );
+    run(dir.path(), &["agent", "install", "codex", "--no-skills"]);
+    assert!(
+        read(&dir.path().join(".codex/config.toml"))
+            .contains("env_vars = [\"OPENROUTER_API_KEY\"]")
+    );
+    run(
+        dir.path(),
+        &[
+            "agent",
+            "install",
+            "claude-code",
+            "--no-skills",
+            "--pass-env",
+            "EXTRA_KEY",
+        ],
+    );
+    let claude: Value = serde_json::from_str(&read(&dir.path().join(".mcp.json"))).unwrap();
+    assert_eq!(
+        claude["mcpServers"]["mockingbird"]["env"],
+        json!({ "EXTRA_KEY": "${EXTRA_KEY:-}", "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY:-}" })
+    );
+    let out = run(
+        dir.path(),
+        &["agent", "install", "claude-desktop", "--no-skills"],
+    );
+    assert!(
+        out["passthrough_unsupported"]
+            .as_str()
+            .unwrap()
+            .contains("keys setup"),
+        "{out}"
+    );
+    let bad = bin()
+        .args([
+            "agent",
+            "install",
+            "cursor",
+            "--no-skills",
+            "--pass-env",
+            "not a name",
+        ])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    for f in [".cursor/mcp.json", ".codex/config.toml", ".mcp.json"] {
+        assert!(
+            !read(&dir.path().join(f)).contains("sk-or-secret-value"),
+            "{f}"
+        );
+    }
+    let desktop = mockingbird_desktop_config(dir.path());
+    assert!(!read(&desktop).contains("sk-or-secret-value"));
+    assert!(!read(&desktop).contains("\"env\""));
+
+    let bare = tempdir();
+    let out = run(bare.path(), &["agent", "install", "cursor", "--no-skills"]);
+    assert!(out.get("passthrough").is_none(), "{out}");
+    let cursor: Value = serde_json::from_str(&read(&bare.path().join(".cursor/mcp.json"))).unwrap();
+    assert!(cursor["mcpServers"]["mockingbird"].get("env").is_none());
+}
+
+/// Claude Desktop's config under `home`.
+#[cfg(unix)]
+fn mockingbird_desktop_config(home: &Path) -> PathBuf {
+    match std::env::consts::OS {
+        "macos" => home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        _ => home.join(".config/Claude/claude_desktop_config.json"),
+    }
+}
+
 /// A `mockingbird mcp` child speaking newline-delimited JSON-RPC.
 struct McpClient {
     child: Child,
@@ -412,6 +513,13 @@ fn mcp_drives_a_background_server() {
             json!({ "mock": "orders", "session": "t", "limit": 5 }),
         );
         assert_eq!(log.as_array().unwrap().len(), 2);
+        assert!(log[0].get("response").is_none(), "{log}");
+        assert!(log[0]["response_bytes"].as_u64().unwrap() > 0, "{log}");
+        let one = mcp.tool(
+            "get_request",
+            json!({ "mock": "orders", "id": log[0]["id"] }),
+        );
+        assert!(one["response"].is_object(), "{one}");
 
         let imported = mcp.tool(
             "import_contract",
@@ -432,6 +540,241 @@ fn mcp_drives_a_background_server() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[test]
+fn server_tools_find_the_server_from_another_folder() {
+    let project = tempdir();
+    std::fs::copy(fixture(), project.path().join("orders.yaml")).unwrap();
+    run_json(
+        project.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let config = project.path().join("mockingbird.yaml");
+    let config = config.to_str().unwrap();
+    let other = tempdir();
+    let (port, admin, grpc) = (free_port(), free_port(), free_port());
+    let admin_url = format!("http://127.0.0.1:{admin}");
+    let mut mcp = McpClient::start(other.path(), &admin_url);
+    let started = mcp.tool(
+        "start_server",
+        json!({ "config": config, "port": port, "admin_port": admin, "grpc_port": grpc }),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        let logs = mcp.tool("server_logs", json!({}));
+        let log = logs["log"].as_str().unwrap();
+        assert!(!log.is_empty(), "{logs}");
+        assert!(!log.contains('\x1b'), "{log}");
+        drop(mcp);
+        let mut mcp = McpClient::start(other.path(), &admin_url);
+        let status = mcp.tool("server_status", json!({ "config": config }));
+        assert_eq!(status["running"], true, "{status}");
+        let stopped = mcp.tool("stop_server", json!({ "config": config }));
+        assert_eq!(stopped["stopped"], true, "{stopped}");
+    }));
+    if result.is_err() {
+        let mut cleanup = McpClient::start(other.path(), &admin_url);
+        let _ = cleanup.rpc(
+            "tools/call",
+            json!({ "name": "stop_server", "arguments": { "config": config } }),
+        );
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(project.path().join(".mockingbird/server.json").exists());
+    assert!(!other.path().join(".mockingbird").exists());
+}
+
+#[test]
+fn start_server_with_the_proxy_returns_its_variables() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    run_json(
+        dir.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let ca = dir.path().join("ca");
+    let (port, admin, grpc, proxy) = (free_port(), free_port(), free_port(), free_port());
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        format!(
+            "{}\nproxy:\n  port: {proxy}\n",
+            read(&dir.path().join("mockingbird.yaml"))
+        ),
+    )
+    .unwrap();
+    let admin_url = format!("http://127.0.0.1:{admin}");
+    let mut mcp = McpClient::start_with(dir.path(), &admin_url, |cmd| {
+        cmd.env("MB_NO_SHELL_ENV", "1").env("MB_CA_DIR", &ca);
+    });
+    let started = mcp.tool(
+        "start_server",
+        json!({ "config": "mockingbird.yaml", "proxy": true, "port": port, "admin_port": admin, "grpc_port": grpc }),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(started["ready"], true, "{started}");
+        assert_eq!(
+            started["proxy"],
+            format!("http://127.0.0.1:{proxy}"),
+            "{started}"
+        );
+        assert_eq!(
+            started["proxy_env"]["vars"]["HTTPS_PROXY"],
+            format!("http://127.0.0.1:{proxy}")
+        );
+        assert!(ca.join("ca.pem").exists());
+        let env = mcp.tool("proxy_env", json!({ "config": "mockingbird.yaml" }));
+        assert_eq!(env["vars"], started["proxy_env"]["vars"]);
+        // The proxy answers: a plain request for an unmocked host through it.
+        std::net::TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+    }));
+    let stopped = mcp.tool("stop_server", json!({}));
+    assert_eq!(stopped["stopped"], true);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn skills_recommend_proxy_mode() {
+    for name in ["mockingbird-mock-api", "mockingbird-testing"] {
+        let skill = SKILLS.iter().find(|s| s.name == name).unwrap();
+        assert!(skill.text.contains("proxy_env"), "{name}");
+        assert!(skill.text.contains("mockingbird proxy env"), "{name}");
+    }
+    let entry = SKILLS.iter().find(|s| s.name == "mockingbird").unwrap();
+    for tool in [
+        "get_draft",
+        "edit_draft",
+        "approve_draft",
+        "get_request",
+        "proxy_env",
+    ] {
+        assert!(entry.text.contains(tool), "{tool}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_the_key_store() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir();
+    let home = dir.path().join("home");
+    let store = home.join(".mockingbird/secrets");
+    let key = mockingbird::keys::store::write_secret(&store, "openrouter", "sk-or-test").unwrap();
+    let doctor = |dir: &Path| -> Value {
+        let out = bin()
+            .args(["doctor"])
+            .current_dir(dir)
+            .env("HOME", &home)
+            .env("MB_ADMIN_URL", "http://127.0.0.1:9")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let report = doctor(dir.path());
+    assert_eq!(
+        report["key_store"]["keys"][0]["name"], "openrouter",
+        "{report}"
+    );
+    assert_eq!(report["key_store"]["keys"][0]["private"], true);
+    assert!(!report.to_string().contains("sk-or-test"));
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let report = doctor(dir.path());
+    assert!(
+        report["problems"].to_string().contains("chmod 600"),
+        "{report}"
+    );
+}
+
+/// POSTs `key=<value>` to the key page at `url` (a plain TCP client: the
+/// test needs no async runtime). Returns the status line.
+fn post_key(url: &str, key: &str) -> String {
+    use std::io::Read;
+    let rest = url.strip_prefix("http://").unwrap();
+    let (host, path) = rest.split_once('/').unwrap();
+    let body = format!("key={key}");
+    let mut conn = std::net::TcpStream::connect(host).unwrap();
+    write!(
+        conn,
+        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    conn.read_to_string(&mut response).unwrap();
+    assert!(!response.contains(key), "the page echoed the key");
+    response.lines().next().unwrap_or_default().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn open_key_setup_never_returns_the_key() {
+    let dir = tempdir();
+    run_json(dir.path(), &["init", "--provider", "openrouter"]);
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
+        cmd.env("MB_NO_SHELL_ENV", "1")
+            .env("HOME", &home)
+            .env_remove("OPENROUTER_API_KEY");
+    });
+    let r = mcp.tool("open_key_setup", json!({ "open": false }));
+    let url = r["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("http://127.0.0.1:"), "{r}");
+    assert!(r["saved"].is_null(), "{r}");
+    assert_eq!(r["profile"], "openrouter", "{r}");
+    assert!(
+        r["config"].as_str().unwrap().ends_with("mockingbird.yaml"),
+        "{r}"
+    );
+    let status = post_key(&url, "sk-or-v1-from-browser");
+    assert!(status.contains("200"), "{status}");
+    let mut doctor = Value::Null;
+    for _ in 0..50 {
+        doctor = mcp.tool("doctor", json!({}));
+        if doctor["key_store"]["keys"][0]["name"] == "openrouter" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        doctor["key_store"]["keys"][0]["name"], "openrouter",
+        "{doctor}"
+    );
+    assert_eq!(doctor["key_store"]["keys"][0]["private"], true);
+    assert_eq!(
+        doctor["config"]["profiles"][0]["secrets"][0]["set"], true,
+        "{doctor}"
+    );
+    assert!(!doctor.to_string().contains("sk-or-v1-from-browser"));
+    assert!(!r.to_string().contains("sk-or-v1-from-browser"));
+    let config = read(&dir.path().join("mockingbird.yaml"));
+    assert!(!config.contains("sk-or-v1-from-browser"));
+    assert!(config.contains("file:"), "{config}");
+    assert_eq!(
+        read(&home.join(".mockingbird/secrets/openrouter")),
+        "sk-or-v1-from-browser"
+    );
+}
+
+#[test]
+fn keys_setup_needs_a_name_without_a_config() {
+    let dir = tempdir();
+    let out = bin()
+        .args(["keys", "setup", "--no-open", "-c", "none.yaml"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("mockingbird keys setup <name>"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -542,6 +885,37 @@ fn mcp_imports_missing_variables_from_the_login_shell() {
     assert!(
         !doctor.to_string().contains("from-the-shell"),
         "doctor never shows values"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_passed_through_variable_is_imported_from_the_login_shell() {
+    let dir = tempdir();
+    run_json(
+        dir.path(),
+        &[
+            "init",
+            "--provider",
+            "custom",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+            "--model",
+            "m",
+            "--api-key-env",
+            "MB_TEST_SHELL_ONLY_API_KEY",
+        ],
+    );
+    let shell = fake_login_shell(dir.path());
+    // What an agent's `${NAME:-}` passthrough hands over when it lacks the key.
+    let mut mcp = McpClient::start_with(dir.path(), "http://127.0.0.1:9", |cmd| {
+        cmd.env("SHELL", &shell)
+            .env("MB_TEST_SHELL_ONLY_API_KEY", "");
+    });
+    let doctor = mcp.tool("doctor", json!({}));
+    assert_eq!(
+        doctor["config"]["profiles"][0]["secrets"][0]["set"], true,
+        "{doctor}"
     );
 }
 
