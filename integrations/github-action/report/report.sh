@@ -46,4 +46,8 @@ for mock in $(jq -r '.mocks[].mock' "$out/report.json" 2> /dev/null); do
     -o "$out/requests/$mock.json" || true
 done
 cp "$MB_STATE_DIR/server.log" "$out/server.log" 2> /dev/null || true
+# The mocks are done: the artifact upload and every later step reach GitHub
+# and registries directly, not through the proxy (which may block them).
+# Both cases, which a step's `env:` cannot tell apart.
+printf '%s=\n' HTTPS_PROXY HTTP_PROXY https_proxy http_proxy >> "$GITHUB_ENV"
 exit 0

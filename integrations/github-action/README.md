@@ -72,9 +72,11 @@ Later steps get `HTTPS_PROXY`, `HTTP_PROXY` (and the lowercase forms),
 `mockingbird` on the `PATH`. Every later step goes through the proxy,
 including other actions: with `proxy.unmapped: block`, a step that talks
 to GitHub (`actions/upload-artifact`, `actions/cache`) or a package
-registry needs the proxy variables cleared on it (`env: { HTTPS_PROXY: "",
-HTTP_PROXY: "", https_proxy: "", http_proxy: "" }`), as the report step
-does for its upload; with `pass` (the default) they are forwarded. See [docs/proxy.md](../../docs/proxy.md) for
+registry needs the proxy variables cleared before it (`printf '%s=\n' HTTPS_PROXY
+HTTP_PROXY https_proxy http_proxy >> "$GITHUB_ENV"` in a step; a step's
+`env:` cannot set the lowercase and uppercase names apart), as the report
+step does before its upload; with `pass` (the default) they are
+forwarded. See [docs/proxy.md](../../docs/proxy.md) for
 which runtimes honour which variable (Java and some Go clients need a
 flag).
 
