@@ -26,6 +26,14 @@ pub fn event_type(op: &Operation) -> Option<String> {
     Some(format!("{}.{verb}", singular(resource)))
 }
 
+/// The event type a read sends to targets that name its operation (an
+/// RPC-style read with side effects, Plaid's `/transactions/sync`):
+/// `<resource>.updated`.
+pub fn read_event_type(op: &Operation) -> String {
+    let resource = op.resource_type.as_deref().unwrap_or(&op.id);
+    format!("{}.updated", singular(resource))
+}
+
 /// The static segment directly before the trailing `{param}`s of an HTTP
 /// path, when the path ends in a param.
 fn path_resource(op: &Operation) -> Option<&str> {

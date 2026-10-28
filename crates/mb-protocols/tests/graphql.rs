@@ -283,12 +283,13 @@ async fn swapped_aliases_in_a_read_keep_their_fields() {
     assert_eq!(r.body["data"]["issue"], json!({"title": null, "body": "T"}));
 }
 
-/// A mutation answered in full serves swapped aliases, then an aliased read
-/// of the stored issue reflects it.
+/// A mutation answered for its selection serves swapped aliases, then an
+/// aliased read of the stored issue reflects it.
 #[tokio::test]
 async fn aliases_after_a_mutation_reflect_state() {
     let provider = scripted(vec![
-        issue("i-1", "Crash on start"),
+        // Keyed by response key: `title` reads `body`, `body` reads `title`.
+        json!({"__typename": "Issue", "id": "i-1", "title": null, "body": "Crash on start"}),
         json!({"__typename": "Issue", "ref": "other", "heading": "Something else"}),
     ]);
     let base = serve(runtime(Some(provider))).await;
@@ -1533,5 +1534,213 @@ async fn root_fields_of_one_query_share_one_call() {
     assert!(
         system.contains("`repository`") && system.contains("`issue`"),
         "{system}"
+    );
+}
+
+const STOREFRONT: &str = r#"
+type ProductVariant { id: ID! title: String! product: Product! }
+type Product { id: ID! title: String! handle: String! variants: [ProductVariant!]! }
+type CartLine { id: ID! quantity: Int! merchandise: ProductVariant! }
+type Cart { id: ID! checkoutUrl: String! totalQuantity: Int! lines: [CartLine!]! }
+type UserError { field: [String!] message: String! }
+type CartCreatePayload { cart: Cart userErrors: [UserError!]! }
+type CartLinesAddPayload { cart: Cart userErrors: [UserError!]! }
+input CartLineInput { merchandiseId: ID! quantity: Int }
+input CartInput { lines: [CartLineInput!] }
+type Query {
+  product(handle: String): Product
+  cart(id: ID!): Cart
+}
+type Mutation {
+  cartCreate(input: CartInput): CartCreatePayload
+  cartLinesAdd(cartId: ID!, lines: [CartLineInput!]!): CartLinesAddPayload
+}
+"#;
+
+fn storefront(provider: Arc<ScriptedProvider>) -> MockRuntime {
+    MockRuntime::new(
+        "shop",
+        Arc::new(compile(STOREFRONT.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    )
+}
+
+const CART_FIELDS: &str =
+    "id checkoutUrl totalQuantity lines { id quantity merchandise { id title product { title } } }";
+
+/// A cart created, read back and added to holds together: `cartCreate`'s
+/// cart is stored under its type, `cart(id:)` is served from it, and
+/// `cartLinesAdd` is generated knowing the cart and the variant (read
+/// earlier with its product), then stored over it.
+#[tokio::test]
+async fn a_graphql_cart_holds_together() {
+    let cart_id = "gid://shopify/Cart/c1?key=0123";
+    let variant = json!({"__typename": "ProductVariant", "id": "gid://shopify/ProductVariant/42", "title": "M", "product": {"__typename": "Product", "title": "Fern Tee"}});
+    let provider = scripted(vec![
+        json!({"__typename": "Product", "id": "gid://shopify/Product/7", "title": "Fern Tee", "handle": "fern-tee",
+               "variants": [{"__typename": "ProductVariant", "id": "gid://shopify/ProductVariant/42", "title": "M"}]}),
+        json!({"__typename": "CartCreatePayload", "cart": {"__typename": "Cart", "id": cart_id, "checkoutUrl": "https://shop/c1", "totalQuantity": 0, "lines": []},
+               "userErrors": []}),
+        json!({"__typename": "CartLinesAddPayload", "cart": {"__typename": "Cart", "id": cart_id, "checkoutUrl": "https://shop/c1", "totalQuantity": 1,
+                        "lines": [{"__typename": "CartLine", "id": "gid://shopify/CartLine/1", "quantity": 1, "merchandise": variant}]},
+               "userErrors": []}),
+    ]);
+    let base = serve(storefront(provider.clone())).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let product = post(
+        &base,
+        json!({"query": r#"{ product(handle: "fern-tee") { id title handle variants { id title } } }"#}),
+        &session,
+    )
+    .await;
+    assert!(product.body.get("errors").is_none(), "{}", product.body);
+
+    let created = post(
+        &base,
+        json!({"query": format!("mutation {{ cartCreate(input: {{lines: []}}) {{ cart {{ {CART_FIELDS} }} userErrors {{ message }} }} }}")}),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    assert_eq!(created.body["data"]["cartCreate"]["cart"]["id"], cart_id);
+
+    // Served from the stored cart: no LLM call.
+    let read = post(
+        &base,
+        json!({"query": format!("query($id: ID!) {{ cart(id: $id) {{ {CART_FIELDS} }} }}"), "variables": {"id": cart_id}}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(read.body["data"]["cart"]["lines"], json!([]));
+    assert_eq!(provider.requests().len(), 2);
+
+    let added = post(
+        &base,
+        json!({
+            "query": format!("mutation($id: ID!, $lines: [CartLineInput!]!) {{ cartLinesAdd(cartId: $id, lines: $lines) {{ cart {{ {CART_FIELDS} }} userErrors {{ message }} }} }}"),
+            "variables": {"id": cart_id, "lines": [{"merchandiseId": "gid://shopify/ProductVariant/42", "quantity": 1}]},
+        }),
+        &session,
+    )
+    .await;
+    assert!(added.body.get("errors").is_none(), "{}", added.body);
+    // The prompt carried the stored cart and the variant the line names.
+    let prompt: String = provider.requests()[2]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(prompt.contains("https://shop/c1"), "{prompt}");
+    let related = prompt
+        .split("<related_resources>")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        related.contains(r#""id":"gid://shopify/ProductVariant/42""#),
+        "{prompt}"
+    );
+    // The variant was read inside its product, so it knows the product.
+    assert!(
+        related.contains(r#""product":{"__typename":"Product","handle":"fern-tee","id":"gid://shopify/Product/7","title":"Fern Tee"}"#),
+        "{prompt}"
+    );
+
+    // The cart now has the line, from state.
+    let read = post(
+        &base,
+        json!({"query": format!("query($id: ID!) {{ cart(id: $id) {{ {CART_FIELDS} }} }}"), "variables": {"id": cart_id}}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(read.body["data"]["cart"]["totalQuantity"], 1);
+    assert_eq!(
+        read.body["data"]["cart"]["lines"][0]["merchandise"]["product"]["title"],
+        "Fern Tee"
+    );
+    assert_eq!(provider.requests().len(), 3);
+}
+
+const PAYLOADS: &str = r#"
+type User { id: ID! login: String! bio: String company: String location: String }
+type Label { id: ID! name: String! color: String! description: String }
+type Issue {
+  id: ID! number: Int! title: String! body: String url: String! state: String!
+  author: User labels: [Label!]! createdAt: String! closedAt: String
+}
+input CreateIssueInput { repositoryId: ID! title: String! body: String }
+type CreateIssuePayload { clientMutationId: String issue: Issue }
+type Query { node(id: ID!): Issue }
+type Mutation { createIssue(input: CreateIssueInput!): CreateIssuePayload }
+"#;
+
+/// A create mutation generates only its selection (GitHub's
+/// `createIssue { issue { id url } }`), and the stored issue takes the
+/// input's title and body.
+#[tokio::test]
+async fn a_create_mutation_generates_only_its_selection() {
+    let provider = scripted(vec![
+        json!({"__typename": "CreateIssuePayload", "issue": {"__typename": "Issue", "id": "I_1", "url": "https://github.com/o/r/issues/1"}}),
+    ]);
+    let rt = MockRuntime::new(
+        "gh",
+        Arc::new(compile(PAYLOADS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({
+            "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { issue { id url } } }",
+            "variables": {"in": {"repositoryId": "R_1", "title": "Crash on start", "body": "Trace"}},
+        }),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    assert_eq!(
+        created.body["data"]["createIssue"]["issue"],
+        json!({"id": "I_1", "url": "https://github.com/o/r/issues/1"})
+    );
+    let schema = match &provider.requests()[0].response_format {
+        mb_llm::ResponseFormat::JsonSchema { schema, .. } => schema.to_string(),
+        other => panic!("{other:?}"),
+    };
+    for unselected in ["author", "labels", "createdAt", "clientMutationId"] {
+        assert!(!schema.contains(unselected), "{unselected} in {schema}");
+    }
+
+    let read = post(
+        &base,
+        json!({"query": r#"{ node(id: "I_1") { id title body url } }"#}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["node"],
+        json!({"id": "I_1", "title": "Crash on start", "body": "Trace", "url": "https://github.com/o/r/issues/1"})
     );
 }

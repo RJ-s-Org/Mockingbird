@@ -86,7 +86,8 @@ pub struct VerifyArgs {
 pub struct Counts {
     pub requests: u64,
     /// By response source: `llm`, `repaired`, `cache`, `state`, `faker`
-    /// (an offline mock), `fallback` (the LLM call failed) or `none`.
+    /// (an offline mock), `fallback` (the LLM call failed), `rejected` (the
+    /// request failed validation) or `none`.
     pub sources: BTreeMap<String, u64>,
     pub fallbacks: u64,
     pub client_errors: u64,

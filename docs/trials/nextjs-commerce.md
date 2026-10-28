@@ -95,3 +95,22 @@ The drawer showed the invented lines; the Fern Tee never appeared. This is the o
 - `protocols.graphql.path` is global. Shopify's endpoint is `graphql.json`, so a config with this mock and another GraphQL API at `/graphql` cannot serve both. Open: a per-mock GraphQL path.
 - The app asks for API version 2023-01 and the contract is 2025-07; nothing the template queries changed between the two, so no query failed validation.
 - Prompts are large: the Storefront types the selections touch (`Product`, `Collection`, `Cart`) put 4–12k tokens in each prompt, and the cart queries about 11.6k.
+
+## After the engine fixes
+
+Run 3, on the engine-fixes branch: GraphQL answers store their objects by type, mutations generate only their selection and are generated knowing the cart and the variant they name. Same build, config and model; a fresh browser cookie. Size M, colour "Heather Moss", "Add to cart", then the cart drawer:
+
+| Step | Run 1 | Run 3 |
+| --- | --- | --- |
+| `cartCreate` | empty cart, `llm` 1.5 s | empty cart, `llm` 1.5 s (stored as `cart`) |
+| `cart(id:)` | invented three lines, `llm` 13.9 s | the stored empty cart, `state`, 1 ms |
+| `cartLinesAdd` | a "Fernwood Fleece Hoodie", not the variant sent | "Fern Tee", M / Heather Moss, quantity 1 (`llm`, 1.8 s); a second add: quantity 2 (4.6 s) |
+| `cart(id:)` (drawer) | the invented lines | the stored cart, `state`, 2–32 ms |
+
+The drawer shows one line, Fern Tee, M / Heather Moss, quantity 2. The variant was stored when the product page read it, and it carries its product (`ProductVariant.product`, filled from the product it was read inside), so the prompt for `cartLinesAdd` names "Fern Tee". Before that link was added, the same run's cart line had the right variant (M / Moss) under an invented product name ("Fernwood Trail Tee").
+
+| Calls | Sources | Fallbacks | Latency (generated) | Tokens (prompt / completion) |
+| --- | --- | --- | --- | --- |
+| 29 | 24 `llm`, 1 `repaired`, 4 `state` | 0 | 0.8–15.4 s, median 1.8 s | 134k / 22.7k |
+
+Still open: the line price ($28.00) is not the product page's ($32.00), and the cart id ignores the persona's `?key=` format. The first "Add to cart" after the cart is created waits about 10 s in the app before its server action reaches the mock; a second click goes through at once (both runs).

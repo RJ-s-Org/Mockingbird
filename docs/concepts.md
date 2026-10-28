@@ -21,12 +21,13 @@ For each request, the adapter decodes it and validates it against the operation 
 | `llm` | The LLM generated it, prompted with the operation, its response schema, the request, the session's relevant state, the mock's persona and the scenario's instructions, and the answer validated. |
 | `repaired` | The LLM's answer had small errors (a pattern, a length, a null where none is allowed) that were patched locally, or fixed in one repair call. |
 | `fallback` | The built-in faker generated a schema-valid answer, because there is no LLM (`--offline`), or the LLM timed out, failed or never produced a valid answer. `X-Mockingbird-Fallback-Reason` says which. |
+| `rejected` | The request failed validation and was answered with the contract's error shape (or problem+json), without the LLM. `X-Mockingbird-Validation` says why. A client error, so `verify --no-fallbacks` does not count it. |
 
 Every answer, whatever its source, matches the contract. `--offline` serves faker answers only, which needs no key and no network: the usual choice for CI.
 
 ## Sessions and state
 
-State is kept per **session**, named by the `X-Mockingbird-Session` header (or `default`). Writes (creates, updates, deletes) change the session's state, so a `POST /orders` followed by `GET /orders/{id}` returns the order you created, and a deleted resource is gone. Lists seed the session too: the items of a list answer can be read back by id. `unknown_ids: 404` makes reads of ids the session never saw answer 404, as the real API would.
+State is kept per **session**, named by the `X-Mockingbird-Session` header (or `default`). Writes (creates, updates, deletes) change the session's state, so a `POST /orders` followed by `GET /orders/{id}` returns the order you created, and a deleted resource is gone. Lists seed the session too: the items of a list answer can be read back by id. Reads are `GET`s, and `POST`s whose last path segment is a read verb in RPC style (`/accounts/get`, `/transactions/sync`, `/institutions/get_by_id`, `users.list`, `_search`), so Plaid's reads are cached and seeded too, and a read's answer is generated knowing the lists other reads stored under its list members' names (`/auth/get` knows the `accounts` `/accounts/get` answered). GraphQL answers store every object with an `id` under its type (`Cart` as `cart`): a mutation's are merged into what the session holds, a query's added when new, so `cartCreate` → `cart(id:)` → `cartLinesAdd` → `cart(id:)` reads and updates one cart, and a mutation is generated knowing what its `<x>Id` arguments and `gid://…/<Type>/…` ids name. `unknown_ids: 404` makes reads of ids the session never saw answer 404, as the real API would.
 
 Sessions can be exported as fixtures, seeded from fixtures and reset ([CLI](cli.md), [Admin API](admin-api.md)), which is how tests start from a known state. State lives in memory, in the storage database, or in Redis (`storage.state_url`), so several replicas share it.
 

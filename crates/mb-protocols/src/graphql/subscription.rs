@@ -669,7 +669,21 @@ async fn open(
     }
 
     // Subscribe now, so changes made while the stream opens are not missed.
-    let feed = call::change_feed(&rt, plan.session.clone(), &op).map(Piece::Changed);
+    // A stored resource is sent when it has what the selection reads:
+    // mutations store only what they were asked for.
+    let check = op
+        .stream_item_schema()
+        .map(|schema| super::select::narrow(schema, &rt.bundle.defs, &selection))
+        .and_then(|narrowed| mb_engine::SchemaValidator::new(&narrowed).ok())
+        .map(|validator| {
+            let selection = selection.clone();
+            Arc::new(move |data: &Value| {
+                validator
+                    .validate(&super::select::rekey(data.clone(), &selection))
+                    .is_ok()
+            }) as call::ItemCheck
+        });
+    let feed = call::change_feed(&rt, plan.session.clone(), &op, check).map(Piece::Changed);
     let call = OperationCall {
         operation_id: op.id.clone(),
         headers: forwarded_headers(&rt, &conn.headers),

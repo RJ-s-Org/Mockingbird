@@ -132,7 +132,7 @@ fn system_message(
     s.push_str("\n\n");
     binding_lines(&mut s, bundle, op, persona);
     let _ = writeln!(s, "Response status: {status}");
-    let schema = crate::compact::prompt_schema(bundle, schema);
+    let schema = crate::compact::response_prompt_schema(bundle, schema);
     let _ = write!(s, "Response JSON Schema:\n{schema}");
     s
 }
