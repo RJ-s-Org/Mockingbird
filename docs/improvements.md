@@ -50,7 +50,6 @@ Five more open-source apps in other stacks, unmodified, under `mockingbird run` 
 
 ### From the proxy trials (2026-10-28)
 
-- `storage.url: sqlite://./…` is relative to the working directory, while `contract:` paths are relative to the config file, so `mockingbird run -c elsewhere/mockingbird.yaml` opens a different database than `cd elsewhere && mockingbird run`. Resolve relative SQLite paths against the config's directory (a behaviour change; needs a decision).
 - Go binaries built with Go < 1.27 on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux, OpenSSL Rubies and Go 1.27+ (with the `GODEBUG` that `proxy env` now sets) work. A documented opt-in keychain install would close the rest.
 
 ### From the examples catalog (2026-10-28)
@@ -106,6 +105,7 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
 
 ## Done
 
+- Relative `sqlite:` paths in `storage.url` / `storage.state_url`, and `server.tls`, `outbound.ca_file` and `brokers.<name>.ca_file`, are relative to the config file's directory, like `contract:` (were the working directory), so `mockingbird run -c elsewhere/mockingbird.yaml` opens the same database as `cd elsewhere && mockingbird run`. The Stripe Java trial hit `unable to open database file` running from a subdirectory.
 - Consistency and realism gaps from the examples catalog and field trials 2.0 (PR below; live re-checks of Stripe, GitHub REST, Twilio, Slack and Shopify in its description):
   - Path ids that are not `id` are state keys. The importer reads which response field a path parameter names (`issue_number` → `number`, `issueIdOrKey` → `key`, `MessageSid` → `sid`), treats `{Sid}.json` as a parameter and `Messages.json` as the resource `Messages`, and identifies a created resource without an `id` by `sid` or `uuid`. A read by such a field finds the stored resource (GitHub issues by number, Jira issues by key or id, Twilio messages by sid), and `unknown_ids: 404` applies to them. A create's number moves above the numbers the session holds (and URLs ending in `/issues/<n>` follow), so a new issue no longer collides with a listed one.
   - Any successful command clears the session's cached reads, so a list after a create is generated again knowing the new item, also when the two have different resource types. An object a create's answer wraps (Slack's `chat.postMessage` → `message`) is stored under the list a read holds (`conversations.history`'s `messages`, found inside `anyOf [success, error]` too), and the prompt asks a list answer to include the matching related resources. Live: Twilio's list after a send held the message 3/3 (was missing), Slack's history after three posts held all three (was 0).

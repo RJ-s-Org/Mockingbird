@@ -2,7 +2,7 @@
 # Runs the workspace tests against a throwaway local Postgres server.
 #
 # Usage: scripts/test-postgres.sh [cargo test args...]
-# Example: scripts/test-postgres.sh -p mb-store --test postgres
+# Example: scripts/test-postgres.sh -p mockingbird-store --test postgres
 #
 # Starts initdb'd Postgres in a temp dir on a free 127.0.0.1 port with trust
 # auth, creates database `mb_test`, exports MB_TEST_POSTGRES_URL and runs

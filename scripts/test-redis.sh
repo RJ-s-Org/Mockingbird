@@ -2,7 +2,7 @@
 # Runs the workspace tests against a throwaway local Redis server.
 #
 # Usage: scripts/test-redis.sh [cargo test args...]
-# Example: scripts/test-redis.sh -p mb-state --test redis
+# Example: scripts/test-redis.sh -p mockingbird-state --test redis
 #
 # Starts `redis-server` (no persistence) in a temp dir on a free 127.0.0.1
 # port, exports MB_TEST_REDIS_URL and runs

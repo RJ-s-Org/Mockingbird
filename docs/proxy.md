@@ -27,7 +27,7 @@ mockingbird run [-c <config>] [--offline] [--record <dir> | --replay <dir>] [--w
 | `--keep` | off | Leave a server `run` started running (stop it with `mockingbird server stop`). |
 | `--state-dir` | `.mockingbird` (`MB_STATE_DIR`) | Where the pid and `server.log` of the server `run` starts are kept. |
 
-The server inherits `run`'s environment (LLM keys, webhook secrets), but not the proxy variables, so its own LLM calls go straight to the provider. `storage.url: sqlite://./…` is relative to the directory `run` is started in.
+The server inherits `run`'s environment (LLM keys, webhook secrets), but not the proxy variables, so its own LLM calls go straight to the provider. `storage.url: sqlite://./…` is relative to the config file, like `contract:`, wherever `run` is started.
 
 ## Setup
 

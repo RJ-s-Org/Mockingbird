@@ -77,7 +77,8 @@ The first release. Since 0.1.0-rc.1, in short:
 
 ### Changed
 
-- The binary's package is `mockingbird-cli` (the command is still `mockingbird`): `cargo install mockingbird-cli` and `cargo binstall mockingbird-cli` once 0.1.0 is on crates.io, and `-p mockingbird-cli` in cargo commands. The `publish-cli` release job publishes it with the internal `mb-*` crates, which pin each other to the workspace version.
+- Relative `sqlite:` paths in `storage.url` / `storage.state_url`, and relative `server.tls`, `outbound.ca_file` and `brokers.<name>.ca_file` paths, are resolved against the config file's directory, like `contract:` paths (were the working directory). Flags, environment variables and runs without a config file keep the working directory. See [Upgrading](docs/upgrading.md#relative-paths-in-the-config-file-follow-the-file).
+- The binary's package is `mockingbird-cli` (the command is still `mockingbird`): `cargo install mockingbird-cli` and `cargo binstall mockingbird-cli` once 0.1.0 is on crates.io, and `-p mockingbird-cli` in cargo commands. The `publish-cli` release job publishes it with the internal crates as `mockingbird-<name>` (`mockingbird-engine`, `mockingbird-protocols`, …; libraries still `mb_*`), which pin each other to the workspace version and carry no API stability guarantee; `mb-ext` keeps its name and its own semver.
 - GraphQL mutations generate only their selection, like queries (GitHub `createIssue`: 38.8k → 745 prompt tokens, no fallback).
 - `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `users.list`, `_search`) are imported as reads: cached, seeded, and generated knowing the lists other reads stored; a webhook target fires for such a read only when it names its operation.
 - `mockingbird verify` prints a short text summary by default (`--format text`): the totals and one line per failed check, naming the most frequent reasons; `--format json` keeps the whole report.

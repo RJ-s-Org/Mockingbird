@@ -1,11 +1,15 @@
 [package]
-name = "mb-mcm"
+name = "mockingbird-mcm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mockingbird Contract Model: a protocol-neutral description of an API contract"
+description = "Internal crate of Mockingbird (the contract model), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_mcm::…`).
+[lib]
+name = "mb_mcm"
 
 [lints]
 workspace = true

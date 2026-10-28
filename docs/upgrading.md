@@ -25,6 +25,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 - nodes of the previous release keep working against the migrated schema during a rolling upgrade (they ignore the new columns);
 - no data needs converting. Existing mocks have no chaos and no limits until you set them.
 
+## Upgrading to 0.1.0
+
+### Relative paths in the config file follow the file
+
+In a config file, relative `sqlite:` paths in `storage.url` and `storage.state_url`, and relative `server.tls.cert_file`, `server.tls.key_file`, `outbound.ca_file` and `brokers.<name>.ca_file`, now resolve against the config file's directory, like `mocks.<name>.contract` and `proxy.ca_dir` already did. Before, they resolved against the working directory.
+
+Nothing changes when you start Mockingbird from the config file's directory (`mockingbird run`, `serve -c mockingbird.yaml`), which is what `mockingbird init` sets up. If you start it from elsewhere with `-c some/dir/mockingbird.yaml` and `storage.url: sqlite://./mockingbird.db`, it now opens `some/dir/mockingbird.db` instead of `./mockingbird.db`: move the database next to the config, or write an absolute path. `--storage-url`, `MB_STORAGE_URL`, `MB_STATE_URL` and runs without a config file still resolve against the working directory.
+
 ## Upgrading to the P7 release
 
 New, all off or neutral by default:
