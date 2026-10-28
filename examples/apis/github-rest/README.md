@@ -1,13 +1,13 @@
 # GitHub REST
 
 A stateful mock of the GitHub REST API v3 for "Fernwood Labs", a small open-source
-company: repositories, issues, pull requests, users and repository search on
-`api.github.com`, with `issues` and `pull_request` webhooks for new issues and pull
-requests.
+company: repositories, issues, pull requests, users, repository search and GitHub
+Apps (installations and installation access tokens) on `api.github.com`, with `issues`
+and `pull_request` webhooks for new issues and pull requests.
 
 | | |
 | --- | --- |
-| Contract | [`github-rest.openapi.yaml`](github-rest.openapi.yaml), a hand-written subset (12 operations) that keeps GitHub's operation ids (`repos/get`, `issues/create`, ...) |
+| Contract | [`github-rest.openapi.yaml`](github-rest.openapi.yaml), a hand-written subset (18 operations) that keeps GitHub's operation ids (`repos/get`, `issues/create`, ...) |
 | Upstream | [github/rest-api-description](https://github.com/github/rest-api-description) `api.github.com.json` (MIT), pinned in [`example.json`](example.json); `mockingbird examples init github-rest --full` downloads it |
 | Hosts | `api.github.com` |
 | Scenarios | `rate-limited` (403), `not-found` (404), `outage` (503) |
@@ -40,6 +40,16 @@ print(repo.full_name, repo.stargazers_count, repo.default_branch)
 issue = repo.create_issue(title="Router panics on empty path segment", labels=["bug"])
 print(issue.number, issue.state, issue.html_url)
 PY
+```
+
+A GitHub App's token exchange works too: `POST /app/installations/{installation_id}/access_tokens`
+answers `201` with a `ghs_…` token, and `GET /installation/repositories` lists what it
+can reach, so code built on `@octokit/auth-app` or PyGithub's `GithubIntegration` (and
+healthchecks that mint a token) run against the mock:
+
+```bash
+curl -s -X POST localhost:8080/app/installations/51837264/access_tokens -H 'Host: api.github.com' \
+  -H 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.test.jwt'
 ```
 
 Octokit (`@octokit/rest`) works the same way on Node ≥ 22.21 (`NODE_USE_ENV_PROXY`
@@ -90,9 +100,12 @@ curl -s localhost:8080/repos/fernwood-labs/trellis -H 'Host: api.github.com' \
 GitHub answers an exhausted primary rate limit with 403 (secondary limits with 429),
 so `rate-limited` uses 403 and keeps working with the full upstream spec. PyGithub
 recognises the message and raises `RateLimitExceededException` (pass `retry=None`,
-or its default retry policy waits first). The mock sends no `x-ratelimit-*` headers.
+or its default retry policy waits first). The scenario's `headers:` send
+`x-ratelimit-limit: 5000`, `x-ratelimit-remaining: 0`, `x-ratelimit-used` and
+`x-ratelimit-resource: core`, as GitHub does.
 `not-found` answers 404 `{"message":"Not Found",...}` on `repos/get`, `issues/get`,
-`pulls/get` and `users/get-by-username`; `outage` answers 503. Set
+`pulls/get`, `users/get-by-username`, `apps/get-installation` and
+`apps/get-repo-installation`; `outage` answers 503. Set
 `default_scenario: rate-limited` on the mock to apply it to every call.
 
 ## Webhooks

@@ -464,7 +464,8 @@ async fn generate_in(
                         }
                     };
                     let generated = match generated {
-                        Ok(generated) => {
+                        Ok(mut generated) => {
+                            reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
                             Ok(generated)
                         }
@@ -523,6 +524,30 @@ async fn generate_in(
         call::report(rt, &http.headers, report).await;
     }
     outcome.map_err(|f| f.error)
+}
+
+/// A generated 2xx answer's money made to agree with state: the objects
+/// its arguments name take their stored prices, and totals add up (see
+/// [`super::ledger`]). Answers from state or the cache are left alone.
+async fn reconcile_money(
+    rt: &MockRuntime,
+    plan: &call::CallPlan<'_>,
+    call: &OperationCall,
+    generated: &mut mb_engine::GeneratedResponse,
+) {
+    if !(200..300).contains(&generated.status)
+        || matches!(generated.source, Source::State | Source::Cache)
+    {
+        return;
+    }
+    let Some(body) = generated.body.as_mut() else {
+        return;
+    };
+    let stored = match &call.body {
+        Some(Value::Object(args)) => call::referenced(rt, &plan.session, args).await,
+        _ => Vec::new(),
+    };
+    super::ledger::reconcile(body, &stored);
 }
 
 /// Stores the objects a generated 2xx answer holds (see [`super::state`]):

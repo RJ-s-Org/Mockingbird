@@ -1,5 +1,6 @@
-# GitHub REST API v3: repositories, issues, pull requests, users and search,
-# with webhooks for new issues and pull requests.
+# GitHub REST API v3: repositories, issues, pull requests, users, search and
+# GitHub Apps (installations and installation tokens), with webhooks for new
+# issues and pull requests.
 #   mockingbird serve -c mockingbird.yaml --offline
 #   curl -s localhost:8080/repos/fernwood-labs/trellis -H 'Host: api.github.com' -H 'Authorization: Bearer ghp_test123'
 # Contract: github-rest.openapi.yaml, a hand-written subset (see its header). The
@@ -22,10 +23,14 @@ mocks:
       url is https://api.github.com/repos/<owner>/<repo>, html_url
       https://github.com/<owner>/<repo>, issue urls end in /issues/<number>.
       node_id values use GitHub's prefixes (U_kgDO, R_kgDO, I_kwDO, PR_kwDO, IC_kwDO).
-      Timestamps are ISO 8601 UTC ("2024-05-14T09:21:07Z"). Issues and pull requests
+      Timestamps are ISO 8601 UTC with a Z and no fraction ("YYYY-MM-DDThh:mm:ssZ"). Issues and pull requests
       talk about routing, middleware, docs and releases in plain English; titles,
       bodies and labels of a create are copied from the request, state is "open"
-      and the author is mira-okafor. Counts are plausible and consistent.
+      and the author is mira-okafor. Counts are plausible and consistent. The
+      GitHub App "trellis-bot" (app id 412873, slug "trellis-bot", owned by
+      fernwood-labs) is installed on fernwood-labs with installation id 51837264;
+      installation tokens are "ghs_" plus 36 alphanumeric characters and expire one
+      hour after they are created.
     webhooks:
       # GitHub delivers these to your app's webhook URL; smee.io/`gh webhook forward` use the same shape.
       - url: http://127.0.0.1:3000/api/github/webhooks
@@ -36,13 +41,18 @@ mocks:
       rate-limited:
         # GitHub answers an exhausted primary rate limit with 403 (429 for secondary limits).
         status: 403
+        headers:
+          x-ratelimit-limit: "5000"
+          x-ratelimit-remaining: "0"
+          x-ratelimit-used: "5000"
+          x-ratelimit-resource: core
         set:
           message: API rate limit exceeded for user ID 58213947. If you reach out to GitHub Support for help, please include the request ID 0C3A:3F2B:1A2B3C:1D2E3F:66A1B2C3.
           documentation_url: https://docs.github.com/rest/overview/rate-limits-for-the-rest-api
           status: "403"
       not-found:
         status: 404
-        operations: [repos/get, issues/get, pulls/get, users/get-by-username]
+        operations: [repos/get, issues/get, pulls/get, users/get-by-username, apps/get-installation, apps/get-repo-installation]
         set:
           message: Not Found
           documentation_url: https://docs.github.com/rest/repos/repos#get-a-repository

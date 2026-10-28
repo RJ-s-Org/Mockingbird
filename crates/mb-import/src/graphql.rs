@@ -567,6 +567,7 @@ fn operation(
                 path_param: None,
                 field: "id".into(),
                 input_field,
+                path_field: None,
             }
         });
     let (body, body_required) = input_values_schema(&f.args);
@@ -590,6 +591,7 @@ fn operation(
             status: StatusSelector::Code(200),
             content_type: Some("application/json".into()),
             schema: Some(output_type_schema(schema, &f.ty)),
+            headers: Default::default(),
         }],
         resource_type,
         identity,

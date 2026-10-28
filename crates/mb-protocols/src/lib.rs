@@ -138,6 +138,9 @@ pub struct ScenarioRuntime {
     pub stream_item_interval: Option<Duration>,
     /// Replaces the mock's chaos while the scenario applies.
     pub chaos: Option<Arc<ChaosRuntime>>,
+    /// Response headers to send, by name, over any the contract declares
+    /// (HTTP and GraphQL over HTTP).
+    pub headers: Vec<(String, String)>,
     /// This scenario with other instructions, by operation id (see
     /// [`ScenarioRuntime::with_operation_instructions`]).
     pub per_operation: HashMap<String, ScenarioRuntime>,

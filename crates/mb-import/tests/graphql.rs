@@ -102,6 +102,7 @@ fn root_fields_become_operations() {
             path_param: None,
             field: "id".into(),
             input_field: Some("id".into()),
+            path_field: None,
         })
     );
     assert_eq!(issue.resource_type.as_deref(), Some("issue"));
@@ -129,6 +130,7 @@ fn root_fields_become_operations() {
             status: StatusSelector::Code(200),
             content_type: Some("application/json".into()),
             schema: Some(json!({"anyOf": [{"$ref": "#/$defs/Issue"}, {"type": "null"}]})),
+            headers: Default::default(),
         }]
     );
 
@@ -172,6 +174,7 @@ fn resource_id_argument_is_the_input_field() {
             path_param: None,
             field: "id".into(),
             input_field: Some("orderId".into()),
+            path_field: None,
         })
     );
 }

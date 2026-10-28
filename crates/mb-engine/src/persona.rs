@@ -99,17 +99,27 @@ struct Prefixed {
 pub struct PersonaFormats {
     templates: Vec<Template>,
     ids: Vec<Prefixed>,
+    /// Bare id templates (`gid://shopify/Cart/<26 chars>?key=<32 hex>`),
+    /// kept on ids that start with their leading literal.
+    id_templates: Vec<Template>,
 }
 
-/// `<N [random] [class] chars>`.
+/// `<N [random] [class] chars>`, or `<N class>` (`<32 hex>`).
 fn random_part(text: &str) -> Option<Part> {
     let re = Regex::new(
-        r"(?i)^(\d{1,3})(?:[\s-]+random)?(?:[\s-]+([a-z-]+))?[\s-]+(?:chars?|characters?)$",
+        r"(?i)^(\d{1,3})(?:[\s-]+random)?(?:[\s-]+([a-z-]+))?(?:[\s-]+(chars?|characters?))?$",
     )
     .ok()?;
     let caps = re.captures(text.trim())?;
     let n = caps.get(1)?.as_str().parse().ok()?;
-    let class = Class::parse(caps.get(2).map(|m| m.as_str()))?;
+    let word = caps.get(2).map(|m| m.as_str());
+    let unit = word.is_some_and(|w| {
+        ["char", "chars", "character", "characters"].contains(&w.to_ascii_lowercase().as_str())
+    });
+    if caps.get(3).is_none() && (word.is_none() || unit) {
+        return (unit).then_some(Part::Random(n, Class::Alphanumeric));
+    }
+    let class = Class::parse(word.filter(|_| !unit))?;
     Some(Part::Random(n, class))
 }
 
@@ -182,11 +192,26 @@ impl PersonaFormats {
                 }
             }
         }
+        // Bare templates outside quotes: `gid://shopify/Cart/<26 chars>`.
+        if let Ok(re) =
+            Regex::new(r#"(?:[^\s<>"'`]|<[^<>"'`\n]+>)*<[^<>"'`\n]+>(?:[^\s<>"'`]|<[^<>"'`\n]+>)*"#)
+        {
+            for m in re.find_iter(persona) {
+                let text = m.as_str().trim_end_matches(['.', ',', ';', ':', ')']);
+                let Some(t) = template("id", text) else {
+                    continue;
+                };
+                let lead = matches!(t.parts.first(), Some(Part::Literal(l)) if l.len() >= 3);
+                if lead && !formats.templates.iter().any(|q| q.parts == t.parts) {
+                    formats.id_templates.push(t);
+                }
+            }
+        }
         formats
     }
 
     pub fn is_empty(&self) -> bool {
-        self.templates.is_empty() && self.ids.is_empty()
+        self.templates.is_empty() && self.ids.is_empty() && self.id_templates.is_empty()
     }
 
     /// `body` with every object's declared formats kept; values equal to
@@ -243,6 +268,30 @@ impl PersonaFormats {
         {
             obj.insert("id".into(), Value::String(fixed));
             changed = true;
+        }
+        let id_keys: Vec<String> = obj
+            .iter()
+            .filter(|(k, v)| {
+                (k.as_str() == "id" || k.ends_with("Id") || k.ends_with("_id"))
+                    && v.is_string()
+                    && free(v)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in id_keys {
+            let current = obj[&key].as_str().unwrap_or_default().to_string();
+            let fixed = self.id_templates.iter().find_map(|t| {
+                let Some(Part::Literal(lead)) = t.parts.first() else {
+                    return None;
+                };
+                current
+                    .starts_with(lead.as_str())
+                    .then(|| t.fix(&current, obj, rng))?
+            });
+            if let Some(fixed) = fixed {
+                obj.insert(key, Value::String(fixed));
+                changed = true;
+            }
         }
         for t in &self.templates {
             let Some(current @ Value::String(_)) = obj.get(&t.field) else {
@@ -388,6 +437,24 @@ mod tests {
                 .unwrap()
                 .starts_with("pi_fromthepath_secret_")
         );
+    }
+
+    const SHOPIFY: &str = "Global ids look like gid://shopify/Product/8123456789012 (13 digits), gid://shopify/Collection/..., gid://shopify/Cart/<26 chars>?key=<32 hex>. Images at https://cdn.shopify.com/files/<handle>-<n>.png.";
+
+    #[test]
+    fn id_templates_with_a_query_part_are_kept() {
+        let f = PersonaFormats::parse(SHOPIFY);
+        assert_eq!(f.id_templates.len(), 1, "{f:?}");
+        let body = json!({"cart": {"id": "gid://shopify/Cart/8f3a1c6d9b2e4f70a5c8d13e6b", "lines": []},
+                          "product": {"id": "gid://shopify/Product/8123456789012"}});
+        let out = f.apply(&any(), &body, &[]).unwrap();
+        let id = out["cart"]["id"].as_str().unwrap();
+        let re = Regex::new(r"^gid://shopify/Cart/8f3a1c6d9b2e4f70a5c8d13e6b\?key=[0-9a-f]{32}$")
+            .unwrap();
+        assert!(re.is_match(id), "{id}");
+        assert_eq!(out["product"], body["product"]);
+        let kept = json!({"cartId": id});
+        assert!(f.apply(&any(), &kept, &[]).is_none());
     }
 
     #[test]

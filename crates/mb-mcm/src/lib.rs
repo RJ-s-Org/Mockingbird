@@ -311,6 +311,10 @@ pub struct OutputVariant {
     pub status: StatusSelector,
     pub content_type: Option<String>,
     pub schema: Option<Value>,
+    /// Response headers the contract declares, by name as written, each
+    /// with its JSON Schema (`Retry-After`, `X-RateLimit-Remaining`).
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub headers: serde_json::Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -321,6 +325,11 @@ pub struct Identity {
     /// Top-level request-body field carrying the target id (non-HTTP protocols).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_field: Option<String>,
+    /// The response field the path parameter names when it is not `field`:
+    /// GitHub's `issue_number` reads by `number`, Jira's `issueIdOrKey` by
+    /// `key` (or `field`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_field: Option<String>,
 }
 
 impl Bundle {

@@ -593,6 +593,52 @@ pub struct ScenarioRules {
     /// operation id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub operation_instructions: BTreeMap<String, String>,
+    /// Response headers the scenario sets, by name; they replace any the
+    /// contract declares.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Response headers a scenario may not set: framing is the server's.
+const RESERVED_SCENARIO_HEADERS: [&str; 4] = [
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "content-type",
+];
+
+impl ScenarioRules {
+    /// `Err` names the first unusable header: an empty or non-token name, a
+    /// framing header, an `X-Mockingbird-*` header or a value with
+    /// characters a header cannot carry.
+    pub fn check_headers(&self) -> Result<(), String> {
+        for (name, value) in &self.headers {
+            let token = !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+            if !token {
+                return Err(format!(
+                    "header name {name:?} is not a valid HTTP header name"
+                ));
+            }
+            let lower = name.to_ascii_lowercase();
+            if RESERVED_SCENARIO_HEADERS.contains(&lower.as_str())
+                || lower.starts_with("x-mockingbird-")
+            {
+                return Err(format!("header {name:?} cannot be set by a scenario"));
+            }
+            if !value
+                .bytes()
+                .all(|b| b == b'\t' || (b' '..=b'~').contains(&b))
+            {
+                return Err(format!(
+                    "header {name:?} must have a value of visible ASCII characters"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

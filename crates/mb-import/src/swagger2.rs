@@ -183,10 +183,28 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
                 None => (produces.first().cloned(), None),
             },
         };
+        // A Swagger 2 header object is its own schema.
+        let headers = resp
+            .get("headers")
+            .and_then(Value::as_object)
+            .map(|h| {
+                h.iter()
+                    .filter(|(name, _)| !name.eq_ignore_ascii_case("content-type"))
+                    .map(|(name, header)| {
+                        let mut schema = header.clone();
+                        if let Some(obj) = schema.as_object_mut() {
+                            obj.remove("description");
+                        }
+                        (name.clone(), norm(&schema))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         outputs.push(OutputVariant {
             status: selector,
             content_type,
             schema,
+            headers,
         });
     }
     Ok(outputs)

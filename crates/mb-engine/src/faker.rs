@@ -865,10 +865,29 @@ fn fake_string<R: Rng>(ctx: &mut Ctx<'_>, s: &Map<String, Value>, rng: &mut R) -
     out
 }
 
+/// A moment in the last 30 days, mostly in the last 3: generated records
+/// read as recent activity.
 fn random_datetime<R: Rng>(rng: &mut R) -> chrono::DateTime<chrono::Utc> {
-    // 2000-01-01 .. ~2033
-    let secs = rng.random_range(946_684_800_i64..2_000_000_000);
+    let now = chrono::Utc::now().timestamp();
+    let window = if rng.random_bool(0.7) {
+        3 * 86_400
+    } else {
+        30 * 86_400
+    };
+    let secs = now - rng.random_range(0..window);
     chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default()
+}
+
+/// Whether an integer member holds a Unix timestamp (`created`,
+/// `updated_at`, `expires_at`, `timestamp`).
+fn timestamp_field(field: &str) -> bool {
+    let f = field.to_ascii_lowercase();
+    ["created", "updated", "timestamp", "date"].contains(&f.as_str())
+        || f.ends_with("_at")
+        || f.ends_with("_time")
+        || f.ends_with("_date")
+        || f.ends_with("timestamp")
+        || (field.ends_with("At") && field.len() > 2)
 }
 
 /// A string matching `pattern` with `min..=max` characters, drawn by
@@ -1005,6 +1024,13 @@ fn fake_integer<R: Rng>(s: &Map<String, Value>, field: Option<&str>, rng: &mut R
     if let Some(x) = num("exclusiveMaximum") {
         let x = x.ceil() - 1.0;
         hi = Some(hi.map_or(x, |h| h.min(x)));
+    }
+    // Unix seconds, unless the bounds rule recent ones out.
+    if field.is_some_and(timestamp_field) {
+        let secs = random_datetime(rng).timestamp() as f64;
+        if lo.is_none_or(|l| l <= secs) && hi.is_none_or(|h| h >= secs) {
+            return Value::from(secs as i64);
+        }
     }
     const I32_MIN: f64 = -2_147_483_648.0;
     const I32_MAX: f64 = 2_147_483_647.0;

@@ -29,6 +29,7 @@ fn compiles_orders_30() {
             path_param: Some("orderId".into()),
             field: "id".into(),
             input_field: None,
+            path_field: None,
         })
     );
     let create = b.operation("createOrder").unwrap();
@@ -441,4 +442,140 @@ fn webhook_payload_refs_are_checked() {
         compile(src.as_bytes()),
         Err(ImportError::Invalid { .. })
     ));
+}
+
+#[test]
+fn response_headers_are_declared() {
+    let b = compile(
+        br##"
+openapi: 3.0.3
+info: {title: t, version: "1"}
+components:
+  headers:
+    Remaining: {schema: {type: integer}, description: requests left}
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        "200":
+          description: ok
+          headers:
+            X-RateLimit-Remaining: {$ref: "#/components/headers/Remaining"}
+          content: {application/json: {schema: {type: array, items: {type: string}}}}
+        "429":
+          description: slow down
+          headers:
+            Retry-After: {schema: {type: integer}}
+"##,
+    )
+    .unwrap();
+    let op = b.operation("listThings").unwrap();
+    let ok = op.output_for_status(200).unwrap();
+    assert_eq!(
+        ok.headers.get("X-RateLimit-Remaining"),
+        Some(&json!({"type": "integer"}))
+    );
+    let limited = op.output_for_status(429).unwrap();
+    assert_eq!(
+        limited.headers.get("Retry-After"),
+        Some(&json!({"type": "integer"}))
+    );
+}
+
+#[test]
+fn path_ids_name_their_response_field() {
+    let b = compile(
+        br##"
+openapi: 3.0.3
+info: {title: t, version: "1"}
+components:
+  schemas:
+    Issue:
+      type: object
+      properties: {id: {type: integer}, number: {type: integer}, key: {type: string}}
+    Message:
+      type: object
+      properties: {sid: {type: string}, body: {type: string}}
+paths:
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: issue_number, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /rest/issue/{issueIdOrKey}:
+    get:
+      operationId: getJiraIssue
+      parameters:
+        - {name: issueIdOrKey, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /Accounts/{AccountSid}/Messages.json:
+    post:
+      operationId: CreateMessage
+      parameters:
+        - {name: AccountSid, in: path, required: true, schema: {type: string}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+    get:
+      operationId: ListMessage
+      parameters:
+        - {name: AccountSid, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {messages: {type: array, items: {$ref: "#/components/schemas/Message"}}}}}}}
+  /Accounts/{AccountSid}/Messages/{Sid}.json:
+    get:
+      operationId: FetchMessage
+      parameters:
+        - {name: AccountSid, in: path, required: true, schema: {type: string}}
+        - {name: Sid, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+"##,
+    )
+    .unwrap();
+    let issue = b.operation("getIssue").unwrap();
+    assert_eq!(
+        issue.identity,
+        Some(Identity {
+            path_param: Some("issue_number".into()),
+            field: "id".into(),
+            input_field: None,
+            path_field: Some("number".into()),
+        })
+    );
+    let jira = b
+        .operation("getJiraIssue")
+        .unwrap()
+        .identity
+        .clone()
+        .unwrap();
+    assert_eq!(jira.path_field.as_deref(), Some("key"));
+
+    for id in ["CreateMessage", "ListMessage", "FetchMessage"] {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.resource_type.as_deref(), Some("Messages"), "{id}");
+    }
+    let create = b
+        .operation("CreateMessage")
+        .unwrap()
+        .identity
+        .clone()
+        .unwrap();
+    assert_eq!((create.path_param, create.field.as_str()), (None, "sid"));
+    let fetch = b.operation("FetchMessage").unwrap();
+    assert_eq!(fetch.kind, OperationKind::Query);
+    assert_eq!(
+        fetch.identity,
+        Some(Identity {
+            path_param: Some("Sid".into()),
+            field: "sid".into(),
+            input_field: None,
+            path_field: None,
+        })
+    );
 }
