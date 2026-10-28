@@ -1,0 +1,84 @@
+name: IaC
+
+# The Terraform/OpenTofu provider and its acceptance tests, which run every
+# resource against a real `mockingbird serve --offline`. Only changes that can
+# affect the provider (it, the Admin API and what it stores) trigger it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - integrations/**
+      - crates/mb-admin/**
+      - crates/mb-auth/**
+      - crates/mb-store/**
+      - crates/mb-import/**
+      - crates/mockingbird/**
+      - Cargo.lock
+      - .github/workflows/iac.yml
+  pull_request:
+    paths:
+      - integrations/**
+      - crates/mb-admin/**
+      - crates/mb-auth/**
+      - crates/mb-store/**
+      - crates/mb-import/**
+      - crates/mockingbird/**
+      - Cargo.lock
+      - .github/workflows/iac.yml
+  workflow_dispatch:
+
+concurrency:
+  group: iac-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  terraform-provider:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: integrations/terraform-provider
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: iac
+      # The slim binary: no MQTT/AMQP clients to compile, same Admin API.
+      - name: Build mockingbird
+        working-directory: .
+        run: cargo build -p mockingbird --no-default-features
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: integrations/terraform-provider/go.mod
+          cache-dependency-path: integrations/terraform-provider/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false
+      - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Generated docs are current
+        run: |
+          go generate ./...
+          git diff --exit-code -- docs || (echo "run 'go generate ./...' in integrations/terraform-provider" && exit 1)
+      - name: Acceptance tests (Terraform)
+        run: go test ./... -count=1 -timeout 10m
+        env:
+          TF_ACC: "1"
+          MOCKINGBIRD_BIN: ${{ github.workspace }}/target/debug/mockingbird
+      - name: Acceptance tests (OpenTofu)
+        run: TF_ACC_TERRAFORM_PATH="$(command -v tofu)" go test ./... -count=1 -timeout 10m
+        env:
+          TF_ACC: "1"
+          TF_ACC_PROVIDER_HOST: registry.opentofu.org
+          MOCKINGBIRD_BIN: ${{ github.workspace }}/target/debug/mockingbird
