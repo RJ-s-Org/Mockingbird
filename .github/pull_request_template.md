@@ -10,6 +10,7 @@
 - [ ] Console changes: `npm run typecheck`, `npm run lint`, `npm test` and `npm run check:api` pass
 - [ ] Tests cover the change
 - [ ] User-visible behaviour is documented and noted in `CHANGELOG.md` under `## [Unreleased]`
+- [ ] Docs changes: new pages are in `docs/SUMMARY.md` and `scripts/docs-check.sh` passes
 - [ ] `mb-ext` changes: semver impact stated (additive or breaking)
 
 ## Notes for reviewers

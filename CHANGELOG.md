@@ -8,6 +8,16 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this heading to `## [0.1.0] - <date>` when tagging; see [docs/launch/checklist.md](docs/launch/checklist.md)).
+
+- **Run apps unchanged.** Mocks take the real host names they stand in for (`hosts:`), and `mockingbird proxy` intercepts HTTPS to them with a local CA, so an app reaches mocks of `api.stripe.com` or `api.github.com` without source edits ([proxy](docs/proxy.md)).
+- **Consistent, stateful answers.** Reads of what a session created come from its state, repeated reads from a per-session cache, and list items seed later reads by id; `unknown_ids: 404`, `default_scenario` and per-operation scenario instructions.
+- **Real-world contracts.** Stripe's and GitHub's full contracts load and serve: form-encoded and multipart bodies, covariant GraphQL interfaces, `$ref`s in vendor extensions, prompts fitted to a 64 KiB schema budget, GraphQL answers generated from the selection set, and local patching instead of repair calls. Fallbacks dropped from 25–33% in the field trials to none on the Stripe and TMDB trials.
+- **Diagnosable.** `X-Mockingbird-Fallback-Reason`, `X-Mockingbird-Validation` and the request log say why an answer fell back or a request was rejected.
+- **Smart import drafts you can finish.** Several URLs and documents per draft, merge or replace, embedded OpenAPI blocks taken as written, confidence and warnings per operation, and MCP tools to read, edit and approve drafts.
+- **Agents set it up alone.** The MCP server finds keys from the login shell, `agent install` passes key names through to each agent, and `keys setup` stores a key without it passing through the agent.
+- **Webhooks.** Signed Stripe-style or HMAC events after writes, with retries and a delivery log.
+
 ### Added
 
 - A Terraform and OpenTofu provider (`integrations/terraform-provider`) for workspaces, mocks (contract from inline content, a file or a URL, re-uploaded when its sha256 changes), contract versions, scenarios, LLM profiles (secret references only), API keys, channels and event settings, with `mockingbird_mock` and `mockingbird_workspace` data sources and import on every resource; Pulumi through its Terraform bridge, with TypeScript and Python examples (`integrations/pulumi`). See [docs/iac.md](docs/iac.md).
