@@ -48,6 +48,11 @@ npm run e2e           # Playwright; run `npx playwright install chromium` once
 `MB_TEST_POSTGRES_URL` and `MB_TEST_REDIS_URL`). After any Admin API change, run
 `npm run gen:api` and commit the regenerated `src/api/schema.d.ts`; never edit it by hand.
 
+Documentation changes: the site is an mdBook over `docs/` (`book.toml` at the root). A new
+page goes into `docs/SUMMARY.md`, and `scripts/docs-check.sh` (needs `mdbook` and `lychee`,
+for example `brew install mdbook lychee` or `cargo install mdbook lychee`) builds the site and
+checks every relative link and anchor, as the Docs workflow does on pull requests.
+
 Project rules the reviewers check:
 
 - no `unwrap()` or `expect()` outside tests;
@@ -57,7 +62,8 @@ Project rules the reviewers check:
   stored JSON and snapshots stay byte-identical;
 - `mb-engine`, `mb-store` and `mb-state` stay free of axum; `mb-protocols` depends on
   neither `mb-store` nor `mb-auth`;
-- user-visible behaviour is documented in `README.md` or `docs/`, and noted in
+- user-visible behaviour is documented in `docs/` (the README is the front page and stays
+  short), and noted in
   `CHANGELOG.md` under `## [Unreleased]`.
 
 ## Commit style

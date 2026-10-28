@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Documentation
+    url: https://github.com/rj-s-org/mockingbird/blob/main/docs/README.md
+    about: Guides for the proxy, protocols, agents, CI, Kubernetes and the configuration reference.
   - name: Report a security vulnerability
     url: https://github.com/rj-s-org/mockingbird/security/advisories/new
     about: Report vulnerabilities privately through GitHub Security Advisories, never in a public issue.
