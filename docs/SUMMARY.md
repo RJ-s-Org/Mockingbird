@@ -22,10 +22,10 @@
 # Automation
 
 - [Integrations](integrations.md)
-- [CI]()
+- [CI](ci.md)
 - [Infrastructure as code](iac.md)
-- [Kubernetes GitOps]()
-- [Examples catalog]()
+- [Kubernetes GitOps](deploy/gitops.md)
+- [Examples catalog](examples.md)
 
 # Deploying
 

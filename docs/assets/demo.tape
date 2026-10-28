@@ -3,13 +3,12 @@
 #
 #   PATH="$PWD/target/release:$PATH" vhs docs/assets/demo.tape
 #
-# Once `mockingbird run` has landed, a second scene can show
-# `mockingbird run -- node app.js` against a mapped host.
+# An unmodified Node app (demo/shop.mjs) calls https://api.bookshop.example;
+# `mockingbird run` sends those calls to the bookshop mock.
 Output docs/assets/demo.gif
 
 Require mockingbird
-Require curl
-Require jq
+Require node
 
 Set Shell zsh
 Set FontSize 15
@@ -21,32 +20,17 @@ Set Theme "Catppuccin Mocha"
 
 Hide
 Type "cd docs/assets/demo && rm -rf .mockingbird && setopt interactivecomments && export PS1='$ ' && clear" Enter
-Type "mockingbird server start -c mockingbird.yaml >/dev/null && sleep 2 && clear" Enter
-Sleep 4s
 Show
 
-Type "# A bookshop API from its OpenAPI contract, answered by an LLM" Enter
-Sleep 600ms
-Type "curl -s 'localhost:8080/books?limit=3' | jq -c '.data[] | {title, author, price}'" Enter
-Wait+Screen@40s /amount/
+Type "# A bookshop mock from its OpenAPI contract, mapped to the host it stands in for" Enter
+Type "grep -A3 '^  bookshop:' mockingbird.yaml" Enter
 Sleep 3s
 
-Type "# Create an order: the response follows the contract" Enter
-Type `curl -s -XPOST localhost:8080/orders -H 'content-type: application/json' -d '{"bookId":"b1","quantity":2,"customerEmail":"ada@example.com"}' | tee order.json | jq -c` Enter
-Wait+Screen@40s /createdAt/
-Sleep 3s
-Hide
-Type "ID=$(jq -r .id order.json) && rm order.json" Enter
-Show
-
-Type "# Read it back: answered from session state, no LLM call" Enter
-Type "curl -s -D - localhost:8080/orders/$ID | grep -E '^HTTP|^x-mockingbird-source|^[{]'" Enter
+Type "# An app that calls https://api.bookshop.example, unchanged" Enter
+Type "head -5 shop.mjs" Enter
 Sleep 2500ms
 
-Type "# Ask for the failure path: the 404 the contract declares" Enter
-Type "curl -s localhost:8080/orders/$ID -H 'X-Mockingbird-Status: 404' | jq -c" Enter
-Wait+Screen@40s /message/
-Sleep 4s
-
-Hide
-Type "mockingbird server stop >/dev/null" Enter
+Type "# Run it against the mock: an LLM writes the answers, session state keeps them" Enter
+Type "mockingbird run -- node shop.mjs" Enter
+Wait+Screen@60s /404 \{/
+Sleep 6s

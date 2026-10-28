@@ -14,6 +14,7 @@ mocks:
   bookshop:
     contract: ./bookshop.yaml
     route_prefix: /
+    hosts: [api.bookshop.example]
     persona: A small independent bookshop in Berlin. Literary fiction and classics, real authors and titles, prices in EUR.
 storage:
   url: "sqlite::memory:"

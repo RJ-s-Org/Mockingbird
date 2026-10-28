@@ -7,7 +7,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Docs](https://img.shields.io/badge/docs-mdBook-informational)](docs/README.md)
 
-![A terminal session against a bookshop API mock: a list of real-looking books with EUR prices, an order created and then read back from session state, and the 404 the contract declares](docs/assets/demo.gif)
+![A terminal session: a bookshop mock mapped to api.bookshop.example, and an unchanged Node app run with `mockingbird run` that lists real-looking books with EUR prices, creates an order, reads it back from session state and gets the 404 the contract declares](docs/assets/demo.gif)
 
 Give Mockingbird an OpenAPI, GraphQL, protobuf, WSDL or AsyncAPI contract and it serves a mock whose answers read like production data: names, prices, timestamps and ids that fit together, in your contract's exact shape. Create an order and the next `GET` returns that order. Ask for a 404, a slow response or a flaky upstream and you get it in the API's own error format. Run your app under `mockingbird run` and its calls to `api.stripe.com` or `api.github.com` land on the mocks, with no base URL to change.
 
@@ -77,16 +77,16 @@ Choose WireMock or Mockoon when you want exact, hand-authored responses; Prism w
 
 | | |
 | --- | --- |
-| **CI** | [GitHub Action](https://github.com/RJ-s-Org/Mockingbird/tree/main/integrations/github-action), GitLab CI, snapshot replay without an LLM key: [CI guide](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/ci.md) |
+| **CI** | [GitHub Action](integrations/github-action), GitLab CI, snapshot replay without an LLM key: [CI guide](docs/ci.md) |
 | **Infrastructure as code** | Terraform / OpenTofu provider and Pulumi: [IaC guide](docs/iac.md) |
-| **Kubernetes** | [Helm chart](deploy/helm/mockingbird) (`oci://ghcr.io/rj-s-org/charts/mockingbird`), Argo CD and Flux: [Kubernetes](docs/deploy/kubernetes.md), [GitOps](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/deploy/gitops.md) |
-| **Tests** | Testcontainers: [GitOps and Testcontainers](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/deploy/gitops.md); fixtures with `export-fixtures` / `seed-fixtures`: [CLI](docs/cli.md) |
+| **Kubernetes** | [Helm chart](deploy/helm/mockingbird) (`oci://ghcr.io/rj-s-org/charts/mockingbird`), Argo CD and Flux: [Kubernetes](docs/deploy/kubernetes.md), [GitOps](docs/deploy/gitops.md) |
+| **Tests** | Testcontainers: [module](integrations/testcontainers), [throwaway mocks for a test run](docs/deploy/gitops.md#4-throwaway-mocks-for-a-test-run); fixtures with `export-fixtures` / `seed-fixtures`: [CLI](docs/cli.md) |
 | **Coding agents** | `/plugin marketplace add rj-s-org/mockingbird` in Claude Code, or `mockingbird agent install <codex\|cursor\|gemini\|kiro\|vscode\|windsurf\|claude-desktop>`: [Coding agents](docs/agents.md) |
 | **Containers** | `ghcr.io/rj-s-org/mockingbird` (full and `-slim`, signed with cosign): [Docker](docs/deploy/docker.md) |
 
 ## Examples
 
-The [examples catalog](https://github.com/RJ-s-Org/Mockingbird/blob/main/docs/examples.md) mocks about twenty well-known APIs, each ready to serve with one command. The [example gallery](examples/gallery/README.md) has one small configuration per protocol family and one for chaos.
+The [examples catalog](docs/examples.md) mocks about twenty well-known APIs, each ready to serve with one command. The [example gallery](examples/gallery/README.md) has one small configuration per protocol family and one for chaos.
 
 ## Documentation
 
@@ -104,6 +104,7 @@ The documentation is an [mdBook](docs/README.md) built from `docs/` (`scripts/do
 | [Coding agents](docs/agents.md) | The MCP server, skills and plugins for Claude Code, Codex, Cursor, Gemini CLI, Kiro, VS Code, Windsurf and ChatGPT; LLM provider onboarding |
 | [Console and auth](docs/console.md) | The web console, auth modes, roles, API keys, workspaces and the audit log |
 | [CLI client](docs/cli.md) | Driving the Admin API from the command line, fixtures and archive uploads |
+| [CI](docs/ci.md) | The GitHub Action and GitLab CI template, snapshot record and replay without an LLM key, `mockingbird report` and `mockingbird verify` |
 | [Admin API](docs/admin-api.md) | Resources, the request log, admin port safety and the [OpenAPI reference](docs/api/index.html) |
 | [Configuration reference](docs/configuration.md) | Every `mockingbird.yaml` key, with its default, range, environment variable and flag |
 | [Architecture](docs/architecture.md) | Crates, roles, the request flow, HA (bus, leader election) and state backends |
