@@ -508,7 +508,8 @@ jobs:
           cargo publish -p mb-ext --locked
 
   # `mockingbird-cli` (the `mockingbird` binary) and the internal crates it
-  # depends on, published together at the workspace version after mb-ext. The
+  # depends on (`mockingbird-engine`, … from crates/mb-*), published together
+  # in dependency order at the workspace version, after mb-ext. The
   # package carries the built console, the example catalog and the agent
   # skills (crates/mockingbird/build.rs). A dry run packages and verifies all
   # of them without uploading; a prerelease publishes nothing.

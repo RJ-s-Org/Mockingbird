@@ -1,15 +1,19 @@
 [package]
-name = "mb-console"
+name = "mockingbird-console"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The embedded Mockingbird web console"
+description = "Internal crate of Mockingbird (the embedded web console), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
 build = "build.rs"
 # `dist/` is the Vite build (not in git); the release workflow builds it
 # before publishing.
 include = ["/src/**", "/build.rs", "/dist/**", "/Cargo.toml"]
+
+# The library keeps its name (`use mb_console::…`).
+[lib]
+name = "mb_console"
 
 [lints]
 workspace = true
