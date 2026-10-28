@@ -1,11 +1,15 @@
 [package]
-name = "mb-protocols"
+name = "mockingbird-protocols"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mockingbird protocol adapters: REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka, AMQP and MQTT"
+description = "Internal crate of Mockingbird (protocol adapters), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_protocols::…`).
+[lib]
+name = "mb_protocols"
 
 [lints]
 workspace = true

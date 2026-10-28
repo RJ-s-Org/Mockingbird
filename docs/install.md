@@ -51,7 +51,7 @@ When the platform package is missing (optional dependencies skipped with `--omit
 | `MOCKINGBIRD_DOWNLOAD_URL` | Base URL of a mirror of the GitHub releases (`<url>/v<version>/<asset>`) |
 | `MOCKINGBIRD_CACHE_DIR` | Where downloaded binaries are cached |
 
-Every package is published from the release workflow with [npm provenance](https://docs.npmjs.com/generating-provenance-statements), so `npm audit signatures` checks that it was built from this repository's tagged commit.
+From 0.1.1 on, every package is published by the release workflow through npm trusted publishing, with [npm provenance](https://docs.npmjs.com/generating-provenance-statements), so `npm audit signatures` checks that it was built from this repository's tagged commit. 0.1.0 was published by hand, before npm could link the packages to the workflow, so it has npm's registry signatures but no provenance attestation; its binaries are the 0.1.0 release archives, which carry their own build provenance (see [Verifying images and binaries](deploy/kubernetes.md#verifying-images-and-binaries)).
 
 ## Install script
 

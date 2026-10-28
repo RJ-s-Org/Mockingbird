@@ -1,11 +1,15 @@
 [package]
-name = "mb-store"
+name = "mockingbird-store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Control-plane entities and the ControlStore trait (SQLite and Postgres)"
+description = "Internal crate of Mockingbird (the control-plane store), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+
+# The library keeps its name (`use mb_store::…`).
+[lib]
+name = "mb_store"
 
 [lints]
 workspace = true
