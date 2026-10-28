@@ -5,6 +5,10 @@ all-features = true
 version = 2
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing attack affects private-key decryption; Mockingbird only verifies signatures (openidconnect) and signs in tests" },
+    # crypto-bigint 0.5.5 (via openidconnect 4.0.1 -> p256/p384 -> elliptic-curve, used by mb-auth).
+    # The fix is in 0.7.6, which openidconnect cannot take yet; revisit when it upgrades.
+    { id = "RUSTSEC-2026-0385", reason = "non-constant-time mask generation and u128 comparisons in crypto-bigint 0.5.5: Mockingbird only verifies OIDC ID-token signatures (public values) through openidconnect; it never handles a private key in production, and no 0.5.x release has the fix" },
+    { id = "RUSTSEC-2026-0387", reason = "timing variability in crypto-bigint 0.5.5 constant-time operations: same exposure as RUSTSEC-2026-0385, signature verification of public tokens only, and no 0.5.x release has the fix" },
     { id = "RUSTSEC-2026-0192", reason = "an unmaintained-crate notice, not a vulnerability: ttf-parser is a mandatory dependency of lopdf 0.42, pinned by pdf-extract 0.12.1 (the latest release; lopdf 0.45 drops ttf-parser but pdf-extract cannot use it). It is reachable only through smart-import PDF text extraction (mb-import feature `smart`), and only from lopdf's font embedding, which that extraction never calls" },
 ]
 
