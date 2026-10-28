@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_store::{
     ChaosSettings, Consistency, DataPlaneAuthConfig, Mock, MockBehavior, MockLimits, NewMock,
-    ResourceSource, StoreError, UnknownIds, WebhookTarget, routes_collide, validate_hosts,
-    validate_route_prefix, validate_webhooks,
+    PathRewrite, ResourceSource, StoreError, UnknownIds, WebhookTarget, routes_collide,
+    validate_hosts, validate_route_prefix, validate_webhooks,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
@@ -135,6 +135,19 @@ pub enum DataPlaneAuthModeSchema {
 }
 
 /// The OpenAPI schema of [`ChaosSettings`] (which lives in `mb-store`).
+/// A mock's path rewrite, applied to the path below the route prefix:
+/// `strip_prefix` is removed when the path starts with it, then
+/// `add_prefix` is put in front.
+#[derive(ToSchema)]
+#[schema(as = PathRewrite)]
+#[allow(dead_code)]
+pub struct PathRewriteSchema {
+    /// `/seg(/seg)*`, removed from the front of the path.
+    strip_prefix: Option<String>,
+    /// `/seg(/seg)*`, put in front of the path.
+    add_prefix: Option<String>,
+}
+
 #[derive(ToSchema)]
 #[schema(as = ChaosSettings)]
 #[allow(dead_code)]
@@ -230,6 +243,10 @@ pub struct MockView {
     pub default_scenario: Option<String>,
     /// Host names the mock answers for; empty answers for any host.
     pub hosts: Vec<String>,
+    /// The path rewrite; absent when none.
+    #[serde(skip_serializing_if = "PathRewrite::is_identity")]
+    #[schema(value_type = Option<PathRewriteSchema>)]
+    pub path_rewrite: PathRewrite,
     /// Where the mock POSTs events after successful writes; absent when
     /// none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -259,6 +276,7 @@ impl MockView {
             consistency: m.behavior.consistency,
             unknown_ids: m.behavior.unknown_ids,
             default_scenario: m.behavior.default_scenario,
+            path_rewrite: m.behavior.path_rewrite,
             hosts: m.hosts,
             webhooks: m.webhooks.into_iter().map(redact_target).collect(),
             created_at: m.created_at,
@@ -305,6 +323,10 @@ pub struct CreateMock {
     /// share a route prefix.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Rewrites the path below the route prefix; none by default.
+    #[serde(default)]
+    #[schema(value_type = Option<PathRewriteSchema>)]
+    pub path_rewrite: PathRewrite,
     /// Webhook targets; none by default.
     #[serde(default)]
     #[schema(value_type = Option<Vec<WebhookTargetSchema>>)]
@@ -350,6 +372,10 @@ pub struct PatchMock {
     pub default_scenario: Option<Option<String>>,
     /// Replaces the host list; `[]` clears it.
     pub hosts: Option<Vec<String>>,
+    /// Replaces the path rewrite; `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<PathRewriteSchema>)]
+    pub path_rewrite: Option<Option<PathRewrite>>,
     /// Replaces the webhook targets; `[]` clears them.
     #[schema(value_type = Option<Vec<WebhookTargetSchema>>)]
     pub webhooks: Option<Vec<WebhookTarget>>,
@@ -478,6 +504,7 @@ pub async fn create(
                     consistency: body.consistency,
                     unknown_ids: body.unknown_ids,
                     default_scenario: None,
+                    path_rewrite: body.path_rewrite,
                 },
                 hosts: body.hosts,
                 webhooks: body.webhooks,
@@ -617,6 +644,9 @@ pub async fn patch(
             ));
         }
         m.behavior.default_scenario = default_scenario;
+    }
+    if let Some(rewrite) = body.path_rewrite {
+        m.behavior.path_rewrite = rewrite.unwrap_or_default();
     }
     let updated = view(&st, st.store.update_mock(&m).await?).await?;
     access

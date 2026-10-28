@@ -309,6 +309,64 @@ pub struct MockBehavior {
     /// The scenario applied when a call names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_scenario: Option<String>,
+    /// Rewrites the path below the route prefix before it is matched
+    /// against the contract.
+    #[serde(default, skip_serializing_if = "PathRewrite::is_identity")]
+    pub path_rewrite: PathRewrite,
+}
+
+/// A mock's path rewrite: `strip_prefix` is removed from the path below the
+/// route prefix (when it starts with it, at a segment boundary), then
+/// `add_prefix` is put in front. Lets one contract serve under another base
+/// path, e.g. TMDB's `/3/...` contract at `movies-proxy.vercel.app/tmdb/...`
+/// with `add_prefix: /3`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PathRewrite {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strip_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_prefix: Option<String>,
+}
+
+impl PathRewrite {
+    pub fn is_identity(&self) -> bool {
+        self.strip_prefix.is_none() && self.add_prefix.is_none()
+    }
+
+    /// Both prefixes are route-prefix shaped (`/seg(/seg)*`) and not `/`.
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("strip_prefix", &self.strip_prefix),
+            ("add_prefix", &self.add_prefix),
+        ] {
+            if let Some(v) = value
+                && (v == "/" || crate::validate_route_prefix(v).is_err())
+            {
+                return Err(format!(
+                    "path_rewrite.{field} {v:?} must look like /seg or /seg/seg (not /)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `path` (below the route prefix, starting with `/`) rewritten.
+    pub fn apply(&self, path: &str) -> String {
+        let rest = match &self.strip_prefix {
+            Some(prefix) => match path.strip_prefix(prefix.as_str()) {
+                Some("") => "/",
+                Some(rest) if rest.starts_with('/') => rest,
+                _ => path,
+            },
+            None => path,
+        };
+        match &self.add_prefix {
+            Some(prefix) if rest == "/" => prefix.clone(),
+            Some(prefix) => format!("{prefix}{rest}"),
+            None => rest.to_owned(),
+        }
+    }
 }
 
 impl MockBehavior {
@@ -951,5 +1009,41 @@ impl ImportJobStatus {
                 "unknown import job status {other:?}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PathRewrite;
+
+    fn rewrite(strip: Option<&str>, add: Option<&str>) -> PathRewrite {
+        PathRewrite {
+            strip_prefix: strip.map(String::from),
+            add_prefix: add.map(String::from),
+        }
+    }
+
+    #[test]
+    fn path_rewrite_strips_then_adds_at_segment_boundaries() {
+        let add = rewrite(None, Some("/3"));
+        assert_eq!(add.apply("/movie/550"), "/3/movie/550");
+        assert_eq!(add.apply("/"), "/3");
+        let strip = rewrite(Some("/v1"), None);
+        assert_eq!(strip.apply("/v1/orders"), "/orders");
+        assert_eq!(strip.apply("/v1"), "/");
+        assert_eq!(strip.apply("/v10/orders"), "/v10/orders");
+        assert_eq!(strip.apply("/orders"), "/orders");
+        let both = rewrite(Some("/api"), Some("/v2"));
+        assert_eq!(both.apply("/api/orders"), "/v2/orders");
+        assert!(PathRewrite::default().is_identity());
+        assert_eq!(PathRewrite::default().apply("/x"), "/x");
+    }
+
+    #[test]
+    fn path_rewrite_prefixes_are_validated() {
+        assert!(rewrite(Some("/a/b"), Some("/3")).validate().is_ok());
+        assert!(rewrite(Some("/"), None).validate().is_err());
+        assert!(rewrite(None, Some("3")).validate().is_err());
+        assert!(rewrite(None, Some("/a b")).validate().is_err());
     }
 }

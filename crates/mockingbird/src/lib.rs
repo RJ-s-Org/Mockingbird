@@ -22,6 +22,7 @@ pub mod proxy;
 pub mod reconcile;
 pub mod recorder;
 pub mod registry;
+pub mod run;
 pub mod runtime;
 pub mod server;
 pub mod shell_env;

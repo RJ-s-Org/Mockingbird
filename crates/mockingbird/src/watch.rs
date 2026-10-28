@@ -235,7 +235,7 @@ pub fn spawn_with_status(
                         applied(cfg).await;
                     }
                     if report.is_empty() {
-                        tracing::debug!(config = %config_path.display(), "config reloaded; no changes");
+                        tracing::info!(config = %config_path.display(), "config reloaded: no changes");
                     } else {
                         let changed = report.summary();
                         tracing::info!(

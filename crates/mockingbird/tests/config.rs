@@ -3261,3 +3261,44 @@ fn a_non_loopback_proxy_must_block_unmapped_hosts() {
     file_config::load(&ws.config_path()).unwrap();
     assert_eq!(FileConfig::default().proxy.host.to_string(), "127.0.0.1");
 }
+
+/// A config with no `mocks:` at startup, then a `mocks:` block added while
+/// the server runs (with a mock created through the API in between): the
+/// new file mock is served without a restart.
+#[tokio::test]
+async fn watch_applies_a_mocks_block_added_later() {
+    let ws = Workspace::new();
+    let head = BASIC.split("mocks:").next().unwrap().to_owned();
+    ws.write(&head);
+    let app = start(config_args(&ws, true)).await;
+    let http = reqwest::Client::new();
+    let r = http
+        .post(format!("{}/api/v1/mocks", app.admin))
+        .json(&json!({"name": "api-mock", "route_prefix": "/orders"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The contract lives in a directory that did not exist at startup.
+    std::fs::create_dir(ws.dir.path().join("sub")).unwrap();
+    std::fs::copy(fixture(), ws.dir.path().join("sub/orders.yaml")).unwrap();
+    ws.write(&format!(
+        "{head}proxy:\n  enabled: true\n  port: 1\nmocks:\n  orders:\n    contract: sub/orders.yaml\n    route_prefix: /orders\n    hosts: [api.orders.test]\n"
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let r = reqwest::Client::new()
+            .get(format!("{}/orders/orders", app.data))
+            .header("host", "api.orders.test")
+            .send()
+            .await
+            .unwrap();
+        if r.status() == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not reloaded: {}", r.status());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

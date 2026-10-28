@@ -1163,6 +1163,7 @@ async fn runtime_carries_mock_behavior() {
         consistency: Consistency::Off,
         unknown_ids: UnknownIds::NotFound,
         default_scenario: Some("gift".into()),
+        ..Default::default()
     };
     let mock = store.update_mock(&mock).await.unwrap();
     let rt = mockingbird::runtime::build_runtime(&deps(store.clone()), &mock)

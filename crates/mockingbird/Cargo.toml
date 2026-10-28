@@ -54,6 +54,7 @@ notify-debouncer-full.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 sha2.workspace = true
+sha1.workspace = true
 mb-engine.workspace = true
 mb-ext.workspace = true
 mb-import = { workspace = true, features = ["smart"] }
@@ -74,7 +75,7 @@ rustls-native-certs.workspace = true
 json-patch.workspace = true
 serde_json.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["signal", "io-std", "io-util"] }
+tokio = { workspace = true, features = ["signal", "io-std", "io-util", "process"] }
 tokio-rustls.workspace = true
 tower.workspace = true
 tracing.workspace = true

@@ -123,6 +123,15 @@ pub async fn run_with(
         _ => None,
     };
     tracing::info!(role = role.as_str(), "starting");
+    if let Some(path) = &args.config
+        && !args.watch
+        && role != Role::Data
+    {
+        tracing::info!(
+            config = %path.display(),
+            "config file read once: edits need a restart (--watch reloads them)"
+        );
+    }
     let (scheme, grpc_mode) = match app.tls {
         Some(_) => ("https", "TLS"),
         None => ("http", "h2c"),

@@ -28,13 +28,11 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
 
 ### From the proxy trials (2026-10-28)
 
-- **SDKs with their own HTTP agent ignore the proxy variables.** stripe-node creates its own `https.Agent`, so `NODE_USE_ENV_PROXY` does not apply and its calls went to the real `api.stripe.com` (the dummy key was rejected; nothing else was sent). `node -r global-agent/bootstrap` with `GLOBAL_AGENT_HTTP_PROXY` fixed it. Ship this: `mockingbird proxy env --node` could add a `NODE_OPTIONS=--require <preload>` that installs the proxy on every agent (and undici's dispatcher), with no package to install.
 - **Huge response schemas time out.** GitHub REST `GET /search/commits` falls back to faker after 60 s every time. A fallback answer is not cached either, so the identical repeat waits another 60 s. Cache fallbacks under consistency (or fail fast on a repeat), and generate fewer, shorter items for list/search envelopes.
 - **Large TMDB detail answers are still slow:** 17–37 s pages, about 5k completion tokens per call. Candidates: stream the answer, trim `append_to_response` sub-objects to the requested ones, or cache per resource across sessions.
-- **One contract under another host and path.** The movies app calls its hosted proxy (`movies-proxy.vercel.app/tmdb/<path>`), not TMDB, so the trial exported the TMDB contract and stripped `/3` from its paths to mount it there. A per-mock path rewrite (`strip_prefix`/`add_prefix`), or letting a mock reuse another mock's contract with a different base path, would avoid the copy.
-- **Browser traffic does not go through the proxy.** Server-side rendering reaches the mocks; images (`movies-proxy.vercel.app/ipx/…`) and client-side navigation are fetched by the browser from the real host. Document browser setups (a PAC file or `--proxy-server` for Playwright/Chrome with the CA) or serve the images via `proxy.images` once the browser uses the proxy.
-- **Adding a `mocks:` block to a running server's config did not take effect** (no reload line in the log, `/readyz` stayed `ready`); a restart did. Check whether a mock defined only in the database plus a new config `mocks:` section is a reload the watcher skips.
 - GraphQL queries with several root fields (pin cards) still skip state, cache and seeding, and are logged once per root field (accepted deviation of [#41](https://github.com/RJ-s-Org/Mockingbird/pull/41)).
+- `storage.url: sqlite://./…` is relative to the working directory, while `contract:` paths are relative to the config file, so `mockingbird run -c elsewhere/mockingbird.yaml` opens a different database than `cd elsewhere && mockingbird run`. Resolve relative SQLite paths against the config's directory (a behaviour change; needs a decision).
+- Go on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux and OpenSSL Rubies work. A per-runtime preload (as for Node.js) or a documented opt-in keychain install would close it.
 - Persona details are not always kept: a few Stripe `client_secret` suffixes were shorter than the 24 characters the persona asks for.
 
 ### From the examples catalog (2026-10-28)
@@ -138,3 +136,9 @@ Found while building the 21 [API examples](examples.md) and 3 sample apps, offli
   - CI: [#45](https://github.com/RJ-s-Org/Mockingbird/pull/45) (OpenSSL vendored into the binary, distroless `base-nossl` image; crypto-bigint advisories ignored with reasons), [#47](https://github.com/RJ-s-Org/Mockingbird/pull/47) (pulldown-cmark 0.13.5).
 
   Measured afterwards: the three trials through the proxy (table above).
+- L2, zero-edit proxy and routing (launch-l2-proxy):
+  - `mockingbird run [-c config] -- <command>` starts the server and proxy unless one answers, runs the command with the proxy environment, stops what it started and exits with the command's code;
+  - `proxy env` covers more runtimes with no package install: a Node.js preload in `NODE_OPTIONS` (every `http`/`https` agent, including SDKs' own, and undici's global dispatcher), `JAVA_TOOL_OPTIONS` with a JKS truststore, `CURL_CA_BUNDLE`, `DENO_CERT`; stripe-node reaches the mock without `global-agent`;
+  - `mocks.<name>.path_rewrite` (`strip_prefix`/`add_prefix`) mounts one contract under another base path, e.g. TMDB's `/3` contract at `movies-proxy.vercel.app/tmdb`;
+  - browsers: a PAC file at `/proxy.pac`, `mockingbird proxy browser` (Chrome/Chromium/Edge through the proxy, trusting the CA by its SPKI hash in a profile of its own), Playwright and Cypress setup in [proxy.md](proxy.md); `proxy.images` entries may name a path prefix on a mocked host (`movies-proxy.vercel.app/ipx`);
+  - the reload gap: with `--watch` an added `mocks:` block was applied, but a reload with nothing to change logged only at debug level, `serve -c` without `--watch` never reloaded and said nothing, and a changed `proxy:` section (added in the same edit in the trial) cannot apply until restart. Each reload now logs at info level, `serve` without `--watch` says it reads the file once, and a changed `proxy:` section logs a restart warning.

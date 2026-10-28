@@ -1,5 +1,6 @@
-//! Placeholder images for `proxy.images` hosts: a solid-colour PNG per
-//! path, generated without an LLM.
+//! Placeholder images for `proxy.images` entries (a host, or a host and a
+//! path prefix such as `movies-proxy.vercel.app/ipx`): a solid-colour PNG
+//! per path, generated without an LLM.
 
 use std::io::Write as _;
 
@@ -16,16 +17,82 @@ pub const DEFAULT_IMAGE_SIZE: (u32, u32) = (300, 450);
 /// Widest image a `w<width>` segment may ask for.
 const MAX_WIDTH: u32 = 2000;
 
-/// From the first `w<digits>` segment of `path` with a width in
-/// `1..=2000`: `(w, w * 3 / 2)` (a poster's aspect ratio); else
+/// One `proxy.images` entry: requests to `host` whose path lies under
+/// `prefix` (any path without one) get placeholder images.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageRule {
+    pub host: String,
+    pub prefix: Option<String>,
+}
+
+impl ImageRule {
+    /// Parses `host` or `host/path/prefix` (lowercased host, no port).
+    pub fn parse(entry: &str) -> Result<ImageRule, String> {
+        let (host, prefix) = match entry.split_once('/') {
+            Some((host, rest)) => (host, Some(format!("/{}", rest.trim_end_matches('/')))),
+            None => (entry, None),
+        };
+        let host = host.to_ascii_lowercase();
+        mb_store::validate_hosts(std::slice::from_ref(&host)).map_err(|e| e.to_string())?;
+        let prefix = prefix.filter(|p| p != "/");
+        if let Some(p) = &prefix
+            && mb_store::validate_route_prefix(p).is_err()
+        {
+            return Err(format!(
+                "{entry:?}: the path after the host must look like /seg/seg"
+            ));
+        }
+        Ok(ImageRule { host, prefix })
+    }
+
+    /// Whether a request for `path` on `host` gets a placeholder.
+    pub fn matches(&self, host: &str, path: &str) -> bool {
+        self.host == host
+            && self.prefix.as_deref().is_none_or(|prefix| {
+                path.strip_prefix(prefix)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+    }
+}
+
+/// Checks every `proxy.images` entry.
+pub fn validate_image_entries(entries: &[String]) -> Result<(), String> {
+    entries
+        .iter()
+        .try_for_each(|e| ImageRule::parse(e).map(drop))
+}
+
+/// The size a path asks for: a `w<digits>` segment (TMDB's `w500`) gives
+/// `(w, w * 3 / 2)` (a poster's aspect ratio); an ipx-style modifier
+/// segment (`s_400x600`, or `w_400` among `&`/`,`-separated modifiers)
+/// gives that size. Dimensions must be in `1..=2000`; otherwise
 /// [`DEFAULT_IMAGE_SIZE`].
 pub fn image_size(path: &str) -> (u32, u32) {
-    path.split('/')
-        .filter_map(|seg| seg.strip_prefix('w'))
-        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-        .find_map(|digits| digits.parse::<u32>().ok())
-        .filter(|w| (1..=MAX_WIDTH).contains(w))
-        .map_or(DEFAULT_IMAGE_SIZE, |w| (w, w * 3 / 2))
+    let ok = |v: u32| (1..=MAX_WIDTH).contains(&v);
+    let num = |s: &str| {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse::<u32>().ok())
+            .flatten()
+            .filter(|v| ok(*v))
+    };
+    for seg in path.split('/') {
+        if let Some(w) = seg.strip_prefix('w').and_then(num) {
+            return (w, w * 3 / 2);
+        }
+        for modifier in seg.split(['&', ',']) {
+            if let Some((w, h)) = modifier
+                .strip_prefix("s_")
+                .and_then(|s| s.split_once('x'))
+                .and_then(|(w, h)| Some((num(w)?, num(h)?)))
+            {
+                return (w, h);
+            }
+            if let Some(w) = modifier.strip_prefix("w_").and_then(num) {
+                return (w, w * 3 / 2);
+            }
+        }
+    }
+    DEFAULT_IMAGE_SIZE
 }
 
 /// The placeholder's colour: the first three bytes of SHA-256 of `path`.
@@ -104,7 +171,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rules_match_hosts_and_path_prefixes() {
+        let any = ImageRule::parse("Image.TMDB.org").unwrap();
+        assert!(any.matches("image.tmdb.org", "/t/p/w92/a.jpg"));
+        let ipx = ImageRule::parse("movies-proxy.vercel.app/ipx/").unwrap();
+        assert_eq!(ipx.prefix.as_deref(), Some("/ipx"));
+        assert!(ipx.matches("movies-proxy.vercel.app", "/ipx/s_400x600/tmdb/a.jpg"));
+        assert!(!ipx.matches("movies-proxy.vercel.app", "/tmdb/movie/1"));
+        assert!(!ipx.matches("movies-proxy.vercel.app", "/ipxx/a.jpg"));
+        assert!(ImageRule::parse("bad host/x").is_err());
+        assert!(ImageRule::parse("a.test/sp ace").is_err());
+    }
+
+    #[test]
     fn size_comes_from_the_w_segment() {
+        assert_eq!(image_size("/ipx/s_400x600/tmdb/a.jpg"), (400, 600));
+        assert_eq!(image_size("/ipx/f_webp&w_200/tmdb/a.jpg"), (200, 300));
         assert_eq!(image_size("/t/p/w92/abc.jpg"), (92, 138));
         assert_eq!(image_size("/t/p/original/abc.jpg"), (300, 450));
         assert_eq!(image_size("/t/p/w99999/abc.jpg"), (300, 450));
