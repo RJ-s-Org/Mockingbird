@@ -1,0 +1,59 @@
+# A Tekton Task: Mockingbird as a sidecar serving the mocks in a ConfigMap,
+# a step that waits for it, runs the tests against it, and prints the request
+# log. Tekton stops the sidecar when the steps finish.
+#
+#   kubectl apply -f ../argo-workflows/mocks-configmap.yaml -f task.yaml
+#   tkn task start mocked-integration-test -p test-image=ghcr.io/example/shop-tests:pr-42 --showlog
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: mocked-integration-test
+spec:
+  params:
+    - name: test-image
+      default: curlimages/curl:8.10.1
+    - name: test-script
+      description: Runs in the test image; PAYMENTS_BASE_URL is the mock's base URL.
+      default: |
+        curl -fsS -X POST -H 'Content-Type: application/json' \
+          --data '{"amount":1999,"currency":"eur"}' "$PAYMENTS_BASE_URL/v1/charges"
+    - name: mocks-configmap
+      default: mocks
+    - name: mock
+      default: payments
+    - name: mockingbird-image
+      default: ghcr.io/rj-s-org/mockingbird:0.1.0
+  volumes:
+    - name: mocks
+      configMap:
+        name: $(params.mocks-configmap)
+  sidecars:
+    - name: mockingbird
+      image: $(params.mockingbird-image)
+      args: ["serve", "-c", "/etc/mockingbird/mockingbird.yaml"]
+      env:
+        - {name: MB_STORAGE_URL, value: "sqlite::memory:"}
+        - {name: MB_STATE_URL, value: memory}
+      volumeMounts:
+        - {name: mocks, mountPath: /etc/mockingbird, readOnly: true}
+  steps:
+    - name: wait-for-mocks
+      image: curlimages/curl:8.10.1
+      script: |
+        #!/bin/sh
+        curl -fsS --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9090/readyz
+    - name: test
+      image: $(params.test-image)
+      env:
+        - name: PAYMENTS_BASE_URL
+          value: http://127.0.0.1:8080/$(params.mock)
+      script: |
+        #!/bin/sh
+        set -e
+        $(params.test-script)
+    - name: requests
+      image: curlimages/curl:8.10.1
+      onError: continue
+      script: |
+        #!/bin/sh
+        curl -fsS "http://127.0.0.1:9090/api/v1/mocks/$(params.mock)/requests"

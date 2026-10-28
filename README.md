@@ -109,6 +109,7 @@ The documentation is an [mdBook](docs/README.md) built from `docs/` (`scripts/do
 | [Docker](docs/deploy/docker.md) | Building and running the image |
 | [Docker Compose](docs/deploy/compose.md) | The Compose stack and its `ha`, `kafka`, `amqp` and `mqtt` profiles |
 | [Kubernetes](docs/deploy/kubernetes.md) | The Helm chart, external stores, OIDC, ingress, secrets and verifying releases |
+| [GitOps and preview environments](docs/deploy/gitops.md) | Mocks declared in Helm values or Kustomize, a mocked environment per pull request (Argo CD, Flux), Argo Workflows, Tekton and Testcontainers |
 | [Infrastructure as code](docs/iac.md) | The Terraform/OpenTofu provider and Pulumi: mocks, contracts, scenarios and keys from code; a mocked staging environment in 20 lines |
 | [Running in production](docs/operations/production.md) | Ops endpoints, storage, high availability and hardening |
 | [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |

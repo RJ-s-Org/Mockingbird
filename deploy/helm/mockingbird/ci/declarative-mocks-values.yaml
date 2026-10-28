@@ -1,0 +1,91 @@
+# CI: mocks declared in values (inline, from a ConfigMap and from a URL), an
+# extra LLM profile with its key from a Secret, hot reload, a per-PR ingress
+# host and `helm test` requests. Also the install of the kind smoke test.
+config:
+  server:
+    insecure_no_auth: true
+
+reload: watch
+
+mocks:
+  orders:
+    contract:
+      inline: |
+        openapi: 3.0.3
+        info: {title: Orders API, version: 1.0.0}
+        paths:
+          /orders:
+            get:
+              operationId: listOrders
+              responses:
+                "200":
+                  description: OK
+                  content:
+                    application/json:
+                      schema:
+                        type: array
+                        items: {$ref: "#/components/schemas/Order"}
+            post:
+              operationId: createOrder
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      required: [item]
+                      properties: {item: {type: string}}
+              responses:
+                "201":
+                  description: Created
+                  content:
+                    application/json:
+                      schema: {$ref: "#/components/schemas/Order"}
+                "409":
+                  description: Out of stock
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties: {error: {type: string}}
+        components:
+          schemas:
+            Order:
+              type: object
+              required: [id, item, status]
+              properties:
+                id: {type: string}
+                item: {type: string}
+                status: {type: string, enum: [pending, shipped]}
+    persona: A small bookshop's order system.
+    scenarios:
+      out-of-stock:
+        status: 409
+        operations: [createOrder]
+
+tests:
+  requests:
+    - path: /orders/orders
+      status: 200
+    - path: /orders/orders
+      method: POST
+      status: 201
+      body: {item: "The Hobbit"}
+      headers: {X-Mockingbird-Session: helm-test}
+    - path: /orders/orders
+      method: POST
+      status: 409
+      body: {item: "The Hobbit"}
+      headers: {X-Mockingbird-Scenario: out-of-stock}
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: "{{ .Release.Name }}.mocks.ci.example"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts: ["{{ .Release.Name }}.mocks.ci.example"]
+      secretName: "{{ .Release.Name }}-tls"

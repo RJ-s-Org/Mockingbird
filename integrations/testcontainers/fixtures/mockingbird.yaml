@@ -1,0 +1,11 @@
+# The config the recipes' tests mount at /etc/mockingbird (with payments.yaml).
+server:
+  host: 0.0.0.0
+  insecure_no_auth: true
+mocks:
+  payments:
+    contract: payments.yaml
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [createCharge]

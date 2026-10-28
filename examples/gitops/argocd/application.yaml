@@ -1,0 +1,61 @@
+# One long-lived mock environment (for example the shared `dev` namespace),
+# from the published chart, with the values kept in Git next to it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mocks-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: ghcr.io/rj-s-org/charts
+      chart: mockingbird
+      targetRevision: 0.1.0
+      helm:
+        releaseName: mocks
+        valueFiles:
+          - $app/deploy/preview/mocks-values.yaml
+        valuesObject:
+          ingress:
+            hosts:
+              - host: mocks.dev.example.com
+                paths: [{path: /, pathType: Prefix}]
+        # Argo CD renders offline; tell the chart the cluster's version so
+        # it keeps the 1.30+ preStop sleep.
+        kubeVersion: "1.30.0"
+    - repoURL: https://github.com/example/shop.git
+      targetRevision: main
+      ref: app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mocks-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# The same environment from the Kustomize overlay instead of the chart.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mocks-staging
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rj-s-org/mockingbird.git
+    targetRevision: v0.1.0
+    path: deploy/kustomize/overlays/staging-llm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mocks-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

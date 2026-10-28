@@ -20,6 +20,8 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 
 ### Added
 
+- Helm chart: `mocks:` declares mocks in the values, with the contract inline, from an existing ConfigMap or downloaded from a URL (optional `sha256`); `llm.baseUrl`, `llm.model` and `llm.profiles` (each key from a Secret); `reload: watch` runs `serve --watch` so config and contract changes apply in place; a `helm test` pod (`tests.requests`); ingress hosts and TLS rendered with `tpl` for per-release (per-PR) hosts. `scripts/check-helm.sh` also checks those renders, the Kustomize overlays and the GitOps examples; `scripts/check-helm-kind.sh` runs the chart on kind.
+- Kustomize base and overlays (`deploy/kustomize`: `offline-dev`, `staging-llm`), GitOps examples (`examples/gitops`: Argo CD `Application` and pull-request `ApplicationSet`, Flux `HelmRelease`, Argo Workflows `WorkflowTemplate`, Tekton `Task`) and Testcontainers modules for Node, Python, Java and Go (`integrations/testcontainers`). See [docs/deploy/gitops.md](docs/deploy/gitops.md).
 - A Terraform and OpenTofu provider (`integrations/terraform-provider`) for workspaces, mocks (contract from inline content, a file or a URL, re-uploaded when its sha256 changes), contract versions, scenarios, LLM profiles (secret references only), API keys, channels and event settings, with `mockingbird_mock` and `mockingbird_workspace` data sources and import on every resource; Pulumi through its Terraform bridge, with TypeScript and Python examples (`integrations/pulumi`). See [docs/iac.md](docs/iac.md).
 - `X-Mockingbird-Fallback-Reason` on every `fallback` response says why the LLM answer was not used (GraphQL: `extensions.mockingbird.fallbackReasons`); the request log records it. Migration `0500_llm_diagnostics` adds `request_log.fallback_reason` and `llm_profiles.extra_body`.
 - LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
@@ -79,6 +81,7 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 
 ### Fixed
 
+- `serve --watch` sees updates to a config or contract mounted from a Kubernetes ConfigMap or Secret, which arrive as a swap of the volume's `..data` link rather than a change to the file.
 - Provider replies with the answer only in `reasoning`, errors inside a 200, or output cut at `max_tokens` are handled (with one retry for transient failures) instead of falling back without a reason.
 - A JSON array the model wrapped in a one-key object (JSON-object mode) is unwrapped when the inner value matches the schema.
 - Real-world contracts load: a `$ref` inside a vendor extension (Stripe's `x-expansionResources`, GitHub's `x-github-breaking-changes`) no longer fails compilation, and an unresolvable `$ref` names its referrer and the JSON pointer where it sits.

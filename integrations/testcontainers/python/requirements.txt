@@ -1,0 +1,2 @@
+testcontainers>=4.8
+pytest>=8
