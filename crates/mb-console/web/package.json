@@ -13,7 +13,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "e2e": "playwright test",
-    "gen:api": "cargo run -q -p mockingbird -- openapi > openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts",
+    "gen:api": "cargo run -q -p mockingbird-cli -- openapi > openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts",
     "check:api": "npm run gen:api && git diff --exit-code src/api/schema.d.ts"
   },
   "dependencies": {

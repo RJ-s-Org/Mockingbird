@@ -42,7 +42,7 @@ jobs:
           shared-key: examples
       # The slim binary: no Kafka (librdkafka) needed, and the console's
       # placeholder page is enough here.
-      - run: cargo build -p mockingbird --locked
+      - run: cargo build -p mockingbird-cli --locked
       - uses: actions/upload-artifact@v7
         with:
           name: mockingbird

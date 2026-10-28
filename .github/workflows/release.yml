@@ -146,10 +146,10 @@ jobs:
       # Default features (mqtt, amqp). Kafka ships only in the full image.
       - name: Build (cargo zigbuild)
         if: matrix.zigbuild
-        run: cargo zigbuild --release --locked -p mockingbird --target "$TARGET"
+        run: cargo zigbuild --release --locked -p mockingbird-cli --target "$TARGET"
       - name: Build (cargo build)
         if: ${{ !matrix.zigbuild }}
-        run: cargo build --release --locked -p mockingbird --target "$TARGET"
+        run: cargo build --release --locked -p mockingbird-cli --target "$TARGET"
       - name: Package
         run: |
           name="mockingbird-$VERSION-$TARGET"
@@ -506,6 +506,48 @@ jobs:
             exit 0
           fi
           cargo publish -p mb-ext --locked
+
+  # `mockingbird-cli` (the `mockingbird` binary) and the internal crates it
+  # depends on, published together at the workspace version after mb-ext. The
+  # package carries the built console, the example catalog and the agent
+  # skills (crates/mockingbird/build.rs). A dry run packages and verifies all
+  # of them without uploading; a prerelease publishes nothing.
+  publish-cli:
+    needs: [verify, console, release, publish-crate]
+    if: >-
+      always() && needs.verify.result == 'success' && needs.console.result == 'success' &&
+      (needs.verify.outputs.publish == 'false' ||
+       (needs.verify.outputs.prerelease == 'false' && needs.publish-crate.result == 'success'))
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@v8
+        with:
+          name: console-dist
+          path: crates/mb-console/dist
+      - name: Put the example catalog and the skills into the package
+        run: |
+          mkdir -p crates/mockingbird/embedded
+          cp -R examples/apis crates/mockingbird/embedded/examples
+          cp -R plugins/mockingbird/skills crates/mockingbird/embedded/skills
+      - name: Publish mockingbird-cli unless this version is on crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PUBLISH: ${{ needs.verify.outputs.publish }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          if [ "$PUBLISH" != true ]; then
+            # mb-ext is packaged too, so the others resolve it locally.
+            cargo publish --workspace --dry-run --allow-dirty --locked
+            exit 0
+          fi
+          if (cd "$RUNNER_TEMP" && cargo info "mockingbird-cli@$VERSION" --registry crates-io > /dev/null 2>&1); then
+            echo "::notice::mockingbird-cli $VERSION is already on crates.io; skipping"
+            exit 0
+          fi
+          # --allow-dirty: dist/ and embedded/ are build output, not in git.
+          cargo publish --workspace --exclude mb-ext --allow-dirty --locked
 
   # The npm packages (npm/): the launcher and one package per target, built
   # from the archives the `binaries` job made. A dry run stops after packing

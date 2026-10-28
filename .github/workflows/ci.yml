@@ -91,7 +91,7 @@ jobs:
       - name: Build the API docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
       - name: Check the slim binary
-        run: cargo check -p mockingbird --no-default-features
+        run: cargo check -p mockingbird-cli --no-default-features
 
   # Each mb-protocols feature (and none) must build on its own, warnings
   # included (P4 Global Constraints; P5 adds the event features). One job

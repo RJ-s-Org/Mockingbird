@@ -36,7 +36,7 @@ make testacc-tofu   # the same with OpenTofu
 make docs           # regenerate docs/ from the schema, templates and examples
 ```
 
-Inside the Mockingbird repository the tests use `../../target/debug/mockingbird` (`cargo build -p mockingbird`); set `MOCKINGBIRD_BIN` elsewhere, or `MB_ADMIN_URL` to test against a running server.
+Inside the Mockingbird repository the tests use `../../target/debug/mockingbird` (`cargo build -p mockingbird-cli`); set `MOCKINGBIRD_BIN` elsewhere, or `MB_ADMIN_URL` to test against a running server.
 
 Releases are built by `.github/workflows/release.yml` with goreleaser on a `v*` tag and signed with the GPG key in the `GPG_PRIVATE_KEY` secret.
 
