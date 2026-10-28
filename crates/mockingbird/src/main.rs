@@ -38,6 +38,15 @@ async fn run(cli: Cli) -> ExitCode {
         }
     };
     let result = match cli.cmd {
+        Command::Run(args) => {
+            return match mockingbird::run::run(args).await {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
+        }
         Command::Serve(args) => server::run(args).await.map_err(|e| match e {
             ServeError::Usage(msg) => Failure::Usage(msg),
             ServeError::Other(e) => Failure::Other(e),

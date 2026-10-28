@@ -38,7 +38,7 @@ To point a real app at mocks without editing its code or base URLs:
 2. Start the server with the proxy: `start_server {config: "mockingbird.yaml", proxy: true}` (CLI `mockingbird server start --proxy -c mockingbird.yaml`).
 3. Export the variables `proxy_env` returns (its `export` field) in the shell that runs the app (CLI `eval "$(mockingbird proxy env)"`). They route HTTP(S) through the proxy and make the app trust Mockingbird's local CA; calls to the mocked hosts are answered by the mock, others pass through.
 
-Editing the app's base URL to `http://127.0.0.1:8080/<mock>` is the fallback for runtimes that ignore proxy variables (Node `fetch` before `NODE_USE_ENV_PROXY` support, axios or got without a proxy agent).
+Or in one step: `mockingbird run -c mockingbird.yaml -- <command>` starts the server and proxy, runs the command with those variables, and stops the server afterwards. Node.js needs no extra package: the variables include a `NODE_OPTIONS` preload that routes every agent (stripe-node's, got's) and `fetch`. Editing the app's base URL to `http://127.0.0.1:8080/<mock>` is the fallback for clients that ignore proxy variables (bare `urllib3`, Go and system Ruby on macOS for HTTPS). If the app calls the API under another host or base path, set `path_rewrite: {add_prefix: /3}` (or `strip_prefix`) on the mock rather than copying the contract.
 
 State is per session: a `POST` creates a resource that a later `GET` of its id returns. Unknown ids are 404s when the contract declares one.
 

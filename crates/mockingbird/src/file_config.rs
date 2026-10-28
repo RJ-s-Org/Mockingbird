@@ -1043,6 +1043,10 @@ pub struct FileMock {
     /// host. With hosts, two mocks may share a route prefix.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Rewrites the path below `route_prefix` before it is matched against
+    /// the contract (`strip_prefix`, then `add_prefix`).
+    #[serde(default)]
+    pub path_rewrite: mb_store::PathRewrite,
     /// Where the mock POSTs an event after each successful write.
     #[serde(default)]
     pub webhooks: Vec<FileWebhook>,
@@ -1220,6 +1224,7 @@ impl FileMock {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             hosts: Vec::new(),
+            path_rewrite: mb_store::PathRewrite::default(),
             webhooks: Vec::new(),
         }
     }
@@ -1429,11 +1434,15 @@ impl FileConfig {
         }
         self.validate_limits()?;
         self.validate_protocols()?;
-        mb_store::validate_hosts(&self.proxy.images).map_err(|e| format!("proxy.images: {e}"))?;
+        crate::proxy::images::validate_image_entries(&self.proxy.images)
+            .map_err(|e| format!("proxy.images: {e}"))?;
         self.proxy.check_bind(self.proxy.host)?;
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
+            mock.path_rewrite
+                .validate()
+                .map_err(|e| format!("mocks.{name}.{e}"))?;
             let webhooks: Vec<_> = mock.webhooks.iter().map(FileWebhook::to_store).collect();
             mb_store::validate_webhooks(&webhooks).map_err(|e| format!("{prefix}{e}"))?;
             if let Some(chaos) = &mock.chaos {

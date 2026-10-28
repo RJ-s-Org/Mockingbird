@@ -1099,7 +1099,6 @@ export interface components {
              */
             triggers: Record<string, never>[];
         };
-        /** @description The OpenAPI schema of [`ChaosSettings`] (which lives in `mb-store`). */
         ChaosSettings: {
             /**
              * Format: double
@@ -1224,6 +1223,7 @@ export interface components {
             llm_profile?: string | null;
             /** @description `^[a-z0-9][a-z0-9-]{0,62}$` */
             name: string;
+            path_rewrite?: components["schemas"]["PathRewrite"] | null;
             persona?: string | null;
             /** @description Defaults to `/<name>`. */
             route_prefix?: string | null;
@@ -1559,6 +1559,7 @@ export interface components {
             limits: components["schemas"]["MockLimits"];
             llm_profile?: string | null;
             name: string;
+            path_rewrite?: components["schemas"]["PathRewrite"] | null;
             persona?: string | null;
             route_prefix: string;
             source: components["schemas"]["Source"];
@@ -1610,6 +1611,7 @@ export interface components {
             hosts?: string[] | null;
             limits?: components["schemas"]["MockLimits"] | null;
             llm_profile?: string | null;
+            path_rewrite?: components["schemas"]["PathRewrite"] | null;
             persona?: string | null;
             route_prefix?: string | null;
             /** @description `generate` or `404`. */
@@ -1620,6 +1622,18 @@ export interface components {
         /** @description The editable fields of a workspace. */
         PatchWorkspace: {
             display_name: string;
+        };
+        /**
+         * @description The OpenAPI schema of [`ChaosSettings`] (which lives in `mb-store`).
+         *     A mock's path rewrite, applied to the path below the route prefix:
+         *     `strip_prefix` is removed when the path starts with it, then
+         *     `add_prefix` is put in front.
+         */
+        PathRewrite: {
+            /** @description `/seg(/seg)*`, put in front of the path. */
+            add_prefix?: string | null;
+            /** @description `/seg(/seg)*`, removed from the front of the path. */
+            strip_prefix?: string | null;
         };
         /** @description What to preview. */
         PreviewRequest: {

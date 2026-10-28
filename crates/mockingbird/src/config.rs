@@ -111,6 +111,11 @@ pub enum Command {
     /// Run the intercepting HTTP proxy in front of a running server, or
     /// print the variables that send an app through it (`proxy env`).
     Proxy(crate::proxy::ProxyArgs),
+    /// Run a command against the mocks: starts the server and proxy unless
+    /// one already answers, runs the command with the proxy environment for
+    /// every runtime, stops what it started and exits with the command's
+    /// code: `mockingbird run -c mockingbird.yaml -- npm test`.
+    Run(crate::run::RunArgs),
     /// The local CA the proxy signs certificates with.
     #[command(subcommand)]
     Ca(crate::proxy::CaCommand),
@@ -789,10 +794,18 @@ async fn build_app_on(
         Role::All | Role::Control => {
             let flags = args.clone();
             let initial_brokers = broker_configs.clone();
+            let initial_proxy = cfg.proxy.clone();
             let prepare: watch::Prepare = Arc::new(move |cfg: &mut FileConfig| {
                 file_config::apply_env(cfg)?;
                 apply_flags(cfg, &flags);
                 cfg.validate_ranges().map_err(|e| anyhow!(e))?;
+                // The proxy is started once: say so instead of ignoring an
+                // edit silently.
+                if cfg.proxy != initial_proxy {
+                    tracing::warn!(
+                        "config reload: the proxy: section changed; restart the server to apply it (mocks and their hosts are reloaded)"
+                    );
+                }
                 // Brokers are connected at startup only: a reload that
                 // changes them is rejected as a whole.
                 ensure_brokers_unchanged(&initial_brokers, cfg)

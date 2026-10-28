@@ -74,7 +74,7 @@ An HTTP proxy that lets unmodified apps reach mocks by their real host names: it
 | `proxy.host` | IP address | `127.0.0.1` | Off loopback, `proxy.unmapped` must be `block` | | The proxy's bind address. Off loopback anyone who reaches the port can use it, so `pass` (an open relay) is refused there. |
 | `proxy.port` | port | `8888` | | `--proxy-port` | The proxy's port. |
 | `proxy.unmapped` | `pass`, `block` | `pass` | | | What happens to a host no mock claims: `pass` tunnels it to the real host; `block` answers 502 problem+json naming the host. Each such host is logged once. |
-| `proxy.images` | list of strings | `[]` | Lowercase host names, no port | | Hosts answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment, else 300×450). |
+| `proxy.images` | list of strings | `[]` | A host name (no port), optionally followed by a path prefix: `image.tmdb.org`, `movies-proxy.vercel.app/ipx` | | Requests answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment or an ipx-style `s_400x600`/`w_400` modifier, else 300×450). A path prefix scopes it to part of a host a mock serves, e.g. an image endpoint the browser fetches. |
 | `proxy.ca_dir` | path | `~/.mockingbird/ca` | Relative to the config file | `MB_CA_DIR` | Where the local CA (`ca.pem`, `ca.key`) is kept; created on first use, never installed system-wide. |
 
 ## `limits`
@@ -233,6 +233,8 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.workspace` | string | `default` | | | Workspace (created if missing). |
 | `mocks.<name>.contract` | path | required | Relative to the config file | | OpenAPI 3.x, Swagger 2.0, GraphQL SDL, protobuf, WSDL 1.1 or AsyncAPI 2.x/3.0 contract. |
 | `mocks.<name>.route_prefix` | path | `/<name>` | | | Where the mock is mounted on the data plane. |
+| `mocks.<name>.path_rewrite.strip_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Removed from the front of the path below `route_prefix` (at a segment boundary) before the contract sees it. |
+| `mocks.<name>.path_rewrite.add_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Put in front of the path below `route_prefix` (after `strip_prefix`). Mounts a contract under another base path: TMDB's `/3/...` contract at `movies-proxy.vercel.app/tmdb/...` with `route_prefix: /tmdb` and `add_prefix: /3`. |
 | `mocks.<name>.hosts` | list of strings | `[]` | Lowercase host names, no port | | Hosts the mock answers for (by `Host`, e.g. through `mockingbird proxy`). With hosts, two mocks may share a route prefix; a mock with hosts is not reached under other hosts. |
 | `mocks.<name>.persona` | string | unset | | | Free text added to every prompt (locale, realism, style). |
 | `mocks.<name>.llm_profile` | string | `llm.default_profile` | | | LLM profile. |
