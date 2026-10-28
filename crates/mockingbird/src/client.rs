@@ -899,7 +899,7 @@ fn job_field(job: &Value, field: &str) -> anyhow::Result<String> {
 /// as tar.gz), `.asyncapi.yaml`/`.asyncapi.yml`/`.asyncapi.json`
 /// (AsyncAPI); else `.json`/`.yaml`/`.yml`, else JSON when the document
 /// starts with `{`, else YAML.
-fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
+pub(crate) fn contract_media_type(path: &Path, source: &[u8]) -> &'static str {
     if path.is_dir() {
         return "application/gzip";
     }

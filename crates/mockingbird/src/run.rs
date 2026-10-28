@@ -31,6 +31,14 @@ pub struct RunArgs {
     /// Faker only, no LLM (for a server `run` starts).
     #[arg(long)]
     pub offline: bool,
+    /// Record every LLM answer into this snapshot directory (for a server
+    /// `run` starts; `serve --record`).
+    #[arg(long, value_name = "DIR")]
+    pub record: Option<PathBuf>,
+    /// Answer from this snapshot directory without calling an LLM (for a
+    /// server `run` starts; `serve --replay`).
+    #[arg(long, value_name = "DIR")]
+    pub replay: Option<PathBuf>,
     /// How long to wait for the server to be ready.
     #[arg(long, default_value = "60s")]
     pub wait: humantime::Duration,
@@ -155,6 +163,8 @@ async fn prepare(
             no_watch: false,
             insecure_no_auth: false,
             wait: args.wait,
+            record: args.record.clone(),
+            replay: args.replay.clone(),
             contracts: Vec::new(),
         };
         let (info, child) = daemon::start_child(&start).await?;

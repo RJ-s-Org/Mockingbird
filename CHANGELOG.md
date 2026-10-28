@@ -20,6 +20,10 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 
 ### Added
 
+- Deterministic CI without an LLM key: `serve --record DIR` appends every LLM answer to `DIR/answers.jsonl`; `serve --replay DIR` answers from it (exact prompt, then same operation), never calls an LLM and falls back to the faker on a miss (`fallback_reason` says so); `mockingbird snapshot export|import` copies mocks, contracts and session state, which `--replay` seeds. `mb_snapshot_answers_total` counts hits and misses. See [docs/ci.md](docs/ci.md).
+- `mockingbird report` (`--format json|markdown|junit`): requests per mock and operation, response sources, fallbacks and their reasons, 4xx/5xx, and proxied hosts no mock claims (`mb_proxy_unmapped_requests_total`). `mockingbird verify` fails (exit 1) on `--no-fallbacks`, `--no-unmapped`, `--no-blocked`, `--no-errors`, `--no-client-errors`, `--exact-replay` and `--called OP[=N]`.
+- `mockingbird server start` exits 1 when the server is not ready within `--wait`, and passes `--record` / `--replay` through.
+- A GitHub Action (`RJ-s-Org/Mockingbird/integrations/github-action@v0`, with a `report` step) and a GitLab CI template (`integrations/gitlab/mockingbird.yml`); recipes for CircleCI, Jenkins, Buildkite and Azure Pipelines in [docs/ci.md](docs/ci.md).
 - Output budget (`limits.output_budget_tokens`, default 1500): a response whose estimated answer is larger is written shorter by the LLM (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker). GitHub `search/commits` p50 29.8 s → 9.4 s, TMDB movie detail 51 s → 6.2 s ([performance](docs/performance.md#latency-against-a-real-llm)).
 - Formats a persona declares (`field = "<id>_secret_<24 random chars>"` templates, `(pi_, cus_) followed by 24 random alphanumeric chars` id prefixes) are checked and patched after generation.
 - `scripts/trial-bench.py`: latency bench over the field-trial contracts against a real provider.

@@ -1,0 +1,94 @@
+# Mockingbird for GitLab CI: a hidden `.mockingbird` job to extend. Its
+# before_script installs a pinned release binary (cached per version),
+# starts the server and exports the proxy environment into the job's shell;
+# its after_script writes the report (Markdown, JSON and JUnit XML), which
+# the job uploads as artifacts, and stops the server.
+#
+#   include:
+#     - remote: https://raw.githubusercontent.com/RJ-s-Org/Mockingbird/v0.1.0/integrations/gitlab/mockingbird.yml
+#       inputs:
+#         config: mockingbird.yaml
+#         mode: replay
+#
+#   test:
+#     extends: .mockingbird
+#     image: node:22
+#     script:
+#       - npm ci && npm test
+#       - mockingbird verify --no-fallbacks --no-unmapped
+#
+# A job that sets its own before_script runs `!reference [.mockingbird,
+# before_script]` first. See docs/ci.md.
+spec:
+  inputs:
+    version:
+      description: Release tag to install.
+      default: v0.1.0
+    config:
+      description: Config file (mockingbird.yaml).
+      default: mockingbird.yaml
+    mode:
+      description: offline, replay (answers from the snapshot, never an LLM), record or llm.
+      default: offline
+      options: [offline, replay, record, llm]
+    snapshot:
+      description: Snapshot directory for replay and record.
+      default: .mockingbird/snapshot
+    proxy:
+      description: Start the proxy and export HTTPS_PROXY and the CA variables.
+      type: boolean
+      default: true
+---
+.mockingbird:
+  variables:
+    MB_VERSION: $[[ inputs.version ]]
+    MB_CONFIG: $[[ inputs.config ]]
+    MB_MODE: $[[ inputs.mode ]]
+    MB_SNAPSHOT: $[[ inputs.snapshot ]]
+    MB_PROXY: "$[[ inputs.proxy ]]"
+    MB_STATE_DIR: $CI_PROJECT_DIR/.mockingbird-ci
+    MB_BIN_DIR: $CI_PROJECT_DIR/.mockingbird-bin/$[[ inputs.version ]]
+  cache:
+    - key: mockingbird-$[[ inputs.version ]]
+      paths: [.mockingbird-bin/]
+  before_script:
+    - |
+      set -eu
+      if [ ! -x "$MB_BIN_DIR/mockingbird" ]; then
+        case "$(uname -m)" in aarch64 | arm64) arch=aarch64 ;; *) arch=x86_64 ;; esac
+        name="mockingbird-${MB_VERSION#v}-$arch-unknown-linux-musl"
+        base="https://github.com/RJ-s-Org/Mockingbird/releases/download/$MB_VERSION"
+        tmp=$(mktemp -d)
+        curl -fsSL --retry 3 -o "$tmp/$name.tar.gz" "$base/$name.tar.gz"
+        curl -fsSL --retry 3 -o "$tmp/sum" "$base/$name.tar.gz.sha256"
+        (cd "$tmp" && echo "$(cut -d ' ' -f 1 sum)  $name.tar.gz" | sha256sum -c -)
+        tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
+        mkdir -p "$MB_BIN_DIR"
+        cp "$tmp/$name/mockingbird" "$MB_BIN_DIR/mockingbird"
+        rm -rf "$tmp"
+      fi
+      export PATH="$MB_BIN_DIR:$PATH"
+      set -- server start --state-dir "$MB_STATE_DIR" --config "$MB_CONFIG" --no-watch
+      case "$MB_MODE" in
+        offline) set -- "$@" --offline ;;
+        replay) set -- "$@" --replay "$MB_SNAPSHOT" ;;
+        record) set -- "$@" --record "$MB_SNAPSHOT" ;;
+      esac
+      [ "$MB_PROXY" = true ] && set -- "$@" --proxy
+      mockingbird "$@"
+      if [ "$MB_PROXY" = true ]; then eval "$(mockingbird proxy env --config "$MB_CONFIG")"; fi
+      set +eu
+  after_script:
+    - |
+      export PATH="$MB_BIN_DIR:$PATH"
+      mkdir -p "$MB_STATE_DIR/report"
+      mockingbird report --format markdown -o "$MB_STATE_DIR/report/summary.md" && cat "$MB_STATE_DIR/report/summary.md"
+      mockingbird report --format json -o "$MB_STATE_DIR/report/report.json"
+      mockingbird report --format junit -o "$MB_STATE_DIR/report/mockingbird.junit.xml"
+      cp "$MB_STATE_DIR/server.log" "$MB_STATE_DIR/report/" 2>/dev/null
+      mockingbird server stop --state-dir "$MB_STATE_DIR"
+  artifacts:
+    when: always
+    paths: [.mockingbird-ci/report/]
+    reports:
+      junit: .mockingbird-ci/report/mockingbird.junit.xml

@@ -72,6 +72,16 @@ async fn run(cli: Cli) -> ExitCode {
         Command::Keys(mockingbird::keys::KeysCommand::Setup(args)) => {
             print_json(mockingbird::keys::setup(&args).await)
         }
+        Command::Snapshot(cmd) => print_json(
+            mockingbird::snapshot::run(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd)
+                .await,
+        ),
+        Command::Report(args) => report(&cli.admin_url, cli.token.as_deref(), &cli.workspace, args)
+            .await
+            .map_err(Failure::Other),
+        Command::Verify(args) => {
+            verify(&cli.admin_url, cli.token.as_deref(), &cli.workspace, args).await
+        }
         Command::Examples(cmd) => print_json(mockingbird::examples::run(cmd).await),
         Command::Client(cmd) => {
             client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
@@ -190,7 +200,19 @@ async fn llm(
 
 async fn server_cmd(cmd: ServerCommand) -> Result<(), Failure> {
     match cmd {
-        ServerCommand::Start(args) => print_json(daemon::start(&args).await),
+        ServerCommand::Start(args) => {
+            let out = daemon::start(&args).await?;
+            print_json(Ok(out.clone()))?;
+            if out["ready"] == true {
+                return Ok(());
+            }
+            eprintln!(
+                "error: the server was not ready within {} (it keeps running; stop it with `mockingbird server stop`). Log:\n{}",
+                args.wait,
+                daemon::logs(&args.state, 30).unwrap_or_default()
+            );
+            Err(Failure::Silent)
+        }
         ServerCommand::Stop(args) => print_json(daemon::stop(&args).await),
         ServerCommand::Status(args) => print_json(daemon::status(&args).await),
         ServerCommand::Logs { state, lines } => {
@@ -198,6 +220,40 @@ async fn server_cmd(cmd: ServerCommand) -> Result<(), Failure> {
             Ok(())
         }
     }
+}
+
+async fn report(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    args: mockingbird::report::ReportArgs,
+) -> anyhow::Result<()> {
+    use mockingbird::report;
+    let collected = report::collect(admin_url, token, workspace).await?;
+    let text = report::render(&collected, None, args.format)?;
+    report::emit(&text, args.output.as_deref())
+}
+
+/// `verify`: the result in the chosen format; exit 1 when a check fails.
+async fn verify(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    args: mockingbird::report::VerifyArgs,
+) -> Result<(), Failure> {
+    use mockingbird::report;
+    let collected = report::collect(admin_url, token, workspace).await?;
+    let failures =
+        report::check(&collected, &args).map_err(|e| Failure::Usage(format!("{e:#}")))?;
+    let text = report::render(&collected, Some(&failures), args.format)?;
+    report::emit(&text, args.output.as_deref())?;
+    if failures.is_empty() {
+        return Ok(());
+    }
+    for f in &failures {
+        eprintln!("verify failed: {}: {}", f.check, f.detail);
+    }
+    Err(Failure::Silent)
 }
 
 /// Prints the Admin API's OpenAPI document.
