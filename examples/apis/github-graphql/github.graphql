@@ -1,0 +1,371 @@
+# A hand-written subset of the GitHub GraphQL API (viewer, users, repositories
+# with issues, pull requests and stargazers, search, rate limit; createIssue and
+# addComment), written for Mockingbird's examples and covered by its license.
+# Type, field and argument names follow GitHub's public schema as published by
+# octokit/graphql-schema (MIT): https://github.com/octokit/graphql-schema (schema.graphql)
+# `mockingbird examples init github-graphql --full` swaps this file for that
+# schema at the commit pinned in example.json.
+
+"""An object with an ID."""
+interface Node {
+  """The Node ID of this object."""
+  id: ID!
+}
+
+"""An ISO-8601 encoded UTC date string."""
+scalar DateTime
+
+"""An RFC 3986, RFC 3987, and RFC 6570 (level 4) compliant URI string."""
+scalar URI
+
+"""Git SSH string"""
+scalar GitSSHRemote
+
+"""Information about pagination in a connection."""
+type PageInfo {
+  endCursor: String
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+}
+
+"""The possible states of an issue."""
+enum IssueState {
+  OPEN
+  CLOSED
+}
+
+"""The possible states of a pull request."""
+enum PullRequestState {
+  OPEN
+  CLOSED
+  MERGED
+}
+
+"""Represents a type that can be retrieved by a URL."""
+interface Actor {
+  login: String!
+  avatarUrl(size: Int): URI!
+  url: URI!
+}
+
+"""A user is an individual's account on GitHub that owns repositories and can make new content."""
+type User implements Node & Actor {
+  id: ID!
+  databaseId: Int
+  login: String!
+  name: String
+  email: String!
+  bio: String
+  company: String
+  location: String
+  avatarUrl(size: Int): URI!
+  url: URI!
+  websiteUrl: URI
+  twitterUsername: String
+  createdAt: DateTime!
+  followers(first: Int, after: String): FollowerConnection!
+  following(first: Int, after: String): FollowingConnection!
+  repositories(first: Int, after: String, privacy: RepositoryPrivacy, isFork: Boolean, ownerAffiliations: [RepositoryAffiliation], orderBy: RepositoryOrder): RepositoryConnection!
+  pullRequests(first: Int, after: String, states: [PullRequestState!]): PullRequestConnection!
+  issues(first: Int, after: String, states: [IssueState!]): IssueConnection!
+  contributionsCollection(from: DateTime, to: DateTime): ContributionsCollection!
+}
+
+"""A contributions collection aggregates contributions such as opened issues and commits created by a user."""
+type ContributionsCollection {
+  totalCommitContributions: Int!
+  totalIssueContributions: Int!
+  totalPullRequestContributions: Int!
+  totalPullRequestReviewContributions: Int!
+  restrictedContributionsCount: Int!
+}
+
+"""The connection type for User."""
+type FollowerConnection {
+  totalCount: Int!
+  nodes: [User]
+  pageInfo: PageInfo!
+}
+
+"""The connection type for User."""
+type FollowingConnection {
+  totalCount: Int!
+  nodes: [User]
+  pageInfo: PageInfo!
+}
+
+"""The privacy of a repository"""
+enum RepositoryPrivacy {
+  PUBLIC
+  PRIVATE
+}
+
+"""The affiliation of a user to a repository"""
+enum RepositoryAffiliation {
+  OWNER
+  COLLABORATOR
+  ORGANIZATION_MEMBER
+}
+
+"""Properties by which repository connections can be ordered."""
+enum RepositoryOrderField {
+  CREATED_AT
+  UPDATED_AT
+  PUSHED_AT
+  NAME
+  STARGAZERS
+}
+
+"""Possible directions in which to order a list of items when provided an `orderBy` argument."""
+enum OrderDirection {
+  ASC
+  DESC
+}
+
+"""Ordering options for repository connections"""
+input RepositoryOrder {
+  field: RepositoryOrderField!
+  direction: OrderDirection!
+}
+
+"""Represents a given language found in repositories."""
+type Language implements Node {
+  id: ID!
+  name: String!
+  color: String
+}
+
+"""A repository's open source license"""
+type License implements Node {
+  id: ID!
+  key: String!
+  name: String!
+  spdxId: String
+}
+
+"""A repository contains the content for a project."""
+type Repository implements Node {
+  id: ID!
+  databaseId: Int
+  name: String!
+  nameWithOwner: String!
+  description: String
+  url: URI!
+  sshUrl: GitSSHRemote!
+  homepageUrl: URI
+  isPrivate: Boolean!
+  isFork: Boolean!
+  isArchived: Boolean!
+  owner: User!
+  primaryLanguage: Language
+  licenseInfo: License
+  stargazerCount: Int!
+  forkCount: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  pushedAt: DateTime
+  stargazers(first: Int, after: String): StargazerConnection!
+  issues(first: Int, after: String, states: [IssueState!], labels: [String!]): IssueConnection!
+  issue(number: Int!): Issue
+  pullRequests(first: Int, after: String, states: [PullRequestState!], baseRefName: String): PullRequestConnection!
+  pullRequest(number: Int!): PullRequest
+}
+
+"""The connection type for Repository."""
+type RepositoryConnection {
+  totalCount: Int!
+  nodes: [Repository]
+  pageInfo: PageInfo!
+}
+
+"""The connection type for User."""
+type StargazerConnection {
+  totalCount: Int!
+  nodes: [User!]
+  pageInfo: PageInfo!
+}
+
+"""A label for categorizing Issues, Pull Requests, Milestones, or Discussions with a given Repository."""
+type Label implements Node {
+  id: ID!
+  name: String!
+  color: String!
+  description: String
+}
+
+"""The connection type for Label."""
+type LabelConnection {
+  totalCount: Int!
+  nodes: [Label]
+}
+
+"""Represents a comment on an Issue."""
+type IssueComment implements Node {
+  id: ID!
+  databaseId: Int
+  body: String!
+  url: URI!
+  author: User
+  createdAt: DateTime!
+}
+
+"""The connection type for IssueComment."""
+type IssueCommentConnection {
+  totalCount: Int!
+  nodes: [IssueComment]
+  pageInfo: PageInfo!
+}
+
+"""An Issue is a place to discuss ideas, enhancements, tasks, and bugs for a project."""
+type Issue implements Node {
+  id: ID!
+  number: Int!
+  title: String!
+  body: String!
+  url: URI!
+  state: IssueState!
+  closed: Boolean!
+  author: User
+  repository: Repository!
+  labels(first: Int): LabelConnection
+  comments(first: Int, after: String): IssueCommentConnection!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  closedAt: DateTime
+}
+
+"""The connection type for Issue."""
+type IssueConnection {
+  totalCount: Int!
+  nodes: [Issue]
+  pageInfo: PageInfo!
+}
+
+"""A repository pull request."""
+type PullRequest implements Node {
+  id: ID!
+  number: Int!
+  title: String!
+  body: String!
+  url: URI!
+  state: PullRequestState!
+  isDraft: Boolean!
+  merged: Boolean!
+  mergedAt: DateTime
+  additions: Int!
+  deletions: Int!
+  changedFiles: Int!
+  headRefName: String!
+  baseRefName: String!
+  author: User
+  repository: Repository!
+  labels(first: Int): LabelConnection
+  comments(first: Int, after: String): IssueCommentConnection!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""The connection type for PullRequest."""
+type PullRequestConnection {
+  totalCount: Int!
+  nodes: [PullRequest]
+  pageInfo: PageInfo!
+}
+
+"""Represents the client's rate limit."""
+type RateLimit {
+  cost: Int!
+  limit: Int!
+  nodeCount: Int!
+  remaining: Int!
+  resetAt: DateTime!
+  used: Int!
+}
+
+"""Represents the individual results of a search."""
+enum SearchType {
+  ISSUE
+  REPOSITORY
+  USER
+  DISCUSSION
+}
+
+"""The results of a search."""
+union SearchResultItem = Issue | PullRequest | Repository | User
+
+"""A list of results that matched against a search query."""
+type SearchResultItemConnection {
+  issueCount: Int!
+  repositoryCount: Int!
+  userCount: Int!
+  nodes: [SearchResultItem]
+  pageInfo: PageInfo!
+}
+
+"""Autogenerated input type of CreateIssue"""
+input CreateIssueInput {
+  """The Node ID of the repository."""
+  repositoryId: ID!
+  """The title for the issue."""
+  title: String!
+  """The body for the issue description."""
+  body: String
+  """The Node ID for the user assignee for this issue."""
+  assigneeIds: [ID!]
+  """An array of Node IDs of labels for this issue."""
+  labelIds: [ID!]
+  """A unique identifier for the client performing the mutation."""
+  clientMutationId: String
+}
+
+"""Autogenerated return type of CreateIssue."""
+type CreateIssuePayload {
+  clientMutationId: String
+  issue: Issue
+}
+
+"""Autogenerated input type of AddComment"""
+input AddCommentInput {
+  """The Node ID of the subject to modify (an issue or pull request)."""
+  subjectId: ID!
+  """The contents of the comment."""
+  body: String!
+  clientMutationId: String
+}
+
+"""Represents an edge in an IssueComment connection."""
+type IssueCommentEdge {
+  cursor: String!
+  node: IssueComment
+}
+
+"""Autogenerated return type of AddComment."""
+type AddCommentPayload {
+  clientMutationId: String
+  commentEdge: IssueCommentEdge
+}
+
+"""The query root of GitHub's GraphQL interface."""
+type Query {
+  """The currently authenticated user."""
+  viewer: User!
+  """Lookup a user by login."""
+  user(login: String!): User
+  """Lookup a given repository by the owner and repository name."""
+  repository(owner: String!, name: String!, followRenames: Boolean = true): Repository
+  """Perform a search across resources, returning a maximum of 1,000 results."""
+  search(query: String!, type: SearchType!, first: Int, after: String): SearchResultItemConnection!
+  """The client's rate limit information."""
+  rateLimit(dryRun: Boolean = false): RateLimit
+  """Fetches an object given its ID."""
+  node(id: ID!): Node
+}
+
+"""The root query for implementing GraphQL mutations."""
+type Mutation {
+  """Creates a new issue."""
+  createIssue(input: CreateIssueInput!): CreateIssuePayload
+  """Adds a comment to an Issue or Pull Request."""
+  addComment(input: AddCommentInput!): AddCommentPayload
+}

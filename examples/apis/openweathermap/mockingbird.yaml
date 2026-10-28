@@ -1,0 +1,44 @@
+# OpenWeather: current weather, 5 day forecast, One Call 3.0, air pollution and geocoding.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s 'localhost:8080/data/2.5/weather?q=Munich,DE&appid=owm_test_123' -H 'Host: api.openweathermap.org'
+# Contract: openweathermap.openapi.yaml, a hand-written subset (see its header).
+# OpenWeather publishes no machine-readable spec, so there is no `--full` variant.
+proxy:
+  enabled: true          # apps reach https://api.openweathermap.org through http://127.0.0.1:8888
+mocks:
+  openweathermap:
+    contract: openweathermap.openapi.yaml
+    route_prefix: /
+    hosts: [api.openweathermap.org]
+    persona: >-
+      OpenWeather API answering "Gipfelglück", a Munich hiking app that asks for
+      weather in Bavaria and the Alps, usually with units=metric and lang=de. Answers are
+      for the place requested (q, zip or lat/lon): real German and Austrian town
+      names, coordinates near that place, city ids as OpenWeather's integer ids
+      (Munich is 2867714), country codes like DE and AT. Temperatures fit late
+      autumn in the Alpine foothills (-3 to 12 °C) and are given in the requested
+      units: Kelvin when units is absent or standard, Celsius for metric,
+      Fahrenheit for imperial. Descriptions are in German
+      when lang=de ("Mäßiger Regen", "Klarer Himmel"). dt, sunrise and sunset are
+      recent unix seconds, timezone is 3600 in winter and 7200 in summer, and the
+      forecast's dt_txt is "YYYY-MM-DD HH:00:00" in 3 hour steps from the next slot.
+    scenarios:
+      city-not-found:
+        status: 404
+        operations: [getCurrentWeather, getForecast5, geocodeZip]
+        set:
+          cod: "404"
+          message: city not found
+      invalid-api-key:
+        status: 401
+        set:
+          cod: 401
+          message: Invalid API key. Please see https://openweathermap.org/faq#error401 for more info.
+      rate-limited:
+        status: 429
+        set:
+          cod: 429
+          message: Your account is temporary blocked due to exceeding of requests limitation of your subscription type. Please choose the proper subscription https://openweathermap.org/price
+      outage:
+        status: 503
+        instructions: The API is down for maintenance.

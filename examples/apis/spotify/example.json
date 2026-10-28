@@ -1,0 +1,48 @@
+{
+  "name": "spotify",
+  "title": "Spotify",
+  "category": "media",
+  "protocol": "openapi",
+  "summary": "Search, tracks, artists, the current user, currently playing and playlist edits on api.spotify.com, plus the accounts.spotify.com token endpoint, with expired-token, nothing-playing, not-found, rate-limit and outage scenarios.",
+  "contracts": [
+    "spotify.openapi.yaml",
+    "spotify-accounts.openapi.yaml"
+  ],
+  "hosts": [
+    "api.spotify.com",
+    "accounts.spotify.com"
+  ],
+  "scenarios": [
+    "token-expired",
+    "nothing-playing",
+    "not-found",
+    "rate-limited",
+    "outage",
+    "invalid-client"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://developer.spotify.com/reference/web-api/open-api-schema.yaml",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Spotify's OpenAPI file has no licence and falls under the Spotify Developer Terms. sonallux/spotify-web-api republishes a fixed copy in an MIT-licensed repository, but the definition itself is Spotify's, so it is not pinned. The contract keeps Spotify's operation ids."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "spotipy",
+    "verified": true
+  },
+  "smoke": {
+    "method": "GET",
+    "path": "/v1/tracks/4uLU6hMCjMI75M1A2tKUQC",
+    "host": "api.spotify.com",
+    "headers": {
+      "Authorization": "Bearer BQtest"
+    },
+    "status": 200,
+    "expect": "\"spotify:track:"
+  }
+}

@@ -1,0 +1,455 @@
+# A hand-written subset of The Movie Database (TMDB) API v3 (movie details,
+# popular, search, discover, TV series, people, genres, configuration), written
+# for Mockingbird's examples and covered by its license. Paths, operation ids
+# (the reference page slugs) and field names follow TMDB's public reference,
+# https://developer.themoviedb.org/reference; TMDB's own OpenAPI file is offered
+# under its API Terms of Use, not an open licence, so none of it is vendored or pinned.
+openapi: 3.1.0
+info:
+  title: TMDB API v3 (Mockingbird example subset)
+  version: "3"
+servers:
+  - url: https://api.themoviedb.org
+security:
+  - apiKey: []
+  - bearerAuth: []
+paths:
+  /3/configuration:
+    get:
+      operationId: configuration-details
+      summary: The system-wide configuration (image base URLs and sizes).
+      responses:
+        "200":
+          description: The configuration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/configuration" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/popular:
+    get:
+      operationId: movie-popular-list
+      summary: A list of movies ordered by popularity.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+        - { name: region, in: query, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/{movie_id}:
+    parameters:
+      - { name: movie_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: movie-details
+      summary: The primary information about a movie.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+        - { name: append_to_response, in: query, schema: { type: string }, description: "Comma-separated, e.g. credits,videos" }
+      responses:
+        "200":
+          description: The movie.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/movie-details" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/movie/{movie_id}/credits:
+    parameters:
+      - { name: movie_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: movie-credits
+      summary: The cast and crew of a movie.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The credits.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, cast, crew]
+                properties:
+                  id: { type: integer }
+                  cast: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/cast-member" } }
+                  crew: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/crew-member" } }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/search/movie:
+    get:
+      operationId: search-movie
+      summary: Search for movies by their original, translated and alternative titles.
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string } }
+        - { name: include_adult, in: query, schema: { type: boolean, default: false } }
+        - { name: year, in: query, schema: { type: string } }
+        - { name: primary_release_year, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "422": { $ref: "#/components/responses/invalid_params" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/discover/movie:
+    get:
+      operationId: discover-movie
+      summary: Find movies using over 30 filters and sort options.
+      parameters:
+        - { name: sort_by, in: query, schema: { type: string, default: popularity.desc, enum: [popularity.asc, popularity.desc, revenue.desc, primary_release_date.desc, vote_average.desc, vote_count.desc] } }
+        - { name: with_genres, in: query, schema: { type: string }, description: "Comma (AND) or pipe (OR) separated genre ids" }
+        - { name: primary_release_year, in: query, schema: { type: integer } }
+        - { name: "vote_average.gte", in: query, schema: { type: number } }
+        - { name: with_original_language, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/language" }
+        - { $ref: "#/components/parameters/page" }
+      responses:
+        "200": { $ref: "#/components/responses/movie_page" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "422": { $ref: "#/components/responses/invalid_params" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/genre/movie/list:
+    get:
+      operationId: genre-movie-list
+      summary: The list of official genres for movies.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The genres.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [genres]
+                properties:
+                  genres: { type: array, minItems: 5, maxItems: 19, items: { $ref: "#/components/schemas/genre" } }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/tv/{series_id}:
+    parameters:
+      - { name: series_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: tv-series-details
+      summary: The details of a TV show.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The series.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/tv-series-details" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+  /3/person/{person_id}:
+    parameters:
+      - { name: person_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: person-details
+      summary: Query the top level details of a person.
+      parameters:
+        - { $ref: "#/components/parameters/language" }
+      responses:
+        "200":
+          description: The person.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/person-details" }
+        "401": { $ref: "#/components/responses/unauthorized" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/rate_limited" }
+        "503": { $ref: "#/components/responses/service_offline" }
+components:
+  securitySchemes:
+    apiKey: { type: apiKey, in: query, name: api_key }
+    bearerAuth: { type: http, scheme: bearer, description: An API Read Access Token. }
+  parameters:
+    language: { name: language, in: query, schema: { type: string, default: en-US, pattern: "^[a-z]{2}-[A-Z]{2}$" } }
+    page: { name: page, in: query, schema: { type: integer, default: 1, minimum: 1, maximum: 500 } }
+  responses:
+    movie_page:
+      description: A page of movies.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [page, results, total_pages, total_results]
+            properties:
+              page: { type: integer, minimum: 1 }
+              results: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/movie-list-item" } }
+              total_pages: { type: integer, minimum: 1, maximum: 500 }
+              total_results: { type: integer, minimum: 0, maximum: 10000 }
+    unauthorized:
+      description: Invalid API key.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/status" }
+    not_found:
+      description: The resource you requested could not be found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/status" }
+    invalid_params:
+      description: Invalid parameters.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [success, errors]
+            properties:
+              success: { type: boolean, const: false }
+              errors: { type: array, items: { type: string } }
+    rate_limited:
+      description: Your request count is over the allowed limit.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/status" }
+    service_offline:
+      description: Service offline, or an internal error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/status" }
+  schemas:
+    status:
+      type: object
+      required: [success, status_code, status_message]
+      properties:
+        success: { type: boolean, const: false }
+        status_code: { type: integer, description: "TMDB's own code: 7 invalid key, 34 not found, 25 rate limit, 11 internal error, 9 service offline." }
+        status_message: { type: string }
+    image-path:
+      type: [string, "null"]
+      pattern: "^/[A-Za-z0-9]{27}\\.jpg$"
+    genre:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer, enum: [12, 14, 16, 18, 27, 28, 35, 36, 37, 53, 80, 99, 878, 9648, 10402, 10749, 10751, 10752, 10770] }
+        name: { type: string, enum: [Adventure, Fantasy, Animation, Drama, Horror, Action, Comedy, History, Western, Thriller, Crime, Documentary, Science Fiction, Mystery, Music, Romance, Family, War, TV Movie] }
+    movie-list-item:
+      type: object
+      required: [adult, backdrop_path, genre_ids, id, original_language, original_title, overview, popularity, poster_path, release_date, title, video, vote_average, vote_count]
+      properties:
+        adult: { type: boolean, const: false }
+        backdrop_path: { $ref: "#/components/schemas/image-path" }
+        genre_ids: { type: array, maxItems: 3, items: { type: integer, enum: [12, 14, 16, 18, 27, 28, 35, 53, 80, 878, 10749, 10751] } }
+        id: { type: integer, minimum: 2, maximum: 1400000 }
+        original_language: { type: string, enum: [en, fr, ja, ko, es, de, it] }
+        original_title: { type: string }
+        overview: { type: string }
+        popularity: { type: number, minimum: 0, maximum: 5000 }
+        poster_path: { $ref: "#/components/schemas/image-path" }
+        release_date: { type: string, format: date }
+        title: { type: string }
+        video: { type: boolean, const: false }
+        vote_average: { type: number, minimum: 0, maximum: 10 }
+        vote_count: { type: integer, minimum: 0, maximum: 40000 }
+    movie-details:
+      type: object
+      required: [adult, backdrop_path, budget, genres, homepage, id, imdb_id, original_language, original_title, overview, popularity, poster_path, release_date, revenue, runtime, status, tagline, title, video, vote_average, vote_count]
+      properties:
+        adult: { type: boolean, const: false }
+        backdrop_path: { $ref: "#/components/schemas/image-path" }
+        belongs_to_collection:
+          oneOf:
+            - type: object
+              required: [id, name]
+              properties:
+                id: { type: integer }
+                name: { type: string }
+                poster_path: { $ref: "#/components/schemas/image-path" }
+                backdrop_path: { $ref: "#/components/schemas/image-path" }
+            - type: "null"
+        budget: { type: integer, minimum: 0, maximum: 400000000 }
+        genres: { type: array, minItems: 1, maxItems: 3, items: { $ref: "#/components/schemas/genre" } }
+        homepage: { type: string }
+        id: { type: integer, minimum: 2, maximum: 1400000 }
+        imdb_id: { type: [string, "null"], pattern: "^tt[0-9]{7,8}$" }
+        origin_country: { type: array, maxItems: 2, items: { type: string, pattern: "^[A-Z]{2}$" } }
+        original_language: { type: string, enum: [en, fr, ja, ko, es, de, it] }
+        original_title: { type: string }
+        overview: { type: string }
+        popularity: { type: number, minimum: 0, maximum: 5000 }
+        poster_path: { $ref: "#/components/schemas/image-path" }
+        production_companies:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [id, name, origin_country]
+            properties:
+              id: { type: integer }
+              logo_path: { type: [string, "null"], pattern: "^/[A-Za-z0-9]{27}\\.png$" }
+              name: { type: string }
+              origin_country: { type: string, pattern: "^[A-Z]{2}$" }
+        release_date: { type: string, format: date }
+        revenue: { type: integer, minimum: 0, maximum: 2900000000 }
+        runtime: { type: integer, minimum: 70, maximum: 200 }
+        spoken_languages:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [english_name, iso_639_1, name]
+            properties:
+              english_name: { type: string }
+              iso_639_1: { type: string, pattern: "^[a-z]{2}$" }
+              name: { type: string }
+        status: { type: string, enum: [Rumored, Planned, In Production, Post Production, Released, Canceled] }
+        tagline: { type: string }
+        title: { type: string }
+        video: { type: boolean, const: false }
+        vote_average: { type: number, minimum: 0, maximum: 10 }
+        vote_count: { type: integer, minimum: 0, maximum: 40000 }
+    cast-member:
+      type: object
+      required: [adult, gender, id, known_for_department, name, original_name, popularity, profile_path, cast_id, character, credit_id, order]
+      properties:
+        adult: { type: boolean, const: false }
+        gender: { type: integer, enum: [0, 1, 2, 3] }
+        id: { type: integer }
+        known_for_department: { type: string, const: Acting }
+        name: { type: string }
+        original_name: { type: string }
+        popularity: { type: number }
+        profile_path: { $ref: "#/components/schemas/image-path" }
+        cast_id: { type: integer }
+        character: { type: string }
+        credit_id: { type: string, pattern: "^[0-9a-f]{24}$" }
+        order: { type: integer, minimum: 0 }
+    crew-member:
+      type: object
+      required: [adult, gender, id, known_for_department, name, original_name, popularity, profile_path, credit_id, department, job]
+      properties:
+        adult: { type: boolean, const: false }
+        gender: { type: integer, enum: [0, 1, 2, 3] }
+        id: { type: integer }
+        known_for_department: { type: string, enum: [Directing, Writing, Production, Camera, Sound, Editing] }
+        name: { type: string }
+        original_name: { type: string }
+        popularity: { type: number }
+        profile_path: { $ref: "#/components/schemas/image-path" }
+        credit_id: { type: string, pattern: "^[0-9a-f]{24}$" }
+        department: { type: string, enum: [Directing, Writing, Production, Camera, Sound, Editing] }
+        job: { type: string, enum: [Director, Screenplay, Producer, Director of Photography, Original Music Composer, Editor] }
+    tv-series-details:
+      type: object
+      required: [adult, backdrop_path, first_air_date, genres, id, in_production, last_air_date, name, number_of_episodes, number_of_seasons, origin_country, original_language, original_name, overview, popularity, poster_path, seasons, status, type, vote_average, vote_count]
+      properties:
+        adult: { type: boolean, const: false }
+        backdrop_path: { $ref: "#/components/schemas/image-path" }
+        created_by:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [id, credit_id, name]
+            properties:
+              id: { type: integer }
+              credit_id: { type: string, pattern: "^[0-9a-f]{24}$" }
+              name: { type: string }
+              profile_path: { $ref: "#/components/schemas/image-path" }
+        episode_run_time: { type: array, maxItems: 2, items: { type: integer, minimum: 20, maximum: 70 } }
+        first_air_date: { type: string, format: date }
+        genres:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: integer, enum: [10759, 16, 35, 80, 99, 18, 10751, 9648, 10765, 10768] }
+              name: { type: string, enum: [Action & Adventure, Animation, Comedy, Crime, Documentary, Drama, Family, Mystery, Sci-Fi & Fantasy, War & Politics] }
+        homepage: { type: string }
+        id: { type: integer, minimum: 1, maximum: 300000 }
+        in_production: { type: boolean }
+        languages: { type: array, maxItems: 2, items: { type: string, pattern: "^[a-z]{2}$" } }
+        last_air_date: { type: [string, "null"], format: date }
+        name: { type: string }
+        networks:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [id, name, origin_country]
+            properties:
+              id: { type: integer }
+              logo_path: { type: [string, "null"], pattern: "^/[A-Za-z0-9]{27}\\.png$" }
+              name: { type: string }
+              origin_country: { type: string, pattern: "^[A-Z]{2}$" }
+        number_of_episodes: { type: integer, minimum: 1, maximum: 300 }
+        number_of_seasons: { type: integer, minimum: 1, maximum: 15 }
+        origin_country: { type: array, maxItems: 2, items: { type: string, pattern: "^[A-Z]{2}$" } }
+        original_language: { type: string, enum: [en, fr, ja, ko, es, de] }
+        original_name: { type: string }
+        overview: { type: string }
+        popularity: { type: number, minimum: 0, maximum: 5000 }
+        poster_path: { $ref: "#/components/schemas/image-path" }
+        seasons:
+          type: array
+          maxItems: 6
+          items:
+            type: object
+            required: [air_date, episode_count, id, name, overview, poster_path, season_number, vote_average]
+            properties:
+              air_date: { type: [string, "null"], format: date }
+              episode_count: { type: integer, minimum: 1, maximum: 24 }
+              id: { type: integer }
+              name: { type: string }
+              overview: { type: string }
+              poster_path: { $ref: "#/components/schemas/image-path" }
+              season_number: { type: integer, minimum: 0, maximum: 15 }
+              vote_average: { type: number, minimum: 0, maximum: 10 }
+        status: { type: string, enum: [Returning Series, Ended, Canceled, In Production, Planned] }
+        tagline: { type: string }
+        type: { type: string, enum: [Scripted, Miniseries, Documentary, Reality, Talk Show] }
+        vote_average: { type: number, minimum: 0, maximum: 10 }
+        vote_count: { type: integer, minimum: 0, maximum: 30000 }
+    person-details:
+      type: object
+      required: [adult, also_known_as, biography, birthday, deathday, gender, homepage, id, imdb_id, known_for_department, name, place_of_birth, popularity, profile_path]
+      properties:
+        adult: { type: boolean, const: false }
+        also_known_as: { type: array, maxItems: 3, items: { type: string } }
+        biography: { type: string }
+        birthday: { type: [string, "null"], format: date }
+        deathday: { type: [string, "null"], format: date }
+        gender: { type: integer, enum: [0, 1, 2, 3] }
+        homepage: { type: [string, "null"] }
+        id: { type: integer, minimum: 1, maximum: 5000000 }
+        imdb_id: { type: [string, "null"], pattern: "^nm[0-9]{7,8}$" }
+        known_for_department: { type: string, enum: [Acting, Directing, Writing, Production] }
+        name: { type: string }
+        place_of_birth: { type: [string, "null"] }
+        popularity: { type: number, minimum: 0, maximum: 500 }
+        profile_path: { $ref: "#/components/schemas/image-path" }
+    configuration:
+      type: object
+      required: [images, change_keys]
+      properties:
+        images:
+          type: object
+          required: [base_url, secure_base_url, backdrop_sizes, logo_sizes, poster_sizes, profile_sizes, still_sizes]
+          properties:
+            base_url: { type: string, const: "http://image.tmdb.org/t/p/" }
+            secure_base_url: { type: string, const: "https://image.tmdb.org/t/p/" }
+            backdrop_sizes: { type: array, items: { type: string }, const: [w300, w780, w1280, original] }
+            logo_sizes: { type: array, items: { type: string }, const: [w45, w92, w154, w185, w300, w500, original] }
+            poster_sizes: { type: array, items: { type: string }, const: [w92, w154, w185, w342, w500, w780, original] }
+            profile_sizes: { type: array, items: { type: string }, const: [w45, w185, h632, original] }
+            still_sizes: { type: array, items: { type: string }, const: [w92, w185, w300, original] }
+        change_keys: { type: array, maxItems: 10, items: { type: string, enum: [adult, air_date, also_known_as, biography, birthday, budget, cast, crew, genres, homepage, images, overview, poster, release_dates, runtime, title, videos] } }

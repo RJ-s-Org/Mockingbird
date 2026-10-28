@@ -1,0 +1,47 @@
+{
+  "name": "twilio",
+  "title": "Twilio",
+  "category": "messaging",
+  "protocol": "openapi",
+  "summary": "Send, list and fetch SMS, place calls and look up phone numbers over form-encoded bodies, with status callbacks and invalid-number, rate-limit and outage scenarios.",
+  "contracts": [
+    "twilio.openapi.yaml",
+    "twilio-lookups.openapi.yaml"
+  ],
+  "hosts": [
+    "api.twilio.com",
+    "lookups.twilio.com"
+  ],
+  "scenarios": [
+    "invalid-to-number",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/twilio/twilio-oai",
+    "license": "MIT",
+    "commit": "d9775142962ea67d5f3d50c5021a23ae6d330c5b",
+    "url": "https://raw.githubusercontent.com/twilio/twilio-oai/d9775142962ea67d5f3d50c5021a23ae6d330c5b/spec/json/twilio_api_v2010.json",
+    "sha256": "bfdf249a129819af274d6bdc7672156ea3416ad48670a6f0544def6ef386ba87",
+    "replaces": "twilio.openapi.yaml",
+    "notes": "Api v2010 only; Lookups v2 is spec/json/twilio_lookups_v2.json in the same repo (sha256 94eecebb7c302115f35ce5842c9a82762495943071051f605c8482ab8c735e6b) and stays hand-written here. The upstream spec declares only success responses (CreateMessage: 201), so the 400 and 429 scenarios need the hand-written contract's error responses."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "twilio",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/2010-04-01/Accounts/ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/Messages.json",
+    "host": "api.twilio.com",
+    "content_type": "application/x-www-form-urlencoded",
+    "headers": {
+      "Authorization": "Basic QUNhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYTp0ZXN0X3Rva2Vu"
+    },
+    "body": "To=%2B15558675310&From=%2B14015550142&Body=Hi",
+    "status": 201,
+    "expect": "\"sid\":\"SM"
+  }
+}

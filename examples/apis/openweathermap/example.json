@@ -1,0 +1,41 @@
+{
+  "name": "openweathermap",
+  "title": "OpenWeather",
+  "category": "weather",
+  "protocol": "openapi",
+  "summary": "Current weather, 5 day forecast, One Call 3.0, air pollution and geocoding with the appid query key, and city-not-found, invalid-key, rate-limit and outage scenarios.",
+  "contracts": [
+    "openweathermap.openapi.yaml"
+  ],
+  "hosts": [
+    "api.openweathermap.org"
+  ],
+  "scenarios": [
+    "city-not-found",
+    "invalid-api-key",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://openweathermap.org/api",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "OpenWeather publishes no OpenAPI or other machine-readable description; the contract is hand-written from the public documentation. Community specs on GitHub carry no licence, so none is pinned."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "pyowm",
+    "verified": true
+  },
+  "smoke": {
+    "method": "GET",
+    "path": "/data/2.5/weather?q=Munich,DE&appid=owm_test_123",
+    "host": "api.openweathermap.org",
+    "status": 200,
+    "expect": "\"coord\""
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "name": "sendgrid",
+  "title": "Twilio SendGrid",
+  "category": "email",
+  "protocol": "openapi",
+  "summary": "Mail Send (202, empty body), transactional templates, bounce suppressions and global stats, with Event Webhook batches and invalid-recipient, rate-limit and outage scenarios.",
+  "contracts": [
+    "sendgrid.openapi.yaml"
+  ],
+  "hosts": [
+    "api.sendgrid.com"
+  ],
+  "scenarios": [
+    "invalid-recipient",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/twilio/sendgrid-oai",
+    "license": "MIT",
+    "commit": "5bd0aa2e4a018fb3bd7b56db30fa750502ce6340",
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "The official spec is split into 46 per-product OpenAPI 3.1 files (spec/json/tsg_*_v3.json), so there is no single file for --full to swap in. This example covers tsg_mail_v3.json (sha256 1bf9b256780b4c32a48e054eb9a8f93c03b586f9586d12b0ebbcdde9c170fac3), tsg_templates_v3.json (d38d9f0cd014ea2d2ac12738f155e969a8f81ca03d85bbcaa959048c15b05a3c), tsg_suppressions_v3.json (3d851d7bfbb9a6d446971ff114cf19e93caec246fed26532000915aae9cdf02f) and tsg_stats_v3.json (d5076d2c898c89e92b9f92ca5c154ff3b7472dd184c7d6ea307ed2551892f7d6) at this commit."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "sendgrid",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/v3/templates",
+    "host": "api.sendgrid.com",
+    "content_type": "application/json",
+    "headers": {
+      "Authorization": "Bearer SG.test"
+    },
+    "body": {
+      "name": "Order confirmation",
+      "generation": "dynamic"
+    },
+    "status": 201,
+    "expect": "\"id\":\"d-"
+  }
+}

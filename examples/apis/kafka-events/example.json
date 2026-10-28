@@ -1,0 +1,24 @@
+{
+  "name": "kafka-events",
+  "title": "Kafka commerce events (AsyncAPI)",
+  "category": "events",
+  "protocol": "asyncapi",
+  "summary": "An AsyncAPI 3.0 order, payment and shipment event stream with Kafka bindings (keys, headers, versioned topics), produced on a schedule and on demand to the in-process broker or a real Kafka cluster.",
+  "contracts": [
+    "commerce-events.asyncapi.yaml"
+  ],
+  "hosts": [],
+  "scenarios": [],
+  "webhooks": null,
+  "upstream": null,
+  "sdk": {
+    "language": "python",
+    "package": "confluent-kafka",
+    "verified": false
+  },
+  "smoke": {
+    "kind": "channel",
+    "mock": "commerce",
+    "channel": "orderCreated"
+  }
+}

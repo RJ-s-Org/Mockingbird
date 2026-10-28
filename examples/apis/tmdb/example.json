@@ -1,0 +1,42 @@
+{
+  "name": "tmdb",
+  "title": "TMDB",
+  "category": "media",
+  "protocol": "openapi",
+  "summary": "The Movie Database API v3: movie details and credits, popular, search, discover, genres, TV series, people and configuration, with placeholder posters for image.tmdb.org and rate-limit, not-found, invalid-key and outage scenarios.",
+  "contracts": [
+    "tmdb.openapi.yaml"
+  ],
+  "hosts": [
+    "api.themoviedb.org",
+    "image.tmdb.org"
+  ],
+  "scenarios": [
+    "rate-limited",
+    "not-found",
+    "invalid-api-key",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://developer.themoviedb.org/reference",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "TMDB's OpenAPI file (developer.themoviedb.org) is offered under the TMDB API Terms of Use, which do not allow redistribution, so nothing is pinned; the subset follows the public reference by hand and uses its page slugs as operation ids."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "tmdbsimple",
+    "verified": true
+  },
+  "smoke": {
+    "method": "GET",
+    "path": "/3/movie/550?api_key=tmdb_test_123",
+    "host": "api.themoviedb.org",
+    "status": 200,
+    "expect": "\"imdb_id\""
+  }
+}

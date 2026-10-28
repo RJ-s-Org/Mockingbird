@@ -1,0 +1,68 @@
+# Square: Payments (create, get, list, complete), Refunds, Customers, Locations
+# and Catalog, with payment.created and customer.created webhooks.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/v2/locations -H 'Host: connect.squareupsandbox.com' -H 'Authorization: Bearer EAAAEtest' -H 'Square-Version: 2026-09-16'
+# Contract: square.openapi.yaml, a hand-written subset (see its header). The full
+# upstream spec (Apache-2.0) is pinned in example.json for
+# reference; it does not compile as is (dangling $refs), so `--full` is off.
+proxy:
+  enabled: true          # apps reach https://connect.squareupsandbox.com through http://127.0.0.1:8888
+mocks:
+  square:
+    contract: square.openapi.yaml
+    route_prefix: /
+    hosts: [connect.squareupsandbox.com, connect.squareup.com]
+    persona: >-
+      Square sandbox account of "Little Fox Bakery", a two-location bakery in
+      Oakland, CA (merchant_id MLR6JQ0V4CFHE). Locations: "Little Fox Bakery -
+      Temescal" (L88917AVBK2S5, 4900 Telegraph Ave, Oakland, CA 94609, PHYSICAL)
+      and "Little Fox Bakery - Farmers Market" (LZ2NCD7H3PQAK, MOBILE); timezone
+      America/Los_Angeles, currency USD. Payment and order ids are 29 base62
+      characters, customer ids 26 uppercase alphanumerics, catalog ids 24
+      uppercase alphanumerics. Card payments use sandbox cards (VISA 1111,
+      MASTERCARD 4444, AMERICAN_EXPRESS 8431), entry_method KEYED or ON_FILE,
+      statement_description "SQ *LITTLE FOX BAKERY". amount_money is copied from
+      the request (cents, USD), total_money adds tip_money; a payment with
+      autocomplete=false is APPROVED, else COMPLETED with card status CAPTURED.
+      The catalog has items such as Morning Bun ($4.50), Sourdough Loaf ($9.00),
+      Seasonal Fruit Galette ($6.75) in categories Pastries and Breads.
+      Customers are Bay Area locals with @example.com emails.
+    webhooks:
+      # Square signs with x-square-hmacsha256-signature = base64(HMAC-SHA256(key,
+      # notification URL + body)); Mockingbird cannot produce that, so this
+      # target is signed with X-Mockingbird-Signature.
+      - url: http://127.0.0.1:8000/square/webhook
+        events: [payment.created, customer.created]
+        secret: env:SQUARE_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [CreatePayment]
+        set:
+          errors:
+            - category: PAYMENT_METHOD_ERROR
+              code: CARD_DECLINED
+              detail: Card declined.
+      generic-decline:
+        status: 400
+        operations: [CreatePayment, CompletePayment]
+        set:
+          errors:
+            - category: PAYMENT_METHOD_ERROR
+              code: GENERIC_DECLINE
+              detail: Authorization error - 'GENERIC_DECLINE'
+      rate-limited:
+        status: 429
+        set:
+          errors:
+            - category: RATE_LIMIT_ERROR
+              code: RATE_LIMITED
+              detail: Rate limited.
+      outage:
+        status: 500
+        set:
+          errors:
+            - category: API_ERROR
+              code: INTERNAL_SERVER_ERROR
+              detail: An internal error occurred.

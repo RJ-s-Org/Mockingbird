@@ -1,0 +1,430 @@
+# A hand-written subset of the Slack Web API (auth, chat, conversations,
+# reactions, users), written for Mockingbird's examples and covered by its license.
+# Method names, operation ids, parameters and shapes follow Slack's published
+# OpenAPI description, which is MIT-licensed:
+#   https://github.com/slackapi/slack-api-specs (web-api/slack_web_openapi_v2.json)
+# `mockingbird examples init slack --full` swaps this file for that spec at the
+# commit pinned in example.json.
+#
+# Slack answers HTTP 200 for almost every error, with {"ok": false, "error": "<code>"};
+# only rate limiting is HTTP 429 (with Retry-After) and outages are 5xx.
+openapi: 3.1.0
+info:
+  title: Slack Web API (Mockingbird example subset)
+  version: 1.7.0
+servers:
+  - url: https://slack.com/api
+security:
+  - slackAuth: []
+paths:
+  /auth.test:
+    get:
+      operationId: auth_test
+      summary: Checks authentication and tells "you" who you are.
+      responses:
+        "200": { $ref: "#/components/responses/auth_test" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+    post:
+      # The Slack SDKs POST every method; Slack accepts GET or POST for all of them.
+      operationId: auth_test_post
+      summary: Checks authentication (POST form, as the SDKs send it).
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object }
+      responses:
+        "200": { $ref: "#/components/responses/auth_test" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+  /chat.postMessage:
+    post:
+      operationId: chat_postMessage
+      summary: Sends a message to a channel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/chat_postMessage_args" }
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/chat_postMessage_args" }
+      responses:
+        "200":
+          description: The posted message, or {ok:false, error} (channel_not_found, not_in_channel, msg_too_long, ...).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    required: [ok, channel, ts, message]
+                    properties:
+                      ok: { $ref: "#/components/schemas/defs_ok_true" }
+                      channel: { $ref: "#/components/schemas/defs_channel" }
+                      ts: { $ref: "#/components/schemas/defs_ts" }
+                      message: { $ref: "#/components/schemas/objs_message" }
+                  - $ref: "#/components/schemas/error"
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+  /conversations.list:
+    get:
+      operationId: conversations_list
+      summary: Lists all channels in a Slack team.
+      parameters:
+        - { name: exclude_archived, in: query, schema: { type: boolean } }
+        - { name: types, in: query, description: "Comma-separated: public_channel, private_channel, mpim, im.", schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/conversations_list" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+    post:
+      operationId: conversations_list_post
+      summary: The same method called with POST (form fields), as the Slack SDKs send it.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                exclude_archived: { type: boolean }
+                types: { type: string }
+                limit: { type: integer, minimum: 1, maximum: 1000 }
+                cursor: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/conversations_list" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+  /conversations.history:
+    get:
+      operationId: conversations_history
+      summary: Fetches a conversation's history of messages and events.
+      parameters:
+        - { name: channel, in: query, required: true, schema: { $ref: "#/components/schemas/defs_channel" } }
+        - { name: latest, in: query, schema: { $ref: "#/components/schemas/defs_ts" } }
+        - { name: oldest, in: query, schema: { $ref: "#/components/schemas/defs_ts" } }
+        - { name: inclusive, in: query, schema: { type: boolean } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 999 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/conversations_history" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+    post:
+      operationId: conversations_history_post
+      summary: The same method called with POST (form fields), as the Slack SDKs send it.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel: { $ref: "#/components/schemas/defs_channel" }
+                latest: { $ref: "#/components/schemas/defs_ts" }
+                oldest: { $ref: "#/components/schemas/defs_ts" }
+                inclusive: { type: boolean }
+                limit: { type: integer, minimum: 1, maximum: 999 }
+                cursor: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/conversations_history" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+  /reactions.add:
+    post:
+      operationId: reactions_add
+      summary: Adds a reaction to an item.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/reactions_add_args" }
+          application/json:
+            schema: { $ref: "#/components/schemas/reactions_add_args" }
+      responses:
+        "200":
+          description: "{ok: true}, or {ok:false, error} (already_reacted, message_not_found, invalid_name, ...)."
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    required: [ok]
+                    properties:
+                      ok: { $ref: "#/components/schemas/defs_ok_true" }
+                  - $ref: "#/components/schemas/error"
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+  /users.info:
+    get:
+      operationId: users_info
+      summary: Gets information about a user.
+      parameters:
+        - { name: user, in: query, required: true, schema: { $ref: "#/components/schemas/defs_user_id" } }
+        - { name: include_locale, in: query, schema: { type: boolean } }
+      responses:
+        "200": { $ref: "#/components/responses/users_info" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+    post:
+      operationId: users_info_post
+      summary: The same method called with POST (form fields), as the Slack SDKs send it.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { $ref: "#/components/schemas/defs_user_id" }
+                include_locale: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/users_info" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+  /users.list:
+    get:
+      operationId: users_list
+      summary: Lists all users in a Slack team.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: include_locale, in: query, schema: { type: boolean } }
+      responses:
+        "200": { $ref: "#/components/responses/users_list" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+    post:
+      operationId: users_list_post
+      summary: The same method called with POST (form fields), as the Slack SDKs send it.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                limit: { type: integer, minimum: 1, maximum: 1000 }
+                cursor: { type: string }
+                include_locale: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/users_list" }
+        "429": { $ref: "#/components/responses/ratelimited" }
+        "503": { $ref: "#/components/responses/unavailable" }
+components:
+  securitySchemes:
+    slackAuth:
+      type: http
+      scheme: bearer
+      description: A bot (xoxb-) or user (xoxp-) token in Authorization, or a token form field.
+  responses:
+    conversations_list:
+      description: A page of conversations.
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - type: object
+                required: [ok, channels, response_metadata]
+                properties:
+                  ok: { $ref: "#/components/schemas/defs_ok_true" }
+                  channels: { type: array, minItems: 2, maxItems: 6, items: { $ref: "#/components/schemas/objs_conversation" } }
+                  response_metadata: { $ref: "#/components/schemas/objs_response_metadata" }
+              - $ref: "#/components/schemas/error"
+    conversations_history:
+      description: Messages, newest first, or {ok:false, error} (channel_not_found, ...).
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - type: object
+                required: [ok, messages, has_more, pin_count, response_metadata]
+                properties:
+                  ok: { $ref: "#/components/schemas/defs_ok_true" }
+                  messages: { type: array, minItems: 1, maxItems: 5, items: { $ref: "#/components/schemas/objs_message" } }
+                  has_more: { type: boolean, const: false }
+                  pin_count: { type: integer, minimum: 0, maximum: 5 }
+                  response_metadata: { $ref: "#/components/schemas/objs_response_metadata" }
+              - $ref: "#/components/schemas/error"
+    users_info:
+      description: The user, or {ok:false, error} (user_not_found, user_not_visible, ...).
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - type: object
+                required: [ok, user]
+                properties:
+                  ok: { $ref: "#/components/schemas/defs_ok_true" }
+                  user: { $ref: "#/components/schemas/objs_user" }
+              - $ref: "#/components/schemas/error"
+    users_list:
+      description: A page of members.
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - type: object
+                required: [ok, members, cache_ts, response_metadata]
+                properties:
+                  ok: { $ref: "#/components/schemas/defs_ok_true" }
+                  members: { type: array, minItems: 2, maxItems: 6, items: { $ref: "#/components/schemas/objs_user" } }
+                  cache_ts: { type: integer, minimum: 1790000000, maximum: 1793000000 }
+                  response_metadata: { $ref: "#/components/schemas/objs_response_metadata" }
+              - $ref: "#/components/schemas/error"
+    auth_test:
+      description: Who the token belongs to.
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - type: object
+                required: [ok, url, team, user, team_id, user_id, bot_id, is_enterprise_install]
+                properties:
+                  ok: { $ref: "#/components/schemas/defs_ok_true" }
+                  url: { type: string, const: "https://lanternlabs.slack.com/" }
+                  team: { type: string, const: Lantern Labs }
+                  user: { type: string, const: deploybot }
+                  team_id: { $ref: "#/components/schemas/defs_team" }
+                  user_id: { $ref: "#/components/schemas/defs_user_id" }
+                  bot_id: { $ref: "#/components/schemas/defs_bot_id" }
+                  is_enterprise_install: { type: boolean, const: false }
+              - $ref: "#/components/schemas/error"
+    ratelimited:
+      description: Rate limited. Slack sends Retry-After (seconds) and {"ok":false,"error":"ratelimited"}.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, minimum: 1, maximum: 60 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+    unavailable:
+      description: Slack is having trouble (5xx).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+  schemas:
+    defs_ok_true: { type: boolean, const: true }
+    defs_ts: { type: string, pattern: "^17[0-9]{8}\\.[0-9]{6}$", title: Timestamp in format 0123456789.012345 }
+    defs_channel: { type: string, pattern: "^[CGD][A-Z0-9]{8,10}$", title: Channel-like conversation ID }
+    defs_user_id: { type: string, pattern: "^[UW][A-Z0-9]{8,10}$", title: User ID }
+    defs_team: { type: string, pattern: "^T[A-Z0-9]{8,10}$", title: Team ID }
+    defs_bot_id: { type: string, pattern: "^B[A-Z0-9]{8,10}$", title: Bot User ID }
+    error:
+      type: object
+      description: Only for failures (a scenario, or a request Slack would refuse); a successful call answers the ok:true shape.
+      required: [ok, error]
+      properties:
+        ok: { type: boolean, const: false }
+        error: { type: string, description: "e.g. channel_not_found, invalid_auth, ratelimited." }
+    objs_response_metadata:
+      type: object
+      required: [next_cursor]
+      properties:
+        next_cursor: { type: string, const: "" }
+        warnings: { type: array, items: { type: string } }
+    chat_postMessage_args:
+      type: object
+      required: [channel]
+      properties:
+        channel: { type: string, description: Channel id (C...) or name (#general). }
+        text: { type: string }
+        blocks: { description: A JSON array of layout blocks (a JSON-encoded string in form bodies). }
+        attachments: { description: A JSON array of attachments. }
+        thread_ts: { $ref: "#/components/schemas/defs_ts" }
+        reply_broadcast: { type: boolean }
+        mrkdwn: { type: boolean }
+        unfurl_links: { type: boolean }
+        unfurl_media: { type: boolean }
+        username: { type: string }
+        icon_emoji: { type: string }
+        icon_url: { type: string, format: uri }
+    reactions_add_args:
+      type: object
+      required: [channel, name, timestamp]
+      properties:
+        channel: { $ref: "#/components/schemas/defs_channel" }
+        name: { type: string, description: Emoji name without colons, e.g. thumbsup. }
+        timestamp: { $ref: "#/components/schemas/defs_ts" }
+    objs_message:
+      type: object
+      required: [type, user, text, ts, team]
+      properties:
+        type: { type: string, const: message }
+        subtype: { type: string, enum: [bot_message, thread_broadcast, channel_join] }
+        user: { $ref: "#/components/schemas/defs_user_id" }
+        bot_id: { $ref: "#/components/schemas/defs_bot_id" }
+        text: { type: string }
+        ts: { $ref: "#/components/schemas/defs_ts" }
+        thread_ts: { $ref: "#/components/schemas/defs_ts" }
+        team: { $ref: "#/components/schemas/defs_team" }
+        reply_count: { type: integer, minimum: 0, maximum: 12 }
+        reactions:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [name, count, users]
+            properties:
+              name: { type: string, enum: [thumbsup, eyes, white_check_mark, rocket, tada] }
+              count: { type: integer, minimum: 1, maximum: 6 }
+              users: { type: array, items: { $ref: "#/components/schemas/defs_user_id" } }
+    objs_conversation:
+      type: object
+      required: [id, name, is_channel, is_group, is_im, is_private, is_archived, is_general, is_member, created, creator, name_normalized, num_members, topic, purpose]
+      properties:
+        id: { $ref: "#/components/schemas/defs_channel" }
+        name: { type: string, enum: [general, engineering, deploys, incidents, random, design] }
+        name_normalized: { type: string, enum: [general, engineering, deploys, incidents, random, design] }
+        is_channel: { type: boolean, const: true }
+        is_group: { type: boolean, const: false }
+        is_im: { type: boolean, const: false }
+        is_mpim: { type: boolean, const: false }
+        is_private: { type: boolean }
+        is_archived: { type: boolean, const: false }
+        is_general: { type: boolean }
+        is_shared: { type: boolean, const: false }
+        is_member: { type: boolean }
+        created: { type: integer, minimum: 1600000000, maximum: 1790000000 }
+        creator: { $ref: "#/components/schemas/defs_user_id" }
+        num_members: { type: integer, minimum: 2, maximum: 80 }
+        topic: { $ref: "#/components/schemas/objs_channel_text" }
+        purpose: { $ref: "#/components/schemas/objs_channel_text" }
+    objs_channel_text:
+      type: object
+      required: [value, creator, last_set]
+      properties:
+        value: { type: string }
+        creator: { $ref: "#/components/schemas/defs_user_id" }
+        last_set: { type: integer, minimum: 1600000000, maximum: 1790000000 }
+    objs_user:
+      type: object
+      required: [id, team_id, name, deleted, real_name, tz, tz_label, tz_offset, profile, is_admin, is_owner, is_bot, is_app_user, updated]
+      properties:
+        id: { $ref: "#/components/schemas/defs_user_id" }
+        team_id: { $ref: "#/components/schemas/defs_team" }
+        name: { type: string, pattern: "^[a-z]{3,8}\\.[a-z]{3,10}$" }
+        deleted: { type: boolean, const: false }
+        color: { type: string, pattern: "^[0-9a-f]{6}$" }
+        real_name: { type: string }
+        tz: { type: string, enum: [America/Los_Angeles, America/New_York, Europe/London, Europe/Berlin] }
+        tz_label: { type: string, enum: [Pacific Daylight Time, Eastern Daylight Time, British Summer Time, Central European Summer Time] }
+        tz_offset: { type: integer, enum: [-25200, -14400, 3600, 7200] }
+        locale: { type: string, enum: [en-US, en-GB, de-DE] }
+        is_admin: { type: boolean }
+        is_owner: { type: boolean }
+        is_bot: { type: boolean }
+        is_app_user: { type: boolean, const: false }
+        updated: { type: integer, minimum: 1700000000, maximum: 1790000000 }
+        profile:
+          type: object
+          required: [real_name, display_name, email, image_72, status_text, status_emoji, team]
+          properties:
+            title: { type: string }
+            real_name: { type: string }
+            display_name: { type: string }
+            email: { type: string, format: email }
+            image_72: { type: string, format: uri }
+            status_text: { type: string }
+            status_emoji: { type: string, enum: ["", ":palm_tree:", ":house_with_garden:", ":spiral_calendar_pad:"] }
+            team: { $ref: "#/components/schemas/defs_team" }

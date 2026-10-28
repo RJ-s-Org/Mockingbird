@@ -1,0 +1,346 @@
+# A hand-written subset of the Twilio SendGrid v3 API (Mail Send, transactional
+# templates, bounce suppressions, global stats), written for Mockingbird's
+# examples and covered by its license.
+# Paths, operation ids and shapes follow Twilio SendGrid's published OpenAPI
+# descriptions, which are MIT-licensed:
+#   https://github.com/twilio/sendgrid-oai (spec/json/tsg_mail_v3.json,
+#   tsg_templates_v3.json, tsg_suppressions_v3.json, tsg_stats_v3.json)
+openapi: 3.1.0
+info:
+  title: Twilio SendGrid v3 API (Mockingbird example subset)
+  version: 1.0.0
+servers:
+  - url: https://api.sendgrid.com
+security:
+  - BearerAuth: []
+paths:
+  /v3/mail/send:
+    post:
+      operationId: SendMail
+      summary: Send an email (queued for delivery; answers 202 with no body).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailSendRequest" }
+      responses:
+        "202":
+          description: Accepted. The body is empty; X-Message-Id names the message.
+          headers:
+            X-Message-Id:
+              schema: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+        "403": { $ref: "#/components/responses/ErrorResponse" }
+        "413": { $ref: "#/components/responses/ErrorResponse" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+  /v3/templates:
+    get:
+      operationId: ListTemplate
+      summary: Retrieve paged transactional templates.
+      parameters:
+        - { name: generations, in: query, schema: { type: string, enum: [legacy, dynamic, "legacy,dynamic"] } }
+        - { name: page_size, in: query, required: true, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: page_token, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of templates.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result, _metadata]
+                properties:
+                  result: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/TransactionalTemplatesTemplateLean" } }
+                  _metadata: { $ref: "#/components/schemas/Metadata" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+    post:
+      operationId: CreateTemplate
+      summary: Create a transactional template.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100 }
+                generation: { type: string, enum: [legacy, dynamic], default: legacy }
+      responses:
+        "201":
+          description: The new template.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransactionalTemplate" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+  /v3/templates/{template_id}:
+    parameters:
+      - { name: template_id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: GetTemplate
+      summary: Retrieve a single transactional template.
+      responses:
+        "200":
+          description: The template with its versions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransactionalTemplate" }
+        "404": { $ref: "#/components/responses/ErrorResponse" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+  /v3/suppression/bounces:
+    get:
+      operationId: ListSuppressionBounces
+      summary: Retrieve all bounces.
+      parameters:
+        - { name: start_time, in: query, schema: { type: integer, description: Unix seconds. } }
+        - { name: end_time, in: query, schema: { type: integer } }
+        - { name: email, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: Bounced addresses.
+          content:
+            application/json:
+              schema: { type: array, minItems: 1, maxItems: 5, items: { $ref: "#/components/schemas/BounceResponse" } }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+  /v3/suppression/bounces/{email}:
+    parameters:
+      - { name: email, in: path, required: true, schema: { type: string, format: email } }
+    get:
+      operationId: GetSuppressionBounces
+      summary: Retrieve a bounce for one address.
+      responses:
+        "200":
+          description: The bounce (an array of at most one entry).
+          content:
+            application/json:
+              schema: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/BounceResponse" } }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+    delete:
+      operationId: DeleteSuppressionBounce
+      summary: Remove an address from the bounce list.
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+  /v3/stats:
+    get:
+      operationId: ListStat
+      summary: Retrieve global email statistics.
+      parameters:
+        - { name: start_date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: end_date, in: query, schema: { type: string, format: date } }
+        - { name: aggregated_by, in: query, schema: { type: string, enum: [day, week, month] } }
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: offset, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          description: One entry per day (or week, month).
+          content:
+            application/json:
+              schema:
+                type: array
+                minItems: 1
+                maxItems: 7
+                items:
+                  type: object
+                  required: [date, stats]
+                  properties:
+                    date: { type: string, pattern: "^2026-10-(1[0-9]|2[0-8])$" }
+                    stats:
+                      type: array
+                      minItems: 1
+                      maxItems: 1
+                      items:
+                        type: object
+                        required: [metrics]
+                        properties:
+                          metrics: { $ref: "#/components/schemas/StatsAdvancedGlobalStats" }
+        "429": { $ref: "#/components/responses/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ErrorResponse" }
+webhooks:
+  # The Event Webhook POSTs a JSON array of events, signed with ECDSA
+  # (X-Twilio-Email-Event-Webhook-Signature and -Timestamp). Mockingbird sends one
+  # array per Mail Send, signed hmac-sha256 instead (see README).
+  SendMail:
+    post:
+      summary: Event Webhook batch for a sent message.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items: { $ref: "#/components/schemas/EventWebhookEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: An API key (SG.<22 chars>.<43 chars>) as a bearer token.
+  responses:
+    ErrorResponse:
+      description: An error, e.g. {"errors":[{"message":"...","field":"from.email","help":null}]}.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [message, field, help]
+            properties:
+              message: { type: string }
+              field: { type: [string, "null"] }
+              help: { type: [string, "null"] }
+        id: { type: string, pattern: "^[0-9a-f]{32}$" }
+    MailAddress:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+    MailSendRequest:
+      type: object
+      required: [personalizations, from]
+      properties:
+        personalizations:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            type: object
+            required: [to]
+            properties:
+              to: { type: array, minItems: 1, items: { $ref: "#/components/schemas/MailAddress" } }
+              cc: { type: array, items: { $ref: "#/components/schemas/MailAddress" } }
+              bcc: { type: array, items: { $ref: "#/components/schemas/MailAddress" } }
+              subject: { type: string }
+              dynamic_template_data: { type: object }
+              send_at: { type: integer }
+        from: { $ref: "#/components/schemas/MailAddress" }
+        reply_to: { $ref: "#/components/schemas/MailAddress" }
+        subject: { type: string }
+        content:
+          type: array
+          items:
+            type: object
+            required: [type, value]
+            properties:
+              type: { type: string, description: MIME type, e.g. text/plain or text/html. }
+              value: { type: string }
+        template_id: { type: string }
+        categories: { type: array, maxItems: 10, items: { type: string } }
+        custom_args: { type: object, additionalProperties: { type: string } }
+        send_at: { type: integer }
+        asm:
+          type: object
+          required: [group_id]
+          properties:
+            group_id: { type: integer }
+        tracking_settings: { type: object }
+    Metadata:
+      type: object
+      required: [self, count]
+      properties:
+        self: { type: string, const: "https://api.sendgrid.com/v3/templates?page_size=20" }
+        count: { type: integer, minimum: 1, maximum: 4 }
+    TransactionalTemplateVersion:
+      type: object
+      required: [id, template_id, active, name, subject, updated_at, editor, generate_plain_content]
+      properties:
+        id: { type: string, format: uuid }
+        template_id: { type: string, pattern: "^d-[0-9a-f]{32}$" }
+        active: { type: integer, enum: [0, 1] }
+        name: { type: string }
+        subject: { type: string }
+        updated_at: { type: string, pattern: "^2026-10-[12][0-9] [01][0-9]:[0-5][0-9]:[0-5][0-9]$" }
+        editor: { type: string, enum: [code, design] }
+        generate_plain_content: { type: boolean }
+        thumbnail_url: { type: string, format: uri }
+    TransactionalTemplatesTemplateLean:
+      type: object
+      required: [id, name, generation, updated_at, versions]
+      properties:
+        id: { type: string, pattern: "^d-[0-9a-f]{32}$" }
+        name: { type: string }
+        generation: { type: string, enum: [legacy, dynamic] }
+        updated_at: { type: string, pattern: "^2026-10-[12][0-9] [01][0-9]:[0-5][0-9]:[0-5][0-9]$" }
+        versions: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/TransactionalTemplateVersion" } }
+    TransactionalTemplate:
+      type: object
+      required: [id, name, generation, updated_at, versions]
+      properties:
+        id: { type: string, pattern: "^d-[0-9a-f]{32}$" }
+        name: { type: string }
+        generation: { type: string, enum: [legacy, dynamic] }
+        updated_at: { type: string, pattern: "^2026-10-[12][0-9] [01][0-9]:[0-5][0-9]:[0-5][0-9]$" }
+        versions: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/TransactionalTemplateVersion" } }
+        warning:
+          type: object
+          properties:
+            message: { type: string }
+    BounceResponse:
+      type: object
+      required: [created, email, reason, status]
+      properties:
+        created: { type: integer, minimum: 1790000000, maximum: 1793000000, description: Unix seconds. }
+        email: { type: string, format: email }
+        reason: { type: string, enum: ["550 5.1.1 The email account that you tried to reach does not exist.", "552 5.2.2 The email account that you tried to reach is over quota.", "550 5.7.1 Message rejected due to local policy."] }
+        status: { type: string, enum: ["5.1.1", "5.2.2", "5.7.1"] }
+    StatsAdvancedGlobalStats:
+      type: object
+      required: [blocks, bounce_drops, bounces, clicks, deferred, delivered, invalid_emails, opens, processed, requests, spam_report_drops, spam_reports, unique_clicks, unique_opens, unsubscribe_drops, unsubscribes]
+      properties:
+        blocks: { type: integer, minimum: 0, maximum: 5 }
+        bounce_drops: { type: integer, minimum: 0, maximum: 5 }
+        bounces: { type: integer, minimum: 0, maximum: 20 }
+        clicks: { type: integer, minimum: 0, maximum: 400 }
+        deferred: { type: integer, minimum: 0, maximum: 30 }
+        delivered: { type: integer, minimum: 800, maximum: 2400 }
+        invalid_emails: { type: integer, minimum: 0, maximum: 5 }
+        opens: { type: integer, minimum: 200, maximum: 1500 }
+        processed: { type: integer, minimum: 800, maximum: 2500 }
+        requests: { type: integer, minimum: 800, maximum: 2500 }
+        spam_report_drops: { type: integer, minimum: 0, maximum: 3 }
+        spam_reports: { type: integer, minimum: 0, maximum: 3 }
+        unique_clicks: { type: integer, minimum: 0, maximum: 300 }
+        unique_opens: { type: integer, minimum: 100, maximum: 1200 }
+        unsubscribe_drops: { type: integer, minimum: 0, maximum: 5 }
+        unsubscribes: { type: integer, minimum: 0, maximum: 10 }
+    EventWebhookEvent:
+      type: object
+      required: [email, timestamp, event, sg_event_id, sg_message_id, smtp-id]
+      properties:
+        email: { type: string, format: email }
+        timestamp: { type: integer, minimum: 1793000000, maximum: 1793100000 }
+        event: { type: string, enum: [processed, delivered] }
+        sg_event_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
+        sg_message_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}\\.recvd-[a-z0-9]{10}-[a-z0-9]{5}-1-[0-9A-F]{8}-[0-9]{2}\\.0$" }
+        smtp-id: { type: string, pattern: "^<[A-Za-z0-9_-]{22}@geopod-ismtpd-[0-9]{1,2}>$" }
+        category: { type: array, items: { type: string } }
+        response: { type: string, const: "250 2.0.0 OK" }
+        ip: { type: string, format: ipv4 }
+        tls: { type: integer, enum: [0, 1] }

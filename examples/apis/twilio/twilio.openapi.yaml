@@ -1,0 +1,362 @@
+# A hand-written subset of the Twilio REST API (2010-04-01: Messages, Calls),
+# written for Mockingbird's examples and covered by its license.
+# Shapes and operation ids follow Twilio's published OpenAPI description, which
+# is MIT-licensed:
+#   https://github.com/twilio/twilio-oai (spec/json/twilio_api_v2010.json)
+# `mockingbird examples init twilio --full` swaps this file for that spec at the
+# commit pinned in example.json.
+openapi: 3.1.0
+info:
+  title: Twilio - Api (Mockingbird example subset)
+  version: 1.0.0
+servers:
+  - url: https://api.twilio.com
+security:
+  - accountSid_authToken: []
+paths:
+  /2010-04-01/Accounts/{AccountSid}/Messages.json:
+    parameters:
+      - $ref: "#/components/parameters/AccountSid"
+    get:
+      operationId: ListMessage
+      summary: Retrieve a list of Message resources associated with a Twilio Account.
+      parameters:
+        - { name: To, in: query, schema: { type: string, format: phone-number } }
+        - { name: From, in: query, schema: { type: string, format: phone-number } }
+        - { name: DateSent, in: query, schema: { type: string, format: date-time } }
+        - { name: PageSize, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: Page, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: PageToken, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of messages, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages, end, first_page_uri, next_page_uri, page, page_size, previous_page_uri, start, uri]
+                properties:
+                  messages: { type: array, items: { $ref: "#/components/schemas/api.v2010.account.message" } }
+                  end: { type: integer, minimum: 0, maximum: 49 }
+                  first_page_uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Messages\\.json\\?PageSize=50&Page=0$" }
+                  next_page_uri: { type: "null", description: Relative URI of the next page; null on the last page. }
+                  page: { type: integer, const: 0 }
+                  page_size: { type: integer, const: 50 }
+                  previous_page_uri: { type: "null" }
+                  start: { type: integer, const: 0 }
+                  uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Messages\\.json\\?PageSize=50&Page=0$" }
+        "429": { $ref: "#/components/responses/too_many_requests" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+    post:
+      operationId: CreateMessage
+      summary: Send a message.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              title: CreateMessageRequest
+              required: [To]
+              properties:
+                To: { type: string, format: phone-number, description: "The recipient's phone number in E.164 format." }
+                From: { type: string, format: phone-number, description: "The sender's Twilio phone number (E.164), short code or alphanumeric sender ID." }
+                MessagingServiceSid: { type: string, pattern: "^MG[0-9a-fA-F]{32}$" }
+                Body: { type: string, maxLength: 1600 }
+                MediaUrl: { type: array, items: { type: string, format: uri } }
+                StatusCallback: { type: string, format: uri, description: URL Twilio POSTs message status changes to. }
+                ValidityPeriod: { type: integer, minimum: 1, maximum: 36000 }
+                SendAt: { type: string, format: date-time }
+                ScheduleType: { type: string, enum: [fixed] }
+                ShortenUrls: { type: boolean }
+      responses:
+        "201":
+          description: The queued message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/api.v2010.account.message" }
+        "400": { $ref: "#/components/responses/bad_request" }
+        "429": { $ref: "#/components/responses/too_many_requests" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /2010-04-01/Accounts/{AccountSid}/Messages/{Sid}.json:
+    parameters:
+      - $ref: "#/components/parameters/AccountSid"
+      - { name: Sid, in: path, required: true, schema: { type: string, pattern: "^(SM|MM)[0-9a-fA-F]{32}$" } }
+    get:
+      operationId: FetchMessage
+      summary: Fetch a specific Message.
+      responses:
+        "200":
+          description: The message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/api.v2010.account.message" }
+        "404": { $ref: "#/components/responses/not_found" }
+        "429": { $ref: "#/components/responses/too_many_requests" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+    post:
+      operationId: UpdateMessage
+      summary: Redact a message body or cancel a scheduled message.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              title: UpdateMessageRequest
+              properties:
+                Body: { type: string, description: An empty string redacts the body. }
+                Status: { type: string, enum: [canceled] }
+      responses:
+        "200":
+          description: The updated message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/api.v2010.account.message" }
+        "404": { $ref: "#/components/responses/not_found" }
+    delete:
+      operationId: DeleteMessage
+      summary: Delete a message from your account.
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/not_found" }
+  /2010-04-01/Accounts/{AccountSid}/Calls.json:
+    parameters:
+      - $ref: "#/components/parameters/AccountSid"
+    get:
+      operationId: ListCall
+      summary: Retrieves a collection of calls made to and from your account.
+      parameters:
+        - { name: To, in: query, schema: { type: string, format: phone-number } }
+        - { name: From, in: query, schema: { type: string, format: phone-number } }
+        - { name: Status, in: query, schema: { $ref: "#/components/schemas/call_enum_status" } }
+        - { name: PageSize, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses:
+        "200":
+          description: A page of calls.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [calls, end, first_page_uri, next_page_uri, page, page_size, previous_page_uri, start, uri]
+                properties:
+                  calls: { type: array, items: { $ref: "#/components/schemas/api.v2010.account.call" } }
+                  end: { type: integer, minimum: 0, maximum: 49 }
+                  first_page_uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Calls\\.json\\?PageSize=50&Page=0$" }
+                  next_page_uri: { type: "null", description: Relative URI of the next page; null on the last page. }
+                  page: { type: integer, const: 0 }
+                  page_size: { type: integer, const: 50 }
+                  previous_page_uri: { type: "null" }
+                  start: { type: integer, const: 0 }
+                  uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Calls\\.json\\?PageSize=50&Page=0$" }
+        "429": { $ref: "#/components/responses/too_many_requests" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+    post:
+      operationId: CreateCall
+      summary: Create a new outgoing call to phones, SIP-enabled endpoints or Twilio Client connections.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              title: CreateCallRequest
+              required: [To, From]
+              properties:
+                To: { type: string, format: phone-number }
+                From: { type: string, format: phone-number }
+                Url: { type: string, format: uri, description: The TwiML URL Twilio fetches when the call connects. }
+                Twiml: { type: string, description: Inline TwiML instructions. }
+                Method: { type: string, enum: [GET, POST] }
+                StatusCallback: { type: string, format: uri }
+                StatusCallbackEvent: { type: array, items: { $ref: "#/components/schemas/call_enum_event" } }
+                Record: { type: boolean }
+                Timeout: { type: integer, minimum: 5, maximum: 600 }
+                MachineDetection: { type: string, enum: [Enable, DetectMessageEnd] }
+      responses:
+        "201":
+          description: The new call.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/api.v2010.account.call" }
+        "400": { $ref: "#/components/responses/bad_request" }
+        "429": { $ref: "#/components/responses/too_many_requests" }
+        "503": { $ref: "#/components/responses/service_unavailable" }
+  /2010-04-01/Accounts/{AccountSid}/Calls/{Sid}.json:
+    parameters:
+      - $ref: "#/components/parameters/AccountSid"
+      - { name: Sid, in: path, required: true, schema: { type: string, pattern: "^CA[0-9a-fA-F]{32}$" } }
+    get:
+      operationId: FetchCall
+      summary: Fetch the call specified by the provided Call SID.
+      responses:
+        "200":
+          description: The call.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/api.v2010.account.call" }
+        "404": { $ref: "#/components/responses/not_found" }
+webhooks:
+  # Twilio POSTs the message (or call) to StatusCallback as form fields on each
+  # status change, signed X-Twilio-Signature. Mockingbird sends these events as
+  # JSON to the configured target.
+  # Named by operation id: Mockingbird derives the event type "Messages.json.created"
+  # from the path, so the operation id is the stable key.
+  CreateMessage:
+    post:
+      summary: Message status callback (queued).
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/message_status_callback" }
+      responses:
+        "200": { description: Acknowledged. }
+  CreateCall:
+    post:
+      summary: Call status callback (initiated).
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/call_status_callback" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    accountSid_authToken: { type: http, scheme: basic }
+  parameters:
+    AccountSid:
+      name: AccountSid
+      in: path
+      required: true
+      description: The SID of the Account (or subaccount) that owns the resource.
+      schema: { type: string, pattern: "^AC[0-9a-fA-F]{32}$" }
+  responses:
+    bad_request:
+      description: Invalid request (for example error 21211, invalid 'To' phone number).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/twilio_error" }
+    not_found:
+      description: The requested resource was not found (error 20404).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/twilio_error" }
+    service_unavailable:
+      description: Twilio is temporarily unavailable (error 20503).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/twilio_error" }
+    too_many_requests:
+      description: Too many requests (error 20429).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/twilio_error" }
+  schemas:
+    rfc2822_date:
+      type: string
+      description: RFC 2822 date, e.g. "Tue, 28 Oct 2026 17:04:11 +0000".
+      pattern: "^(Mon|Tue|Wed|Thu|Fri), [12][0-9] Oct 2026 (0[89]|1[0-7]):[0-5][0-9]:[0-5][0-9] \\+0000$"
+    twilio_error:
+      type: object
+      required: [code, message, more_info, status]
+      properties:
+        code: { type: integer, description: Twilio error code, e.g. 21211. }
+        message: { type: string }
+        more_info: { type: string, format: uri, pattern: "^https://www\\.twilio\\.com/docs/errors/[0-9]{5}$" }
+        status: { type: integer }
+    message_enum_status:
+      type: string
+      enum: [queued, sending, sent, failed, delivered, undelivered, receiving, received, accepted, scheduled, read, partially_delivered, canceled]
+    message_enum_direction:
+      type: string
+      enum: [inbound, outbound-api, outbound-call, outbound-reply]
+    call_enum_status:
+      type: string
+      enum: [queued, ringing, in-progress, completed, busy, failed, no-answer, canceled]
+    call_enum_event:
+      type: string
+      enum: [initiated, ringing, answered, completed]
+    api.v2010.account.message:
+      type: object
+      required: [sid, account_sid, api_version, body, date_created, date_updated, date_sent, direction, error_code, error_message, from, to, messaging_service_sid, num_media, num_segments, price, price_unit, status, uri, subresource_uris]
+      properties:
+        sid: { type: string, pattern: "^SM[0-9a-f]{32}$" }
+        account_sid: { type: string, pattern: "^AC[0-9a-f]{32}$" }
+        api_version: { type: string, const: "2010-04-01" }
+        body: { type: string, maxLength: 1600 }
+        date_created: { $ref: "#/components/schemas/rfc2822_date" }
+        date_updated: { $ref: "#/components/schemas/rfc2822_date" }
+        date_sent: { oneOf: [{ $ref: "#/components/schemas/rfc2822_date" }, { type: "null" }] }
+        direction: { $ref: "#/components/schemas/message_enum_direction" }
+        error_code: { type: "null", description: Set only for failed/undelivered messages (e.g. 30003). }
+        error_message: { type: "null", description: Set only for failed/undelivered messages. }
+        from: { type: [string, "null"], pattern: "^\\+1[2-9][0-9]{9}$" }
+        to: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        messaging_service_sid: { type: [string, "null"], pattern: "^MG[0-9a-f]{32}$" }
+        num_media: { type: string, pattern: "^[0-9]$" }
+        num_segments: { type: string, pattern: "^[1-9]$" }
+        price: { type: [string, "null"], pattern: "^-0\\.0[0-9]{4}$", description: Negative decimal string, e.g. "-0.00790"; null while queued. }
+        price_unit: { type: string, const: USD }
+        status: { $ref: "#/components/schemas/message_enum_status" }
+        uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Messages/SM[0-9a-f]{32}\\.json$" }
+        subresource_uris:
+          type: object
+          required: [media]
+          properties:
+            media: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Messages/SM[0-9a-f]{32}/Media\\.json$" }
+            feedback: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Messages/SM[0-9a-f]{32}/Feedback\\.json$" }
+    api.v2010.account.call:
+      type: object
+      required: [sid, account_sid, api_version, date_created, date_updated, direction, from, from_formatted, to, to_formatted, status, start_time, end_time, duration, price, price_unit, phone_number_sid, uri]
+      properties:
+        sid: { type: string, pattern: "^CA[0-9a-f]{32}$" }
+        parent_call_sid: { type: [string, "null"], pattern: "^CA[0-9a-f]{32}$" }
+        account_sid: { type: string, pattern: "^AC[0-9a-f]{32}$" }
+        api_version: { type: string, const: "2010-04-01" }
+        date_created: { oneOf: [{ $ref: "#/components/schemas/rfc2822_date" }, { type: "null" }] }
+        date_updated: { oneOf: [{ $ref: "#/components/schemas/rfc2822_date" }, { type: "null" }] }
+        direction: { type: string, enum: [inbound, outbound-api, outbound-dial] }
+        from: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        from_formatted: { type: string, pattern: "^\\([2-9][0-9]{2}\\) [0-9]{3}-[0-9]{4}$" }
+        to: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        to_formatted: { type: string, pattern: "^\\([2-9][0-9]{2}\\) [0-9]{3}-[0-9]{4}$" }
+        phone_number_sid: { type: [string, "null"], pattern: "^PN[0-9a-f]{32}$" }
+        status: { $ref: "#/components/schemas/call_enum_status" }
+        start_time: { oneOf: [{ $ref: "#/components/schemas/rfc2822_date" }, { type: "null" }] }
+        end_time: { oneOf: [{ $ref: "#/components/schemas/rfc2822_date" }, { type: "null" }] }
+        duration: { type: [string, "null"], pattern: "^[0-9]{1,3}$", description: Seconds. }
+        price: { type: [string, "null"], pattern: "^-0\\.0[0-9]{4}$" }
+        price_unit: { type: string, const: USD }
+        answered_by: { type: [string, "null"], enum: [human, machine_start, fax, unknown, null] }
+        caller_name: { type: [string, "null"], description: CNAM of the caller, e.g. "HARBOR LANE DENT". }
+        queue_time: { type: string, pattern: "^[0-9]{1,4}$", description: Milliseconds. }
+        uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Calls/CA[0-9a-f]{32}\\.json$" }
+    message_status_callback:
+      type: object
+      description: The fields Twilio sends to a message StatusCallback.
+      required: [MessageSid, SmsSid, AccountSid, From, To, MessageStatus, ApiVersion]
+      properties:
+        MessageSid: { type: string, pattern: "^SM[0-9a-f]{32}$" }
+        SmsSid: { type: string, pattern: "^SM[0-9a-f]{32}$" }
+        SmsStatus: { $ref: "#/components/schemas/message_enum_status" }
+        MessageStatus: { $ref: "#/components/schemas/message_enum_status" }
+        AccountSid: { type: string, pattern: "^AC[0-9a-f]{32}$" }
+        MessagingServiceSid: { type: string, pattern: "^MG[0-9a-f]{32}$" }
+        From: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        To: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        ErrorCode: { type: string }
+        ApiVersion: { type: string, const: "2010-04-01" }
+    call_status_callback:
+      type: object
+      description: The fields Twilio sends to a call StatusCallback.
+      required: [CallSid, AccountSid, From, To, CallStatus, Direction, ApiVersion]
+      properties:
+        CallSid: { type: string, pattern: "^CA[0-9a-f]{32}$" }
+        AccountSid: { type: string, pattern: "^AC[0-9a-f]{32}$" }
+        From: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        To: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+        CallStatus: { $ref: "#/components/schemas/call_enum_status" }
+        Direction: { type: string, enum: [inbound, outbound-api, outbound-dial] }
+        CallDuration: { type: string }
+        Timestamp: { type: string }
+        SequenceNumber: { type: string }
+        ApiVersion: { type: string, const: "2010-04-01" }

@@ -117,6 +117,7 @@ The documentation is an [mdBook](docs/README.md) built from `docs/` (`scripts/do
 | [Improvements](docs/improvements.md) | Known gaps and planned enhancements, from field trials and use |
 | [Extensions](crates/mb-ext/README.md) | The `mb-ext` extension API and its stability policy |
 | [Examples](examples/gallery/README.md) | Ready-to-serve configurations for every protocol and for chaos |
+| [API examples](docs/examples.md) | 21 ready-made mocks of popular APIs (Stripe, GitHub, Twilio, Slack, Shopify, ...) with `mockingbird examples init`, and sample apps tested against them |
 
 ## Contributing
 

@@ -1,0 +1,518 @@
+# A hand-written subset of the Spotify Web API (profile, search, tracks, artists,
+# currently playing, playlists), written for Mockingbird's examples and covered
+# by its license. Operation ids and shapes follow Spotify's published OpenAPI
+# description (https://developer.spotify.com/reference/web-api/open-api-schema.yaml,
+# no licence; under the Spotify Developer Terms), as republished with fixes in
+# https://github.com/sonallux/spotify-web-api. Nothing is copied from it beyond
+# operation ids and field names.
+openapi: 3.1.0
+info:
+  title: Spotify Web API (Mockingbird example subset)
+  version: "1.0"
+servers:
+  - url: https://api.spotify.com
+security:
+  - oauth_2_0: []
+paths:
+  /v1/me:
+    get:
+      operationId: get-current-users-profile
+      summary: The current user's profile (needs a user token).
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrivateUserObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/search:
+    get:
+      operationId: search
+      summary: Search the catalog for tracks, artists and albums.
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - name: type
+          in: query
+          required: true
+          description: Comma-separated list of album, artist, playlist, track, show, episode, audiobook.
+          schema: { type: string }
+        - $ref: "#/components/parameters/market"
+        - { name: limit, in: query, schema: { type: integer, minimum: 0, maximum: 50, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 1000, default: 0 } }
+      responses:
+        "200":
+          description: One page per requested type.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tracks: { $ref: "#/components/schemas/PagingTrackObject" }
+                  artists: { $ref: "#/components/schemas/PagingArtistObject" }
+                  albums: { $ref: "#/components/schemas/PagingSimplifiedAlbumObject" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/tracks/{id}:
+    get:
+      operationId: get-track
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/market"
+      responses:
+        "200":
+          description: The track.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrackObject" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/artists/{id}:
+    get:
+      operationId: get-an-artist
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: The artist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtistObject" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/artists/{id}/top-tracks:
+    get:
+      operationId: get-an-artists-top-tracks
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/market"
+      responses:
+        "200":
+          description: Up to 10 of the artist's most popular tracks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tracks]
+                properties:
+                  tracks: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/TrackObject" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/me/player/currently-playing:
+    get:
+      operationId: get-the-users-currently-playing-track
+      parameters:
+        - $ref: "#/components/parameters/market"
+        - { name: additional_types, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: What the user is playing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CurrentlyPlayingObject" }
+        "204":
+          description: Nothing is playing (no body).
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/playlists/{playlist_id}:
+    get:
+      operationId: get-playlist
+      parameters:
+        - $ref: "#/components/parameters/PathPlaylistId"
+        - $ref: "#/components/parameters/market"
+        - { name: fields, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The playlist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaylistObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/playlists/{playlist_id}/items:
+    get:
+      operationId: get-playlists-items
+      parameters:
+        - $ref: "#/components/parameters/PathPlaylistId"
+        - $ref: "#/components/parameters/market"
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: A page of playlist items.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PagingPlaylistTrackObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: add-items-to-playlist
+      summary: Add tracks or episodes (by URI) to a playlist.
+      parameters:
+        - $ref: "#/components/parameters/PathPlaylistId"
+        - { name: position, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: uris, in: query, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: array
+                  maxItems: 100
+                  items: { type: string, pattern: "^spotify:(track|episode):[0-9A-Za-z]{22}$" }
+                - type: object
+                  properties:
+                    uris: { type: array, maxItems: 100, items: { type: string } }
+                    position: { type: integer, minimum: 0 }
+      responses:
+        "201":
+          description: The playlist's new snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaylistSnapshotId" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/playlists/{playlist_id}/tracks:
+    post:
+      operationId: add-tracks-to-playlist
+      deprecated: true
+      summary: The older path of add-items-to-playlist, still served.
+      parameters:
+        - $ref: "#/components/parameters/PathPlaylistId"
+        - { name: position, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: uris, in: query, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                uris: { type: array, maxItems: 100, items: { type: string, pattern: "^spotify:(track|episode):[0-9A-Za-z]{22}$" } }
+                position: { type: integer, minimum: 0 }
+      responses:
+        "201":
+          description: The playlist's new snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlaylistSnapshotId" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+components:
+  securitySchemes:
+    oauth_2_0:
+      type: oauth2
+      description: A Bearer token from accounts.spotify.com (client credentials, or authorization code for /v1/me endpoints).
+      flows:
+        clientCredentials:
+          tokenUrl: https://accounts.spotify.com/api/token
+          scopes: {}
+        authorizationCode:
+          authorizationUrl: https://accounts.spotify.com/authorize
+          tokenUrl: https://accounts.spotify.com/api/token
+          scopes:
+            user-read-private: Read the user's subscription details.
+            user-read-email: Read the user's email address.
+            user-read-currently-playing: Read what the user is playing.
+            playlist-modify-public: Manage public playlists.
+            playlist-modify-private: Manage private playlists.
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      description: A Spotify id (base62, 22 characters).
+      schema: { type: string, pattern: "^[0-9A-Za-z]{22}$" }
+    PathPlaylistId:
+      name: playlist_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9A-Za-z]{22}$" }
+    market:
+      name: market
+      in: query
+      description: An ISO 3166-1 alpha-2 country code, or from_token.
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: A malformed request, such as an invalid id.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: A missing, expired or revoked token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: A token without the scope or product this needs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: The app exceeded its rate limit; Retry-After says how many seconds to wait.
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: The API is temporarily unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [status, message]
+          properties:
+            status: { type: integer, minimum: 400, maximum: 599 }
+            message: { type: string }
+    ExternalUrls:
+      type: object
+      required: [spotify]
+      properties:
+        spotify: { type: string, pattern: "^https://open\\.spotify\\.com/(track|album|artist|playlist|user)/[0-9A-Za-z]{22}$" }
+    Image:
+      type: object
+      required: [url, height, width]
+      properties:
+        url: { type: string, pattern: "^https://i\\.scdn\\.co/image/ab67616d0000b273[0-9a-f]{24}$" }
+        height: { type: [integer, "null"], enum: [640, 300, 64] }
+        width: { type: [integer, "null"], enum: [640, 300, 64] }
+    Followers:
+      type: object
+      required: [href, total]
+      properties:
+        href: { type: "null" }
+        total: { type: integer, minimum: 0, maximum: 5000000 }
+    PrivateUserObject:
+      type: object
+      required: [id, type, uri, href, display_name, external_urls, followers, images]
+      properties:
+        id: { type: string, pattern: "^[a-z0-9]{8,28}$" }
+        type: { type: string, const: user }
+        uri: { type: string, pattern: "^spotify:user:[a-z0-9]{8,28}$" }
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/users/[a-z0-9]{8,28}$" }
+        display_name: { type: [string, "null"] }
+        email: { type: string, format: email }
+        country: { type: string, enum: [DE, AT, CH, NL, SE] }
+        product: { type: string, enum: [premium, free] }
+        explicit_content:
+          type: object
+          required: [filter_enabled, filter_locked]
+          properties:
+            filter_enabled: { type: boolean }
+            filter_locked: { type: boolean }
+        external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+        followers: { $ref: "#/components/schemas/Followers" }
+        images: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/Image" } }
+    SimplifiedArtistObject:
+      type: object
+      required: [id, name, type, uri, href, external_urls]
+      properties:
+        id: { type: string, pattern: "^[0-9A-Za-z]{22}$" }
+        name: { type: string }
+        type: { type: string, const: artist }
+        uri: { type: string, pattern: "^spotify:artist:[0-9A-Za-z]{22}$" }
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/artists/[0-9A-Za-z]{22}$" }
+        external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+    ArtistObject:
+      allOf:
+        - $ref: "#/components/schemas/SimplifiedArtistObject"
+        - type: object
+          required: [followers, genres, images, popularity]
+          properties:
+            followers: { $ref: "#/components/schemas/Followers" }
+            genres: { type: array, maxItems: 3, items: { type: string, enum: [indie pop, german indie, dream pop, synthpop, hamburger schule, neue deutsche welle, krautrock] } }
+            images: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/Image" } }
+            popularity: { type: integer, minimum: 0, maximum: 100 }
+    SimplifiedAlbumObject:
+      type: object
+      required: [album_type, total_tracks, available_markets, external_urls, href, id, images, name, release_date, release_date_precision, type, uri, artists]
+      properties:
+        album_type: { type: string, enum: [album, single, compilation] }
+        total_tracks: { type: integer, minimum: 1, maximum: 24 }
+        available_markets: { type: array, maxItems: 5, items: { type: string, enum: [DE, AT, CH, NL, SE, US, GB] } }
+        external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/albums/[0-9A-Za-z]{22}$" }
+        id: { type: string, pattern: "^[0-9A-Za-z]{22}$" }
+        images: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/Image" } }
+        name: { type: string }
+        release_date: { type: string, format: date }
+        release_date_precision: { type: string, enum: [year, month, day] }
+        type: { type: string, const: album }
+        uri: { type: string, pattern: "^spotify:album:[0-9A-Za-z]{22}$" }
+        artists: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/SimplifiedArtistObject" } }
+    TrackObject:
+      type: object
+      required: [album, artists, available_markets, disc_number, duration_ms, explicit, external_ids, external_urls, href, id, is_local, name, popularity, preview_url, track_number, type, uri]
+      properties:
+        album: { $ref: "#/components/schemas/SimplifiedAlbumObject" }
+        artists: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/SimplifiedArtistObject" } }
+        available_markets: { type: array, maxItems: 5, items: { type: string, enum: [DE, AT, CH, NL, SE, US, GB] } }
+        disc_number: { type: integer, const: 1 }
+        duration_ms: { type: integer, minimum: 120000, maximum: 420000 }
+        explicit: { type: boolean }
+        external_ids:
+          type: object
+          required: [isrc]
+          properties:
+            isrc: { type: string, pattern: "^DE[A-Z0-9]{3}2[0-6][0-9]{5}$" }
+        external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/tracks/[0-9A-Za-z]{22}$" }
+        id: { type: string, pattern: "^[0-9A-Za-z]{22}$" }
+        is_playable: { type: boolean }
+        is_local: { type: boolean, const: false }
+        name: { type: string }
+        popularity: { type: integer, minimum: 0, maximum: 100 }
+        preview_url: { type: "null", description: Deprecated; null for new apps. }
+        track_number: { type: integer, minimum: 1, maximum: 24 }
+        type: { type: string, const: track }
+        uri: { type: string, pattern: "^spotify:track:[0-9A-Za-z]{22}$" }
+    Paging:
+      type: object
+      required: [href, limit, next, offset, previous, total]
+      properties:
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/(search|playlists/[0-9A-Za-z]{22}/items)\\?offset=0&limit=20$" }
+        limit: { type: integer, minimum: 0, maximum: 50 }
+        next: { type: [string, "null"], pattern: "^https://api\\.spotify\\.com/v1/(search|playlists/[0-9A-Za-z]{22}/items)\\?offset=20&limit=20$" }
+        offset: { type: integer, const: 0 }
+        previous: { type: "null" }
+        total: { type: integer, minimum: 0, maximum: 1000 }
+    PagingTrackObject:
+      allOf:
+        - $ref: "#/components/schemas/Paging"
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/TrackObject" } }
+    PagingArtistObject:
+      allOf:
+        - $ref: "#/components/schemas/Paging"
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/ArtistObject" } }
+    PagingSimplifiedAlbumObject:
+      allOf:
+        - $ref: "#/components/schemas/Paging"
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/SimplifiedAlbumObject" } }
+    PlaylistUserObject:
+      type: object
+      required: [external_urls, href, id, type, uri]
+      properties:
+        external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/users/[a-z0-9]{8,28}$" }
+        id: { type: string, pattern: "^[a-z0-9]{8,28}$" }
+        type: { type: string, const: user }
+        uri: { type: string, pattern: "^spotify:user:[a-z0-9]{8,28}$" }
+        display_name: { type: [string, "null"] }
+    PlaylistTrackObject:
+      type: object
+      required: [added_at, added_by, is_local, track]
+      properties:
+        added_at: { type: string, format: date-time }
+        added_by: { $ref: "#/components/schemas/PlaylistUserObject" }
+        is_local: { type: boolean, const: false }
+        track: { $ref: "#/components/schemas/TrackObject" }
+    PagingPlaylistTrackObject:
+      allOf:
+        - $ref: "#/components/schemas/Paging"
+        - type: object
+          required: [items]
+          properties:
+            items: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/PlaylistTrackObject" } }
+    PlaylistObject:
+      type: object
+      required: [collaborative, description, external_urls, followers, href, id, images, name, owner, public, snapshot_id, tracks, type, uri]
+      properties:
+        collaborative: { type: boolean }
+        description: { type: [string, "null"] }
+        external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+        followers: { $ref: "#/components/schemas/Followers" }
+        href: { type: string, pattern: "^https://api\\.spotify\\.com/v1/playlists/[0-9A-Za-z]{22}$" }
+        id: { type: string, pattern: "^[0-9A-Za-z]{22}$" }
+        images: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/Image" } }
+        name: { type: string }
+        owner: { $ref: "#/components/schemas/PlaylistUserObject" }
+        public: { type: boolean }
+        snapshot_id: { type: string, pattern: "^[A-Za-z0-9+/]{32}$" }
+        tracks: { $ref: "#/components/schemas/PagingPlaylistTrackObject" }
+        type: { type: string, const: playlist }
+        uri: { type: string, pattern: "^spotify:playlist:[0-9A-Za-z]{22}$" }
+    PlaylistSnapshotId:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id]
+      properties:
+        snapshot_id: { type: string, pattern: "^[A-Za-z0-9+/]{32}$" }
+    CurrentlyPlayingObject:
+      type: object
+      required: [timestamp, progress_ms, is_playing, item, currently_playing_type, actions]
+      properties:
+        timestamp: { type: integer, description: Unix milliseconds. }
+        context:
+          type: [object, "null"]
+          required: [type, href, external_urls, uri]
+          properties:
+            type: { type: string, enum: [playlist, album, artist] }
+            href: { type: string }
+            external_urls: { $ref: "#/components/schemas/ExternalUrls" }
+            uri: { type: string, pattern: "^spotify:(playlist|album|artist):[0-9A-Za-z]{22}$" }
+        progress_ms: { type: integer, minimum: 0, maximum: 120000 }
+        is_playing: { type: boolean }
+        item: { $ref: "#/components/schemas/TrackObject" }
+        currently_playing_type: { type: string, const: track }
+        actions:
+          type: object
+          properties:
+            disallows:
+              type: object
+              properties:
+                resuming: { type: boolean }
+                skipping_prev: { type: boolean }

@@ -1,0 +1,375 @@
+# A hand-written subset of PayPal's Orders v2 API (create, get, patch, confirm,
+# authorize, capture), written for Mockingbird's examples and covered by its
+# license. Shapes and operation ids follow PayPal's published OpenAPI
+# description, which is Apache-2.0:
+#   https://github.com/paypal/paypal-rest-api-specifications (openapi/checkout_orders_v2.json)
+# `mockingbird examples init paypal --full` swaps this file for that spec at the
+# commit pinned in example.json. The 429 responses are not in the
+# upstream file; PayPal answers them with name RATE_LIMIT_REACHED.
+openapi: 3.1.0
+info:
+  title: Orders (Mockingbird example subset)
+  version: "2.32"
+servers:
+  - url: https://api-m.sandbox.paypal.com
+  - url: https://api-m.paypal.com
+security:
+  - Oauth2: []
+paths:
+  /v2/checkout/orders:
+    post:
+      operationId: orders.create
+      summary: Create an order.
+      parameters:
+        - { $ref: "#/components/parameters/paypal_request_id" }
+        - { $ref: "#/components/parameters/prefer" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/order_request" }
+      responses:
+        "201":
+          description: The new order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/order" }
+        "400": { $ref: "#/components/responses/error" }
+        "401": { $ref: "#/components/responses/error" }
+        "422": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /v2/checkout/orders/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/order_id" }
+    get:
+      operationId: orders.get
+      summary: Show order details.
+      parameters:
+        - { name: fields, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/order" }
+        "401": { $ref: "#/components/responses/error" }
+        "404": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+    patch:
+      operationId: orders.patch
+      summary: Update an order with JSON Patch operations.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                required: [op]
+                properties:
+                  op: { type: string, enum: [add, remove, replace, move, copy, test] }
+                  path: { type: string }
+                  value: {}
+                  from: { type: string }
+      responses:
+        "204": { description: The order was updated. }
+        "400": { $ref: "#/components/responses/error" }
+        "404": { $ref: "#/components/responses/error" }
+        "422": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /v2/checkout/orders/{id}/confirm-payment-source:
+    parameters:
+      - { $ref: "#/components/parameters/order_id" }
+    post:
+      operationId: orders.confirm
+      summary: Confirm the order with a payment source.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [payment_source]
+              properties:
+                payment_source: { $ref: "#/components/schemas/payment_source" }
+      responses:
+        "200":
+          description: The confirmed order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/order" }
+        "400": { $ref: "#/components/responses/error" }
+        "422": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /v2/checkout/orders/{id}/authorize:
+    parameters:
+      - { $ref: "#/components/parameters/order_id" }
+    post:
+      operationId: orders.authorize
+      summary: Authorize payment for an order.
+      parameters:
+        - { $ref: "#/components/parameters/paypal_request_id" }
+        - { $ref: "#/components/parameters/prefer" }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "201":
+          description: The authorized order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/order" }
+        "400": { $ref: "#/components/responses/error" }
+        "404": { $ref: "#/components/responses/error" }
+        "422": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /v2/checkout/orders/{id}/capture:
+    parameters:
+      - { $ref: "#/components/parameters/order_id" }
+    post:
+      operationId: orders.capture
+      summary: Capture payment for an order.
+      parameters:
+        - { $ref: "#/components/parameters/paypal_request_id" }
+        - { $ref: "#/components/parameters/prefer" }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "201":
+          description: The captured order.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/order" }
+        "400": { $ref: "#/components/responses/error" }
+        "404": { $ref: "#/components/responses/error" }
+        "409": { $ref: "#/components/responses/error" }
+        "422": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+webhooks:
+  # PayPal sends these on its own schedule (CHECKOUT.ORDER.APPROVED once the buyer
+  # approves); here they follow the call that causes them, by operation id.
+  orders.confirm:
+    post:
+      summary: CHECKOUT.ORDER.APPROVED
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/order_approved_event" }
+      responses:
+        "200": { description: Acknowledged. }
+  orders.capture:
+    post:
+      summary: PAYMENT.CAPTURE.COMPLETED
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/capture_completed_event" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    Oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://api-m.sandbox.paypal.com/v1/oauth2/token
+          scopes:
+            https://uri.paypal.com/services/payments/payment: Manage payments and checkout workflow.
+  parameters:
+    order_id: { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Z0-9]{17}$" } }
+    paypal_request_id: { name: PayPal-Request-Id, in: header, schema: { type: string, maxLength: 108 } }
+    prefer: { name: Prefer, in: header, schema: { type: string, enum: [return=minimal, return=representation] } }
+  responses:
+    error:
+      description: A PayPal error (INVALID_REQUEST, UNPROCESSABLE_ENTITY, RESOURCE_NOT_FOUND, RATE_LIMIT_REACHED, INTERNAL_SERVER_ERROR, ...).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+  schemas:
+    money:
+      type: object
+      required: [currency_code, value]
+      properties:
+        currency_code: { type: string, enum: [USD, EUR, GBP, CAD, AUD] }
+        value: { type: string, pattern: "^[1-9][0-9]{0,3}\\.[0-9]{2}$" }
+    link:
+      type: object
+      required: [href, rel]
+      properties:
+        href: { type: string, format: uri }
+        rel: { type: string, enum: [self, approve, update, capture, authorize, payer-action, up, refund, information_link] }
+        method: { type: string, enum: [GET, POST, PUT, DELETE, HEAD, CONNECT, OPTIONS, PATCH] }
+    name:
+      type: object
+      properties:
+        given_name: { type: string, maxLength: 140 }
+        surname: { type: string, maxLength: 140 }
+    payment_source:
+      type: object
+      properties:
+        paypal:
+          type: object
+          properties:
+            email_address: { type: string, format: email }
+            account_id: { type: string, pattern: "^[2-9A-HJ-NP-Z]{13}$" }
+            account_status: { type: string, enum: [VERIFIED, UNVERIFIED] }
+            name: { $ref: "#/components/schemas/name" }
+            experience_context:
+              type: object
+              properties:
+                brand_name: { type: string }
+                return_url: { type: string, format: uri }
+                cancel_url: { type: string, format: uri }
+                user_action: { type: string, enum: [CONTINUE, PAY_NOW] }
+                shipping_preference: { type: string, enum: [GET_FROM_FILE, NO_SHIPPING, SET_PROVIDED_ADDRESS] }
+    purchase_unit_request:
+      type: object
+      required: [amount]
+      properties:
+        reference_id: { type: string, maxLength: 256 }
+        description: { type: string, maxLength: 127 }
+        custom_id: { type: string, maxLength: 255 }
+        invoice_id: { type: string, maxLength: 127 }
+        amount: { $ref: "#/components/schemas/money" }
+    order_request:
+      type: object
+      required: [intent, purchase_units]
+      properties:
+        intent: { type: string, enum: [CAPTURE, AUTHORIZE] }
+        purchase_units: { type: array, minItems: 1, maxItems: 10, items: { $ref: "#/components/schemas/purchase_unit_request" } }
+        payment_source: { $ref: "#/components/schemas/payment_source" }
+    capture:
+      type: object
+      required: [id, status, amount, final_capture, create_time, update_time]
+      properties:
+        id: { type: string, pattern: "^[0-9][A-Z0-9]{16}$" }
+        status: { type: string, enum: [COMPLETED, DECLINED, PARTIALLY_REFUNDED, PENDING, REFUNDED, FAILED] }
+        amount: { $ref: "#/components/schemas/money" }
+        final_capture: { type: boolean }
+        seller_protection:
+          type: object
+          properties:
+            status: { type: string, enum: [ELIGIBLE, PARTIALLY_ELIGIBLE, NOT_ELIGIBLE] }
+            dispute_categories: { type: array, items: { type: string, enum: [ITEM_NOT_RECEIVED, UNAUTHORIZED_TRANSACTION] } }
+        seller_receivable_breakdown:
+          type: object
+          properties:
+            gross_amount: { $ref: "#/components/schemas/money" }
+            paypal_fee: { $ref: "#/components/schemas/money" }
+            net_amount: { $ref: "#/components/schemas/money" }
+        links: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/link" } }
+        create_time: { type: string, format: date-time }
+        update_time: { type: string, format: date-time }
+    authorization:
+      type: object
+      required: [id, status, amount, expiration_time, create_time, update_time]
+      properties:
+        id: { type: string, pattern: "^[0-9][A-Z0-9]{16}$" }
+        status: { type: string, enum: [CREATED, CAPTURED, DENIED, PARTIALLY_CAPTURED, VOIDED, PENDING] }
+        amount: { $ref: "#/components/schemas/money" }
+        expiration_time: { type: string, format: date-time }
+        links: { type: array, maxItems: 4, items: { $ref: "#/components/schemas/link" } }
+        create_time: { type: string, format: date-time }
+        update_time: { type: string, format: date-time }
+    purchase_unit:
+      type: object
+      required: [reference_id, amount]
+      properties:
+        reference_id: { type: string, maxLength: 256 }
+        description: { type: string, maxLength: 127 }
+        custom_id: { type: string, maxLength: 255 }
+        invoice_id: { type: string, maxLength: 127 }
+        amount: { $ref: "#/components/schemas/money" }
+        payee:
+          type: object
+          properties:
+            email_address: { type: string, format: email }
+            merchant_id: { type: string, pattern: "^[2-9A-HJ-NP-Z]{13}$" }
+        payments:
+          type: object
+          properties:
+            captures: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/capture" } }
+            authorizations: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/authorization" } }
+    order:
+      type: object
+      required: [id, intent, status, purchase_units, create_time, links]
+      properties:
+        id: { type: string, pattern: "^[0-9][A-Z0-9]{16}$" }
+        intent: { type: string, enum: [CAPTURE, AUTHORIZE] }
+        status: { type: string, enum: [CREATED, SAVED, APPROVED, VOIDED, COMPLETED, PAYER_ACTION_REQUIRED] }
+        payment_source: { $ref: "#/components/schemas/payment_source" }
+        purchase_units: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/purchase_unit" } }
+        payer:
+          type: object
+          properties:
+            name: { $ref: "#/components/schemas/name" }
+            email_address: { type: string, format: email }
+            payer_id: { type: string, pattern: "^[2-9A-HJ-NP-Z]{13}$" }
+            address:
+              type: object
+              properties:
+                country_code: { type: string, enum: [US, GB, DE, CA, AU] }
+        create_time: { type: string, format: date-time }
+        update_time: { type: string, format: date-time }
+        links: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/link" } }
+    error_details:
+      type: object
+      required: [issue]
+      properties:
+        field: { type: string }
+        value: { type: string }
+        location: { type: string, enum: [body, path, query] }
+        issue: { type: string, pattern: "^[A-Z_]{6,40}$" }
+        description: { type: string }
+    error:
+      type: object
+      required: [name, message, debug_id]
+      properties:
+        name: { type: string, enum: [INVALID_REQUEST, AUTHENTICATION_FAILURE, NOT_AUTHORIZED, RESOURCE_NOT_FOUND, UNPROCESSABLE_ENTITY, RATE_LIMIT_REACHED, INTERNAL_SERVER_ERROR] }
+        message: { type: string }
+        debug_id: { type: string, pattern: "^[0-9a-f]{13}$" }
+        details: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/error_details" } }
+        links: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/link" } }
+    event_base:
+      type: object
+      required: [id, event_version, create_time, resource_type, resource_version, event_type, summary, links]
+      properties:
+        id: { type: string, pattern: "^WH-[0-9A-Z]{17}-[0-9A-Z]{17}$" }
+        event_version: { type: string, const: "1.0" }
+        create_time: { type: string, format: date-time }
+        resource_version: { type: string, const: "2.0" }
+        links: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/link" } }
+    order_approved_event:
+      allOf:
+        - { $ref: "#/components/schemas/event_base" }
+        - type: object
+          required: [resource]
+          properties:
+            event_type: { type: string, const: CHECKOUT.ORDER.APPROVED }
+            resource_type: { type: string, const: checkout-order }
+            summary: { type: string, const: An order has been approved by buyer }
+            resource: { $ref: "#/components/schemas/order" }
+    capture_completed_event:
+      allOf:
+        - { $ref: "#/components/schemas/event_base" }
+        - type: object
+          required: [resource]
+          properties:
+            event_type: { type: string, const: PAYMENT.CAPTURE.COMPLETED }
+            resource_type: { type: string, const: capture }
+            summary: { type: string, pattern: "^Payment completed for \\$ [1-9][0-9]{1,2}\\.[0-9]{2} USD$" }
+            resource: { $ref: "#/components/schemas/capture" }
