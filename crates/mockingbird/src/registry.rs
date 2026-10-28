@@ -64,6 +64,8 @@ enum Served {
     Http {
         prefix: String,
         hosts: Vec<String>,
+        /// Applied to the path below `prefix` before the contract sees it.
+        rewrite: mb_store::PathRewrite,
         /// The path a request for the mount point itself is sent to: a
         /// GraphQL mock at `/graphql` answers `POST /graphql`, as well as
         /// `/graphql/graphql`.
@@ -684,12 +686,13 @@ impl MockRegistry {
             Served::Http {
                 prefix,
                 hosts,
+                rewrite,
                 root,
                 router,
             } if hosts.is_empty() || host.as_ref().is_some_and(|h| hosts.contains(h)) => {
                 strip_prefix(&path, prefix).map(|rest| match root {
-                    Some(root) if prefix != "/" && rest == "/" => (prefix, router, root.as_str()),
-                    _ => (prefix, router, rest),
+                    Some(root) if prefix != "/" && rest == "/" => (prefix, router, root.to_owned()),
+                    _ => (prefix, router, rewrite.apply(rest)),
                 })
             }
             _ => None,
@@ -706,7 +709,7 @@ impl MockRegistry {
             };
             return problem(404, "No mock mounted at this path", detail);
         };
-        match rewrite_path(req.uri(), rest) {
+        match rewrite_path(req.uri(), &rest) {
             Ok(uri) => *req.uri_mut() = uri,
             Err(error) => return problem(400, "Invalid request path", error.to_string()),
         }
@@ -796,6 +799,7 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
     let http = |router: Router| Served::Http {
         prefix: mock.route_prefix.clone(),
         hosts: mock.hosts.clone(),
+        rewrite: mock.behavior.path_rewrite.clone(),
         root: root.clone(),
         router: match &ws {
             Some(ws) => ws.clone().fallback_service(router),

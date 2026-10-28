@@ -1,0 +1,53 @@
+{{- if .Values.tests.enabled -}}
+{{- $fullname := include "mockingbird.fullname" . -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $fullname }}-test
+  labels:
+    {{- include "mockingbird.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: test
+      image: {{ include "mockingbird.curlImage" . | quote }}
+      imagePullPolicy: {{ .Values.curlImage.pullPolicy }}
+      command: ["sh", "-ec"]
+      args:
+        - |
+          admin={{ printf "http://%s-admin:%v" $fullname .Values.service.ports.admin | squote }}
+          mocks={{ printf "http://%s:%v" $fullname .Values.service.ports.http | squote }}
+          echo "GET $admin/readyz"
+          curl -fsS --retry 10 --retry-delay 3 --retry-all-errors "$admin/readyz"
+          echo
+          {{- range .Values.tests.requests }}
+          {{- $method := default "GET" .method | upper }}
+          {{- $status := default 200 .status | toString }}
+          echo {{ printf "%s %s (expect %s)" $method .path $status | squote }}
+          code=$(curl -sS -o /tmp/body -w '%{http_code}' -X {{ $method }}
+          {{- range $k, $v := .headers }} -H {{ printf "%s: %s" $k $v | squote }}{{ end }}
+          {{- with .body }} -H 'Content-Type: application/json' --data {{ toJson . | squote }}{{ end }} "$mocks"{{ .path | squote }})
+          head -c 2000 /tmp/body; echo
+          if [ "$code" != {{ $status | squote }} ]; then echo "got $code"; exit 1; fi
+          {{- end }}
+          echo "helm test passed"
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+{{- end }}

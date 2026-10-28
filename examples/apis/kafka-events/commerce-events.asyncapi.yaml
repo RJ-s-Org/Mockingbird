@@ -1,0 +1,223 @@
+# Commerce event stream on Kafka (AsyncAPI 3.0), written for Mockingbird's
+# examples and covered by its license. A fictional but typical order ->
+# payment -> shipment pipeline: one topic per event type, the order id as the
+# Kafka message key, a correlation id and event type in the record headers,
+# and versioned topic names.
+asyncapi: 3.0.0
+info:
+  title: Juniper & Co commerce events
+  version: 1.4.0
+  description: |-
+    Domain events published by Juniper & Co's checkout, payments and
+    fulfilment services. Every record is keyed by `orderId`, so all events of
+    one order land on the same partition in order.
+defaultContentType: application/json
+servers:
+  production:
+    host: kafka.juniper.example:9092
+    protocol: kafka
+    description: The shop's Kafka cluster (any broker; Mockingbird never connects to it).
+    bindings:
+      kafka:
+        schemaRegistryUrl: https://schema-registry.juniper.example
+        schemaRegistryVendor: confluent
+channels:
+  orderCreated:
+    address: juniper.orders.order-created.v1
+    description: One record per order placed at checkout.
+    messages:
+      orderCreated: { $ref: "#/components/messages/orderCreated" }
+    bindings:
+      kafka:
+        topic: juniper.orders.order-created.v1
+        partitions: 12
+        replicas: 3
+        topicConfiguration:
+          cleanup.policy: [delete]
+          retention.ms: 604800000
+  paymentAuthorized:
+    address: juniper.payments.payment-authorized.v1
+    description: The card payment of an order was authorized.
+    messages:
+      paymentAuthorized: { $ref: "#/components/messages/paymentAuthorized" }
+    bindings:
+      kafka:
+        topic: juniper.payments.payment-authorized.v1
+        partitions: 12
+        replicas: 3
+  shipmentDispatched:
+    address: juniper.fulfilment.shipment-dispatched.v1
+    description: A parcel of an order left the warehouse.
+    messages:
+      shipmentDispatched: { $ref: "#/components/messages/shipmentDispatched" }
+    bindings:
+      kafka:
+        topic: juniper.fulfilment.shipment-dispatched.v1
+        partitions: 6
+        replicas: 3
+operations:
+  orderCreated:
+    action: send
+    channel: { $ref: "#/channels/orderCreated" }
+    summary: Checkout publishes an order once it is placed.
+    traits: [{ $ref: "#/components/operationTraits/kafka" }]
+    messages: [{ $ref: "#/channels/orderCreated/messages/orderCreated" }]
+  paymentAuthorized:
+    action: send
+    channel: { $ref: "#/channels/paymentAuthorized" }
+    summary: Payments publishes an authorization for an order.
+    traits: [{ $ref: "#/components/operationTraits/kafka" }]
+    messages: [{ $ref: "#/channels/paymentAuthorized/messages/paymentAuthorized" }]
+  shipmentDispatched:
+    action: send
+    channel: { $ref: "#/channels/shipmentDispatched" }
+    summary: Fulfilment publishes each dispatched parcel.
+    traits: [{ $ref: "#/components/operationTraits/kafka" }]
+    messages: [{ $ref: "#/channels/shipmentDispatched/messages/shipmentDispatched" }]
+components:
+  messages:
+    orderCreated:
+      name: orderCreated
+      title: Order created
+      summary: An order was placed at checkout.
+      contentType: application/json
+      headers:
+        allOf:
+          - $ref: "#/components/schemas/commonHeaders"
+          - type: object
+            properties:
+              ce_type: { type: string, const: com.juniper.order.created }
+      bindings:
+        kafka:
+          key: { $ref: "#/components/schemas/orderId" }
+      payload: { $ref: "#/components/schemas/orderCreatedPayload" }
+    paymentAuthorized:
+      name: paymentAuthorized
+      title: Payment authorized
+      summary: The payment of an order was authorized by the card network.
+      contentType: application/json
+      headers:
+        allOf:
+          - $ref: "#/components/schemas/commonHeaders"
+          - type: object
+            properties:
+              ce_type: { type: string, const: com.juniper.payment.authorized }
+      bindings:
+        kafka:
+          key: { $ref: "#/components/schemas/orderId" }
+      payload: { $ref: "#/components/schemas/paymentAuthorizedPayload" }
+    shipmentDispatched:
+      name: shipmentDispatched
+      title: Shipment dispatched
+      summary: A parcel of an order left the warehouse with a carrier.
+      contentType: application/json
+      headers:
+        allOf:
+          - $ref: "#/components/schemas/commonHeaders"
+          - type: object
+            properties:
+              ce_type: { type: string, const: com.juniper.shipment.dispatched }
+      bindings:
+        kafka:
+          key: { $ref: "#/components/schemas/orderId" }
+      payload: { $ref: "#/components/schemas/shipmentDispatchedPayload" }
+  operationTraits:
+    kafka:
+      bindings:
+        kafka:
+          clientId: { type: string, enum: [juniper-commerce] }
+  schemas:
+    commonHeaders:
+      type: object
+      required: [ce_type, ce_id, correlation_id]
+      properties:
+        ce_type: { type: string, description: The event type (CloudEvents Kafka binary-mode header). }
+        ce_id: { type: string, format: uuid, description: Equals the payload's event_id. }
+        correlation_id:
+          type: string
+          format: uuid
+          description: Shared by every event of one checkout session.
+    orderId:
+      type: string
+      pattern: "^ord_[0-9A-HJKMNP-TV-Z]{26}$"
+      description: A ULID with an `ord_` prefix.
+    money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: integer, minimum: 0, description: Minor units (cents). }
+        currency: { type: string, enum: [USD] }
+    address:
+      type: object
+      required: [line1, city, region, postal_code, country]
+      properties:
+        line1: { type: string }
+        line2: { type: string }
+        city: { type: string }
+        region: { type: string, pattern: "^[A-Z]{2}$" }
+        postal_code: { type: string, pattern: "^[0-9]{5}$" }
+        country: { type: string, const: US }
+    lineItem:
+      type: object
+      required: [sku, name, quantity, unit_price]
+      properties:
+        sku: { type: string, pattern: "^PLT-[0-9]{5}$" }
+        name: { type: string, description: A houseplant or accessory. }
+        quantity: { type: integer, minimum: 1, maximum: 20 }
+        unit_price: { $ref: "#/components/schemas/money" }
+    orderCreatedPayload:
+      type: object
+      required: [event_id, occurred_at, order_id, customer_id, items, total, shipping_address]
+      properties:
+        event_id: { type: string, format: uuid }
+        occurred_at: { type: string, format: date-time }
+        order_id: { $ref: "#/components/schemas/orderId" }
+        customer_id: { type: string, pattern: "^cus_[0-9A-HJKMNP-TV-Z]{26}$" }
+        channel: { type: string, enum: [web, ios, android, pos] }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items: { $ref: "#/components/schemas/lineItem" }
+        total: { $ref: "#/components/schemas/money" }
+        shipping_address: { $ref: "#/components/schemas/address" }
+    paymentAuthorizedPayload:
+      type: object
+      required: [event_id, occurred_at, order_id, payment_id, amount, method, authorization_code]
+      properties:
+        event_id: { type: string, format: uuid }
+        occurred_at: { type: string, format: date-time }
+        order_id: { $ref: "#/components/schemas/orderId" }
+        payment_id: { type: string, pattern: "^pay_[0-9A-HJKMNP-TV-Z]{26}$" }
+        amount: { $ref: "#/components/schemas/money" }
+        method:
+          type: object
+          required: [type, brand, last4]
+          properties:
+            type: { type: string, enum: [card] }
+            brand: { type: string, enum: [visa, mastercard, amex, discover] }
+            last4: { type: string, pattern: "^[0-9]{4}$" }
+        authorization_code: { type: string, pattern: "^[A-Z0-9]{6}$" }
+        risk_score: { type: integer, minimum: 0, maximum: 99 }
+    shipmentDispatchedPayload:
+      type: object
+      required: [event_id, occurred_at, order_id, shipment_id, carrier, tracking_number, items]
+      properties:
+        event_id: { type: string, format: uuid }
+        occurred_at: { type: string, format: date-time }
+        order_id: { $ref: "#/components/schemas/orderId" }
+        shipment_id: { type: string, pattern: "^shp_[0-9A-HJKMNP-TV-Z]{26}$" }
+        warehouse: { type: string, enum: [PDX-1, SEA-2] }
+        carrier: { type: string, enum: [ups, usps, fedex] }
+        service_level: { type: string, enum: [ground, two_day, overnight] }
+        tracking_number: { type: string, pattern: "^1Z[0-9A-Z]{16}$" }
+        estimated_delivery: { type: string, format: date }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [sku, quantity]
+            properties:
+              sku: { type: string, pattern: "^PLT-[0-9]{5}$" }
+              quantity: { type: integer, minimum: 1 }

@@ -1,0 +1,49 @@
+{
+  "name": "auth0-management",
+  "title": "Auth0 Management API",
+  "category": "identity",
+  "protocol": "openapi",
+  "summary": "Auth0 Management API v2 users, users-by-email, roles and role assignment behind a client-credentials /oauth/token, with Auth0's operation ids and error shape, and rate-limit, user-exists, not-found and outage scenarios.",
+  "contracts": [
+    "auth0-management.openapi.yaml"
+  ],
+  "hosts": [
+    "juniper.us.auth0.com"
+  ],
+  "scenarios": [
+    "rate-limited",
+    "user-exists",
+    "user-not-found",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://auth0.com/docs/api/management/v2",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Auth0 serves its Management API description per tenant (/api/v2/api-docs, Swagger 1.2) and a beta OpenAPI 3.0 download, neither under an open license or at a stable public URL, so nothing is pinned. The embedded subset keeps the Management API's operation ids (get_users, post_users, get_users_by_id, patch_users_by_id, delete_users_by_id, get_users-by-email, get_roles, get_user_roles, post_user_roles); oauth_token, for the Authentication API's token call, is named by this example."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "auth0-python",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/api/v2/users",
+    "host": "juniper.us.auth0.com",
+    "headers": {
+      "authorization": "Bearer test-token"
+    },
+    "body": {
+      "connection": "Username-Password-Authentication",
+      "email": "jo.lee@example.com",
+      "name": "Jo Lee"
+    },
+    "status": 201,
+    "expect": "\"user_id\""
+  }
+}

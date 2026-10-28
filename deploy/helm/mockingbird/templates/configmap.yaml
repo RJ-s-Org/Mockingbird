@@ -6,5 +6,4 @@ metadata:
   labels:
     {{- include "mockingbird.labels" . | nindent 4 }}
 data:
-  mockingbird.yaml: |
-    {{- include "mockingbird.configDict" . | nindent 4 }}
+  {{- include "mockingbird.configMapData" . | nindent 2 }}

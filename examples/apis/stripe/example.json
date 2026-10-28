@@ -1,0 +1,41 @@
+{
+  "name": "stripe",
+  "title": "Stripe",
+  "category": "payments",
+  "protocol": "openapi",
+  "summary": "Customers, PaymentIntents and refunds over form-encoded bodies, with Stripe-signed webhooks and card-declined, rate-limit and outage scenarios.",
+  "contracts": [
+    "stripe.openapi.yaml"
+  ],
+  "hosts": [
+    "api.stripe.com"
+  ],
+  "scenarios": [
+    "card-declined",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "stripe",
+  "upstream": {
+    "source": "https://github.com/stripe/openapi",
+    "license": "MIT",
+    "commit": "a6cd9878ad3d86f46a4b81ec4368e76f690a1e09",
+    "url": "https://raw.githubusercontent.com/stripe/openapi/a6cd9878ad3d86f46a4b81ec4368e76f690a1e09/openapi/spec3.json",
+    "sha256": "7cff4cc46d0654101a36a3302f7544640f5f73e4f3cad6f264f0e23c19fa1776",
+    "replaces": "stripe.openapi.yaml"
+  },
+  "sdk": {
+    "language": "python",
+    "package": "stripe",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/v1/payment_intents",
+    "host": "api.stripe.com",
+    "content_type": "application/x-www-form-urlencoded",
+    "body": "amount=2000&currency=usd",
+    "status": 200,
+    "expect": "\"object\""
+  }
+}

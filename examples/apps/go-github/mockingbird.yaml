@@ -1,0 +1,19 @@
+# The GitHub REST example's contract for the digest app's tests.
+#   mockingbird serve -c mockingbird.yaml --offline
+proxy:
+  enabled: true
+mocks:
+  github-rest:
+    contract: ../../apis/github-rest/github-rest.openapi.yaml
+    route_prefix: /
+    hosts: [api.github.com]
+    persona: >-
+      GitHub.com as seen by the maintainers of fernwood-labs/trellis, a Rust HTTP
+      router. Issues and pull requests talk about routing, middleware and releases.
+      Titles and bodies of a create are copied from the request.
+    scenarios:
+      rate-limited:
+        status: 403
+        set:
+          message: API rate limit exceeded for user ID 58213947.
+          documentation_url: https://docs.github.com/rest/overview/rate-limits-for-the-rest-api

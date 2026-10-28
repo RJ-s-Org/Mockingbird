@@ -4,6 +4,8 @@ The Helm chart in [`deploy/helm/mockingbird`](../../deploy/helm/mockingbird) run
 
 The chart has no subcharts: Postgres, Redis and the OIDC issuer are external, and the chart only takes their URLs or Secrets.
 
+To declare mocks in the values and run a mocked environment per pull request (Argo CD, Flux, Kustomize, Argo Workflows, Tekton, Testcontainers), see [GitOps and preview environments](gitops.md).
+
 ## Install
 
 ### All-in-one

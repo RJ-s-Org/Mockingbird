@@ -1,0 +1,52 @@
+# TMDB (The Movie Database) API v3: movie details and credits, popular, search,
+# discover, genres, TV series, people and configuration, plus placeholder posters
+# for image.tmdb.org.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s 'localhost:8080/3/movie/550?api_key=tmdb_test_123' -H 'Host: api.themoviedb.org'
+# Contract: tmdb.openapi.yaml, a hand-written subset (see its header); TMDB's
+# OpenAPI file is not openly licensed, so there is no upstream to pin.
+proxy:
+  enabled: true          # apps reach https://api.themoviedb.org through http://127.0.0.1:8888
+  images: [image.tmdb.org]   # https://image.tmdb.org/t/p/w500/<path>.jpg answers a placeholder PNG
+mocks:
+  tmdb:
+    contract: tmdb.openapi.yaml
+    route_prefix: /
+    hosts: [api.themoviedb.org]
+    persona: >-
+      The Movie Database (TMDB) API v3, used by "Reelhouse", a small movie-night
+      app in Lyon whose users browse in en-US unless `language` says otherwise. Use
+      real, well-known movies, TV series and people with their actual TMDB ids,
+      titles, original titles, years, runtimes, genres and overviews (movie 550 is
+      Fight Club, 27205 Inception, 603 The Matrix; tv 1396 is Breaking Bad; person
+      287 is Brad Pitt). Translate titles and overviews when `language` is not
+      en-US. Image paths look like TMDB's: "/" + 27 alphanumerics + ".jpg". Lists
+      return 20 results per page with consistent page, total_pages and
+      total_results; search results match the query. Dates are YYYY-MM-DD,
+      vote_average is 0-10 with one or three decimals, imdb_id is "tt" + 7 digits.
+    scenarios:
+      rate-limited:
+        status: 429
+        set:
+          success: false
+          status_code: 25
+          status_message: Your request count (41) is over the allowed limit of (40).
+      not-found:
+        status: 404
+        operations: [movie-details, movie-credits, tv-series-details, person-details]
+        set:
+          success: false
+          status_code: 34
+          status_message: The resource you requested could not be found.
+      invalid-api-key:
+        status: 401
+        set:
+          success: false
+          status_code: 7
+          status_message: "Invalid API key: You must be granted a valid key."
+      outage:
+        status: 503
+        set:
+          success: false
+          status_code: 9
+          status_message: Service offline - This service is temporarily offline, try again later.

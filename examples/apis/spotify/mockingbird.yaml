@@ -1,0 +1,71 @@
+# Spotify Web API (api.spotify.com) and its token endpoint (accounts.spotify.com).
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s 'localhost:8080/v1/search?q=nordlicht&type=track&limit=2' -H 'Host: api.spotify.com' -H 'Authorization: Bearer BQtest'
+# Contracts: spotify.openapi.yaml and spotify-accounts.openapi.yaml, hand-written
+# subsets (see their headers). Spotify's own OpenAPI file carries no licence, so
+# no upstream spec is pinned and there is no `--full` variant.
+proxy:
+  enabled: true          # apps reach https://api.spotify.com and https://accounts.spotify.com through http://127.0.0.1:8888
+  images: [i.scdn.co]    # album art URLs answer placeholder PNGs
+mocks:
+  spotify:
+    contract: spotify.openapi.yaml
+    route_prefix: /
+    hosts: [api.spotify.com]
+    persona: >-
+      Spotify Web API for "Plattenkiste", a Hamburg record-shop app whose user is
+      Mira Okafor (id "miraokafor", country DE, product premium,
+      mira.okafor@example.com). The catalog is fictional German indie and synth-pop:
+      artists such as "Nordlicht Kollektiv", "Die Hafenkräne" and "Lena Sommerfeld",
+      with albums, singles and plausible track names in German and English. Ids are
+      22-character base62 strings; uri is "spotify:<type>:<id>", href is
+      "https://api.spotify.com/v1/<type>s/<id>" and external_urls.spotify is
+      "https://open.spotify.com/<type>/<id>", all using the same id. Search results
+      match q. duration_ms is 2 to 6 minutes, popularity 20 to 80, ISRCs start with
+      DE, release dates fall between 2012 and 2026, preview_url is null, and album
+      images are 640, 300 and 64 px squares on i.scdn.co. A playlist answer's
+      tracks.total matches its items; snapshot_id is 32 base64 characters.
+    scenarios:
+      token-expired:
+        status: 401
+        set:
+          error:
+            status: 401
+            message: The access token expired
+      nothing-playing:
+        status: 204
+        operations: [get-the-users-currently-playing-track]
+      not-found:
+        status: 404
+        operations: [get-track, get-an-artist, get-an-artists-top-tracks, get-playlist, get-playlists-items, add-items-to-playlist]
+        set:
+          error:
+            status: 404
+            message: Resource not found
+      rate-limited:
+        status: 429
+        set:
+          error:
+            status: 429
+            message: API rate limit exceeded
+      outage:
+        status: 503
+        set:
+          error:
+            status: 503
+            message: Service unavailable
+  spotify-accounts:
+    contract: spotify-accounts.openapi.yaml
+    route_prefix: /
+    hosts: [accounts.spotify.com]
+    persona: >-
+      Spotify's accounts service. Access tokens start with "BQ" followed by 110
+      URL-safe characters, token_type is "Bearer", expires_in is 3600. A client
+      credentials grant returns no refresh_token and no scope; an authorization
+      code grant returns a refresh_token starting with "AQ" and the scopes asked for.
+    scenarios:
+      invalid-client:
+        status: 401
+        set:
+          error: invalid_client
+          error_description: Invalid client secret

@@ -1,0 +1,61 @@
+# A mock environment per open pull request of example/shop: namespace
+# `preview-pr-<n>`, release `mocks-pr-<n>`, host
+# `mocks-pr-<n>.preview.example.com`, with the mocks declared in the PR's own
+# deploy/preview/mocks-values.yaml (at the PR's head commit). Closing or
+# merging the PR deletes the Application, and the finalizer prunes the mocks.
+#
+# Requires the PR generator's token: a Secret `github-token` (key `token`) in
+# the argocd namespace with read access to pull requests.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: shop-preview-mocks
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - pullRequest:
+        github:
+          owner: example
+          repo: shop
+          tokenRef:
+            secretName: github-token
+            key: token
+          # Only PRs that ask for a preview.
+          labels: [preview]
+        requeueAfterSeconds: 120
+  template:
+    metadata:
+      name: "mocks-pr-{{ .number }}"
+      labels:
+        preview.example.com/pr: "{{ .number }}"
+      annotations:
+        preview.example.com/head-sha: "{{ .head_sha }}"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      sources:
+        - repoURL: ghcr.io/rj-s-org/charts
+          chart: mockingbird
+          targetRevision: 0.1.0
+          helm:
+            releaseName: "mocks-pr-{{ .number }}"
+            kubeVersion: "1.30.0"
+            # The values file's ingress host is templated on the release
+            # name, which the chart renders per release (mocks-pr-<n>).
+            valueFiles:
+              - $app/deploy/preview/mocks-values.yaml
+        - repoURL: https://github.com/example/shop.git
+          targetRevision: "{{ .head_sha }}"
+          ref: app
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "preview-pr-{{ .number }}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

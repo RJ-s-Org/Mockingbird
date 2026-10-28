@@ -1,0 +1,490 @@
+# A hand-written subset of the OpenWeather APIs (current weather, 5 day / 3 hour
+# forecast, One Call 3.0, air pollution and geocoding), written for Mockingbird's
+# examples and covered by its license.
+# OpenWeather publishes no machine-readable description of these APIs; shapes
+# follow the documentation at https://openweathermap.org/api (proprietary), with
+# field names and error bodies as the live API returns them.
+openapi: 3.1.0
+info:
+  title: OpenWeather API (Mockingbird example subset)
+  version: "2.5"
+servers:
+  - url: https://api.openweathermap.org
+security:
+  - appid: []
+paths:
+  /data/2.5/weather:
+    get:
+      operationId: getCurrentWeather
+      summary: Current weather for a city name, city id, zip code or coordinates.
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - { name: id, in: query, description: City id, schema: { type: integer } }
+        - { name: zip, in: query, description: "Zip code and country, e.g. 80331,de", schema: { type: string } }
+        - $ref: "#/components/parameters/lat"
+        - $ref: "#/components/parameters/lon"
+        - $ref: "#/components/parameters/units"
+        - $ref: "#/components/parameters/lang"
+        - $ref: "#/components/parameters/mode"
+      responses:
+        "200":
+          description: Current weather.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CurrentWeather" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /data/2.5/forecast:
+    get:
+      operationId: getForecast5
+      summary: 5 day forecast in 3 hour steps.
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - { name: id, in: query, schema: { type: integer } }
+        - { name: zip, in: query, schema: { type: string } }
+        - $ref: "#/components/parameters/lat"
+        - $ref: "#/components/parameters/lon"
+        - { name: cnt, in: query, description: Number of 3 hour steps, schema: { type: integer, minimum: 1, maximum: 40 } }
+        - $ref: "#/components/parameters/units"
+        - $ref: "#/components/parameters/lang"
+      responses:
+        "200":
+          description: The forecast.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Forecast" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /data/3.0/onecall:
+    get:
+      operationId: getOneCall
+      summary: One Call 3.0, current weather, minute, hourly and daily forecasts and alerts.
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: -90, maximum: 90 } }
+        - { name: lon, in: query, required: true, schema: { type: number, minimum: -180, maximum: 180 } }
+        - name: exclude
+          in: query
+          description: Comma-separated parts to leave out (current, minutely, hourly, daily, alerts).
+          schema: { type: string }
+        - $ref: "#/components/parameters/units"
+        - $ref: "#/components/parameters/lang"
+      responses:
+        "200":
+          description: The One Call answer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OneCall" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /data/2.5/air_pollution:
+    get:
+      operationId: getAirPollution
+      summary: Current air quality index and pollutant concentrations.
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number } }
+        - { name: lon, in: query, required: true, schema: { type: number } }
+      responses:
+        "200":
+          description: Air pollution data.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AirPollution" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /geo/1.0/direct:
+    get:
+      operationId: geocodeDirect
+      summary: Coordinates for a location name ("city,state,country").
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 5 } }
+      responses:
+        "200":
+          description: Matching locations, possibly none.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 5
+                items: { $ref: "#/components/schemas/GeoLocation" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /geo/1.0/reverse:
+    get:
+      operationId: geocodeReverse
+      summary: Location names near coordinates.
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number } }
+        - { name: lon, in: query, required: true, schema: { type: number } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 5 } }
+      responses:
+        "200":
+          description: Nearby locations.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 5
+                items: { $ref: "#/components/schemas/GeoLocation" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+  /geo/1.0/zip:
+    get:
+      operationId: geocodeZip
+      summary: Coordinates for a zip or post code.
+      parameters:
+        - { name: zip, in: query, required: true, description: "e.g. 80331,DE", schema: { type: string } }
+      responses:
+        "200":
+          description: The zip code's area.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [zip, name, lat, lon, country]
+                properties:
+                  zip: { type: string, pattern: "^[0-9]{5}$" }
+                  name: { type: string }
+                  lat: { type: number, minimum: 47.3, maximum: 55 }
+                  lon: { type: number, minimum: 5.9, maximum: 15 }
+                  country: { type: string, enum: [DE, AT] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+components:
+  securitySchemes:
+    appid:
+      type: apiKey
+      in: query
+      name: appid
+  parameters:
+    q:
+      name: q
+      in: query
+      description: '"{city name},{state code},{country code}", e.g. "Munich,DE".'
+      schema: { type: string }
+    lat:
+      name: lat
+      in: query
+      schema: { type: number, minimum: -90, maximum: 90 }
+    lon:
+      name: lon
+      in: query
+      schema: { type: number, minimum: -180, maximum: 180 }
+    units:
+      name: units
+      in: query
+      description: standard (Kelvin, the default), metric (Celsius) or imperial (Fahrenheit).
+      schema: { type: string, enum: [standard, metric, imperial] }
+    lang:
+      name: lang
+      in: query
+      schema: { type: string }
+    mode:
+      name: mode
+      in: query
+      description: Only json is described here (xml and html also exist).
+      schema: { type: string, enum: [json] }
+  responses:
+    BadRequest:
+      description: A missing or malformed parameter.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid appid, or a product the key does not include.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such city or zip code.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: The subscription's call limit is exceeded.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [cod, message]
+      properties:
+        cod:
+          description: The HTTP status, as a number (401, 429) or a string ("400", "404") depending on the endpoint.
+          type: [integer, string]
+        message: { type: string }
+    Coord:
+      type: object
+      required: [lon, lat]
+      properties:
+        lon: { type: number, minimum: 5.9, maximum: 15 }
+        lat: { type: number, minimum: 47.3, maximum: 55 }
+    Condition:
+      type: object
+      required: [id, main, description, icon]
+      properties:
+        id: { type: integer, enum: [200, 300, 500, 501, 600, 701, 800, 801, 802, 803, 804] }
+        main: { type: string, enum: [Thunderstorm, Drizzle, Rain, Snow, Mist, Clear, Clouds] }
+        description: { type: string, enum: [clear sky, few clouds, scattered clouds, broken clouds, overcast clouds, light rain, moderate rain, light snow, mist] }
+        icon: { type: string, pattern: "^(01|02|03|04|09|10|11|13|50)[dn]$" }
+    Wind:
+      type: object
+      required: [speed, deg]
+      properties:
+        speed: { type: number, minimum: 0, maximum: 25 }
+        deg: { type: integer, minimum: 0, maximum: 360 }
+        gust: { type: number, minimum: 0, maximum: 35 }
+    MainBlock:
+      description: Temperatures are Kelvin with the default units=standard (the offline faker's ranges), Celsius with metric, Fahrenheit with imperial.
+      type: object
+      required: [temp, feels_like, temp_min, temp_max, pressure, humidity]
+      properties:
+        temp: { type: number, minimum: 268, maximum: 288 }
+        feels_like: { type: number, minimum: 265, maximum: 290 }
+        temp_min: { type: number, minimum: 268, maximum: 288 }
+        temp_max: { type: number, minimum: 268, maximum: 288 }
+        pressure: { type: integer, minimum: 960, maximum: 1050 }
+        humidity: { type: integer, minimum: 0, maximum: 100 }
+        sea_level: { type: integer, minimum: 960, maximum: 1050 }
+        grnd_level: { type: integer, minimum: 900, maximum: 1050 }
+    CurrentWeather:
+      type: object
+      required: [coord, weather, base, main, visibility, wind, clouds, dt, sys, timezone, id, name, cod]
+      properties:
+        coord: { $ref: "#/components/schemas/Coord" }
+        weather: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/Condition" } }
+        base: { type: string, const: stations }
+        main: { $ref: "#/components/schemas/MainBlock" }
+        visibility: { type: integer, minimum: 0, maximum: 10000 }
+        wind: { $ref: "#/components/schemas/Wind" }
+        clouds:
+          type: object
+          required: [all]
+          properties:
+            all: { type: integer, minimum: 0, maximum: 100 }
+        rain:
+          type: object
+          properties:
+            1h: { type: number, minimum: 0, maximum: 20 }
+        snow:
+          type: object
+          properties:
+            1h: { type: number, minimum: 0, maximum: 20 }
+        dt: { type: integer, minimum: 1761000000, maximum: 1800000000, description: Unix seconds, UTC. }
+        sys:
+          type: object
+          required: [country, sunrise, sunset]
+          properties:
+            type: { type: integer, enum: [1, 2] }
+            id: { type: integer }
+            country: { type: string, enum: [DE, AT] }
+            sunrise: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+            sunset: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        timezone: { type: integer, enum: [3600, 7200], description: Shift from UTC in seconds. }
+        id: { type: integer, minimum: 2800000, maximum: 2960000, description: City id. }
+        name: { type: string }
+        cod: { type: integer, const: 200 }
+    ForecastItem:
+      type: object
+      required: [dt, main, weather, clouds, wind, visibility, pop, sys, dt_txt]
+      properties:
+        dt: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        main:
+          allOf:
+            - $ref: "#/components/schemas/MainBlock"
+            - type: object
+              properties:
+                temp_kf: { type: number }
+        weather: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/Condition" } }
+        clouds:
+          type: object
+          required: [all]
+          properties:
+            all: { type: integer, minimum: 0, maximum: 100 }
+        wind: { $ref: "#/components/schemas/Wind" }
+        visibility: { type: integer, minimum: 0, maximum: 10000 }
+        pop: { type: number, minimum: 0, maximum: 1, description: Probability of precipitation. }
+        rain:
+          type: object
+          properties:
+            3h: { type: number, minimum: 0, maximum: 30 }
+        sys:
+          type: object
+          required: [pod]
+          properties:
+            pod: { type: string, enum: [d, n] }
+        dt_txt: { type: string, pattern: "^2026-(0[1-9]|1[0-2])-(0[1-9]|1[0-9]|2[0-8]) (00|03|06|09|12|15|18|21):00:00$" }
+    Forecast:
+      type: object
+      required: [cod, message, cnt, list, city]
+      properties:
+        cod: { type: string, const: "200" }
+        message: { type: integer, const: 0 }
+        cnt: { type: integer, minimum: 1, maximum: 40 }
+        list: { type: array, minItems: 1, maxItems: 8, items: { $ref: "#/components/schemas/ForecastItem" } }
+        city:
+          type: object
+          required: [id, name, coord, country, population, timezone, sunrise, sunset]
+          properties:
+            id: { type: integer, minimum: 2800000, maximum: 2960000 }
+            name: { type: string }
+            coord: { $ref: "#/components/schemas/Coord" }
+            country: { type: string, enum: [DE, AT] }
+            population: { type: integer, minimum: 1000, maximum: 4000000 }
+            timezone: { type: integer, enum: [3600, 7200] }
+            sunrise: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+            sunset: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+    OneCallCurrent:
+      type: object
+      required: [dt, temp, feels_like, pressure, humidity, dew_point, uvi, clouds, visibility, wind_speed, wind_deg, weather]
+      properties:
+        dt: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        sunrise: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        sunset: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        temp: { type: number, minimum: 268, maximum: 288 }
+        feels_like: { type: number, minimum: 265, maximum: 290 }
+        pressure: { type: integer, minimum: 960, maximum: 1050 }
+        humidity: { type: integer, minimum: 0, maximum: 100 }
+        dew_point: { type: number, minimum: 260, maximum: 285 }
+        uvi: { type: number, minimum: 0, maximum: 11 }
+        clouds: { type: integer, minimum: 0, maximum: 100 }
+        visibility: { type: integer, minimum: 0, maximum: 10000 }
+        wind_speed: { type: number, minimum: 0, maximum: 25 }
+        wind_deg: { type: integer, minimum: 0, maximum: 360 }
+        wind_gust: { type: number, minimum: 0, maximum: 35 }
+        pop: { type: number, minimum: 0, maximum: 1 }
+        weather: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/Condition" } }
+    OneCallDaily:
+      type: object
+      required: [dt, sunrise, sunset, moon_phase, summary, temp, feels_like, pressure, humidity, wind_speed, wind_deg, weather, clouds, pop, uvi]
+      properties:
+        dt: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        sunrise: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        sunset: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        moonrise: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        moonset: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+        moon_phase: { type: number, minimum: 0, maximum: 1 }
+        summary: { type: string }
+        temp:
+          type: object
+          required: [day, min, max, night, eve, morn]
+          properties:
+            day: { type: number, minimum: 268, maximum: 288 }
+            min: { type: number, minimum: 268, maximum: 288 }
+            max: { type: number, minimum: 268, maximum: 288 }
+            night: { type: number, minimum: 268, maximum: 288 }
+            eve: { type: number, minimum: 268, maximum: 288 }
+            morn: { type: number, minimum: 268, maximum: 288 }
+        feels_like:
+          type: object
+          required: [day, night, eve, morn]
+          properties:
+            day: { type: number, minimum: 265, maximum: 290 }
+            night: { type: number, minimum: 265, maximum: 290 }
+            eve: { type: number, minimum: 265, maximum: 290 }
+            morn: { type: number, minimum: 265, maximum: 290 }
+        pressure: { type: integer, minimum: 960, maximum: 1050 }
+        humidity: { type: integer, minimum: 0, maximum: 100 }
+        dew_point: { type: number, minimum: 260, maximum: 285 }
+        wind_speed: { type: number, minimum: 0, maximum: 25 }
+        wind_deg: { type: integer, minimum: 0, maximum: 360 }
+        wind_gust: { type: number, minimum: 0, maximum: 35 }
+        weather: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/Condition" } }
+        clouds: { type: integer, minimum: 0, maximum: 100 }
+        pop: { type: number, minimum: 0, maximum: 1 }
+        rain: { type: number, minimum: 0, maximum: 40 }
+        uvi: { type: number, minimum: 0, maximum: 11 }
+    OneCall:
+      type: object
+      required: [lat, lon, timezone, timezone_offset]
+      properties:
+        lat: { type: number, minimum: 47.3, maximum: 55 }
+        lon: { type: number, minimum: 5.9, maximum: 15 }
+        timezone: { type: string, enum: [Europe/Berlin, Europe/Vienna, Europe/Zurich] }
+        timezone_offset: { type: integer, enum: [3600, 7200] }
+        current: { $ref: "#/components/schemas/OneCallCurrent" }
+        minutely:
+          type: array
+          maxItems: 6
+          items:
+            type: object
+            required: [dt, precipitation]
+            properties:
+              dt: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+              precipitation: { type: number, minimum: 0, maximum: 5 }
+        hourly: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/OneCallCurrent" } }
+        daily: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/OneCallDaily" } }
+        alerts:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [sender_name, event, start, end, description, tags]
+            properties:
+              sender_name: { type: string, const: Deutscher Wetterdienst }
+              event: { type: string, enum: [Frost warning, Wind gusts, Heavy rain, Thunderstorms] }
+              start: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+              end: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+              description: { type: string }
+              tags: { type: array, items: { type: string, enum: [Extreme temperature value, Wind, Rain, Thunderstorm] } }
+    AirPollution:
+      type: object
+      required: [coord, list]
+      properties:
+        coord:
+          type: object
+          required: [lon, lat]
+          properties:
+            lon: { type: number }
+            lat: { type: number }
+        list:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [dt, main, components]
+            properties:
+              dt: { type: integer, minimum: 1761000000, maximum: 1800000000 }
+              main:
+                type: object
+                required: [aqi]
+                properties:
+                  aqi: { type: integer, minimum: 1, maximum: 5, description: 1 good to 5 very poor. }
+              components:
+                type: object
+                required: [co, "no", no2, o3, so2, pm2_5, pm10, nh3]
+                properties:
+                  co: { type: number, minimum: 100, maximum: 600 }
+                  "no": { type: number, minimum: 0, maximum: 20 }
+                  no2: { type: number, minimum: 0, maximum: 80 }
+                  o3: { type: number, minimum: 0, maximum: 150 }
+                  so2: { type: number, minimum: 0, maximum: 20 }
+                  pm2_5: { type: number, minimum: 0, maximum: 60 }
+                  pm10: { type: number, minimum: 0, maximum: 80 }
+                  nh3: { type: number, minimum: 0, maximum: 10 }
+    GeoLocation:
+      type: object
+      required: [name, lat, lon, country]
+      properties:
+        name: { type: string }
+        local_names:
+          type: object
+          properties:
+            de: { type: string }
+            en: { type: string }
+        lat: { type: number, minimum: 47.3, maximum: 55 }
+        lon: { type: number, minimum: 5.9, maximum: 15 }
+        country: { type: string, enum: [DE, AT] }
+        state: { type: string, enum: [Bavaria, Berlin, Hamburg, Hesse, Saxony, Baden-Württemberg] }

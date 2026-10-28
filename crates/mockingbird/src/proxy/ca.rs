@@ -26,6 +26,12 @@ pub const CA_COMMON_NAME: &str = "Mockingbird Local CA";
 const CERT_FILE: &str = "ca.pem";
 const KEY_FILE: &str = "ca.key";
 const BUNDLE_FILE: &str = "bundle.pem";
+const TRUSTSTORE_FILE: &str = "truststore.jks";
+
+/// The password of [`LocalCa::write_truststore`]'s keystore. It guards
+/// nothing (the store holds public certificates only); Java wants one to
+/// check the file's integrity.
+pub const TRUSTSTORE_PASSWORD: &str = "changeit";
 
 /// How long a process that finds the key but not yet the certificate (one
 /// being written by another process) waits for it.
@@ -54,6 +60,8 @@ pub struct LocalCa {
     dir: PathBuf,
     cert_pem: String,
     cert_der: CertificateDer<'static>,
+    /// The CA's SubjectPublicKeyInfo, DER.
+    spki_der: Vec<u8>,
     issuer: Issuer<'static, KeyPair>,
     leaves: Mutex<HashMap<String, Arc<ServerConfig>>>,
 }
@@ -97,12 +105,14 @@ impl LocalCa {
         };
         let cert_der = pem_to_der(&cert_pem)
             .with_context(|| format!("{} is not a PEM certificate", cert_path.display()))?;
+        let spki_der = rcgen::PublicKeyData::subject_public_key_info(&key);
         let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
             .with_context(|| format!("cannot load the local CA from {}", cert_path.display()))?;
         Ok(LocalCa {
             dir: dir.to_path_buf(),
             cert_pem,
             cert_der,
+            spki_der,
             issuer,
             leaves: Mutex::new(HashMap::new()),
         })
@@ -161,18 +171,9 @@ impl LocalCa {
     /// `SSL_CERT_FILE`-style variables, so passthrough hosts keep working.
     /// Rewritten on each call.
     pub fn write_bundle(&self) -> anyhow::Result<PathBuf> {
-        let native = rustls_native_certs::load_native_certs().certs;
-        let roots: Vec<&[u8]> = if native.is_empty() {
-            webpki_root_certs::TLS_SERVER_ROOT_CERTS
-                .iter()
-                .map(|c| c.as_ref())
-                .collect()
-        } else {
-            native.iter().map(|c| c.as_ref()).collect()
-        };
         let mut text = String::new();
-        for der in roots {
-            text.push_str(&der_to_pem(der));
+        for der in root_ders() {
+            text.push_str(&der_to_pem(&der));
         }
         text.push_str(self.cert_pem.trim_end());
         text.push('\n');
@@ -180,6 +181,72 @@ impl LocalCa {
         write_atomically(&self.dir, &path, text.as_bytes())?;
         Ok(path)
     }
+
+    /// Writes `truststore.jks` next to the CA: a Java keystore (JKS) with
+    /// the same certificates as [`write_bundle`](Self::write_bundle), for
+    /// `-Djavax.net.ssl.trustStore`. Its password is
+    /// [`TRUSTSTORE_PASSWORD`]. Rewritten on each call.
+    pub fn write_truststore(&self) -> anyhow::Result<PathBuf> {
+        let mut certs = root_ders();
+        certs.push(self.cert_der.to_vec());
+        let jks = jks_truststore(&certs, TRUSTSTORE_PASSWORD);
+        let path = self.dir.join(TRUSTSTORE_FILE);
+        write_atomically(&self.dir, &path, &jks)?;
+        Ok(path)
+    }
+
+    /// Base64 of SHA-256 over the CA's SubjectPublicKeyInfo: what Chrome's
+    /// `--ignore-certificate-errors-spki-list` takes.
+    pub fn spki_sha256(&self) -> String {
+        use sha2::Digest as _;
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(&self.spki_der))
+    }
+}
+
+/// The system's root certificates (DER), or Mozilla's when it has none.
+fn root_ders() -> Vec<Vec<u8>> {
+    let native = rustls_native_certs::load_native_certs().certs;
+    if native.is_empty() {
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .map(|c| c.to_vec())
+            .collect()
+    } else {
+        native.iter().map(|c| c.to_vec()).collect()
+    }
+}
+
+/// A JKS keystore holding `certs` (DER) as trusted-certificate entries
+/// (`ca0`, `ca1`, …), sealed with `password` (Java's keyed SHA-1 digest).
+fn jks_truststore(certs: &[Vec<u8>], password: &str) -> Vec<u8> {
+    use sha1::Digest as _;
+    fn utf(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&0xFEED_FEED_u32.to_be_bytes());
+    out.extend_from_slice(&2u32.to_be_bytes());
+    out.extend_from_slice(&(certs.len() as u32).to_be_bytes());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    for (i, der) in certs.iter().enumerate() {
+        out.extend_from_slice(&2u32.to_be_bytes()); // trusted certificate
+        utf(&mut out, &format!("ca{i}"));
+        out.extend_from_slice(&now.to_be_bytes());
+        utf(&mut out, "X.509");
+        out.extend_from_slice(&(der.len() as u32).to_be_bytes());
+        out.extend_from_slice(der);
+    }
+    let mut digest = sha1::Sha1::new();
+    for unit in password.encode_utf16() {
+        digest.update(unit.to_be_bytes());
+    }
+    digest.update(b"Mighty Aphrodite");
+    digest.update(&out);
+    out.extend_from_slice(&digest.finalize());
+    out
 }
 
 fn ca_params() -> anyhow::Result<CertificateParams> {

@@ -42,7 +42,13 @@ fn community_files_exist() {
 
 #[test]
 fn issue_templates_are_valid_yaml() {
-    for file in ["bug_report.yml", "feature_request.yml", "config.yml"] {
+    for file in [
+        "bug_report.yml",
+        "feature_request.yml",
+        "contract.yml",
+        "docs.yml",
+        "config.yml",
+    ] {
         let path = repo().join(".github/ISSUE_TEMPLATE").join(file);
         let doc: Value = serde_saphyr::from_str(&read(&path))
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));

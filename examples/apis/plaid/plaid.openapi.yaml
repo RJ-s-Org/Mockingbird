@@ -1,0 +1,517 @@
+# A hand-written subset of the Plaid API (Link tokens, token exchange, accounts,
+# Auth, Identity, Transactions sync), written for Mockingbird's examples and
+# covered by its license. Shapes and operation ids follow Plaid's published
+# OpenAPI description (https://github.com/plaid/plaid-openapi, 2020-09-14.yml),
+# which carries no license file, so nothing from it is copied wholesale here.
+# Top-level response objects are closed (additionalProperties: false) so the
+# mock does not copy request fields such as `secret` into its answers.
+openapi: 3.1.0
+info:
+  title: The Plaid API (Mockingbird example subset)
+  version: "2020-09-14"
+servers:
+  - url: https://sandbox.plaid.com
+  - url: https://production.plaid.com
+security:
+  - clientId: []
+    secret: []
+paths:
+  /link/token/create:
+    post:
+      operationId: linkTokenCreate
+      summary: Create a Link token to initialize Plaid Link.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_name, language, country_codes, user]
+              properties:
+                client_id: { type: string }
+                secret: { type: string }
+                client_name: { type: string, maxLength: 30 }
+                language: { type: string, enum: [en, fr, es, nl, de, ja] }
+                country_codes:
+                  type: array
+                  items: { $ref: "#/components/schemas/CountryCode" }
+                user:
+                  type: object
+                  required: [client_user_id]
+                  properties:
+                    client_user_id: { type: string }
+                    phone_number: { type: string }
+                    email_address: { type: string }
+                products:
+                  type: array
+                  items: { $ref: "#/components/schemas/Products" }
+                webhook: { type: string, format: uri }
+                redirect_uri: { type: string }
+                access_token: { type: string }
+      responses:
+        "200":
+          description: A Link token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [link_token, expiration, request_id]
+                additionalProperties: false
+                properties:
+                  link_token: { type: string, pattern: "^link-sandbox-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+                  expiration: { type: string, format: date-time }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /sandbox/public_token/create:
+    post:
+      operationId: sandboxPublicTokenCreate
+      summary: Create a test Item and public token without Link (Sandbox only).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [institution_id, initial_products]
+              properties:
+                client_id: { type: string }
+                secret: { type: string }
+                institution_id: { type: string }
+                initial_products:
+                  type: array
+                  items: { $ref: "#/components/schemas/Products" }
+                options:
+                  type: object
+                  properties:
+                    webhook: { type: string }
+                    override_username: { type: string }
+      responses:
+        "200":
+          description: A public token for the new Item.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [public_token, request_id]
+                additionalProperties: false
+                properties:
+                  public_token: { $ref: "#/components/schemas/PublicToken" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /item/public_token/exchange:
+    post:
+      operationId: itemPublicTokenExchange
+      summary: Exchange a public token for an access token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_token]
+              properties:
+                client_id: { type: string }
+                secret: { type: string }
+                public_token: { type: string }
+      responses:
+        "200":
+          description: The Item's access token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, item_id, request_id]
+                additionalProperties: false
+                properties:
+                  access_token: { $ref: "#/components/schemas/AccessToken" }
+                  item_id: { $ref: "#/components/schemas/ItemId" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /item/get:
+    post:
+      operationId: itemGet
+      summary: Retrieve an Item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessTokenRequest" }
+      responses:
+        "200":
+          description: The Item.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item, request_id]
+                additionalProperties: false
+                properties:
+                  item: { $ref: "#/components/schemas/Item" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /accounts/get:
+    post:
+      operationId: accountsGet
+      summary: Retrieve the accounts of an Item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessTokenRequest" }
+      responses:
+        "200":
+          description: The Item's accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, item, request_id]
+                additionalProperties: false
+                properties:
+                  accounts: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/AccountBase" } }
+                  item: { $ref: "#/components/schemas/Item" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /auth/get:
+    post:
+      operationId: authGet
+      summary: Retrieve account and routing numbers for checking and savings accounts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessTokenRequest" }
+      responses:
+        "200":
+          description: Accounts with their ACH numbers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, numbers, item, request_id]
+                additionalProperties: false
+                properties:
+                  accounts: { type: array, minItems: 1, maxItems: 3, items: { $ref: "#/components/schemas/AccountBase" } }
+                  numbers:
+                    type: object
+                    required: [ach, eft, international, bacs]
+                    properties:
+                      ach: { type: array, items: { $ref: "#/components/schemas/NumbersACH" } }
+                      eft: { type: array, maxItems: 0, items: { type: object } }
+                      international: { type: array, maxItems: 0, items: { type: object } }
+                      bacs: { type: array, maxItems: 0, items: { type: object } }
+                  item: { $ref: "#/components/schemas/Item" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /identity/get:
+    post:
+      operationId: identityGet
+      summary: Retrieve the account holders' names, emails, phone numbers and addresses.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccessTokenRequest" }
+      responses:
+        "200":
+          description: Accounts with their owners.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts, item, request_id]
+                additionalProperties: false
+                properties:
+                  accounts:
+                    type: array
+                    minItems: 1
+                    maxItems: 3
+                    items:
+                      allOf:
+                        - { $ref: "#/components/schemas/AccountBase" }
+                        - type: object
+                          required: [owners]
+                          properties:
+                            owners: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/Owner" } }
+                  item: { $ref: "#/components/schemas/Item" }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+  /transactions/sync:
+    post:
+      operationId: transactionsSync
+      summary: Get incremental transaction updates on an Item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [access_token]
+              properties:
+                client_id: { type: string }
+                secret: { type: string }
+                access_token: { type: string }
+                cursor: { type: string, maxLength: 256 }
+                count: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Transactions added, modified and removed since the cursor.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transactions_update_status, accounts, added, modified, removed, next_cursor, has_more, request_id]
+                additionalProperties: false
+                properties:
+                  transactions_update_status:
+                    type: string
+                    enum: [TRANSACTIONS_UPDATE_STATUS_UNKNOWN, NOT_READY, INITIAL_UPDATE_COMPLETE, HISTORICAL_UPDATE_COMPLETE]
+                  accounts: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/AccountBase" } }
+                  added: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/Transaction" } }
+                  modified: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/Transaction" } }
+                  removed:
+                    type: array
+                    maxItems: 1
+                    items:
+                      type: object
+                      required: [transaction_id, account_id]
+                      properties:
+                        transaction_id: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+                        account_id: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+                  next_cursor: { type: string, pattern: "^[A-Za-z0-9+/]{40,64}$" }
+                  has_more: { type: boolean }
+                  request_id: { $ref: "#/components/schemas/RequestID" }
+        "400": { $ref: "#/components/responses/PlaidError" }
+        "429": { $ref: "#/components/responses/RateLimitExceeded" }
+        default: { $ref: "#/components/responses/PlaidError" }
+webhooks:
+  # Plaid sends TRANSACTIONS / SYNC_UPDATES_AVAILABLE once /transactions/sync has
+  # been called on an Item; named after that operation so the mock sends it then.
+  transactionsSync:
+    post:
+      summary: TRANSACTIONS SYNC_UPDATES_AVAILABLE
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SyncUpdatesAvailableWebhook" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    clientId: { type: apiKey, in: header, name: PLAID-CLIENT-ID }
+    secret: { type: apiKey, in: header, name: PLAID-SECRET }
+  responses:
+    PlaidError:
+      description: A Plaid error (ITEM_ERROR, INVALID_REQUEST, INVALID_INPUT, API_ERROR, ...).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PlaidError" }
+    RateLimitExceeded:
+      description: Too many requests (error_type RATE_LIMIT_EXCEEDED).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/PlaidError" }
+  schemas:
+    RequestID: { type: string, pattern: "^[A-Za-z0-9]{15}$" }
+    AccessToken: { type: string, pattern: "^access-sandbox-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+    PublicToken: { type: string, pattern: "^public-sandbox-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
+    ItemId: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+    CountryCode: { type: string, enum: [US, GB, ES, NL, FR, IE, CA, DE, IT, PL, DK, NO, SE, EE, LT, LV, PT, BE, AT, FI] }
+    Products:
+      type: string
+      enum: [assets, auth, balance, identity, investments, liabilities, payment_initiation, transactions, signal, transfer]
+    AccessTokenRequest:
+      type: object
+      required: [access_token]
+      properties:
+        client_id: { type: string }
+        secret: { type: string }
+        access_token: { type: string }
+        options:
+          type: object
+          properties:
+            account_ids: { type: array, items: { type: string } }
+    Item:
+      type: object
+      required: [item_id, webhook, error, available_products, billed_products, consent_expiration_time, update_type]
+      properties:
+        item_id: { $ref: "#/components/schemas/ItemId" }
+        institution_id: { type: [string, "null"], pattern: "^ins_[0-9]{1,6}$" }
+        institution_name: { type: [string, "null"] }
+        webhook: { type: [string, "null"] }
+        auth_method: { type: [string, "null"], enum: [INSTANT_AUTH, INSTANT_MATCH, AUTOMATED_MICRODEPOSITS, SAME_DAY_MICRODEPOSITS, INSTANT_MICRODEPOSITS, DATABASE_MATCH, DATABASE_INSIGHTS, TRANSFER_MIGRATED, INVESTMENTS_FALLBACK, null] }
+        error: { oneOf: [{ $ref: "#/components/schemas/PlaidError" }, { type: "null" }] }
+        available_products: { type: array, items: { $ref: "#/components/schemas/Products" } }
+        billed_products: { type: array, items: { $ref: "#/components/schemas/Products" } }
+        products: { type: array, items: { $ref: "#/components/schemas/Products" } }
+        consent_expiration_time: { type: [string, "null"], format: date-time }
+        update_type: { type: string, enum: [background, user_present_required] }
+    AccountBase:
+      type: object
+      required: [account_id, balances, mask, name, official_name, type, subtype]
+      properties:
+        account_id: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+        balances:
+          type: object
+          required: [available, current, limit, iso_currency_code, unofficial_currency_code]
+          properties:
+            available: { type: [number, "null"], minimum: 0, maximum: 25000 }
+            current: { type: [number, "null"], minimum: 0, maximum: 25000 }
+            limit: { type: [number, "null"] }
+            iso_currency_code: { type: [string, "null"], enum: [USD, null] }
+            unofficial_currency_code: { type: [string, "null"], const: null }
+        mask: { type: [string, "null"], pattern: "^[0-9]{4}$" }
+        name: { type: string }
+        official_name: { type: [string, "null"] }
+        type: { type: string, enum: [investment, credit, depository, loan, other] }
+        subtype: { type: [string, "null"], enum: [checking, savings, "cd", "money market", "credit card", paypal, mortgage, student, "401k", ira, null] }
+        verification_status: { type: string, enum: [automatically_verified, pending_automatic_verification, pending_manual_verification, manually_verified, verification_expired, verification_failed, database_matched] }
+        persistent_account_id: { type: string }
+    NumbersACH:
+      type: object
+      required: [account_id, account, routing, wire_routing]
+      properties:
+        account_id: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+        account: { type: string, pattern: "^[0-9]{10,12}$" }
+        routing: { type: string, pattern: "^[0-9]{9}$" }
+        wire_routing: { type: [string, "null"], pattern: "^[0-9]{9}$" }
+        can_transfer_in: { type: [boolean, "null"] }
+        can_transfer_out: { type: [boolean, "null"] }
+    Owner:
+      type: object
+      required: [names, phone_numbers, emails, addresses]
+      properties:
+        names: { type: array, minItems: 1, maxItems: 1, items: { type: string } }
+        phone_numbers:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [data, primary, type]
+            properties:
+              data: { type: string, pattern: "^\\+1[2-9][0-9]{9}$" }
+              primary: { type: boolean }
+              type: { type: string, enum: [home, work, office, mobile, mobile1, other] }
+        emails:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [data, primary, type]
+            properties:
+              data: { type: string, format: email }
+              primary: { type: boolean }
+              type: { type: string, enum: [primary, secondary, other] }
+        addresses:
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            required: [data]
+            properties:
+              primary: { type: boolean }
+              data:
+                type: object
+                required: [city, region, street, postal_code, country]
+                properties:
+                  city: { type: [string, "null"] }
+                  region: { type: [string, "null"], pattern: "^[A-Z]{2}$" }
+                  street: { type: string }
+                  postal_code: { type: [string, "null"], pattern: "^[0-9]{5}$" }
+                  country: { type: [string, "null"], const: US }
+    Transaction:
+      type: object
+      required: [transaction_id, account_id, amount, iso_currency_code, unofficial_currency_code, date, authorized_date, authorized_datetime, datetime, name, merchant_name, pending, pending_transaction_id, account_owner, payment_channel, payment_meta, location, personal_finance_category, transaction_code]
+      properties:
+        transaction_id: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+        account_id: { type: string, pattern: "^[A-Za-z0-9]{37}$" }
+        amount: { type: number, minimum: -2500, maximum: 2500, description: Positive is money out of the account. }
+        iso_currency_code: { type: [string, "null"], enum: [USD, null] }
+        unofficial_currency_code: { type: [string, "null"], const: null }
+        date: { type: string, format: date }
+        authorized_date: { type: [string, "null"], format: date }
+        datetime: { type: [string, "null"], format: date-time }
+        authorized_datetime: { type: [string, "null"], format: date-time }
+        name: { type: string }
+        merchant_name: { type: [string, "null"] }
+        merchant_entity_id: { type: [string, "null"] }
+        logo_url: { type: [string, "null"], format: uri }
+        website: { type: [string, "null"] }
+        pending: { type: boolean }
+        pending_transaction_id: { type: [string, "null"] }
+        account_owner: { type: [string, "null"] }
+        payment_channel: { type: string, enum: [online, "in store", other] }
+        location:
+          type: object
+          required: [address, city, region, postal_code, country, lat, lon, store_number]
+          properties:
+            address: { type: [string, "null"] }
+            city: { type: [string, "null"] }
+            region: { type: [string, "null"], pattern: "^[A-Z]{2}$" }
+            postal_code: { type: [string, "null"], pattern: "^[0-9]{5}$" }
+            country: { type: [string, "null"], const: US }
+            lat: { type: [number, "null"], minimum: 25, maximum: 48 }
+            lon: { type: [number, "null"], minimum: -123, maximum: -70 }
+            store_number: { type: [string, "null"], pattern: "^[0-9]{3,5}$" }
+        payment_meta:
+          type: object
+          required: [reference_number, ppd_id, payee, by_order_of, payer, payment_method, payment_processor, reason]
+          properties:
+            reference_number: { type: [string, "null"] }
+            ppd_id: { type: [string, "null"] }
+            payee: { type: [string, "null"] }
+            by_order_of: { type: [string, "null"] }
+            payer: { type: [string, "null"] }
+            payment_method: { type: [string, "null"] }
+            payment_processor: { type: [string, "null"] }
+            reason: { type: [string, "null"] }
+        personal_finance_category:
+          oneOf:
+            - type: object
+              required: [primary, detailed]
+              properties:
+                primary: { type: string, enum: [INCOME, TRANSFER_IN, TRANSFER_OUT, LOAN_PAYMENTS, BANK_FEES, ENTERTAINMENT, FOOD_AND_DRINK, GENERAL_MERCHANDISE, HOME_IMPROVEMENT, MEDICAL, PERSONAL_CARE, GENERAL_SERVICES, TRANSPORTATION, TRAVEL, RENT_AND_UTILITIES] }
+                detailed: { type: string, pattern: "^[A-Z_]{8,40}$" }
+                confidence_level: { type: [string, "null"], enum: [VERY_HIGH, HIGH, MEDIUM, LOW, UNKNOWN, null] }
+            - type: "null"
+        transaction_code: { type: [string, "null"], enum: [adjustment, atm, "bank charge", "bill payment", cash, cashback, cheque, "direct debit", interest, purchase, "standing order", transfer, null] }
+    PlaidError:
+      type: object
+      required: [error_type, error_code, error_message, display_message, request_id]
+      properties:
+        error_type:
+          type: string
+          enum: [INVALID_REQUEST, INVALID_RESULT, INVALID_INPUT, INSTITUTION_ERROR, RATE_LIMIT_EXCEEDED, API_ERROR, ITEM_ERROR, ASSET_REPORT_ERROR, RECAPTCHA_ERROR, OAUTH_ERROR, PAYMENT_ERROR, BANK_TRANSFER_ERROR, INCOME_VERIFICATION_ERROR, MICRODEPOSITS_ERROR, SANDBOX_ERROR, PARTNER_ERROR, TRANSACTIONS_ERROR, TRANSACTION_ERROR, TRANSFER_ERROR, CHECK_REPORT_ERROR, CONSUMER_REPORT_ERROR, USER_ERROR]
+        error_code: { type: string }
+        error_code_reason: { type: [string, "null"] }
+        error_message: { type: string }
+        display_message: { type: [string, "null"] }
+        request_id: { $ref: "#/components/schemas/RequestID" }
+        causes: { type: array, maxItems: 0, items: { type: object } }
+        status: { type: [integer, "null"] }
+        documentation_url: { type: string }
+        suggested_action: { type: [string, "null"] }
+    SyncUpdatesAvailableWebhook:
+      type: object
+      required: [webhook_type, webhook_code, item_id, initial_update_complete, historical_update_complete, environment]
+      properties:
+        webhook_type: { type: string, const: TRANSACTIONS }
+        webhook_code: { type: string, const: SYNC_UPDATES_AVAILABLE }
+        item_id: { $ref: "#/components/schemas/ItemId" }
+        initial_update_complete: { type: boolean }
+        historical_update_complete: { type: boolean }
+        environment: { type: string, const: sandbox }

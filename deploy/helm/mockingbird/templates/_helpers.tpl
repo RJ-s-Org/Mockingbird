@@ -67,11 +67,93 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
 
-{{/* The merged config as a dict: files/default-config.yaml with .Values.config over it. */}}
+{{/*
+The merged config as a dict: files/default-config.yaml, then .Values.config,
+then the mocks and LLM profiles declared in .Values.mocks and .Values.llm.profiles.
+*/}}
 {{- define "mockingbird.configDict" -}}
 {{- $defaults := .Files.Get "files/default-config.yaml" | fromYaml -}}
 {{- $merged := mergeOverwrite $defaults (deepCopy (default (dict) .Values.config)) -}}
+{{- $mocks := default (dict) (get $merged "mocks") -}}
+{{- range $name, $mock := .Values.mocks }}
+{{- $entry := omit (deepCopy $mock) "contract" -}}
+{{- $_ := set $entry "contract" (include "mockingbird.contractPath" (dict "name" $name "contract" $mock.contract)) -}}
+{{- $_ := set $mocks $name (mergeOverwrite (default (dict) (get $mocks $name)) $entry) -}}
+{{- end }}
+{{- if $mocks }}
+{{- $_ := set $merged "mocks" $mocks -}}
+{{- end }}
+{{- if .Values.llm.profiles }}
+{{- $llm := default (dict) (get $merged "llm") -}}
+{{- $profiles := default (dict) (get $llm "profiles") -}}
+{{- range $name, $profile := .Values.llm.profiles }}
+{{- $entry := omit (deepCopy $profile) "apiKeySecret" -}}
+{{- if $profile.apiKeySecret }}
+{{- $_ := set $entry "api_key" (printf "env:%s" (include "mockingbird.profileKeyEnv" $name)) -}}
+{{- end }}
+{{- $_ := set $profiles $name (mergeOverwrite (default (dict) (get $profiles $name)) $entry) -}}
+{{- end }}
+{{- $_ := set $llm "profiles" $profiles -}}
+{{- $_ := set $merged "llm" $llm -}}
+{{- end }}
 {{- toYaml $merged -}}
+{{- end -}}
+
+{{/* The environment variable carrying an LLM profile's key: MB_PROFILE_KEY_<NAME>. */}}
+{{- define "mockingbird.profileKeyEnv" -}}
+{{- printf "MB_PROFILE_KEY_%s" (regexReplaceAll "[^A-Z0-9]" (upper .) "_") -}}
+{{- end -}}
+
+{{/* Where an inline contract lives in the ConfigMap: key `<mock>.<fileName>`. */}}
+{{- define "mockingbird.inlineContractKey" -}}
+{{- printf "%s.%s" .name (default "contract.yaml" .contract.fileName) -}}
+{{- end -}}
+
+{{/*
+The path a mock's contract is served from. Takes (dict "name" <mock> "contract" <contract>).
+A string stays as given; `inline` is a key of the main ConfigMap (next to
+mockingbird.yaml), `configMap` a volume under /var/lib/mockingbird/contracts and
+`url` a file the fetch-contracts init container downloads into /var/lib/mockingbird/fetched.
+*/}}
+{{- define "mockingbird.contractPath" -}}
+{{- $c := .contract -}}
+{{- if kindIs "string" $c -}}
+{{- $c -}}
+{{- else if not (kindIs "map" $c) -}}
+{{- fail (printf "mocks.%s.contract is required: a path, or one of inline, configMap or url" .name) -}}
+{{- else if hasKey $c "inline" -}}
+{{- include "mockingbird.inlineContractKey" . -}}
+{{- else if $c.configMap -}}
+{{- printf "/var/lib/mockingbird/contracts/%s/%s" .name $c.configMap.key -}}
+{{- else if $c.url -}}
+{{- printf "/var/lib/mockingbird/fetched/%s/%s" .name (default "contract" $c.fileName) -}}
+{{- else -}}
+{{- fail (printf "mocks.%s.contract needs one of inline, configMap or url" .name) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The main ConfigMap's data: mockingbird.yaml and the inline contracts. */}}
+{{- define "mockingbird.configMapData" -}}
+mockingbird.yaml: |
+  {{- include "mockingbird.configDict" . | nindent 2 }}
+{{- range $name, $mock := .Values.mocks }}
+{{- if and (kindIs "map" $mock.contract) (hasKey $mock.contract "inline") }}
+{{ include "mockingbird.inlineContractKey" (dict "name" $name "contract" $mock.contract) }}: |
+  {{- $mock.contract.inline | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* Whether any mock's contract is downloaded from a URL. */}}
+{{- define "mockingbird.hasUrlContracts" -}}
+{{- range $name, $mock := .Values.mocks }}
+{{- if and (kindIs "map" $mock.contract) $mock.contract.url }}true{{ end }}
+{{- end }}
+{{- end -}}
+
+{{/* The curl image used by the fetch-contracts init container and helm test. */}}
+{{- define "mockingbird.curlImage" -}}
+{{- printf "%s:%s" .Values.curlImage.repository .Values.curlImage.tag -}}
 {{- end -}}
 
 {{/* A port of the merged config's `server` section, or its default. Takes (dict "root" $ "key" "port" "default" 8080). */}}
@@ -107,6 +189,23 @@ app.kubernetes.io/component: {{ .component }}
       name: {{ .Values.llm.existingSecret }}
       key: {{ .Values.llm.apiKeyKey }}
 {{- end }}
+{{- with .Values.llm.baseUrl }}
+- name: MB_LLM_BASE_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.llm.model }}
+- name: MB_LLM_MODEL
+  value: {{ . | quote }}
+{{- end }}
+{{- range $name, $profile := .Values.llm.profiles }}
+{{- with $profile.apiKeySecret }}
+- name: {{ include "mockingbird.profileKeyEnv" $name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .name }}
+      key: {{ default "api-key" .key }}
+{{- end }}
+{{- end }}
 {{- with .Values.env }}
 {{ toYaml . }}
 {{- end }}
@@ -118,6 +217,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- $_ := required "mode: split needs storage.url or storage.existingSecret (a postgres:// URL)" (or .Values.storage.url .Values.storage.existingSecret) -}}
 {{- else if ne .Values.mode "allInOne" -}}
 {{- fail (printf "mode must be allInOne or split, not %q" .Values.mode) -}}
+{{- end -}}
+{{- if not (has .Values.reload (list "rollout" "watch")) -}}
+{{- fail (printf "reload must be rollout or watch, not %q" .Values.reload) -}}
 {{- end -}}
 {{- end -}}
 
@@ -144,7 +246,9 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/config: {{ include "mockingbird.configDict" $root | sha256sum }}
+        {{- if eq $root.Values.reload "rollout" }}
+        checksum/config: {{ include "mockingbird.configMapData" $root | sha256sum }}
+        {{- end }}
         {{- with $spec.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -159,11 +263,37 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       terminationGracePeriodSeconds: 30
+      {{- if include "mockingbird.hasUrlContracts" $root }}
+      initContainers:
+        - name: fetch-contracts
+          image: {{ include "mockingbird.curlImage" $root | quote }}
+          imagePullPolicy: {{ $root.Values.curlImage.pullPolicy }}
+          command: ["sh", "-ec"]
+          args:
+            - |
+              {{- range $name, $mock := $root.Values.mocks }}
+              {{- if and (kindIs "map" $mock.contract) $mock.contract.url }}
+              {{- $path := include "mockingbird.contractPath" (dict "name" $name "contract" $mock.contract) }}
+              mkdir -p {{ dir $path | squote }}
+              curl -fsSL --retry 3 --max-time 60 -o {{ $path | squote }} {{ $mock.contract.url | squote }}
+              {{- with $mock.contract.sha256 }}
+              echo {{ printf "%s  %s" . $path | squote }} | sha256sum -c -
+              {{- end }}
+              {{- end }}
+              {{- end }}
+          {{- with $root.Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: fetched-contracts
+              mountPath: /var/lib/mockingbird/fetched
+      {{- end }}
       containers:
         - name: mockingbird
           image: {{ include "mockingbird.image" $root | quote }}
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
-          args: ["serve", "-c", "/etc/mockingbird/mockingbird.yaml", "--role", {{ .role | quote }}]
+          args: ["serve", "-c", "/etc/mockingbird/mockingbird.yaml", "--role", {{ .role | quote }}{{ if and (eq $root.Values.reload "watch") (ne .role "data") }}, "--watch"{{ end }}]
           {{- $env := include "mockingbird.env" $root | trim }}
           {{- if $env }}
           env:
@@ -216,12 +346,41 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- range $i, $name := keys $root.Values.mocks | sortAlpha }}
+            {{- $contract := (get $root.Values.mocks $name).contract }}
+            {{- if and (kindIs "map" $contract) $contract.configMap }}
+            - name: contract-{{ $i }}
+              mountPath: /var/lib/mockingbird/contracts/{{ $name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if include "mockingbird.hasUrlContracts" $root }}
+            - name: fetched-contracts
+              mountPath: /var/lib/mockingbird/fetched
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "mockingbird.fullname" $root }}
         - name: tmp
           emptyDir: {}
+        {{- range $i, $name := keys $root.Values.mocks | sortAlpha }}
+        {{- $contract := (get $root.Values.mocks $name).contract }}
+        {{- if and (kindIs "map" $contract) $contract.configMap }}
+        {{- /* The whole ConfigMap, not a subPath, so updates reach the pod (and --watch). */}}
+        - name: contract-{{ $i }}
+          configMap:
+            name: {{ tpl $contract.configMap.name $root }}
+            items:
+              - key: {{ $contract.configMap.key }}
+                path: {{ $contract.configMap.key }}
+        {{- end }}
+        {{- end }}
+        {{- if include "mockingbird.hasUrlContracts" $root }}
+        - name: fetched-contracts
+          emptyDir: {}
+        {{- end }}
       {{- with $spec.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -264,11 +423,11 @@ spec:
   {{- end }}
   {{- with $values.tls }}
   tls:
-    {{- toYaml . | nindent 4 }}
+    {{- tpl (toYaml .) $root | nindent 4 }}
   {{- end }}
   rules:
     {{- range $values.hosts }}
-    - host: {{ .host | quote }}
+    - host: {{ tpl .host $root | quote }}
       http:
         paths:
           {{- range .paths }}

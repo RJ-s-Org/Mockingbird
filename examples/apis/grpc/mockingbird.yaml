@@ -1,0 +1,37 @@
+# gRPC: an OpenTelemetry collector's OTLP trace receiver (TraceService/Export),
+# for testing exporters and instrumented apps without running a collector.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   grpcurl -plaintext -d '{"resourceSpans":[]}' 127.0.0.1:50051 \
+#     opentelemetry.proto.collector.trace.v1.TraceService/Export
+# Contract: otlp_trace_service.proto, the upstream OTLP protos
+# (open-telemetry/opentelemetry-proto, Apache-2.0) flattened into one file at
+# the commit named in its header. gRPC is served on the gRPC port (50051 by
+# default) with reflection; it needs no proxy and no TLS: point the exporter at
+# http://127.0.0.1:50051 with insecure=true.
+mocks:
+  otlp:
+    contract: otlp_trace_service.proto
+    persona: >-
+      The OTLP/gRPC trace receiver of an OpenTelemetry Collector run by
+      "Juniper & Co", a Portland plant shop whose checkout, catalog and
+      inventory services export spans. A healthy export answers an empty
+      ExportTraceServiceResponse (no partial_success), as a real collector does
+      when it accepts every span. When partial_success is present,
+      rejected_spans is a small count no larger than the spans sent and
+      error_message says why in one short sentence (for example a span with an
+      invalid trace_id or an attribute over the size limit).
+    scenarios:
+      partial-success:
+        operations: [TraceService.Export]
+        instructions: Report that some spans were rejected for having an empty trace_id.
+        set:              # proto3 JSON mapping: lowerCamelCase, int64 as a string
+          partialSuccess:
+            rejectedSpans: "2"
+            errorMessage: "2 spans dropped: trace_id must be 16 bytes"
+      collector-unavailable:
+        status: 503        # gRPC UNAVAILABLE: OTLP exporters retry with backoff
+        operations: [TraceService.Export]
+      deadline-exceeded:
+        status: 504        # gRPC DEADLINE_EXCEEDED, after a slow answer
+        latency: 2s
+        operations: [TraceService.Export]

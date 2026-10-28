@@ -1,0 +1,51 @@
+{
+  "name": "zendesk",
+  "title": "Zendesk Support",
+  "category": "customer-support",
+  "protocol": "openapi",
+  "summary": "Zendesk Support tickets, ticket comments, users and search (with and without the .json suffix) using Zendesk's operation ids, ticket webhooks, and rate-limit, not-found, validation and outage scenarios.",
+  "contracts": [
+    "zendesk.openapi.yaml"
+  ],
+  "hosts": [
+    "juniper.zendesk.com"
+  ],
+  "scenarios": [
+    "rate-limited",
+    "not-found",
+    "record-invalid",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://developer.zendesk.com/zendesk/oas.yaml",
+    "license": "proprietary",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Zendesk publishes the Support API's OpenAPI description at this URL, unversioned and under the Zendesk Developer Terms rather than an open license, so it is not pinned or fetched. The embedded subset keeps its paths, operation ids and field names. Real Zendesk webhooks are signed with X-Zendesk-Webhook-Signature (base64 HMAC-SHA256 of timestamp + body), which Mockingbird does not produce; the example signs with hmac-sha256 (X-Mockingbird-Signature)."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "zenpy",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/api/v2/tickets",
+    "host": "juniper.zendesk.com",
+    "headers": {
+      "authorization": "Basic YW5hQGV4YW1wbGUuY29tL3Rva2VuOnRlc3QtdG9rZW4="
+    },
+    "body": {
+      "ticket": {
+        "subject": "My monstera arrived with yellow leaves",
+        "priority": "high",
+        "comment": {"body": "Order #10432 came today and two leaves are yellow."}
+      }
+    },
+    "status": 201,
+    "expect": "\"ticket\""
+  }
+}

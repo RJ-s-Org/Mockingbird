@@ -57,6 +57,15 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
 
 /// A registry with one mock `orders` at `/` for `host`.
 async fn hosted_registry(host: &str) -> Arc<MockRegistry> {
+    hosted_registry_with(host, "/", Default::default()).await
+}
+
+/// A registry with one mock `orders` at `prefix` for `host`.
+async fn hosted_registry_with(
+    host: &str,
+    prefix: &str,
+    behavior: mb_store::MockBehavior,
+) -> Arc<MockRegistry> {
     let store: Arc<dyn ControlStore> = Arc::new(
         SqliteControlStore::connect("sqlite::memory:")
             .await
@@ -67,7 +76,7 @@ async fn hosted_registry(host: &str) -> Arc<MockRegistry> {
             DEFAULT_WORKSPACE,
             NewMock {
                 name: "orders".into(),
-                route_prefix: Some("/".into()),
+                route_prefix: Some(prefix.into()),
                 persona: None,
                 llm_profile: None,
                 header_overrides: true,
@@ -76,7 +85,7 @@ async fn hosted_registry(host: &str) -> Arc<MockRegistry> {
                 limits: Default::default(),
                 data_plane_auth: Default::default(),
                 hosts: vec![host.into()],
-                behavior: Default::default(),
+                behavior,
                 webhooks: Vec::new(),
             },
         )
@@ -442,4 +451,210 @@ async fn standalone_proxy_forwards_to_a_running_server() {
         200,
         "Host survives forwarding, so the hosted mock answers"
     );
+}
+
+#[tokio::test]
+async fn pac_file_routes_through_the_proxy() {
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, _ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let r = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{proxy}/proxy.pac"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        r.headers()["content-type"],
+        "application/x-ns-proxy-autoconfig"
+    );
+    let text = r.text().await.unwrap();
+    let authority = proxy.trim_start_matches("http://");
+    assert!(text.contains(&format!("\"PROXY {authority}\"")), "{text}");
+    assert!(text.contains("FindProxyForURL"));
+}
+
+#[tokio::test]
+async fn plain_http_inside_connect_is_served() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, _ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let mut tcp = tokio::net::TcpStream::connect(proxy.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    tcp.write_all(b"CONNECT api.orders.test:80 HTTP/1.1\r\nHost: api.orders.test:80\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = vec![0u8; 1024];
+    let n = tcp.read(&mut buf).await.unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+    tcp.write_all(b"GET /orders HTTP/1.1\r\nHost: api.orders.test\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    tcp.read_to_end(&mut out).await.unwrap();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+}
+
+#[tokio::test]
+async fn image_path_prefixes_get_placeholders_on_a_mock_host() {
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) = start_proxy(
+        registry,
+        Unmapped::Block,
+        vec!["api.orders.test/ipx".into()],
+    )
+    .await;
+    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    let http = client(&proxy, &ca);
+    let r = http
+        .get("https://api.orders.test/ipx/s_40x60/tmdb/a.jpg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.headers()["content-type"], "image/png");
+    let body = r.bytes().await.unwrap();
+    assert_eq!(u32::from_be_bytes(body[16..20].try_into().unwrap()), 40);
+    assert_eq!(u32::from_be_bytes(body[20..24].try_into().unwrap()), 60);
+    let r = http
+        .get("https://api.orders.test/orders")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_ne!(r.headers()["content-type"], "image/png");
+}
+
+#[tokio::test]
+async fn path_rewrite_serves_a_contract_under_another_base_path() {
+    let behavior = mb_store::MockBehavior {
+        path_rewrite: mb_store::PathRewrite {
+            strip_prefix: Some("/v9".into()),
+            add_prefix: None,
+        },
+        ..Default::default()
+    };
+    let registry = hosted_registry_with("api.orders.test", "/api", behavior).await;
+    let (proxy, ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    let r = client(&proxy, &ca)
+        .get("https://api.orders.test/api/v9/orders")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+}
+
+/// `node`, when installed.
+fn node() -> Option<PathBuf> {
+    let out = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .ok()?;
+    out.status.success().then(|| PathBuf::from("node"))
+}
+
+/// A custom `https.Agent` (as stripe-node creates), `fetch` and a custom
+/// `http.Agent` all reach the mock through the preload, with and without
+/// Node's own `NODE_USE_ENV_PROXY`. Unmapped hosts are blocked, so a
+/// request that bypassed the proxy would fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_preload_routes_custom_agents_and_fetch() {
+    let Some(node) = node() else {
+        eprintln!("skipped: node is not installed");
+        return;
+    };
+    let registry = hosted_registry("api.orders.test").await;
+    let (proxy, ca_dir, _stop) = start_proxy(registry, Unmapped::Block, vec![]).await;
+    let port: u16 = proxy.rsplit(':').next().unwrap().parse().unwrap();
+    let env = mockingbird::proxy::env::proxy_env_with(
+        &mockingbird::proxy::env::ProxyEnvOptions {
+            host: "127.0.0.1".into(),
+            port,
+            ca_dir: ca_dir.path().into(),
+        },
+        |_| None,
+    )
+    .unwrap();
+    let script = r#"
+const https = require('https');
+const http = require('http');
+const get = (mod, url, agent) => new Promise((resolve, reject) => {
+  mod.get(url, { agent }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); })
+    .on('error', reject);
+});
+(async () => {
+  const agent = await get(https, 'https://api.orders.test/orders', new https.Agent({ keepAlive: true }));
+  const fetched = (await fetch('https://api.orders.test/orders')).status;
+  const plain = await get(http, 'http://api.orders.test/orders', new http.Agent());
+  console.log(`agent=${agent} fetch=${fetched} http=${plain}`);
+  process.exit(0);
+})().catch((e) => { console.error(e); process.exit(1); });
+"#;
+    for use_env_proxy in [true, false] {
+        let mut vars = env.vars.clone();
+        if !use_env_proxy {
+            vars.remove("NODE_USE_ENV_PROXY");
+        }
+        let node = node.clone();
+        let script = script.to_owned();
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(node)
+                .arg("-e")
+                .arg(script)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .envs(&vars)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.trim(),
+            "agent=200 fetch=200 http=200",
+            "NODE_USE_ENV_PROXY={use_env_proxy}; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn proxy_browser_prints_the_chromium_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = assert_cmd::Command::cargo_bin("mockingbird")
+        .unwrap()
+        .env("MB_CA_DIR", dir.path())
+        .args([
+            "proxy",
+            "browser",
+            "--print",
+            "--port",
+            "9999",
+            "--browser",
+            "/bin/echo",
+            "https://movies.test/",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).unwrap();
+    let args: Vec<&str> = json["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(args[0], "--proxy-server=http://127.0.0.1:9999");
+    let spki = json["ca_spki_sha256"].as_str().unwrap();
+    assert!(args.contains(&format!("--ignore-certificate-errors-spki-list={spki}").as_str()));
+    assert!(args.iter().any(|a| a.starts_with("--user-data-dir=")));
+    assert_eq!(args.last(), Some(&"https://movies.test/"));
+    assert_eq!(json["pac"], "http://127.0.0.1:9999/proxy.pac");
 }

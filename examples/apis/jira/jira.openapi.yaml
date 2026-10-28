@@ -1,0 +1,723 @@
+# A hand-written subset of the Jira Cloud platform REST API v3 (issues, JQL
+# search, transitions, comments, projects, the current user), written for
+# Mockingbird's examples and covered by its license. Paths, operation ids and
+# field names follow Atlassian's published OpenAPI description,
+#   https://developer.atlassian.com/cloud/jira/platform/swagger-v3.v3.json
+# whose terms do not clearly allow redistribution, so none of it is copied here.
+openapi: 3.1.0
+info:
+  title: Jira Cloud platform REST API (Mockingbird example subset)
+  version: 1001.0.0
+servers:
+  - url: https://juniper.atlassian.net
+security:
+  - basicAuth: []
+  - OAuth2: []
+paths:
+  /rest/api/3/issue:
+    post:
+      operationId: createIssue
+      summary: Create an issue (or a sub-task).
+      parameters:
+        - { name: updateHistory, in: query, schema: { type: boolean } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueUpdateDetails" }
+      responses:
+        "201":
+          description: The issue was created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedIssue" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/issue/{issueIdOrKey}:
+    parameters:
+      - { name: issueIdOrKey, in: path, required: true, schema: { type: string, pattern: "^([0-9]+|[A-Z][A-Z0-9]+-[0-9]+)$" } }
+    get:
+      operationId: getIssue
+      summary: Return an issue by id or key.
+      parameters:
+        - { name: fields, in: query, schema: { type: array, items: { type: string } }, style: form, explode: false }
+        - { name: expand, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The issue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssueBean" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    put:
+      operationId: editIssue
+      summary: Edit an issue's fields.
+      parameters:
+        - { name: notifyUsers, in: query, schema: { type: boolean, default: true } }
+        - { name: returnIssue, in: query, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueUpdateDetails" }
+      responses:
+        "204": { description: The issue was updated. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/issue/{issueIdOrKey}/transitions:
+    parameters:
+      - { name: issueIdOrKey, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getTransitions
+      summary: The transitions the user can perform on the issue in its current status.
+      parameters:
+        - { name: expand, in: query, schema: { type: string } }
+        - { name: transitionId, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The available transitions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transitions]
+                properties:
+                  expand: { type: string }
+                  transitions:
+                    type: array
+                    minItems: 2
+                    maxItems: 4
+                    items: { $ref: "#/components/schemas/IssueTransition" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: doTransition
+      summary: Move the issue through its workflow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transition]
+              properties:
+                transition:
+                  type: object
+                  properties:
+                    id: { type: string }
+                fields: { type: object, additionalProperties: true }
+                update: { type: object, additionalProperties: true }
+      responses:
+        "204": { description: The issue was transitioned. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/issue/{issueIdOrKey}/comment:
+    parameters:
+      - { name: issueIdOrKey, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getComments
+      summary: The issue's comments, oldest first.
+      parameters:
+        - { name: startAt, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: maxResults, in: query, schema: { type: integer, minimum: 0, default: 5000 } }
+        - { name: orderBy, in: query, schema: { type: string, enum: [created, -created, +created] } }
+      responses:
+        "200":
+          description: A page of comments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [startAt, maxResults, total, comments]
+                properties:
+                  startAt: { type: integer, minimum: 0, maximum: 0 }
+                  maxResults: { type: integer, const: 5000 }
+                  total: { type: integer, minimum: 0, maximum: 5 }
+                  comments:
+                    type: array
+                    maxItems: 5
+                    items: { $ref: "#/components/schemas/Comment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: addComment
+      summary: Add a comment (Atlassian Document Format body).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { $ref: "#/components/schemas/Doc" }
+                visibility:
+                  type: object
+                  properties:
+                    type: { type: string, enum: [group, role] }
+                    value: { type: string }
+      responses:
+        "201":
+          description: The new comment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Comment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/search/jql:
+    get:
+      operationId: searchAndReconsileIssuesUsingJql
+      summary: Search issues with JQL (token-paginated enhanced search).
+      parameters:
+        - { name: jql, in: query, schema: { type: string } }
+        - { name: nextPageToken, in: query, schema: { type: string } }
+        - { name: maxResults, in: query, schema: { type: integer, default: 50 } }
+        - { name: fields, in: query, schema: { type: array, items: { type: string } }, style: form, explode: false }
+        - { name: expand, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Matching issues.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchAndReconcileResults" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: searchAndReconsileIssuesUsingJqlPost
+      summary: Search issues with JQL, the query in the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jql: { type: string }
+                nextPageToken: { type: string }
+                maxResults: { type: integer }
+                fields: { type: array, items: { type: string } }
+                expand: { type: string }
+      responses:
+        "200":
+          description: Matching issues.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchAndReconcileResults" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/myself:
+    get:
+      operationId: getCurrentUser
+      summary: The user the credentials belong to.
+      parameters:
+        - { name: expand, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/project/search:
+    get:
+      operationId: searchProjects
+      summary: A page of the projects visible to the user.
+      parameters:
+        - { name: startAt, in: query, schema: { type: integer, default: 0 } }
+        - { name: maxResults, in: query, schema: { type: integer, default: 50 } }
+        - { name: query, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of projects.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [self, startAt, maxResults, total, isLast, values]
+                properties:
+                  self: { type: string, format: uri }
+                  nextPage: { type: string, format: uri }
+                  startAt: { type: integer, const: 0 }
+                  maxResults: { type: integer, const: 50 }
+                  total: { type: integer, minimum: 1, maximum: 4 }
+                  isLast: { type: boolean, const: true }
+                  values:
+                    type: array
+                    minItems: 1
+                    maxItems: 4
+                    items: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/project:
+    get:
+      operationId: getAllProjects
+      summary: All projects visible to the user (deprecated in favour of project/search, still widely used).
+      deprecated: true
+      responses:
+        "200":
+          description: The projects.
+          content:
+            application/json:
+              schema:
+                type: array
+                minItems: 1
+                maxItems: 4
+                items: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/project/{projectIdOrKey}:
+    parameters:
+      - { name: projectIdOrKey, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getProject
+      summary: One project by id or key.
+      parameters:
+        - { name: expand, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/field:
+    get:
+      operationId: getFields
+      summary: The system and custom issue fields.
+      responses:
+        "200":
+          description: The fields.
+          content:
+            application/json:
+              schema:
+                type: array
+                minItems: 3
+                maxItems: 6
+                items: { $ref: "#/components/schemas/FieldDetails" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /rest/api/3/serverInfo:
+    get:
+      operationId: getServerInfo
+      summary: The Jira instance's version and base URL.
+      responses:
+        "200":
+          description: Server information.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [baseUrl, version, versionNumbers, deploymentType, buildNumber, serverTitle]
+                properties:
+                  baseUrl: { type: string, const: "https://juniper.atlassian.net" }
+                  version: { type: string, const: "1001.0.0-SNAPSHOT" }
+                  versionNumbers: { type: array, items: { type: integer }, const: [1001, 0, 0] }
+                  deploymentType: { type: string, const: Cloud }
+                  buildNumber: { type: integer, const: 100285 }
+                  buildDate: { type: string, format: date-time }
+                  serverTime: { type: string, format: date-time }
+                  scmInfo: { type: string, pattern: "^[0-9a-f]{40}$" }
+                  serverTitle: { type: string, const: Jira }
+                  defaultLocale: { type: object, properties: { locale: { type: string, const: en_US } } }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+webhooks:
+  # Mockingbird picks a webhook payload by the event type it derives
+  # (<resource>.<created|updated>); webhookEvent carries Jira's own name.
+  issue.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueCreatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+  issue.updated:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueUpdatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+  comment.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentCreatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Email address and API token.
+    OAuth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.atlassian.com/authorize
+          tokenUrl: https://auth.atlassian.com/oauth/token
+          scopes:
+            read:jira-work: Read Jira project and issue data.
+            write:jira-work: Create and edit issues.
+            read:jira-user: Read user information.
+  responses:
+    BadRequest:
+      description: The request is invalid (a field value, the JQL, ...).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorCollection" }
+    Unauthorized:
+      description: Authentication credentials are missing or invalid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorCollection" }
+    Forbidden:
+      description: The user lacks the permission.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorCollection" }
+    NotFound:
+      description: The issue is not found or the user does not have permission to view it.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorCollection" }
+    ServiceUnavailable:
+      description: Jira is temporarily unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorCollection" }
+    TooManyRequests:
+      description: Rate limited; retry after the number of seconds in Retry-After.
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1, maximum: 60 }
+        X-RateLimit-Reset:
+          schema: { type: string, format: date-time }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorCollection" }
+  schemas:
+    ErrorCollection:
+      type: object
+      required: [errorMessages, errors]
+      properties:
+        errorMessages: { type: array, maxItems: 1, items: { type: string } }
+        errors: { type: object, maxProperties: 1, additionalProperties: { type: string } }
+    AvatarUrls:
+      type: object
+      required: [16x16, 24x24, 32x32, 48x48]
+      properties:
+        16x16: { type: string, format: uri }
+        24x24: { type: string, format: uri }
+        32x32: { type: string, format: uri }
+        48x48: { type: string, format: uri }
+    User:
+      type: object
+      required: [self, accountId, accountType, displayName, active, timeZone, avatarUrls]
+      properties:
+        self: { type: string, pattern: "^https://juniper\\.atlassian\\.net/rest/api/3/user\\?accountId=712020:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }
+        accountId: { type: string, pattern: "^712020:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", maxLength: 128 }
+        accountType: { type: string, enum: [atlassian] }
+        emailAddress: { type: string, format: email }
+        displayName: { type: string }
+        active: { type: boolean, const: true }
+        timeZone: { type: string, enum: [America/Los_Angeles] }
+        locale: { type: string, const: en_US }
+        avatarUrls: { $ref: "#/components/schemas/AvatarUrls" }
+    UserDetails:
+      type: [object, "null"]
+      required: [accountId, displayName, active]
+      properties:
+        self: { type: string, format: uri }
+        accountId: { type: string, pattern: "^712020:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }
+        accountType: { type: string, enum: [atlassian] }
+        emailAddress: { type: string, format: email }
+        displayName: { type: string }
+        active: { type: boolean, const: true }
+        timeZone: { type: string, enum: [America/Los_Angeles] }
+    Doc:
+      description: An Atlassian Document Format (ADF) document.
+      type: object
+      required: [type, version, content]
+      properties:
+        type: { type: string, const: doc }
+        version: { type: integer, const: 1 }
+        content:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items:
+            type: object
+            required: [type, content]
+            properties:
+              type: { type: string, const: paragraph }
+              content:
+                type: array
+                minItems: 1
+                maxItems: 1
+                items:
+                  type: object
+                  required: [type, text]
+                  properties:
+                    type: { type: string, const: text }
+                    text: { type: string }
+    StatusCategory:
+      type: object
+      required: [self, id, key, colorName, name]
+      properties:
+        self: { type: string, format: uri }
+        id: { type: integer, enum: [2, 3, 4] }
+        key: { type: string, enum: [new, indeterminate, done] }
+        colorName: { type: string, enum: [blue-gray, yellow, green] }
+        name: { type: string, enum: [To Do, In Progress, Done] }
+    StatusDetails:
+      type: object
+      required: [self, id, name, statusCategory]
+      properties:
+        self: { type: string, format: uri }
+        description: { type: string }
+        iconUrl: { type: string, format: uri }
+        id: { type: string, enum: ["10000", "3", "10001"] }
+        name: { type: string, enum: [To Do, In Progress, Done] }
+        statusCategory: { $ref: "#/components/schemas/StatusCategory" }
+    IssueTypeDetails:
+      type: object
+      required: [self, id, name, subtask, hierarchyLevel]
+      properties:
+        self: { type: string, format: uri }
+        id: { type: string, enum: ["10001", "10002", "10003", "10004"] }
+        name: { type: string, enum: [Task, Bug, Story, Sub-task] }
+        description: { type: string }
+        iconUrl: { type: string, format: uri }
+        subtask: { type: boolean }
+        hierarchyLevel: { type: integer, enum: [0, -1] }
+    Priority:
+      type: object
+      required: [self, id, name]
+      properties:
+        self: { type: string, format: uri }
+        id: { type: string, enum: ["1", "2", "3", "4", "5"] }
+        name: { type: string, enum: [Highest, High, Medium, Low, Lowest] }
+        iconUrl: { type: string, format: uri }
+    ProjectRef:
+      type: object
+      required: [self, id, key, name, projectTypeKey]
+      properties:
+        self: { type: string, pattern: "^https://juniper\\.atlassian\\.net/rest/api/3/project/1000[0-1]$" }
+        id: { type: string, enum: ["10000", "10001"] }
+        key: { type: string, enum: [PLNT, WEB] }
+        name: { type: string, enum: [Plant Ops, Storefront] }
+        projectTypeKey: { type: string, enum: [software, business, service_desk] }
+        simplified: { type: boolean }
+        avatarUrls: { $ref: "#/components/schemas/AvatarUrls" }
+    Project:
+      allOf:
+        - $ref: "#/components/schemas/ProjectRef"
+        - type: object
+          properties:
+            expand: { type: string }
+            style: { type: string, enum: [classic, next-gen] }
+            isPrivate: { type: boolean }
+            entityId: { type: string, format: uuid }
+            uuid: { type: string, format: uuid }
+    FieldDetails:
+      type: object
+      required: [id, key, name, custom, orderable, navigable, searchable, clauseNames]
+      properties:
+        id: { type: string, enum: [summary, description, status, assignee, priority, labels, customfield_10020] }
+        key: { type: string }
+        name: { type: string, enum: [Summary, Description, Status, Assignee, Priority, Labels, Sprint] }
+        custom: { type: boolean }
+        orderable: { type: boolean }
+        navigable: { type: boolean }
+        searchable: { type: boolean }
+        clauseNames: { type: array, maxItems: 2, items: { type: string } }
+        schema:
+          type: object
+          required: [type]
+          properties:
+            type: { type: string, enum: [string, user, priority, status, array] }
+            system: { type: string }
+            items: { type: string }
+    IssueFields:
+      type: object
+      required: [summary, status, issuetype, project, priority, reporter, assignee, labels, created, updated]
+      properties:
+        summary: { type: string, maxLength: 255 }
+        description: { oneOf: [{ $ref: "#/components/schemas/Doc" }, { type: "null" }] }
+        status: { $ref: "#/components/schemas/StatusDetails" }
+        issuetype: { $ref: "#/components/schemas/IssueTypeDetails" }
+        project: { $ref: "#/components/schemas/ProjectRef" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        reporter: { $ref: "#/components/schemas/UserDetails" }
+        assignee: { $ref: "#/components/schemas/UserDetails" }
+        labels: { type: array, maxItems: 3, items: { type: string, pattern: "^[a-z][a-z0-9-]{2,19}$" } }
+        duedate: { type: [string, "null"], format: date }
+        created: { type: string, format: date-time, description: "Jira's format: 2026-10-27T09:14:03.512-0700." }
+        updated: { type: string, format: date-time }
+        resolutiondate: { type: [string, "null"], format: date-time }
+    IssueBean:
+      type: object
+      required: [expand, id, self, key, fields]
+      properties:
+        expand: { type: string, const: "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations" }
+        id: { type: string, pattern: "^100[0-9]{2}$" }
+        self: { type: string, pattern: "^https://juniper\\.atlassian\\.net/rest/api/3/issue/100[0-9]{2}$" }
+        key: { type: string, pattern: "^(PLNT|WEB)-[1-9][0-9]{0,3}$" }
+        fields: { $ref: "#/components/schemas/IssueFields" }
+    CreatedIssue:
+      type: object
+      additionalProperties: false
+      required: [id, key, self]
+      properties:
+        id: { type: string, pattern: "^100[0-9]{2}$" }
+        key: { type: string, pattern: "^(PLNT|WEB)-[1-9][0-9]{0,3}$" }
+        self: { type: string, pattern: "^https://juniper\\.atlassian\\.net/rest/api/3/issue/100[0-9]{2}$" }
+    IssueUpdateDetails:
+      type: object
+      properties:
+        fields:
+          type: object
+          additionalProperties: true
+          properties:
+            summary: { type: string, maxLength: 255 }
+            description: { $ref: "#/components/schemas/Doc" }
+            project:
+              type: object
+              properties:
+                id: { type: string }
+                key: { type: string }
+            issuetype:
+              type: object
+              properties:
+                id: { type: string }
+                name: { type: string }
+            priority: { type: object, properties: { id: { type: string }, name: { type: string } } }
+            assignee: { type: object, properties: { accountId: { type: string } } }
+            labels: { type: array, items: { type: string } }
+            duedate: { type: string, format: date }
+        update: { type: object, additionalProperties: true }
+        transition: { type: object, properties: { id: { type: string } } }
+    IssueTransition:
+      type: object
+      required: [id, name, to, hasScreen, isGlobal, isInitial, isAvailable, isConditional]
+      properties:
+        id: { type: string, enum: ["11", "21", "31"] }
+        name: { type: string, enum: [To Do, In Progress, Done] }
+        to: { $ref: "#/components/schemas/StatusDetails" }
+        hasScreen: { type: boolean }
+        isGlobal: { type: boolean }
+        isInitial: { type: boolean }
+        isAvailable: { type: boolean, const: true }
+        isConditional: { type: boolean }
+        isLooped: { type: boolean }
+    Comment:
+      type: object
+      required: [self, id, author, body, updateAuthor, created, updated, jsdPublic]
+      properties:
+        self: { type: string, pattern: "^https://juniper\\.atlassian\\.net/rest/api/3/issue/100[0-9]{2}/comment/10[0-9]{3}$" }
+        id: { type: string, pattern: "^10[0-9]{3}$" }
+        author: { $ref: "#/components/schemas/UserDetails" }
+        body: { $ref: "#/components/schemas/Doc" }
+        updateAuthor: { $ref: "#/components/schemas/UserDetails" }
+        created: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+        jsdPublic: { type: boolean, const: true }
+    SearchAndReconcileResults:
+      type: object
+      required: [issues, isLast]
+      properties:
+        issues:
+          type: array
+          maxItems: 5
+          items: { $ref: "#/components/schemas/IssueBean" }
+        nextPageToken: { type: [string, "null"] }
+        isLast: { type: boolean, const: true }
+    IssueCreatedEvent:
+      type: object
+      required: [timestamp, webhookEvent, issue_event_type_name, user, issue]
+      properties:
+        timestamp: { type: integer, description: Unix milliseconds. }
+        webhookEvent: { type: string, const: "jira:issue_created" }
+        issue_event_type_name: { type: string, const: issue_created }
+        user: { $ref: "#/components/schemas/UserDetails" }
+        issue: { $ref: "#/components/schemas/IssueBean" }
+    IssueUpdatedEvent:
+      type: object
+      required: [timestamp, webhookEvent, issue_event_type_name, user, issue, changelog]
+      properties:
+        timestamp: { type: integer }
+        webhookEvent: { type: string, const: "jira:issue_updated" }
+        issue_event_type_name: { type: string, enum: [issue_updated, issue_generic] }
+        user: { $ref: "#/components/schemas/UserDetails" }
+        issue: { $ref: "#/components/schemas/IssueBean" }
+        changelog:
+          type: object
+          required: [id, items]
+          properties:
+            id: { type: string, pattern: "^10[0-9]{3}$" }
+            items:
+              type: array
+              minItems: 1
+              maxItems: 2
+              items:
+                type: object
+                required: [field, fieldtype, fromString, toString]
+                properties:
+                  field: { type: string, enum: [summary, status, assignee, priority, labels] }
+                  fieldtype: { type: string, const: jira }
+                  fieldId: { type: string }
+                  from: { type: [string, "null"] }
+                  fromString: { type: [string, "null"] }
+                  to: { type: [string, "null"] }
+                  toString: { type: [string, "null"] }
+    CommentCreatedEvent:
+      type: object
+      required: [timestamp, webhookEvent, comment, issue]
+      properties:
+        timestamp: { type: integer }
+        webhookEvent: { type: string, const: comment_created }
+        comment: { $ref: "#/components/schemas/Comment" }
+        issue:
+          type: object
+          required: [id, key, self]
+          properties:
+            id: { type: string }
+            key: { type: string }
+            self: { type: string, format: uri }

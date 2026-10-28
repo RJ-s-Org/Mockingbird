@@ -39,7 +39,7 @@ proxy:
   host: 127.0.0.1
   port: 8888
   unmapped: pass
-  images: [images.example.test]
+  images: [images.example.test, orders.example.test/img]
   ca_dir: /var/lib/mockingbird/ca
 
 limits:
@@ -161,6 +161,9 @@ mocks:
     contract: ../../fixtures/openapi/orders-3.0.yaml
     route_prefix: /orders-api
     hosts: [orders.example.test]
+    path_rewrite:
+      strip_prefix: /api
+      add_prefix: /v1
     persona: A small online shop selling hiking gear.
     llm_profile: deepseek
     header_overrides: true

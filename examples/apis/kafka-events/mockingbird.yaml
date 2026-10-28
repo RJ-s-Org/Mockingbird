@@ -1,0 +1,37 @@
+# Kafka events: an AsyncAPI 3.0 order -> payment -> shipment event stream
+# with Kafka bindings, produced by Mockingbird on its in-process broker.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   mockingbird channels publish commerce orderCreated --count 3
+# Contract: commerce-events.asyncapi.yaml, hand-written for this example (no
+# upstream spec). orderCreated fires every 10 s; the other channels publish on
+# demand. To produce to a real Kafka cluster, see "A real Kafka broker" in the
+# README (it needs a build with the `kafka` feature).
+brokers:
+  local:
+    kind: memory          # in-process; nothing leaves Mockingbird
+  # kafka:                # a real cluster (build with --features kafka)
+  #   kind: kafka
+  #   bootstrap_servers: localhost:9092
+mocks:
+  commerce:
+    contract: commerce-events.asyncapi.yaml
+    broker: local         # or: kafka
+    persona: >-
+      Event stream of "Juniper & Co", an online plant shop in Portland, Oregon.
+      Customers are in the US Pacific Northwest (OR, WA); line items are
+      houseplants and accessories ("Fiddle leaf fig", "Monstera deliciosa 10in",
+      "Terracotta pot 6in") priced 800 to 12000 cents in USD, and an order's
+      total is the sum of its items. Ids are ULIDs with a type prefix (ord_,
+      cus_, pay_, shp_). Timestamps are recent and in UTC. Events of one order
+      share its order_id and correlation_id; payments are authorized a few
+      seconds after the order, shipments dispatched from PDX-1 or SEA-2 hours
+      later with a UPS 1Z tracking number.
+    channels:
+      orderCreated:
+        triggers:
+          - every: 10s
+          - manual
+      paymentAuthorized:
+        triggers: [manual]
+      shipmentDispatched:
+        triggers: [manual]

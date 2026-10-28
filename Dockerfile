@@ -46,6 +46,8 @@ RUN for manifest in crates/*/Cargo.toml; do \
 COPY crates crates
 # The agent skills the binary embeds (`mockingbird agent`, the MCP server).
 COPY plugins plugins
+# The API examples catalog the binary embeds (`mockingbird examples`).
+COPY examples/apis examples/apis
 COPY --from=console /src/crates/mb-console/dist crates/mb-console/dist
 # COPY keeps the context's timestamps, which can be older than the stub
 # build; touch the sources so Cargo rebuilds the workspace crates.

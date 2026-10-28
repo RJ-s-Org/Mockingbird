@@ -96,9 +96,19 @@ impl Watcher {
 
     fn concerns(&self, paths: &[PathBuf]) -> bool {
         paths.iter().any(|p| {
-            self.files.contains(p) || normalize(p).is_some_and(|(_, f)| self.files.contains(&f))
+            self.files.contains(p)
+                || normalize(p).is_some_and(|(dir, f)| {
+                    self.files.contains(&f) || (is_atomic_swap(&f) && self.dirs.contains(&dir))
+                })
         })
     }
+}
+
+/// Whether `path` is the `..data` symlink a Kubernetes ConfigMap or Secret
+/// volume swaps to publish an update: the files in the volume are links
+/// through it, so their own names never appear in the events.
+fn is_atomic_swap(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "..data")
 }
 
 /// `(directory, file)` with the directory canonicalized, so the file
@@ -225,7 +235,7 @@ pub fn spawn_with_status(
                         applied(cfg).await;
                     }
                     if report.is_empty() {
-                        tracing::debug!(config = %config_path.display(), "config reloaded; no changes");
+                        tracing::info!(config = %config_path.display(), "config reloaded: no changes");
                     } else {
                         let changed = report.summary();
                         tracing::info!(
@@ -272,4 +282,33 @@ async fn load_and_reconcile(
 
 fn contract_paths(cfg: &FileConfig) -> Vec<PathBuf> {
     cfg.mocks.values().map(|m| m.contract.clone()).collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn watcher(dir: &Path, file: &str) -> Watcher {
+        let debouncer = new_debouncer(DEBOUNCE, None, |_: DebounceEventResult| {}).unwrap();
+        let mut watcher = Watcher {
+            debouncer,
+            dirs: HashSet::new(),
+            files: HashSet::new(),
+        };
+        watcher.add(&dir.join(file)).unwrap();
+        watcher
+    }
+
+    #[test]
+    fn a_configmap_swap_concerns_the_files_of_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let w = watcher(dir.path(), "mockingbird.yaml");
+        assert!(w.concerns(&[dir.path().join("mockingbird.yaml")]));
+        assert!(w.concerns(&[dir.path().join("..data")]));
+        assert!(!w.concerns(&[dir.path().join("..data_tmp")]));
+        assert!(!w.concerns(&[dir.path().join("other.yaml")]));
+        assert!(!w.concerns(&[other.path().join("..data")]));
+    }
 }

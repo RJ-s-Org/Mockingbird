@@ -1,0 +1,220 @@
+# A hand-written subset of PayPal's Payments v2 API (captures, refunds,
+# authorizations), written for Mockingbird's examples and covered by its
+# license. Shapes and operation ids follow PayPal's published OpenAPI
+# description, which is Apache-2.0:
+#   https://github.com/paypal/paypal-rest-api-specifications (openapi/payments_payment_v2.json)
+# Mounted at route_prefix /v2/payments, so the paths below are relative to it.
+openapi: 3.1.0
+info:
+  title: Payments (Mockingbird example subset)
+  version: "2.0"
+servers:
+  - url: https://api-m.sandbox.paypal.com/v2/payments
+  - url: https://api-m.paypal.com/v2/payments
+security:
+  - Oauth2: []
+paths:
+  /captures/{capture_id}:
+    parameters:
+      - { $ref: "#/components/parameters/capture_id" }
+    get:
+      operationId: captures.get
+      summary: Show captured payment details.
+      responses:
+        "200":
+          description: The capture.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/capture" }
+        "401": { $ref: "#/components/responses/error" }
+        "404": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /captures/{capture_id}/refund:
+    parameters:
+      - { $ref: "#/components/parameters/capture_id" }
+    post:
+      operationId: captures.refund
+      summary: Refund a captured payment, in full or in part.
+      parameters:
+        - { name: PayPal-Request-Id, in: header, schema: { type: string, maxLength: 108 } }
+        - { name: Prefer, in: header, schema: { type: string, enum: [return=minimal, return=representation] } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: { $ref: "#/components/schemas/money" }
+                invoice_id: { type: string, maxLength: 127 }
+                custom_id: { type: string, maxLength: 255 }
+                note_to_payer: { type: string, maxLength: 255 }
+      responses:
+        "201":
+          description: The new refund.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/refund" }
+        "400": { $ref: "#/components/responses/error" }
+        "404": { $ref: "#/components/responses/error" }
+        "409": { $ref: "#/components/responses/error" }
+        "422": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /refunds/{refund_id}:
+    parameters:
+      - { name: refund_id, in: path, required: true, schema: { type: string, pattern: "^[0-9A-Z]{17}$" } }
+    get:
+      operationId: refunds.get
+      summary: Show refund details.
+      responses:
+        "200":
+          description: The refund.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/refund" }
+        "404": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+  /authorizations/{authorization_id}:
+    parameters:
+      - { name: authorization_id, in: path, required: true, schema: { type: string, pattern: "^[0-9A-Z]{17}$" } }
+    get:
+      operationId: authorizations.get
+      summary: Show details for an authorized payment.
+      responses:
+        "200":
+          description: The authorization.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/authorization" }
+        "404": { $ref: "#/components/responses/error" }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+        default: { $ref: "#/components/responses/error" }
+webhooks:
+  captures.refund:
+    post:
+      summary: PAYMENT.CAPTURE.REFUNDED
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/refund_event" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    Oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://api-m.sandbox.paypal.com/v1/oauth2/token
+          scopes:
+            https://uri.paypal.com/services/payments/payment: Manage payments and checkout workflow.
+  parameters:
+    capture_id: { name: capture_id, in: path, required: true, schema: { type: string, pattern: "^[0-9A-Z]{17}$" } }
+  responses:
+    error:
+      description: A PayPal error (INVALID_REQUEST, UNPROCESSABLE_ENTITY, RESOURCE_NOT_FOUND, RATE_LIMIT_REACHED, INTERNAL_SERVER_ERROR, ...).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/error" }
+  schemas:
+    money:
+      type: object
+      required: [currency_code, value]
+      properties:
+        currency_code: { type: string, enum: [USD, EUR, GBP, CAD, AUD] }
+        value: { type: string, pattern: "^[1-9][0-9]{0,3}\\.[0-9]{2}$" }
+    link:
+      type: object
+      required: [href, rel]
+      properties:
+        href: { type: string, format: uri }
+        rel: { type: string, enum: [self, up, refund, capture, void, reauthorize, information_link] }
+        method: { type: string, enum: [GET, POST, PATCH] }
+    capture:
+      type: object
+      required: [id, status, amount, final_capture, create_time, update_time]
+      properties:
+        id: { type: string, pattern: "^[0-9][A-Z0-9]{16}$" }
+        status: { type: string, enum: [COMPLETED, DECLINED, PARTIALLY_REFUNDED, PENDING, REFUNDED, FAILED] }
+        amount: { $ref: "#/components/schemas/money" }
+        invoice_id: { type: string }
+        final_capture: { type: boolean }
+        disbursement_mode: { type: string, enum: [INSTANT, DELAYED] }
+        seller_protection:
+          type: object
+          properties:
+            status: { type: string, enum: [ELIGIBLE, PARTIALLY_ELIGIBLE, NOT_ELIGIBLE] }
+        links: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/link" } }
+        create_time: { type: string, format: date-time }
+        update_time: { type: string, format: date-time }
+    refund:
+      type: object
+      required: [id, status, amount, create_time, update_time, links]
+      properties:
+        id: { type: string, pattern: "^[0-9][A-Z0-9]{16}$" }
+        status: { type: string, enum: [CANCELLED, FAILED, PENDING, COMPLETED] }
+        status_details:
+          type: object
+          properties:
+            reason: { type: string, const: ECHECK }
+        amount: { $ref: "#/components/schemas/money" }
+        invoice_id: { type: string }
+        note_to_payer: { type: string }
+        seller_payable_breakdown:
+          type: object
+          properties:
+            gross_amount: { $ref: "#/components/schemas/money" }
+            paypal_fee: { $ref: "#/components/schemas/money" }
+            net_amount: { $ref: "#/components/schemas/money" }
+            total_refunded_amount: { $ref: "#/components/schemas/money" }
+        links: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/link" } }
+        create_time: { type: string, format: date-time }
+        update_time: { type: string, format: date-time }
+    authorization:
+      type: object
+      required: [id, status, amount, expiration_time, create_time, update_time]
+      properties:
+        id: { type: string, pattern: "^[0-9][A-Z0-9]{16}$" }
+        status: { type: string, enum: [CREATED, CAPTURED, DENIED, PARTIALLY_CAPTURED, VOIDED, PENDING] }
+        amount: { $ref: "#/components/schemas/money" }
+        expiration_time: { type: string, format: date-time }
+        links: { type: array, maxItems: 4, items: { $ref: "#/components/schemas/link" } }
+        create_time: { type: string, format: date-time }
+        update_time: { type: string, format: date-time }
+    error_details:
+      type: object
+      required: [issue]
+      properties:
+        field: { type: string }
+        value: { type: string }
+        location: { type: string, enum: [body, path, query] }
+        issue: { type: string, pattern: "^[A-Z_]{6,40}$" }
+        description: { type: string }
+    error:
+      type: object
+      required: [name, message, debug_id]
+      properties:
+        name: { type: string, enum: [INVALID_REQUEST, AUTHENTICATION_FAILURE, NOT_AUTHORIZED, RESOURCE_NOT_FOUND, UNPROCESSABLE_ENTITY, RATE_LIMIT_REACHED, INTERNAL_SERVER_ERROR] }
+        message: { type: string }
+        debug_id: { type: string, pattern: "^[0-9a-f]{13}$" }
+        details: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/error_details" } }
+        links: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/link" } }
+    refund_event:
+      type: object
+      required: [id, event_version, create_time, resource_type, resource_version, event_type, summary, resource, links]
+      properties:
+        id: { type: string, pattern: "^WH-[0-9A-Z]{17}-[0-9A-Z]{17}$" }
+        event_version: { type: string, const: "1.0" }
+        create_time: { type: string, format: date-time }
+        resource_type: { type: string, const: refund }
+        resource_version: { type: string, const: "2.0" }
+        event_type: { type: string, const: PAYMENT.CAPTURE.REFUNDED }
+        summary: { type: string, pattern: "^A \\$ [1-9][0-9]{1,2}\\.[0-9]{2} USD capture payment was refunded$" }
+        resource: { $ref: "#/components/schemas/refund" }
+        links: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/link" } }

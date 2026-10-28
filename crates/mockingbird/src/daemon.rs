@@ -219,6 +219,12 @@ pub fn default_profile_env_names(config: &Path) -> Vec<String> {
 
 /// `server start`.
 pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
+    start_child(args).await.map(|(info, _child)| info)
+}
+
+/// [`start`], also returning the server process, which the caller reaps
+/// (`mockingbird run` stops it itself; a dropped handle is not waited for).
+pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::process::Child)> {
     let dir = &args.state.state_dir;
     if let Some(pid) = read_pid(dir)
         && alive(pid)
@@ -309,7 +315,7 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
             let mut out = info;
             out["ready"] = json!(ready);
             out["readyz"] = body;
-            return Ok(out);
+            return Ok((out, child));
         }
         if Instant::now() >= deadline {
             let mut out = info;
@@ -318,7 +324,7 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
                 "the Admin API did not answer within {}; see the log",
                 args.wait
             ));
-            return Ok(out);
+            return Ok((out, child));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -370,14 +376,31 @@ fn alive(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn terminate(pid: u32, force: bool) -> bool {
+pub(crate) fn terminate(pid: u32, force: bool) -> bool {
     let signal = if force { "-KILL" } else { "-TERM" };
     quiet(Command::new("kill").arg(signal).arg(pid.to_string()))
 }
 
 #[cfg(not(unix))]
-fn terminate(pid: u32, _force: bool) -> bool {
+pub(crate) fn terminate(pid: u32, _force: bool) -> bool {
     quiet(Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]))
+}
+
+/// Stops `child`, a server [`start_child`] started in this process: SIGTERM,
+/// then SIGKILL after 10 seconds, and reaps it.
+pub async fn stop_child(args: &StateArgs, mut child: std::process::Child) -> anyhow::Result<()> {
+    terminate(child.id(), false);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            child.wait()?;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = std::fs::remove_file(pid_file(&args.state_dir));
+    Ok(())
 }
 
 /// `server stop`.
