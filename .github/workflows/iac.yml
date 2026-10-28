@@ -42,7 +42,7 @@ jobs:
       run:
         working-directory: integrations/terraform-provider
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97"
@@ -53,14 +53,14 @@ jobs:
       - name: Build mockingbird
         working-directory: .
         run: cargo build -p mockingbird --no-default-features
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: integrations/terraform-provider/go.mod
           cache-dependency-path: integrations/terraform-provider/go.sum
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
-      - uses: opentofu/setup-opentofu@v1
+      - uses: opentofu/setup-opentofu@v2
         with:
           tofu_wrapper: false
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
