@@ -29,7 +29,8 @@ pub fn imported() -> Option<&'static [String]> {
 }
 
 /// Reads the login shell's environment and sets every variable this process
-/// lacks; returns their names. Never fails: a missing, slow or broken shell
+/// lacks, or has empty where the shell's is not (an agent's `${NAME:-}`
+/// passthrough of a variable it lacks); returns their names. Never fails: a missing, slow or broken shell
 /// imports nothing.
 ///
 /// # Safety
@@ -43,7 +44,11 @@ pub unsafe fn import() -> &'static [String] {
             let found = login_env().unwrap_or_default();
             let mut names = Vec::new();
             for (name, value) in found {
-                if std::env::var_os(&name).is_none() {
+                let lacking = match std::env::var_os(&name) {
+                    None => true,
+                    Some(v) => v.is_empty() && !value.is_empty(),
+                };
+                if lacking {
                     // SAFETY: the caller guarantees the process is still
                     // single-threaded, and `login_env` has joined its reader.
                     unsafe { std::env::set_var(&name, value) };

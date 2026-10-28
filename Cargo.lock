@@ -3863,6 +3863,7 @@ dependencies = [
  "humantime-serde",
  "hyper 1.12.0",
  "hyper-util",
+ "json-patch",
  "mb-admin",
  "mb-auth",
  "mb-console",

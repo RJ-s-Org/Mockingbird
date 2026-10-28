@@ -6,7 +6,7 @@ Mockingbird reads one YAML file, `mockingbird.yaml`, passed with `mockingbird se
 
 **Reloading:** with `--watch`, a change to the file or to a contract it names reconciles mocks, scenarios, LLM profiles and workspaces again. Keys marked *read at startup* are read once, when the process starts; change them with a restart (or a rolling restart, see the [runbook](operations/runbook.md#rolling-upgrades)).
 
-**Secrets** never appear in the file. A key that takes a secret takes a *reference*: `env:NAME` (an environment variable), `file:/path` (a file's contents, whitespace trimmed) or `vault:<mount>/<path>#<field>` (a HashiCorp Vault KV v2 field, enabled when `VAULT_ADDR` is set; see [Kubernetes secrets](deploy/kubernetes.md#secrets)).
+**Secrets** never appear in the file. A key that takes a secret takes a *reference*: `env:NAME` (an environment variable), `file:/path` (a file's contents, whitespace trimmed) or `vault:<mount>/<path>#<field>` (a HashiCorp Vault KV v2 field, enabled when `VAULT_ADDR` is set; see [Kubernetes secrets](deploy/kubernetes.md#secrets)). A `file:` reference into the key store (`~/.mockingbird/secrets/`, written by `mockingbird keys setup`) is refused when the file is readable by group or others.
 
 **Durations** are written as `250ms`, `30s`, `5m`, `12h` or `1d`.
 

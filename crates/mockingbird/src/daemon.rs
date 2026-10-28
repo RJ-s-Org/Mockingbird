@@ -67,6 +67,10 @@ pub struct StartArgs {
     /// Faker only, no LLM.
     #[arg(long)]
     pub offline: bool,
+    /// Also run the HTTP(S) proxy (`proxy.enabled`); see `mockingbird proxy
+    /// env`.
+    #[arg(long)]
+    pub proxy: bool,
     /// Do not watch the config file for changes.
     #[arg(long)]
     pub no_watch: bool,
@@ -91,6 +95,20 @@ fn log_file(dir: &Path) -> PathBuf {
 
 fn info_file(dir: &Path) -> PathBuf {
     dir.join("server.json")
+}
+
+/// The variables `mockingbird proxy env` sets that route HTTP traffic.
+const PROXY_VARS: &[&str] = &["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
+
+/// `http://<proxy.host>:<proxy.port>` of `config` (with `MB_*` applied).
+fn proxy_url(config: Option<&Path>) -> anyhow::Result<String> {
+    let opts = crate::proxy::env::options_for(config, None)?;
+    let host = if opts.host.contains(':') {
+        format!("[{}]", opts.host)
+    } else {
+        opts.host
+    };
+    Ok(format!("http://{host}:{}", opts.port))
 }
 
 fn env_port(name: &str) -> Option<u16> {
@@ -163,18 +181,40 @@ pub fn missing_default_secrets(config: &Path) -> Vec<String> {
     let Ok(cfg) = file_config::load(config) else {
         return Vec::new();
     };
-    let profile = match &cfg.llm.default_profile {
-        Some(name) => cfg.llm.profiles.get(name),
-        None if cfg.llm.profiles.len() == 1 => cfg.llm.profiles.values().next(),
-        None => None,
-    };
-    profile
+    default_profile(&cfg)
         .map(crate::providers::secret_status)
         .unwrap_or_default()
         .into_iter()
         .filter(|s| s["set"] == false)
         .filter_map(|s| s["ref"].as_str().map(String::from))
         .collect()
+}
+
+/// `llm.default_profile`, else the only profile.
+fn default_profile(cfg: &file_config::FileConfig) -> Option<&file_config::FileProfile> {
+    match &cfg.llm.default_profile {
+        Some(name) => cfg.llm.profiles.get(name),
+        None if cfg.llm.profiles.len() == 1 => cfg.llm.profiles.values().next(),
+        None => None,
+    }
+}
+
+/// The environment variable names `config`'s default LLM profile references
+/// (`api_key: env:NAME`, `${env:NAME}` in headers), sorted; empty when the
+/// config is missing or does not load.
+pub fn default_profile_env_names(config: &Path) -> Vec<String> {
+    let Ok(cfg) = file_config::load(config) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = default_profile(&cfg)
+        .map(crate::providers::secret_status)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| s["ref"].as_str()?.strip_prefix("env:").map(String::from))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// `server start`.
@@ -213,6 +253,18 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     if args.insecure_no_auth {
         cmd.arg("--insecure-no-auth");
     }
+    // The proxy's own URL: from `proxy.port` / `proxy.host`, or the
+    // defaults. A shell that exported `proxy env` would otherwise send the
+    // server's own LLM calls back through its proxy.
+    let proxy_url = proxy_url(args.config.as_deref())?;
+    for (name, value) in std::env::vars() {
+        if PROXY_VARS.contains(&name.as_str()) && value.trim_end_matches('/') == proxy_url {
+            cmd.env_remove(name);
+        }
+    }
+    if args.proxy {
+        cmd.arg("--proxy");
+    }
     cmd.args(&args.contracts);
     let log_path = log_file(dir);
     let log = OpenOptions::new()
@@ -229,7 +281,7 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     let pid = child.id();
     std::fs::write(pid_file(dir), pid.to_string())?;
     let admin_url = url(host, admin);
-    let info = json!({
+    let mut info = json!({
         "pid": pid,
         "data_plane": url(host, port),
         "admin": admin_url,
@@ -238,6 +290,9 @@ pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
         "contracts": args.contracts,
         "log": log_path,
     });
+    if args.proxy {
+        info["proxy"] = json!(proxy_url);
+    }
     std::fs::write(info_file(dir), serde_json::to_vec_pretty(&info)?)?;
 
     let deadline = Instant::now() + Duration::from(args.wait);
@@ -372,13 +427,90 @@ pub fn tail(path: &Path, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-/// `server logs`.
+/// `text` without terminal escape sequences: CSI (`ESC [` parameters,
+/// intermediates, final byte) and OSC (`ESC ]` … BEL or `ESC \\`); any other
+/// `ESC` is dropped on its own.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                while chars.next_if(|c| ('\x30'..='\x3f').contains(c)).is_some() {}
+                while chars.next_if(|c| ('\x20'..='\x2f').contains(c)).is_some() {}
+                chars.next_if(|c| ('\x40'..='\x7e').contains(c));
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.next_if_eq(&'\\').is_some() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `server logs`, as plain text.
 pub fn logs(args: &StateArgs, lines: usize) -> anyhow::Result<String> {
     let path = log_file(&args.state_dir);
     if !path.exists() {
         return Err(anyhow!("no log at {}", path.display()));
     }
-    Ok(tail(&path, lines))
+    Ok(strip_ansi(&tail(&path, lines)))
+}
+
+/// The state directory of the background server for `config`:
+/// `state_dir` when absolute. Otherwise, with a config, the first
+/// `<ancestor>/<state_dir>` above the config whose `server.json` records
+/// that same config (a server started from a parent folder with `-c
+/// sub/…`), else `<config dir>/<state_dir>`; never another project's
+/// server. Without a config, `<cwd>/<state_dir>` (as `server start` does).
+pub fn resolve_state_dir(state_dir: &Path, config: Option<&Path>, cwd: &Path) -> PathBuf {
+    if state_dir.is_absolute() {
+        return state_dir.to_path_buf();
+    }
+    let Some(config) = config.map(|c| cwd.join(c)) else {
+        return cwd.join(state_dir);
+    };
+    let wanted = same_file_key(&config);
+    let config_dir = config
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    config_dir
+        .ancestors()
+        .map(|a| (a, a.join(state_dir)))
+        .find(|(ancestor, dir)| {
+            std::fs::read(info_file(dir))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v["config"].as_str().map(PathBuf::from))
+                // A relative `-c` was relative to the folder it was run in,
+                // which holds the state directory.
+                .is_some_and(|recorded| same_file_key(&ancestor.join(recorded)) == wanted)
+        })
+        .map(|(_, dir)| dir)
+        .unwrap_or_else(|| config_dir.join(state_dir))
+}
+
+/// `path` canonicalized when it exists, else made absolute: for comparing
+/// two spellings of one config path.
+fn same_file_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// `mockingbird doctor`.
@@ -413,7 +545,7 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
                     for s in &secrets {
                         if s["set"] == false {
                             problems.push(format!(
-                                "LLM profile {name:?} needs {} ({not_set_here})",
+                                "LLM profile {name:?} needs {} ({not_set_here}), or store the key with `mockingbird keys setup` (MCP open_key_setup)",
                                 s["ref"].as_str().unwrap_or_default()
                             ));
                         }
@@ -468,6 +600,19 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
     if config_path.is_none() {
         problems.push("no mockingbird.yaml here: create one with `mockingbird init`".into());
     }
+    let key_store = match crate::keys::store::default_store_dir() {
+        Ok(dir) => {
+            let keys = crate::keys::store::list(&dir);
+            for k in keys.iter().filter(|k| k["private"] == false) {
+                let file = k["file"].as_str().unwrap_or_default();
+                problems.push(format!(
+                    "key file {file} is readable by other users: chmod 600 {file}"
+                ));
+            }
+            json!({ "dir": dir, "keys": keys })
+        }
+        Err(_) => Value::Null,
+    };
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "binary": std::env::current_exe().ok(),
@@ -479,6 +624,85 @@ pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
         "background_server": background,
         "docker": docker,
         "shell_env": shell_env.map(|names| json!({ "imported": names })),
+        "key_store": key_store,
         "problems": problems,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(
+            strip_ansi("\x1b[2m2026\x1b[0m \x1b[32m INFO\x1b[0m ready"),
+            "2026  INFO ready"
+        );
+        assert_eq!(
+            strip_ansi("a\x1b]8;;http://x\x07link\x1b]8;;\x1b\\b"),
+            "alinkb"
+        );
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("lone\x1b"), "lone");
+    }
+
+    #[test]
+    fn state_dir_is_found_next_to_the_config() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("app/sub");
+        std::fs::create_dir_all(root.path().join("app/.mockingbird")).unwrap();
+        // Started from app/ with `-c sub/mockingbird.yaml`.
+        std::fs::write(
+            root.path().join("app/.mockingbird/server.json"),
+            r#"{"config": "sub/mockingbird.yaml"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let rel = Path::new(".mockingbird");
+        assert_eq!(
+            resolve_state_dir(
+                rel,
+                Some(&project.join("mockingbird.yaml")),
+                elsewhere.path()
+            ),
+            root.path().join("app/.mockingbird")
+        );
+        // Another project's server above this config is not this one's.
+        let other = root.path().join("app/sub/other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert_eq!(
+            resolve_state_dir(rel, Some(&other.join("m.yaml")), elsewhere.path()),
+            other.join(".mockingbird")
+        );
+        // Nor is a server found by walking up from the working folder.
+        std::fs::create_dir_all(elsewhere.path().join(".mockingbird")).unwrap();
+        std::fs::write(
+            elsewhere.path().join(".mockingbird/server.json"),
+            r#"{"config": "a.yaml"}"#,
+        )
+        .unwrap();
+        let nested = elsewhere.path().join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let fresh_cfg = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_state_dir(rel, Some(&fresh_cfg.path().join("m.yaml")), &nested),
+            fresh_cfg.path().join(".mockingbird")
+        );
+        let fresh = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_state_dir(rel, Some(&fresh.path().join("m.yaml")), elsewhere.path()),
+            fresh.path().join(".mockingbird")
+        );
+        assert_eq!(
+            resolve_state_dir(rel, None, elsewhere.path()),
+            elsewhere.path().join(".mockingbird")
+        );
+        assert_eq!(
+            resolve_state_dir(Path::new("/abs/state"), None, elsewhere.path()),
+            PathBuf::from("/abs/state")
+        );
+    }
 }

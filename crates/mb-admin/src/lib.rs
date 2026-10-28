@@ -262,6 +262,7 @@ pub fn router(st: AdminState) -> Router {
         )
         .route("/mocks/{mock}/requests", get(requests::list))
         .route("/mocks/{mock}/requests/stream", get(live::stream))
+        .route("/mocks/{mock}/requests/{id}", get(requests::get_one))
         .route(
             "/mocks/{mock}/imports",
             get(imports::list)

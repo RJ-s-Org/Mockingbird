@@ -34,10 +34,14 @@ use crate::providers::{self, ProviderArgs};
 /// Protocol versions this server speaks, newest first.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// How long `open_key_setup` waits for the key before it returns the URL:
+/// under the common 60 s tool-call timeout of agents.
+const KEY_PAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// Largest body `call_mock` returns inline.
 const MAX_INLINE_BODY: usize = 64 * 1024;
 
-const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports. The `mockingbird://skills/…` resources hold the full guides.";
+const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -84,6 +88,9 @@ pub struct McpServer {
     /// [`LOCAL_TOOLS`]).
     local_tools: bool,
     state_dir: PathBuf,
+    /// The absolute config path of the last successful `start_server`: the
+    /// server tools find its state next to it.
+    started_config: std::sync::Mutex<Option<PathBuf>>,
 }
 
 /// Tools that read or write this machine's files or environment, or run
@@ -99,6 +106,8 @@ const LOCAL_TOOLS: &[&str] = &[
     "server_status",
     "server_logs",
     "stop_server",
+    "proxy_env",
+    "open_key_setup",
 ];
 
 /// Why a tool call failed: shown to the model as an error result.
@@ -311,7 +320,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "validate_contract",
             title: "Validate a contract file",
-            description: "Compile a contract (OpenAPI, Swagger, GraphQL, protobuf, WSDL, AsyncAPI, archive) locally and list its operations and channels. Needs no server.",
+            description: "Compile a contract (OpenAPI, Swagger, GraphQL, protobuf, WSDL, AsyncAPI, archive) locally: counts by protocol and the first 20 operations and channels (operations_truncated says how many more). Needs no server.",
             schema: obj(json!({ "path": s("Contract file path.") }), &["path"]),
             read_only: true,
             destructive: false,
@@ -319,7 +328,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "start_server",
             title: "Start Mockingbird in the background",
-            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs.",
+            description: "Run `mockingbird serve` in the background (config watched for changes) and wait until it is ready. Returns pid and the data-plane, admin and gRPC URLs; with proxy, the proxy URL and proxy_env.",
             schema: obj(
                 json!({
                     "config": s("Config file (preferred)."),
@@ -328,6 +337,37 @@ fn tools() -> Vec<Tool> {
                     "port": n("Data-plane port; default 8080."),
                     "admin_port": n("Admin API port; default 9090."),
                     "grpc_port": n("gRPC port; default 50051."),
+                    "proxy": b("Also start the HTTP(S) proxy; the result carries proxy_env."),
+                }),
+                &[],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "proxy_env",
+            title: "Proxy variables for an app",
+            description: "The environment variables that send an app's HTTP(S) traffic through Mockingbird's proxy (start_server with proxy: true) and make it trust the local CA: vars, ca_path, bundle_path, and export (shell lines). Mocks with hosts: [api.example.com] then answer for those hosts with no change to the app.",
+            schema: obj(
+                json!({
+                    "config": s("Config file (proxy.host, proxy.port, proxy.ca_dir); default: the one start_server used, else defaults."),
+                    "port": n("Proxy port; default proxy.port (8888)."),
+                }),
+                &[],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "open_key_setup",
+            title: "Let the user store an LLM key",
+            description: "Open a one-shot page on this machine where the user types an LLM key; Mockingbird stores it in ~/.mockingbird/secrets/<name> (mode 0600) and points the config's profile at the file. Returns the key's name and the profile it updated, never the key; if the user has not saved it within 45 s, the URL (the page stays open 10 minutes). Use it when doctor reports a missing key that the agent's environment cannot provide.",
+            schema: obj(
+                json!({
+                    "name": s("Key name in the store; default the profile's name."),
+                    "config": s("Config whose profile to update; default mockingbird.yaml."),
+                    "profile": s("Profile to update; default llm.default_profile or the only one."),
+                    "open": b("Open the browser and wait for the key (default true); false returns the URL for the user to open."),
                 }),
                 &[],
             ),
@@ -338,7 +378,10 @@ fn tools() -> Vec<Tool> {
             name: "server_status",
             title: "Background server status",
             description: "Whether the background server runs, and its /readyz (ready, degraded reasons).",
-            schema: obj(json!({}), &[]),
+            schema: obj(
+                json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
             read_only: true,
             destructive: false,
         },
@@ -346,7 +389,10 @@ fn tools() -> Vec<Tool> {
             name: "server_logs",
             title: "Background server log",
             description: "The last lines of the background server's log.",
-            schema: obj(json!({ "lines": n("Lines; default 100.") }), &[]),
+            schema: obj(
+                json!({ "lines": n("Lines; default 100."), "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
             read_only: true,
             destructive: false,
         },
@@ -354,7 +400,10 @@ fn tools() -> Vec<Tool> {
             name: "stop_server",
             title: "Stop the background server",
             description: "Stop the server started with start_server.",
-            schema: obj(json!({}), &[]),
+            schema: obj(
+                json!({ "config": s("Config file the server was started with; default: the one start_server used.") }),
+                &[],
+            ),
             read_only: false,
             destructive: true,
         },
@@ -412,13 +461,15 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "import_contract",
             title: "Import a contract into a mock",
-            description: "Import a contract (OpenAPI, Swagger, GraphQL, .proto, WSDL, AsyncAPI, zip/tar.gz, a directory) as a new version of a mock, creating the mock if missing. API documentation (Markdown, HTML, PDF, text), HAR recordings and Postman collections become a draft: pass approve to accept it when there are no warnings. Give a local path or http(s) URL in source, or the file text in content with a filename.",
+            description: "Import a contract (OpenAPI, Swagger, GraphQL, .proto, WSDL, AsyncAPI, zip/tar.gz, a directory) as a new version of a mock, creating the mock if missing. API documentation (Markdown, HTML, PDF, text), HAR recordings and Postman collections become a draft: pass approve to accept it when there are no warnings. Give a local path or http(s) URL in source, several documentation URLs in urls, or the file text in content with a filename. Review a draft with get_draft, fix it with edit_draft, accept it with approve_draft.",
             schema: obj(
                 json!({
                     "mock": mock(),
                     "source": s("File path, directory, or http(s) URL."),
                     "content": s("The contract or document text, when there is no file."),
                     "content_base64": s("Binary content (zip, PDF, descriptor set), base64."),
+                    "urls": { "type": "array", "items": { "type": "string" }, "description": "Documentation pages to import together (http(s))." },
+                    "mode": { "type": "string", "enum": ["merge", "replace"], "description": "With an existing draft or active contract: merge (default) adds and replaces operations by method+path; replace starts over." },
                     "filename": s("Name for content, with its extension, e.g. api.yaml."),
                     "activate": b("Activate the new version (the first is always activated)."),
                     "approve": b("Approve a draft import that reported no warnings."),
@@ -444,6 +495,52 @@ fn tools() -> Vec<Tool> {
             schema: obj(
                 json!({ "mock": mock(), "version": n("Version number.") }),
                 &["mock", "version"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "get_draft",
+            title: "Review a draft contract",
+            description: "Review a draft import: operations with confidence and warnings; pass operation for its full definition. Without version, the newest draft.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Draft version; default the newest draft."),
+                    "operation": s("Operation id: return its full OpenAPI definition."),
+                }),
+                &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "edit_draft",
+            title: "Edit a draft contract",
+            description: "Apply a JSON merge patch (RFC 7396: null removes a key) to one operation of a draft (operation given: its OpenAPI operation object) or to the whole OpenAPI document, and save it. Returns the get_draft summary; a patch that breaks the document changes nothing and names the problem.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Draft version; default the newest draft."),
+                    "operation": s("Operation id to patch; default the whole document."),
+                    "patch": o("JSON merge patch."),
+                }),
+                &["mock", "patch"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "approve_draft",
+            title: "Approve a draft contract",
+            description: "Approve a reviewed draft; it is activated (served) unless activate is false.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Draft version; default the newest draft."),
+                    "activate": b("Serve the approved version; default true."),
+                }),
+                &["mock"],
             ),
             read_only: false,
             destructive: false,
@@ -519,7 +616,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "list_requests",
             title: "Read the request log",
-            description: "Recorded calls to a mock, newest first, with redacted bodies, matched operation, status, source (llm, repaired, fallback) and latency.",
+            description: "Recorded calls to a mock, newest first: method, path, status, matched operation, source (llm, repaired, fallback), fallback reason, latency, sizes; bodies with include_bodies or get_request.",
             schema: obj(
                 json!({
                     "mock": mock(),
@@ -528,8 +625,20 @@ fn tools() -> Vec<Tool> {
                     "operation": s("Only this operation id."),
                     "source": s("llm, repaired or fallback."),
                     "kind": s("http, graphql, grpc, soap or event."),
+                    "include_bodies": b("Return request and response bodies; default false (sizes only)."),
                 }),
                 &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "get_request",
+            title: "Show one recorded request",
+            description: "One entry of a mock's request log with its redacted request and response bodies.",
+            schema: obj(
+                json!({ "mock": mock(), "id": n("Request log id (list_requests).") }),
+                &["mock", "id"],
             ),
             read_only: true,
             destructive: false,
@@ -730,6 +839,132 @@ fn paths(args: &Value, key: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// The operation `id` of a draft view, or an error listing known ids.
+fn draft_operation<'a>(view: &'a Value, id: &str) -> Result<&'a Value, ToolError> {
+    let ops = view["operations"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    ops.iter().find(|o| o["id"] == id).ok_or_else(|| {
+        let known: Vec<&str> = ops
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .take(20)
+            .collect();
+        ToolError(format!(
+            "the draft has no operation {id:?}; known: {}",
+            known.join(", ")
+        ))
+    })
+}
+
+/// A draft view (`GET …/draft`) without its document: each operation with
+/// its confidence and warnings, plus the warnings tied to no operation; or,
+/// with `operation`, that operation with its OpenAPI definition.
+fn draft_summary(view: &Value, operation: Option<&str>) -> ToolResult {
+    let warnings = view["meta"]["warnings"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let target = |op: &Value| {
+        format!(
+            "{} {}",
+            op["method"].as_str().unwrap_or_default(),
+            op["path"].as_str().unwrap_or_default()
+        )
+    };
+    let warnings_of = |t: &str| -> Vec<Value> {
+        warnings
+            .iter()
+            .filter(|w| w["operation"].as_str() == Some(t))
+            .map(|w| w["message"].clone())
+            .collect()
+    };
+    let ops = view["operations"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if let Some(id) = operation {
+        let op = draft_operation(view, id)?;
+        let method = op["method"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let path = op["path"].as_str().unwrap_or_default();
+        return Ok(json!({
+            "version": view["version"],
+            "id": op["id"],
+            "method": op["method"],
+            "path": op["path"],
+            "confidence": op["confidence"],
+            "warnings": warnings_of(&target(op)),
+            "definition": view["document"]["paths"][path][method],
+        }));
+    }
+    let targets: Vec<String> = ops.iter().map(target).collect();
+    let general: Vec<Value> = warnings
+        .iter()
+        .filter(|w| {
+            w["operation"]
+                .as_str()
+                .is_none_or(|t| !targets.iter().any(|x| x == t))
+        })
+        .map(|w| {
+            let mut out = json!({ "code": w["code"], "message": w["message"] });
+            if let Some(t) = w["operation"].as_str() {
+                out["operation"] = json!(t);
+            }
+            out
+        })
+        .collect();
+    let operations: Vec<Value> = ops
+        .iter()
+        .map(|op| {
+            json!({
+                "id": op["id"],
+                "method": op["method"],
+                "path": op["path"],
+                "confidence": op["confidence"],
+                "warnings": warnings_of(&target(op)),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "version": view["version"],
+        "status": view["status"],
+        "source_kind": view["meta"]["source_kind"],
+        "operations": operations,
+        "warnings": general,
+        "diff": view["diff"],
+    }))
+}
+
+/// The tool error for a 422 from `PUT …/draft`: the detail and each
+/// `pointer: message`.
+fn invalid_draft(body: &str) -> String {
+    let problem: Value = serde_json::from_str(body).unwrap_or_default();
+    let detail = problem["detail"]
+        .as_str()
+        .or(problem["title"].as_str())
+        .unwrap_or("invalid draft");
+    let errors: Vec<String> = problem["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            format!(
+                "{}: {}",
+                e["pointer"].as_str().unwrap_or_default(),
+                e["message"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    format!(
+        "the patched draft does not compile ({detail}); nothing was saved: {}",
+        errors.join("; ")
+    )
+}
+
 impl McpServer {
     pub fn new(admin_url: &str, token: Option<&str>, workspace: &str, args: &McpArgs) -> Self {
         Self {
@@ -739,6 +974,7 @@ impl McpServer {
             read_only: args.read_only,
             local_tools: args.transport == Transport::Stdio || args.allow_local_tools,
             state_dir: args.state_dir.clone(),
+            started_config: std::sync::Mutex::new(None),
         }
     }
 
@@ -778,10 +1014,87 @@ impl McpServer {
         Ok(out.unwrap_or_else(|| json!({ "ok": true })))
     }
 
-    fn state(&self) -> daemon::StateArgs {
+    /// The background server's state for `config` (else the config the
+    /// last `start_server` used): found next to the config, not in this
+    /// process's working folder.
+    fn state_for(&self, config: Option<&std::path::Path>) -> daemon::StateArgs {
+        let recorded = self
+            .started_config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        let cwd = std::env::current_dir().unwrap_or_default();
         daemon::StateArgs {
-            state_dir: self.state_dir.clone(),
+            state_dir: daemon::resolve_state_dir(
+                &self.state_dir,
+                config.or(recorded.as_deref()),
+                &cwd,
+            ),
         }
+    }
+
+    /// `proxy env` as JSON, with the shell lines under `export`.
+    fn proxy_env(&self, config: Option<&std::path::Path>, port: Option<u16>) -> ToolResult {
+        let opts = crate::proxy::env::options_for(config, port)?;
+        let env = crate::proxy::env::proxy_env(&opts)?;
+        let mut out = serde_json::to_value(&env).map_err(anyhow::Error::from)?;
+        out["export"] = json!(env.to_shell());
+        Ok(out)
+    }
+
+    /// The key setup page for the tool's config (default: the one
+    /// `start_server` used, else ./mockingbird.yaml). With a browser, waits
+    /// briefly for the key (agents' tool calls time out); otherwise, or when
+    /// the user is slower, returns the URL and leaves the page open.
+    async fn open_key_setup(&self, a: &Value) -> ToolResult {
+        let config = opt_str(a, "config")
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.started_config
+                    .lock()
+                    .map(|c| c.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_else(|| "mockingbird.yaml".into());
+        let opts = crate::keys::page_options(
+            opt_str(a, "name").as_deref(),
+            &config,
+            opt_str(a, "profile").as_deref(),
+            crate::keys::page::PAGE_TIMEOUT,
+        )?;
+        let target = json!({
+            "profile": opts.profile.as_ref().map(|t| t.profile.clone()),
+            "config": opts.profile.as_ref().map(|t| t.config.clone()),
+        });
+        let mut page = crate::keys::page::start(opts).await?;
+        let open = a.get("open").and_then(Value::as_bool).unwrap_or(true);
+        let opened = open && crate::keys::page::open_browser(&page.url);
+        if opened && let Some(saved) = page.saved_within(KEY_PAGE_WAIT).await {
+            return Ok(json!({
+                "saved": saved.name,
+                "profile": target["profile"],
+                "config": target["config"],
+            }));
+        }
+        let url = page.url.clone();
+        crate::keys::page::detach(page);
+        let detail = if opened {
+            "The page is open in the user's browser; ask them to paste the key there (or open this URL on this machine). It stays open for 10 minutes; doctor lists the key once it is saved."
+        } else {
+            "Ask the user to open this URL on this machine and paste the key there; the page stays open for 10 minutes. doctor lists the key once it is saved."
+        };
+        Ok(json!({
+            "url": url,
+            "saved": null,
+            "profile": target["profile"],
+            "config": target["config"],
+            "detail": detail,
+        }))
+    }
+
+    /// [`Self::state_for`] the tool's `config` argument.
+    fn server_state(&self, a: &Value) -> daemon::StateArgs {
+        self.state_for(opt_str(a, "config").map(PathBuf::from).as_deref())
     }
 
     /// Runs tool `name`.
@@ -794,9 +1107,10 @@ impl McpServer {
         }
         match name {
             "doctor" => {
+                let config = opt_str(a, "config").map(PathBuf::from);
                 let args = daemon::DoctorArgs {
-                    config: opt_str(a, "config").map(PathBuf::from),
-                    state: self.state(),
+                    state: self.state_for(config.as_deref()),
+                    config,
                 };
                 Ok(daemon::doctor(&args, &self.admin_url).await)
             }
@@ -852,14 +1166,17 @@ impl McpServer {
                 a, "path",
             )?))?),
             "start_server" => {
+                let config = opt_str(a, "config")
+                    .map(|c| std::env::current_dir().unwrap_or_default().join(c));
                 let args = daemon::StartArgs {
-                    state: self.state(),
-                    config: opt_str(a, "config").map(PathBuf::from),
+                    state: self.state_for(config.as_deref()),
+                    config,
                     host: None,
                     port: opt_port(a, "port")?,
                     admin_port: opt_port(a, "admin_port")?,
                     grpc_port: opt_port(a, "grpc_port")?,
                     offline: opt_bool(a, "offline"),
+                    proxy: opt_bool(a, "proxy"),
                     no_watch: false,
                     insecure_no_auth: false,
                     wait: std::time::Duration::from_secs(60).into(),
@@ -879,15 +1196,34 @@ impl McpServer {
                         )));
                     }
                 }
-                Ok(daemon::start(&args).await?)
+                let mut started = daemon::start(&args).await?;
+                if args.proxy {
+                    started["proxy_env"] = self.proxy_env(args.config.as_deref(), None)?;
+                }
+                if let (Some(config), Ok(mut recorded)) = (&args.config, self.started_config.lock())
+                {
+                    *recorded = Some(config.clone());
+                }
+                Ok(started)
             }
-            "server_status" => Ok(daemon::status(&self.state()).await?),
+            "proxy_env" => {
+                let config = opt_str(a, "config").map(PathBuf::from).or_else(|| {
+                    self.started_config
+                        .lock()
+                        .map(|c| c.clone())
+                        .unwrap_or_default()
+                });
+                self.proxy_env(config.as_deref(), opt_port(a, "port")?)
+            }
+            "open_key_setup" => self.open_key_setup(a).await,
+            "server_status" => Ok(daemon::status(&self.server_state(a)).await?),
             "server_logs" => {
                 let lines = opt_u64(a, "lines").unwrap_or(100);
-                let text = daemon::logs(&self.state(), usize::try_from(lines).unwrap_or(100))?;
+                let text =
+                    daemon::logs(&self.server_state(a), usize::try_from(lines).unwrap_or(100))?;
                 Ok(json!({ "log": text }))
             }
-            "stop_server" => Ok(daemon::stop(&self.state()).await?),
+            "stop_server" => Ok(daemon::stop(&self.server_state(a)).await?),
             "list_mocks" => self.ws(Method::GET, &["mocks"], &[], None).await,
             "get_mock" => {
                 self.ws(Method::GET, &["mocks", str_arg(a, "name")?], &[], None)
@@ -917,6 +1253,28 @@ impl McpServer {
                     .await
             }
             "import_contract" => self.import(a).await,
+            "get_draft" => {
+                let mock = str_arg(a, "mock")?;
+                let version = self.draft_version(mock, opt_u64(a, "version")).await?;
+                let view = self.get_draft(mock, version).await?;
+                draft_summary(&view, opt_str(a, "operation").as_deref())
+            }
+            "edit_draft" => self.edit_draft(a).await,
+            "approve_draft" => {
+                let mock = str_arg(a, "mock")?;
+                let version = self
+                    .draft_version(mock, opt_u64(a, "version"))
+                    .await?
+                    .to_string();
+                let activate = a.get("activate").and_then(Value::as_bool).unwrap_or(true);
+                self.ws(
+                    Method::POST,
+                    &["mocks", mock, "contracts", &version, "approve"],
+                    &[],
+                    Some(json!({ "activate": activate })),
+                )
+                .await
+            }
             "list_contract_versions" => {
                 self.ws(
                     Method::GET,
@@ -1014,10 +1372,25 @@ impl McpServer {
                         query.push((key, v));
                     }
                 }
+                if !opt_bool(a, "include_bodies") {
+                    query.push(("fields", "summary".into()));
+                }
                 self.ws(
                     Method::GET,
                     &["mocks", str_arg(a, "mock")?, "requests"],
                     &query,
+                    None,
+                )
+                .await
+            }
+            "get_request" => {
+                let id = opt_u64(a, "id")
+                    .ok_or_else(|| ToolError("missing integer argument \"id\"".into()))?
+                    .to_string();
+                self.ws(
+                    Method::GET,
+                    &["mocks", str_arg(a, "mock")?, "requests", &id],
+                    &[],
                     None,
                 )
                 .await
@@ -1104,14 +1477,141 @@ impl McpServer {
         }
     }
 
+    /// `version`, else the mock's newest draft version.
+    async fn draft_version(&self, mock: &str, version: Option<u64>) -> Result<u64, ToolError> {
+        if let Some(v) = version {
+            return Ok(v);
+        }
+        let versions = self
+            .ws(Method::GET, &["mocks", mock, "contracts"], &[], None)
+            .await?;
+        versions
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|v| v["status"] == "draft")
+            .filter_map(|v| v["version"].as_u64())
+            .max()
+            .ok_or_else(|| {
+                ToolError(format!(
+                    "mock {mock:?} has no draft; import documentation, HAR or Postman with import_contract first"
+                ))
+            })
+    }
+
+    async fn get_draft(&self, mock: &str, version: u64) -> ToolResult {
+        let version = version.to_string();
+        self.ws(
+            Method::GET,
+            &["mocks", mock, "contracts", &version, "draft"],
+            &[],
+            None,
+        )
+        .await
+    }
+
+    async fn edit_draft(&self, a: &Value) -> ToolResult {
+        let mock = str_arg(a, "mock")?;
+        let patch = a
+            .get("patch")
+            .filter(|p| p.is_object())
+            .ok_or_else(|| ToolError("patch must be a JSON object".into()))?;
+        let version = self.draft_version(mock, opt_u64(a, "version")).await?;
+        let view = self.get_draft(mock, version).await?;
+        let mut document = view["document"].clone();
+        match opt_str(a, "operation") {
+            None => json_patch::merge(&mut document, patch),
+            Some(id) => {
+                let op = draft_operation(&view, &id)?;
+                let (path, method) = (
+                    op["path"].as_str().unwrap_or_default(),
+                    op["method"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase(),
+                );
+                let target = document
+                    .get_mut("paths")
+                    .and_then(|p| p.get_mut(path))
+                    .and_then(|p| p.get_mut(&method))
+                    .ok_or_else(|| {
+                        ToolError(format!(
+                            "the draft document has no {method} {path} for operation {id:?}"
+                        ))
+                    })?;
+                json_patch::merge(target, patch);
+            }
+        }
+        let version = version.to_string();
+        let saved = client::api(
+            &self.admin_url,
+            self.token.as_deref(),
+            Some(&self.workspace),
+            Method::PUT,
+            &["mocks", mock, "contracts", &version, "draft"],
+            &[],
+            Some(json!({ "document": document })),
+        )
+        .await;
+        match saved {
+            Ok(view) => draft_summary(&view.unwrap_or_default(), None),
+            Err(ClientError::Api { status, body })
+                if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                Err(ToolError(invalid_draft(&body)))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn import(&self, a: &Value) -> ToolResult {
         let mock = str_arg(a, "mock")?.to_string();
+        let mode = match opt_str(a, "mode").as_deref() {
+            None => None,
+            Some("merge") => Some(client::ImportMode::Merge),
+            Some("replace") => Some(client::ImportMode::Replace),
+            Some(other) => {
+                return Err(ToolError(format!("mode {other:?}: use merge or replace")));
+            }
+        };
+        let urls: Vec<String> = a
+            .get("urls")
+            .and_then(Value::as_array)
+            .map(|u| {
+                u.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let given = [
+            a.get("source").is_some(),
+            a.get("content").is_some(),
+            a.get("content_base64").is_some(),
+            !urls.is_empty(),
+        ];
+        if given.iter().filter(|g| **g).count() != 1 {
+            return Err(ToolError(
+                "give exactly one of source, content, content_base64 or urls".into(),
+            ));
+        }
+        let mut more_urls = Vec::new();
         let mut scratch = None;
         let source = match (
             opt_str(a, "source"),
             opt_str(a, "content"),
             opt_str(a, "content_base64"),
         ) {
+            (None, None, None) if !urls.is_empty() => {
+                if let Some(bad) = urls.iter().find(|u| {
+                    let u = u.to_ascii_lowercase();
+                    !u.starts_with("http://") && !u.starts_with("https://")
+                }) {
+                    return Err(ToolError(format!("urls: {bad:?} is not an http(s) URL")));
+                }
+                more_urls = urls[1..].to_vec();
+                urls[0].clone()
+            }
             (Some(source), None, None) => {
                 let remote = ["http://", "https://"]
                     .iter()
@@ -1151,15 +1651,15 @@ impl McpServer {
             }
             _ => {
                 return Err(ToolError(
-                    "give exactly one of source, content or content_base64".into(),
+                    "give exactly one of source, content, content_base64 or urls".into(),
                 ));
             }
         };
         let cmd = client::ClientCommand::Import(client::ImportArgs {
             source,
-            more_urls: Vec::new(),
+            more_urls,
             no_activate: false,
-            mode: None,
+            mode,
             mock,
             activate: opt_bool(a, "activate"),
             approve: opt_bool(a, "approve"),
@@ -1181,7 +1681,7 @@ impl McpServer {
             .filter(|_| self.local_tools)
             .or_else(|| std::env::var("MB_DATA_URL").ok())
             .or_else(|| {
-                std::fs::read(self.state_dir.join("server.json"))
+                std::fs::read(self.state_for(None).state_dir.join("server.json"))
                     .ok()
                     .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                     .and_then(|v| v["data_plane"].as_str().map(String::from))
@@ -1514,7 +2014,7 @@ struct HttpState {
 }
 
 /// Equal in time independent of where the inputs differ.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -1616,6 +2116,7 @@ async fn http_post(State(st): State<HttpState>, headers: HeaderMap, body: String
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1627,7 +2128,321 @@ mod tests {
             read_only,
             local_tools: true,
             state_dir: std::env::temp_dir().join("mb-mcp-test-none"),
+            started_config: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Calls tool `name`; asserts it succeeded and parses its JSON text.
+    async fn call_tool(s: &McpServer, name: &str, args: Value) -> Value {
+        let r = s
+            .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}))
+            .await
+            .unwrap_or_default();
+        let text = r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert_eq!(r["result"]["isError"], false, "{name}: {text}");
+        serde_json::from_str(text).unwrap()
+    }
+
+    /// Calls tool `name`; asserts it failed and returns the error text.
+    async fn call_tool_error(s: &McpServer, name: &str, args: Value) -> String {
+        let r = s
+            .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}))
+            .await
+            .unwrap_or_default();
+        assert_eq!(r["result"]["isError"], true, "{name} succeeded: {r}");
+        r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// A server whose Admin API is `admin`.
+    fn against(admin: &wiremock::MockServer) -> McpServer {
+        McpServer {
+            admin_url: admin.uri(),
+            ..server(false)
+        }
+    }
+
+    const WS: &str = "/api/v1/workspaces/default";
+
+    #[tokio::test]
+    async fn list_requests_asks_for_summaries_unless_bodies_are_wanted() {
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = wiremock::MockServer::start().await;
+        let requests = format!("{WS}/mocks/m/requests");
+        Mock::given(method("GET"))
+            .and(path(requests.as_str()))
+            .and(query_param("fields", "summary"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1}])))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(requests.as_str()))
+            .and(query_param_is_missing("fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id":1,"request":{}}])))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{requests}/7")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id":7,"response":{"ok":true}})),
+            )
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let r = call_tool(&s, "list_requests", json!({"mock":"m"})).await;
+        assert_eq!(r, json!([{"id":1}]));
+        let r = call_tool(&s, "get_request", json!({"mock":"m","id":7})).await;
+        assert_eq!(r["response"]["ok"], true);
+        let r = call_tool(
+            &s,
+            "list_requests",
+            json!({"mock":"m","include_bodies":true}),
+        )
+        .await;
+        assert_eq!(r, json!([{"id":1,"request":{}}]));
+    }
+
+    fn draft_view() -> Value {
+        json!({
+            "version": 2,
+            "status": "draft",
+            "document": {
+                "openapi": "3.1.0",
+                "info": { "title": "Pets", "version": "1" },
+                "paths": {
+                    "/pets": { "get": { "operationId": "listPets", "responses": { "200": { "description": "ok" } } } },
+                    "/pets/{id}": { "get": { "operationId": "getPet", "responses": { "200": { "description": "ok" } } } }
+                }
+            },
+            "meta": {
+                "source_kind": "documentation",
+                "warnings": [
+                    { "code": "invalid_schema", "message": "x", "operation": "GET /pets/{id}" },
+                    { "code": "chunk_skipped", "message": "y", "operation": null }
+                ]
+            },
+            "operations": [
+                { "id": "listPets", "method": "GET", "path": "/pets", "summary": null, "confidence": 0.9, "edited": false, "provenance": [] },
+                { "id": "getPet", "method": "GET", "path": "/pets/{id}", "summary": null, "confidence": 0.5, "edited": false, "provenance": [] }
+            ],
+            "diff": null
+        })
+    }
+
+    /// An Admin API with mock `pets` whose versions are `versions`, and
+    /// version 2's draft.
+    async fn draft_admin(versions: Value) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pets/contracts")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(versions))
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/draft")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(draft_view()))
+            .mount(&admin)
+            .await;
+        admin
+    }
+
+    fn two_versions() -> Value {
+        json!([{"version":1,"status":"active"},{"version":2,"status":"draft"}])
+    }
+
+    #[tokio::test]
+    async fn get_draft_summarises_and_expands_one_operation() {
+        let admin = draft_admin(two_versions()).await;
+        let s = against(&admin);
+        let r = call_tool(&s, "get_draft", json!({"mock":"pets"})).await;
+        assert_eq!(r["version"], 2);
+        assert_eq!(r["source_kind"], "documentation");
+        assert_eq!(
+            r["operations"][1],
+            json!({"id":"getPet","method":"GET","path":"/pets/{id}","confidence":0.5,"warnings":["x"]})
+        );
+        assert_eq!(r["operations"][0]["warnings"], json!([]));
+        assert_eq!(
+            r["warnings"],
+            json!([{"code":"chunk_skipped","message":"y"}])
+        );
+        assert!(r.get("document").is_none());
+        let one = call_tool(&s, "get_draft", json!({"mock":"pets","operation":"getPet"})).await;
+        assert!(one["definition"]["responses"].is_object(), "{one}");
+        assert_eq!(one["warnings"], json!(["x"]));
+        let text =
+            call_tool_error(&s, "get_draft", json!({"mock":"pets","operation":"nope"})).await;
+        assert!(
+            text.contains("listPets") && text.contains("getPet"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_draft_merges_into_one_operation() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = draft_admin(two_versions()).await;
+        Mock::given(method("PUT"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/draft")))
+            .and(body_partial_json(json!({"document":{"paths":{"/pets/{id}":{"get":{"summary":"Fetch","operationId":"getPet"}}}}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(draft_view()))
+            .expect(1)
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let r = call_tool(
+            &s,
+            "edit_draft",
+            json!({"mock":"pets","operation":"getPet","patch":{"summary":"Fetch"}}),
+        )
+        .await;
+        assert_eq!(r["version"], 2);
+        assert!(r["operations"].is_array() && r.get("document").is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_draft_surfaces_an_invalid_patch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = draft_admin(two_versions()).await;
+        Mock::given(method("PUT"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/draft")))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .insert_header("content-type", "application/problem+json")
+                    .set_body_json(json!({
+                        "type": "about:blank", "title": "Invalid draft", "status": 422, "detail": "the draft does not compile",
+                        "errors": [{ "pointer": "/paths/~1pets/get/responses", "message": "required" }]
+                    })),
+            )
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let text = call_tool_error(
+            &s,
+            "edit_draft",
+            json!({"mock":"pets","operation":"listPets","patch":{"responses":null}}),
+        )
+        .await;
+        assert!(
+            text.contains("does not compile")
+                && text.contains("/paths/~1pets/get/responses")
+                && text.contains("required"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_draft_activates_by_default() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = draft_admin(two_versions()).await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/approve")))
+            .and(body_json(json!({"activate": true})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"version":2,"status":"active"})),
+            )
+            .mount(&admin)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks/pets/contracts/2/approve")))
+            .and(body_json(json!({"activate": false})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"version":2,"status":"approved"})),
+            )
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let r = call_tool(&s, "approve_draft", json!({"mock":"pets"})).await;
+        assert_eq!(r["status"], "active");
+        let r = call_tool(
+            &s,
+            "approve_draft",
+            json!({"mock":"pets","version":2,"activate":false}),
+        )
+        .await;
+        assert_eq!(r["status"], "approved");
+    }
+
+    #[tokio::test]
+    async fn draft_tools_without_a_draft_say_so() {
+        let admin = draft_admin(json!([{"version":1,"status":"active"}])).await;
+        let s = against(&admin);
+        let text = call_tool_error(&s, "get_draft", json!({"mock":"pets"})).await;
+        assert!(text.contains("has no draft"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn import_contract_takes_one_kind_of_source() {
+        let text = call_tool_error(
+            &server(false),
+            "import_contract",
+            json!({"mock":"m","source":"a.yaml","urls":["https://example.com/docs"]}),
+        )
+        .await;
+        assert!(text.contains("urls"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn proxy_env_is_local_and_lists_the_variables() {
+        let remote = McpServer {
+            local_tools: false,
+            ..server(false)
+        };
+        let names: Vec<&str> = remote.tools().iter().map(|t| t.name).collect();
+        assert!(!names.contains(&"proxy_env"));
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mockingbird.yaml");
+        std::fs::write(
+            &config,
+            format!("proxy:\n  ca_dir: {}\n", dir.path().join("ca").display()),
+        )
+        .unwrap();
+        let r = call_tool(
+            &server(false),
+            "proxy_env",
+            json!({"config": config, "port": 8899}),
+        )
+        .await;
+        assert_eq!(r["vars"]["HTTPS_PROXY"], "http://127.0.0.1:8899");
+        assert_eq!(r["vars"]["NO_PROXY"], "localhost,127.0.0.1");
+        assert_eq!(
+            PathBuf::from(r["ca_path"].as_str().unwrap()),
+            dir.path().join("ca/ca.pem")
+        );
+        assert!(
+            r["export"]
+                .as_str()
+                .unwrap()
+                .contains("export NODE_USE_ENV_PROXY='1'"),
+            "{r}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_key_setup_uses_the_started_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("svc.yaml");
+        std::fs::write(
+            &config,
+            "llm:\n  default_profile: gw\n  profiles:\n    gw:\n      base_url: https://example.com/v1\n      model: m\n      api_key: env:GW_KEY\n",
+        )
+        .unwrap();
+        let s = server(false);
+        *s.started_config.lock().unwrap() = Some(config.clone());
+        let r = call_tool(&s, "open_key_setup", json!({ "open": false })).await;
+        assert_eq!(r["profile"], "gw", "{r}");
+        assert_eq!(PathBuf::from(r["config"].as_str().unwrap()), config);
+        assert!(r["url"].as_str().unwrap().starts_with("http://127.0.0.1:"));
     }
 
     #[tokio::test]
@@ -1702,6 +2517,9 @@ mod tests {
         let names: Vec<&str> = remote.tools().iter().map(|t| t.name).collect();
         assert!(!names.contains(&"test_llm") && !names.contains(&"init_config"));
         assert!(names.contains(&"import_contract") && names.contains(&"list_mocks"));
+        for remote_tool in ["get_draft", "edit_draft", "approve_draft", "get_request"] {
+            assert!(names.contains(&remote_tool), "{remote_tool}");
+        }
         let r = remote
             .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"import_contract","arguments":{"mock":"m","source":"/etc/passwd"}}}))
             .await

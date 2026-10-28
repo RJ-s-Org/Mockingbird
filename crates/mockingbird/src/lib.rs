@@ -11,6 +11,7 @@ pub mod file_config;
 pub mod ha;
 pub mod host_guard;
 pub mod import_llm;
+pub mod keys;
 pub mod maintenance;
 pub mod mcp;
 pub mod onboard;

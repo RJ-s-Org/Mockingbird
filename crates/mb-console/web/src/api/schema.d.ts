@@ -389,6 +389,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mocks/{mock}/requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["requests_get_one_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mocks/{mock}/scenarios": {
         parameters: {
             query?: never;
@@ -854,6 +871,22 @@ export interface paths {
         };
         /** @description Server-sent events: `event: request` with one served call per event, `event: lagged` with `{"dropped": N}` when this subscriber fell behind; a keep-alive comment every 15 s. */
         get: operations["requests_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["requests_get_one"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1795,6 +1828,40 @@ export interface components {
              * @description Greater than 0, at most 100000.
              */
             requests_per_second: number;
+        };
+        /** @description One recorded request without its bodies (`fields=summary`). */
+        RequestLogSummaryView: {
+            /** Format: date-time */
+            at: string;
+            /** Format: int32 */
+            completion_tokens: number;
+            /** @description Why a `fallback` response did not use the LLM's answer. */
+            fallback_reason?: string | null;
+            /** Format: int64 */
+            id: number;
+            /** @description `http`, `graphql`, `grpc`, `soap` or `event`. */
+            kind: string;
+            /** Format: int64 */
+            latency_ms: number;
+            method: string;
+            operation_id?: string | null;
+            path: string;
+            /** Format: int32 */
+            prompt_tokens: number;
+            /**
+             * Format: int64
+             * @description Size of the stored (redacted) request as JSON.
+             */
+            request_bytes: number;
+            /**
+             * Format: int64
+             * @description Size of the stored (redacted) response as JSON; 0 without one.
+             */
+            response_bytes: number;
+            session: string;
+            source?: string | null;
+            /** Format: int32 */
+            status: number;
         };
         /** @description One recorded request, with redacted request and response bodies. */
         RequestLogView: {
@@ -3454,6 +3521,11 @@ export interface operations {
                 before?: number;
                 /** @description Request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
                 kind?: string;
+                /**
+                 * @description `summary`: entries without request and response bodies, with their
+                 *     sizes instead.
+                 */
+                fields?: string;
             };
             header?: never;
             path: {
@@ -3464,7 +3536,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Newest first */
+            /** @description Newest first; with `fields=summary`, `RequestLogSummaryView` items */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3548,6 +3620,47 @@ export interface operations {
             };
             /** @description No live feed */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    requests_get_one_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Request log id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One recorded request with its bodies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestLogView"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5723,6 +5836,11 @@ export interface operations {
                 before?: number;
                 /** @description Request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
                 kind?: string;
+                /**
+                 * @description `summary`: entries without request and response bodies, with their
+                 *     sizes instead.
+                 */
+                fields?: string;
             };
             header?: never;
             path: {
@@ -5735,7 +5853,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Newest first */
+            /** @description Newest first; with `fields=summary`, `RequestLogSummaryView` items */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5821,6 +5939,49 @@ export interface operations {
             };
             /** @description No live feed */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    requests_get_one: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Request log id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One recorded request with its bodies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestLogView"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

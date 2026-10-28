@@ -53,7 +53,11 @@ pub fn init_with(
     otlp_endpoint: Option<String>,
 ) -> anyhow::Result<TelemetryGuard> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    // Colours only on a terminal: a background server's stderr is a log
+    // file that agents read as text.
+    let fmt = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()));
 
     let endpoint = otlp_endpoint.filter(|v| !v.trim().is_empty());
     let provider = match endpoint {
