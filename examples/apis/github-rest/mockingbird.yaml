@@ -1,0 +1,54 @@
+# GitHub REST API v3: repositories, issues, pull requests, users and search,
+# with webhooks for new issues and pull requests.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/repos/fernwood-labs/trellis -H 'Host: api.github.com' -H 'Authorization: Bearer ghp_test123'
+# Contract: github-rest.openapi.yaml, a hand-written subset (see its header). The
+# full upstream spec (MIT) is pinned in example.json; fetch it with
+# `mockingbird examples init github-rest --full`.
+proxy:
+  enabled: true          # apps reach https://api.github.com through http://127.0.0.1:8888
+mocks:
+  github-rest:
+    contract: github-rest.openapi.yaml
+    route_prefix: /
+    hosts: [api.github.com]
+    persona: >-
+      GitHub.com REST API v3 as seen by Mira Okafor (login "mira-okafor", user id
+      58213947), a maintainer at "Fernwood Labs" (organization login
+      "fernwood-labs", id 91827364), a small Berlin open-source company. Its main
+      repositories are fernwood-labs/trellis (a Rust HTTP router, about 4.2k stars,
+      MIT), fernwood-labs/trellis-docs (TypeScript docs site) and
+      fernwood-labs/sprout (a Go CLI). Owners and URLs are consistent with the path:
+      url is https://api.github.com/repos/<owner>/<repo>, html_url
+      https://github.com/<owner>/<repo>, issue urls end in /issues/<number>.
+      node_id values use GitHub's prefixes (U_kgDO, R_kgDO, I_kwDO, PR_kwDO, IC_kwDO).
+      Timestamps are ISO 8601 UTC ("2024-05-14T09:21:07Z"). Issues and pull requests
+      talk about routing, middleware, docs and releases in plain English; titles,
+      bodies and labels of a create are copied from the request, state is "open"
+      and the author is mira-okafor. Counts are plausible and consistent.
+    webhooks:
+      # GitHub delivers these to your app's webhook URL; smee.io/`gh webhook forward` use the same shape.
+      - url: http://127.0.0.1:3000/api/github/webhooks
+        events: [issue.created, pull.created]
+        secret: env:GITHUB_WEBHOOK_SECRET
+        signing: hmac-sha256    # same HMAC as X-Hub-Signature-256, sent as X-Mockingbird-Signature
+    scenarios:
+      rate-limited:
+        # GitHub answers an exhausted primary rate limit with 403 (429 for secondary limits).
+        status: 403
+        set:
+          message: API rate limit exceeded for user ID 58213947. If you reach out to GitHub Support for help, please include the request ID 0C3A:3F2B:1A2B3C:1D2E3F:66A1B2C3.
+          documentation_url: https://docs.github.com/rest/overview/rate-limits-for-the-rest-api
+          status: "403"
+      not-found:
+        status: 404
+        operations: [repos/get, issues/get, pulls/get, users/get-by-username]
+        set:
+          message: Not Found
+          documentation_url: https://docs.github.com/rest/repos/repos#get-a-repository
+          status: "404"
+      outage:
+        status: 503
+        set:
+          message: Service Unavailable
+          documentation_url: https://www.githubstatus.com

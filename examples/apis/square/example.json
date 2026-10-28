@@ -1,0 +1,55 @@
+{
+  "name": "square",
+  "title": "Square",
+  "category": "payments",
+  "protocol": "openapi",
+  "summary": "Payments, refunds, customers, locations and catalog under /v2 with Square's error envelope, payment.created and customer.created webhooks, and card-declined, generic-decline, rate-limit and outage scenarios.",
+  "contracts": [
+    "square.openapi.yaml"
+  ],
+  "hosts": [
+    "connect.squareupsandbox.com",
+    "connect.squareup.com"
+  ],
+  "scenarios": [
+    "card-declined",
+    "generic-decline",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/square/connect-api-specification",
+    "license": "Apache-2.0",
+    "commit": "0689c901bdfe1ff73f47aa28b17ccd6e0c40bf2d",
+    "url": "https://raw.githubusercontent.com/square/connect-api-specification/0689c901bdfe1ff73f47aa28b17ccd6e0c40bf2d/api.json",
+    "sha256": "8f65460732e19d7445f7a34d8a9df09163db45273df5176a1cc794890ef591fb",
+    "replaces": null,
+    "notes": "api.json (release 2026-09-16, OpenAPI 3.0) is pinned for provenance but `replaces` is unset so `init --full` stays off: the file references schemas it does not define (#/components/schemas/AppFeeAllocation and CurrencyExchange; every release since 2025-10 has a similar dangling $ref), and Mockingbird refuses to compile it ('unresolvable $ref'). It also declares only 200 responses, so the scenarios' 400/402/429 would not apply to it. The subset keeps its operation ids (CreatePayment, ListCustomers, ...). Real webhooks are signed with x-square-hmacsha256-signature = base64(HMAC-SHA256(key, notification URL + body)), which Mockingbird does not produce; the example signs with hmac-sha256 instead."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "squareup",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/v2/payments",
+    "host": "connect.squareupsandbox.com",
+    "content_type": "application/json",
+    "headers": {
+      "Authorization": "Bearer EAAAEtest",
+      "Square-Version": "2026-09-16"
+    },
+    "body": {
+      "source_id": "cnon:card-nonce-ok",
+      "idempotency_key": "7b0f3ec5-086a-4871-8f13-3c81b3875218",
+      "amount_money": {
+        "amount": 450,
+        "currency": "USD"
+      }
+    },
+    "status": 200,
+    "expect": "\"payment\""
+  }
+}

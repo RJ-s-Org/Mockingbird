@@ -55,3 +55,25 @@ Compare runs on the same machine only, with nothing else busy. When you change t
 ## LLM quality
 
 `mb-evals run` measures the generation pipeline against a real provider (schema-valid, repair and fallback rates, and p95 latency per contract). It runs weekly in CI (Mondays) (`.github/workflows/evals.yml`) and fails when a rate crosses its threshold; see `mb-evals run --help`.
+
+## Latency against a real LLM
+
+[`scripts/trial-bench.py`](../scripts/trial-bench.py) measures what an app waits for: it serves the field-trial contracts (GitHub REST and GraphQL, TMDB, Stripe) with `mockingbird serve` and a real provider, sends each case in fresh sessions (no cache), then once more as a repeat, and prints p50, max, sources and per-case checks. It needs the `mockingbird-trials` checkout and `OPENROUTER_API_KEY`:
+
+```sh
+cargo build --release -p mockingbird
+scripts/trial-bench.py --trials ../mockingbird-trials --runs 5
+```
+
+OpenRouter `deepseek/deepseek-v4.1-flash`, 2026-10-28, 3 runs before and 5 after the output budget, cached fallbacks, per-field GraphQL state and reasoning off ([#57](https://github.com/RJ-s-Org/Mockingbird/pull/57)):
+
+| Case | p50 before | p50 after | max after | Sources after | Repeat after |
+| --- | ---: | ---: | ---: | --- | --- |
+| GitHub `search/commits` | 29.8 s | 9.4 s | 29.0 s | llm 5 | cache, 0.01 s |
+| GitHub GraphQL stats | 1.7 s | 0.8 s | 1.4 s | llm 5 | cache |
+| GitHub GraphQL pin (2 root fields) | 2.4 s | 1.2 s | 3.0 s | llm 5 | cache (was a new LLM call) |
+| TMDB movie detail, all `append_to_response` parts | 51.0 s | 6.2 s | 14.9 s | llm 2, patched 3 | cache |
+| TMDB popular | 15.3 s | 7.8 s | 19.6 s | llm 5 | cache |
+| Stripe create PaymentIntent | 3.5 s | 1.7 s | 2.9 s | llm 4, patched 1 | n/a (a create) |
+
+Provider latency varies run to run by 2–3×, so compare p50s from runs on the same day.

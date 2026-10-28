@@ -74,7 +74,7 @@ An HTTP proxy that lets unmodified apps reach mocks by their real host names: it
 | `proxy.host` | IP address | `127.0.0.1` | Off loopback, `proxy.unmapped` must be `block` | | The proxy's bind address. Off loopback anyone who reaches the port can use it, so `pass` (an open relay) is refused there. |
 | `proxy.port` | port | `8888` | | `--proxy-port` | The proxy's port. |
 | `proxy.unmapped` | `pass`, `block` | `pass` | | | What happens to a host no mock claims: `pass` tunnels it to the real host; `block` answers 502 problem+json naming the host. Each such host is logged once. |
-| `proxy.images` | list of strings | `[]` | Lowercase host names, no port | | Hosts answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment, else 300×450). |
+| `proxy.images` | list of strings | `[]` | A host name (no port), optionally followed by a path prefix: `image.tmdb.org`, `movies-proxy.vercel.app/ipx` | | Requests answered with a generated placeholder PNG (a solid colour from the path; size from a `w123` path segment or an ipx-style `s_400x600`/`w_400` modifier, else 300×450). A path prefix scopes it to part of a host a mock serves, e.g. an image endpoint the browser fetches. |
 | `proxy.ca_dir` | path | `~/.mockingbird/ca` | Relative to the config file | `MB_CA_DIR` | Where the local CA (`ca.pem`, `ca.key`) is kept; created on first use, never installed system-wide. |
 
 ## `limits`
@@ -87,6 +87,7 @@ Global admission limits. Per-mock limits are under [`mocks.<name>.limits`](#mock
 | `limits.max_concurrent_generations` | integer | `64` | 1..=4096 | | LLM generations running at once across every mock on the node. A call that gets no slot within its LLM timeout is served by the faker (`mb_generation_queue_timeouts_total`). |
 | `limits.max_request_bytes` | integer (bytes) | `1048576` | 1024..=67108864 | | Larger request bodies are answered 413 and recorded. |
 | `limits.max_response_bytes` | integer (bytes) | `1048576` | 1024..=16777216 | | Larger generated responses are replaced by faker output. |
+| `limits.output_budget_tokens` | integer (tokens) | `1500` | 0, or 100..=100000 | | Completion tokens the LLM is asked to write per answer. When a response schema's estimated answer is larger, the LLM writes a shorter one: optional object and array members the request does not name (such as `append_to_response` sub-resources it did not ask for) are left out, arrays get a `maxItems`, and then required objects below the top level are left out and filled by the faker. Output tokens set latency, so this trades a little fidelity on big pages (GitHub search, TMDB details) for answers in seconds. `0` turns it off. |
 
 ## `pii`
 
@@ -164,7 +165,7 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles.<name>.fallback` | string | unset | A profile name | | Profile tried when this one's provider fails. |
 | `llm.profiles.<name>.headers` | map | `{}` | Lowercase header names; not `authorization`, `content-type`, `content-length`, `host` or `transfer-encoding` | | Extra request headers sent to the provider, such as Cloudflare AI Gateway's `cf-aig-authorization` or Azure OpenAI's `api-key`. A value may embed secret references as `${env:NAME}` or `${file:/path}` (`Bearer ${env:CF_AIG_API_KEY}`); a header whose name contains `auth`, `key`, `token`, `secret`, `password` or `cookie` must use one. Through the Admin API each reference must match `server.api_secret_refs`, and only a sysadmin may set them. |
 | `llm.profiles.<name>.headers.<name>` | string | | | | One header value. |
-| `llm.profiles.<name>.extra_body` | map | `{}` | Not `model`, `messages`, `response_format`, `temperature`, `max_tokens` or `stream`; at most 8 KiB as JSON | | JSON merged into every request body, such as OpenRouter's `provider` routing or `reasoning` settings (`{reasoning: {enabled: false}}`). |
+| `llm.profiles.<name>.extra_body` | map | `{}` | Not `model`, `messages`, `response_format`, `temperature`, `max_tokens` or `stream`; at most 8 KiB as JSON | | JSON merged into every request body, such as OpenRouter's `provider` routing or `reasoning` settings. Requests to `openrouter.ai` send `reasoning: {enabled: false}` unless this sets `reasoning` (hidden reasoning was most of a large answer's tokens and latency); a model that rejects it is asked again without it. |
 
 `--offline` serves every mock with the faker and makes no LLM calls.
 
@@ -233,6 +234,9 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.workspace` | string | `default` | | | Workspace (created if missing). |
 | `mocks.<name>.contract` | path | required | Relative to the config file | | OpenAPI 3.x, Swagger 2.0, GraphQL SDL, protobuf, WSDL 1.1 or AsyncAPI 2.x/3.0 contract. |
 | `mocks.<name>.route_prefix` | path | `/<name>` | | | Where the mock is mounted on the data plane. |
+| `mocks.<name>.path_rewrite` | map | unset | `strip_prefix`, `add_prefix` | | Rewrites the path below `route_prefix` before it is matched against the contract (see [the proxy guide](proxy.md#one-contract-under-another-host-and-path)). |
+| `mocks.<name>.path_rewrite.strip_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Removed from the front of the path below `route_prefix` (at a segment boundary) before the contract sees it. |
+| `mocks.<name>.path_rewrite.add_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Put in front of the path below `route_prefix` (after `strip_prefix`). Mounts a contract under another base path: TMDB's `/3/...` contract at `movies-proxy.vercel.app/tmdb/...` with `route_prefix: /tmdb` and `add_prefix: /3`. |
 | `mocks.<name>.hosts` | list of strings | `[]` | Lowercase host names, no port | | Hosts the mock answers for (by `Host`, e.g. through `mockingbird proxy`). With hosts, two mocks may share a route prefix; a mock with hosts is not reached under other hosts. |
 | `mocks.<name>.persona` | string | unset | | | Free text added to every prompt (locale, realism, style). |
 | `mocks.<name>.llm_profile` | string | `llm.default_profile` | | | LLM profile. |

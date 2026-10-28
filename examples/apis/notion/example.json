@@ -1,0 +1,45 @@
+{
+  "name": "notion",
+  "title": "Notion",
+  "category": "productivity",
+  "protocol": "openapi",
+  "summary": "Pages, block children, data source and database queries, search and the bot user, with the Notion-Version header, page webhooks, and not-found, validation, rate-limit and outage scenarios.",
+  "contracts": [
+    "notion.openapi.yaml"
+  ],
+  "hosts": [
+    "api.notion.com"
+  ],
+  "scenarios": [
+    "object-not-found",
+    "validation-error",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/makenotion/notion-mcp-server",
+    "license": "MIT",
+    "commit": "6abe1cd16f44ca75d1771f7e7c0b29c3c595ad9f",
+    "url": "https://raw.githubusercontent.com/makenotion/notion-mcp-server/6abe1cd16f44ca75d1771f7e7c0b29c3c595ad9f/scripts/notion-openapi.json",
+    "sha256": "d33548174dfc6ebad012fc73b1483532c7887d8c97fd6deb62d56c742e96baba",
+    "replaces": "notion.openapi.yaml",
+    "notes": "Notion's own OpenAPI 3.1 description (API version 2025-09-03, 24 operations), kept in its MCP server repository. Its page, block and query answers are untyped objects and it has no POST /v1/databases/{database_id}/query, so the hand-written subset gives richer offline answers."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "notion-client",
+    "verified": true
+  },
+  "smoke": {
+    "method": "GET",
+    "path": "/v1/users/me",
+    "host": "api.notion.com",
+    "headers": {
+      "Authorization": "Bearer ntn_test_123",
+      "Notion-Version": "2025-09-03"
+    },
+    "status": 200,
+    "expect": "\"bot\""
+  }
+}

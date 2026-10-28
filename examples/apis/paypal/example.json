@@ -1,0 +1,58 @@
+{
+  "name": "paypal",
+  "title": "PayPal",
+  "category": "payments",
+  "protocol": "openapi",
+  "summary": "OAuth 2.0 client-credentials tokens, Orders v2 (create, confirm, authorize, capture) and Payments v2 refunds, with order and capture webhooks and instrument-declined, rate-limit and outage scenarios.",
+  "contracts": [
+    "paypal-orders.openapi.yaml",
+    "paypal-payments.openapi.yaml",
+    "paypal-oauth.openapi.yaml"
+  ],
+  "hosts": [
+    "api-m.sandbox.paypal.com",
+    "api-m.paypal.com"
+  ],
+  "scenarios": [
+    "instrument-declined",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/paypal/paypal-rest-api-specifications",
+    "license": "Apache-2.0",
+    "commit": "90e8041ffe02d80c452d2b476bedd59a8d219bdc",
+    "url": "https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02d80c452d2b476bedd59a8d219bdc/openapi/checkout_orders_v2.json",
+    "sha256": "14db0b9e0d7440e38595b823724599edc7ab8b7a2b41ac442463e81b7d477fd6",
+    "replaces": "paypal-orders.openapi.yaml",
+    "notes": "Only the Orders v2 spec is pinned (one upstream file per example); Payments v2 is openapi/payments_payment_v2.json in the same repository and keeps its operation ids in paypal-payments.openapi.yaml. PayPal publishes no OpenAPI file for /v1/oauth2/token. The upstream Orders spec declares no 429 and no webhooks, and its loose id patterns (^[\\S\\s]*$) make offline answers unreadable; it is best used with an LLM. Real webhooks are verified with PAYPAL-TRANSMISSION-SIG (certificate signature over transmission id, time, webhook id and the body's CRC32), which Mockingbird does not produce; the example signs with hmac-sha256 instead."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "paypal-server-sdk",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/v2/checkout/orders",
+    "host": "api-m.sandbox.paypal.com",
+    "content_type": "application/json",
+    "headers": {
+      "Authorization": "Bearer A21AAtest"
+    },
+    "body": {
+      "intent": "CAPTURE",
+      "purchase_units": [
+        {
+          "amount": {
+            "currency_code": "USD",
+            "value": "42.00"
+          }
+        }
+      ]
+    },
+    "status": 201,
+    "expect": "\"purchase_units\""
+  }
+}

@@ -385,6 +385,32 @@ async fn llm_create_reflects_request_body() {
     assert_eq!(body["total"], 10);
 }
 
+/// Only request members the response schema declares are copied into the
+/// answer: Twilio's `To`/`Body` beside the schema's `to`/`body`, or a
+/// credential sent in the body, never reach the response.
+#[tokio::test]
+async fn create_echoes_only_declared_request_fields() {
+    let bundle = orders();
+    let op = bundle.operation("createOrder").unwrap();
+    let mut c = call("createOrder");
+    c.path_params.clear();
+    c.body = Some(json!({
+        "customerId": "c1", "total": 10, "note": "leave at the door",
+        "secret": "sk_test_123", "Body": "hi"
+    }));
+    let (_p, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(body["customerId"], "c1", "{body}");
+    assert_eq!(body["note"], "leave at the door", "{body}");
+    assert!(body.get("secret").is_none(), "{body}");
+    assert!(body.get("Body").is_none(), "{body}");
+    let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(body["customerId"], "c1", "{body}");
+    assert!(body.get("secret").is_none(), "{body}");
+}
+
 #[tokio::test]
 async fn update_keeps_identity_and_applies_body() {
     let bundle = orders();
@@ -672,6 +698,22 @@ async fn array_wrapped_in_an_object_is_unwrapped() {
     assert_eq!(provider.requests().len(), 1, "no repair call");
 }
 
+/// Asked for a list, models sometimes answer one item: it is the list's
+/// only item, not a reason to repair.
+#[tokio::test]
+async fn a_single_item_for_a_list_is_wrapped() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let (provider, engine) = scripted(vec![Ok(valid_order().to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(json!([valid_order()])));
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+}
+
 #[tokio::test]
 async fn fallback_records_its_reason() {
     let bundle = orders();
@@ -877,6 +919,25 @@ async fn answer_wrapped_like_a_graphql_response_is_unwrapped() {
     assert_eq!(provider.requests().len(), 1, "no repair call");
 }
 
+/// Models answering like a GraphQL server also send `"errors": null`
+/// beside `data` (seen on GitHub's `createIssue`).
+#[tokio::test]
+async fn graphql_envelope_with_null_errors_is_unwrapped() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "data": {"order": valid_order_at_o1()}, "errors": null, "extensions": null
+    })
+    .to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(valid_order_at_o1()));
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+}
+
 /// A part whose schema allows null may be left out of the joint answer
 /// (models drop the fields they mean as null), and the joint answer may come
 /// wrapped in a GraphQL `data` envelope.
@@ -943,7 +1004,7 @@ async fn nulls_with_other_errors_still_ask_for_a_repair() {
     let op = bundle.operation("getOrder").unwrap();
     let mut answer = valid_order_at_o1();
     answer["category"] = Value::Null;
-    answer["total"] = json!(-1);
+    answer["total"] = json!("forty-two");
     let (provider, engine) = scripted(vec![
         Ok(answer.to_string()),
         Ok(valid_order_at_o1().to_string()),
@@ -1140,6 +1201,38 @@ paths:
             .is_match(&path),
         "{path}"
     );
+}
+
+/// A number outside `minimum`/`maximum` (a negative balance where the
+/// schema says `minimum: 0`) is refilled locally like a pattern error.
+#[tokio::test]
+async fn range_errors_are_patched_without_a_repair_call() {
+    let bundle = inline(
+        r#"
+openapi: 3.1.0
+info: {title: Accounts, version: "1"}
+paths:
+  /accounts/{id}:
+    get:
+      operationId: getAccount
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object, required: [current, percent], properties: {current: {type: number, minimum: 0}, percent: {type: integer, maximum: 100}}}}}}
+"#,
+    );
+    let op = bundle.operation("getAccount").unwrap();
+    let (provider, engine) = scripted(vec![Ok(
+        json!({"current": -342.87, "percent": 140}).to_string()
+    )]);
+    let out = engine
+        .generate(&bundle, op, &OperationCall::default(), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out.source, Source::Repaired);
+    let body = out.body.unwrap();
+    assert!(body["current"].as_f64().unwrap() >= 0.0, "{body}");
+    assert!(body["percent"].as_i64().unwrap() <= 100, "{body}");
 }
 
 #[tokio::test]

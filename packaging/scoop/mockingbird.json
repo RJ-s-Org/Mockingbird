@@ -1,0 +1,28 @@
+{
+    "version": "0.1.0-rc.1",
+    "description": "LLM-backed API mocks for every protocol, stateful, with a zero-edit proxy",
+    "homepage": "https://github.com/RJ-s-Org/Mockingbird",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/RJ-s-Org/Mockingbird/releases/download/v0.1.0-rc.1/mockingbird-0.1.0-rc.1-x86_64-pc-windows-msvc.zip",
+            "hash": "5d8e0c5bcd1590e5e20002a6f5c3888b5dd16c5f3eb452672378e0760de85766",
+            "extract_dir": "mockingbird-0.1.0-rc.1-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": "mockingbird.exe",
+    "checkver": {
+        "github": "https://github.com/RJ-s-Org/Mockingbird"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/RJ-s-Org/Mockingbird/releases/download/v$version/mockingbird-$version-x86_64-pc-windows-msvc.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                },
+                "extract_dir": "mockingbird-$version-x86_64-pc-windows-msvc"
+            }
+        }
+    }
+}

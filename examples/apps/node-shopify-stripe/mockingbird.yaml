@@ -1,0 +1,26 @@
+# Shopify Admin GraphQL and Stripe, from the API examples, for the storefront's tests.
+#   STRIPE_WEBHOOK_SECRET=whsec_local mockingbird serve -c mockingbird.yaml --offline
+proxy:
+  enabled: true
+protocols:
+  graphql:
+    path: /graphql.json
+mocks:
+  shopify-admin:
+    contract: ../../apis/shopify-admin-graphql/shopify-admin.graphql
+    route_prefix: /admin/api/2026-10
+    hosts: [juniper-plants.myshopify.com]
+    persona: >-
+      Shopify Admin GraphQL API for "Juniper Plants", a Portland houseplant store.
+      Products are plants and pots with prices like "34.00" USD. Ids are
+      "gid://shopify/<Type>/<13 digits>".
+  stripe:
+    contract: ../../apis/stripe/stripe.openapi.yaml
+    route_prefix: /
+    hosts: [api.stripe.com]
+    persona: Stripe API in test mode for Juniper Plants; amounts are copied from the request.
+    webhooks:
+      - url: http://127.0.0.1:3000/stripe/webhook
+        events: [payment_intent.created]
+        secret: env:STRIPE_WEBHOOK_SECRET
+        signing: stripe

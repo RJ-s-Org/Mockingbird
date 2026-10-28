@@ -1,0 +1,47 @@
+{
+  "name": "plaid",
+  "title": "Plaid",
+  "category": "fintech",
+  "protocol": "openapi",
+  "summary": "Link tokens, public token exchange, accounts, Auth, Identity and Transactions sync over Plaid's POST-JSON API, with a SYNC_UPDATES_AVAILABLE webhook and item-login-required, rate-limit and outage scenarios.",
+  "contracts": [
+    "plaid.openapi.yaml"
+  ],
+  "hosts": [
+    "sandbox.plaid.com",
+    "production.plaid.com"
+  ],
+  "scenarios": [
+    "item-login-required",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/plaid/plaid-openapi",
+    "license": "unknown",
+    "commit": "f17afda277d3b8d9ee320316e0356270909a1f11",
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Plaid publishes 2020-09-14.yml (OpenAPI 3.0, about 3.3 MB) but the repository has no LICENSE file and GitHub reports no license; the spec's info block only links Plaid's terms of service. It is not pinned for download. Its operation ids (linkTokenCreate, accountsGet, ...) are kept in the subset. Real webhooks are signed with an ES256 JWT in the Plaid-Verification header, which Mockingbird does not produce; the example signs with hmac-sha256 instead."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "plaid-python",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/accounts/get",
+    "host": "sandbox.plaid.com",
+    "content_type": "application/json",
+    "body": {
+      "client_id": "test_client_id",
+      "secret": "test_secret",
+      "access_token": "access-sandbox-de3ce8ef-33f8-452c-a685-8671031fc0f6"
+    },
+    "status": 200,
+    "expect": "\"accounts\""
+  }
+}

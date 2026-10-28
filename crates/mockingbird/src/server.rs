@@ -86,7 +86,7 @@ pub async fn run_with(
     cfg.server
         .check_bind(&cfg.auth)
         .map_err(ServeError::Usage)?;
-    if missing_env_api_key(&cfg, args.offline) {
+    if missing_env_api_key(&cfg, args.offline || crate::config::replay_only(&args)) {
         return Err(ServeError::Usage(
             "MB_LLM_API_KEY is not set (use --offline for faker-only mode)".into(),
         ));
@@ -123,6 +123,15 @@ pub async fn run_with(
         _ => None,
     };
     tracing::info!(role = role.as_str(), "starting");
+    if let Some(path) = &args.config
+        && !args.watch
+        && role != Role::Data
+    {
+        tracing::info!(
+            config = %path.display(),
+            "config file read once: edits need a restart (--watch reloads them)"
+        );
+    }
     let (scheme, grpc_mode) = match app.tls {
         Some(_) => ("https", "TLS"),
         None => ("http", "h2c"),

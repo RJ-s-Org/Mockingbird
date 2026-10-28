@@ -1,0 +1,667 @@
+# A hand-written subset of the Notion API (pages, blocks, data source and
+# database queries, search, the bot user), written for Mockingbird's examples and
+# covered by its license. Operation ids and paths follow Notion's own OpenAPI
+# description, published MIT-licensed in
+#   https://github.com/makenotion/notion-mcp-server (scripts/notion-openapi.json)
+# whose response schemas are left open; the shapes here follow the reference at
+# https://developers.notion.com/reference. `mockingbird examples init notion --full`
+# swaps this file for that spec at the commit pinned in example.json.
+# POST /v1/databases/{database_id}/query (Notion-Version 2022-06-28) is not in it.
+openapi: 3.1.0
+info:
+  title: Notion API (Mockingbird example subset)
+  version: "2025-09-03"
+servers:
+  - url: https://api.notion.com
+security:
+  - bearerAuth: []
+paths:
+  /v1/users/me:
+    get:
+      operationId: get-self
+      summary: The bot user of the integration's token.
+      parameters:
+        - $ref: "#/components/parameters/notionVersion"
+      responses:
+        "200":
+          description: The bot user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BotUser" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/search:
+    post:
+      operationId: post-search
+      summary: Pages and data sources shared with the integration whose title matches query.
+      parameters:
+        - $ref: "#/components/parameters/notionVersion"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query: { type: string }
+                filter:
+                  type: object
+                  properties:
+                    property: { type: string, const: object }
+                    value: { type: string, enum: [page, data_source] }
+                sort:
+                  type: object
+                  properties:
+                    direction: { type: string, enum: [ascending, descending] }
+                    timestamp: { type: string, const: last_edited_time }
+                start_cursor: { type: string }
+                page_size: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: A page of results.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListBase"
+                  - type: object
+                    required: [results, type, page_or_data_source]
+                    properties:
+                      results: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/Page" } }
+                      type: { type: string, const: page_or_data_source }
+                      page_or_data_source: { type: object, additionalProperties: false }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/pages:
+    post:
+      operationId: post-page
+      summary: Create a page under a page or in a data source.
+      parameters:
+        - $ref: "#/components/parameters/notionVersion"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent]
+              properties:
+                parent: { $ref: "#/components/schemas/Parent" }
+                properties: { type: object, additionalProperties: true }
+                children: { type: array, maxItems: 100, items: { type: object } }
+                icon: { $ref: "#/components/schemas/Icon" }
+                cover: { type: [object, "null"] }
+      responses:
+        "200":
+          description: The new page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/pages/{page_id}:
+    parameters:
+      - $ref: "#/components/parameters/notionVersion"
+      - { name: page_id, in: path, required: true, schema: { $ref: "#/components/schemas/Id" } }
+    get:
+      operationId: retrieve-a-page
+      responses:
+        "200":
+          description: The page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    patch:
+      operationId: patch-page
+      summary: Update a page's properties, icon or cover, or move it to the trash.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                properties: { type: object, additionalProperties: true }
+                in_trash: { type: boolean }
+                archived: { type: boolean }
+                icon: { $ref: "#/components/schemas/Icon" }
+                cover: { type: [object, "null"] }
+      responses:
+        "200":
+          description: The updated page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/blocks/{block_id}/children:
+    parameters:
+      - $ref: "#/components/parameters/notionVersion"
+      - { name: block_id, in: path, required: true, description: A block or page id., schema: { $ref: "#/components/schemas/Id" } }
+    get:
+      operationId: get-block-children
+      parameters:
+        - { name: start_cursor, in: query, schema: { type: string } }
+        - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: A page of child blocks.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BlockList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    patch:
+      operationId: patch-block-children
+      summary: Append blocks to a block or page.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [children]
+              properties:
+                children: { type: array, maxItems: 100, items: { type: object } }
+                after: { $ref: "#/components/schemas/Id" }
+      responses:
+        "200":
+          description: The appended blocks.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BlockList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/data_sources/{data_source_id}/query:
+    post:
+      operationId: query-data-source
+      summary: Pages of a data source matching a filter, sorted (Notion-Version 2025-09-03).
+      parameters:
+        - $ref: "#/components/parameters/notionVersion"
+        - { name: data_source_id, in: path, required: true, schema: { $ref: "#/components/schemas/Id" } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "200":
+          description: A page of results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PageList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/databases/{database_id}/query:
+    post:
+      operationId: post-database-query
+      deprecated: true
+      summary: Pages of a database (Notion-Version 2022-06-28; newer versions query its data source).
+      parameters:
+        - $ref: "#/components/parameters/notionVersion"
+        - { name: database_id, in: path, required: true, schema: { $ref: "#/components/schemas/Id" } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueryRequest" }
+      responses:
+        "200":
+          description: A page of results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PageList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/databases/{database_id}:
+    get:
+      operationId: retrieve-a-database
+      summary: A database and its data sources.
+      parameters:
+        - $ref: "#/components/parameters/notionVersion"
+        - { name: database_id, in: path, required: true, schema: { $ref: "#/components/schemas/Id" } }
+      responses:
+        "200":
+          description: The database.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Database" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+webhooks:
+  page.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEvent"
+                - type: object
+                  properties:
+                    type: { type: string, const: page.created }
+      responses:
+        "200": { description: Acknowledged. }
+  page.updated:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WebhookEvent"
+                - type: object
+                  properties:
+                    type: { type: string, const: page.properties_updated }
+                    data:
+                      type: object
+                      properties:
+                        updated_properties: { type: array, maxItems: 2, items: { type: string, enum: [title, "Q%5Ex", "%3AUPp", "zMn~"] } }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An integration token (ntn_...) or an OAuth access token.
+  parameters:
+    notionVersion:
+      name: Notion-Version
+      in: header
+      required: true
+      description: The API version, e.g. 2025-09-03 (current) or 2022-06-28.
+      schema: { type: string, enum: ["2025-09-03", "2022-06-28"] }
+  responses:
+    BadRequest:
+      description: A malformed body or parameter (validation_error, invalid_json, missing_version, ...).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: The bearer token is not valid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such object, or it is not shared with the integration.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: The data was changed by another request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: Notion is unavailable or the request took longer than 60 seconds.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: More than an average of three requests per second; Retry-After says how long to wait.
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Id:
+      type: string
+      format: uuid
+      description: A UUID; Notion also accepts it without dashes.
+    Error:
+      type: object
+      required: [object, status, code, message, request_id]
+      properties:
+        object: { type: string, const: error }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        code:
+          type: string
+          enum: [invalid_json, invalid_request_url, invalid_request, validation_error, missing_version, unauthorized, restricted_resource, object_not_found, conflict_error, rate_limited, internal_server_error, service_unavailable]
+        message: { type: string }
+        request_id: { type: string, format: uuid }
+    PartialUser:
+      type: object
+      required: [object, id]
+      properties:
+        object: { type: string, const: user }
+        id: { $ref: "#/components/schemas/Id" }
+    BotUser:
+      type: object
+      required: [object, id, type, name, avatar_url, bot, request_id]
+      properties:
+        object: { type: string, const: user }
+        id: { $ref: "#/components/schemas/Id" }
+        type: { type: string, const: bot }
+        name: { type: string }
+        avatar_url: { type: "null" }
+        bot:
+          type: object
+          required: [owner, workspace_name]
+          properties:
+            owner:
+              type: object
+              required: [type, workspace]
+              properties:
+                type: { type: string, const: workspace }
+                workspace: { type: boolean, const: true }
+            workspace_name: { type: string }
+            workspace_limits:
+              type: object
+              properties:
+                max_file_upload_size_in_bytes: { type: integer, const: 5368709120 }
+        request_id: { type: string, format: uuid }
+    Parent:
+      oneOf:
+        - type: object
+          required: [type, page_id]
+          properties:
+            type: { type: string, const: page_id }
+            page_id: { $ref: "#/components/schemas/Id" }
+        - type: object
+          required: [type, data_source_id]
+          properties:
+            type: { type: string, const: data_source_id }
+            data_source_id: { $ref: "#/components/schemas/Id" }
+            database_id: { $ref: "#/components/schemas/Id" }
+        - type: object
+          required: [type, database_id]
+          properties:
+            type: { type: string, const: database_id }
+            database_id: { $ref: "#/components/schemas/Id" }
+    Icon:
+      type: [object, "null"]
+      required: [type, emoji]
+      properties:
+        type: { type: string, const: emoji }
+        emoji: { type: string, enum: ["🚀", "📝", "✅", "🎨", "📅"] }
+    RichText:
+      type: object
+      required: [type, text, annotations, plain_text, href]
+      properties:
+        type: { type: string, const: text }
+        text:
+          type: object
+          required: [content, link]
+          properties:
+            content: { type: string }
+            link: { type: "null" }
+        annotations:
+          type: object
+          required: [bold, italic, strikethrough, underline, code, color]
+          properties:
+            bold: { type: boolean }
+            italic: { type: boolean, const: false }
+            strikethrough: { type: boolean, const: false }
+            underline: { type: boolean, const: false }
+            code: { type: boolean, const: false }
+            color: { type: string, const: default }
+        plain_text: { type: string }
+        href: { type: "null" }
+    PageProperties:
+      type: object
+      description: The properties of a page in the "Launch Tracker" data source; a page under another page has only title.
+      required: [Name]
+      additionalProperties: true
+      properties:
+        Name:
+          type: object
+          required: [id, type, title]
+          properties:
+            id: { type: string, const: title }
+            type: { type: string, const: title }
+            title: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/RichText" } }
+        Status:
+          type: object
+          required: [id, type, status]
+          properties:
+            id: { type: string, const: "Q%5Ex" }
+            type: { type: string, const: status }
+            status:
+              type: object
+              required: [id, name, color]
+              properties:
+                id: { type: string, pattern: "^[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}$" }
+                name: { type: string, enum: [Not started, In progress, Blocked, Done] }
+                color: { type: string, enum: [default, blue, red, green] }
+        Due:
+          type: object
+          required: [id, type, date]
+          properties:
+            id: { type: string, const: "%3AUPp" }
+            type: { type: string, const: date }
+            date:
+              type: [object, "null"]
+              required: [start, end, time_zone]
+              properties:
+                start: { type: string, format: date }
+                end: { type: "null" }
+                time_zone: { type: "null" }
+        Priority:
+          type: object
+          required: [id, type, select]
+          properties:
+            id: { type: string, const: "zMn~" }
+            type: { type: string, const: select }
+            select:
+              type: [object, "null"]
+              required: [id, name, color]
+              properties:
+                id: { type: string, pattern: "^[A-Za-z0-9]{4}$" }
+                name: { type: string, enum: [P0, P1, P2] }
+                color: { type: string, enum: [red, orange, gray] }
+    Page:
+      type: object
+      required: [object, id, created_time, last_edited_time, created_by, last_edited_by, cover, icon, parent, archived, in_trash, properties, url, public_url]
+      properties:
+        object: { type: string, const: page }
+        id: { $ref: "#/components/schemas/Id" }
+        created_time: { type: string, format: date-time, description: ISO 8601, minute precision (seconds are 00). }
+        last_edited_time: { type: string, format: date-time }
+        created_by: { $ref: "#/components/schemas/PartialUser" }
+        last_edited_by: { $ref: "#/components/schemas/PartialUser" }
+        cover: { type: "null" }
+        icon: { $ref: "#/components/schemas/Icon" }
+        parent: { $ref: "#/components/schemas/Parent" }
+        archived: { type: boolean, const: false }
+        in_trash: { type: boolean, const: false }
+        is_locked: { type: boolean, const: false }
+        properties: { $ref: "#/components/schemas/PageProperties" }
+        url: { type: string, pattern: "^https://www\\.notion\\.so/(Launch-checklist|Brand-refresh|Client-kickoff|Sprint-review)-[0-9a-f]{32}$" }
+        public_url: { type: "null" }
+        request_id: { type: string, format: uuid }
+    ListBase:
+      type: object
+      required: [object, next_cursor, has_more, request_id]
+      properties:
+        object: { type: string, const: list }
+        next_cursor: { oneOf: [{ $ref: "#/components/schemas/Id" }, { type: "null" }] }
+        has_more: { type: boolean }
+        request_id: { type: string, format: uuid }
+    PageList:
+      allOf:
+        - $ref: "#/components/schemas/ListBase"
+        - type: object
+          required: [results, type, page_or_data_source]
+          properties:
+            results: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/Page" } }
+            type: { type: string, const: page_or_data_source }
+            page_or_data_source: { type: object, additionalProperties: false }
+    BlockBase:
+      type: object
+      required: [object, id, parent, created_time, last_edited_time, created_by, last_edited_by, has_children, archived, in_trash]
+      properties:
+        object: { type: string, const: block }
+        id: { $ref: "#/components/schemas/Id" }
+        parent:
+          type: object
+          required: [type, page_id]
+          properties:
+            type: { type: string, const: page_id }
+            page_id: { $ref: "#/components/schemas/Id" }
+        created_time: { type: string, format: date-time }
+        last_edited_time: { type: string, format: date-time }
+        created_by: { $ref: "#/components/schemas/PartialUser" }
+        last_edited_by: { $ref: "#/components/schemas/PartialUser" }
+        has_children: { type: boolean, const: false }
+        archived: { type: boolean, const: false }
+        in_trash: { type: boolean, const: false }
+    Block:
+      oneOf:
+        - allOf:
+            - $ref: "#/components/schemas/BlockBase"
+            - type: object
+              required: [type, paragraph]
+              properties:
+                type: { type: string, const: paragraph }
+                paragraph:
+                  type: object
+                  required: [rich_text, color]
+                  properties:
+                    rich_text: { type: array, minItems: 1, maxItems: 2, items: { $ref: "#/components/schemas/RichText" } }
+                    color: { type: string, const: default }
+        - allOf:
+            - $ref: "#/components/schemas/BlockBase"
+            - type: object
+              required: [type, heading_2]
+              properties:
+                type: { type: string, const: heading_2 }
+                heading_2:
+                  type: object
+                  required: [rich_text, color, is_toggleable]
+                  properties:
+                    rich_text: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/RichText" } }
+                    color: { type: string, const: default }
+                    is_toggleable: { type: boolean, const: false }
+        - allOf:
+            - $ref: "#/components/schemas/BlockBase"
+            - type: object
+              required: [type, to_do]
+              properties:
+                type: { type: string, const: to_do }
+                to_do:
+                  type: object
+                  required: [rich_text, checked, color]
+                  properties:
+                    rich_text: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/RichText" } }
+                    checked: { type: boolean }
+                    color: { type: string, const: default }
+    BlockList:
+      allOf:
+        - $ref: "#/components/schemas/ListBase"
+        - type: object
+          required: [results, type, block]
+          properties:
+            results: { type: array, maxItems: 6, items: { $ref: "#/components/schemas/Block" } }
+            type: { type: string, const: block }
+            block: { type: object, additionalProperties: false }
+    QueryRequest:
+      type: object
+      properties:
+        filter: { type: object, description: "A property filter, or {and: [...]} / {or: [...]}." }
+        sorts:
+          type: array
+          items:
+            type: object
+            properties:
+              property: { type: string }
+              timestamp: { type: string, enum: [created_time, last_edited_time] }
+              direction: { type: string, enum: [ascending, descending] }
+        start_cursor: { type: string }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+    Database:
+      type: object
+      required: [object, id, title, parent, data_sources, created_time, last_edited_time, is_inline, in_trash, url]
+      properties:
+        object: { type: string, const: database }
+        id: { $ref: "#/components/schemas/Id" }
+        title: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/RichText" } }
+        parent:
+          type: object
+          required: [type, page_id]
+          properties:
+            type: { type: string, const: page_id }
+            page_id: { $ref: "#/components/schemas/Id" }
+        data_sources:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { $ref: "#/components/schemas/Id" }
+              name: { type: string, const: Launch Tracker }
+        created_time: { type: string, format: date-time }
+        last_edited_time: { type: string, format: date-time }
+        is_inline: { type: boolean }
+        in_trash: { type: boolean, const: false }
+        url: { type: string, pattern: "^https://www\\.notion\\.so/[0-9a-f]{32}$" }
+        request_id: { type: string, format: uuid }
+    WebhookEvent:
+      type: object
+      required: [id, timestamp, workspace_id, workspace_name, subscription_id, integration_id, type, authors, attempt_number, entity, data]
+      properties:
+        id: { $ref: "#/components/schemas/Id" }
+        timestamp: { type: string, format: date-time }
+        workspace_id: { $ref: "#/components/schemas/Id" }
+        workspace_name: { type: string, const: Ferngrove Studio }
+        subscription_id: { $ref: "#/components/schemas/Id" }
+        integration_id: { $ref: "#/components/schemas/Id" }
+        type: { type: string }
+        authors:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [id, type]
+            properties:
+              id: { $ref: "#/components/schemas/Id" }
+              type: { type: string, enum: [person, bot] }
+        attempt_number: { type: integer, const: 1 }
+        entity:
+          type: object
+          required: [id, type]
+          properties:
+            id: { $ref: "#/components/schemas/Id" }
+            type: { type: string, const: page }
+        data:
+          type: object
+          required: [parent]
+          properties:
+            parent:
+              type: object
+              required: [id, type]
+              properties:
+                id: { $ref: "#/components/schemas/Id" }
+                type: { type: string, enum: [page, database, space] }

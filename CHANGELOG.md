@@ -8,8 +8,31 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this heading to `## [0.1.0] - <date>` when tagging; see [docs/launch/checklist.md](docs/launch/checklist.md)).
+
+- **Run apps unchanged.** Mocks take the real host names they stand in for (`hosts:`), and `mockingbird proxy` intercepts HTTPS to them with a local CA, so an app reaches mocks of `api.stripe.com` or `api.github.com` without source edits ([proxy](docs/proxy.md)).
+- **Consistent, stateful answers.** Reads of what a session created come from its state, repeated reads from a per-session cache, and list items seed later reads by id; `unknown_ids: 404`, `default_scenario` and per-operation scenario instructions.
+- **Real-world contracts.** Stripe's and GitHub's full contracts load and serve: form-encoded and multipart bodies, covariant GraphQL interfaces, `$ref`s in vendor extensions, prompts fitted to a 64 KiB schema budget, GraphQL answers generated from the selection set, and local patching instead of repair calls. Fallbacks dropped from 25–33% in the field trials to none on the Stripe and TMDB trials.
+- **Diagnosable.** `X-Mockingbird-Fallback-Reason`, `X-Mockingbird-Validation` and the request log say why an answer fell back or a request was rejected.
+- **Smart import drafts you can finish.** Several URLs and documents per draft, merge or replace, embedded OpenAPI blocks taken as written, confidence and warnings per operation, and MCP tools to read, edit and approve drafts.
+- **Agents set it up alone.** The MCP server finds keys from the login shell, `agent install` passes key names through to each agent, and `keys setup` stores a key without it passing through the agent.
+- **Webhooks.** Signed Stripe-style or HMAC events after writes, with retries and a delivery log.
+
 ### Added
 
+- Deterministic CI without an LLM key: `serve --record DIR` appends every LLM answer to `DIR/answers.jsonl`; `serve --replay DIR` answers from it (exact prompt, then same operation), never calls an LLM and falls back to the faker on a miss (`fallback_reason` says so); `mockingbird snapshot export|import` copies mocks, contracts and session state, which `--replay` seeds. `mb_snapshot_answers_total` counts hits and misses. See [docs/ci.md](docs/ci.md).
+- `mockingbird report` (`--format json|markdown|junit`): requests per mock and operation, response sources, fallbacks and their reasons, 4xx/5xx, and proxied hosts no mock claims (`mb_proxy_unmapped_requests_total`). `mockingbird verify` fails (exit 1) on `--no-fallbacks`, `--no-unmapped`, `--no-blocked`, `--no-errors`, `--no-client-errors`, `--exact-replay` and `--called OP[=N]`.
+- `mockingbird server start` exits 1 when the server is not ready within `--wait`, and passes `--record` / `--replay` through.
+- A GitHub Action (`RJ-s-Org/Mockingbird/integrations/github-action@v0`, with a `report` step) and a GitLab CI template (`integrations/gitlab/mockingbird.yml`); recipes for CircleCI, Jenkins, Buildkite and Azure Pipelines in [docs/ci.md](docs/ci.md).
+- Output budget (`limits.output_budget_tokens`, default 1500): a response whose estimated answer is larger is written shorter by the LLM (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker). GitHub `search/commits` p50 29.8 s → 9.4 s, TMDB movie detail 51 s → 6.2 s ([performance](docs/performance.md#latency-against-a-real-llm)).
+- Formats a persona declares (`field = "<id>_secret_<24 random chars>"` templates, `(pi_, cus_) followed by 24 random alphanumeric chars` id prefixes) are checked and patched after generation.
+- `scripts/trial-bench.py`: latency bench over the field-trial contracts against a real provider.
+- `proxy env` (and `mockingbird run`) sets `PYTHONPATH` to a Python preload (`<ca_dir>/python/sitecustomize.py`) that points `certifi.where()` at the CA bundle and sends plain `urllib3.PoolManager`s through `HTTPS_PROXY` (plaid-python and other OpenAPI-generated SDKs), and `GODEBUG=x509sslcertoverrideplatform=1`, so Go 1.27+ binaries on macOS and Windows trust `SSL_CERT_FILE`. Both keep what the shell had.
+- Field trials 2.0: case studies of plaid/quickstart, healthchecks, the GitHub CLI, Next.js Commerce and Stripe's Java sample under `mockingbird run` ([docs/trials](docs/trials/README.md)).
+- Examples: Plaid `/accounts/balance/get` and `/institutions/get_by_id`.
+- Helm chart: `mocks:` declares mocks in the values, with the contract inline, from an existing ConfigMap or downloaded from a URL (optional `sha256`); `llm.baseUrl`, `llm.model` and `llm.profiles` (each key from a Secret); `reload: watch` runs `serve --watch` so config and contract changes apply in place; a `helm test` pod (`tests.requests`); ingress hosts and TLS rendered with `tpl` for per-release (per-PR) hosts. `scripts/check-helm.sh` also checks those renders, the Kustomize overlays and the GitOps examples; `scripts/check-helm-kind.sh` runs the chart on kind.
+- Kustomize base and overlays (`deploy/kustomize`: `offline-dev`, `staging-llm`), GitOps examples (`examples/gitops`: Argo CD `Application` and pull-request `ApplicationSet`, Flux `HelmRelease`, Argo Workflows `WorkflowTemplate`, Tekton `Task`) and Testcontainers modules for Node, Python, Java and Go (`integrations/testcontainers`). See [docs/deploy/gitops.md](docs/deploy/gitops.md).
+- A Terraform and OpenTofu provider (`integrations/terraform-provider`) for workspaces, mocks (contract from inline content, a file or a URL, re-uploaded when its sha256 changes), contract versions, scenarios, LLM profiles (secret references only), API keys, channels and event settings, with `mockingbird_mock` and `mockingbird_workspace` data sources and import on every resource; Pulumi through its Terraform bridge, with TypeScript and Python examples (`integrations/pulumi`). See [docs/iac.md](docs/iac.md).
 - `X-Mockingbird-Fallback-Reason` on every `fallback` response says why the LLM answer was not used (GraphQL: `extensions.mockingbird.fallbackReasons`); the request log records it. Migration `0500_llm_diagnostics` adds `request_log.fallback_reason` and `llm_profiles.extra_body`.
 - LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
@@ -39,6 +62,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 ### Changed
 
 - The default LLM is OpenRouter: `MB_LLM_BASE_URL` defaults to `https://openrouter.ai/api/v1` and `MB_LLM_MODEL` to `deepseek/deepseek-v4.1-flash` (DeepSeek V4.1 Flash), so `MB_LLM_API_KEY` is an OpenRouter key. Set both variables to keep using DeepSeek directly (`https://api.deepseek.com`, `deepseek-chat`). The example configs and tests use an `openrouter` default profile.
+- Requests to OpenRouter send `reasoning: {enabled: false}` unless the profile's `extra_body` sets `reasoning`; a model that rejects it is asked again without it.
+- A single object answered for a top-level array schema is taken as the list's one item instead of costing a repair; a faker list standing in for a failed LLM call no longer seeds session state.
+- A fallback answer to a read is cached under consistency: the identical repeat is answered at once and still reported as `fallback`.
+- GraphQL queries with several root fields read state, the response cache and stored resources per field, seed and cache per field, and are recorded as one request (operations comma-separated, `request.args` keyed by response key); each field is still metered.
 - MCP `list_requests` returns summaries (method, path, status, source, fallback reason, sizes) unless `include_bodies: true`; `validate_contract` returns counts by protocol and the first 20 operations and channels (`operations_truncated`, `channels_truncated`).
 - Background-server logs carry no ANSI codes (colour only on a terminal; `server_logs` strips any left), and the MCP server tools find the server's state next to the config `start_server` used (or the `config` argument), not in the MCP process's folder.
 - The mock-api and testing skills recommend proxy mode over editing an app's base URL.
@@ -69,6 +96,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- A create or update copies only the request members its response schema declares (all of them when it declares none): undeclared fields such as Twilio's `To`/`Body` in request casing or a credential sent in the body no longer appear in answers.
+- An answer wrapped as `{"data": …, "errors": null}` is unwrapped like `{"data": …}`, and `minimum`/`maximum`/`multipleOf` violations are patched locally instead of costing a repair call.
+- The GitHub GraphQL example mounts at `/graphql`, so it shares `api.github.com` with the GitHub REST example in one config.
+- `serve --watch` sees updates to a config or contract mounted from a Kubernetes ConfigMap or Secret, which arrive as a swap of the volume's `..data` link rather than a change to the file.
 - Provider replies with the answer only in `reasoning`, errors inside a 200, or output cut at `max_tokens` are handled (with one retry for transient failures) instead of falling back without a reason.
 - A JSON array the model wrapped in a one-key object (JSON-object mode) is unwrapped when the inner value matches the schema.
 - Real-world contracts load: a `$ref` inside a vendor extension (Stripe's `x-expansionResources`, GitHub's `x-github-breaking-changes`) no longer fails compilation, and an unresolvable `$ref` names its referrer and the JSON pointer where it sits.

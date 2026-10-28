@@ -1,0 +1,570 @@
+# A hand-written subset of the HubSpot CRM v3 objects API (contacts, companies,
+# deals and contact search), written for Mockingbird's examples and covered by
+# its license. Operation ids, paths and field names follow HubSpot's public API
+# specs (https://github.com/HubSpot/HubSpot-public-api-spec-collection, which
+# HubSpot states are proprietary and not licensed for external use) and the
+# docs at https://developers.hubspot.com/docs/api/crm/contacts. Nothing else is
+# copied from them. Deals use the /crm/v3/objects/deals path the SDKs call
+# (HubSpot's spec lists it under the object type id 0-3).
+openapi: 3.1.0
+info:
+  title: HubSpot CRM objects v3 (Mockingbird example subset)
+  version: v3
+servers:
+  - url: https://api.hubapi.com
+security:
+  - oauth2: []
+  - private_apps: []
+paths:
+  /crm/v3/objects/contacts:
+    get:
+      operationId: get-/crm/v3/objects/contacts_getPage
+      summary: A page of contacts.
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/properties"
+        - $ref: "#/components/parameters/archived"
+      responses:
+        "200":
+          description: A page of contacts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContactPage" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      operationId: post-/crm/v3/objects/contacts_create
+      summary: Create a contact.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ContactInputForCreate" }
+      responses:
+        "201":
+          description: The new contact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contact" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+  /crm/v3/objects/contacts/{contactId}:
+    parameters:
+      - $ref: "#/components/parameters/contactId"
+    get:
+      operationId: get-/crm/v3/objects/contacts/{contactId}_getById
+      parameters:
+        - $ref: "#/components/parameters/properties"
+        - { name: idProperty, in: query, description: "A unique property to look up by, e.g. email.", schema: { type: string } }
+        - $ref: "#/components/parameters/archived"
+      responses:
+        "200":
+          description: The contact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contact" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+    patch:
+      operationId: patch-/crm/v3/objects/contacts/{contactId}_update
+      summary: Update a contact's properties.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [properties]
+              properties:
+                properties: { $ref: "#/components/schemas/ContactProperties" }
+      responses:
+        "200":
+          description: The updated contact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contact" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: delete-/crm/v3/objects/contacts/{contactId}_archive
+      summary: Archive (soft-delete) a contact.
+      responses:
+        "204": { description: Archived. }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+  /crm/v3/objects/contacts/search:
+    post:
+      operationId: post-/crm/v3/objects/contacts/search_doSearch
+      summary: Search contacts by property filters, sorts and a free-text query.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublicObjectSearchRequest" }
+      responses:
+        "200":
+          description: Matching contacts with the total count.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContactSearchPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+  /crm/v3/objects/companies:
+    get:
+      operationId: get-/crm/v3/objects/companies_getPage
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/properties"
+      responses:
+        "200":
+          description: A page of companies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompanyPage" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      operationId: post-/crm/v3/objects/companies_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [properties]
+              properties:
+                properties: { $ref: "#/components/schemas/CompanyProperties" }
+                associations: { type: array, items: { $ref: "#/components/schemas/AssociationSpec" } }
+      responses:
+        "201":
+          description: The new company.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Company" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+  /crm/v3/objects/companies/{companyId}:
+    get:
+      operationId: get-/crm/v3/objects/companies/{companyId}_getById
+      parameters:
+        - { name: companyId, in: path, required: true, schema: { type: string, pattern: "^[1-9][0-9]{9,10}$" } }
+        - $ref: "#/components/parameters/properties"
+      responses:
+        "200":
+          description: The company.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Company" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+  /crm/v3/objects/deals:
+    get:
+      operationId: get-/crm/v3/objects/deals_getPage
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/properties"
+      responses:
+        "200":
+          description: A page of deals.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DealPage" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      operationId: post-/crm/v3/objects/deals_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [properties]
+              properties:
+                properties: { $ref: "#/components/schemas/DealProperties" }
+                associations: { type: array, items: { $ref: "#/components/schemas/AssociationSpec" } }
+      responses:
+        "201":
+          description: The new deal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+  /crm/v3/objects/deals/{dealId}:
+    get:
+      operationId: get-/crm/v3/objects/deals/{dealId}_getById
+      parameters:
+        - { name: dealId, in: path, required: true, schema: { type: string, pattern: "^[1-9][0-9]{9,10}$" } }
+        - $ref: "#/components/parameters/properties"
+      responses:
+        "200":
+          description: The deal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deal" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        default: { $ref: "#/components/responses/Error" }
+webhooks:
+  # HubSpot POSTs a JSON array of events per delivery. The mock names its events
+  # <object>.created / <object>.updated; HubSpot's subscriptionType is
+  # contact.creation / contact.propertyChange, which the payload carries.
+  contact.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              maxItems: 1
+              items:
+                allOf:
+                  - $ref: "#/components/schemas/WebhookEvent"
+                  - type: object
+                    properties:
+                      subscriptionType: { type: string, const: contact.creation }
+      responses:
+        "200": { description: Acknowledged. }
+  contact.updated:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              maxItems: 1
+              items:
+                allOf:
+                  - $ref: "#/components/schemas/WebhookEvent"
+                  - type: object
+                    required: [propertyName, propertyValue]
+                    properties:
+                      subscriptionType: { type: string, const: contact.propertyChange }
+                      propertyName: { type: string, enum: [lifecyclestage, email, phone, jobtitle] }
+                      propertyValue: { type: string }
+      responses:
+        "200": { description: Acknowledged. }
+  deal.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              maxItems: 1
+              items:
+                allOf:
+                  - $ref: "#/components/schemas/WebhookEvent"
+                  - type: object
+                    properties:
+                      subscriptionType: { type: string, const: deal.creation }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://app.hubspot.com/oauth/authorize
+          tokenUrl: https://api.hubapi.com/oauth/v1/token
+          scopes:
+            crm.objects.contacts.read: Read contacts.
+            crm.objects.contacts.write: Write contacts.
+            crm.objects.companies.read: Read companies.
+            crm.objects.companies.write: Write companies.
+            crm.objects.deals.read: Read deals.
+            crm.objects.deals.write: Write deals.
+    private_apps:
+      type: http
+      scheme: bearer
+      description: A private app access token (pat-na1-...), sent as a Bearer token.
+  parameters:
+    contactId:
+      name: contactId
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[1-9][0-9]{4,11}$" }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+    after:
+      name: after
+      in: query
+      description: The paging cursor from paging.next.after.
+      schema: { type: string }
+    properties:
+      name: properties
+      in: query
+      description: Comma-separated property names to return.
+      schema: { type: string }
+    archived:
+      name: archived
+      in: query
+      schema: { type: boolean, default: false }
+  responses:
+    Error:
+      description: An error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: The input failed validation (category VALIDATION_ERROR).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such object (category OBJECT_NOT_FOUND).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: A unique property (such as email) is already taken (category CONFLICT).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: A daily or ten-secondly limit was hit; policyName says which.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RateLimitError" }
+  schemas:
+    Error:
+      type: object
+      required: [status, message, correlationId, category]
+      properties:
+        status: { type: string, const: error }
+        message: { type: string }
+        correlationId: { type: string, format: uuid }
+        category:
+          type: string
+          enum: [VALIDATION_ERROR, OBJECT_NOT_FOUND, CONFLICT, RATE_LIMITS, INVALID_AUTHENTICATION, MISSING_SCOPES, INTERNAL_ERROR]
+        errors:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [message]
+            properties:
+              message: { type: string }
+              code: { type: string, enum: [INVALID_EMAIL, INVALID_OPTION, REQUIRED_FIELD] }
+              context: { type: object, additionalProperties: { type: array, items: { type: string } } }
+              in: { type: string }
+        context: { type: object, additionalProperties: { type: array, items: { type: string } } }
+        links: { type: object, additionalProperties: { type: string } }
+    RateLimitError:
+      type: object
+      required: [status, message, errorType, correlationId, policyName, groupName]
+      properties:
+        status: { type: string, const: error }
+        message: { type: string, enum: ["You have reached your ten_secondly_rolling limit.", "You have reached your daily limit.", "You have reached your secondly limit."] }
+        errorType: { type: string, const: RATE_LIMIT }
+        correlationId: { type: string, format: uuid }
+        policyName: { type: string, enum: [DAILY, TEN_SECONDLY_ROLLING, SECONDLY] }
+        groupName: { type: string, pattern: "^publicapi:private-app:24681357$" }
+    AssociationSpec:
+      type: object
+      required: [to, types]
+      properties:
+        to:
+          type: object
+          required: [id]
+          properties:
+            id: { type: string }
+        types:
+          type: array
+          items:
+            type: object
+            required: [associationCategory, associationTypeId]
+            properties:
+              associationCategory: { type: string, enum: [HUBSPOT_DEFINED, USER_DEFINED, INTEGRATOR_DEFINED] }
+              associationTypeId: { type: integer }
+    ContactProperties:
+      type: object
+      additionalProperties: { type: [string, "null"] }
+      properties:
+        email: { type: string, format: email }
+        firstname: { type: string }
+        lastname: { type: string }
+        phone: { type: string, pattern: "^\\+1 617 555 0[0-9]{3}$" }
+        company: { type: string }
+        jobtitle: { type: string }
+        website: { type: string }
+        lifecyclestage: { type: string, enum: [subscriber, lead, marketingqualifiedlead, salesqualifiedlead, opportunity, customer, evangelist, other] }
+        hubspot_owner_id: { type: string, pattern: "^[1-9][0-9]{7,8}$" }
+    ContactInputForCreate:
+      type: object
+      required: [properties]
+      properties:
+        properties: { $ref: "#/components/schemas/ContactProperties" }
+        associations: { type: array, items: { $ref: "#/components/schemas/AssociationSpec" } }
+    Contact:
+      type: object
+      required: [id, properties, createdAt, updatedAt, archived]
+      properties:
+        id: { type: string, pattern: "^[1-9][0-9]{4,11}$" }
+        properties:
+          allOf:
+            - $ref: "#/components/schemas/ContactProperties"
+            - type: object
+              required: [createdate, email, firstname, hs_object_id, lastmodifieddate, lastname]
+              properties:
+                createdate: { type: string, format: date-time }
+                lastmodifieddate: { type: string, format: date-time }
+                hs_object_id: { type: string, pattern: "^[1-9][0-9]{4,11}$" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        archived: { type: boolean, const: false }
+        url: { type: string }
+    CompanyProperties:
+      type: object
+      additionalProperties: { type: [string, "null"] }
+      properties:
+        name: { type: string }
+        domain: { type: string }
+        industry: { type: string, enum: [COMPUTER_SOFTWARE, FINANCIAL_SERVICES, HOSPITAL_HEALTH_CARE, MARKETING_AND_ADVERTISING, LOGISTICS_AND_SUPPLY_CHAIN] }
+        city: { type: string }
+        state: { type: string }
+        country: { type: string }
+        numberofemployees: { type: string, pattern: "^[1-9][0-9]{1,4}$" }
+        annualrevenue: { type: string, pattern: "^[1-9][0-9]{5,8}$" }
+        lifecyclestage: { type: string, enum: [lead, opportunity, customer] }
+    Company:
+      type: object
+      required: [id, properties, createdAt, updatedAt, archived]
+      properties:
+        id: { type: string, pattern: "^[1-9][0-9]{9,10}$" }
+        properties:
+          allOf:
+            - $ref: "#/components/schemas/CompanyProperties"
+            - type: object
+              required: [createdate, domain, hs_lastmodifieddate, hs_object_id, name]
+              properties:
+                createdate: { type: string, format: date-time }
+                hs_lastmodifieddate: { type: string, format: date-time }
+                hs_object_id: { type: string, pattern: "^[1-9][0-9]{9,10}$" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        archived: { type: boolean, const: false }
+    DealProperties:
+      type: object
+      additionalProperties: { type: [string, "null"] }
+      properties:
+        dealname: { type: string }
+        amount: { type: string, pattern: "^[1-9][0-9]{3,5}(\\.00)?$" }
+        dealstage: { type: string, enum: [appointmentscheduled, qualifiedtobuy, presentationscheduled, decisionmakerboughtin, contractsent, closedwon, closedlost] }
+        pipeline: { type: string, const: default }
+        closedate: { type: string, format: date-time }
+        hubspot_owner_id: { type: string, pattern: "^[1-9][0-9]{7,8}$" }
+    Deal:
+      type: object
+      required: [id, properties, createdAt, updatedAt, archived]
+      properties:
+        id: { type: string, pattern: "^[1-9][0-9]{9,10}$" }
+        properties:
+          allOf:
+            - $ref: "#/components/schemas/DealProperties"
+            - type: object
+              required: [amount, closedate, createdate, dealname, dealstage, hs_lastmodifieddate, hs_object_id, pipeline]
+              properties:
+                createdate: { type: string, format: date-time }
+                hs_lastmodifieddate: { type: string, format: date-time }
+                hs_object_id: { type: string, pattern: "^[1-9][0-9]{9,10}$" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        archived: { type: boolean, const: false }
+    Paging:
+      type: object
+      required: [next]
+      properties:
+        next:
+          type: object
+          required: [after]
+          properties:
+            after: { type: string, pattern: "^[1-9][0-9]{1,4}$" }
+            link: { type: string }
+    ContactPage:
+      type: object
+      required: [results]
+      properties:
+        results: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Contact" } }
+        paging: { $ref: "#/components/schemas/Paging" }
+    CompanyPage:
+      type: object
+      required: [results]
+      properties:
+        results: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Company" } }
+        paging: { $ref: "#/components/schemas/Paging" }
+    DealPage:
+      type: object
+      required: [results]
+      properties:
+        results: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Deal" } }
+        paging: { $ref: "#/components/schemas/Paging" }
+    ContactSearchPage:
+      type: object
+      additionalProperties: false
+      required: [total, results]
+      properties:
+        total: { type: integer, minimum: 0, maximum: 500 }
+        results: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Contact" } }
+        paging: { $ref: "#/components/schemas/Paging" }
+    PublicObjectSearchRequest:
+      type: object
+      properties:
+        query: { type: string, maxLength: 3000 }
+        filterGroups:
+          type: array
+          maxItems: 6
+          items:
+            type: object
+            required: [filters]
+            properties:
+              filters:
+                type: array
+                maxItems: 6
+                items:
+                  type: object
+                  required: [propertyName, operator]
+                  properties:
+                    propertyName: { type: string }
+                    operator: { type: string, enum: [BETWEEN, CONTAINS_TOKEN, EQ, GT, GTE, HAS_PROPERTY, IN, LT, LTE, NEQ, NOT_CONTAINS_TOKEN, NOT_HAS_PROPERTY, NOT_IN] }
+                    value: { type: string }
+                    highValue: { type: string }
+                    values: { type: array, items: { type: string } }
+        sorts: { type: array, items: { type: string } }
+        properties: { type: array, items: { type: string } }
+        limit: { type: integer, minimum: 1, maximum: 200 }
+        after: { type: string }
+    WebhookEvent:
+      type: object
+      required: [eventId, subscriptionId, portalId, appId, occurredAt, subscriptionType, attemptNumber, objectId, changeSource]
+      properties:
+        eventId: { type: integer, minimum: 100000000, maximum: 4294967295 }
+        subscriptionId: { type: integer, minimum: 1000000, maximum: 9999999 }
+        portalId: { type: integer, const: 24681357 }
+        appId: { type: integer, const: 3141592 }
+        occurredAt: { type: integer, description: Unix milliseconds. }
+        subscriptionType: { type: string }
+        attemptNumber: { type: integer, const: 0 }
+        objectId: { type: integer, minimum: 10000, maximum: 99999999999 }
+        changeSource: { type: string, enum: [CRM_UI, INTEGRATION, API, IMPORT] }
+        changeFlag: { type: string, enum: [NEW, UPDATED] }

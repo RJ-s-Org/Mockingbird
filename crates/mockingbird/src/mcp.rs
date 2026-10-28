@@ -1179,6 +1179,8 @@ impl McpServer {
                     proxy: opt_bool(a, "proxy"),
                     no_watch: false,
                     insecure_no_auth: false,
+                    record: None,
+                    replay: None,
                     wait: std::time::Duration::from_secs(60).into(),
                     contracts: paths(a, "contracts"),
                 };

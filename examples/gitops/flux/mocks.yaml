@@ -1,0 +1,94 @@
+# Flux: the chart from the Mockingbird repository, the values from the app's
+# repository (deploy/preview/mocks-values.yaml), reconciled every 5 minutes.
+# Flux runs `helm test` after each install and upgrade (spec.test).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: mockingbird
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://github.com/rj-s-org/mockingbird
+  ref:
+    tag: v0.1.0
+  ignore: |
+    /*
+    !/deploy/helm/
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: shop
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/example/shop
+  ref:
+    branch: main
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: mocks
+  namespace: mocks-dev
+spec:
+  interval: 5m
+  releaseName: mocks
+  chart:
+    spec:
+      chart: deploy/helm/mockingbird
+      sourceRef:
+        kind: GitRepository
+        name: mockingbird
+        namespace: flux-system
+  # The mocks: a ConfigMap Flux builds from the app's repository (below).
+  valuesFrom:
+    - kind: ConfigMap
+      name: mocks-values
+      valuesKey: values.yaml
+  install:
+    createNamespace: true
+  test:
+    enable: true
+  upgrade:
+    remediation:
+      retries: 2
+---
+# The app repository's mocks-values.yaml as a ConfigMap, via a Kustomization
+# over a directory there holding:
+#   kustomization.yaml:
+#     configMapGenerator:
+#       - name: mocks-values
+#         namespace: mocks-dev
+#         files: [values.yaml=mocks-values.yaml]
+#         options: {disableNameSuffixHash: true}
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: shop-mocks-values
+  namespace: flux-system
+spec:
+  interval: 5m
+  path: ./deploy/preview
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: shop
+  targetNamespace: mocks-dev
+---
+# Alternatively the published, signed chart (OCI), verified by Flux.
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: mockingbird-chart
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: oci://ghcr.io/rj-s-org/charts/mockingbird
+  ref:
+    semver: "0.1.x"
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: ^https://token\.actions\.githubusercontent\.com$
+        subject: ^https://github\.com/rj-s-org/mockingbird/.*$

@@ -72,6 +72,7 @@ use crate::{
         mocks::DataPlaneAuthSchema,
         mocks::DataPlaneAuthModeSchema,
         mocks::ChaosSchema,
+        mocks::PathRewriteSchema,
         mocks::LatencyJitterSchema,
         mocks::MockLimitsSchema,
         mocks::RateLimitSchema,

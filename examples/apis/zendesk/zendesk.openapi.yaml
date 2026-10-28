@@ -1,0 +1,859 @@
+# A hand-written subset of the Zendesk Support API (tickets, ticket comments,
+# users, search), written for Mockingbird's examples and covered by its
+# license. Paths, operation ids and field names follow Zendesk's published
+# OpenAPI description,
+#   https://developer.zendesk.com/zendesk/oas.yaml
+# which is governed by the Zendesk Developer Terms rather than an open license,
+# so none of it is copied here.
+openapi: 3.1.0
+info:
+  title: Zendesk Support API (Mockingbird example subset)
+  version: "2.0"
+servers:
+  - url: https://{subdomain}.zendesk.com
+    variables:
+      subdomain: { default: juniper }
+security:
+  - basicAuth: []
+  - bearerAuth: []
+paths:
+  /api/v2/tickets:
+    get:
+      operationId: ListTickets
+      summary: List tickets (offset or cursor pagination).
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: "page[size]", in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: "page[after]", in: query, schema: { type: string } }
+        - { name: sort_by, in: query, schema: { type: string, enum: [created_at, updated_at, id, status] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: external_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of tickets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tickets, count, next_page, previous_page]
+                properties:
+                  tickets: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/TicketObject" } }
+                  count: { type: integer, minimum: 0, maximum: 5 }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: CreateTicket
+      summary: Create a ticket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ticket]
+              properties:
+                ticket: { $ref: "#/components/schemas/TicketCreateInput" }
+      responses:
+        "201":
+          description: The new ticket and the audit of its creation.
+          headers:
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/RecordInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/tickets/{ticket_id}:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: ShowTicket
+      summary: Show one ticket.
+      responses:
+        "200":
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket]
+                properties:
+                  ticket: { $ref: "#/components/schemas/TicketObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    put:
+      operationId: UpdateTicket
+      summary: Update a ticket; a `comment` adds a public reply or internal note.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ticket]
+              properties:
+                ticket: { $ref: "#/components/schemas/TicketUpdateInput" }
+      responses:
+        "200":
+          description: The updated ticket and the audit of the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "422": { $ref: "#/components/responses/RecordInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/tickets/{ticket_id}/comments:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: ListTicketComments
+      summary: The ticket's comments, oldest first.
+      parameters:
+        - { name: include_inline_images, in: query, schema: { type: boolean } }
+        - { name: include, in: query, schema: { type: string, enum: [users] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+      responses:
+        "200":
+          description: The comments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [comments, count, next_page, previous_page]
+                properties:
+                  comments: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/TicketCommentObject" } }
+                  count: { type: integer, minimum: 1, maximum: 4 }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users:
+    get:
+      operationId: ListUsers
+      summary: List users.
+      parameters:
+        - { name: role, in: query, schema: { type: string, enum: [end-user, agent, admin] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100 } }
+      responses:
+        "200":
+          description: A page of users.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users, count, next_page, previous_page]
+                properties:
+                  users: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/UserObject" } }
+                  count: { type: integer, minimum: 0, maximum: 5 }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: CreateUser
+      summary: Create a user (an end user by default).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: { type: string }
+                    email: { type: string, format: email }
+                    role: { type: string, enum: [end-user, agent, admin] }
+                    phone: { type: string }
+                    organization_id: { type: integer }
+                    external_id: { type: string }
+                    tags: { type: array, items: { type: string } }
+                    verified: { type: boolean }
+      responses:
+        "201":
+          description: The new user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/UserObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/RecordInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users/me:
+    get:
+      operationId: ShowCurrentUser
+      summary: The user the credentials belong to.
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/UserObject" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users/{user_id}:
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: ShowUser
+      summary: Show one user.
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/UserObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/search:
+    get:
+      operationId: ListSearchResults
+      summary: "Search tickets, users and organizations (query syntax: `type:ticket status:open`)."
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string } }
+        - { name: sort_by, in: query, schema: { type: string, enum: [updated_at, created_at, priority, status, ticket_type] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100 } }
+      responses:
+        "200":
+          description: Matching records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, count, facets, next_page, previous_page]
+                properties:
+                  results:
+                    type: array
+                    maxItems: 5
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/TicketObject"
+                        - type: object
+                          required: [result_type]
+                          properties:
+                            result_type: { type: string, const: ticket }
+                  count: { type: integer, minimum: 0, maximum: 5 }
+                  facets: { type: ["null"] }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "400":
+          description: The query is invalid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  # The same operations with the .json suffix, which Zendesk also accepts and
+  # clients such as zenpy and node-zendesk always send. Operation ids end in Json.
+  /api/v2/tickets.json:
+    get:
+      operationId: ListTicketsJson
+      summary: List tickets (offset or cursor pagination).
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: "page[size]", in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: "page[after]", in: query, schema: { type: string } }
+        - { name: sort_by, in: query, schema: { type: string, enum: [created_at, updated_at, id, status] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: external_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of tickets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tickets, count, next_page, previous_page]
+                properties:
+                  tickets: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/TicketObject" } }
+                  count: { type: integer, minimum: 0, maximum: 5 }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: CreateTicketJson
+      summary: Create a ticket.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ticket]
+              properties:
+                ticket: { $ref: "#/components/schemas/TicketCreateInput" }
+      responses:
+        "201":
+          description: The new ticket and the audit of its creation.
+          headers:
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/RecordInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/tickets/{ticket_id}.json:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: ShowTicketJson
+      summary: Show one ticket.
+      responses:
+        "200":
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket]
+                properties:
+                  ticket: { $ref: "#/components/schemas/TicketObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    put:
+      operationId: UpdateTicketJson
+      summary: Update a ticket; a `comment` adds a public reply or internal note.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ticket]
+              properties:
+                ticket: { $ref: "#/components/schemas/TicketUpdateInput" }
+      responses:
+        "200":
+          description: The updated ticket and the audit of the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "422": { $ref: "#/components/responses/RecordInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/tickets/{ticket_id}/comments.json:
+    parameters:
+      - { name: ticket_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: ListTicketCommentsJson
+      summary: The ticket's comments, oldest first.
+      parameters:
+        - { name: include_inline_images, in: query, schema: { type: boolean } }
+        - { name: include, in: query, schema: { type: string, enum: [users] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+      responses:
+        "200":
+          description: The comments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [comments, count, next_page, previous_page]
+                properties:
+                  comments: { type: array, minItems: 1, maxItems: 4, items: { $ref: "#/components/schemas/TicketCommentObject" } }
+                  count: { type: integer, minimum: 1, maximum: 4 }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users.json:
+    get:
+      operationId: ListUsersJson
+      summary: List users.
+      parameters:
+        - { name: role, in: query, schema: { type: string, enum: [end-user, agent, admin] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100 } }
+      responses:
+        "200":
+          description: A page of users.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users, count, next_page, previous_page]
+                properties:
+                  users: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/UserObject" } }
+                  count: { type: integer, minimum: 0, maximum: 5 }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: CreateUserJson
+      summary: Create a user (an end user by default).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: { type: string }
+                    email: { type: string, format: email }
+                    role: { type: string, enum: [end-user, agent, admin] }
+                    phone: { type: string }
+                    organization_id: { type: integer }
+                    external_id: { type: string }
+                    tags: { type: array, items: { type: string } }
+                    verified: { type: boolean }
+      responses:
+        "201":
+          description: The new user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/UserObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/RecordInvalid" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users/me.json:
+    get:
+      operationId: ShowCurrentUserJson
+      summary: The user the credentials belong to.
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/UserObject" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users/{user_id}.json:
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: integer } }
+    get:
+      operationId: ShowUserJson
+      summary: Show one user.
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/UserObject" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/RecordNotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/search.json:
+    get:
+      operationId: ListSearchResultsJson
+      summary: "Search tickets, users and organizations (query syntax: `type:ticket status:open`)."
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string } }
+        - { name: sort_by, in: query, schema: { type: string, enum: [updated_at, created_at, priority, status, ticket_type] } }
+        - { name: sort_order, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100 } }
+      responses:
+        "200":
+          description: Matching records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, count, facets, next_page, previous_page]
+                properties:
+                  results:
+                    type: array
+                    maxItems: 5
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/TicketObject"
+                        - type: object
+                          required: [result_type]
+                          properties:
+                            result_type: { type: string, const: ticket }
+                  count: { type: integer, minimum: 0, maximum: 5 }
+                  facets: { type: ["null"] }
+                  next_page: { type: ["null"] }
+                  previous_page: { type: ["null"] }
+        "400":
+          description: The query is invalid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+webhooks:
+  # Mockingbird picks a webhook payload by the event type it derives
+  # (ticket.created, ticket.updated); `type` carries Zendesk's event name.
+  ticket.created:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TicketCreatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+  ticket.updated:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TicketUpdatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+  # The .json aliases derive no clean event type, so their payloads are
+  # matched by operation id.
+  CreateTicketJson:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TicketCreatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+  UpdateTicketJson:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TicketUpdatedEvent" }
+      responses:
+        "200": { description: Acknowledged. }
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: "`{email}/token:{api_token}`, or email and password."
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An OAuth access token.
+  responses:
+    Unauthorized:
+      description: Couldn't authenticate you.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RecordNotFound:
+      description: The record does not exist.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RecordInvalid:
+      description: The record failed validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Rate limited; wait Retry-After seconds.
+      headers:
+        Retry-After: { schema: { type: integer, minimum: 1, maximum: 60 } }
+        ratelimit-remaining: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: Zendesk is temporarily unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [RecordNotFound, RecordInvalid, InvalidValue, Unauthorized, TooManyRequests, DatabaseError]
+        description: { type: string }
+        details:
+          type: object
+          maxProperties: 1
+          additionalProperties:
+            type: array
+            maxItems: 1
+            items:
+              type: object
+              required: [description, error]
+              properties:
+                description: { type: string }
+                error: { type: string }
+    Via:
+      type: object
+      required: [channel]
+      properties:
+        channel: { type: string, enum: [web, email, api, chat] }
+        source:
+          type: object
+          properties:
+            from: { type: object }
+            to: { type: object }
+            rel: { type: ["string", "null"] }
+    TicketObject:
+      type: object
+      required: [id, url, subject, raw_subject, description, status, priority, type, requester_id, submitter_id, assignee_id, group_id, tags, via, created_at, updated_at, is_public]
+      properties:
+        id: { type: integer, minimum: 1000, maximum: 9999 }
+        url: { type: string, pattern: "^https://juniper\\.zendesk\\.com/api/v2/tickets/[1-9][0-9]{3}\\.json$" }
+        external_id: { type: ["string", "null"] }
+        type: { type: ["string", "null"], enum: [problem, incident, question, task, null] }
+        subject: { type: string }
+        raw_subject: { type: string }
+        description: { type: string, description: The first comment. }
+        priority: { type: ["string", "null"], enum: [urgent, high, normal, low, null] }
+        status: { type: string, enum: [new, open, pending, hold, solved, closed] }
+        recipient: { type: ["string", "null"], format: email }
+        requester_id: { type: integer, minimum: 360000000000, maximum: 369999999999 }
+        submitter_id: { type: integer, minimum: 360000000000, maximum: 369999999999 }
+        assignee_id: { type: ["integer", "null"], minimum: 360000000000, maximum: 369999999999 }
+        organization_id: { type: ["integer", "null"] }
+        group_id: { type: ["integer", "null"], minimum: 360000000000, maximum: 369999999999 }
+        collaborator_ids: { type: array, maxItems: 2, items: { type: integer } }
+        follower_ids: { type: array, maxItems: 2, items: { type: integer } }
+        email_cc_ids: { type: array, maxItems: 2, items: { type: integer } }
+        tags: { type: array, maxItems: 3, items: { type: string, pattern: "^[a-z][a-z0-9_]{2,19}$" } }
+        custom_fields:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            required: [id, value]
+            properties:
+              id: { type: integer }
+              value: {}
+        via: { $ref: "#/components/schemas/Via" }
+        satisfaction_rating: { type: ["object", "null"] }
+        brand_id: { type: integer }
+        has_incidents: { type: boolean }
+        is_public: { type: boolean }
+        allow_attachments: { type: boolean, const: true }
+        due_at: { type: ["string", "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TicketCommentInput:
+      type: object
+      properties:
+        body: { type: string }
+        html_body: { type: string }
+        public: { type: boolean }
+        author_id: { type: integer }
+        uploads: { type: array, items: { type: string } }
+    TicketCreateInput:
+      type: object
+      required: [comment]
+      properties:
+        subject: { type: string }
+        comment: { $ref: "#/components/schemas/TicketCommentInput" }
+        description: { type: string }
+        priority: { type: string, enum: [urgent, high, normal, low] }
+        status: { type: string, enum: [new, open, pending, hold, solved, closed] }
+        type: { type: string, enum: [problem, incident, question, task] }
+        requester_id: { type: integer }
+        requester:
+          type: object
+          properties:
+            name: { type: string }
+            email: { type: string, format: email }
+            locale_id: { type: integer }
+        assignee_id: { type: integer }
+        group_id: { type: integer }
+        external_id: { type: string }
+        tags: { type: array, items: { type: string } }
+        custom_fields: { type: array, items: { type: object } }
+    TicketUpdateInput:
+      type: object
+      properties:
+        subject: { type: string }
+        comment: { $ref: "#/components/schemas/TicketCommentInput" }
+        priority: { type: string, enum: [urgent, high, normal, low] }
+        status: { type: string, enum: [new, open, pending, hold, solved, closed] }
+        type: { type: string, enum: [problem, incident, question, task] }
+        assignee_id: { type: integer }
+        group_id: { type: integer }
+        tags: { type: array, items: { type: string } }
+        additional_tags: { type: array, items: { type: string } }
+        safe_update: { type: boolean }
+        updated_stamp: { type: string, format: date-time }
+    TicketResponse:
+      type: object
+      required: [ticket, audit]
+      properties:
+        ticket: { $ref: "#/components/schemas/TicketObject" }
+        audit:
+          type: object
+          required: [id, ticket_id, created_at, author_id, events]
+          properties:
+            id: { type: integer }
+            ticket_id: { type: integer }
+            created_at: { type: string, format: date-time }
+            author_id: { type: integer }
+            via: { $ref: "#/components/schemas/Via" }
+            metadata: { type: object }
+            events:
+              type: array
+              minItems: 1
+              maxItems: 3
+              items:
+                type: object
+                required: [id, type]
+                properties:
+                  id: { type: integer }
+                  type: { type: string, enum: [Comment, Create, Change, Notification] }
+                  field_name: { type: string }
+                  value: {}
+                  previous_value: {}
+                  body: { type: string }
+                  public: { type: boolean }
+    TicketCommentObject:
+      type: object
+      required: [id, type, author_id, body, html_body, plain_body, public, attachments, created_at]
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [Comment, VoiceComment] }
+        author_id: { type: integer, minimum: 360000000000, maximum: 369999999999 }
+        body: { type: string }
+        html_body: { type: string }
+        plain_body: { type: string }
+        public: { type: boolean }
+        audit_id: { type: integer }
+        attachments: { type: array, maxItems: 0, items: { type: object } }
+        via: { $ref: "#/components/schemas/Via" }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
+    UserObject:
+      type: object
+      required: [id, url, name, email, role, active, verified, time_zone, iana_time_zone, locale, locale_id, created_at, updated_at, suspended, tags]
+      properties:
+        id: { type: integer, minimum: 360000000000, maximum: 369999999999 }
+        url: { type: string, pattern: "^https://juniper\\.zendesk\\.com/api/v2/users/36[0-9]{10}\\.json$" }
+        name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: ["string", "null"] }
+        role: { type: string, enum: [end-user, agent, admin] }
+        role_type: { type: ["integer", "null"] }
+        organization_id: { type: ["integer", "null"] }
+        default_group_id: { type: ["integer", "null"] }
+        external_id: { type: ["string", "null"] }
+        active: { type: boolean, const: true }
+        verified: { type: boolean }
+        suspended: { type: boolean, const: false }
+        shared: { type: boolean }
+        moderator: { type: boolean }
+        only_private_comments: { type: boolean }
+        restricted_agent: { type: boolean }
+        ticket_restriction: { type: ["string", "null"], enum: [organization, groups, assigned, requested, null] }
+        time_zone: { type: string, const: Pacific Time (US & Canada) }
+        iana_time_zone: { type: string, const: America/Los_Angeles }
+        locale: { type: string, const: en-US }
+        locale_id: { type: integer, const: 1 }
+        tags: { type: array, maxItems: 2, items: { type: string } }
+        user_fields: { type: object }
+        last_login_at: { type: ["string", "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TicketCreatedEvent:
+      type: object
+      required: [account_id, id, time, type, zendesk_event_version, subject, detail, event]
+      properties:
+        account_id: { type: integer, const: 21983745 }
+        id: { type: string, format: uuid }
+        time: { type: string, format: date-time }
+        type: { type: string, const: "zen:event-type:ticket.created" }
+        zendesk_event_version: { type: string, const: "2022-11-06" }
+        subject: { type: string, pattern: "^zen:ticket:[1-9][0-9]{3}$" }
+        detail: { $ref: "#/components/schemas/EventTicketDetail" }
+        event: { type: object, maxProperties: 0 }
+    TicketUpdatedEvent:
+      type: object
+      required: [account_id, id, time, type, zendesk_event_version, subject, detail, event]
+      properties:
+        account_id: { type: integer, const: 21983745 }
+        id: { type: string, format: uuid }
+        time: { type: string, format: date-time }
+        type: { type: string, enum: ["zen:event-type:ticket.status_changed", "zen:event-type:ticket.priority_changed", "zen:event-type:ticket.comment_added"] }
+        zendesk_event_version: { type: string, const: "2022-11-06" }
+        subject: { type: string, pattern: "^zen:ticket:[1-9][0-9]{3}$" }
+        detail: { $ref: "#/components/schemas/EventTicketDetail" }
+        event:
+          type: object
+          properties:
+            current: { type: string, enum: [OPEN, PENDING, SOLVED, HIGH, NORMAL] }
+            previous: { type: string, enum: [NEW, OPEN, PENDING, NORMAL, LOW] }
+    EventTicketDetail:
+      type: object
+      required: [id, subject, status, priority, requester_id, assignee_id, created_at, updated_at, via, tags]
+      properties:
+        id: { type: string, pattern: "^[1-9][0-9]{3}$" }
+        subject: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [NEW, OPEN, PENDING, HOLD, SOLVED, CLOSED] }
+        priority: { type: ["string", "null"], enum: [URGENT, HIGH, NORMAL, LOW, null] }
+        type: { type: ["string", "null"], enum: [PROBLEM, INCIDENT, QUESTION, TASK, null] }
+        requester_id: { type: string, pattern: "^36[0-9]{10}$" }
+        submitter_id: { type: string, pattern: "^36[0-9]{10}$" }
+        assignee_id: { type: ["string", "null"], pattern: "^36[0-9]{10}$" }
+        group_id: { type: ["string", "null"] }
+        brand_id: { type: string }
+        tags: { type: array, maxItems: 3, items: { type: string } }
+        via: { type: string, enum: [web_form, mail, api, chat] }
+        is_public: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }

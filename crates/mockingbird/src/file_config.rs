@@ -229,6 +229,9 @@ pub struct LimitsConfig {
     pub max_request_bytes: u64,
     /// Largest response body generated, in bytes.
     pub max_response_bytes: u64,
+    /// Completion tokens the LLM is asked to write per answer: a larger
+    /// response is generated shorter and completed by the faker (0: off).
+    pub output_budget_tokens: u32,
 }
 
 impl Default for LimitsConfig {
@@ -237,6 +240,7 @@ impl Default for LimitsConfig {
             max_concurrent_generations: 64,
             max_request_bytes: 1_048_576,
             max_response_bytes: 1_048_576,
+            output_budget_tokens: mb_engine::budget::DEFAULT_OUTPUT_BUDGET,
         }
     }
 }
@@ -337,6 +341,10 @@ fn serialize_custom_patterns<S: serde::Serializer>(
 
 /// Accepted `import.workers`.
 pub const IMPORT_WORKERS: std::ops::RangeInclusive<usize> = 1..=16;
+
+/// Accepted `limits.output_budget_tokens` other than 0 (off).
+const MIN_OUTPUT_BUDGET: u32 = 100;
+const MAX_OUTPUT_BUDGET: u32 = 100_000;
 
 /// Smallest accepted `import.max_tokens`.
 pub const MIN_IMPORT_TOKENS: u64 = 1000;
@@ -1043,6 +1051,10 @@ pub struct FileMock {
     /// host. With hosts, two mocks may share a route prefix.
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Rewrites the path below `route_prefix` before it is matched against
+    /// the contract (`strip_prefix`, then `add_prefix`).
+    #[serde(default)]
+    pub path_rewrite: mb_store::PathRewrite,
     /// Where the mock POSTs an event after each successful write.
     #[serde(default)]
     pub webhooks: Vec<FileWebhook>,
@@ -1220,6 +1232,7 @@ impl FileMock {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             hosts: Vec::new(),
+            path_rewrite: mb_store::PathRewrite::default(),
             webhooks: Vec::new(),
         }
     }
@@ -1429,11 +1442,15 @@ impl FileConfig {
         }
         self.validate_limits()?;
         self.validate_protocols()?;
-        mb_store::validate_hosts(&self.proxy.images).map_err(|e| format!("proxy.images: {e}"))?;
+        crate::proxy::images::validate_image_entries(&self.proxy.images)
+            .map_err(|e| format!("proxy.images: {e}"))?;
         self.proxy.check_bind(self.proxy.host)?;
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
+            mock.path_rewrite
+                .validate()
+                .map_err(|e| format!("mocks.{name}.{e}"))?;
             let webhooks: Vec<_> = mock.webhooks.iter().map(FileWebhook::to_store).collect();
             mb_store::validate_webhooks(&webhooks).map_err(|e| format!("{prefix}{e}"))?;
             if let Some(chaos) = &mock.chaos {
@@ -1490,7 +1507,15 @@ impl FileConfig {
             "limits.max_response_bytes",
             l.max_response_bytes,
             MockLimits::MIN_BYTES..=MockLimits::MAX_RESPONSE_BYTES,
-        )
+        )?;
+        if l.output_budget_tokens != 0 {
+            in_range(
+                "limits.output_budget_tokens",
+                l.output_budget_tokens,
+                MIN_OUTPUT_BUDGET..=MAX_OUTPUT_BUDGET,
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_protocols(&self) -> Result<(), String> {

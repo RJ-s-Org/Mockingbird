@@ -13,7 +13,11 @@
 
 ## Docs
 
-- [README](README.md): protocols, overrides, scenarios, Admin API, smart import, auth
+- [README](README.md): what Mockingbird is, the quickstart, how it compares
+- [Quickstart](docs/quickstart.md) and [Concepts](docs/concepts.md): serving, sessions, response sources, scenarios
+- [Proxy](docs/proxy.md): `mockingbird proxy` and `hosts:`, reaching mocks without changing the app
+- [Protocols](docs/protocols.md), [Events](docs/events.md): contract formats, overrides per protocol, AsyncAPI channels
+- [Smart import](docs/import.md), [Webhooks](docs/webhooks.md), [Console and auth](docs/console.md), [CLI](docs/cli.md), [Admin API](docs/admin-api.md)
 - [Configuration reference](docs/configuration.md): every `mockingbird.yaml` key
-- [Running locally](docs/deploy/local.md), [Docker Compose](docs/deploy/compose.md), [Kubernetes](docs/deploy/kubernetes.md)
+- [Running locally](docs/deploy/local.md), [Docker Compose](docs/deploy/compose.md), [Kubernetes](docs/deploy/kubernetes.md), [GitOps and preview environments](docs/deploy/gitops.md)
 - [Operations runbook](docs/operations/runbook.md)

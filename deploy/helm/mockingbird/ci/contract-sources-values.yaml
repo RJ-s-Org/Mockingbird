@@ -1,0 +1,42 @@
+# CI (render only): contracts from an existing ConfigMap and from a URL, and
+# an LLM profile whose key comes from a Secret.
+config:
+  server:
+    insecure_no_auth: true
+
+mocks:
+  stripe:
+    contract:
+      configMap:
+        name: "{{ .Release.Name }}-stripe-openapi"
+        key: openapi.yaml
+    hosts: [api.stripe.com]
+    llm_profile: openrouter
+    webhooks:
+      - url: http://checkout.preview.svc:8080/stripe/webhook
+        signing: stripe
+        secret: env:STRIPE_WEBHOOK_SECRET
+  petstore:
+    contract:
+      url: https://petstore3.swagger.io/api/v3/openapi.json
+      fileName: openapi.json
+      sha256: "3b4c9ae5a1f0d2e7c8b6a9f4e3d2c1b0a9f8e7d6c5b4a3928170f6e5d4c3b2a1"
+  baked:
+    contract: /contracts/baked.yaml
+
+llm:
+  existingSecret: mockingbird-llm
+  baseUrl: https://openrouter.ai/api/v1
+  model: deepseek/deepseek-v4.1-flash
+  profiles:
+    openrouter:
+      base_url: https://openrouter.ai/api/v1
+      model: deepseek/deepseek-v4.1-flash
+      apiKeySecret:
+        name: openrouter
+        key: api-key
+
+env:
+  - name: STRIPE_WEBHOOK_SECRET
+    valueFrom:
+      secretKeyRef: {name: stripe-webhook, key: secret}

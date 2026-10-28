@@ -1,0 +1,15 @@
+# Replaces the base's mockingbird.yaml; payments.yaml stays from the base.
+server:
+  host: 0.0.0.0
+  insecure_no_auth: true
+mocks:
+  payments:
+    contract: payments.yaml
+    route_prefix: /payments
+    # Deterministic, fast answers for local loops: the faker, no latency.
+    consistency: "on"
+    unknown_ids: "404"
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [createCharge]

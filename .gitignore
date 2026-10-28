@@ -32,3 +32,6 @@ crates/mb-console/web/playwright-report/
 
 # scripts/check-helm.sh downloads helm and kubeconform here
 .tools/
+
+# `mockingbird server start` state (the docs demo, local runs)
+.mockingbird/

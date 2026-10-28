@@ -62,6 +62,35 @@ pub async fn serve(
     }
 }
 
+/// Where the proxy serves its PAC file (`http://127.0.0.1:8888/proxy.pac`).
+pub const PAC_PATH: &str = "/proxy.pac";
+
+/// A proxy auto-config script: loopback and plain host names go direct,
+/// everything else through this proxy (which decides what is mocked).
+pub fn pac_script(proxy_authority: &str) -> String {
+    format!(
+        "function FindProxyForURL(url, host) {{\n  \
+         if (isPlainHostName(host) || host === \"localhost\" || shExpMatch(host, \"127.*\") || host === \"[::1]\" || host === \"::1\") return \"DIRECT\";\n  \
+         return \"PROXY {proxy_authority}\";\n}}\n"
+    )
+}
+
+/// `GET /proxy.pac`, addressed to the proxy itself.
+fn pac(req: &Request) -> Response {
+    let authority = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1:8888")
+        .to_owned();
+    (
+        [(header::CONTENT_TYPE, "application/x-ns-proxy-autoconfig")],
+        pac_script(&authority),
+    )
+        .into_response()
+}
+
 fn blocked(host: &str) -> Response {
     problem(
         502,
@@ -74,6 +103,9 @@ async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
     if req.method() == Method::CONNECT {
         return connect(state, req);
     }
+    if req.uri().authority().is_none() && req.uri().path() == PAC_PATH {
+        return pac(&req);
+    }
     let Some(host) = request_host(&req) else {
         return problem(
             400,
@@ -81,7 +113,7 @@ async fn handle(state: Arc<ProxyState>, req: Request) -> Response {
             "the request names no host (send absolute-form requests or CONNECT)",
         );
     };
-    if state.is_image_host(&host) {
+    if state.is_image(&host, req.uri().path()) {
         return placeholder_response(req.method(), req.uri().path());
     }
     if state.claims.claims(&host) {
@@ -159,16 +191,40 @@ async fn tunnel(
     Ok(())
 }
 
+/// Serves a tunnel to a mapped host: TLS with a leaf from the local CA
+/// when the client starts a handshake, else plain HTTP (a client that
+/// tunnels `http://` requests too, like the Node.js preload).
 async fn intercept(
     state: Arc<ProxyState>,
     host: String,
     client: TokioIo<hyper::upgrade::Upgraded>,
 ) -> anyhow::Result<()> {
-    let config = state.ca.server_config(&host)?;
-    let tls = tokio_rustls::TlsAcceptor::from(config)
-        .accept(client)
-        .await?;
+    use tokio::io::AsyncBufReadExt as _;
+    let mut client = tokio::io::BufReader::new(client);
+    let first = client.fill_buf().await?.first().copied();
     let host_value = HeaderValue::from_str(&host)?;
+    match first {
+        None => Ok(()),
+        // A TLS handshake record.
+        Some(0x16) => {
+            let config = state.ca.server_config(&host)?;
+            let tls = tokio_rustls::TlsAcceptor::from(config)
+                .accept(client)
+                .await?;
+            serve_tunnel(state, host_value, tls).await
+        }
+        Some(_) => serve_tunnel(state, host_value, client).await,
+    }
+}
+
+async fn serve_tunnel<S>(
+    state: Arc<ProxyState>,
+    host_value: HeaderValue,
+    io: S,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let svc = service_fn(move |req: Request<Incoming>| {
         let state = Arc::clone(&state);
         let host_value = host_value.clone();
@@ -178,7 +234,7 @@ async fn intercept(
                 req.headers_mut().insert(header::HOST, host_value.clone());
             }
             let host = host_value.to_str().unwrap_or_default().to_owned();
-            let resp = if state.is_image_host(&host) {
+            let resp = if state.is_image(&host, req.uri().path()) {
                 placeholder_response(req.method(), req.uri().path())
             } else {
                 serve_mapped(&state, req).await
@@ -187,7 +243,7 @@ async fn intercept(
         }
     });
     hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-        .serve_connection_with_upgrades(TokioIo::new(tls), svc)
+        .serve_connection_with_upgrades(TokioIo::new(io), svc)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())

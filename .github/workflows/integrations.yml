@@ -1,0 +1,76 @@
+name: Integrations
+
+# Runs the GitHub Action (integrations/github-action) on a tiny offline
+# example: a source build of the slim binary, the action's setup step, an
+# app that calls a real API host through the proxy, and the report step
+# with its checks. Only when the action or the CLI changes.
+on:
+  pull_request:
+    paths:
+      - integrations/**
+      - crates/mockingbird/src/**
+      - .github/workflows/integrations.yml
+  push:
+    branches: [main]
+    paths:
+      - integrations/**
+      - crates/mockingbird/src/**
+      - .github/workflows/integrations.yml
+  workflow_dispatch:
+
+concurrency:
+  group: integrations-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  github-action:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      # Its own cache, written only from main, so pull requests start warm
+      # and do not evict the check job's.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: integrations
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The slim binary (no MQTT, AMQP or Kafka) builds fastest and has every
+      # command the action uses.
+      - run: cargo build -p mockingbird --no-default-features
+      - name: Start Mockingbird (the action under test)
+        id: mockingbird
+        uses: ./integrations/github-action
+        with:
+          binary: target/debug/mockingbird
+          config: integrations/github-action/test/mockingbird.yaml
+          mode: offline
+      - name: Run the app through the proxy
+        run: integrations/github-action/test/app.sh
+      - name: A host no mock claims is blocked
+        run: |
+          if curl -fsS --cacert "$SSL_CERT_FILE" https://unmapped.example.test/; then
+            echo "::error::the proxy let an unmapped host through"
+            exit 1
+          fi
+      - name: Report and verify
+        uses: ./integrations/github-action/report
+        with:
+          fail-on-fallback: "true"
+          verify: --no-errors --called orders/getOrder=2 --called listOrders
+          artifact: mockingbird-self-test
+      - name: The report counted the requests and the blocked host
+        run: |
+          report="$MB_STATE_DIR/report/report.json"
+          jq -e '.mocks[0].operations.getOrder.requests == 2' "$report"
+          jq -e '.unmapped_hosts | map(select(.host == "unmapped.example.test" and .mode == "block")) | length == 1' "$report"
+          grep -q 'getOrder' "$MB_STATE_DIR/report/summary.md"
+          test -s "$MB_STATE_DIR/report/requests/orders.json"

@@ -1,0 +1,31 @@
+# The documentation site: mdBook over docs/. Build with `mdbook build`
+# (output in target/book); see docs/launch/checklist.md for publishing.
+[book]
+title = "Mockingbird"
+description = "LLM-backed API mocks: every protocol, stateful, zero-edit proxy, agent-native."
+authors = ["The Mockingbird authors"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+# A SUMMARY entry without its file is an error, not an empty page.
+create-missing = false
+
+# Links that leave docs/ (crates, examples, deploy, CHANGELOG) or point at
+# pages outside the book become links to the file on GitHub.
+[preprocessor.repo-links]
+command = "python3 scripts/docs-repo-links.py"
+
+[output.html]
+git-repository-url = "https://github.com/RJ-s-Org/Mockingbird"
+edit-url-template = "https://github.com/RJ-s-Org/Mockingbird/edit/main/{path}"
+site-url = "/Mockingbird/"
+no-section-label = true
+
+[output.html.search]
+limit-results = 20
+
+[output.html.fold]
+enable = true
+level = 1

@@ -24,21 +24,119 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
 | `github-readme-stats`: stats, top-langs, 5 pin cards, stats again | `api.github.com`, REST at `/` and GraphQL at `/graphql` on one host; axios honours `HTTPS_PROXY` | every card renders; the repeated stats query is a `cache` hit | GraphQL 12 `llm`, 2 `cache`; REST 2 `fallback` (`/search/commits`, timeout) | 10k | GraphQL 1.3–3.9 s; cards with `include_all_commits` wait 60 s (below) |
 | `nuxt/movies`: 5 SSR pages incl. 2 detail pages | `movies-proxy.vercel.app` (the app's hosted proxy, see below); Node `fetch` with `NODE_USE_ENV_PROXY` | 5/5 pages render with real titles, cast and figures; detail pages agree with the list they came from (seeded from state) | 10 `llm`, 3 `repaired`, 0 fallbacks | 20k (69k completion) | 6.6–37 s per call, median 19.8 s |
 
+## Field trials 2.0, 2026-10-28
+
+Five more open-source apps in other stacks, unmodified, under `mockingbird run` on a local merge of L1, L2, L3 and L6, plus the three earlier trials re-run on the same build. Case studies with configs, commands and per-call numbers: [trials](trials/README.md).
+
+| Trial | Stack | APIs | Result | Calls | Fallbacks |
+|---|---|---|---|---|---|
+| [plaid/quickstart](trials/plaid-quickstart.md) | Python, Flask | Plaid | Bypassed the proxy (plaid-python's plain `urllib3.PoolManager`) until the Python preload; then 9/9 routes after two catalog operations were added | 10 | 0 |
+| [healthchecks](trials/healthchecks.md) | Python, Django, pycurl | Twilio, GitHub App, Slack webhooks, Telegram, Opsgenie | 6/6 channels; Twilio and Telegram answers echoed request fields until the fix | 7 | 0 |
+| [`gh` CLI](trials/gh-cli.md) | Go 1.27 | GitHub REST + GraphQL | 8/10 commands; `issue create` null payload, `repo view` corrupt base64 | 15 | 2 |
+| [Next.js Commerce](trials/nextjs-commerce.md) | Next.js 15 | Shopify Storefront GraphQL | Build and catalog pages work; the cart is invented | 37 | 0 |
+| [Stripe accept-a-payment, Java](trials/stripe-java.md) | Java, Spark | Stripe | 8/8 creates (1.0–2.9 s), 4/4 retrieves | 12 | 0 |
+| Stripe accept-a-payment, Node (re-run) | Node | Stripe | 8/8 creates 1.3–2.9 s (was 3.2–7.6 s), 8/8 webhooks verified | 12 | 0 |
+| github-readme-stats (re-run) | Node | GitHub REST + GraphQL | 8/9 cards; `search/commits` answers in 11 s (was a 60 s fallback) | 10 | 0 |
+| nuxt/movies (re-run) | Nuxt 3 | TMDB | 6/6 pages; median call 9.7 s (was 19.8 s), cold home page 53 s | 11 | 0 |
+
 ## Open
+
+### From field trials 2.0 (2026-10-28)
+
+- **RPC-style reads are neither cached nor seeded.** Plaid reads are all `POST` (`/accounts/get`, `/auth/get`, `/identity/get`, `/transactions/sync`, `/accounts/balance/get`), so each call invents its own `account_id`s and balances, and a repeated `/accounts/get` differs from the first. Let a contract (or a heuristic: `POST …/get`, `…/list`, `…/sync` with no side effect) mark an operation as a read, and seed accounts from the first answer.
+- **Create and update mutations generate their whole return type.** GitHub's `createIssue { issue { id url } }` asked for every field of `Issue`: 36–39k prompt tokens, 16–20 s, an invalid answer and a `null` payload; `gh issue create` printed nothing and exited 0. Generate the selection plus the type's scalar fields and fill the rest of the stored object with the faker.
+- **Stateful GraphQL flows do not hold together** (with the existing "mutation results are not stored" item): in Next.js Commerce, `cartCreate` returned an empty cart, `cart(id:)` for it invented three lines, and `cartLinesAdd` answered a different product than the variant sent. The cart id ignored the persona's format.
+- **LLM-written base64 is corrupt.** GitHub's README `content` (`encoding: base64`) decoded to a garbled line, then to invalid UTF-8 (`gh repo view` fails). Ask for text and encode locally when a sibling says `encoding: base64` or the schema says `contentEncoding: base64`.
+- **Validation errors hide the cause.** A nullable object's `anyOf` reports only `is not valid under any of the schemas listed in the 'anyOf' keyword`, and the fallback reason carries the whole answer (kilobytes); `verify` prints those reasons in full (about 10 KB for the gh run). Report the deepest branch's errors and cap the quoted answer.
+- **The `verify` bar misses contract gaps.** A path the contract lacks (`no operation matches POST /accounts/balance/get`) is a 4xx, so `--no-fallbacks --no-unmapped` passes; add `--no-unmatched` (or count it under unmapped).
+- **Request-validation rejections are logged as source `fallback`** with no reason (healthchecks' Telegram and Opsgenie calls against strict hand-written contracts), so `verify --no-fallbacks` blames generation for a client error. Give them their own source.
+- An answer with only one possible value (Slack's literal `"ok"`) is labelled `llm` with 0 tokens and 0 ms.
+- **Catalog:** octokit's GraphQL schema (pinned July 2024; still on main in July 2026) lacks `Issue.issueType`, `blockedBy` and `blocking`, which current `gh` queries on github.com; GitHub's own `schema.docs.graphql` has them (check its licence before pinning it). GitHub REST has no GitHub Apps operations (`POST /app/installations/{id}/access_tokens`, used by healthchecks).
+- **GraphQL contracts from introspection JSON** (Shopify publishes the Storefront schema only that way) need converting to SDL first; accept them directly.
+- **`protocols.graphql.path` is global**: Shopify's `graphql.json` and GitHub's `/graphql` cannot be served by one config. Make it per mock.
+- github-readme-stats' torvalds/linux pin still gets `user` and `organization` both null (17 completion tokens), which the card reports as an error.
+- TMDB list endpoints stay slow: `/movie/popular` took 28 s for 1.8k completion tokens (about 65 tokens/s from the routed provider), so the cold home page took 53 s. A smaller default list size or streaming would help. Facts drift too: TMDB id 94997 came back as "Game of Thrones" (it is House of the Dragon).
 
 ### From the proxy trials (2026-10-28)
 
-- **SDKs with their own HTTP agent ignore the proxy variables.** stripe-node creates its own `https.Agent`, so `NODE_USE_ENV_PROXY` does not apply and its calls went to the real `api.stripe.com` (the dummy key was rejected; nothing else was sent). `node -r global-agent/bootstrap` with `GLOBAL_AGENT_HTTP_PROXY` fixed it. Ship this: `mockingbird proxy env --node` could add a `NODE_OPTIONS=--require <preload>` that installs the proxy on every agent (and undici's dispatcher), with no package to install.
-- **Huge response schemas time out.** GitHub REST `GET /search/commits` falls back to faker after 60 s every time. A fallback answer is not cached either, so the identical repeat waits another 60 s. Cache fallbacks under consistency (or fail fast on a repeat), and generate fewer, shorter items for list/search envelopes.
-- **Large TMDB detail answers are still slow:** 17–37 s pages, about 5k completion tokens per call. Candidates: stream the answer, trim `append_to_response` sub-objects to the requested ones, or cache per resource across sessions.
-- **One contract under another host and path.** The movies app calls its hosted proxy (`movies-proxy.vercel.app/tmdb/<path>`), not TMDB, so the trial exported the TMDB contract and stripped `/3` from its paths to mount it there. A per-mock path rewrite (`strip_prefix`/`add_prefix`), or letting a mock reuse another mock's contract with a different base path, would avoid the copy.
-- **Browser traffic does not go through the proxy.** Server-side rendering reaches the mocks; images (`movies-proxy.vercel.app/ipx/…`) and client-side navigation are fetched by the browser from the real host. Document browser setups (a PAC file or `--proxy-server` for Playwright/Chrome with the CA) or serve the images via `proxy.images` once the browser uses the proxy.
-- **Adding a `mocks:` block to a running server's config did not take effect** (no reload line in the log, `/readyz` stayed `ready`); a restart did. Check whether a mock defined only in the database plus a new config `mocks:` section is a reload the watcher skips.
-- GraphQL queries with several root fields (pin cards) still skip state, cache and seeding, and are logged once per root field (accepted deviation of [#41](https://github.com/RJ-s-Org/Mockingbird/pull/41)).
-- Persona details are not always kept: a few Stripe `client_secret` suffixes were shorter than the 24 characters the persona asks for.
+- `storage.url: sqlite://./…` is relative to the working directory, while `contract:` paths are relative to the config file, so `mockingbird run -c elsewhere/mockingbird.yaml` opens a different database than `cd elsewhere && mockingbird run`. Resolve relative SQLite paths against the config's directory (a behaviour change; needs a decision).
+- Go binaries built with Go < 1.27 on macOS (keychain verifier) and macOS's system Ruby (LibreSSL) ignore `SSL_CERT_FILE`, so HTTPS to mocked hosts fails for them on a Mac; Linux, OpenSSL Rubies and Go 1.27+ (with the `GODEBUG` that `proxy env` now sets) work. A documented opt-in keychain install would close the rest.
+
+### From the examples catalog (2026-10-28)
+
+Found while building the 21 [API examples](examples.md) and 3 sample apps, offline and with live checks of Stripe, GitHub REST, Twilio, Slack and Shopify (OpenRouter `deepseek/deepseek-v4.1-flash`, default routing).
+
+**Live checks**
+
+| Example | Calls | Latency | Sources | Shape and state |
+| --- | --- | --- | --- | --- |
+| Stripe | 3 PaymentIntent creates, retrieve, customer create/list, 2 scenarios | creates 1.2–3.4 s; reads from state 7 ms | all `llm` or `state`, 0 fallbacks | Amount, currency, description, customer copied; `client_secret` = `<id>_secret_…`; list filtered by `email` came from state |
+| GitHub REST | repo, issues, create issue, read it back, pulls, search, user | 2.8–29 s (repo 12.9 s, issues 17.9 s, search 14.3 s) | 3 `llm`, 3 `repaired`, **`GET /pulls` fell back after 29 s** | Persona kept (owners, URLs, labels). **Reading the created issue `#412` back returned a different issue**, and the create's number collided with a listed `#412` |
+| Twilio | send SMS, fetch it, list, call, Lookups | 1.5–19 s (list 19.1 s, send 9.4 s) | all `llm` | To/From/Body copied, `uri` consistent with the sid. **Fetching the sent message by sid returned another message** |
+| Slack | auth.test, 3× chat.postMessage, history, users.info | 0.5–7.5 s | all `llm`, 1 `repaired` | Before an example fix, a plain `chat.postMessage` came back `{"ok": false}`: the LLM picked the error branch of the 200's `anyOf` |
+| Shopify Admin GraphQL | shop, products, productCreate, product(id) of it, orders, `userErrors` scenario | 0.6–2.4 s | all `llm` | gid ids, plant titles, prices; **`product(id:)` of the just-created gid returned a different product** |
+
+**State and consistency**
+
+- **Path ids that are not `id`-like are not state keys.** `issue_number`/`pull_number` (GitHub), `{issueIdOrKey}` (Jira) and `{MessageSid}.json` (Twilio, the `.json` suffix is part of the segment) miss the created resource, so create-then-read returns a generated stranger. Treat `*_number`, `*Key`, `*Sid` path params as ids, strip a `.json`/`.xml` suffix before matching, and allocate list numbers above the ones already listed.
+- **GraphQL mutation results are not stored**, so `product(id:)` after `productCreate` generates anew. Store a mutation payload's object by its `id` (and global id) like a REST create.
+- **A list read after a create omits the created item** when the list was cached earlier in the session (Twilio, Slack history). Invalidate or append on create.
+- **Timestamps are not recent.** The LLM has no clock: Stripe `created` came back as 2025-01-15 every time, Slack `ts` values from 2024–2025; offline, `date-time` values spread over 2000–2033. Put the current time in the prompt and bias the faker to the last few days.
+
+**Scenarios**
+
+- **Scenarios cannot set response headers**, and headers a contract declares are never sent: no `Retry-After` on 429s (Slack, Discord, Jira, Zendesk, Auth0, Spotify, Notion declare it; zenpy and slack_sdk read it), no `x-ratelimit-*`, no SendGrid `X-Message-Id`. Add `headers:` to scenarios and emit declared headers with generated values.
+- **An invalid `set` is dropped whole, at request time, with only a WARN** (`scenario set produces an invalid body; ignoring it`): a value outside an `enum`, against a `const` (Slack `ok: false` on a `const: true` schema), a snake_case key in a gRPC message, or an object in a GraphQL list without `__typename`. Validate `set` against every response it can apply to when the config loads and reject it there.
+- **`null` in `set` deletes the field** (JSON merge patch), so a required nullable field cannot be forced to `null` (Plaid `display_message`).
+- **An undeclared 5xx ignores `set`**: `operation repos/get declares no response for forced status 503` comes back as problem+json without the scenario's body. Several examples declare 503 on every operation only for this. Apply `set` to the native answer.
+- **GraphQL and gRPC scenarios cannot force a 4xx**: only 200 is declared, so `status: 429` is rejected (`status 429 is not declared by any operation …`), while the `X-Mockingbird-Status: 429` header works (`RATE_LIMITED`). Map 4xx statuses to GraphQL errors (GitHub `RATE_LIMITED`, Shopify `THROTTLED` with `extensions.cost`) and gRPC codes (`RESOURCE_EXHAUSTED`). A forced GraphQL 5xx answers HTTP 200 with `errors[].extensions.status`; GitHub answers a real 502/503.
+- **`"4XX"` range responses do not count as declaring 404** (Discord's upstream spec), so scenarios that work on the subset are refused on `--full`.
+- The gRPC `set` uses the protobuf JSON mapping (lowerCamelCase keys, int64 as strings); document it in the configuration reference.
+
+**Webhooks**
+
+- **Signing schemes the real APIs use** (each example uses `hmac-sha256` meanwhile): same HMAC as `hmac-sha256` under another header (GitHub `X-Hub-Signature-256` plus `X-GitHub-Event`/`X-GitHub-Delivery`; Notion `X-Notion-Signature`); base64 HMAC-SHA256 (Shopify `X-Shopify-Hmac-Sha256` plus topic and shop headers; Square over URL + body; Zendesk over timestamp + body; HubSpot v3 over method + URI + body + timestamp); Slack `v0=` over `v0:<ts>:<body>`; Twilio base64 HMAC-SHA1 over URL + sorted form params (and callbacks are form-encoded, not JSON); Ed25519 (Discord), ECDSA (SendGrid), JWT (Plaid), certificate signatures (PayPal). A configurable header name and encoding would cover half of these.
+- **Event types cannot be mapped to the API's names**: `POST …/Messages.json` → `Messages.json.created`, `/transactions/sync` → `sync.created`, `POST /pulls` → `pull.created`, GraphQL `productCreate` → `productcreatepayload.updated`. Add `webhooks[].event_types: {<operationId>: products/create}` and strip `.json`.
+- The upstream GitHub spec is OpenAPI 3.0.3 with `x-webhooks`; those payloads are not used for event bodies.
+
+**Contracts and validation**
+
+- **`serve` panics on a schema `validate` accepts**: octokit/graphql-schema at `597478f` declares `EnterpriseOwnerInfo.repositoryDeployKeySetting` twice, and async-graphql panics with ``Field `repositoryDeployKeySetting` already exists`` (`dynamic/object.rs:88`). Reject or de-duplicate at compile time. The example pins `503d8f1`.
+- **Dangling `$ref`s fail compilation**: Square's `api.json` (every release since 2025-10) references undefined `AppFeeAllocation`/`CurrencyExchange`: `unresolvable $ref referenced from schema CreatePaymentRequest`. Treat an unresolvable ref as an open schema with a warning.
+- **Form booleans are case-sensitive**: stripe-python sends `automatic_payment_methods[enabled]=True`, which fails with `body/automatic_payment_methods/enabled: "True" is not of type "boolean"`; `true` passes. Accept `True`/`False`.
+- **Required header parameters are not checked** (a request without `Notion-Version` gets 200).
+- **Request-validation 400 bodies are faker-filled**: Stripe's answer to `amount=abc` carries `type: idempotency_error` and `doc_url: "bravo"` around the real message.
+- **Two mocks cannot share a route prefix on one host**, so PayPal is three mocks with mount-relative paths, and every Zendesk path is duplicated with a `.json` suffix. A per-mock path alias or suffix rule would avoid it.
+- **One response shape per operation**: Auth0's `include_totals` switches between an array and a page object; Discord's `with_response` between 200 and 204. With two 2xx responses the faker always picks the first.
+
+**Generated data**
+
+- **Offline faker**: optional fields are always filled (a `cursor` or `next_page_uri: "cedar"` sends SDK pagers into endless loops or `GET /cedar`; a healthy OTLP export gets a random `partialSuccess`); GraphQL `ID` and custom scalars (`DateTime`, `URI`, `Decimal`) are random words; a union member is picked ignoring arguments (`search(type: REPOSITORY)` returned a `User`); `format: uri` wins over `pattern`; patterns like `^[\S\s]*$` produce non-ASCII ids; path and query params are not reflected (`account_sid`, `channel_id`, the queried email); a nested request object (HubSpot/Notion `properties`) is not copied on create. An offline 202 without a body is labelled `x-mockingbird-source: llm`.
+- With an LLM, a 200 whose schema is `anyOf [success, error]` sometimes gets the error branch (Slack); prefer the first branch unless a scenario applies.
+- Large list schemas are still slow or fall back: GitHub `GET /pulls` (10 pull objects) fell back after 29 s; GitHub issue lists and Twilio message lists took 18–19 s.
+
+**Proxy and SDKs**
+
+- SDKs that ignore the proxy variables or the CA bundle need explicit settings in the snippets: stripe-python (`stripe.ca_bundle_path`, its own bundled roots), Go binaries built before Go 1.27 on macOS. plaid-python and other OpenAPI-generated clients built on a plain `urllib3.PoolManager` and certifi are covered by the Python preload since field trials 2.0.
+- An unresolved webhook secret logs a WARN for every delivery; once per target is enough.
+- The `kafka` broker kind is not in the default build (`this build has no kafka support`), so the Kafka example runs on the memory broker unless you use the full image.
 
 ## Done
 
+- Field trials 2.0 (launch-b1-trials), from the [trials](trials/README.md):
+  - `proxy env` sets `PYTHONPATH` to a `sitecustomize` preload: `certifi.where()` names the bundle and a plain `urllib3.PoolManager` goes through `HTTPS_PROXY` (plaid-python reached the real Plaid sandbox before);
+  - `proxy env` sets `GODEBUG=x509sslcertoverrideplatform=1`, so Go 1.27+ binaries on macOS and Windows trust the bundle (`gh` works on a Mac);
+  - a create or update copies only the request members the response schema declares (Twilio's `To`/`Body`/`RiskCheck`/`StatusCallback` and Telegram's `chat_id`/`parse_mode` were echoed, as were the catalog's Plaid and Auth0 credentials before their objects were closed);
+  - `{"data": …, "errors": null}` answers are unwrapped like `{"data": …}`;
+  - `minimum`/`maximum`/`multipleOf` violations are patched locally instead of costing a repair call;
+  - examples: Plaid gains `/accounts/balance/get` and `/institutions/get_by_id`; GitHub GraphQL mounts at `/graphql` so it combines with GitHub REST on one host, and a test checks that no two catalog mocks collide.
+
+- Launch L1, engine speed and fidelity, [#57](https://github.com/RJ-s-Org/Mockingbird/pull/57) (numbers: [performance](performance.md#latency-against-a-real-llm)):
+  - huge response schemas: an output budget (`limits.output_budget_tokens`, 1500) shapes what the LLM writes (unrequested optional sub-objects left out, arrays capped, deep required objects filled by the faker), and OpenRouter requests send `reasoning: {enabled: false}`; GitHub `search/commits` p50 29.8 s → 9.4 s with no fallback, and a fallback answer is now cached under consistency (the repeat is answered at once and still reported as a fallback);
+  - large TMDB details: movie detail with every `append_to_response` part p50 51 s → 6.2 s (about 5–8k completion tokens, mostly hidden reasoning, down to ~1k);
+  - persona formats: templates (`client_secret = "<id>_secret_<24 random chars>"`) and id prefixes (`(pi_, cus_) followed by 24 random alphanumeric chars`) are checked and patched after generation; Stripe `client_secret` format 2/3 → 5/5;
+  - GraphQL queries with several root fields read state, the cache and stored resources per field, seed and cache per field, and are logged as one request (each field is still metered);
+  - `scripts/trial-bench.py`: a repeatable latency bench over the trial contracts.
 - Phase 1, [#31](https://github.com/RJ-s-Org/Mockingbird/pull/31):
   - the MCP server imports keys from the login shell;
   - `doctor` names the process that lacks a key, and `start_server` refuses a profile whose key is missing;
@@ -78,3 +176,9 @@ The three trial apps ran again on `main` with the backlog merged, unmodified (`g
   - CI: [#45](https://github.com/RJ-s-Org/Mockingbird/pull/45) (OpenSSL vendored into the binary, distroless `base-nossl` image; crypto-bigint advisories ignored with reasons), [#47](https://github.com/RJ-s-Org/Mockingbird/pull/47) (pulldown-cmark 0.13.5).
 
   Measured afterwards: the three trials through the proxy (table above).
+- L2, zero-edit proxy and routing (launch-l2-proxy):
+  - `mockingbird run [-c config] -- <command>` starts the server and proxy unless one answers, runs the command with the proxy environment, stops what it started and exits with the command's code;
+  - `proxy env` covers more runtimes with no package install: a Node.js preload in `NODE_OPTIONS` (every `http`/`https` agent, including SDKs' own, and undici's global dispatcher), `JAVA_TOOL_OPTIONS` with a JKS truststore, `CURL_CA_BUNDLE`, `DENO_CERT`; stripe-node reaches the mock without `global-agent`;
+  - `mocks.<name>.path_rewrite` (`strip_prefix`/`add_prefix`) mounts one contract under another base path, e.g. TMDB's `/3` contract at `movies-proxy.vercel.app/tmdb`;
+  - browsers: a PAC file at `/proxy.pac`, `mockingbird proxy browser` (Chrome/Chromium/Edge through the proxy, trusting the CA by its SPKI hash in a profile of its own), Playwright and Cypress setup in [proxy.md](proxy.md); `proxy.images` entries may name a path prefix on a mocked host (`movies-proxy.vercel.app/ipx`);
+  - the reload gap: with `--watch` an added `mocks:` block was applied, but a reload with nothing to change logged only at debug level, `serve -c` without `--watch` never reloaded and said nothing, and a changed `proxy:` section (added in the same edit in the trial) cannot apply until restart. Each reload now logs at info level, `serve` without `--watch` says it reads the file once, and a changed `proxy:` section logs a restart warning.

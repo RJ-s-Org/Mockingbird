@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mockingbird
+spec:
+  template:
+    spec:
+      containers:
+        - name: mockingbird
+          env:
+            # Create it first: kubectl -n mocks-staging create secret generic
+            #   mockingbird-llm --from-literal=api-key=...
+            - name: MB_LLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: mockingbird-llm, key: api-key}
+            - name: MB_LLM_BASE_URL
+              value: https://openrouter.ai/api/v1
+            - name: MB_LLM_MODEL
+              value: deepseek/deepseek-v4.1-flash
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}

@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mockingbird
+spec:
+  # SQLite and in-memory stores: one replica.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mockingbird
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mockingbird
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: mockingbird
+          image: ghcr.io/rj-s-org/mockingbird:0.1.0
+          args: ["serve", "-c", "/etc/mockingbird/mockingbird.yaml", "--role", "all"]
+          env:
+            - name: MB_STORAGE_URL
+              value: sqlite:///tmp/mockingbird.db
+            - name: MB_STATE_URL
+              value: memory
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 50051}
+            - {name: admin, containerPort: 9090}
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 5
+          lifecycle:
+            # Kubernetes 1.30+; the image is distroless (no shell).
+            preStop:
+              sleep: {seconds: 5}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/mockingbird, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: mockingbird-config
+        - name: tmp
+          emptyDir: {}

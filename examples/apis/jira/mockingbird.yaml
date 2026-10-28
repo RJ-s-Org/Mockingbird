@@ -1,0 +1,58 @@
+# Jira Cloud: issues, JQL search, transitions, comments and projects (REST v3),
+# with issue and comment webhooks.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/rest/api/3/issue/PLNT-42 -H 'Host: juniper.atlassian.net' -u ana@example.com:test-token
+# Contract: jira.openapi.yaml, a hand-written subset (see its header) that keeps
+# Atlassian's operation ids. Atlassian's full OpenAPI description is not
+# redistributed (see examples/apis/jira/example.json).
+proxy:
+  enabled: true          # apps reach https://juniper.atlassian.net through http://127.0.0.1:8888
+mocks:
+  jira:
+    contract: jira.openapi.yaml
+    route_prefix: /
+    hosts: [juniper.atlassian.net]
+    persona: >-
+      Jira Cloud site juniper.atlassian.net of "Juniper & Co", a small online
+      plant shop in Portland, Oregon (timezone America/Los_Angeles, locale
+      en_US). Two projects: PLNT "Plant Ops" (id 10000, business: greenhouse,
+      stock and shipping work) and WEB "Storefront" (id 10001, software: the
+      shop's website). Issue ids are numeric strings from 10000; keys are
+      PLNT-<n> or WEB-<n>; every self link is
+      https://juniper.atlassian.net/rest/api/3/<resource>/<id>. Users have
+      accountIds "712020:<uuid>" and @example.com emails: Ana Ruiz (ops lead,
+      the API user), Theo Park (web developer), Mia Okafor (warehouse).
+      Summaries are realistic: "Repot the fiddle leaf figs in bay 3", "Checkout
+      button unresponsive on Safari", "Restock 6in terracotta pots". Rich text
+      (description, comment body) is Atlassian Document Format. Timestamps are
+      recent, with a -0700 offset. A created issue echoes the summary, project
+      and issue type of the request.
+    webhooks:
+      # A Jira admin webhook (Settings > System > WebHooks) posts unsigned JSON.
+      - url: http://127.0.0.1:4242/jira/webhook
+        events: [issue.created, issue.updated, comment.created]
+        signing: none
+    scenarios:
+      rate-limited:
+        status: 429
+        set:
+          errorMessages: ["Rate limit exceeded."]
+          errors: {}
+      issue-not-found:
+        status: 404
+        operations: [getIssue, editIssue, getTransitions, doTransition, getComments, addComment]
+        set:
+          errorMessages: ["Issue does not exist or you do not have permission to see it."]
+          errors: {}
+      invalid-field:
+        status: 400
+        operations: [createIssue, editIssue]
+        set:
+          errorMessages: []
+          errors:
+            customfield_10020: "Field 'customfield_10020' cannot be set. It is not on the appropriate screen, or unknown."
+      outage:
+        status: 503
+        set:
+          errorMessages: ["Jira is temporarily unavailable. Please try again later."]
+          errors: {}

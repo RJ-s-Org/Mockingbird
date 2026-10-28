@@ -1,0 +1,27 @@
+# The Stripe example's contract, with webhooks sent to this app on port 4242.
+#   STRIPE_WEBHOOK_SECRET=whsec_local mockingbird serve -c mockingbird.yaml --offline
+proxy:
+  enabled: true
+mocks:
+  stripe:
+    contract: ../../apis/stripe/stripe.openapi.yaml
+    route_prefix: /
+    hosts: [api.stripe.com]
+    persona: >-
+      Stripe API in test mode for "Juniper & Co", a small online plant shop.
+      Amount, currency and description are copied from the request.
+    webhooks:
+      - url: http://127.0.0.1:4242/webhook
+        events: [payment_intent.created]
+        secret: env:STRIPE_WEBHOOK_SECRET
+        signing: stripe
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [PostPaymentIntents]
+        set:
+          error:
+            type: card_error
+            code: card_declined
+            decline_code: insufficient_funds
+            message: Your card has insufficient funds.

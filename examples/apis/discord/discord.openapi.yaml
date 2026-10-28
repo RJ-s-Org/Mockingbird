@@ -1,0 +1,340 @@
+# A hand-written subset of the Discord HTTP API v10 (current user, guilds,
+# channels, messages, interaction responses), written for Mockingbird's examples
+# and covered by its license.
+# Paths, operation ids and shapes follow Discord's published OpenAPI description,
+# which is MIT-licensed:
+#   https://github.com/discord/discord-api-spec (specs/openapi.json)
+# `mockingbird examples init discord --full` swaps this file for that spec at the
+# commit pinned in example.json.
+openapi: 3.1.0
+info:
+  title: Discord HTTP API (Mockingbird example subset)
+  version: "10"
+servers:
+  - url: https://discord.com/api/v10
+security:
+  - BotToken: []
+paths:
+  /users/@me:
+    get:
+      operationId: get_my_user
+      summary: Returns the user object of the requester's account (the bot).
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPIIResponse" }
+        "401": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+        "502": { $ref: "#/components/responses/ServerErrorResponse" }
+  /guilds/{guild_id}:
+    parameters:
+      - { name: guild_id, in: path, required: true, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+    get:
+      operationId: get_guild
+      summary: Returns the guild object for the given id.
+      parameters:
+        - { name: with_counts, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: The guild.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GuildWithCountsResponse" }
+        "403": { $ref: "#/components/responses/ClientErrorResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+        "502": { $ref: "#/components/responses/ServerErrorResponse" }
+  /guilds/{guild_id}/channels:
+    parameters:
+      - { name: guild_id, in: path, required: true, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+    get:
+      operationId: list_guild_channels
+      summary: Returns the guild's channels (threads excluded).
+      responses:
+        "200":
+          description: The channels.
+          content:
+            application/json:
+              schema: { type: array, minItems: 3, maxItems: 8, items: { $ref: "#/components/schemas/GuildChannelResponse" } }
+        "403": { $ref: "#/components/responses/ClientErrorResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+        "502": { $ref: "#/components/responses/ServerErrorResponse" }
+  /channels/{channel_id}/messages:
+    parameters:
+      - { name: channel_id, in: path, required: true, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+    get:
+      operationId: list_messages
+      summary: Returns messages in a channel, newest first.
+      parameters:
+        - { name: around, in: query, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+        - { name: before, in: query, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+        - { name: after, in: query, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: The messages.
+          content:
+            application/json:
+              schema: { type: array, minItems: 1, maxItems: 5, items: { $ref: "#/components/schemas/MessageResponse" } }
+        "403": { $ref: "#/components/responses/ClientErrorResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+        "502": { $ref: "#/components/responses/ServerErrorResponse" }
+    post:
+      operationId: create_message
+      summary: Post a message to a guild text or DM channel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessageCreateRequest" }
+      responses:
+        "200":
+          description: The new message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageResponse" }
+        "400": { $ref: "#/components/responses/ClientErrorResponse" }
+        "403": { $ref: "#/components/responses/ClientErrorResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+        "502": { $ref: "#/components/responses/ServerErrorResponse" }
+  /channels/{channel_id}/messages/{message_id}:
+    parameters:
+      - { name: channel_id, in: path, required: true, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+      - { name: message_id, in: path, required: true, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+    get:
+      operationId: get_message
+      summary: Returns a specific message in the channel.
+      responses:
+        "200":
+          description: The message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+    delete:
+      operationId: delete_message
+      summary: Delete a message.
+      responses:
+        "204": { description: Deleted. }
+        "403": { $ref: "#/components/responses/ClientErrorResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+  /interactions/{interaction_id}/{interaction_token}/callback:
+    parameters:
+      - { name: interaction_id, in: path, required: true, schema: { $ref: "#/components/schemas/SnowflakeType" } }
+      - { name: interaction_token, in: path, required: true, schema: { type: string, maxLength: 152133 } }
+    post:
+      operationId: create_interaction_response
+      summary: Respond to an interaction (no bot token needed; the token is in the path).
+      security: [{}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InteractionCallbackRequest" }
+      responses:
+        "204": { description: Acknowledged (with_response=true, not covered here, answers 200 with the callback resource). }
+        "400": { $ref: "#/components/responses/ClientErrorResponse" }
+        "404": { $ref: "#/components/responses/ClientErrorResponse" }
+        "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
+components:
+  securitySchemes:
+    BotToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: '"Bot <token>".'
+  responses:
+    ClientErrorResponse:
+      description: Client error, e.g. {"message":"Unknown Channel","code":10003}.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ClientRatelimitedResponse:
+      description: Rate limited. Discord also sends Retry-After and X-RateLimit-* headers.
+      headers:
+        Retry-After: { schema: { type: integer } }
+        X-RateLimit-Scope: { schema: { type: string, enum: [user, global, shared] } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RatelimitedResponse" }
+    ServerErrorResponse:
+      description: Discord is having trouble.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    SnowflakeType: { type: string, pattern: "^1[0-9]{17,18}$", format: snowflake }
+    Iso8601: { type: string, pattern: "^2026-10-(1[0-9]|2[0-8])T(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}000\\+00:00$" }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer, description: Discord JSON error code, e.g. 10003 Unknown Channel. }
+        message: { type: string }
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer }
+        message: { type: string }
+        errors: { type: object, description: Per-field error details for 50035 Invalid Form Body. }
+    RatelimitedResponse:
+      type: object
+      required: [code, message, retry_after, global]
+      properties:
+        code: { type: integer, const: 0 }
+        message: { type: string, const: You are being rate limited. }
+        retry_after: { type: number, minimum: 0.1, maximum: 10, description: Seconds to wait before retrying. }
+        global: { type: boolean }
+    UserResponse:
+      type: object
+      required: [id, username, avatar, discriminator, public_flags, flags, global_name]
+      properties:
+        id: { $ref: "#/components/schemas/SnowflakeType" }
+        username: { type: string, pattern: "^[a-z][a-z0-9_.]{2,15}$" }
+        avatar: { type: [string, "null"], pattern: "^[0-9a-f]{32}$" }
+        discriminator: { type: string, const: "0" }
+        public_flags: { type: integer, enum: [0, 64, 128, 256] }
+        flags: { type: integer, enum: [0, 64, 128, 256] }
+        bot: { type: boolean }
+        global_name: { type: [string, "null"] }
+    UserPIIResponse:
+      type: object
+      required: [id, username, avatar, discriminator, public_flags, flags, global_name, bot, mfa_enabled, locale, verified]
+      properties:
+        id: { $ref: "#/components/schemas/SnowflakeType" }
+        username: { type: string, const: Quillbot }
+        avatar: { type: [string, "null"], pattern: "^[0-9a-f]{32}$" }
+        discriminator: { type: string, const: "0" }
+        public_flags: { type: integer, const: 524288 }
+        flags: { type: integer, const: 524288 }
+        bot: { type: boolean, const: true }
+        global_name: { type: "null" }
+        mfa_enabled: { type: boolean }
+        locale: { type: string, enum: [en-US, en-GB, de, fr, es-ES, ja, pt-BR] }
+        verified: { type: boolean, const: true }
+        email: { type: "null" }
+    GuildWithCountsResponse:
+      type: object
+      required: [id, name, icon, description, features, owner_id, afk_timeout, verification_level, roles, emojis, premium_tier, preferred_locale, system_channel_id, nsfw_level, approximate_member_count, approximate_presence_count]
+      properties:
+        id: { $ref: "#/components/schemas/SnowflakeType" }
+        name: { type: string }
+        icon: { type: [string, "null"], pattern: "^(a_)?[0-9a-f]{32}$" }
+        description: { type: [string, "null"] }
+        features: { type: array, items: { type: string, enum: [COMMUNITY, NEWS, WELCOME_SCREEN_ENABLED, MEMBER_VERIFICATION_GATE_ENABLED, PREVIEW_ENABLED, INVITE_SPLASH, ROLE_ICONS] } }
+        owner_id: { $ref: "#/components/schemas/SnowflakeType" }
+        afk_timeout: { type: integer, enum: [60, 300, 900, 1800, 3600] }
+        system_channel_id: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/SnowflakeType" }] }
+        verification_level: { type: integer, enum: [0, 1, 2, 3, 4] }
+        premium_tier: { type: integer, enum: [0, 1, 2, 3] }
+        preferred_locale: { type: string, enum: [en-US, en-GB, de, fr] }
+        nsfw_level: { type: integer, enum: [0, 1, 2, 3] }
+        approximate_member_count: { type: integer, minimum: 200, maximum: 5000 }
+        approximate_presence_count: { type: integer, minimum: 20, maximum: 800 }
+        roles:
+          type: array
+          minItems: 2
+          maxItems: 5
+          items:
+            type: object
+            required: [id, name, permissions, position, color, hoist, managed, mentionable]
+            properties:
+              id: { $ref: "#/components/schemas/SnowflakeType" }
+              name: { type: string, enum: ["@everyone", Moderator, Organizer, Speaker, Member] }
+              permissions: { type: string, pattern: "^[0-9]{10,16}$" }
+              position: { type: integer, minimum: 0, maximum: 10 }
+              color: { type: integer, minimum: 0, maximum: 16777215 }
+              hoist: { type: boolean }
+              managed: { type: boolean }
+              mentionable: { type: boolean }
+        emojis: { type: array, maxItems: 3, items: { type: object, properties: { id: { $ref: "#/components/schemas/SnowflakeType" }, name: { type: string }, animated: { type: boolean } } } }
+    GuildChannelResponse:
+      type: object
+      required: [id, type, flags, guild_id, name, position, parent_id, nsfw, permission_overwrites]
+      properties:
+        id: { $ref: "#/components/schemas/SnowflakeType" }
+        type: { type: integer, enum: [0, 2, 4, 5, 15], description: 0 text, 2 voice, 4 category, 5 announcement, 15 forum. }
+        flags: { type: integer, const: 0 }
+        guild_id: { $ref: "#/components/schemas/SnowflakeType" }
+        name: { type: string, enum: [welcome, announcements, general, help, show-and-tell, events, Lounge, Stage] }
+        topic: { type: [string, "null"] }
+        position: { type: integer, minimum: 0, maximum: 20 }
+        parent_id: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/SnowflakeType" }] }
+        last_message_id: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/SnowflakeType" }] }
+        rate_limit_per_user: { type: integer, enum: [0, 5, 30] }
+        nsfw: { type: boolean, const: false }
+        permission_overwrites: { type: array, maxItems: 2, items: { type: object, required: [id, type, allow, deny], properties: { id: { $ref: "#/components/schemas/SnowflakeType" }, type: { type: integer, enum: [0, 1] }, allow: { type: string, pattern: "^[0-9]{1,12}$" }, deny: { type: string, pattern: "^[0-9]{1,12}$" } } } }
+    MessageResponse:
+      type: object
+      required: [id, type, content, channel_id, author, attachments, embeds, mentions, mention_roles, pinned, mention_everyone, tts, timestamp, edited_timestamp, flags, components]
+      properties:
+        id: { $ref: "#/components/schemas/SnowflakeType" }
+        type: { type: integer, enum: [0, 19], description: 0 default, 19 reply. }
+        content: { type: string, maxLength: 2000 }
+        channel_id: { $ref: "#/components/schemas/SnowflakeType" }
+        author: { $ref: "#/components/schemas/UserResponse" }
+        attachments: { type: array, maxItems: 0, items: { type: object } }
+        embeds: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/RichEmbed" } }
+        mentions: { type: array, maxItems: 2, items: { $ref: "#/components/schemas/UserResponse" } }
+        mention_roles: { type: array, maxItems: 1, items: { $ref: "#/components/schemas/SnowflakeType" } }
+        pinned: { type: boolean }
+        mention_everyone: { type: boolean, const: false }
+        tts: { type: boolean, const: false }
+        timestamp: { $ref: "#/components/schemas/Iso8601" }
+        edited_timestamp: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/Iso8601" }] }
+        flags: { type: integer, enum: [0, 4] }
+        components: { type: array, maxItems: 0, items: { type: object } }
+        nonce: { oneOf: [{ type: integer }, { type: string, maxLength: 25 }] }
+        message_reference:
+          type: object
+          properties:
+            message_id: { $ref: "#/components/schemas/SnowflakeType" }
+            channel_id: { $ref: "#/components/schemas/SnowflakeType" }
+            guild_id: { $ref: "#/components/schemas/SnowflakeType" }
+    RichEmbed:
+      type: object
+      properties:
+        type: { type: string, const: rich }
+        title: { type: string, maxLength: 256 }
+        description: { type: string, maxLength: 4096 }
+        url: { type: string, format: uri }
+        color: { type: integer, minimum: 0, maximum: 16777215 }
+    MessageCreateRequest:
+      type: object
+      properties:
+        content: { type: string, maxLength: 2000 }
+        nonce: { oneOf: [{ type: integer }, { type: string, maxLength: 25 }] }
+        tts: { type: boolean }
+        embeds: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/RichEmbed" } }
+        allowed_mentions:
+          type: object
+          properties:
+            parse: { type: array, items: { type: string, enum: [users, roles, everyone] } }
+            users: { type: array, items: { $ref: "#/components/schemas/SnowflakeType" } }
+        message_reference:
+          type: object
+          required: [message_id]
+          properties:
+            message_id: { $ref: "#/components/schemas/SnowflakeType" }
+            fail_if_not_exists: { type: boolean }
+        sticker_ids: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/SnowflakeType" } }
+        flags: { type: integer }
+    InteractionCallbackRequest:
+      type: object
+      required: [type]
+      properties:
+        type: { type: integer, enum: [1, 4, 5, 6, 7, 8, 9, 10, 12], description: 4 CHANNEL_MESSAGE_WITH_SOURCE, 5 DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, 9 MODAL. }
+        data:
+          type: object
+          properties:
+            content: { type: string, maxLength: 2000 }
+            embeds: { type: array, items: { $ref: "#/components/schemas/RichEmbed" } }
+            flags: { type: integer, description: 64 makes the reply ephemeral. }

@@ -1,0 +1,17 @@
+# Mockingbird, all-in-one, with its config and contracts in a generated
+# ConfigMap. The ConfigMap's name carries a content hash, so a change to
+# mockingbird.yaml or a contract rolls the Deployment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: mockingbird
+resources:
+  - deployment.yaml
+  - service.yaml
+configMapGenerator:
+  - name: mockingbird-config
+    files:
+      - mockingbird.yaml
+      - payments.yaml=contracts/payments.yaml

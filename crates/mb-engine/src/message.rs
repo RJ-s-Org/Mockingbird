@@ -63,7 +63,14 @@ impl Engine {
         };
         let mut usage = Usage::default();
         let (payload, source) = match self
-            .generate_with_llm(provider.as_ref(), &validator, messages, &format, &mut usage)
+            .generate_with_llm(
+                provider.as_ref(),
+                &validator,
+                messages,
+                &format,
+                None,
+                &mut usage,
+            )
             .await
         {
             Ok(generated) => generated,

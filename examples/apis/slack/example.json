@@ -1,0 +1,48 @@
+{
+  "name": "slack",
+  "title": "Slack Web API",
+  "category": "messaging",
+  "protocol": "openapi",
+  "summary": "chat.postMessage, conversations, users, reactions and auth.test with Slack's HTTP 200 ok:false errors, plus channel-not-found, ratelimited and outage scenarios.",
+  "contracts": [
+    "slack.openapi.yaml"
+  ],
+  "hosts": [
+    "slack.com"
+  ],
+  "scenarios": [
+    "channel-not-found",
+    "ratelimited",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://github.com/slackapi/slack-api-specs",
+    "license": "MIT",
+    "commit": "bc08db49625630e3585bf2f1322128ea04f2a7f3",
+    "url": "https://raw.githubusercontent.com/slackapi/slack-api-specs/bc08db49625630e3585bf2f1322128ea04f2a7f3/web-api/slack_web_openapi_v2.json",
+    "sha256": "742a5c977180a829df8767cf57bc417d99b3713583aee83741efb9c08ca731e7",
+    "replaces": "slack.openapi.yaml",
+    "notes": "Swagger 2.0, archived by Slack in 2021 (last commit 2021-09-07), so newer methods are missing. It declares token as a required header parameter, so under --full a call that sends only Authorization: Bearer is answered 400 from the default response; it also has GET-only auth.test, conversations.*, users.* where the SDKs POST."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "slack_sdk",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/api/chat.postMessage",
+    "host": "slack.com",
+    "content_type": "application/json",
+    "headers": {
+      "Authorization": "Bearer xoxb-test"
+    },
+    "body": {
+      "channel": "C07DEPLOYS1",
+      "text": "Deploy finished"
+    },
+    "status": 200,
+    "expect": "\"ok\":true"
+  }
+}
