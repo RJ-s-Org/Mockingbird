@@ -3,9 +3,9 @@
 #   mockingbird serve -c mockingbird.yaml --offline
 #   curl -s localhost:8080/graphql -H 'Host: api.github.com' -H 'Authorization: bearer ghp_test123' \
 #     -H 'content-type: application/json' -d '{"query":"{ viewer { login name } }"}'
-# Contract: github.graphql, a hand-written subset (see its header). The full
-# public schema (MIT, octokit/graphql-schema) is pinned in example.json;
-# fetch it with `mockingbird examples init github-graphql --full`.
+# Contract: github.graphql, a hand-written subset (see its header). GitHub's
+# full public schema (github/docs schema.docs.graphql, CC-BY-4.0) is pinned in
+# example.json; fetch it with `mockingbird examples init github-graphql --full`.
 proxy:
   enabled: true          # apps reach https://api.github.com/graphql through http://127.0.0.1:8888
 mocks:

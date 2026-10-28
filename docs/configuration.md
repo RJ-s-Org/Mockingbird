@@ -187,7 +187,7 @@ Knobs shared by every mock. Read at startup.
 | --- | --- | --- | --- | --- | --- |
 | `protocols` | section | | | | |
 | `protocols.graphql` | section | | | | GraphQL mocks. |
-| `protocols.graphql.path` | path | `/graphql` | Starts with `/` | | Endpoint below each GraphQL mock's route prefix. |
+| `protocols.graphql.path` | path | `/graphql` | Starts with `/` | | Endpoint below each GraphQL mock's route prefix; `mocks.<name>.graphql_path` overrides it for one mock. |
 | `protocols.graphql.introspection` | bool | `true` | | | Answer introspection queries. |
 | `protocols.graphql.max_depth` | integer | `15` | | | Deepest accepted query. |
 | `protocols.graphql.max_complexity` | integer | `1000` | | | Most complex accepted query. |
@@ -237,6 +237,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.path_rewrite` | map | unset | `strip_prefix`, `add_prefix` | | Rewrites the path below `route_prefix` before it is matched against the contract (see [the proxy guide](proxy.md#one-contract-under-another-host-and-path)). |
 | `mocks.<name>.path_rewrite.strip_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Removed from the front of the path below `route_prefix` (at a segment boundary) before the contract sees it. |
 | `mocks.<name>.path_rewrite.add_prefix` | string | unset | `/seg(/seg)*`, not `/` | | Put in front of the path below `route_prefix` (after `strip_prefix`). Mounts a contract under another base path: TMDB's `/3/...` contract at `movies-proxy.vercel.app/tmdb/...` with `route_prefix: /tmdb` and `add_prefix: /3`. |
+| `mocks.<name>.graphql_path` | path | `protocols.graphql.path` | Starts with `/` | | A GraphQL mock's endpoint below its `route_prefix`, for APIs whose endpoint is not `/graphql` (Shopify's `/api/<version>/graphql.json`). Other mocks keep the server-wide path. |
 | `mocks.<name>.hosts` | list of strings | `[]` | Lowercase host names, no port | | Hosts the mock answers for (by `Host`, e.g. through `mockingbird proxy`). With hosts, two mocks may share a route prefix; a mock with hosts is not reached under other hosts. |
 | `mocks.<name>.persona` | string | unset | | | Free text added to every prompt (locale, realism, style). |
 | `mocks.<name>.llm_profile` | string | `llm.default_profile` | | | LLM profile. |

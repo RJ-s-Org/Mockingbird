@@ -505,6 +505,7 @@ pub async fn create(
                     unknown_ids: body.unknown_ids,
                     default_scenario: None,
                     path_rewrite: body.path_rewrite,
+                    graphql_path: None,
                 },
                 hosts: body.hosts,
                 webhooks: body.webhooks,

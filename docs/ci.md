@@ -104,7 +104,11 @@ other client commands).
 - per mock and operation: requests, response sources (`llm`, `repaired`,
   `cache`, `state`, `faker` for offline answers, `fallback` when the LLM
   call or the replay failed), 4xx and 5xx counts;
-- fallback reasons;
+- fallback reasons (each names the failing JSON pointer and schema
+  keyword, for example `/owner: anyOf: no branch matches; closest:
+  /owner/login: type: 7 is not of type "string"`);
+- routes no operation of the contract matches (`METHOD path`, answered
+  404 or 405);
 - hosts the proxy saw that no mock claims, with the `proxy.unmapped` mode
   (`pass` or `block`) and request counts;
 - snapshot answers by result (`exact`, `operation`, `miss`, `recorded`).
@@ -113,14 +117,19 @@ other client commands).
 comment) or `junit` (one test case per operation, failing on fallbacks or
 5xx, and one per blocked host). `-o FILE` writes to a file.
 
-`mockingbird verify` checks the same data and exits 1 when a check fails
-(the result goes to stdout in `--format`, each failure also to stderr):
+`mockingbird verify` checks the same data and exits 1 when a check fails.
+By default (`--format text`) it prints the totals and one short line per
+failed check, naming the three most frequent fallback reasons or routes
+(cut to 120 characters) and how many more there are; `--format json`
+carries the whole report with every reason in full, and `markdown` or
+`junit` as for `report` (each failure then also goes to stderr):
 
 | Flag | Fails when |
 |---|---|
 | `--no-fallbacks` | an answer fell back to the faker because the LLM call or the replay failed |
 | `--no-unmapped` | the proxy saw a host no mock claims |
 | `--no-blocked` | the proxy blocked a host no mock claims |
+| `--no-unmatched` | a request reached a mock but matched no operation of its contract (a route the contract lacks) |
 | `--no-errors` | a mock answered 5xx |
 | `--no-client-errors` | a mock answered 4xx (for example a request the contract rejects) |
 | `--exact-replay` | a replay used an operation-level match |

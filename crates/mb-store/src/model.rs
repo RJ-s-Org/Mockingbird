@@ -313,6 +313,10 @@ pub struct MockBehavior {
     /// against the contract.
     #[serde(default, skip_serializing_if = "PathRewrite::is_identity")]
     pub path_rewrite: PathRewrite,
+    /// A GraphQL mock's endpoint below its route prefix, instead of the
+    /// server-wide `protocols.graphql.path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql_path: Option<String>,
 }
 
 /// A mock's path rewrite: `strip_prefix` is removed from the path below the
@@ -372,6 +376,18 @@ impl PathRewrite {
 impl MockBehavior {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The path rewrite is valid and `graphql_path`, when set, is an
+    /// absolute path.
+    pub fn validate(&self) -> Result<(), String> {
+        self.path_rewrite.validate()?;
+        if let Some(path) = &self.graphql_path
+            && (!path.starts_with('/') || path.contains(['?', '#']) || path.chars().any(char::is_whitespace))
+        {
+            return Err(format!("graphql_path {path:?} must be a path starting with '/'"));
+        }
+        Ok(())
     }
 }
 
