@@ -241,17 +241,18 @@ paths:
                 properties:
                   institution:
                     type: object
-                    required: [institution_id, name, products, country_codes, routing_numbers, oauth]
+                    required: [institution_id, name, products, country_codes, routing_numbers, oauth, connection_availability]
                     properties:
                       institution_id: { type: string, description: "Echoes the requested id, e.g. ins_109508." }
                       name: { type: string }
-                      products: { $ref: "#/components/schemas/Products" }
+                      products: { type: array, items: { $ref: "#/components/schemas/Products" } }
                       country_codes: { type: array, items: { type: string } }
                       url: { type: [string, "null"] }
                       primary_color: { type: [string, "null"], description: "Hex colour such as #1f1f1f." }
                       logo: { type: [string, "null"], description: "Base64 PNG; null unless include_optional_metadata." }
                       routing_numbers: { type: array, items: { type: string, pattern: "^[0-9]{9}$" } }
                       oauth: { type: boolean }
+                      connection_availability: { type: string, enum: [SUPPORTED, NOT_SUPPORTED] }
                   request_id: { $ref: "#/components/schemas/RequestID" }
         "400": { $ref: "#/components/responses/PlaidError" }
         "429": { $ref: "#/components/responses/RateLimitExceeded" }

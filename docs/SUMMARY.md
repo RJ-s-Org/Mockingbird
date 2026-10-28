@@ -49,3 +49,9 @@
 # Project
 
 - [Improvements and known gaps](improvements.md)
+- [Field trials](trials/README.md)
+  - [plaid/quickstart (Python)](trials/plaid-quickstart.md)
+  - [healthchecks (Django)](trials/healthchecks.md)
+  - [GitHub CLI (Go)](trials/gh-cli.md)
+  - [Next.js Commerce](trials/nextjs-commerce.md)
+  - [Stripe accept-a-payment (Java)](trials/stripe-java.md)

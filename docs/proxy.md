@@ -79,6 +79,7 @@ It reads the hosts the server's mocks claim from `GET /proxy/hosts` on the admin
 - **Loopback by default.** The proxy binds `proxy.host` (`127.0.0.1`). On any other address `proxy.unmapped` must be `block`, so the port is not an open relay.
 - **Start `serve` from a clean shell.** The server's own outbound clients (LLM providers, OIDC, Vault) honour `HTTPS_PROXY` like any app. Started from a shell that ran `mockingbird proxy env`, they reach their providers through the proxy: that works with `pass`, and fails with `block`. Use `outbound.proxy`/`outbound.no_proxy` or a shell without the variables.
 - A mock with `hosts` answers only under those hosts: `curl localhost:8080/…` no longer reaches it, but `curl -H 'Host: api.github.com' localhost:8080/…` does.
+- **Apps that refuse private addresses** (an SSRF guard that checks the socket it connects to, like healthchecks' `INTEGRATIONS_ALLOW_PRIVATE_IPS`) see the proxy at `127.0.0.1` and refuse it. Allow private addresses in the app's test settings.
 
 ## The variables
 
