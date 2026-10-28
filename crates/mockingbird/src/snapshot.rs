@@ -270,7 +270,10 @@ fn keys(req: &ChatRequest) -> (String, String) {
 }
 
 fn digest(v: &Value) -> String {
-    format!("{:x}", Sha256::digest(v.to_string().as_bytes()))
+    Sha256::digest(v.to_string().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The snapshot `serve --record/--replay` installed in this process.
