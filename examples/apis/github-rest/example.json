@@ -3,7 +3,7 @@
   "title": "GitHub REST",
   "category": "developer-tools",
   "protocol": "openapi",
-  "summary": "Repositories, issues, pull requests, users and repository search on api.github.com, with issue and pull request webhooks and rate-limit, not-found and outage scenarios.",
+  "summary": "Repositories, issues, pull requests, users, repository search and GitHub Apps installation tokens on api.github.com, with issue and pull request webhooks and rate-limit, not-found and outage scenarios.",
   "contracts": [
     "github-rest.openapi.yaml"
   ],

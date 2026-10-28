@@ -104,6 +104,22 @@ async fn scenario_instructions_in_user_message_only() {
 }
 
 #[tokio::test]
+async fn current_time_in_user_message_only() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(valid_order().to_string())]));
+    engine_with(provider.clone())
+        .generate(&bundle, op, &call(), ctx(None))
+        .await
+        .unwrap();
+    let messages = &provider.requests()[0].messages;
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert!(!messages[0].content.contains(&today));
+    let user = &messages[1].content;
+    assert!(user.contains(&format!("<now>{today}T")), "{user}");
+}
+
+#[tokio::test]
 async fn scenario_set_applied_and_validated() {
     let bundle = orders();
     let op = bundle.operation("getOrder").unwrap();

@@ -198,6 +198,8 @@ mocks:
         operations: [createOrder]
         stream_items: 3
         stream_item_interval: 500ms
+        headers:
+          Retry-After: "30"
         chaos:
           error_rate: 0.5
           latency_jitter: {min: 0s, max: 2s}

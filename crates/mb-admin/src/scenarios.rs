@@ -53,6 +53,9 @@ pub struct ScenarioView {
     /// operation id; absent when none.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub operation_instructions: BTreeMap<String, String>,
+    /// Response headers the scenario sets, by name; absent when none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     pub source: Source,
 }
 
@@ -70,6 +73,7 @@ impl From<Scenario> for ScenarioView {
             stream_item_interval_ms: s.rules.stream_item_interval_ms,
             chaos: s.rules.chaos,
             operation_instructions: s.rules.operation_instructions,
+            headers: s.rules.headers,
         }
     }
 }
@@ -108,6 +112,12 @@ pub struct PutScenario {
     /// and an operation of the active contract when there is one.
     #[serde(default)]
     pub operation_instructions: BTreeMap<String, String>,
+    /// Response headers the scenario sets, by name (`Retry-After: "30"`);
+    /// they replace any the contract declares. Not `Content-Type`,
+    /// `Content-Length`, `Transfer-Encoding`, `Connection` or
+    /// `X-Mockingbird-*`.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 /// A scenario status applies only where an operation it covers declares it
@@ -333,9 +343,14 @@ pub async fn put(
             stream_item_interval_ms: body.stream_item_interval_ms,
             chaos: body.chaos,
             operation_instructions: body.operation_instructions,
+            headers: body.headers,
         },
         source: ResourceSource::Api,
     };
+    scenario
+        .rules
+        .check_headers()
+        .map_err(|e| Problem::invalid(INVALID_SCENARIO, e))?;
     st.store.put_scenario(&scenario).await?;
     let view = ScenarioView::from(scenario);
     access

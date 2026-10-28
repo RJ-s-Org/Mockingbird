@@ -310,6 +310,8 @@ Named scenarios, applied with `X-Mockingbird-Scenario: <name>`, by the mock's `d
 | `mocks.<name>.scenarios.<name>.operations[].instructions` | string | unset | | | Instructions replacing the scenario's `instructions` for that operation. |
 | `mocks.<name>.scenarios.<name>.stream_items` | integer | unset | | | Items per streamed response unless `X-Mockingbird-Stream-Items` overrides it. |
 | `mocks.<name>.scenarios.<name>.stream_item_interval` | duration | unset | At most `30s` | | Pause between streamed items. |
+| `mocks.<name>.scenarios.<name>.headers` | map | `{}` | Header names and visible-ASCII values; not `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Connection` or `X-Mockingbird-*` | | Response headers to send while the scenario applies (HTTP and GraphQL over HTTP), such as `Retry-After: "30"` or `x-ratelimit-remaining: "0"`. They replace the headers the contract declares for the response, which are otherwise sent with generated values. |
+| `mocks.<name>.scenarios.<name>.headers.<name>` | string | | | | One header's value. |
 | `mocks.<name>.scenarios.<name>.chaos` | section | unset | | | Replaces the mock's chaos while the scenario applies. |
 | `mocks.<name>.scenarios.<name>.chaos.error_rate` | number | `0` | 0.0..=1.0 | | As `mocks.<name>.chaos.error_rate`. |
 | `mocks.<name>.scenarios.<name>.chaos.latency_jitter` | section | unset | | | As `mocks.<name>.chaos.latency_jitter`. |

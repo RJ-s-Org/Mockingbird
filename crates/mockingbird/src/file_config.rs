@@ -1321,6 +1321,9 @@ pub struct FileScenario {
     pub stream_item_interval: Option<Duration>,
     /// Replaces the mock's chaos while the scenario applies.
     pub chaos: Option<FileChaos>,
+    /// Response headers to send, by name (`Retry-After: "30"`); they
+    /// replace any the contract declares.
+    pub headers: BTreeMap<String, String>,
 }
 
 /// One `operations:` entry of a scenario: an operation id, or an id with
@@ -1489,6 +1492,12 @@ impl FileConfig {
                         humantime::format_duration(interval)
                     ));
                 }
+                mb_store::ScenarioRules {
+                    headers: scenario.headers.clone(),
+                    ..mb_store::ScenarioRules::default()
+                }
+                .check_headers()
+                .map_err(|e| format!("{prefix}headers: {e}"))?;
             }
         }
         Scrubber::new(&ScrubberConfig {

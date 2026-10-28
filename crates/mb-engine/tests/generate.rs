@@ -648,6 +648,7 @@ async fn force_identity_uses_input_field() {
         path_param: None,
         field: "id".into(),
         input_field: Some("id".into()),
+        path_field: None,
     });
     let op = bundle.operation("getItem").unwrap();
     let mut c = call("getItem");
@@ -1386,4 +1387,33 @@ fn plaid_style_list_identity_and_members() {
         "item": {"type": "object"},
     }});
     assert_eq!(list_members(&bundle, &schema), vec!["accounts".to_string()]);
+    // Slack: `anyOf [success, error]`.
+    let either = json!({"anyOf": [
+        {"type": "object", "properties": {"ok": {"const": true}, "messages": {"type": "array", "items": {"type": "object"}}}},
+        {"type": "object", "properties": {"ok": {"const": false}, "error": {"type": "string"}}},
+    ]});
+    assert_eq!(list_members(&bundle, &either), vec!["messages".to_string()]);
+}
+
+/// JSON-object output mode makes models wrap a list: `{"orders": [...]}`.
+/// When the list inside needs a local patch (an item with a bad enum), the
+/// patched list is the answer, not a repair of the wrapper.
+#[tokio::test]
+async fn a_wrapped_list_is_unwrapped_and_patched() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let mut bad = valid_order();
+    bad["status"] = json!("lost");
+    let (provider, engine) = scripted(vec![
+        Ok(json!({"orders": [valid_order(), bad]}).to_string()),
+    ]);
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(provider.requests().len(), 1);
+    let items = out.body.as_ref().unwrap().as_array().unwrap();
+    assert_eq!(items.len(), 2, "{:?}", out.body);
+    assert_eq!(items[0], valid_order());
+    assert!(["pending", "shipped"].contains(&items[1]["status"].as_str().unwrap()));
 }

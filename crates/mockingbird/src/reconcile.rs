@@ -633,6 +633,7 @@ async fn apply_mock(
                 )?,
                 chaos: s.chaos.as_ref().map(|c| c.to_store()),
                 operation_instructions: s.operation_instructions(),
+                headers: s.headers.clone(),
             },
             source: ResourceSource::File,
         };

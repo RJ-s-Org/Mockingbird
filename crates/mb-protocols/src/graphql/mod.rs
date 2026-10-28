@@ -28,9 +28,10 @@ use serde_json::{Value, json};
 
 use mb_ext::Tenancy;
 
-use crate::{DataPlaneAuthMode, MockRuntime, call};
+use crate::{DataPlaneAuthMode, MockRuntime, ScenarioRuntime, call};
 
 mod batch;
+mod ledger;
 mod resolve;
 mod schema;
 mod select;
@@ -269,6 +270,7 @@ async fn execute(
     admitted: Option<Tenancy>,
 ) -> Response {
     let variables = serde_json::to_value(&request.variables).unwrap_or(Value::Null);
+    let scenario = request_scenario(&st.rt, &headers);
     let call = Arc::new(resolve::HttpCall::new(
         headers,
         method.as_str().to_string(),
@@ -278,6 +280,16 @@ async fn execute(
     let mut response = st.schema.execute(request.data(Arc::clone(&call))).await;
     let mut collected = call.collected();
     let reports = std::mem::take(&mut collected.reports);
+    // The scenario's headers, when it applies to a root field answered.
+    let scenario_headers: Vec<(String, String)> = scenario
+        .filter(|s| {
+            reports
+                .iter()
+                .filter_map(|(_, r)| r.operation_id.as_deref())
+                .any(|op| s.applies_to(op))
+        })
+        .map(|s| s.headers.clone())
+        .unwrap_or_default();
     if let Some(record) = resolve::merged_record(reports, || serde_json::to_value(&response).ok()) {
         call::record_request(&st.rt, record);
     }
@@ -317,6 +329,14 @@ async fn execute(
             HeaderName::from_static("x-mockingbird-fallback-reason"),
             crate::call::reason_header(&reason),
         );
+    }
+    for (name, value) in scenario_headers {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            resp.headers_mut().insert(name, value);
+        }
     }
     resp
 }
@@ -638,6 +658,17 @@ impl<'d> Expander<'d> {
         self.memo.insert(key, size);
         size
     }
+}
+
+/// The scenario a request selects (`X-Mockingbird-Scenario` where header
+/// overrides are on, else the mock's default scenario), if it exists.
+fn request_scenario<'a>(rt: &'a MockRuntime, headers: &HeaderMap) -> Option<&'a ScenarioRuntime> {
+    let named = headers
+        .get("x-mockingbird-scenario")
+        .filter(|_| rt.header_overrides)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim);
+    rt.scenarios.get(named.or(rt.default_scenario.as_deref())?)
 }
 
 /// An RFC 9457 `application/problem+json` response.

@@ -652,6 +652,7 @@ async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
             stream_item_interval_ms: Some(250),
             chaos: None,
             operation_instructions: Default::default(),
+            headers: BTreeMap::from([("Retry-After".into(), "30".into())]),
         },
         source: ResourceSource::File,
     };
