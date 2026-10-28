@@ -250,8 +250,11 @@ async fn verify(
     if failures.is_empty() {
         return Ok(());
     }
-    for f in &failures {
-        eprintln!("verify failed: {}: {}", f.check, f.detail);
+    // The text format on stdout already names each failure.
+    if args.format != report::Format::Text || args.output.is_some() {
+        for f in &failures {
+            eprintln!("verify failed: {}: {}", f.check, f.detail);
+        }
     }
     Err(Failure::Silent)
 }

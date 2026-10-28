@@ -1055,6 +1055,10 @@ pub struct FileMock {
     /// the contract (`strip_prefix`, then `add_prefix`).
     #[serde(default)]
     pub path_rewrite: mb_store::PathRewrite,
+    /// A GraphQL mock's endpoint below `route_prefix` (Shopify's
+    /// `/graphql.json`); default `protocols.graphql.path`.
+    #[serde(default)]
+    pub graphql_path: Option<String>,
     /// Where the mock POSTs an event after each successful write.
     #[serde(default)]
     pub webhooks: Vec<FileWebhook>,
@@ -1233,6 +1237,7 @@ impl FileMock {
             default_scenario: None,
             hosts: Vec::new(),
             path_rewrite: mb_store::PathRewrite::default(),
+            graphql_path: None,
             webhooks: Vec::new(),
         }
     }
@@ -1448,9 +1453,13 @@ impl FileConfig {
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
-            mock.path_rewrite
-                .validate()
-                .map_err(|e| format!("mocks.{name}.{e}"))?;
+            mb_store::MockBehavior {
+                path_rewrite: mock.path_rewrite.clone(),
+                graphql_path: mock.graphql_path.clone(),
+                ..Default::default()
+            }
+            .validate()
+            .map_err(|e| format!("mocks.{name}.{e}"))?;
             let webhooks: Vec<_> = mock.webhooks.iter().map(FileWebhook::to_store).collect();
             mb_store::validate_webhooks(&webhooks).map_err(|e| format!("{prefix}{e}"))?;
             if let Some(chaos) = &mock.chaos {
