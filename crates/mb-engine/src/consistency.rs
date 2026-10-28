@@ -105,6 +105,9 @@ pub fn list_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
                 .is_some_and(|item| {
                     item.get("properties").is_some()
                         || item.get("type").and_then(Value::as_str) == Some("object")
+                        || ["allOf", "anyOf", "oneOf"]
+                            .iter()
+                            .any(|k| item.get(*k).is_some())
                 })
         })
         .map(|(name, _)| name.clone())

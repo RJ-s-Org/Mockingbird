@@ -65,3 +65,24 @@ Most `repaired` answers cost no extra LLM call: the model cannot count to 37, so
 ## The bar
 
 `mockingbird verify --no-fallbacks --no-unmapped` passed on run 2 even though two routes 404'd: a path the contract does not have is a 4xx, not an unmapped host or a fallback. Open: count "no operation matches" as its own failure (`--no-unmatched`).
+
+## After the engine fixes
+
+Run 6, on the engine-fixes branch: `POST`s whose last segment is a read verb are reads (cached, seeded, generated knowing the lists other reads stored). Same app, config, contract and model.
+
+| Route | Run 4 `account_id` of the first account | Run 6 |
+| --- | --- | --- |
+| `/api/accounts` | `GQ144VATLjBE…` | `g6Of06pOJanJ…` |
+| `/api/auth` | `tW35i4Gf1Vol…` | `g6Of06pOJanJ…` |
+| `/api/identity` | `57TkotGYFpEk…` | `g6Of06pOJanJ…` |
+| `/api/transactions` | `pQ3rT7vW1xY4…` | `g6Of06pOJanJ…` |
+| `/api/balance` | `XSfg0kLag3pn…` | `g6Of06pOJanJ…` |
+| `/api/accounts` (again) | `VgjSr5AVGJpI…`, 2.0 s | `g6Of06pOJanJ…`, `cache`, 3 ms |
+
+Balances agree too (available 1420.75, current 1583.42 on every route). The repeated `/accounts/get` is a `cache` hit; the other reads see the accounts `/accounts/get` seeded (stored under `accounts`, keyed by `account_id`).
+
+| Calls | Sources | Fallbacks | Latency (generated) | Tokens (prompt / completion) |
+| --- | --- | --- | --- | --- |
+| 10 | 4 `llm`, 5 `repaired`, 1 `cache` | 0 | 0.8–5.2 s, median 2.2 s | 14.6k / 4.3k |
+
+The catalog's `transactionsSync` webhook still fires: a target that names a read's operation gets its event.

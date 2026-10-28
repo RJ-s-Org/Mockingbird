@@ -1645,7 +1645,12 @@ async fn a_graphql_cart_holds_together() {
         .nth(1)
         .unwrap_or_default();
     assert!(
-        related.contains(r#""id":"gid://shopify/ProductVariant/42","title":"M""#),
+        related.contains(r#""id":"gid://shopify/ProductVariant/42""#),
+        "{prompt}"
+    );
+    // The variant was read inside its product, so it knows the product.
+    assert!(
+        related.contains(r#""product":{"__typename":"Product","handle":"fern-tee","id":"gid://shopify/Product/7","title":"Fern Tee"}"#),
         "{prompt}"
     );
 

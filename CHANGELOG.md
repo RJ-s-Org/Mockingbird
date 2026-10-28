@@ -58,9 +58,14 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 - `mockingbird keys setup` and MCP `open_key_setup`: a one-shot local page that stores an LLM key in `~/.mockingbird/secrets/<name>` (`0600`) and points the profile at it, returning only the name and profile (the URL when the user takes longer than 45 s). `doctor` reports the store under `key_store`.
 - `mb-ext`: `check_secret_file` and `in_key_store` (additive).
 - Webhooks: mocks POST an event after each successful write to the URLs in `mocks.<name>.webhooks` (or the Admin API), signed Stripe-style (`Stripe-Signature`) or with `X-Mockingbird-Signature`, retried 3 times (1 s, 2 s, 4 s); the payload is the contract's OpenAPI `webhooks`/`callbacks` body when defined, else a Stripe-shaped `<resource>.<created|updated|deleted>` event. Deliveries: `GET …/mocks/{mock}/webhooks/deliveries`, `mockingbird webhooks deliveries`, MCP `list_webhook_deliveries`; `mockingbird webhooks sign` prints a signature for tests. `server.api_webhook_secret_refs` limits secret references set through the API. Migration `0700_mock_webhooks` adds `mocks.webhooks`. See [docs/webhooks.md](docs/webhooks.md).
+- GraphQL answers store every object with an `id` under its type (`Cart` → `cart`): a mutation's are merged into the session, a query's added when new, so `cartCreate` → `cart(id:)` → `cartLinesAdd` reads and updates one cart. Mutations are generated knowing what their `<x>Id` arguments and `gid://…/<Type>/…` ids name (in nested inputs too).
+- Base64 fields (`format: byte`, `contentEncoding: base64`, `content` beside `encoding: "base64"`) are asked for as plain text and encoded locally; values that do not decode are re-encoded from their text.
+- Request-validation rejections have their own source, `rejected` (header, request log, metrics and `report`), instead of `fallback`.
 
 ### Changed
 
+- GraphQL mutations generate only their selection, like queries (GitHub `createIssue`: 38.8k → 745 prompt tokens, no fallback).
+- `POST`s whose last path segment is a read verb (`/accounts/get`, `/transactions/sync`, `users.list`, `_search`) are imported as reads: cached, seeded, and generated knowing the lists other reads stored; a webhook target fires for such a read only when it names its operation.
 - Requests to OpenRouter send `reasoning: {enabled: false}` unless the profile's `extra_body` sets `reasoning`; a model that rejects it is asked again without it.
 - A single object answered for a top-level array schema is taken as the list's one item instead of costing a repair; a faker list standing in for a failed LLM call no longer seeds session state.
 - A fallback answer to a read is cached under consistency: the identical repeat is answered at once and still reported as `fallback`.

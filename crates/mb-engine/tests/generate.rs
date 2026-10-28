@@ -1368,3 +1368,22 @@ async fn base64_fields_are_encoded_locally() {
     // Valid base64 is kept as it is.
     assert_eq!(body["avatar"], "aGk=");
 }
+
+/// Plaid-style lists: items identified by `<singular>_id`, and the list
+/// members of a schema whose items are objects, `allOf` included.
+#[test]
+fn plaid_style_list_identity_and_members() {
+    use mb_engine::consistency::{item_identity, list_members};
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let body = json!({"accounts": [{"account_id": "a1", "name": "Checking"}], "request_id": "r"});
+    assert_eq!(item_identity(&bundle, op, &body), "account_id");
+    assert_eq!(item_identity(&bundle, op, &json!([{"id": "o1"}])), "id");
+    let schema = json!({"type": "object", "properties": {
+        "accounts": {"type": "array", "items": {"allOf": [{"type": "object"}, {"properties": {"owners": {}}}]}},
+        "numbers": {"type": "object"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "item": {"type": "object"},
+    }});
+    assert_eq!(list_members(&bundle, &schema), vec!["accounts".to_string()]);
+}

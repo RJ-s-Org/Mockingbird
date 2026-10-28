@@ -59,7 +59,7 @@ pub(crate) fn objects(
         bundle,
         found: Vec::new(),
     };
-    walk.value(schema, sel, body, 0);
+    walk.value(schema, sel, body, 0, None);
     if mode(op) == Some(Store::Merge) {
         let inputs = scalar_args(args);
         for (resource, depth) in &mut walk.found {
@@ -78,7 +78,16 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn value(&mut self, schema: &Value, sel: &Selection, value: &Value, depth: usize) {
+    /// Walks `value` (answered for `schema` and `sel`); `parent` is the
+    /// nearest enclosing stored object: its type and scalar fields.
+    fn value(
+        &mut self,
+        schema: &Value,
+        sel: &Selection,
+        value: &Value,
+        depth: usize,
+        parent: Option<&(String, Map<String, Value>)>,
+    ) {
         if depth > MAX_DEPTH || self.found.len() >= MAX_OBJECTS || sel.fields.is_empty() {
             return;
         }
@@ -88,7 +97,7 @@ impl Walk<'_> {
                     return;
                 };
                 for v in items {
-                    self.value(item, sel, v, depth);
+                    self.value(item, sel, v, depth, parent);
                 }
             }
             Value::Object(obj) => {
@@ -96,14 +105,20 @@ impl Walk<'_> {
                     return;
                 };
                 let props = def.get("properties").and_then(Value::as_object);
+                let mut own = None;
                 if let Some(Value::String(id)) = obj.get("id")
-                    && props.is_some_and(|p| p.contains_key("id"))
+                    && let Some(props) = props.filter(|p| p.contains_key("id"))
                 {
+                    let mut data = by_field_name(value, sel);
+                    if let (Some(parent), Value::Object(fields)) = (parent, &mut data) {
+                        link_parent(props, parent, fields);
+                    }
+                    own = Some((name.to_string(), scalars(&data)));
                     self.found.push((
                         StoredResource {
                             resource_type: name.to_lowercase(),
                             id: id.clone(),
-                            data: by_field_name(value, sel),
+                            data,
                         },
                         depth,
                     ));
@@ -111,16 +126,63 @@ impl Walk<'_> {
                 let Some(props) = props else {
                     return;
                 };
+                let parent = own.as_ref().or(parent);
                 for (key, child) in &sel.fields {
                     let (Some(member), Some(field)) = (obj.get(key), props.get(&child.name)) else {
                         continue;
                     };
-                    self.value(field, child, member, depth + 1);
+                    self.value(field, child, member, depth + 1, parent);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Sets the field of `fields` (an object whose type declares `props`) that
+/// refers to the enclosing object's type, when the answer left it out, to
+/// that object's scalars: a variant read inside its product knows the
+/// product (`ProductVariant.product`).
+fn link_parent(
+    props: &Map<String, Value>,
+    (parent_type, parent): &(String, Map<String, Value>),
+    fields: &mut Map<String, Value>,
+) {
+    let refers = |schema: &Value| {
+        let mut schema = schema;
+        for _ in 0..4 {
+            if def_name(schema) == Some(parent_type.as_str()) {
+                return true;
+            }
+            match schema
+                .get("anyOf")
+                .and_then(Value::as_array)
+                .and_then(|b| b.iter().find(|b| def_name(b).is_some()))
+            {
+                Some(branch) => schema = branch,
+                None => return false,
+            }
+        }
+        false
+    };
+    if let Some((field, _)) = props
+        .iter()
+        .find(|(field, schema)| !fields.contains_key(*field) && refers(schema))
+    {
+        fields.insert(field.clone(), Value::Object(parent.clone()));
+    }
+}
+
+/// The scalar members of `data` (an object), `__typename` included.
+fn scalars(data: &Value) -> Map<String, Value> {
+    data.as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(_, v)| !v.is_object() && !v.is_array())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The object type `schema` refers to (through a nullable `anyOf`, and

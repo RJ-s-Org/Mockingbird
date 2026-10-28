@@ -85,3 +85,21 @@ mockingbird run -c mockingbird/mockingbird.yaml -- ./mockingbird/flows.sh
 - `createIssue`'s first answer was wrapped as `{"data": {...}, "errors": null}`, which the envelope check did not unwrap because of the `errors` member. This PR treats `null` members as absent there.
 - `verify` prints every fallback reason in full, so the failure message for this run was about 10 KB. Its reasons should be truncated.
 - Pull requests and issues got the same numbers (412, 409, 405, …); on GitHub they share one sequence.
+
+## After the engine fixes
+
+Run 3: the same build of `gh`, config, schema and model, on the engine-fixes branch (GraphQL mutations narrowed to their selection, base64 encoded locally).
+
+| Command | Run 2 | Run 3 |
+| --- | --- | --- |
+| `repo view` (twice) | `invalid UTF-8 string` | name, description and the README rendered (REST `repos/get-readme` 3.4 s, then `cache`) |
+| `issue create` | prints nothing, exits 0; `createIssue` fallback after 16 s, 38.8k prompt tokens | prints `https://github.com/fernwood-labs/trellis/issues/318`; `createIssue` `llm` in 1.0 s, 745 prompt tokens, 54 completion |
+| `pr view 7` | fallback | reviewers, projects, additions/deletions (`llm`, 11.1 s) |
+| the other 7 | worked | worked |
+
+| | Calls | Sources | Fallbacks | GraphQL prompt / completion tokens |
+| --- | --- | --- | --- | --- |
+| Run 2 | 15 | 11 `llm`, 2 `cache`, 2 `fallback` | 2 | 74.7k / 10.4k |
+| Run 3 | 15 | 13 `llm`, 2 `cache` | 0 | 25.9k / 5.1k |
+
+10 of 10 commands succeed. The `pr view 7` fallback in run 2 was the large `anyOf` answer failing validation; in run 3 the model's answer validated, so that one is luck, not a fix.
