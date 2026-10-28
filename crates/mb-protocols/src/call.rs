@@ -798,7 +798,12 @@ pub(crate) async fn complete(
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
             }
-            let seeding = is_query && rt.consistency && target_id.is_none();
+            // A faker list standing in for a failed LLM call seeds nothing,
+            // or its items would join the session's later LLM lists.
+            let seeding = is_query
+                && rt.consistency
+                && target_id.is_none()
+                && !transient_fallback(&generated);
             if !is_query || seeding {
                 let origin = if is_query {
                     WriteOrigin::Seeded

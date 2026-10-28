@@ -193,7 +193,9 @@ impl Engine {
     fn check_value(&self, validator: &SchemaValidator, value: Value) -> Checked {
         match validator.validate(&value) {
             Ok(()) => Checked::Valid(value),
-            Err(errors) => match unwrap_envelope(validator, &value) {
+            Err(errors) => match unwrap_envelope(validator, &value)
+                .or_else(|| wrap_single_item(validator, &value))
+            {
                 Some(inner) => Checked::Valid(inner),
                 None => match self.patch(validator, &value) {
                     Some(patched) => {
@@ -234,6 +236,16 @@ impl Engine {
         let mut rng = rand::rng();
         validator.patch(value, |schema| faker.fake(schema, &mut rng))
     }
+}
+
+/// `[value]` when that is valid: asked for a list (a top-level array),
+/// models sometimes answer with its one item.
+fn wrap_single_item(validator: &SchemaValidator, value: &Value) -> Option<Value> {
+    if !value.is_object() {
+        return None;
+    }
+    let wrapped = Value::Array(vec![value.clone()]);
+    validator.validate(&wrapped).is_ok().then_some(wrapped)
 }
 
 /// The value inside one or two nested one-key objects, when it is valid and

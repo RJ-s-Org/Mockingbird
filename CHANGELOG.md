@@ -42,6 +42,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 ### Changed
 
 - Requests to OpenRouter send `reasoning: {enabled: false}` unless the profile's `extra_body` sets `reasoning`; a model that rejects it is asked again without it.
+- A single object answered for a top-level array schema is taken as the list's one item instead of costing a repair; a faker list standing in for a failed LLM call no longer seeds session state.
 - A fallback answer to a read is cached under consistency: the identical repeat is answered at once and still reported as `fallback`.
 - GraphQL queries with several root fields read state, the response cache and stored resources per field, seed and cache per field, and are recorded as one request (operations comma-separated, `request.args` keyed by response key); each field is still metered.
 - MCP `list_requests` returns summaries (method, path, status, source, fallback reason, sizes) unless `include_bodies: true`; `validate_contract` returns counts by protocol and the first 20 operations and channels (`operations_truncated`, `channels_truncated`).

@@ -829,3 +829,18 @@ async fn a_fallback_is_cached_and_still_reported_as_one() {
     assert_eq!(body_json(again).await, body);
     assert_eq!(provider.requests().len(), 1, "the repeat made no LLM call");
 }
+
+/// A faker list standing in for a failed LLM call seeds nothing: its items
+/// would otherwise be mixed into the session's later LLM lists.
+#[tokio::test]
+async fn a_fallback_list_seeds_nothing() {
+    let store = Arc::new(SeedSpy {
+        inner: memory(),
+        seeded: AtomicUsize::new(0),
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![Err(mb_llm::LlmError::Timeout)]));
+    let router = http_rest::router(Arc::new(runtime(Some(provider), store.clone())));
+    let resp = send(&router, get_with("/orders", &[])).await;
+    assert_eq!(resp.headers()["x-mockingbird-source"], "fallback");
+    assert_eq!(store.seeded.load(Ordering::SeqCst), 0);
+}
