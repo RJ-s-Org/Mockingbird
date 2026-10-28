@@ -31,6 +31,9 @@ pub struct CachedResponse {
     pub status: u16,
     pub content_type: Option<String>,
     pub body: Option<Value>,
+    /// Why the faker answered, for an answer that stood in for a failed LLM
+    /// call: a hit is then reported as that fallback again.
+    pub fallback_reason: Option<String>,
 }
 
 struct Entry {

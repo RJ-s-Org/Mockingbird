@@ -803,3 +803,44 @@ async fn cache_hits_do_not_seed_again() {
     assert_eq!(resp.headers()["x-mockingbird-source"], "cache");
     assert_eq!(store.seeded.load(Ordering::SeqCst), first);
 }
+
+/// A faker answer standing in for a failed LLM call is cached like any
+/// other read: the identical repeat is served at once, still reported as a
+/// fallback, instead of waiting for the LLM again.
+#[tokio::test]
+async fn a_fallback_is_cached_and_still_reported_as_one() {
+    let store = mb_state::CachingStateStore::wrap(
+        memory(),
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    let provider = Arc::new(ScriptedProvider::new(vec![Err(mb_llm::LlmError::Timeout)]));
+    let router = http_rest::router(Arc::new(runtime(Some(provider.clone()), store)));
+    let first = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(first.headers()["x-mockingbird-source"], "fallback");
+    let body = body_json(first).await;
+    let again = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(again.headers()["x-mockingbird-source"], "fallback");
+    let reason = again.headers()["x-mockingbird-fallback-reason"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("earlier"), "{reason}");
+    assert_eq!(body_json(again).await, body);
+    assert_eq!(provider.requests().len(), 1, "the repeat made no LLM call");
+}
+
+/// A faker list standing in for a failed LLM call seeds nothing: its items
+/// would otherwise be mixed into the session's later LLM lists.
+#[tokio::test]
+async fn a_fallback_list_seeds_nothing() {
+    let store = Arc::new(SeedSpy {
+        inner: memory(),
+        seeded: AtomicUsize::new(0),
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![Err(mb_llm::LlmError::Timeout)]));
+    let router = http_rest::router(Arc::new(runtime(Some(provider), store.clone())));
+    let resp = send(&router, get_with("/orders", &[])).await;
+    assert_eq!(resp.headers()["x-mockingbird-source"], "fallback");
+    assert_eq!(store.seeded.load(Ordering::SeqCst), 0);
+}

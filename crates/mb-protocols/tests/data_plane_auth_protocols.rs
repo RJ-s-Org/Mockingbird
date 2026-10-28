@@ -702,7 +702,8 @@ async fn graphql_http_401_is_reported_and_requests_are_admitted_once() {
     // Refused before generation: counted under source `not_generated`.
     assert_eq!(events[0].source, "not_generated");
 
-    // Two root fields in one admitted request: admitted once, two calls.
+    // Two root fields in one admitted request: admitted once, metered as
+    // two calls, recorded as one request.
     let resp = app
         .clone()
         .oneshot(graphql_post(
@@ -713,8 +714,10 @@ async fn graphql_http_401_is_reported_and_requests_are_admitted_once() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(quota.0.load(Ordering::Relaxed), 2);
-    let statuses: Vec<u16> = records.wait(3).await.iter().map(|r| r.status).collect();
-    assert_eq!(statuses, [401, 200, 200]);
+    let statuses: Vec<u16> = records.wait(2).await.iter().map(|r| r.status).collect();
+    assert_eq!(statuses, [401, 200]);
+    let events = usage.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 3, "one usage event per root field");
 }
 
 // ----------------------------------------------------- GraphQL WebSocket

@@ -672,8 +672,10 @@ async fn http_errors_are_problems() {
     );
 }
 
+/// The root fields of one HTTP request are metered one by one but logged
+/// as one request.
 #[tokio::test]
-async fn one_report_per_root_field() {
+async fn one_record_per_request() {
     let records = Arc::new(Records::default());
     let mut rt = runtime(None);
     rt.recorder = Some(records.clone());
@@ -689,30 +691,61 @@ async fn one_report_per_root_field() {
     .await;
     assert_eq!(r.status, 200);
     let recs = records.0.lock().unwrap();
-    assert_eq!(recs.len(), 2);
-    let mut ops: Vec<&str> = recs
-        .iter()
-        .map(|r| r.operation_id.as_deref().unwrap())
-        .collect();
-    ops.sort_unstable();
-    assert_eq!(ops, ["Query.repository", "Query.viewer"]);
-    for rec in recs.iter() {
-        assert_eq!(rec.method, "POST");
-        assert_eq!(rec.path, "/graphql");
-        assert_eq!(rec.status, 200);
-        assert_eq!(rec.session, "s9");
-        assert_eq!(rec.source.as_deref(), Some("fallback"));
-        assert_eq!(rec.request["variables"], json!({"o": "octocat"}));
-        assert_eq!(rec.request["headers"]["x-mockingbird-session"], "s9");
-    }
-    let repo = recs
-        .iter()
-        .find(|r| r.operation_id.as_deref() == Some("Query.repository"))
-        .unwrap();
+    assert_eq!(recs.len(), 1);
+    let rec = &recs[0];
     assert_eq!(
-        repo.request["args"],
+        rec.operation_id.as_deref(),
+        Some("Query.repository,Query.viewer")
+    );
+    assert_eq!(rec.method, "POST");
+    assert_eq!(rec.path, "/graphql");
+    assert_eq!(rec.status, 200);
+    assert_eq!(rec.session, "s9");
+    assert_eq!(rec.source.as_deref(), Some("fallback"));
+    assert_eq!(rec.request["variables"], json!({"o": "octocat"}));
+    assert_eq!(rec.request["headers"]["x-mockingbird-session"], "s9");
+    assert_eq!(
+        rec.request["args"]["repository"],
         json!({"owner": "octocat", "name": "n"})
     );
+    assert_eq!(rec.request["args"]["viewer"], json!({}));
+    assert!(rec.response.as_ref().unwrap()["data"]["viewer"]["login"].is_string());
+}
+
+/// A query with several root fields is cached per field like a single
+/// one: the identical repeat makes no LLM call.
+#[tokio::test]
+async fn several_root_fields_are_cached() {
+    let provider = scripted(vec![json!({
+        "repository": {"__typename": "Repository", "name": "n"},
+        "issue": {"__typename": "Issue", "title": "t"},
+    })]);
+    let rt = MockRuntime::new(
+        "github",
+        github(),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        mb_state::CachingStateStore::wrap(
+            Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+            Duration::from_secs(3600),
+            mb_state::DEFAULT_CACHE_ENTRIES,
+        ),
+    );
+    let base = serve(rt).await;
+    let q = r#"{ repository(owner: "o", name: "n") { name } issue(id: "I_1") { title } }"#;
+    let first = query(&base, q).await;
+    assert_eq!(
+        first.headers["x-mockingbird-source"], "llm",
+        "{}",
+        first.body
+    );
+    let again = query(&base, q).await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_eq!(again.body["data"], first.body["data"]);
+    assert_eq!(again.headers["x-mockingbird-source"], "cache");
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]
