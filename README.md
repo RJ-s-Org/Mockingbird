@@ -16,6 +16,7 @@ It mocks REST, GraphQL, gRPC, SOAP, SSE, WebSocket and event channels (Kafka, AM
 | [Running locally](docs/deploy/local.md) | The binary, `serve`, offline mode and TLS |
 | [Docker Compose](docs/deploy/compose.md) | The Compose stack and its `ha`, `kafka`, `amqp` and `mqtt` profiles |
 | [Kubernetes](docs/deploy/kubernetes.md) | The Helm chart, external stores, OIDC, ingress, secrets and verifying releases |
+| [Infrastructure as code](docs/iac.md) | The Terraform/OpenTofu provider and Pulumi: mocks, contracts, scenarios and keys from code; a mocked staging environment in 20 lines |
 | [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |
 | [Upgrading](docs/upgrading.md) | Upgrade notes, migrations and the `mb-ext` 1.0 changes |
 | [Performance](docs/performance.md) | The offline bench: method, numbers and how to rerun it |

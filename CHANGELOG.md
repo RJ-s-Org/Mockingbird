@@ -10,6 +10,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Added
 
+- A Terraform and OpenTofu provider (`integrations/terraform-provider`) for workspaces, mocks (contract from inline content, a file or a URL, re-uploaded when its sha256 changes), contract versions, scenarios, LLM profiles (secret references only), API keys, channels and event settings, with `mockingbird_mock` and `mockingbird_workspace` data sources and import on every resource; Pulumi through its Terraform bridge, with TypeScript and Python examples (`integrations/pulumi`). See [docs/iac.md](docs/iac.md).
 - `X-Mockingbird-Fallback-Reason` on every `fallback` response says why the LLM answer was not used (GraphQL: `extensions.mockingbird.fallbackReasons`); the request log records it. Migration `0500_llm_diagnostics` adds `request_log.fallback_reason` and `llm_profiles.extra_body`.
 - LLM profiles take `extra_body`, JSON merged into every provider request (OpenRouter `provider` routing, `reasoning` settings); `--extra-body` on `llm configure` and `init`.
 - `mockingbird mcp` imports the variables it lacks from the login shell at startup (`MB_NO_SHELL_ENV=1` skips it), so keys exported in `~/.zshenv` reach a server started by a desktop agent; `doctor` reports `shell_env.imported`.
