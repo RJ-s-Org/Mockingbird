@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "mockingbird",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0",
   "description": "Mock any API from its contract with LLM-generated, schema-valid responses: install, LLM onboarding, self-hosting and the full Admin API as MCP tools and skills.",
   "author": { "name": "Mockingbird contributors", "url": "https://github.com/rj-s-org/mockingbird" },
   "homepage": "https://github.com/rj-s-org/mockingbird",

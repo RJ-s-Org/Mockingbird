@@ -8,7 +8,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
-The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this heading to `## [0.1.0] - <date>` when tagging; see [docs/launch/checklist.md](docs/launch/checklist.md)).
+## [0.1.0] - 2026-10-28
+
+The first release. Since 0.1.0-rc.1, in short:
 
 - **Run apps unchanged.** Mocks take the real host names they stand in for (`hosts:`), and `mockingbird proxy` intercepts HTTPS to them with a local CA, so an app reaches mocks of `api.stripe.com` or `api.github.com` without source edits. `mockingbird run -- <command>` does the whole setup for one command, with preloads that make Node, Python, Java, Go, curl and Deno trust the CA and use the proxy, and `mockingbird proxy browser` for Chromium-based browsers ([proxy](docs/proxy.md)).
 - **Deterministic CI.** `serve --record` / `--replay` answers a CI run from recorded LLM answers without a key; `mockingbird report` and `mockingbird verify` turn the request log into a summary, JUnit and a pass/fail gate; a GitHub Action and a GitLab CI template wrap it ([CI](docs/ci.md)).
@@ -164,5 +166,6 @@ The 0.1.0 release: everything below, since 0.1.0-rc.1, in short (rename this hea
 - The repository moved to `RJ-s-Org/Mockingbird`: images are `ghcr.io/rj-s-org/mockingbird`, the chart is `oci://ghcr.io/rj-s-org/charts/mockingbird`, and the installers download from the new repository.
 - Console: a refined look in light and dark mode. Colours come from semantic tokens defined once per theme; pages share one set of buttons, fields, cards, notices and badges; the header carries the product mark (and a favicon) and stays compact on phones; forms are grouped into titled cards, with Delete mock in its own card; HTTP methods, status codes, response sources and statuses (keys, contract versions, readiness, draft confidence) are shown as colour-coded badges.
 
-[Unreleased]: https://github.com/rj-s-org/mockingbird/compare/v0.1.0-rc.1...HEAD
+[Unreleased]: https://github.com/rj-s-org/mockingbird/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/rj-s-org/mockingbird/compare/v0.1.0-rc.1...v0.1.0
 [0.1.0-rc.1]: https://github.com/rj-s-org/mockingbird/releases/tag/v0.1.0-rc.1
