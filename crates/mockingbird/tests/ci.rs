@@ -275,15 +275,28 @@ async fn record_then_replay_answers_without_an_llm() {
     );
 }
 
-#[test]
-fn server_start_fails_when_not_ready_in_time() {
+/// A stub holds the admin port and answers `/readyz` with 503, so the
+/// server never becomes ready: `server start` must exit 1, whether it sees
+/// the 503s until `--wait` runs out or `serve` exiting on the busy port.
+#[tokio::test]
+async fn server_start_fails_when_not_ready() {
+    let stub = MockServer::start().await;
+    Mock::given(path("/readyz"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&stub)
+        .await;
+    let mut ports = Ports::new();
+    ports.admin = stub.address().port();
     let tmp = tempfile::tempdir().unwrap();
     let state = tmp.path().join("state");
-    let out = start(&state, &Ports::new(), &["--offline", "--wait", "0s"], &[]);
+    let out = start(&state, &ports, &["--offline", "--wait", "2s"], &[]);
     let _server = Server(state);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(json_out(&out)["ready"], false);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("was not ready within 0s"));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("was not ready within 2s") || stderr.contains("before it was ready"),
+        "{stderr}"
+    );
 }
 
 #[test]

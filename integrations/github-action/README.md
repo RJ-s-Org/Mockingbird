@@ -69,7 +69,12 @@ Later steps get `HTTPS_PROXY`, `HTTP_PROXY` (and the lowercase forms),
 `NO_PROXY=localhost,127.0.0.1`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
 `REQUESTS_CA_BUNDLE` and `NODE_USE_ENV_PROXY=1` (with `proxy: true`), plus
 `MOCKINGBIRD_URL` (the data plane), `MB_ADMIN_URL` and `MB_STATE_DIR`, and
-`mockingbird` on the `PATH`. See [docs/proxy.md](../../docs/proxy.md) for
+`mockingbird` on the `PATH`. Every later step goes through the proxy,
+including other actions: with `proxy.unmapped: block`, a step that talks
+to GitHub (`actions/upload-artifact`, `actions/cache`) or a package
+registry needs the proxy variables cleared on it (`env: { HTTPS_PROXY: "",
+HTTP_PROXY: "", https_proxy: "", http_proxy: "" }`), as the report step
+does for its upload; with `pass` (the default) they are forwarded. See [docs/proxy.md](../../docs/proxy.md) for
 which runtimes honour which variable (Java and some Go clients need a
 flag).
 

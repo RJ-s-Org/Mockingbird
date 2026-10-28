@@ -36,6 +36,12 @@ runs:
     - name: Upload the request log
       if: always() && inputs.artifact != ''
       uses: actions/upload-artifact@v4
+      # GitHub's own endpoints must not go through the mock proxy.
+      env:
+        HTTPS_PROXY: ""
+        HTTP_PROXY: ""
+        https_proxy: ""
+        http_proxy: ""
       with:
         name: ${{ inputs.artifact }}
         path: ${{ env.MB_STATE_DIR }}/report
