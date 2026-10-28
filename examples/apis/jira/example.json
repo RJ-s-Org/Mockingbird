@@ -1,0 +1,51 @@
+{
+  "name": "jira",
+  "title": "Jira Cloud",
+  "category": "project-management",
+  "protocol": "openapi",
+  "summary": "Jira Cloud REST v3 issues, JQL search, transitions, comments and projects with Atlassian's operation ids, unsigned issue and comment webhooks, and rate-limit, not-found, invalid-field and outage scenarios.",
+  "contracts": [
+    "jira.openapi.yaml"
+  ],
+  "hosts": [
+    "juniper.atlassian.net"
+  ],
+  "scenarios": [
+    "rate-limited",
+    "issue-not-found",
+    "invalid-field",
+    "outage"
+  ],
+  "webhooks": "none",
+  "upstream": {
+    "source": "https://developer.atlassian.com/cloud/jira/platform/swagger-v3.v3.json",
+    "license": "unknown",
+    "commit": null,
+    "url": null,
+    "sha256": null,
+    "replaces": null,
+    "notes": "Atlassian publishes the complete Jira Cloud platform OpenAPI description at this URL, unversioned and without a license that clearly allows redistribution, so it is not pinned or fetched. The embedded subset keeps its paths, operation ids and field names; download the full file yourself and point `contract:` at it to mock every operation."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "jira",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/rest/api/3/issue",
+    "host": "juniper.atlassian.net",
+    "headers": {
+      "authorization": "Basic YW5hQGV4YW1wbGUuY29tOnRlc3QtdG9rZW4="
+    },
+    "body": {
+      "fields": {
+        "project": {"key": "PLNT"},
+        "issuetype": {"name": "Task"},
+        "summary": "Repot the fiddle leaf figs in bay 3"
+      }
+    },
+    "status": 201,
+    "expect": "\"key\""
+  }
+}

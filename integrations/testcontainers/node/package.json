@@ -1,0 +1,15 @@
+{
+  "name": "@mockingbird/testcontainers",
+  "version": "0.1.0",
+  "description": "A Testcontainers module for Mockingbird, the LLM-backed API mock server",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "mockingbird.js",
+  "files": ["mockingbird.js"],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {"node": ">=20"},
+  "peerDependencies": {"testcontainers": ">=10"},
+  "devDependencies": {"testcontainers": "^10.13.2"}
+}

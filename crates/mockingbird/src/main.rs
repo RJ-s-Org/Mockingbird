@@ -63,6 +63,7 @@ async fn run(cli: Cli) -> ExitCode {
         Command::Keys(mockingbird::keys::KeysCommand::Setup(args)) => {
             print_json(mockingbird::keys::setup(&args).await)
         }
+        Command::Examples(cmd) => print_json(mockingbird::examples::run(cmd).await),
         Command::Client(cmd) => {
             client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
         }

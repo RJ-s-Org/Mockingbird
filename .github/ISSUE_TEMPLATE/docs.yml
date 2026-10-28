@@ -1,0 +1,17 @@
+name: Documentation
+description: Something in the docs or the README is wrong, missing or unclear.
+labels: ["docs"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: The page's URL or its path in `docs/`.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing?
+    validations:
+      required: true

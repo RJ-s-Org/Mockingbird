@@ -1,0 +1,44 @@
+name: A contract does not load or serve well
+description: A real-world OpenAPI, GraphQL, protobuf, WSDL or AsyncAPI contract fails to load, or its mock answers badly.
+labels: ["contracts"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real contracts are the best bug reports we get. Remove secrets from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `mockingbird --version`, or the image tag.
+    validations:
+      required: true
+  - type: input
+    id: contract
+    attributes:
+      label: Contract
+      description: A public URL to the contract (for example a vendor's OpenAPI on GitHub), or attach it below if you can share it.
+    validations:
+      required: true
+  - type: textarea
+    id: validate
+    attributes:
+      label: Output of `mockingbird validate <contract>`
+      render: text
+  - type: textarea
+    id: request
+    attributes:
+      label: The request and the answer
+      description: The request you sent, the response, and its `X-Mockingbird-Source`, `X-Mockingbird-Fallback-Reason` and `X-Mockingbird-Validation` headers.
+      render: text
+  - type: input
+    id: model
+    attributes:
+      label: LLM provider and model
+      description: For example `openrouter`, `deepseek/deepseek-v4.1-flash`; or `--offline`.
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true

@@ -1,0 +1,414 @@
+# A hand-written subset of the Auth0 Management API v2 (users, users by email,
+# roles, user role assignment) and the client-credentials token call of the
+# Authentication API, written for Mockingbird's examples and covered by its
+# license. Paths, operation ids and field names follow Auth0's published API
+# reference (https://auth0.com/docs/api/management/v2); Auth0 does not
+# publish the description under an open license, so none of it is copied here.
+openapi: 3.1.0
+info:
+  title: Auth0 Management API v2 (Mockingbird example subset)
+  version: "2.0"
+servers:
+  - url: https://{tenant}.us.auth0.com
+    variables:
+      tenant: { default: juniper }
+security:
+  - bearerAuth: []
+paths:
+  /oauth/token:
+    post:
+      operationId: oauth_token
+      summary: "Authentication API: exchange client credentials for a Management API access token."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "200":
+          description: An access token.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [access_token, token_type, expires_in, scope]
+                properties:
+                  access_token: { type: string, pattern: "^eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9\\.[A-Za-z0-9_-]{60}\\.[A-Za-z0-9_-]{43}$" }
+                  token_type: { type: string, const: Bearer }
+                  expires_in: { type: integer, const: 86400 }
+                  scope: { type: string, const: "read:users update:users delete:users create:users read:roles create:role_members" }
+        "401":
+          description: Invalid client credentials (OAuth error shape).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, error_description]
+                properties:
+                  error: { type: string, enum: [access_denied, invalid_client, unauthorized_client] }
+                  error_description: { type: string }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users:
+    get:
+      operationId: get_users
+      summary: List or search users (Lucene query syntax in q).
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { name: include_totals, in: query, schema: { type: boolean } }
+        - { name: sort, in: query, schema: { type: string, pattern: "^((.*):(-1|1))$" } }
+        - { name: connection, in: query, schema: { type: string } }
+        - { name: fields, in: query, schema: { type: string } }
+        - { name: include_fields, in: query, schema: { type: boolean } }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: search_engine, in: query, schema: { type: string, enum: [v1, v2, v3] } }
+      responses:
+        "200":
+          description: The matching users.
+          content:
+            application/json:
+              schema:
+                description: >-
+                  The page as include_totals=true returns it (the official SDKs
+                  always send it); without it Auth0 returns the bare array.
+                type: object
+                required: [start, limit, length, total, users]
+                properties:
+                  start: { type: integer, const: 0 }
+                  limit: { type: integer, const: 50 }
+                  length: { type: integer, minimum: 0, maximum: 5 }
+                  total: { type: integer, minimum: 0, maximum: 5 }
+                  users:
+                    type: array
+                    minItems: 0
+                    maxItems: 5
+                    items: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: post_users
+      summary: Create a user in a connection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [connection]
+              properties:
+                connection: { type: string }
+                email: { type: string, format: email }
+                phone_number: { type: string }
+                username: { type: string, minLength: 1, maxLength: 128 }
+                password: { type: string }
+                user_id: { type: string }
+                name: { type: string }
+                given_name: { type: string }
+                family_name: { type: string }
+                nickname: { type: string }
+                picture: { type: string, format: uri }
+                email_verified: { type: boolean }
+                verify_email: { type: boolean }
+                blocked: { type: boolean }
+                user_metadata: { type: object }
+                app_metadata: { type: object }
+      responses:
+        "201":
+          description: The new user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: get_users_by_id
+      summary: One user by user_id.
+      parameters:
+        - { name: fields, in: query, schema: { type: string } }
+        - { name: include_fields, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    patch:
+      operationId: patch_users_by_id
+      summary: Update a user (metadata objects are merged, other fields replaced).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                blocked: { type: boolean }
+                email_verified: { type: boolean }
+                email: { type: string, format: email }
+                phone_number: { type: string }
+                given_name: { type: string }
+                family_name: { type: string }
+                name: { type: string }
+                nickname: { type: string }
+                picture: { type: string, format: uri }
+                password: { type: string }
+                connection: { type: string }
+                user_metadata: { type: object }
+                app_metadata: { type: object }
+      responses:
+        "200":
+          description: The updated user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    delete:
+      operationId: delete_users_by_id
+      summary: Delete a user.
+      responses:
+        "204": { description: The user was deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users-by-email:
+    get:
+      operationId: get_users-by-email
+      summary: Users with exactly this email (case-sensitive), across connections.
+      parameters:
+        - { name: email, in: query, required: true, schema: { type: string, format: email } }
+        - { name: fields, in: query, schema: { type: string } }
+        - { name: include_fields, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: The users with the email.
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 2
+                items: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/users/{id}/roles:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: get_user_roles
+      summary: The roles assigned to a user.
+      parameters:
+        - { name: per_page, in: query, schema: { type: integer } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: include_totals, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: The user's roles.
+          content:
+            application/json:
+              schema:
+                description: >-
+                  The page as include_totals=true returns it (the official SDKs
+                  always send it); without it Auth0 returns the bare array.
+                type: object
+                required: [start, limit, length, total, roles]
+                properties:
+                  start: { type: integer, const: 0 }
+                  limit: { type: integer, const: 50 }
+                  length: { type: integer, minimum: 0, maximum: 3 }
+                  total: { type: integer, minimum: 0, maximum: 3 }
+                  roles:
+                    type: array
+                    minItems: 0
+                    maxItems: 3
+                    items: { $ref: "#/components/schemas/Role" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      operationId: post_user_roles
+      summary: Assign roles to a user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles: { type: array, minItems: 1, items: { type: string } }
+      responses:
+        "204": { description: The roles were assigned. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/roles:
+    get:
+      operationId: get_roles
+      summary: List the tenant's roles.
+      parameters:
+        - { name: per_page, in: query, schema: { type: integer } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: include_totals, in: query, schema: { type: boolean } }
+        - { name: name_filter, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The roles.
+          content:
+            application/json:
+              schema:
+                description: >-
+                  The page as include_totals=true returns it (the official SDKs
+                  always send it); without it Auth0 returns the bare array.
+                type: object
+                required: [start, limit, length, total, roles]
+                properties:
+                  start: { type: integer, const: 0 }
+                  limit: { type: integer, const: 50 }
+                  length: { type: integer, minimum: 1, maximum: 4 }
+                  total: { type: integer, minimum: 1, maximum: 4 }
+                  roles:
+                    type: array
+                    minItems: 1
+                    maxItems: 4
+                    items: { $ref: "#/components/schemas/Role" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A Management API access token from POST /oauth/token.
+  responses:
+    BadRequest:
+      description: Invalid request body or query.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Invalid or expired token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The token lacks the required scope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The user does not exist.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: The user already exists.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Rate limited; X-RateLimit-Reset is the unix time the bucket refills.
+      headers:
+        X-RateLimit-Limit: { schema: { type: integer } }
+        X-RateLimit-Remaining: { schema: { type: integer } }
+        X-RateLimit-Reset: { schema: { type: integer } }
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: Auth0 is temporarily unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [statusCode, error, message]
+      properties:
+        statusCode: { type: integer, enum: [400, 401, 403, 404, 409, 429, 503] }
+        error: { type: string, enum: [Bad Request, Unauthorized, Forbidden, Not Found, Conflict, Too Many Requests, Service Unavailable] }
+        message: { type: string }
+        errorCode: { type: string, enum: [invalid_body, invalid_query_string, invalid_token, insufficient_scope, inexistent_user, auth0_idp_error, too_many_requests] }
+    TokenRequest:
+      type: object
+      required: [grant_type, client_id]
+      properties:
+        grant_type: { type: string, enum: [client_credentials] }
+        client_id: { type: string }
+        client_secret: { type: string }
+        client_assertion: { type: string }
+        client_assertion_type: { type: string }
+        audience: { type: string, format: uri }
+        organization: { type: [string, "null"], description: "auth0-python sends null when unset." }
+    Identity:
+      type: object
+      required: [connection, user_id, provider, isSocial]
+      properties:
+        connection: { type: string, enum: [Username-Password-Authentication, google-oauth2] }
+        user_id: { type: string, pattern: "^[0-9a-f]{24}$" }
+        provider: { type: string, enum: [auth0, google-oauth2] }
+        isSocial: { type: boolean }
+    User:
+      type: object
+      additionalProperties: false
+      required: [user_id, email, email_verified, name, nickname, picture, identities, created_at, updated_at, logins_count]
+      properties:
+        user_id: { type: string, pattern: "^auth0\\|[0-9a-f]{24}$" }
+        email: { type: string, format: email }
+        email_verified: { type: boolean }
+        username: { type: string }
+        phone_number: { type: string, pattern: "^\\+1503[0-9]{7}$" }
+        phone_verified: { type: boolean }
+        name: { type: string }
+        given_name: { type: string }
+        family_name: { type: string }
+        nickname: { type: string }
+        picture: { type: string, pattern: "^https://s\\.gravatar\\.com/avatar/[0-9a-f]{32}\\?s=480&r=pg&d=https%3A%2F%2Fcdn\\.auth0\\.com%2Favatars%2F[a-z]{2}\\.png$" }
+        identities: { type: array, minItems: 1, maxItems: 1, items: { $ref: "#/components/schemas/Identity" } }
+        user_metadata: { type: object }
+        app_metadata: { type: object }
+        blocked: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        last_login: { type: string, format: date-time }
+        last_ip: { type: string, format: ipv4 }
+        logins_count: { type: integer, minimum: 0, maximum: 400 }
+    Role:
+      type: object
+      required: [id, name, description]
+      properties:
+        id: { type: string, pattern: "^rol_[A-Za-z0-9]{16}$" }
+        name: { type: string, enum: [admin, support-agent, warehouse, customer] }
+        description: { type: string }

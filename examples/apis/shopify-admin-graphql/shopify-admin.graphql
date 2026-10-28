@@ -1,0 +1,498 @@
+# A hand-written subset of the Shopify Admin GraphQL API, version 2026-10
+# (shop, products and variants, inventory, orders, customers; productCreate,
+# customerCreate and inventoryAdjustQuantities with userErrors), written for
+# Mockingbird's examples and covered by its license. Type, field and argument
+# names follow Shopify's public reference, https://shopify.dev/docs/api/admin-graphql/2026-10;
+# Shopify publishes no schema file under an open licence, so nothing of it is
+# vendored or pinned (the full schema is served by introspection to
+# authenticated apps only).
+
+"""An ISO-8601 encoded UTC date time string, e.g. "2024-10-01T12:30:00Z"."""
+scalar DateTime
+
+"""A signed decimal number serialized as a string, e.g. "29.00"."""
+scalar Decimal
+
+"""An RFC 3986 and RFC 3987 compliant URI string."""
+scalar URL
+
+"""An unsigned 64-bit integer serialized as a string."""
+scalar UnsignedInt64
+
+"""A string containing HTML code."""
+scalar HTML
+
+"""An object with an ID field (a global id, e.g. gid://shopify/Product/8493028147510)."""
+interface Node {
+  id: ID!
+}
+
+"""Returns information about pagination in a connection, in accordance with the Relay specification."""
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+"""The three-letter currency codes that represent the world currencies used in stores."""
+enum CurrencyCode {
+  USD
+  CAD
+  EUR
+  GBP
+}
+
+"""A monetary value with currency."""
+type MoneyV2 {
+  amount: Decimal!
+  currencyCode: CurrencyCode!
+}
+
+"""A collection of monetary values in their respective currencies."""
+type MoneyBag {
+  shopMoney: MoneyV2!
+  presentmentMoney: MoneyV2!
+}
+
+"""The possible product statuses."""
+enum ProductStatus {
+  ACTIVE
+  ARCHIVED
+  DRAFT
+}
+
+"""Represents a collection of general settings and information about the shop."""
+type Shop implements Node {
+  id: ID!
+  name: String!
+  email: String!
+  myshopifyDomain: String!
+  url: URL!
+  currencyCode: CurrencyCode!
+  ianaTimezone: String!
+  plan: ShopPlan!
+}
+
+"""The billing plan of the shop."""
+type ShopPlan {
+  displayName: String!
+  partnerDevelopment: Boolean!
+  shopifyPlus: Boolean!
+}
+
+"""Represents a location where product inventory is held."""
+type Location implements Node {
+  id: ID!
+  name: String!
+  isActive: Boolean!
+  fulfillsOnlineOrders: Boolean!
+}
+
+"""An auto-generated type for paginating through multiple Locations."""
+type LocationConnection {
+  edges: [LocationEdge!]!
+  nodes: [Location!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one Location and a cursor during pagination."""
+type LocationEdge {
+  cursor: String!
+  node: Location!
+}
+
+"""Represents a quantity of an inventory item at a specific location, for a specific name."""
+type InventoryQuantity {
+  name: String!
+  quantity: Int!
+  updatedAt: DateTime
+}
+
+"""The quantities of an inventory item that are related to a specific location."""
+type InventoryLevel implements Node {
+  id: ID!
+  location: Location!
+  quantities(names: [String!]!): [InventoryQuantity!]!
+  updatedAt: DateTime!
+}
+
+"""An auto-generated type for paginating through multiple InventoryLevels."""
+type InventoryLevelConnection {
+  edges: [InventoryLevelEdge!]!
+  nodes: [InventoryLevel!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one InventoryLevel and a cursor during pagination."""
+type InventoryLevelEdge {
+  cursor: String!
+  node: InventoryLevel!
+}
+
+"""Represents the goods available to be shipped to a customer."""
+type InventoryItem implements Node {
+  id: ID!
+  sku: String
+  tracked: Boolean!
+  requiresShipping: Boolean!
+  inventoryLevels(first: Int, after: String): InventoryLevelConnection!
+  variant: ProductVariant!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""Represents a product variant."""
+type ProductVariant implements Node {
+  id: ID!
+  title: String!
+  sku: String
+  price: Decimal!
+  compareAtPrice: Decimal
+  inventoryQuantity: Int
+  inventoryItem: InventoryItem!
+  product: Product!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""An auto-generated type for paginating through multiple ProductVariants."""
+type ProductVariantConnection {
+  edges: [ProductVariantEdge!]!
+  nodes: [ProductVariant!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one ProductVariant and a cursor during pagination."""
+type ProductVariantEdge {
+  cursor: String!
+  node: ProductVariant!
+}
+
+"""The price range of the product."""
+type ProductPriceRangeV2 {
+  minVariantPrice: MoneyV2!
+  maxVariantPrice: MoneyV2!
+}
+
+"""The Product resource lets you manage products in a merchant's store."""
+type Product implements Node {
+  id: ID!
+  legacyResourceId: UnsignedInt64!
+  title: String!
+  handle: String!
+  descriptionHtml: HTML!
+  vendor: String!
+  productType: String!
+  status: ProductStatus!
+  tags: [String!]!
+  totalInventory: Int!
+  onlineStoreUrl: URL
+  priceRangeV2: ProductPriceRangeV2!
+  variants(first: Int, after: String): ProductVariantConnection!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  publishedAt: DateTime
+}
+
+"""An auto-generated type for paginating through multiple Products."""
+type ProductConnection {
+  edges: [ProductEdge!]!
+  nodes: [Product!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one Product and a cursor during pagination."""
+type ProductEdge {
+  cursor: String!
+  node: Product!
+}
+
+"""The set of valid sort keys for the Product query."""
+enum ProductSortKeys {
+  CREATED_AT
+  ID
+  INVENTORY_TOTAL
+  PRODUCT_TYPE
+  RELEVANCE
+  TITLE
+  UPDATED_AT
+  VENDOR
+}
+
+"""The state of a customer's email marketing consent."""
+enum CustomerEmailMarketingState {
+  NOT_SUBSCRIBED
+  PENDING
+  SUBSCRIBED
+  UNSUBSCRIBED
+}
+
+"""The record of a customer's email marketing consent."""
+type CustomerEmailMarketingConsentState {
+  marketingState: CustomerEmailMarketingState!
+  consentUpdatedAt: DateTime
+}
+
+"""Represents information about a customer of the shop."""
+type Customer implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  displayName: String!
+  email: String
+  phone: String
+  numberOfOrders: UnsignedInt64!
+  amountSpent: MoneyV2!
+  tags: [String!]!
+  note: String
+  verifiedEmail: Boolean!
+  emailMarketingConsent: CustomerEmailMarketingConsentState
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""An auto-generated type for paginating through multiple Customers."""
+type CustomerConnection {
+  edges: [CustomerEdge!]!
+  nodes: [Customer!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one Customer and a cursor during pagination."""
+type CustomerEdge {
+  cursor: String!
+  node: Customer!
+}
+
+"""Represents an order's financial status for display in the Shopify admin."""
+enum OrderDisplayFinancialStatus {
+  AUTHORIZED
+  EXPIRED
+  PAID
+  PARTIALLY_PAID
+  PARTIALLY_REFUNDED
+  PENDING
+  REFUNDED
+  VOIDED
+}
+
+"""Represents the order's aggregated fulfillment status for display purposes."""
+enum OrderDisplayFulfillmentStatus {
+  FULFILLED
+  IN_PROGRESS
+  ON_HOLD
+  OPEN
+  PARTIALLY_FULFILLED
+  PENDING_FULFILLMENT
+  RESTOCKED
+  SCHEDULED
+  UNFULFILLED
+}
+
+"""Represents individual products and quantities purchased in the associated order."""
+type LineItem implements Node {
+  id: ID!
+  name: String!
+  title: String!
+  sku: String
+  quantity: Int!
+  originalUnitPriceSet: MoneyBag!
+  variant: ProductVariant
+}
+
+"""An auto-generated type for paginating through multiple LineItems."""
+type LineItemConnection {
+  edges: [LineItemEdge!]!
+  nodes: [LineItem!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one LineItem and a cursor during pagination."""
+type LineItemEdge {
+  cursor: String!
+  node: LineItem!
+}
+
+"""An order is a customer's request to purchase one or more products from a shop."""
+type Order implements Node {
+  id: ID!
+  legacyResourceId: UnsignedInt64!
+  name: String!
+  email: String
+  phone: String
+  createdAt: DateTime!
+  processedAt: DateTime!
+  cancelledAt: DateTime
+  closed: Boolean!
+  displayFinancialStatus: OrderDisplayFinancialStatus
+  displayFulfillmentStatus: OrderDisplayFulfillmentStatus!
+  currencyCode: CurrencyCode!
+  subtotalPriceSet: MoneyBag!
+  totalPriceSet: MoneyBag!
+  totalTaxSet: MoneyBag!
+  customer: Customer
+  lineItems(first: Int, after: String): LineItemConnection!
+  tags: [String!]!
+  note: String
+}
+
+"""An auto-generated type for paginating through multiple Orders."""
+type OrderConnection {
+  edges: [OrderEdge!]!
+  nodes: [Order!]!
+  pageInfo: PageInfo!
+}
+
+"""An auto-generated type which holds one Order and a cursor during pagination."""
+type OrderEdge {
+  cursor: String!
+  node: Order!
+}
+
+"""The set of valid sort keys for the Order query."""
+enum OrderSortKeys {
+  CREATED_AT
+  ID
+  ORDER_NUMBER
+  PROCESSED_AT
+  TOTAL_PRICE
+  UPDATED_AT
+}
+
+"""Represents an error in the input of a mutation."""
+type UserError {
+  """The path to the input field that caused the error."""
+  field: [String!]
+  """The error message."""
+  message: String!
+}
+
+"""Possible error codes that can be returned by ProductUserError."""
+enum ProductErrorCode {
+  BLANK
+  INVALID
+  TAKEN
+  TOO_LONG
+  PRODUCT_DOES_NOT_EXIST
+}
+
+"""Errors that occur while creating or updating products."""
+type ProductUserError {
+  field: [String!]
+  message: String!
+  code: ProductErrorCode
+}
+
+"""The input fields required to create a product."""
+input ProductCreateInput {
+  title: String
+  handle: String
+  descriptionHtml: String
+  vendor: String
+  productType: String
+  status: ProductStatus
+  tags: [String!]
+}
+
+"""Return type for productCreate mutation."""
+type ProductCreatePayload {
+  product: Product
+  userErrors: [UserError!]!
+}
+
+"""The input fields and values to use when creating or updating a customer."""
+input CustomerInput {
+  firstName: String
+  lastName: String
+  email: String
+  phone: String
+  note: String
+  tags: [String!]
+}
+
+"""Return type for customerCreate mutation."""
+type CustomerCreatePayload {
+  customer: Customer
+  userErrors: [UserError!]!
+}
+
+"""The input fields for the quantity to be adjusted."""
+input InventoryChangeInput {
+  delta: Int!
+  inventoryItemId: ID!
+  locationId: ID!
+}
+
+"""The input fields required to adjust inventory quantities."""
+input InventoryAdjustQuantitiesInput {
+  reason: String!
+  name: String!
+  referenceDocumentUri: String
+  changes: [InventoryChangeInput!]!
+}
+
+"""Represents a change in an inventory quantity of an inventory item at a location."""
+type InventoryChange {
+  delta: Int!
+  name: String!
+  item: InventoryItem
+  location: Location
+}
+
+"""A group of one or more changes to inventory quantities."""
+type InventoryAdjustmentGroup {
+  id: ID!
+  reason: String!
+  createdAt: DateTime!
+  changes: [InventoryChange!]!
+}
+
+"""An error that occurs during the execution of InventoryAdjustQuantities."""
+type InventoryAdjustQuantitiesUserError {
+  field: [String!]
+  message: String!
+}
+
+"""Return type for inventoryAdjustQuantities mutation."""
+type InventoryAdjustQuantitiesPayload {
+  inventoryAdjustmentGroup: InventoryAdjustmentGroup
+  userErrors: [InventoryAdjustQuantitiesUserError!]!
+}
+
+"""The schema's entry-point for queries."""
+type QueryRoot {
+  """Returns the Shop resource corresponding to the access token used in the request."""
+  shop: Shop!
+  """Returns a Product resource by ID."""
+  product(id: ID!): Product
+  """Returns a list of products."""
+  products(first: Int, after: String, last: Int, before: String, query: String, sortKey: ProductSortKeys = ID, reverse: Boolean = false): ProductConnection!
+  """Returns an Order resource by ID."""
+  order(id: ID!): Order
+  """Returns a list of orders placed in the store."""
+  orders(first: Int, after: String, query: String, sortKey: OrderSortKeys = PROCESSED_AT, reverse: Boolean = false): OrderConnection!
+  """Returns a Customer resource by ID."""
+  customer(id: ID!): Customer
+  """Returns a list of customers."""
+  customers(first: Int, after: String, query: String, reverse: Boolean = false): CustomerConnection!
+  """Returns an InventoryItem object by ID."""
+  inventoryItem(id: ID!): InventoryItem
+  """Returns a list of active inventory locations."""
+  locations(first: Int, after: String): LocationConnection!
+}
+
+"""The schema's entry-point for mutations."""
+type Mutation {
+  """Creates a product."""
+  productCreate(product: ProductCreateInput): ProductCreatePayload
+  """Create a new customer."""
+  customerCreate(input: CustomerInput!): CustomerCreatePayload
+  """Apply changes to inventory quantities."""
+  inventoryAdjustQuantities(input: InventoryAdjustQuantitiesInput!): InventoryAdjustQuantitiesPayload
+}
+
+schema {
+  query: QueryRoot
+  mutation: Mutation
+}

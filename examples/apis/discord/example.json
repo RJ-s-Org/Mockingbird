@@ -1,0 +1,47 @@
+{
+  "name": "discord",
+  "title": "Discord",
+  "category": "messaging",
+  "protocol": "openapi",
+  "summary": "The bot's user, a guild and its channels, messages and interaction responses on the v10 HTTP API, with unknown-channel, rate-limit and outage scenarios.",
+  "contracts": [
+    "discord.openapi.yaml"
+  ],
+  "hosts": [
+    "discord.com"
+  ],
+  "scenarios": [
+    "unknown-channel",
+    "rate-limited",
+    "outage"
+  ],
+  "webhooks": null,
+  "upstream": {
+    "source": "https://github.com/discord/discord-api-spec",
+    "license": "MIT",
+    "commit": "1f132453655c48ebbfe58b77c6e0ba1b2f3e987d",
+    "url": "https://raw.githubusercontent.com/discord/discord-api-spec/1f132453655c48ebbfe58b77c6e0ba1b2f3e987d/specs/openapi.json",
+    "sha256": "4d910814812b3a742ef2490b224f976747c8cffde996282037a0c9224daf9e12",
+    "replaces": "discord.openapi.yaml",
+    "notes": "Upstream declares client errors as a \"4XX\" range, which Mockingbird does not count as declaring 404, so the unknown-channel scenario needs the hand-written contract."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "httpx",
+    "verified": true
+  },
+  "smoke": {
+    "method": "POST",
+    "path": "/api/v10/channels/1180000000000000001/messages",
+    "host": "discord.com",
+    "content_type": "application/json",
+    "headers": {
+      "Authorization": "Bot test-token"
+    },
+    "body": {
+      "content": "Weekly sprint starts in 10 minutes!"
+    },
+    "status": 200,
+    "expect": "\"content\":\"Weekly sprint starts in 10 minutes!\""
+  }
+}

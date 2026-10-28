@@ -1,0 +1,43 @@
+{
+  "name": "github-rest",
+  "title": "GitHub REST",
+  "category": "developer-tools",
+  "protocol": "openapi",
+  "summary": "Repositories, issues, pull requests, users and repository search on api.github.com, with issue and pull request webhooks and rate-limit, not-found and outage scenarios.",
+  "contracts": [
+    "github-rest.openapi.yaml"
+  ],
+  "hosts": [
+    "api.github.com"
+  ],
+  "scenarios": [
+    "rate-limited",
+    "not-found",
+    "outage"
+  ],
+  "webhooks": "hmac-sha256",
+  "upstream": {
+    "source": "https://github.com/github/rest-api-description",
+    "license": "MIT",
+    "commit": "c66e298030d4070b70a569dcd4268b3a041b5380",
+    "url": "https://raw.githubusercontent.com/github/rest-api-description/c66e298030d4070b70a569dcd4268b3a041b5380/descriptions/api.github.com/api.github.com.json",
+    "sha256": "b81f098026e98084a83f0a33db43502213919f68449b028543c373757766a758",
+    "replaces": "github-rest.openapi.yaml",
+    "notes": "The full description (about 14 MB, OpenAPI 3.0.3) keeps the subset's operation ids; its webhooks are under x-webhooks, so with --full events are Mockingbird's default event envelope."
+  },
+  "sdk": {
+    "language": "python",
+    "package": "PyGithub",
+    "verified": true
+  },
+  "smoke": {
+    "method": "GET",
+    "path": "/repos/fernwood-labs/trellis",
+    "host": "api.github.com",
+    "headers": {
+      "authorization": "Bearer ghp_test123"
+    },
+    "status": 200,
+    "expect": "\"full_name\""
+  }
+}

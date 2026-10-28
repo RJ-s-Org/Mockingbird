@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mockingbird
+spec:
+  selector:
+    app.kubernetes.io/name: mockingbird
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+    - {name: grpc, port: 50051, targetPort: grpc, appProtocol: kubernetes.io/h2c}
+    - {name: admin, port: 9090, targetPort: admin}

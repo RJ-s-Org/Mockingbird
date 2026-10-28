@@ -1,0 +1,19 @@
+# The README demo (docs/assets/demo.tape), written by `mockingbird init`.
+# Every key: docs/configuration.md. Secrets are references (env:NAME), never values.
+llm:
+  default_profile: openrouter
+  profiles:
+    openrouter:
+      api_key: env:OPENROUTER_API_KEY
+      base_url: https://openrouter.ai/api/v1
+      headers:
+        http-referer: https://github.com/rj-s-org/mockingbird
+        x-title: Mockingbird
+      model: deepseek/deepseek-v4.1-flash
+mocks:
+  bookshop:
+    contract: ./bookshop.yaml
+    route_prefix: /
+    persona: A small independent bookshop in Berlin. Literary fiction and classics, real authors and titles, prices in EUR.
+storage:
+  url: "sqlite::memory:"

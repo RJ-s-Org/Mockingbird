@@ -1,0 +1,124 @@
+# PayPal REST: an OAuth 2.0 token, Orders v2 (create, get, confirm, authorize,
+# capture) and Payments v2 (captures, refunds), with order and capture webhooks.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/v2/checkout/orders -H 'Host: api-m.sandbox.paypal.com' -H 'Authorization: Bearer A21AAtest' \
+#     -H 'content-type: application/json' -d '{"intent":"CAPTURE","purchase_units":[{"amount":{"currency_code":"USD","value":"42.00"}}]}'
+# Contracts: paypal-orders.openapi.yaml (mounted at /), paypal-payments.openapi.yaml
+# (at /v2/payments) and paypal-oauth.openapi.yaml (at /v1/oauth2), hand-written
+# subsets (see their headers). The full Orders v2 spec (Apache-2.0) is pinned in
+# example.json; `mockingbird examples init paypal --full` fetches it
+# for the paypal-orders mock.
+proxy:
+  enabled: true          # apps reach https://api-m.sandbox.paypal.com through http://127.0.0.1:8888
+mocks:
+  paypal-orders:
+    contract: paypal-orders.openapi.yaml
+    route_prefix: /
+    hosts: [api-m.sandbox.paypal.com, api-m.paypal.com]
+    persona: &persona >-
+      PayPal REST API in the sandbox for "Fernwood Coffee Roasters", a small
+      roastery in Asheville, NC selling beans and brewing gear in USD; payee
+      sb-fernwood@business.example.com, merchant_id 7KQ2XWZNJLVBE. The buyer is
+      the sandbox personal account Sam Okafor, sb-sam.okafor@personal.example.com,
+      payer_id X8RJYL5D3EUWN, country US. Order, capture and refund ids are 17
+      uppercase alphanumerics starting with a digit (5O190127TN364715T); debug_id
+      is 13 lowercase hex characters. Amounts are strings with two decimals,
+      copied from the request (whole-bean bags 14.00 to 24.00, a burr grinder
+      129.00). A new order is CREATED with links self, approve
+      (https://www.sandbox.paypal.com/checkoutnow?token=<order id>), update and
+      capture; after capture it is COMPLETED with one COMPLETED capture whose
+      seller_protection is ELIGIBLE. Times are recent RFC 3339 UTC.
+    webhooks:
+      # PayPal signs with PAYPAL-TRANSMISSION-SIG (a certificate over
+      # transmission id, time, webhook id and the body's CRC32); Mockingbird
+      # cannot produce that, so these targets are signed with X-Mockingbird-Signature.
+      - url: http://127.0.0.1:8000/paypal/webhook
+        events: [orders.confirm, orders.capture]
+        secret: env:PAYPAL_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      instrument-declined:
+        status: 422
+        operations: [orders.capture, orders.authorize]
+        set:
+          name: UNPROCESSABLE_ENTITY
+          message: The requested action could not be performed, semantically incorrect, or failed business validation.
+          details:
+            - issue: INSTRUMENT_DECLINED
+              description: The instrument presented  was either declined by the processor or bank, or it can't be used for this payment.
+          links:
+            - href: https://developer.paypal.com/docs/api/orders/v2/#error-INSTRUMENT_DECLINED
+              rel: information_link
+              method: GET
+      rate-limited:
+        status: 429
+        set:
+          name: RATE_LIMIT_REACHED
+          message: Too many requests. Blocked due to rate limiting.
+          details:
+            - issue: RATE_LIMIT_REACHED
+              description: Too many requests. Blocked due to rate limiting.
+      outage:
+        status: 500
+        set:
+          name: INTERNAL_SERVER_ERROR
+          message: An internal server error occurred.
+          details: []
+          links:
+            - href: https://developer.paypal.com/api/orders/v2/#error-INTERNAL_SERVER_ERROR
+              rel: information_link
+              method: GET
+  paypal-payments:
+    contract: paypal-payments.openapi.yaml
+    route_prefix: /v2/payments
+    hosts: [api-m.sandbox.paypal.com, api-m.paypal.com]
+    persona: *persona
+    webhooks:
+      - url: http://127.0.0.1:8000/paypal/webhook
+        events: [captures.refund]
+        secret: env:PAYPAL_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      instrument-declined:
+        status: 422
+        operations: [captures.refund]
+        set:
+          name: UNPROCESSABLE_ENTITY
+          message: The requested action could not be performed, semantically incorrect, or failed business validation.
+          details:
+            - issue: REFUND_FAILED_INSUFFICIENT_FUNDS
+              description: Capture could not be refunded due to insufficient funds. Please check to see if you have sufficient funds in your PayPal account or if the bank account linked to your PayPal account is verified and has sufficient funds.
+      rate-limited:
+        status: 429
+        set:
+          name: RATE_LIMIT_REACHED
+          message: Too many requests. Blocked due to rate limiting.
+          details:
+            - issue: RATE_LIMIT_REACHED
+              description: Too many requests. Blocked due to rate limiting.
+      outage:
+        status: 500
+        set:
+          name: INTERNAL_SERVER_ERROR
+          message: An internal server error occurred.
+          details: []
+  paypal-oauth:
+    contract: paypal-oauth.openapi.yaml
+    route_prefix: /v1/oauth2
+    hosts: [api-m.sandbox.paypal.com, api-m.paypal.com]
+    persona: *persona
+    scenarios:
+      rate-limited:
+        status: 429
+        set:
+          name: RATE_LIMIT_REACHED
+          message: Too many requests. Blocked due to rate limiting.
+          details:
+            - issue: RATE_LIMIT_REACHED
+              description: Too many requests. Blocked due to rate limiting.
+      outage:
+        status: 500
+        set:
+          name: INTERNAL_SERVER_ERROR
+          message: An internal server error occurred.
+          details: []

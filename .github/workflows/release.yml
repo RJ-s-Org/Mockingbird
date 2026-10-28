@@ -450,6 +450,41 @@ jobs:
             --notes-file <(scripts/changelog-section.sh "$VERSION") \
             dist/*.tar.gz dist/*.zip dist/*.sha256 dist/SHA256SUMS "dist/mockingbird-$VERSION.cdx.json"
 
+  # Updates Formula/mockingbird.rb in RJ-s-Org/homebrew-tap. Skipped (with a
+  # notice) until the HOMEBREW_TAP_TOKEN secret exists: a fine-grained token
+  # with contents write on that repository only. See docs/launch/checklist.md.
+  homebrew:
+    needs: [verify, release]
+    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.prerelease == 'false'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render the formula and push it to the tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; the Homebrew tap was not updated"
+            exit 0
+          fi
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          scripts/render-packaging.sh "$VERSION" "$RUNNER_TEMP/SHA256SUMS" "$RUNNER_TEMP/packaging"
+          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/RJ-s-Org/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          cp "$RUNNER_TEMP/packaging/homebrew/mockingbird.rb" "$RUNNER_TEMP/tap/Formula/mockingbird.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Formula/mockingbird.rb
+          if git diff --cached --quiet; then
+            echo "::notice::the tap already has mockingbird $VERSION"
+            exit 0
+          fi
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+            commit -m "mockingbird $VERSION"
+          git push origin HEAD
+
   # crates.io versions cannot be deleted, so a prerelease leaves mb-ext alone.
   publish-crate:
     needs: [verify, release]

@@ -1,0 +1,74 @@
+# A hand-written description of PayPal's OAuth 2.0 token endpoint
+# (POST /v1/oauth2/token), written for Mockingbird's examples and covered by its
+# license. PayPal publishes no OpenAPI file for it; it follows
+# https://developer.paypal.com/api/rest/authentication/.
+# Mounted at route_prefix /v1/oauth2, so the path below is relative to it.
+openapi: 3.1.0
+info:
+  title: PayPal OAuth 2.0 (Mockingbird example subset)
+  version: "1.0"
+servers:
+  - url: https://api-m.sandbox.paypal.com/v1/oauth2
+  - url: https://api-m.paypal.com/v1/oauth2
+paths:
+  /token:
+    post:
+      operationId: oauth2.token
+      summary: Exchange the app's client id and secret for an access token.
+      security:
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, enum: [client_credentials, refresh_token, authorization_code] }
+                response_type: { type: string }
+                ignoreCache: { type: boolean }
+                return_authn_schemes: { type: boolean }
+      responses:
+        "200":
+          description: An access token.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [scope, access_token, token_type, app_id, expires_in, nonce]
+                properties:
+                  scope: { type: string, const: "https://uri.paypal.com/services/invoicing https://uri.paypal.com/services/vault/payment-tokens/read https://uri.paypal.com/services/disputes/read-buyer https://uri.paypal.com/services/payments/realtimepayment https://uri.paypal.com/services/payments/payment/authcapture openid https://uri.paypal.com/services/payments/refund" }
+                  access_token: { type: string, pattern: "^A21AA[A-Za-z0-9_-]{92}$" }
+                  token_type: { type: string, const: Bearer }
+                  app_id: { type: string, pattern: "^APP-[0-9A-Z]{17}$" }
+                  expires_in: { type: integer, const: 32400 }
+                  nonce: { type: string, pattern: "^2026-(0[1-9]|1[0-2])-(0[1-9]|1[0-9]|2[0-8])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z[A-Za-z0-9_-]{43}$" }
+        "401":
+          description: Client authentication failed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, error_description]
+                properties:
+                  error: { type: string, enum: [invalid_client, invalid_grant, unsupported_grant_type] }
+                  error_description: { type: string }
+        "429": { $ref: "#/components/responses/error" }
+        "500": { $ref: "#/components/responses/error" }
+components:
+  securitySchemes:
+    basicAuth: { type: http, scheme: basic, description: "client_id:secret" }
+  responses:
+    error:
+      description: A PayPal error (RATE_LIMIT_REACHED, ...).
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [name, message, debug_id]
+            properties:
+              name: { type: string, enum: [RATE_LIMIT_REACHED, INTERNAL_SERVER_ERROR] }
+              message: { type: string }
+              debug_id: { type: string, pattern: "^[0-9a-f]{13}$" }

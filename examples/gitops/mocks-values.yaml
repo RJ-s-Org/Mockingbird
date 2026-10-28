@@ -1,0 +1,96 @@
+# The mocks of a preview environment, kept in the application's own repository
+# (here: deploy/preview/mocks-values.yaml), so a pull request that changes a
+# contract or a scenario changes its own preview's mocks.
+#
+# Values of the Mockingbird chart (deploy/helm/mockingbird); the Argo CD
+# ApplicationSet and the Flux HelmRelease in this directory both use it.
+config:
+  server:
+    # Cluster-internal preview: no login on the Admin API. Keep adminIngress
+    # off, or configure config.auth (OIDC).
+    insecure_no_auth: true
+
+# Pushes to the PR branch update the ConfigMap; `--watch` reconciles the mocks
+# in place, so the app's sessions survive a contract change.
+reload: watch
+
+mocks:
+  payments:
+    contract:
+      # In a real repository: a ConfigMap generated from the vendored contract,
+      # or `url:` with a pinned `sha256`. Inline keeps the example self-contained.
+      inline: |
+        openapi: 3.0.3
+        info: {title: Payments API, version: 1.0.0}
+        paths:
+          /v1/charges:
+            post:
+              operationId: createCharge
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      required: [amount, currency]
+                      properties:
+                        amount: {type: integer, minimum: 1}
+                        currency: {type: string, enum: [eur, usd, gbp]}
+              responses:
+                "201":
+                  description: Created
+                  content:
+                    application/json:
+                      schema: {$ref: "#/components/schemas/Charge"}
+                "402":
+                  description: Card declined
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties: {error: {type: string}}
+          /v1/charges/{chargeId}:
+            get:
+              operationId: getCharge
+              parameters:
+                - {name: chargeId, in: path, required: true, schema: {type: string}}
+              responses:
+                "200":
+                  description: OK
+                  content:
+                    application/json:
+                      schema: {$ref: "#/components/schemas/Charge"}
+        components:
+          schemas:
+            Charge:
+              type: object
+              required: [id, amount, currency, status]
+              properties:
+                id: {type: string}
+                amount: {type: integer}
+                currency: {type: string, enum: [eur, usd, gbp]}
+                status: {type: string, enum: [succeeded, pending, failed]}
+    route_prefix: /payments
+    persona: A European card processor; amounts in cents.
+    scenarios:
+      card-declined:
+        status: 402
+        operations: [createCharge]
+
+# `helm test <release>` (and Argo CD's / Flux's own test runs) call a mock.
+tests:
+  requests:
+    - path: /payments/v1/charges
+      method: POST
+      status: 201
+      body: {amount: 1999, currency: eur}
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    # One host per preview: the release name carries the PR number.
+    - host: "{{ .Release.Name }}.preview.example.com"
+      paths:
+        - path: /
+          pathType: Prefix

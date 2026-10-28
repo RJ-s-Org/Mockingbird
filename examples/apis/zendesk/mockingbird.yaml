@@ -1,0 +1,63 @@
+# Zendesk Support: tickets, ticket comments, users and search, with ticket
+# webhooks.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/api/v2/tickets/1042 -H 'Host: juniper.zendesk.com' -u 'ana@example.com/token:test-token'
+# Contract: zendesk.openapi.yaml, a hand-written subset (see its header) that
+# keeps Zendesk's operation ids. Zendesk's full OpenAPI description is not
+# redistributed (see examples/apis/zendesk/example.json).
+proxy:
+  enabled: true          # apps reach https://juniper.zendesk.com through http://127.0.0.1:8888
+mocks:
+  zendesk:
+    contract: zendesk.openapi.yaml
+    route_prefix: /
+    hosts: [juniper.zendesk.com]
+    persona: >-
+      Zendesk Support account juniper.zendesk.com of "Juniper & Co", a small
+      online plant shop in Portland, Oregon (Pacific Time, en-US). Ticket ids
+      are integers around 1000-9999 and each url is
+      https://juniper.zendesk.com/api/v2/tickets/<id>.json. User ids are
+      12-digit integers starting with 36. Agents: Ana Ruiz (admin) and Theo
+      Park, in the "Customer Care" group; requesters are US customers with
+      @example.com emails. Tickets are about plant orders: "My monstera arrived
+      with yellow leaves", "Where is order #10432?", "Can I change my delivery
+      address?", "Refund for a cracked terracotta pot". via.channel is web,
+      email or api; tags look like order_issue, shipping, refund. A created
+      ticket copies subject, priority and the comment body (as description)
+      from the request and starts in status new.
+    webhooks:
+      # Zendesk signs with X-Zendesk-Webhook-Signature (base64 HMAC-SHA256 of
+      # timestamp + body), which Mockingbird cannot produce yet; this target is
+      # signed with X-Mockingbird-Signature instead (see the README).
+      - url: http://127.0.0.1:4242/zendesk/webhook
+        events: [ticket.created, ticket.updated, CreateTicketJson, UpdateTicketJson]
+        secret: env:ZENDESK_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      rate-limited:
+        status: 429
+        set:
+          error: TooManyRequests
+          description: "Rate limit exceeded: 700 requests per minute for your plan."
+      not-found:
+        status: 404
+        operations: [ShowTicket, UpdateTicket, ListTicketComments, ShowUser,
+                     ShowTicketJson, UpdateTicketJson, ListTicketCommentsJson, ShowUserJson]
+        set:
+          error: RecordNotFound
+          description: Not found
+      record-invalid:
+        status: 422
+        operations: [CreateTicket, UpdateTicket, CreateUser, CreateTicketJson, UpdateTicketJson, CreateUserJson]
+        set:
+          error: RecordInvalid
+          description: Record validation errors
+          details:
+            requester:
+              - description: "Requester: Email is not properly formatted"
+                error: InvalidValue
+      outage:
+        status: 503
+        set:
+          error: DatabaseError
+          description: Zendesk is temporarily unavailable. Please retry shortly.

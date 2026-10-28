@@ -1,0 +1,65 @@
+# Plaid: Link tokens, public token exchange, accounts, Auth, Identity and
+# Transactions sync, with a TRANSACTIONS SYNC_UPDATES_AVAILABLE webhook.
+#   mockingbird serve -c mockingbird.yaml --offline
+#   curl -s localhost:8080/accounts/get -H 'Host: sandbox.plaid.com' -H 'content-type: application/json' \
+#     -d '{"client_id":"test_client_id","secret":"test_secret","access_token":"access-sandbox-de3ce8ef-33f8-452c-a685-8671031fc0f6"}'
+# Contract: plaid.openapi.yaml, a hand-written subset (see its header). Plaid's
+# own spec (github.com/plaid/plaid-openapi) has no license file, so it is not
+# pinned for `init --full`.
+proxy:
+  enabled: true          # apps reach https://sandbox.plaid.com through http://127.0.0.1:8888
+mocks:
+  plaid:
+    contract: plaid.openapi.yaml
+    route_prefix: /
+    hosts: [sandbox.plaid.com, production.plaid.com]
+    persona: >-
+      Plaid Sandbox for "Ledgerly", a US personal-budgeting app. The linked
+      Item is at "First Platypus Bank" (institution_id ins_109508) and belongs to
+      Alberta Bobbeth Charleson, 2992 Cameron Road, Malakoff, NY 14236,
+      accountholder0@example.com, +1 111-555-3333. Accounts are "Plaid Checking"
+      (mask 0000, depository/checking), "Plaid Saving" (mask 1111,
+      depository/savings) and "Plaid Credit Card" (mask 3333, credit/credit card),
+      all in USD. account_id, item_id and transaction_id are 37 random base62
+      characters; tokens are access-sandbox-<uuid v4>, public-sandbox-<uuid v4>
+      and link-sandbox-<uuid v4>; request_id is 15 base62 characters. ACH
+      routing numbers are 011401533 or 021000021. Transactions are recent
+      everyday US purchases (Starbucks, Uber, United Airlines, McDonald's,
+      Touchstone Climbing, a payroll deposit as a negative amount), positive
+      amounts for money out. Dates are within the last 30 days.
+    webhooks:
+      # Plaid signs with a JWT in Plaid-Verification (ES256); Mockingbird cannot
+      # produce that, so this target is signed with X-Mockingbird-Signature.
+      - url: http://127.0.0.1:8000/plaid/webhook
+        events: [transactionsSync]
+        secret: env:PLAID_WEBHOOK_SECRET
+        signing: hmac-sha256
+    scenarios:
+      item-login-required:
+        status: 400
+        operations: [accountsGet, authGet, identityGet, transactionsSync, itemGet]
+        set:
+          error_type: ITEM_ERROR
+          error_code: ITEM_LOGIN_REQUIRED
+          error_message: "the login details of this item have changed (credentials, MFA, or required user action) and a user login is required to update this information. use Link's update mode to restore the item to a good state"
+          status: 400
+          causes: []
+          documentation_url: https://plaid.com/docs/errors/item/#item_login_required
+      rate-limited:
+        status: 429
+        set:
+          error_type: RATE_LIMIT_EXCEEDED
+          error_code: RATE_LIMIT
+          error_message: rate limit exceeded for attempts to access this item. please try again later
+          status: 429
+          causes: []
+          documentation_url: https://plaid.com/docs/errors/rate-limit-exceeded/
+      outage:
+        status: 500
+        set:
+          error_type: API_ERROR
+          error_code: INTERNAL_SERVER_ERROR
+          error_message: an unexpected error occurred
+          status: 500
+          causes: []
+          documentation_url: https://plaid.com/docs/errors/api/#internal_server_error

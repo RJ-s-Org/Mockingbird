@@ -118,6 +118,10 @@ pub enum Command {
     /// the profile at it.
     #[command(subcommand)]
     Keys(crate::keys::KeysCommand),
+    /// The catalog of ready-made API examples (Stripe, GitHub, Twilio, ...):
+    /// list them, show one, or write one into a directory.
+    #[command(subcommand)]
+    Examples(crate::examples::ExamplesCommand),
     #[command(flatten)]
     Client(ClientCommand),
 }
