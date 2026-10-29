@@ -12,7 +12,7 @@ Mockingbird reads one YAML file, `mockingbird.yaml`, passed with `mockingbird se
 
 **Durations** are written as `250ms`, `30s`, `5m`, `12h` or `1d`.
 
-[`examples/mockingbird.full.yaml`](examples/mockingbird.full.yaml) sets every key below; [`examples/mockingbird.yaml`](examples/mockingbird.yaml) is a commented starting point. A test (`crates/mockingbird/tests/docs_reference.rs`) checks that the full example loads and that this page names every key the code accepts.
+[`examples/mockingbird.full.yaml`](examples/mockingbird.full.yaml) sets every key below; [`examples/mockingbird.yaml`](examples/mockingbird.yaml) is a commented starting point. A test (`crates/mockingbird/tests/it/docs_reference.rs`) checks that the full example loads and that this page names every key the code accepts.
 
 In key paths, `<name>` stands for a name you choose (a mock, broker, profile, scenario or channel id), and `[]` for an item of a list. The top-level sections are `server`, `storage`, `bus`, `outbound`, `limits`, `pii`, `import`, `auth`, `audit`, `llm`, `observability`, `protocols`, `brokers` and `mocks`.
 

@@ -2,10 +2,11 @@
 //! engine guards, through an in-process app.
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::{fixture, serve};
 use mb_engine::{SchemaValidator, TokenBudget};
 use mb_mcm::ProtocolPayload;
 use mb_protocols::grpc::DynamicCodec;
@@ -17,19 +18,6 @@ use serde_json::{Value, json};
 use tonic::codegen::http::uri::PathAndQuery;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
-}
 
 /// An app built from `config` (written next to any extra files), offline
 /// unless the config names an LLM profile.

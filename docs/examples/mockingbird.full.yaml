@@ -1,7 +1,7 @@
 # Mockingbird configuration with every key set. This file is a reference,
 # not a recommendation: it turns on OIDC, TLS, Redis, Vault-free secret
 # references, chaos and limits all at once. docs/configuration.md describes
-# each key; crates/mockingbird/tests/docs_reference.rs checks that this file
+# each key; crates/mockingbird/tests/it/docs_reference.rs checks that this file
 # loads and that every key it sets is documented there.
 #
 # Precedence: this file < MB_* environment variables < command-line flags.

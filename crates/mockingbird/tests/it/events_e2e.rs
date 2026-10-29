@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::support::serve;
 use futures::StreamExt;
 use mb_mcm::ChannelBinding;
 use mb_protocols::events::InMessage;
@@ -22,13 +23,6 @@ struct Running {
     data: String,
     admin: String,
     _dir: tempfile::TempDir,
-}
-
-async fn serve(router: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    format!("http://{addr}")
 }
 
 /// `build_app` (offline) on a config file with `brokers` and `mocks`

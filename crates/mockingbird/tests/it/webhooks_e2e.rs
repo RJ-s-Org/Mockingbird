@@ -22,9 +22,20 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-// Set for this test process only; a throwaway value.
-const SECRET_VAR: &str = "WS6_TEST_WEBHOOK_SECRET";
+// Never set: the `env:` reference of the unresolvable-secret test.
 const UNSET_VAR: &str = "WS6_UNSET_WEBHOOK_SECRET";
+
+/// A `file:` reference to a throwaway signing secret, and the directory
+/// holding it (kept alive by the caller). A file rather than an
+/// environment variable: setting one is unsound while other test threads
+/// run.
+fn secret_file() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("webhook-secret");
+    std::fs::write(&path, "whsec_test_secret").unwrap();
+    let reference = format!("file:{}", path.display());
+    (dir, reference)
+}
 
 fn deps(store: Arc<dyn ControlStore>, log: SharedDeliveryLog) -> RuntimeDeps {
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
@@ -139,14 +150,13 @@ async fn create_order(base: &str) -> u16 {
 
 #[tokio::test]
 async fn served_mock_delivers_stripe_signed_event() {
-    // SAFETY: only this test reads the variable; set before any thread reads it.
-    unsafe { std::env::set_var(SECRET_VAR, "whsec_test_secret") };
+    let (_secret_dir, secret) = secret_file();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let (base, log) = serve(&server, &format!("env:{SECRET_VAR}")).await;
+    let (base, log) = serve(&server, &secret).await;
     assert_eq!(create_order(&base).await, 201);
     let r = wait_for(&log, DeliveryStatus::Delivered).await;
     assert_eq!(r.event_type, "order.created");
@@ -192,7 +202,7 @@ async fn unset_secret_keeps_serving_and_records_failure() {
 
 #[tokio::test]
 async fn redirects_are_not_followed() {
-    unsafe { std::env::set_var(SECRET_VAR, "whsec_test_secret") };
+    let (_secret_dir, secret) = secret_file();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/webhook"))
@@ -203,7 +213,7 @@ async fn redirects_are_not_followed() {
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let (base, log) = serve(&server, &format!("env:{SECRET_VAR}")).await;
+    let (base, log) = serve(&server, &secret).await;
     assert_eq!(create_order(&base).await, 201);
     for _ in 0..500 {
         if let Some(r) = log.list(DEFAULT_WORKSPACE, "orders", 1).first()

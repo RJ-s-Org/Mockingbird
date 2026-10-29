@@ -5,13 +5,9 @@
 #![cfg(test)]
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
+use crate::support::repo;
 use serde_json::Value;
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
 
 fn workflow() -> Value {
     let path = repo().join(".github/workflows/release.yml");

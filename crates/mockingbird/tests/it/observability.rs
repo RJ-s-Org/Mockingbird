@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::support::serve;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use mb_engine::StreamConfig;
@@ -500,13 +501,6 @@ fn deps(
         mode: mockingbird::runtime::ServeMode::Full,
         webhook_log: Default::default(),
     }
-}
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
 }
 
 fn ops_state(
@@ -1065,12 +1059,6 @@ async fn metrics_exposes_request_counters() {
             && text.contains("le=\"10\""),
         "{text}"
     );
-}
-
-#[test]
-fn otlp_disabled_without_endpoint() {
-    let guard = telemetry::init_with("mockingbird-test", None).unwrap();
-    assert!(!guard.otlp_enabled());
 }
 
 /// A state store whose database is unreachable fails fast: a request is

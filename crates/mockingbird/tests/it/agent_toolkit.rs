@@ -7,17 +7,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
+use crate::support::{free_port, read, repo};
 use assert_cmd::cargo::CommandCargoExt;
 use mockingbird::agents::SKILLS;
 use serde_json::{Value, json};
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
 
 fn json_file(rel: &str) -> Value {
     serde_json::from_str(&read(&repo().join(rel))).unwrap_or_else(|e| panic!("{rel}: {e}"))
@@ -455,14 +448,6 @@ impl Drop for McpClient {
     }
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 #[test]
 fn mcp_drives_a_background_server() {
     let dir = tempdir();
@@ -839,19 +824,27 @@ fn llm_test_defaults_to_the_config_default_profile() {
 }
 
 /// A login shell that exports a key, then runs the `-c` command it was given.
+///
+/// A child `sh` writes the script, not this process: a process that other
+/// tests in this binary fork while the script is open for writing would
+/// inherit the descriptor, and executing the script then fails with
+/// ETXTBSY (the import then silently finds nothing).
+#[cfg(unix)]
 fn fake_login_shell(dir: &Path) -> PathBuf {
     let path = dir.join("fake-shell.sh");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\nexport MB_TEST_SHELL_ONLY_API_KEY=from-the-shell\n\
-         while [ \"$1\" != \"-c\" ] && [ $# -gt 0 ]; do shift; done\nshift\nexec /bin/sh -c \"$1\"\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let script = "#!/bin/sh\nexport MB_TEST_SHELL_ONLY_API_KEY=from-the-shell\n\
+         while [ \"$1\" != \"-c\" ] && [ $# -gt 0 ]; do shift; done\nshift\nexec /bin/sh -c \"$1\"\n";
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+            "sh",
+        ])
+        .arg(script)
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "writing {}", path.display());
     path
 }
 

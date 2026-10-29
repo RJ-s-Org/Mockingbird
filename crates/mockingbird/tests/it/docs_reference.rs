@@ -6,16 +6,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::support::{read, repo};
 use mockingbird::file_config::{self, FileConfig};
 use serde_json::Value;
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
 
 fn full_example() -> FileConfig {
     file_config::load(&repo().join("docs/examples/mockingbird.full.yaml")).unwrap()
