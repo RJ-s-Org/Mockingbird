@@ -1,6 +1,5 @@
-#![allow(clippy::unwrap_used)]
-
 //! The admin client subcommands, run as a binary against a live Admin API.
+#![cfg(test)]
 
 use std::path::PathBuf;
 

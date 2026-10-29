@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use mb_import::{ImportError, SourceFile, SourceFormat, compile, compile_files, sniff};
 use mb_mcm::{
     Binding, Bundle, Effect, Identity, OperationKind, Protocol, ProtocolPayload, SoapVersion,

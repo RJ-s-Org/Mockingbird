@@ -1,0 +1,8 @@
+# Library code may not unwrap or expect ([workspace.lints.clippy] denies
+# both); test code may. Clippy counts code as test code when it is inside a
+# #[test] function or an item marked #[cfg(test)]. Helper functions in an
+# integration-test crate (tests/*.rs) are neither, so those crates start with
+# `#![cfg(test)]` (always true when they are built) to put their helpers
+# under these settings too.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
 //! P3 × P4 through a built app: data-plane auth (P3) on the GraphQL and
 //! gRPC adapters (P4), and a gRPC mock in a non-default workspace.
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::time::Duration;

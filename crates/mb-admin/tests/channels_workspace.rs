@@ -1,7 +1,7 @@
 //! P3 × P5: the channels Admin API under `/api/v1/workspaces/{ws}`, with
 //! RBAC (viewers read, editors change and publish), one audit event per
 //! change or publish, and the P2 aliases for `default`.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

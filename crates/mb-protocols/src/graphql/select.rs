@@ -331,7 +331,6 @@ fn copy_shared(value: &mut Value, sel: &Selection) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::BTreeSet;
 

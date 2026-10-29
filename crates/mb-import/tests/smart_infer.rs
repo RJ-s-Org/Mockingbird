@@ -1,5 +1,4 @@
 //! Deterministic JSON Schema inference from examples.
-#![allow(clippy::unwrap_used)]
 
 use mb_import::smart::infer::{infer_scalar, infer_schema, schema_richness};
 use proptest::prelude::*;

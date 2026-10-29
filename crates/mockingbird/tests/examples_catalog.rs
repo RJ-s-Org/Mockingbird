@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! The API examples catalog (`examples/apis`) and `mockingbird examples`.
 
 use std::collections::BTreeSet;

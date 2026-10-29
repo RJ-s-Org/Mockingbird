@@ -1888,7 +1888,6 @@ pub(crate) fn reason_header(reason: &str) -> axum::http::HeaderValue {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
 
     use super::*;
     use mb_engine::{Engine, EngineConfig, ScenarioSpec};

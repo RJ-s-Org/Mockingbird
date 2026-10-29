@@ -1,5 +1,5 @@
+#![cfg(test)]
 #![cfg(feature = "events")]
-#![allow(clippy::unwrap_used)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

@@ -1,8 +1,7 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! The operator documentation stays in step with the code: the full example
 //! config sets every key and loads, `docs/configuration.md` documents every
 //! key path, and every relative markdown link resolves.
+#![cfg(test)]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

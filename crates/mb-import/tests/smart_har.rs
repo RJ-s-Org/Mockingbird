@@ -1,5 +1,5 @@
 //! Path-parameter inference, redaction and the HAR importer.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 
 use mb_import::smart::SmartError;
 use mb_import::smart::har::import_har;

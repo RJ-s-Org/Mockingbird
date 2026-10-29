@@ -69,7 +69,6 @@ pub fn signature_header(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

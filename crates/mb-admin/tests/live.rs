@@ -1,5 +1,5 @@
 //! The live request tail: `GET …/mocks/{mock}/requests/stream` over SSE.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};

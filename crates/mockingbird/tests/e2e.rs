@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use std::path::PathBuf;
 
 use assert_cmd::Command;

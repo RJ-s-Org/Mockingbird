@@ -1,5 +1,5 @@
+#![cfg(test)]
 #![cfg(feature = "mqtt")]
-#![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};

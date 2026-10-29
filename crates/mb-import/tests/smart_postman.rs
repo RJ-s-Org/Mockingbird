@@ -1,5 +1,5 @@
 //! The Postman v2.0/v2.1 collection importer.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 
 use mb_import::smart::SmartError;
 use mb_import::smart::model::{DraftOperation, ParamLocation, RecordedImport};

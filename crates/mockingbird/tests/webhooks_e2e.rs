@@ -1,6 +1,6 @@
 //! A served mock with `webhooks:` delivers signed events to a local
 //! receiver; an unresolvable secret keeps the mock serving.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

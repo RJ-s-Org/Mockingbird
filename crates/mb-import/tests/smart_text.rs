@@ -1,5 +1,5 @@
 //! Text extraction, kind detection and chunking of the smart importer.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use mb_import::smart::chunk::{Chunk, chunk, estimate_tokens};
 use mb_import::smart::text::{

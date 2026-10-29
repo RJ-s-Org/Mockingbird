@@ -1,8 +1,7 @@
 //! The CI commands end to end through the binary: `server start --record`
 //! against a stub LLM, `snapshot export`, `server start --replay` with no
 //! LLM at all, `report` and `verify`, and `server start --wait` failing.
-
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::process::Output;

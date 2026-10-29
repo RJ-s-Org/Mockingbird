@@ -1,6 +1,6 @@
 //! P3 × P4: a multi-file proto archive (P4) uploaded through the
 //! workspace-scoped, RBAC-checked and audited contract endpoint (P3).
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::io::Write;

@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use mb_import::compile;
 use mb_mcm::Bundle;
 use serde_json::json;

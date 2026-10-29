@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used)]
 use mb_mcm::*;
 use serde_json::json;
 

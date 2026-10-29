@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use std::time::Duration;
 
 use mb_llm::*;

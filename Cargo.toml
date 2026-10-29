@@ -125,6 +125,7 @@ mb-console = { package = "mockingbird-console", path = "crates/mb-console", vers
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+expect_used = "deny"
 
 # RSA key generation in the `testing` OIDC provider is very slow unoptimized.
 [profile.dev.package.num-bigint-dig]

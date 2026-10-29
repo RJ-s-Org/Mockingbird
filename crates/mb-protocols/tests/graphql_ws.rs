@@ -1,5 +1,5 @@
+#![cfg(test)]
 #![cfg(feature = "graphql")]
-#![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

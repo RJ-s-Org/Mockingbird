@@ -129,7 +129,6 @@ impl FromRequestParts<AdminState> for WsAccess {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use axum::http::HeaderMap;
 

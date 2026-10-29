@@ -1,5 +1,4 @@
 #![cfg(feature = "amqp")]
-#![allow(clippy::unwrap_used)]
 
 use std::time::Duration;
 

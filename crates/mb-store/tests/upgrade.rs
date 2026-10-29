@@ -1,7 +1,7 @@
-#![allow(clippy::unwrap_used)]
 //! Upgrading a P2 database (migration 0001) or a P3 one (0001–0003) to the
 //! current schema, which adds P5's `0100_events` on top: existing request
 //! log rows become `http` events-wise, and the event tables work.
+#![cfg(test)]
 
 use std::path::Path;
 

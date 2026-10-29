@@ -4,7 +4,7 @@
 //! named `orders` in two workspaces, on one broker and one state store, is
 //! isolated: publishes, activity, the live tail, state-change triggers and
 //! consumed-message state effects stay in their own workspace.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::time::Duration;

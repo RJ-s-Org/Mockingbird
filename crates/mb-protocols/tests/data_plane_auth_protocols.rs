@@ -2,13 +2,13 @@
 //! gRPC streaming and reflection, GraphQL over HTTP and over WebSocket,
 //! and SOAP `?wsdl`. Every refusal happens before the engine runs, and the
 //! key never reaches the prompt or the request record.
+#![cfg(test)]
 #![cfg(all(
     feature = "sse",
     feature = "grpc",
     feature = "graphql",
     feature = "soap"
 ))]
-#![allow(clippy::unwrap_used)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

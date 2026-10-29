@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
 //! The LLM access of imports and draft previews: `runtime::import_provider`
 //! and `runtime::build_engine`.
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,8 +1,7 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! The agent toolkit: the plugin packaging stays consistent, and the
 //! onboarding commands, `agent install` and the MCP server work as a binary
 //! (the last against a background server started with `server start`).
+#![cfg(test)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

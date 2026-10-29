@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use mb_import::{ImportError, SourceFormat, compile, sniff};
 use mb_mcm::{
     Binding, Bundle, Effect, GraphqlOperationType, Identity, OperationKind, OutputVariant,

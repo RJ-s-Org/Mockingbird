@@ -1,7 +1,7 @@
-#![allow(clippy::unwrap_used)]
 //! `mockingbird run -- <command>`: starts the server and proxy, runs the
 //! command with the proxy environment, returns its exit code and stops the
 //! server again.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 

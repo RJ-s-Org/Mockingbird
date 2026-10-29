@@ -1,5 +1,5 @@
 //! OpenAPI assembly, draft compilation and the `run_import` pipeline.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

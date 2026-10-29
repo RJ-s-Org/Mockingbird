@@ -1,5 +1,5 @@
-#![allow(clippy::unwrap_used)]
 //! Chaos on scenarios.
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::time::Duration;

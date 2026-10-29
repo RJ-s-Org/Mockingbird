@@ -295,7 +295,6 @@ pub async fn method_not_allowed() -> Problem {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};

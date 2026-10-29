@@ -1056,7 +1056,6 @@ async fn last_items<T, E>(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
 
     use std::sync::atomic::AtomicUsize;
 

@@ -1,5 +1,5 @@
 //! SSRF-guarded URL fetch of the smart importer.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};

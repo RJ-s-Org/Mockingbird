@@ -248,7 +248,6 @@ fn write_if_changed(path: &Path, contents: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -711,7 +711,6 @@ pub fn emit(text: &str, output: Option<&std::path::Path>) -> anyhow::Result<()> 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

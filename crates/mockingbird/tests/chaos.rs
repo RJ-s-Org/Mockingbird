@@ -1,8 +1,7 @@
-#![allow(clippy::unwrap_used)]
-
 //! Per-mock and per-scenario chaos (error injection, latency jitter and
 //! stream drops) through an in-process, offline app. Rates of 0 and 1 need
 //! no `MB_CHAOS_SEED`.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

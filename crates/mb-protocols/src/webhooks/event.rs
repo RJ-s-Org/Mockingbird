@@ -101,7 +101,6 @@ pub fn envelope_object(op: &Operation, body: Option<&Value>, target_id: Option<&
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use mb_mcm::{HttpMethod, InputSchemas, Protocol};

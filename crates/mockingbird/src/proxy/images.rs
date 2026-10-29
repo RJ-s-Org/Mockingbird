@@ -166,7 +166,6 @@ pub fn placeholder_response(method: &Method, path: &str) -> Response {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

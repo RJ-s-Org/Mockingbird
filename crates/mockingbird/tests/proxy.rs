@@ -1,6 +1,6 @@
-#![allow(clippy::unwrap_used)]
 //! `mockingbird proxy`: HTTPS interception for hosts a mock claims,
 //! passthrough or block for the rest, placeholder images.
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

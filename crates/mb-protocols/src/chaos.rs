@@ -166,7 +166,6 @@ pub(crate) fn count(mock: &str, kind: &'static str) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
 
     use super::*;
 

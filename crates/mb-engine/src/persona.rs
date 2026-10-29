@@ -383,7 +383,6 @@ fn run(from: &str, n: usize, class: Class, rng: &mut impl Rng) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;

@@ -572,7 +572,6 @@ pub fn configure_api_body(args: &ConfigureArgs) -> anyhow::Result<(String, Value
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -1,6 +1,7 @@
 //! Leader election. The Postgres and Redis tests are gated by
 //! `MB_TEST_POSTGRES_URL` / `MB_TEST_REDIS_URL`; each uses its own random lock
 //! name so tests share one server safely.
+#![cfg(test)]
 
 use std::time::Duration;
 

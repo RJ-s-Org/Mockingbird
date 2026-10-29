@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! The deployment artifacts: the Helm chart (`deploy/helm/mockingbird`) and
 //! the Compose stack with its `ha`, `kafka`, `amqp` and `mqtt` profiles
 //! (`deploy/compose`). Neither Kubernetes nor Docker runs locally, so this
@@ -7,6 +5,7 @@
 //! version, every config the chart can render and the Compose HA config all
 //! load with `file_config::load`. `scripts/check-helm.sh` lints and renders
 //! the chart itself.
+#![cfg(test)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

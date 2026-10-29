@@ -1,10 +1,9 @@
-#![allow(clippy::unwrap_used)]
-
 //! TLS termination (`server.tls`) and the outbound HTTP settings
 //! (`outbound.ca_file`, `outbound.proxy`, `outbound.no_proxy`). The
 //! certificates are the test-only ones in `fixtures/tls` (see its README):
 //! `server.pem` and `server2.pem` for `localhost`/`127.0.0.1`, both signed
 //! by `ca.pem`.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
