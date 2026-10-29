@@ -10,6 +10,7 @@ mod support;
 
 mod archive;
 mod asyncapi;
+mod external_refs;
 mod graphql;
 mod openapi3;
 mod perf;

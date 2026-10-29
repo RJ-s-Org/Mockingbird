@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use mb_mcm::{Channel, Direction, Reply, StateEffect, Trigger};
 use serde_json::{Map, Value, json};
 
-use crate::openapi3::{check_refs, deref, invalid};
+use crate::openapi3::{EXTERNAL_REF_HINT, check_refs, deref, invalid};
 use crate::schema::{collect_refs, normalize_schema};
 use crate::{ImportError, triggers::validate_triggers, version_string};
 
@@ -22,7 +22,6 @@ pub(crate) use v3::compile_v3;
 /// Source prefix of component schema references.
 pub(crate) const REF_PREFIX: &str = "#/components/schemas/";
 
-const EXTERNAL_REF: &str = "external $ref is not supported";
 const TRIGGERS_EXT: &str = "x-mockingbird-triggers";
 const REPLY_EXT: &str = "x-mockingbird-reply";
 const STATE_EXT: &str = "x-mockingbird-state";
@@ -95,7 +94,7 @@ pub(crate) fn resolve<'a>(
             break;
         };
         if !r.starts_with('#') {
-            return Err(invalid(at, EXTERNAL_REF));
+            return Err(external_ref(r, at));
         }
         match r.strip_prefix('#').and_then(|p| doc.pointer(p)) {
             Some(next) => cur = next,
@@ -109,10 +108,18 @@ pub(crate) fn resolve<'a>(
 pub(crate) fn reject_external(schema: &Value, at: &str) -> Result<(), ImportError> {
     let mut refs = Vec::new();
     collect_refs(schema, &mut refs);
-    if refs.iter().any(|(_, r)| !r.starts_with('#')) {
-        return Err(invalid(at, EXTERNAL_REF));
+    match refs.iter().find(|(_, r)| !r.starts_with('#')) {
+        Some((_, r)) => Err(external_ref(r, at)),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The error of an external `$ref` left after bundling, at `at`.
+fn external_ref(r: &str, at: &str) -> ImportError {
+    invalid(
+        at,
+        format!("external $ref {r} cannot be resolved: {EXTERNAL_REF_HINT}"),
+    )
 }
 
 /// Normalizes an AsyncAPI (JSON Schema) schema.

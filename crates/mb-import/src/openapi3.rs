@@ -35,6 +35,24 @@ pub(crate) fn escape(seg: &str) -> String {
     seg.replace('~', "~0").replace('/', "~1")
 }
 
+/// What to do about an external `$ref` that cannot be resolved.
+pub(crate) const EXTERNAL_REF_HINT: &str = "upload the files it names together with the contract (a directory or a zip/tar.gz archive), or bundle the spec into one file (e.g. `redocly bundle`); URLs are never fetched";
+
+/// The error of a `$ref` that names nothing, referenced from `referrer`; an
+/// external one says how to supply what it names.
+pub(crate) fn unresolvable(r: &str, referrer: &str) -> ImportError {
+    if r.starts_with('#') {
+        invalid(r, format!("unresolvable $ref referenced from {referrer}"))
+    } else {
+        invalid(
+            r,
+            format!(
+                "external $ref {r} referenced from {referrer} cannot be resolved: {EXTERNAL_REF_HINT}"
+            ),
+        )
+    }
+}
+
 /// Follow a component `$ref` (`#/components/...`) until a concrete object.
 pub(crate) fn deref<'a>(
     doc: &'a Value,
@@ -47,7 +65,7 @@ pub(crate) fn deref<'a>(
                 v = r
                     .strip_prefix('#')
                     .and_then(|p| doc.pointer(p))
-                    .ok_or_else(|| invalid(r, format!("unresolvable $ref referenced from {at}")))?;
+                    .ok_or_else(|| unresolvable(r, at))?;
             }
             None => return Ok(v),
         }
@@ -508,10 +526,7 @@ pub(crate) fn check_refs(
             } else {
                 format!(" at {pointer}")
             };
-            return Err(invalid(
-                r,
-                format!("unresolvable $ref referenced from {at}{location}"),
-            ));
+            return Err(unresolvable(r, &format!("{at}{location}")));
         }
     }
     Ok(())
@@ -562,12 +577,7 @@ fn dangling_refs(
             Some(name) if ctx.stub_dangling_refs && !name.is_empty() && !name.contains('/') => {
                 stubs.push((name.to_owned(), format!("{at}{location}")));
             }
-            _ => {
-                return Err(invalid(
-                    r,
-                    format!("unresolvable $ref referenced from {at}{location}"),
-                ));
-            }
+            _ => return Err(unresolvable(r, &format!("{at}{location}"))),
         }
     }
     Ok(stubs)

@@ -8,6 +8,7 @@ mod graphql;
 mod heuristics;
 mod openapi3;
 mod proto;
+mod refs;
 mod schema;
 mod security;
 #[cfg(feature = "smart")]
@@ -229,6 +230,17 @@ pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
 /// [`compile`], collecting the compilers' warnings in `ctx`.
 fn compile_in(bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let (format, doc) = sniff_parsed(bytes)?;
+    compile_sniffed(format, doc, bytes, ctx)
+}
+
+/// Compiles `bytes`, which [`sniff_parsed`] found to be `format` (with
+/// `doc`, the document it parsed).
+fn compile_sniffed(
+    format: SourceFormat,
+    doc: Option<Value>,
+    bytes: &[u8],
+    ctx: &mut Ctx,
+) -> Result<Bundle, ImportError> {
     // The document sniff parsed, or a fresh parse (not reached in practice:
     // every format below comes with its document).
     let doc = move || doc.map_or_else(|| parse_document(bytes), Ok);
@@ -508,8 +520,14 @@ fn is_incidental(path: &str) -> bool {
 ///    joined by `\n` in path order;
 /// 4. else the one file that is a contract ([`sniff`] recognises it, and
 ///    it is not documentation, an image, a `README` or a `LICENSE`) is
-///    compiled on its own (it may not be another archive); none or several
-///    such files are invalid, and the error names them.
+///    compiled (it may not be another archive); a contract that another
+///    one references through an external `$ref` does not count. None or
+///    several such files are invalid, and the error names them. When the
+///    contract is an OpenAPI, Swagger or AsyncAPI document whose `$ref`s
+///    name other uploaded files (`./schemas/pet.yaml#/Pet`), those refs are
+///    resolved and bundled into the one compiled contract: schemas become
+///    definitions, other objects are copied in place. Refs to URLs are
+///    never fetched.
 pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
     compile_files_in(files, &mut Ctx::new())
 }
@@ -558,16 +576,19 @@ fn compile_files_in(files: &[SourceFile], ctx: &mut Ctx) -> Result<Bundle, Impor
     // contracts count.
     let contracts: Vec<&SourceFile> = match files {
         [one] => vec![one],
-        _ => files
-            .iter()
-            .filter(|f| !is_incidental(&f.path) && sniff(&f.bytes).is_ok())
-            .collect(),
+        _ => roots(
+            files
+                .iter()
+                .filter(|f| !is_incidental(&f.path) && sniff(&f.bytes).is_ok())
+                .collect(),
+        ),
     };
     match contracts.as_slice() {
         [one] if archive::is_archive(&one.bytes) => Err(ImportError::Invalid {
             pointer: one.path.clone(),
             message: "nested archives are not supported".into(),
         }),
+        [one] if files.len() > 1 => compile_root(one, files, ctx),
         [one] => compile_in(&one.bytes, ctx),
         [] => {
             let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -588,6 +609,52 @@ fn compile_files_in(files: &[SourceFile], ctx: &mut Ctx) -> Result<Bundle, Impor
             })
         }
     }
+}
+
+/// The contracts no other contract among `contracts` references through an
+/// external `$ref` (a shared `common.yaml` with its own `openapi` header is
+/// not a root); all of them when that would leave none.
+fn roots(contracts: Vec<&SourceFile>) -> Vec<&SourceFile> {
+    if contracts.len() < 2 {
+        return contracts;
+    }
+    let mut referenced = HashSet::new();
+    for f in &contracts {
+        if let Ok((_, Some(doc))) = sniff_parsed(&f.bytes) {
+            referenced.extend(
+                refs::referenced_files(&f.path, &doc)
+                    .into_iter()
+                    .filter(|p| p != &f.path),
+            );
+        }
+    }
+    let roots: Vec<&SourceFile> = contracts
+        .iter()
+        .copied()
+        .filter(|f| !referenced.contains(&f.path))
+        .collect();
+    if roots.is_empty() { contracts } else { roots }
+}
+
+/// Compiles `root`, the contract of a multi-file upload, bundling the
+/// external `$ref`s that name the other `files`. Without such refs this is
+/// [`compile`] of the root's bytes; with them, the source digest is the
+/// digest of all the files.
+fn compile_root(
+    root: &SourceFile,
+    files: &[SourceFile],
+    ctx: &mut Ctx,
+) -> Result<Bundle, ImportError> {
+    let (format, doc) = sniff_parsed(&root.bytes)?;
+    let Some(parsed) = doc.as_ref().filter(|d| refs::has_file_refs(d)) else {
+        return compile_sniffed(format, doc, &root.bytes, ctx);
+    };
+    let Some(bundled) = refs::bundle(&root.path, parsed, format, files)? else {
+        return compile_sniffed(format, doc, &root.bytes, ctx);
+    };
+    let mut bundle = compile_sniffed(format, Some(bundled), &root.bytes, ctx)?;
+    bundle.source_digest = proto::files_digest(&files.iter().collect::<Vec<_>>());
+    Ok(bundle)
 }
 
 #[cfg(test)]
