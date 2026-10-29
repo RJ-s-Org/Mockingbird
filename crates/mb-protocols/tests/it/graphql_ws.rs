@@ -450,3 +450,32 @@ async fn connection_without_init_is_closed_and_frees_its_slot() {
     }
     assert!(ok, "slot not released");
 }
+
+/// MB-PROTOCOLS-STUB-1: executable directives the SDL declares are
+/// accepted on a subscription too.
+#[tokio::test]
+async fn sdl_declared_directives_are_accepted_on_subscriptions() {
+    let path = format!(
+        "{}/../../fixtures/graphql/github.graphql",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut sdl = std::fs::read_to_string(path).unwrap();
+    sdl.push_str("directive @inContext(country: String) on SUBSCRIPTION\n");
+    let rt = MockRuntime::new(
+        "github",
+        Arc::new(compile(sdl.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let addr = serve(rt).await;
+    let mut ws = init(&addr, json!({"x-mockingbird-stream-items": "1"})).await;
+    let query = r#"subscription S($c: String) @inContext(country: $c) {
+        issueAdded(repositoryId: "r-1") { id title } }"#;
+    send(
+        &mut ws,
+        json!({"type": "subscribe", "id": "1",
+               "payload": {"query": query, "variables": {"c": "CA"}}}),
+    )
+    .await;
+    assert_issue(&recv(&mut ws).await, "next");
+}

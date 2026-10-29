@@ -906,6 +906,60 @@ fn render_type(t: &Value, name: &str, at: &str) -> Result<String, ImportError> {
     Ok(out)
 }
 
+/// Directive locations a query can use.
+const EXECUTABLE_LOCATIONS: [&str; 8] = [
+    "QUERY",
+    "MUTATION",
+    "SUBSCRIPTION",
+    "FIELD",
+    "FRAGMENT_DEFINITION",
+    "FRAGMENT_SPREAD",
+    "INLINE_FRAGMENT",
+    "VARIABLE_DEFINITION",
+];
+
+/// Directives every GraphQL server knows.
+const BUILTIN_DIRECTIVES: [&str; 5] = ["skip", "include", "deprecated", "specifiedBy", "oneOf"];
+
+/// The custom directives of `__schema.directives` that a query can use, as
+/// SDL definitions limited to their executable locations (the GraphQL
+/// adapter accepts queries using them; type-system directives play no part
+/// in serving).
+fn render_directives(schema: &Value, base: &str) -> Result<String, ImportError> {
+    let mut out = String::new();
+    for (i, d) in list(schema, "directives").iter().enumerate() {
+        let at = format!("{base}/directives/{i}");
+        let name = name_of(d, &at)?;
+        let locations: Vec<&str> = list(d, "locations")
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|l| EXECUTABLE_LOCATIONS.contains(l))
+            .collect();
+        if BUILTIN_DIRECTIVES.contains(&name) || locations.is_empty() {
+            continue;
+        }
+        let args = list(d, "args")
+            .iter()
+            .enumerate()
+            .map(|(k, a)| render_input_value(a, &format!("{at}/args/{k}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        out.push('\n');
+        out.push_str(&description_prefix(d, ""));
+        out.push_str("directive @");
+        out.push_str(name);
+        if !args.is_empty() {
+            out.push_str(&format!("({})", args.join(", ")));
+        }
+        if d.get("isRepeatable").and_then(Value::as_bool) == Some(true) {
+            out.push_str(" repeatable");
+        }
+        out.push_str(" on ");
+        out.push_str(&locations.join(" | "));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Render an introspection result as SDL (types sorted by name, built-in
 /// scalars and `__*` types omitted); also returns the schema description.
 fn render_introspection(doc: &Value) -> Result<(String, Option<String>), ImportError> {
@@ -962,6 +1016,7 @@ fn render_introspection(doc: &Value) -> Result<(String, Option<String>), ImportE
         .map(|(n, at, t)| render_type(t, n, at))
         .collect::<Result<Vec<_>, _>>()?;
     out.push_str(&rendered.join("\n"));
+    out.push_str(&render_directives(schema, base)?);
     let description = schema
         .get("description")
         .and_then(Value::as_str)

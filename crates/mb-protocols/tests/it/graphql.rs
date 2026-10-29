@@ -1833,3 +1833,131 @@ async fn cart_costs_come_from_stored_prices() {
     assert_eq!(cart["cost"]["totalAmount"]["amount"], "64.00", "{cart}");
     assert_eq!(cart["totalQuantity"], 2, "{cart}");
 }
+
+/// Executable directives the GitHub fixture's SDL is extended with, in the
+/// shape of Shopify Storefront's `@inContext`.
+const DIRECTIVES: &str = r#"
+directive @inContext(country: String, language: String) on QUERY | MUTATION | SUBSCRIPTION
+directive @tag(name: String!) repeatable on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT | FRAGMENT_DEFINITION
+directive @onVar on VARIABLE_DEFINITION
+directive @key(fields: String!) on OBJECT
+"#;
+
+fn with_directives() -> MockRuntime {
+    let path = format!(
+        "{}/../../fixtures/graphql/github.graphql",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut sdl = std::fs::read_to_string(path).unwrap();
+    sdl.push_str(DIRECTIVES);
+    MockRuntime::new(
+        "github",
+        Arc::new(compile(sdl.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    )
+}
+
+/// MB-PROTOCOLS-STUB-1: executable directives the SDL declares were
+/// dropped, so a Storefront-style `@inContext` query failed validation
+/// with `Unknown directive`. They are now accepted (and ignored), with the
+/// variables only they use.
+#[tokio::test]
+async fn sdl_declared_executable_directives_are_accepted() {
+    let base = serve(with_directives()).await;
+    let q = r#"
+        query Q($country: String, $lang: String @onVar, $owner: String!)
+          @inContext(country: $country, language: $lang) {
+          viewer @tag(name: "a") @tag(name: "b") { login ...F @tag(name: "c") }
+          repository(owner: $owner, name: "x") {
+            ... on Repository @tag(name: $owner) { name }
+          }
+        }
+        fragment F on User @tag(name: "e") { name }
+    "#;
+    let r = post(
+        &base,
+        json!({"query": q, "operationName": "Q",
+               "variables": {"country": "CA", "lang": "FR", "owner": "octocat"}}),
+        &[],
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert_eq!(keys(&r.body["data"]["viewer"]), set(&["login", "name"]));
+    // `repository` is nullable, so the fallback may answer null.
+    assert!(r.body["data"].get("repository").is_some(), "{}", r.body);
+
+    // Over GET too, and with the built-in directives left alone.
+    let q = "query Q($c: String) @inContext(country: $c) { viewer { login name @skip(if: true) } }";
+    let r = answer(
+        reqwest::get(get_url(
+            &base,
+            &[("query", q), ("variables", r#"{"c":"CA"}"#)],
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(r.body.get("errors").is_none(), "{}", r.body);
+    assert_eq!(keys(&r.body["data"]["viewer"]), set(&["login"]));
+}
+
+#[tokio::test]
+async fn undeclared_or_misused_directives_still_fail_validation() {
+    let base = serve(with_directives()).await;
+    for (q, message) in [
+        // Not declared by the SDL.
+        ("{ viewer @nope { login } }", "Unknown directive"),
+        // Declared for type-system locations only.
+        (
+            "{ viewer @key(fields: \"id\") { login } }",
+            "Unknown directive",
+        ),
+        // A variable unused before stripping stays an error.
+        (
+            "query Q($c: String, $unused: Int) @inContext(country: $c) { viewer { login } }",
+            "is not used",
+        ),
+    ] {
+        let r = query(&base, q).await;
+        let errors = r.body["errors"].to_string();
+        assert!(errors.contains(message), "{q}: {}", r.body);
+    }
+}
+
+/// A bundle compiled before refine(B3) can carry a name defined twice in
+/// one type, which async-graphql's dynamic schema panics on: serving it is
+/// now an error.
+#[test]
+fn duplicate_definitions_in_a_stored_sdl_are_an_error() {
+    for sdl in [
+        "type Query { a: Int a: String }",
+        "type Query { a: Int } extend type Query { a: Int }",
+        "type Query { a: Int } interface Node { id: ID id: ID }",
+        "type Query { a: Int } interface Node { id: ID } type T implements Node & Node { id: ID }",
+        "type Query { a: Int } input In { x: Int } extend input In { x: Int }",
+        "type Query { a: Int } type Subscription { s: Int s: Int }",
+        "type Query { a: Int } enum E { A B A }",
+        "type Query { a: Int } type T { b: Int } union U = T | T",
+        "type Query { a(x: Int, x: Int): Int }",
+    ] {
+        let mut bundle = compile(b"type Query { a: Int }").unwrap();
+        bundle.protocol_payload = Some(mb_mcm::ProtocolPayload::Graphql { sdl: sdl.into() });
+        let rt = MockRuntime::new(
+            "dup",
+            Arc::new(bundle),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graphql::try_router(Arc::new(rt)).map(|_| ())
+        }));
+        let err = match outcome {
+            Ok(Err(e)) => e.to_string(),
+            Ok(Ok(())) => panic!("{sdl}: served"),
+            Err(_) => panic!("{sdl}: panicked"),
+        };
+        assert!(err.contains("more than once"), "{sdl}: {err}");
+    }
+}

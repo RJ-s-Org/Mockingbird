@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_graphql::dynamic::{
-    FieldValue, ResolverContext, Schema, SubscriptionField, SubscriptionFieldFuture,
+    FieldValue, ResolverContext, SubscriptionField, SubscriptionFieldFuture,
 };
 use async_graphql::http::{WebSocket, WebSocketProtocols, WsMessage};
 use async_graphql::parser::types::{FieldDefinition, Type};
@@ -102,7 +102,7 @@ const CLOSE_INIT_TIMEOUT: u16 = 4408;
 /// sends no `connection_init` within `graphql_connection_init_timeout` is
 /// closed with code 4408, freeing its slot.
 pub(crate) async fn upgrade(
-    schema: Schema,
+    schema: super::directives::Served,
     rt: &Arc<MockRuntime>,
     connections: Arc<AtomicUsize>,
     upgrade: WebSocketUpgrade,
@@ -195,7 +195,7 @@ async fn report_refusal(rt: &MockRuntime, headers: &HeaderMap, detail: &str) {
 }
 
 async fn run(
-    schema: Schema,
+    schema: super::directives::Served,
     io: ChannelIo,
     rt: Arc<MockRuntime>,
     headers: HeaderMap,
