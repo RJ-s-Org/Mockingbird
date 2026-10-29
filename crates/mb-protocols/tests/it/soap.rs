@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![cfg(feature = "soap")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mb_engine::{Engine, EngineConfig, SchemaValidator};
@@ -9,9 +9,11 @@ use mb_import::compile;
 use mb_llm::{Provider, ScriptedProvider};
 use mb_mcm::{Bundle, StatusSelector};
 use mb_protocols::soap::{self, envelope_body_to_json};
-use mb_protocols::{MockRuntime, MountPrefix, RequestRecord, RequestRecorder};
+use mb_protocols::{MockRuntime, MountPrefix};
 use mb_state::MemoryStore;
 use serde_json::{Value, json};
+
+use crate::support::Records;
 
 const SOAP11_NS: &str = "http://schemas.xmlsoap.org/soap/envelope/";
 const SOAP12_NS: &str = "http://www.w3.org/2003/05/soap-envelope";
@@ -19,15 +21,6 @@ const SOAP12_NS: &str = "http://www.w3.org/2003/05/soap-envelope";
 fn fixture(name: &str) -> Arc<Bundle> {
     let path = format!("{}/../../fixtures/wsdl/{name}", env!("CARGO_MANIFEST_DIR"));
     Arc::new(compile(&std::fs::read(path).unwrap()).unwrap())
-}
-
-#[derive(Default)]
-struct Records(Mutex<Vec<RequestRecord>>);
-
-impl RequestRecorder for Records {
-    fn record(&self, r: RequestRecord) {
-        self.0.lock().unwrap().push(r);
-    }
 }
 
 fn scripted(script: Vec<Value>) -> Arc<ScriptedProvider> {

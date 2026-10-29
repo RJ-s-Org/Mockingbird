@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![cfg(feature = "sse")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -10,10 +10,12 @@ use mb_engine::{Engine, EngineConfig, SchemaValidator};
 use mb_import::compile;
 use mb_llm::{Provider, ScriptedProvider};
 use mb_mcm::Bundle;
+use mb_protocols::MockRuntime;
 use mb_protocols::http_rest;
-use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder};
 use mb_state::MemoryStore;
 use serde_json::{Value, json};
+
+use crate::support::Records;
 
 fn events() -> Arc<Bundle> {
     let path = format!(
@@ -116,15 +118,6 @@ async fn open(base: &str, headers: &[(&str, &str)]) -> reqwest::Response {
 fn tick_validator(bundle: &Bundle) -> SchemaValidator {
     let tick = json!({"$ref": "#/$defs/Tick"});
     SchemaValidator::new(&bundle.with_reachable_defs(&tick)).unwrap()
-}
-
-#[derive(Default)]
-struct Records(Mutex<Vec<RequestRecord>>);
-
-impl RequestRecorder for Records {
-    fn record(&self, r: RequestRecord) {
-        self.0.lock().unwrap().push(r);
-    }
 }
 
 async fn timeout<F: std::future::Future>(f: F) -> F::Output {

@@ -43,9 +43,10 @@ impl Capture {
 }
 
 fn orders() -> Bundle {
-    mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/orders-amqp-2.6.yaml"
-    ))
+    mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/orders-amqp-2.6.yaml"
+    )))
     .unwrap()
 }
 
@@ -630,9 +631,10 @@ async fn publish_only_runtime_starts_nothing_but_publishes_to_brokers() {
 
 #[tokio::test]
 async fn publish_only_runtime_refuses_websocket_publish() {
-    let chat = mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/chat-ws-2.6.yaml"
-    ))
+    let chat = mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/chat-ws-2.6.yaml"
+    )))
     .unwrap();
     let h = runtime_with(
         chat,

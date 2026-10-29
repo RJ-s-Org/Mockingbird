@@ -2,16 +2,18 @@
 #![cfg(feature = "graphql")]
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
 use mb_llm::{Provider, ScriptedProvider};
 use mb_mcm::Bundle;
-use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder, graphql};
+use mb_protocols::{MockRuntime, graphql};
 use mb_state::MemoryStore;
 use serde_json::{Value, json};
+
+use crate::support::Records;
 
 fn github() -> Arc<Bundle> {
     let path = format!(
@@ -153,15 +155,6 @@ fn keys(v: &Value) -> BTreeSet<String> {
 
 fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
-}
-
-#[derive(Default)]
-struct Records(Mutex<Vec<RequestRecord>>);
-
-impl RequestRecorder for Records {
-    fn record(&self, r: RequestRecord) {
-        self.0.lock().unwrap().push(r);
-    }
 }
 
 #[tokio::test]
@@ -766,20 +759,6 @@ async fn missing_sdl_is_an_error() {
         graphql::try_router(Arc::new(rt)),
         Err(graphql::GraphqlError::MissingSdl)
     ));
-}
-
-impl Records {
-    /// Waits up to 2 s for at least `n` records and returns them all.
-    async fn wait(&self, n: usize) -> Vec<RequestRecord> {
-        for _ in 0..100 {
-            let got = self.0.lock().unwrap().clone();
-            if got.len() >= n {
-                return got;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        self.0.lock().unwrap().clone()
-    }
 }
 
 /// `{ a0: viewer { login } … }` with `n` aliases.

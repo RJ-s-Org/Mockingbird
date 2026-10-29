@@ -10,7 +10,7 @@ use mb_import::compile;
 use mb_llm::{LlmError, Provider, Role, ScriptedProvider};
 use mb_mcm::Bundle;
 use mb_protocols::grpc::{DynamicCodec, GrpcError, GrpcMock, GrpcServer, grpc_code_for_status};
-use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder};
+use mb_protocols::{MockRuntime, RequestRecorder};
 use mb_state::MemoryStore;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMessage};
 use serde_json::{Value, json};
@@ -18,6 +18,8 @@ use tonic::Code;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::transport::Channel;
+
+use crate::support::Records;
 
 fn route_guide() -> Arc<Bundle> {
     let path = format!(
@@ -36,15 +38,6 @@ service Blobs {
 message Blob { bytes data = 1; }
 message Ack { string id = 1; }
 "#;
-
-#[derive(Default)]
-struct Records(Mutex<Vec<RequestRecord>>);
-
-impl RequestRecorder for Records {
-    fn record(&self, record: RequestRecord) {
-        self.0.lock().unwrap().push(record);
-    }
-}
 
 fn runtime(
     name: &str,

@@ -66,9 +66,10 @@ impl LeaseProvider for ScriptedLease {
 }
 
 fn orders() -> Bundle {
-    mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/orders-amqp-2.6.yaml"
-    ))
+    mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/orders-amqp-2.6.yaml"
+    )))
     .unwrap()
 }
 
@@ -401,9 +402,10 @@ async fn state_effect_and_trigger_on_one_topic_stay_bounded() {
 
 /// The chat mock (WebSocket only) with `chatMessage` on `triggers`.
 fn start_chat(triggers: Vec<Trigger>, lease: Arc<dyn LeaseProvider>) -> Harness {
-    let bundle = mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/chat-ws-2.6.yaml"
-    ))
+    let bundle = mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/chat-ws-2.6.yaml"
+    )))
     .unwrap();
     let records = Arc::new(Capture::default());
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
