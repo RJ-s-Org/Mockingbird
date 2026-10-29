@@ -171,8 +171,12 @@ async fn forced_status_uses_error_variant() {
         .unwrap();
     assert_eq!(out.status, 404);
     assert_eq!(out.source, Source::Llm);
-    let body = out.body.unwrap();
-    assert!(body.get("code").is_some() && body.get("message").is_some());
+    assert_eq!(
+        out.body,
+        Some(json!({"code": 404, "message": "order not found"}))
+    );
+    // Valid on the first answer: no repair call.
+    assert_eq!(provider.requests().len(), 1);
     let system = &provider.requests()[0].messages[0].content;
     assert!(system.contains("404"), "{system}");
 }

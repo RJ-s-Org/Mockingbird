@@ -11,7 +11,7 @@ use mb_state::leader::{
 use sqlx::Connection;
 use sqlx::postgres::PgConnection;
 use tokio::sync::watch;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 use crate::support::env_url;
@@ -106,10 +106,9 @@ async fn pg_leader_single_holder() {
     assert!(a.is_leader() && !b.is_leader(), "exactly one leader");
 
     let mut wb = b.watch();
-    let dropped = Instant::now();
     drop(a);
+    // `wait_for` fails past this bound, so it is the failover-time check.
     wait_for(&mut wb, true, RENEW * 2 + Duration::from_millis(300)).await;
-    assert!(dropped.elapsed() <= RENEW * 2 + Duration::from_millis(300));
 }
 
 #[tokio::test(flavor = "multi_thread")]

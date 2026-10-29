@@ -64,10 +64,9 @@ async fn state_session_count_default_matches_sessions() {
 #[tokio::test]
 async fn redis_ttl_expiry() {
     let Some(url) = env_url(URL_VAR) else { return };
-    let store = RedisStateStore::connect(&url, Duration::from_secs(1))
-        .await
-        .expect("connect");
-    crate::conformance::ttl_expiry_in(Arc::new(store), &workspace()).await;
+    let ttl = Duration::from_secs(1);
+    let store = RedisStateStore::connect(&url, ttl).await.expect("connect");
+    crate::conformance::ttl_expiry_in(Arc::new(store), &workspace(), ttl).await;
 }
 
 #[tokio::test]

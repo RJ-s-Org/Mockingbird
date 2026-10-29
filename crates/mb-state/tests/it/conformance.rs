@@ -432,29 +432,31 @@ async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>, ws: &str) {
     assert!(summary.contains(&("dst", 3)), "{summary:?}");
 }
 
-/// Real-time TTL check. `store` must have been built with a 1 s TTL.
+/// TTL check. `store` must have been built with TTL `ttl`; the waits are
+/// fractions of it (0.7, 0.6 and 0.6), so every margin scales with it.
 ///
 /// `touch` extends a session's life; reads alone do not.
-pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
-    ttl_expiry_in(store, "default").await;
+pub async fn ttl_expiry(store: Arc<dyn StateStore>, ttl: Duration) {
+    ttl_expiry_in(store, "default", ttl).await;
 }
 
 /// [`ttl_expiry`] with the session in `workspace`.
-pub async fn ttl_expiry_in(store: Arc<dyn StateStore>, workspace: &str) {
+pub async fn ttl_expiry_in(store: Arc<dyn StateStore>, workspace: &str, ttl: Duration) {
     let ws = workspace;
+    let tenths = |n: u32| ttl * n / 10;
     let k = key(ws, "ttl", "a");
     store
         .upsert(&k, res("order", "1", json!({})))
         .await
         .expect("upsert");
     assert!(store.get(&k, "order", "1").await.expect("get").is_some());
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    tokio::time::sleep(tenths(7)).await;
     store.touch(&k).await.expect("touch");
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    // 1.3 s after the write, alive thanks to the touch.
+    tokio::time::sleep(tenths(6)).await;
+    // 1.3 TTL after the write, alive thanks to the touch.
     assert!(store.get(&k, "order", "1").await.expect("get").is_some());
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    // 1.2 s after the touch: the read in between did not extend it.
+    tokio::time::sleep(tenths(6)).await;
+    // 1.2 TTL after the touch: the read in between did not extend it.
     assert!(store.get(&k, "order", "1").await.expect("get").is_none());
     assert!(store.list(&k, "order", 10).await.expect("list").is_empty());
     assert!(store.export(&k).await.expect("export").is_empty());

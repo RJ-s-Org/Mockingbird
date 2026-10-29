@@ -79,17 +79,37 @@ impl StateStore for ListOnly {
     }
 }
 
-#[tokio::test]
+// Paused clock: MemoryStore expires on `tokio::time::Instant`, so the waits
+// are virtual. (`memory_conformance` stays on real time: it orders sessions
+// by their wall-clock `last_touched`.)
+#[tokio::test(start_paused = true)]
 async fn memory_ttl_expiry() {
-    crate::conformance::ttl_expiry(Arc::new(MemoryStore::new(Duration::from_secs(1)))).await;
+    let ttl = Duration::from_secs(1);
+    crate::conformance::ttl_expiry(Arc::new(MemoryStore::new(ttl)), ttl).await;
 }
 
+/// `connect("memory")` routes to a working in-process store. The store
+/// itself is `memory_conformance`'s; this checks only the routing.
 #[tokio::test]
 async fn connect_memory_url() {
     let store = mb_state::connect("memory", Duration::from_secs(60))
         .await
         .expect("connect");
-    crate::conformance::run_all(store).await;
+    store.ping().await.expect("ping");
+    let k = SessionKey {
+        workspace: "default".into(),
+        mock: "m".into(),
+        session: "a".into(),
+    };
+    let r = StoredResource {
+        resource_type: "order".into(),
+        id: "1".into(),
+        data: json!({"n": 1}),
+    };
+    store.upsert(&k, r.clone()).await.expect("upsert");
+    assert_eq!(store.get(&k, "order", "1").await.expect("get"), Some(r));
+    let s = store.sessions("default", "m").await.expect("sessions");
+    assert_eq!((s.len(), s[0].resources), (1, 1));
 }
 
 #[tokio::test(start_paused = true)]

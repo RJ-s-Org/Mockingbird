@@ -221,7 +221,10 @@ fn p2_bundle_without_payload_deserializes() {
     assert_eq!(bundle.protocol_payload, None);
     let get = bundle.operation("getOrder").unwrap();
     assert_eq!(get.identity.as_ref().unwrap().input_field, None);
-    assert_eq!(serde_json::to_string(&bundle).unwrap(), P2_ORDERS);
+    assert!(bundle.channels.is_empty());
+    let text = serde_json::to_string(&bundle).unwrap();
+    assert_eq!(text, P2_ORDERS);
+    assert!(!text.contains("\"channels\""));
 }
 
 #[test]
@@ -375,13 +378,27 @@ fn operation_target_and_stream_item_schema() {
     assert_eq!(o.target(), "Calc/CalcSoap Add");
 }
 
+/// A pre-P4 bundle that uses the P3 fields (`protocol_payload`,
+/// `input_field`) but has no channels: the later fields survive a round
+/// trip and `channels` stays absent from the output.
 #[test]
 fn p4_bundle_without_channels_round_trips() {
-    let bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
-    assert!(bundle.channels.is_empty());
+    let mut bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    bundle.protocol_payload = Some(ProtocolPayload::Grpc {
+        file_descriptor_set: vec![7, 8, 9],
+    });
+    bundle.operations[0].identity.as_mut().unwrap().input_field = Some("orderId".into());
     let text = serde_json::to_string(&bundle).unwrap();
-    assert_eq!(text, P2_ORDERS);
-    assert!(!text.contains("\"channels\""));
+    assert!(!text.contains("\"channels\""), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v["protocol_payload"],
+        json!({"grpc": {"file_descriptor_set": "BwgJ"}})
+    );
+    assert_eq!(v["operations"][0]["identity"]["input_field"], "orderId");
+    let back: Bundle = serde_json::from_str(&text).unwrap();
+    assert!(back.channels.is_empty());
+    assert_eq!(back, bundle);
 }
 
 fn kafka_channel() -> Channel {

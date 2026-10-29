@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -175,7 +175,9 @@ fn scrubber() -> Arc<Scrubber> {
     Arc::new(Scrubber::new(&ScrubberConfig::default()).unwrap())
 }
 
-#[tokio::test]
+// Paused clock: the provider delay and the queue timeout are tokio timers,
+// so the 200 ms wait is virtual and the elapsed time is exact.
+#[tokio::test(start_paused = true)]
 async fn saturated_limiter_falls_back_within_timeout() {
     let bundle = Arc::new(bundle());
     let limiter = GenerationLimiter::new(1);
@@ -194,19 +196,27 @@ async fn saturated_limiter_falls_back_within_timeout() {
         let bundle = Arc::clone(&bundle);
         tokio::spawn(async move { generate(&holder, &bundle).await })
     };
-    while limiter.in_use() == 0 {
+    // Bounded: the holder takes its permit within a few scheduler turns.
+    for _ in 0..1_000 {
+        if limiter.in_use() > 0 {
+            break;
+        }
         tokio::task::yield_now().await;
     }
+    assert_eq!(limiter.in_use(), 1, "the holder never took its permit");
 
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let response = generate(&waiter, &bundle).await;
     let elapsed = started.elapsed();
     assert_eq!(response.source, Source::Fallback);
     assert!(
-        elapsed < Duration::from_millis(300),
-        "took {elapsed:?}, expected under 300 ms"
+        elapsed >= Duration::from_millis(200) && elapsed < Duration::from_millis(300),
+        "took {elapsed:?}, expected the 200 ms queue timeout"
     );
     assert!(response.body.is_some());
+    // The waiter gave up on the queue; the holder still has its permit.
+    assert_eq!(limiter.in_use(), 1);
+    assert!(!held.is_finished());
 
     held.abort();
     let _ = held.await;

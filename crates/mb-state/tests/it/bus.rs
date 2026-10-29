@@ -46,13 +46,14 @@ async fn next(rx: &mut broadcast::Receiver<BusEvent>, within: Duration) -> BusEv
         .expect("bus channel closed")
 }
 
-/// Asserts nothing arrives for a short while.
+/// Asserts nothing arrives for a short while. Its callers are in-process
+/// and run on a paused clock, so the 300 ms are virtual.
 async fn assert_silent(rx: &mut broadcast::Receiver<BusEvent>) {
     let got = timeout(Duration::from_millis(300), rx.recv()).await;
     assert!(got.is_err(), "unexpected bus event: {got:?}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn memory_hub_delivers_to_others_not_self() {
     let hub = MemoryBusHub::new();
     let a = hub.join("a".into());
@@ -71,7 +72,7 @@ async fn memory_hub_delivers_to_others_not_self() {
     assert_silent(&mut ra).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn local_bus_is_silent() {
     let bus = LocalBus::new("solo".into());
     assert!(bus.is_local());
