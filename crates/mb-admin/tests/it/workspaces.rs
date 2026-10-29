@@ -252,6 +252,62 @@ async fn delete_nonempty_requires_force() {
 }
 
 #[tokio::test]
+async fn force_delete_refuses_file_managed_resources() {
+    use mb_store::{LlmProfile, NewMock, ResourceSource};
+    let h = harness().await;
+    h.create_workspace("team-a").await;
+    h.store
+        .create_mock(
+            "team-a",
+            NewMock {
+                name: "filed".into(),
+                route_prefix: None,
+                persona: None,
+                llm_profile: None,
+                header_overrides: true,
+                source: ResourceSource::File,
+                chaos: None,
+                limits: Default::default(),
+                data_plane_auth: Default::default(),
+                behavior: Default::default(),
+                hosts: vec![],
+                webhooks: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    h.store
+        .put_profile(&LlmProfile {
+            workspace: "team-a".into(),
+            name: "filed-llm".into(),
+            base_url: "https://x".into(),
+            model: "m".into(),
+            secret_ref: None,
+            json_schema: false,
+            temperature: 0.7,
+            timeout_ms: 3000,
+            max_tokens: 2048,
+            fallback_profile: None,
+            headers: Default::default(),
+            extra_body: Default::default(),
+            source: ResourceSource::File,
+        })
+        .await
+        .unwrap();
+
+    let p = h
+        .delete("/api/v1/workspaces/team-a?force=true")
+        .await
+        .problem(StatusCode::CONFLICT);
+    assert_eq!(p["title"], "Managed by config file", "{p}");
+    let detail = p["detail"].as_str().unwrap();
+    assert!(detail.contains("mock \"filed\""), "{detail}");
+    assert!(detail.contains("LLM profile \"filed-llm\""), "{detail}");
+    assert!(h.store.get_workspace("team-a").await.unwrap().is_some());
+    assert!(h.store.get_mock("team-a", "filed").await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn same_mock_name_two_workspaces_ok() {
     let h = harness().await;
     h.create_workspace("team-a").await;
@@ -464,8 +520,9 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
     }
     // 23 P3 operations, the 6 channel and event-settings operations (P5)
     // the 8 import, draft and preview operations (P6), the single
-    // request log entry and the webhook delivery list (WS6).
-    assert_eq!(aliases, 39, "every mock and profile operation has an alias");
+    // request log entry and the webhook delivery list (WS6), and contract
+    // version delete.
+    assert_eq!(aliases, 40, "every mock and profile operation has an alias");
     assert!(paths["/api/v1/mocks"]["post"]["deprecated"] == true);
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();

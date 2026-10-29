@@ -6,14 +6,14 @@ use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::{Permission, Principal, Role};
 use mb_protocols::webhooks::log::SharedDeliveryLog;
-use mb_store::{DEFAULT_WORKSPACE, Workspace};
+use mb_store::{DEFAULT_WORKSPACE, Mock, ResourceSource, Workspace};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AdminState;
 use crate::access::{CurrentPrincipal, WsAccess, request_id};
 use crate::audit::snapshot;
-use crate::problem::{ApiResult, Json, Problem, Query};
+use crate::problem::{ApiResult, Json, MANAGED_BY_FILE, Problem, Query};
 
 /// Longest accepted `display_name`, in characters.
 const MAX_DISPLAY_NAME: usize = 128;
@@ -74,6 +74,38 @@ pub struct DeleteParams {
     /// Also delete the workspace's mocks (with their session state) and
     /// LLM profiles.
     pub force: Option<bool>,
+}
+
+/// A 409 naming the mocks and LLM profiles of `ws` that the config file
+/// declares: deleting them through the API would not stick (the next reload
+/// recreates them), so a forced workspace delete refuses, as the per-resource
+/// routes do.
+async fn ensure_no_file_resources(st: &AdminState, ws: &str, mocks: &[Mock]) -> ApiResult<()> {
+    let mut managed: Vec<String> = mocks
+        .iter()
+        .filter(|m| m.source == ResourceSource::File)
+        .map(|m| format!("mock {:?}", m.name))
+        .collect();
+    managed.extend(
+        st.store
+            .list_profiles(ws)
+            .await?
+            .into_iter()
+            .filter(|p| p.source == ResourceSource::File)
+            .map(|p| format!("LLM profile {:?}", p.name)),
+    );
+    if managed.is_empty() {
+        return Ok(());
+    }
+    Err(Problem::titled(
+        StatusCode::CONFLICT,
+        MANAGED_BY_FILE,
+        format!(
+            "workspace {ws:?} holds resources declared in the config file ({}); remove them \
+             from the config file before deleting the workspace",
+            managed.join(", ")
+        ),
+    ))
 }
 
 /// 1–128 characters, not only whitespace.
@@ -220,7 +252,7 @@ pub async fn patch(
         (status = 204, description = "Deleted with its API keys (and, with `force`, its mocks and profiles)"),
         (status = 403, body = Problem, content_type = "application/problem+json"),
         (status = 404, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The default workspace, or a non-empty one without `force`", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The default workspace, a non-empty one without `force`, or (with `force`) one holding mocks or LLM profiles declared in the config file", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "Session state could not be reset; nothing was deleted", body = Problem, content_type = "application/problem+json"),
     )
 )]
@@ -242,9 +274,11 @@ pub async fn delete(
         .await?
         .map(|w| WorkspaceView::new(w, &access.principal));
     if force {
+        let mocks = st.store.list_mocks(ws).await?;
+        ensure_no_file_resources(&st, ws, &mocks).await?;
         // Session state goes first, so a failed reset (503) leaves the
         // workspace in place for a retry.
-        for mock in st.store.list_mocks(ws).await? {
+        for mock in &mocks {
             st.state.reset_mock(ws, &mock.name).await?;
         }
     }

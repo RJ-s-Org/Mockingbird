@@ -380,6 +380,15 @@ impl OidcClient {
             }
         }
 
+        let ignored = self.mapping.ignored_groups(&claims);
+        if !ignored.is_empty() {
+            tracing::info!(
+                claim = %self.mapping.roles_claim,
+                groups = ?ignored,
+                "login: ignoring prefixed groups that grant no role (unknown role, missing \
+                 segment or invalid workspace name)"
+            );
+        }
         Ok(CompletedLogin {
             principal: self.mapping.principal(&claims)?,
             return_to: pending.return_to,

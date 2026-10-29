@@ -306,7 +306,7 @@ Named scenarios, applied with `X-Mockingbird-Scenario: <name>`, by the mock's `d
 | `mocks.<name>.scenarios.<name>.instructions` | string | unset | | | Extra prompt instructions. |
 | `mocks.<name>.scenarios.<name>.status` | integer | unset | A status the contract declares, or a 5xx | | Answer with this status's response variant (`set` applies to it too); an undeclared 5xx is answered natively. Any other status must be declared by one of the scenario's `operations` (by any operation when it lists none), or the config is rejected, as the Admin API answers 422; an operation that does not declare it serves its own status. |
 | `mocks.<name>.scenarios.<name>.latency` | duration | unset | | | Added latency. |
-| `mocks.<name>.scenarios.<name>.set` | JSON object | unset | | | Fields forced into the response body. |
+| `mocks.<name>.scenarios.<name>.set` | JSON object | unset | | | Fields merged (JSON merge patch; `null` deletes one) into the response body. Each key present must fit the response schema the scenario selects (the `status` response, else the success response) of at least one of its operations, or the config is rejected, as the Admin API answers 422; absent keys and `required` are not checked. |
 | `mocks.<name>.scenarios.<name>.operations` | list | `[]` (all) | Operation ids | | Operations the scenario applies to. Each entry is an operation id, or `{id, instructions}`. |
 | `mocks.<name>.scenarios.<name>.operations[].id` | string | | An operation id | | The operation of an `{id, instructions}` entry. |
 | `mocks.<name>.scenarios.<name>.operations[].instructions` | string | unset | | | Instructions replacing the scenario's `instructions` for that operation. |

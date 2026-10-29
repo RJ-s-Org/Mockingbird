@@ -403,6 +403,11 @@ async fn validate<'a>(
             {
                 bail!("mock {label:?}, scenario {sname:?}: {why}");
             }
+            if let Some(set) = &s.set
+                && let Some(why) = mb_admin::invalid_scenario_set(&bundle, &ids, s.status, set)
+            {
+                bail!("mock {label:?}, scenario {sname:?}: {why}");
+            }
             if let Some(items) = s.stream_items
                 && !(1..=10_000).contains(&items)
             {

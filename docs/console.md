@@ -36,7 +36,7 @@ Each workspace grants one of `viewer < editor < admin < owner`:
 
 A **sysadmin** is `owner` in every workspace, and is the only one who can create workspaces or read the global audit log.
 
-Roles come from the `roles_claim` claim (default `groups`) of the ID token or JWT, as strings `<prefix>:<workspace>:<role>` and `<prefix>:sysadmin`. With the default prefix `mb`, a user in the groups `mb:payments:editor` and `mb:default:viewer` is an editor of `payments` and a viewer of `default`, and `mb:sysadmin` makes a sysadmin.
+Roles come from the `roles_claim` claim (default `groups`) of the ID token or JWT, as strings `<prefix>:<workspace>:<role>` and `<prefix>:sysadmin`. With the default prefix `mb`, a user in the groups `mb:payments:editor` and `mb:default:viewer` is an editor of `payments` and a viewer of `default`, and `mb:sysadmin` makes a sysadmin. A group with the prefix that grants nothing (an unknown role such as `mb:payments:superuser`, a missing segment such as `mb:payments`, or an invalid workspace name) is skipped; a console login logs the skipped groups at info (`login: ignoring prefixed groups that grant no role`), and a bearer token at debug. Groups without the prefix are ignored silently.
 
 ## API keys
 

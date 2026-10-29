@@ -1,5 +1,5 @@
-//! `/api/v1/workspaces/{ws}/mocks/{mock}/contracts…`: upload, list, inspect and activate
-//! contract versions.
+//! `/api/v1/workspaces/{ws}/mocks/{mock}/contracts…`: upload, list, inspect,
+//! activate and delete contract versions.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -700,6 +700,57 @@ pub async fn activate(
     Ok(Json(view))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = i64, Path, description = "Contract version number"),
+    ),
+    responses(
+        (status = 204, description = "Deleted, with the finished import jobs whose result it was"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The active version, or managed by config file", body = Problem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn delete(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(VersionPath {
+        mock,
+        version: number,
+    }): Path<VersionPath>,
+) -> ApiResult<StatusCode> {
+    access.require(Permission::Edit)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = version(&st, &m, number).await?;
+    ensure_api_managed(&m.source, format_args!("mock {mock:?}"))?;
+    if v.status == ContractStatus::Active {
+        return Err(Problem::conflict(format!(
+            "contract version {number} of mock {mock:?} is active; activate another version \
+             before deleting it"
+        )));
+    }
+    let before = snapshot(&ContractVersionSummary::from(&v));
+    if !st.store.delete_contract_version(m.id, number).await? {
+        return Err(Problem::not_found(format!(
+            "mock {mock:?} has no contract version {number}"
+        )));
+    }
+    access
+        .audit(
+            &st.audit,
+            "contract.delete",
+            format!("contract:{mock}@{number}"),
+            before,
+            None,
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -711,6 +762,25 @@ mod tests {
             env!("CARGO_MANIFEST_DIR")
         ))
         .unwrap()
+    }
+
+    /// docs/admin-api.md names every accepted upload media type, either
+    /// literally or as its base type followed by the `+json`/`+yaml` forms.
+    #[test]
+    fn admin_api_doc_lists_every_contract_media_type() {
+        let doc = std::fs::read_to_string(format!(
+            "{}/../../docs/admin-api.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        for t in CONTRACT_MEDIA_TYPES {
+            let named = doc.contains(&format!("`{t}`"))
+                || ["+json", "+yaml"].iter().any(|suffix| {
+                    t.strip_suffix(suffix)
+                        .is_some_and(|base| doc.contains(&format!("`{base}` (`+json`/`+yaml`)")))
+                });
+            assert!(named, "docs/admin-api.md does not list {t}");
+        }
     }
 
     #[test]

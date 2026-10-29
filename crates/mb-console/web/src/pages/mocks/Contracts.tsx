@@ -4,6 +4,7 @@ import {
   contractSourceUrl,
   useActivate,
   useContracts,
+  useDeleteContract,
   useMock,
   useUploadContract,
   CONTRACT_EXTENSIONS,
@@ -11,6 +12,7 @@ import {
 } from "../../api/queries";
 import { useMe } from "../../auth/me";
 import { can } from "../../auth/permissions";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataTable, columnHelper } from "../../components/DataTable";
 import { ProblemAlert } from "../../components/ProblemAlert";
 import { OperationsTable } from "./OperationsTable";
@@ -37,13 +39,15 @@ function statusTone(status: string): Tone {
   return "neutral";
 }
 
-/** A mock's contract versions: upload, activate or roll back, inspect. */
+/** A mock's contract versions: upload, activate or roll back, inspect, discard. */
 export function Contracts({ ws, mock }: { ws: string; mock: string }) {
   const me = useMe();
   const m = useMock(ws, mock);
   const versions = useContracts(ws, mock);
   const activate = useActivate(ws, mock);
+  const discard = useDeleteContract(ws, mock);
   const [viewing, setViewing] = useState<number>();
+  const [discarding, setDiscarding] = useState<number>();
 
   const canEdit = me.data ? can(me.data, ws, "edit") : false;
   const reason = m.data ? readOnlyReason(m.data, canEdit) : "";
@@ -120,6 +124,16 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
             >
               Download source
             </a>
+            {reason === undefined && v.status !== "active" ? (
+              <button
+                type="button"
+                className={secondaryButton}
+                aria-label={`Discard version ${v.version}`}
+                onClick={() => setDiscarding(v.version)}
+              >
+                Discard
+              </button>
+            ) : null}
           </div>
         );
       },
@@ -132,7 +146,7 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
         <Notice tone="warn">{reason}</Notice>
       ) : null}
       {reason === undefined ? <UploadForm ws={ws} mock={mock} /> : null}
-      <ProblemAlert error={activate.error ?? versions.error} />
+      <ProblemAlert error={activate.error ?? discard.error ?? versions.error} />
       {versions.data ? (
         <DataTable
           caption="Contract versions"
@@ -145,6 +159,16 @@ export function Contracts({ ws, mock }: { ws: string; mock: string }) {
       ) : null}
       {viewing !== undefined ? (
         <OperationsTable ws={ws} mock={mock} version={viewing} onClose={() => setViewing(undefined)} />
+      ) : null}
+      {discarding !== undefined ? (
+        <ConfirmDialog
+          title={`Discard version ${discarding}?`}
+          message="Its source and compiled contract are deleted, with the finished import that produced it. This cannot be undone."
+          confirmLabel="Discard"
+          busy={discard.isPending}
+          onConfirm={() => discard.mutate(discarding, { onSettled: () => setDiscarding(undefined) })}
+          onCancel={() => setDiscarding(undefined)}
+        />
       ) : null}
     </div>
   );

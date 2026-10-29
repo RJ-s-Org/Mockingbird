@@ -103,6 +103,20 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         version: i64,
     ) -> Result<ContractVersion, StoreError>;
+    /// Deletes `version` of the mock, with the finished import jobs whose
+    /// result it was; `false` when there is no such version. The active
+    /// version is a `Conflict`. The default refuses with `Invalid`, for
+    /// stores written before this method existed.
+    async fn delete_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<bool, StoreError> {
+        let _ = (mock_id, version);
+        Err(StoreError::Invalid(
+            "this control store cannot delete contract versions".to_string(),
+        ))
+    }
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError>;
     /// The active version number of each of `mock_ids` that has one, in
     /// one query (mocks without an active version, or unknown, are left

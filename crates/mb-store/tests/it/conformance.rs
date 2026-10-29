@@ -35,6 +35,7 @@ macro_rules! conformance_checks {
             contract_versions_increment,
             activation_is_exclusive_and_rolls_back,
             draft_cannot_activate,
+            contract_version_delete,
             delete_mock_cascades,
             scenario_upsert_and_delete,
             profile_crud,
@@ -578,6 +579,62 @@ pub(crate) async fn activation_is_exclusive_and_rolls_back(store: &Arc<dyn Contr
         .await
         .expect_err("missing version");
     assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+}
+
+pub(crate) async fn contract_version_delete(store: &Arc<dyn ControlStore>) {
+    drain_queue(store).await;
+    let mock = create(store, "deletable").await;
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Active, "a"))
+        .await
+        .expect("add v1");
+    let job = create_job(store, mock.id, b"d").await;
+    store.claim_import_job(now_us()).await.expect("claim");
+    let draft = store
+        .complete_import_job(
+            job.id,
+            mock.id,
+            new_version(ContractStatus::Draft, "rejected"),
+            draft_meta("rejected"),
+            now_us(),
+        )
+        .await
+        .expect("complete")
+        .expect("the job was running");
+    assert_eq!(draft.version, 2);
+
+    let err = store
+        .delete_contract_version(mock.id, 1)
+        .await
+        .expect_err("the active version");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    assert!(
+        !store
+            .delete_contract_version(mock.id, 9)
+            .await
+            .expect("missing version")
+    );
+
+    assert!(
+        store
+            .delete_contract_version(mock.id, 2)
+            .await
+            .expect("delete the draft")
+    );
+    let versions = store.list_contract_versions(mock.id).await.expect("list");
+    assert_eq!(
+        versions.iter().map(|v| v.version).collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(versions[0].status, ContractStatus::Active);
+    // The job whose result it was goes with it.
+    assert!(store.get_import_job(job.id).await.expect("get").is_none());
+    assert!(
+        !store
+            .delete_contract_version(mock.id, 2)
+            .await
+            .expect("already deleted")
+    );
 }
 
 pub(crate) async fn draft_cannot_activate(store: &Arc<dyn ControlStore>) {

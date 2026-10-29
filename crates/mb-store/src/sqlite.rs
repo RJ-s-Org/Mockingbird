@@ -949,6 +949,44 @@ impl ControlStore for SqliteControlStore {
         Ok(target)
     }
 
+    async fn delete_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<bool, StoreError> {
+        let (_, name) = self.require_mock_key(mock_id).await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM contract_versions WHERE mock_id = ? AND version = ?",
+        )
+        .bind(mock_id.to_string())
+        .bind(version)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match status.as_deref() {
+            None => return Ok(false),
+            Some("active") => {
+                return Err(StoreError::Conflict(format!(
+                    "contract version {version} of mock {name:?} is active"
+                )));
+            }
+            Some(_) => {}
+        }
+        sqlx::query("DELETE FROM contract_versions WHERE mock_id = ? AND version = ?")
+            .bind(mock_id.to_string())
+            .bind(version)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM import_jobs WHERE mock_id = ? AND result_version = ?")
+            .bind(mock_id.to_string())
+            .bind(version)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        // Only an inactive version goes: the runtime has nothing to reload.
+        Ok(true)
+    }
+
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError> {
         let sql = format!(
             "SELECT {VERSION_COLUMNS} FROM contract_versions WHERE mock_id = ? AND status = 'active'"
