@@ -292,7 +292,11 @@ fn external_ref_invalid() {
     );
     let (pointer, message) = invalid(&src);
     assert_eq!(pointer, "/channels/users/subscribe/message");
-    assert_eq!(message, "external $ref is not supported");
+    assert!(
+        message.starts_with("external $ref messages.yaml#/UserSignedUp cannot be resolved"),
+        "{message}"
+    );
+    assert!(message.contains("archive"), "{message}");
 }
 
 #[test]

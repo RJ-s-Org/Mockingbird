@@ -136,7 +136,7 @@ fn apply_nullable(obj: &mut Map<String, Value>) {
 }
 
 /// Keywords whose object value maps names (not keywords) to schemas.
-const NAME_MAPS: [&str; 5] = [
+pub(crate) const NAME_MAPS: [&str; 5] = [
     "properties",
     "patternProperties",
     "$defs",

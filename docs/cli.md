@@ -21,7 +21,7 @@ mockingbird seed-fixtures --mock orders --session ci fixtures.json
 
 ## Archive uploads
 
-A contract that spans several files (`.proto` files importing each other, a WSDL with its XSDs, a GraphQL schema split into files) is uploaded as one zip or tar.gz archive. `mockingbird import` packs a directory for you:
+A contract that spans several files (`.proto` files importing each other, a WSDL with its XSDs, a GraphQL schema split into files, an OpenAPI, Swagger or AsyncAPI document whose `$ref`s name other files) is uploaded as one zip or tar.gz archive. `mockingbird import` and `mockingbird validate` pack a directory for you:
 
 ```sh
 mockingbird import --as orders protos/          # packs protos/ as tar.gz
@@ -29,6 +29,8 @@ mockingbird import --as calc calculator.zip
 ```
 
 An archive is at most 20 MiB, holds at most 500 files and unpacks to at most 64 MiB. It is unpacked in memory only: absolute paths, `..`, links and devices are rejected, and when every file shares one top-level directory, that directory is stripped. `__MACOSX/` entries and hidden files and directories (`.DS_Store`, `.git/`) are dropped, as packing a directory skips them. Beside one contract, documentation (`.md`, `.txt`, `.html`, …), images and `README`/`LICENSE` files are ignored; several contracts in one archive are refused with an error naming them. Nested archives are not supported. The CLI picks the upload's media type from the file extension (`.graphql`, `.proto`, `.pb`/`.desc`, `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz`, `.json`, `.yaml`).
+
+For an OpenAPI, Swagger 2.0 or AsyncAPI contract, the root document is the one contract no other contract in the archive references (so a shared `common.yaml` with its own `openapi:` header does not count twice). A `$ref` with a path (`./schemas/pet.yaml`, `../common.yaml#/components/schemas/Error`, `#/Pet` inside a referenced file) is resolved relative to the file that holds it and bundled into the one stored contract: a schema becomes a named definition (`pet` for `./schemas/pet.yaml`, `Error` for `#/.../Error`; a name already taken gets `_2`, and `Owner: {$ref: ./owner.yaml}` keeps the name `Owner`), recursive schemas included, and other objects (path items, parameters, responses) are copied in place. A ref that climbs above the archive root, an absolute path, a file that is not in the archive, a missing pointer and a cycle outside schemas are refused with an error naming the ref. Refs to URLs are never fetched. Bundling stops at 32 MiB of content and 64 nested refs. Pointing the CLI at one file of a split spec uploads that file only, and its first external ref fails with a message saying to upload the directory or bundle the spec (for example with `redocly bundle`).
 
 ## Reference
 

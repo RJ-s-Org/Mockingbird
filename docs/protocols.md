@@ -129,6 +129,7 @@ Request limits: HTTP/REST requests at most 1,000 query pairs and 1,000 form or m
 ## Known limits
 
 - GraphQL directives the schema declares for query locations (`directive @inContext(country: CountryCode) on QUERY`, as Shopify's Storefront schema has; from SDL or from an introspection result's `directives`) are accepted wherever they appear in a query and ignored: the answer is generated as if they were absent. A variable that only such directives use is accepted too. A directive the schema does not declare, or declares only for type-system locations (`on OBJECT`, `on FIELD_DEFINITION`, …), fails validation with `Unknown directive`. `@skip` and `@include` work as usual.
+- OpenAPI, Swagger and AsyncAPI `$ref`s to other files are resolved only against files uploaded together with the contract (an archive, or a directory given to the CLI; see [archive uploads](cli.md#archive-uploads)). Refs to URLs are never fetched: bundle such a spec into one file first.
 - WSDL 2.0 is not supported; only WSDL 1.1 with SOAP 1.1/1.2 bindings is.
 - External XSDs are never fetched: a `schemaLocation` must name a file uploaded with the WSDL in the same archive.
 - `wsdl:import` is not followed, and an upload holds one `.wsdl`: merge imported WSDL definitions into the file that holds `wsdl:service`. A document that needs the imported definitions fails with an error naming the import.
