@@ -8,11 +8,16 @@ use super::xml::{Element, QName};
 use crate::ImportError;
 use crate::openapi3::invalid;
 use serde_json::{Map, Number, Value, json};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 pub(crate) const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
 /// Deeper chains of type references are taken to be circular.
 const MAX_DEPTH: usize = 64;
+/// The most JSON nodes that replaying memoised group and attributeGroup
+/// expansions may add to the schemas of one import.
+const MAX_EXPANSION: usize = 1_000_000;
 const HEX_PATTERN: &str = "^[0-9A-Fa-f]*$";
 
 /// One `xs:schema` element and where it came from.
@@ -52,7 +57,18 @@ pub(crate) struct Xsd<'a> {
     attr_groups: BTreeMap<QName, Comp<'a>>,
     attributes: BTreeMap<QName, Comp<'a>>,
     def_names: BTreeMap<(DefKind, QName), String>,
+    /// Finished expansions of named groups (keyed by name, optional and
+    /// in_choice) and attributeGroups (keyed by name), each with its size in
+    /// JSON nodes. Expanding a group once keeps nested or repeated references
+    /// linear instead of exponential.
+    group_memo: RefCell<BTreeMap<(QName, bool, bool), Memo>>,
+    attr_group_memo: RefCell<BTreeMap<QName, Memo>>,
+    /// JSON nodes added so far by replaying memoised expansions.
+    expanded: Cell<usize>,
 }
+
+/// A finished group expansion and its size in JSON nodes.
+type Memo = Rc<(Obj, usize)>;
 
 /// The properties of one object schema being built.
 #[derive(Default)]
@@ -81,6 +97,30 @@ impl Obj {
         self.add(name, schema, required);
     }
 
+    /// Apply everything `other` recorded, as if its `add`/`element` calls
+    /// were made on `self` in the same order.
+    fn merge(&mut self, other: &Obj) {
+        for (list, from) in [
+            (&mut self.order, &other.order),
+            (&mut self.choice, &other.choice),
+            (&mut self.required, &other.required),
+        ] {
+            for name in from {
+                if !list.contains(name) {
+                    list.push(name.clone());
+                }
+            }
+        }
+        for (name, schema) in &other.props {
+            self.props.insert(name.clone(), schema.clone());
+        }
+    }
+
+    /// The number of JSON nodes in the property schemas.
+    fn size(&self) -> usize {
+        self.props.values().map(nodes).sum()
+    }
+
     fn finish(self, ctx: &Ctx) -> Value {
         let mut out = Map::new();
         out.insert("type".into(), json!("object"));
@@ -95,6 +135,15 @@ impl Obj {
             out.insert("x-xml-choice".into(), json!(self.choice));
         }
         Value::Object(out)
+    }
+}
+
+/// The number of JSON nodes in `v`.
+fn nodes(v: &Value) -> usize {
+    1 + match v {
+        Value::Array(items) => items.iter().map(nodes).sum(),
+        Value::Object(map) => map.values().map(nodes).sum(),
+        _ => 0,
     }
 }
 
@@ -241,6 +290,9 @@ impl<'a> Xsd<'a> {
             attr_groups: BTreeMap::new(),
             attributes: BTreeMap::new(),
             def_names: BTreeMap::new(),
+            group_memo: RefCell::new(BTreeMap::new()),
+            attr_group_memo: RefCell::new(BTreeMap::new()),
+            expanded: Cell::new(0),
         };
         for (schema, doc) in docs.iter().enumerate() {
             xsd.schemas.push(Ctx {
@@ -359,6 +411,16 @@ impl<'a> Xsd<'a> {
         Ok(())
     }
 
+    /// Account for replaying a memoised expansion of `size` JSON nodes.
+    fn charge(&self, size: usize, schema: usize) -> Result<(), ImportError> {
+        let total = self.expanded.get().saturating_add(size);
+        if total > MAX_EXPANSION {
+            return Err(invalid(self.file(schema), "schema expansion too large"));
+        }
+        self.expanded.set(total);
+        Ok(())
+    }
+
     /// The type of an element declaration, without occurrence or nillable.
     fn element_type(&self, el: &Element, s: usize, depth: usize) -> Result<Value, ImportError> {
         self.check_depth(depth, s)?;
@@ -470,11 +532,27 @@ impl<'a> Xsd<'a> {
             .get(&q)
             .ok_or_else(|| invalid(self.file(s), format!("unknown group \"{q}\"")))?;
         let optional = optional || min_occurs(el) == 0;
-        for child in g.el.children_in(XSD_NS) {
-            if matches!(child.name.local.as_str(), "sequence" | "all" | "choice") {
-                self.particles(child, g.schema, obj, optional, in_choice, depth + 1)?;
+        let key = (q, optional, in_choice);
+        let cached = self.group_memo.borrow().get(&key).cloned();
+        let memo = match cached {
+            Some(memo) => {
+                self.charge(memo.1, s)?;
+                memo
             }
-        }
+            None => {
+                let mut sub = Obj::default();
+                for child in g.el.children_in(XSD_NS) {
+                    if matches!(child.name.local.as_str(), "sequence" | "all" | "choice") {
+                        self.particles(child, g.schema, &mut sub, optional, in_choice, depth + 1)?;
+                    }
+                }
+                let size = sub.size();
+                let memo = Rc::new((sub, size));
+                self.group_memo.borrow_mut().insert(key, Rc::clone(&memo));
+                memo
+            }
+        };
+        obj.merge(&memo.0);
         Ok(())
     }
 
@@ -580,13 +658,32 @@ impl<'a> Xsd<'a> {
             .attr_groups
             .get(&q)
             .ok_or_else(|| invalid(self.file(s), format!("unknown attributeGroup \"{q}\"")))?;
-        for child in g.el.children_in(XSD_NS) {
-            match child.name.local.as_str() {
-                "attribute" => self.attribute(child, g.schema, obj, depth + 1)?,
-                "attributeGroup" => self.attribute_group(child, g.schema, obj, depth + 1)?,
-                _ => {}
+        let cached = self.attr_group_memo.borrow().get(&q).cloned();
+        let memo = match cached {
+            Some(memo) => {
+                self.charge(memo.1, s)?;
+                memo
             }
-        }
+            None => {
+                let mut sub = Obj::default();
+                for child in g.el.children_in(XSD_NS) {
+                    match child.name.local.as_str() {
+                        "attribute" => self.attribute(child, g.schema, &mut sub, depth + 1)?,
+                        "attributeGroup" => {
+                            self.attribute_group(child, g.schema, &mut sub, depth + 1)?;
+                        }
+                        _ => {}
+                    }
+                }
+                let size = sub.size();
+                let memo = Rc::new((sub, size));
+                self.attr_group_memo
+                    .borrow_mut()
+                    .insert(q, Rc::clone(&memo));
+                memo
+            }
+        };
+        obj.merge(&memo.0);
         Ok(())
     }
 

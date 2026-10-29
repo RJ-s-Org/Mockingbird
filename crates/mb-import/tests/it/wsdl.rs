@@ -535,3 +535,159 @@ fn compile_is_deterministic() {
     let b = calculator();
     assert_eq!(b.source_digest.len(), 64);
 }
+
+/// A one-operation document/literal WSDL whose input element `Put` holds
+/// `put_body` and whose schema also declares `extra`.
+fn schema_wsdl(extra: &str, put_body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:groups"
+    targetNamespace="urn:groups">
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:groups" elementFormDefault="qualified">
+      {extra}
+      <xs:element name="Put"><xs:complexType>{put_body}</xs:complexType></xs:element>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="PutIn"><wsdl:part name="parameters" element="tns:Put"/></wsdl:message>
+  <wsdl:portType name="P">
+    <wsdl:operation name="Put"><wsdl:input message="tns:PutIn"/></wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="B" type="tns:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Put">
+      <soap:operation soapAction=""/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S">
+    <wsdl:port name="Port" binding="tns:B"><soap:address location="urn:no-path"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
+"#
+    )
+}
+
+/// Each of `depth` groups (and attributeGroups) refers to the next one
+/// twice, so a naive expansion visits 2^depth particles.
+fn doubling_chain(depth: usize) -> String {
+    let mut extra = String::new();
+    for k in 0..depth {
+        let next = k + 1;
+        extra.push_str(&format!(
+            r#"<xs:group name="G{k}"><xs:sequence>
+                 <xs:element name="e{k}" type="xs:string" minOccurs="0"/>
+                 <xs:group ref="tns:G{next}"/><xs:group ref="tns:G{next}"/>
+               </xs:sequence></xs:group>
+               <xs:attributeGroup name="A{k}">
+                 <xs:attribute name="a{k}" type="xs:string"/>
+                 <xs:attributeGroup ref="tns:A{next}"/><xs:attributeGroup ref="tns:A{next}"/>
+               </xs:attributeGroup>"#
+        ));
+    }
+    extra.push_str(&format!(
+        r#"<xs:group name="G{depth}"><xs:sequence>
+             <xs:element name="leaf" type="xs:int"/>
+           </xs:sequence></xs:group>
+           <xs:attributeGroup name="A{depth}">
+             <xs:attribute name="leafAttr" type="xs:int" use="required"/>
+           </xs:attributeGroup>"#
+    ));
+    schema_wsdl(
+        &extra,
+        r#"<xs:group ref="tns:G0"/><xs:attributeGroup ref="tns:A0"/>"#,
+    )
+}
+
+#[test]
+fn nested_group_refs_expand_in_linear_time() {
+    // 25 levels is close to the nesting the depth guard allows; a naive
+    // expansion visits 2^25 (33M) particles here.
+    let depth = 25;
+    let wsdl = doubling_chain(depth);
+    let start = std::time::Instant::now();
+    let b = compile(wsdl.as_bytes()).unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "depth-{depth} group chain took {elapsed:?}"
+    );
+    let put = &b.defs["Put"];
+    let order: Vec<&str> = put["x-xml-order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut expected: Vec<String> = (0..depth).map(|k| format!("e{k}")).collect();
+    expected.push("leaf".into());
+    assert_eq!(order, expected);
+    assert_eq!(put["required"], json!(["leaf", "@leafAttr"]));
+    assert_eq!(
+        put["properties"]["leaf"],
+        json!({"type": "integer", "minimum": i32::MIN, "maximum": i32::MAX})
+    );
+    assert_eq!(put["properties"]["@a24"], json!({"type": "string"}));
+    assert_eq!(put["properties"].as_object().unwrap().len(), 2 * depth + 2);
+}
+
+#[test]
+fn exponential_group_output_is_rejected() {
+    // Each group holds eight anonymous elements whose content is the next
+    // group, so the expanded schema itself would hold 8^10 objects.
+    let (depth, fanout) = (10, 8);
+    let mut extra = String::new();
+    for k in 0..depth {
+        let next = k + 1;
+        extra.push_str(&format!(r#"<xs:group name="G{k}"><xs:sequence>"#));
+        for c in 0..fanout {
+            extra.push_str(&format!(
+                r#"<xs:element name="c{c}"><xs:complexType><xs:group ref="tns:G{next}"/></xs:complexType></xs:element>"#
+            ));
+        }
+        extra.push_str("</xs:sequence></xs:group>");
+    }
+    extra.push_str(&format!(
+        r#"<xs:group name="G{depth}"><xs:sequence><xs:element name="leaf" type="xs:int"/></xs:sequence></xs:group>"#
+    ));
+    let wsdl = schema_wsdl(&extra, r#"<xs:group ref="tns:G0"/>"#);
+    let start = std::time::Instant::now();
+    let err = compile(wsdl.as_bytes()).unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(&err, ImportError::Invalid { message, .. }
+            if message == "schema expansion too large"),
+        "{err:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "took {elapsed:?}"
+    );
+}
+
+#[test]
+fn recursive_group_is_rejected() {
+    let extra = r#"<xs:group name="G"><xs:sequence>
+        <xs:element name="x" type="xs:string"/>
+        <xs:group ref="tns:G"/><xs:group ref="tns:G"/>
+      </xs:sequence></xs:group>
+      <xs:attributeGroup name="A">
+        <xs:attribute name="y" type="xs:string"/>
+        <xs:attributeGroup ref="tns:A"/><xs:attributeGroup ref="tns:A"/>
+      </xs:attributeGroup>"#;
+    for body in [
+        r#"<xs:group ref="tns:G"/>"#,
+        r#"<xs:attributeGroup ref="tns:A"/>"#,
+    ] {
+        let start = std::time::Instant::now();
+        let err = compile(schema_wsdl(extra, body).as_bytes()).unwrap_err();
+        assert!(
+            matches!(&err, ImportError::Invalid { message, .. } if message.contains("circular")),
+            "{err:?}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+}
