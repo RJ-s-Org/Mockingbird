@@ -20,9 +20,6 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 ### Changed
 
 - Less work per call in the protocol adapters, with the same answers: narrowed GraphQL selections and event key, header and address-parameter schemas reuse a compiled validator (bounded cache) instead of compiling one per call; a GraphQL request is parsed once instead of two or three times; subscription frames read only their `type` and `id`; operations are found by id through an index, and the per-create path-field and listed-member walks are computed once per mock; gRPC calls no longer copy their operation and scenario; offline bidi streams no longer copy earlier messages; consumed events copy their payload and headers only for the request log.
-
-### Changed
-
 - Faster contract and smart imports, with identical results: saving or assembling a draft checks its schemas in one compile instead of one per schema location (a 400-component draft went from 1.8 s to 15 ms), the `schema_too_large` check measures schema sizes without cloning or serializing the reachable definitions (1.8 s to 83 ms for 1,000 operations that each reach 1,000 definitions), `compile` parses a JSON or YAML document once instead of twice, recognising a HAR or Postman upload no longer builds the whole JSON tree (20 MiB in 39 ms instead of 125 ms), and the extra roots of `outbound.ca_file` are parsed once per bundle instead of on every fetch hop.
 
 ## [0.1.0] - 2026-10-28
