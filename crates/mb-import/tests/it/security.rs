@@ -65,8 +65,104 @@ fn oas3_security_compiled() {
             },
         ])]
     );
-    // Unknown schemes are skipped; a requirement of only unknown schemes is dropped.
-    assert_eq!(security(&b, "getAdmin"), [req(vec![SecurityScheme::Basic])]);
+    // Every alternative uses mutualTLS, which the mock cannot check: the
+    // operation keeps one requirement that is never satisfied rather than
+    // becoming unsecured or accepting basic alone.
+    assert_eq!(security(&b, "getAdmin"), [unsupported("mtls")]);
+    // An AND requirement with an unsupported leg is never satisfied (it is
+    // not weakened to its bearer leg); the fully supported basic
+    // alternative still applies, and comes first.
+    assert_eq!(
+        security(&b, "getReports"),
+        [req(vec![SecurityScheme::Basic]), unsupported("mtls")]
+    );
+}
+
+/// The requirement an operation keeps for alternatives that use schemes the
+/// mock cannot check: an API key in a header whose name is not a valid
+/// header name, so no request carries it.
+fn unsupported(names: &str) -> SecurityRequirement {
+    req(vec![SecurityScheme::ApiKey {
+        location: ApiKeyLocation::Header,
+        name: format!("unsupported security scheme {names}"),
+    }])
+}
+
+/// MB-IMPORT-STUB-8: an unsupported or undefined scheme inside an AND
+/// requirement makes the whole requirement unsatisfiable, with a
+/// `security_scheme_unsupported` warning; fully supported OR alternatives
+/// are kept as they are.
+#[test]
+fn unsupported_scheme_in_and_requirement_is_not_weakened() {
+    let doc = r#"
+openapi: 3.0.3
+info: {title: t, version: "1"}
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+    digest: {type: http, scheme: digest}
+    cookieless: {type: apiKey, in: body, name: k}
+paths:
+  /a:
+    get:
+      operationId: andDigest
+      security:
+        - bearer: []
+          digest: []
+      responses: {"204": {description: ok}}
+  /b:
+    get:
+      operationId: orBearer
+      security:
+        - digest: []
+          cookieless: []
+        - bearer: []
+      responses: {"204": {description: ok}}
+  /c:
+    get:
+      operationId: andUndefined
+      security:
+        - bearer: []
+          missing: []
+      responses: {"204": {description: ok}}
+  /d:
+    get:
+      operationId: plainBearer
+      security:
+        - bearer: []
+      responses: {"204": {description: ok}}
+"#;
+    let (b, warnings) = mb_import::compile_with_warnings(doc.as_bytes()).unwrap();
+    assert_eq!(security(&b, "andDigest"), [unsupported("digest")]);
+    assert_eq!(
+        security(&b, "orBearer"),
+        [
+            req(vec![SecurityScheme::Bearer]),
+            unsupported("cookieless digest")
+        ]
+    );
+    assert_eq!(security(&b, "andUndefined"), [unsupported("missing")]);
+    assert_eq!(
+        security(&b, "plainBearer"),
+        [req(vec![SecurityScheme::Bearer])]
+    );
+
+    let flagged: Vec<(&str, &str)> = warnings
+        .iter()
+        .filter(|w| w.code == "security_scheme_unsupported")
+        .map(|w| (w.operation.as_deref().unwrap_or(""), w.message.as_str()))
+        .collect();
+    let ops: Vec<&str> = flagged.iter().map(|(op, _)| *op).collect();
+    assert_eq!(
+        ops,
+        ["andDigest", "orBearer", "andUndefined"],
+        "{warnings:?}"
+    );
+    assert!(
+        flagged[1].1.contains("cookieless digest"),
+        "{}",
+        flagged[1].1
+    );
 }
 
 #[test]

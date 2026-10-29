@@ -349,7 +349,7 @@ async fn passthrough_bearer_basic_apikey() {
         ),
         ("DELETE", "/widgets/w1", vec![("authorization", "Bearer t")]),
         ("GET", "/me", vec![("authorization", "Bearer t")]),
-        ("GET", "/admin", vec![("authorization", basic_ok)]),
+        ("GET", "/reports", vec![("authorization", basic_ok)]),
     ];
     for (method, uri, headers) in ok {
         let resp = send(&router, req(method, uri, &headers)).await;
@@ -416,7 +416,21 @@ async fn passthrough_bearer_basic_apikey() {
         ),
         ("DELETE", "/widgets/w1", vec![], bearer),
         ("GET", "/me", vec![], bearer),
-        ("GET", "/admin", vec![], basic),
+        // MB-IMPORT-STUB-8: mutualTLS cannot be checked, so an operation
+        // whose every alternative uses it is never satisfied (basic used to
+        // be enough), and `mtls AND bearer` is not weakened to bearer.
+        (
+            "GET",
+            "/admin",
+            vec![("authorization", basic_ok)],
+            r#"ApiKey realm="mockingbird", header="unsupported security scheme mtls""#,
+        ),
+        (
+            "GET",
+            "/reports",
+            vec![("authorization", "Bearer t")],
+            basic,
+        ),
     ];
     for (method, uri, headers, challenge) in denied {
         let resp = send(&router, req(method, uri, &headers)).await;
