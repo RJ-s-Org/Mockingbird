@@ -108,6 +108,33 @@ describe("llm profiles", () => {
     expect(JSON.parse(put?.body ?? "").headers).toEqual({ "x-title": "Mockingbird" });
   });
 
+  it("editing a profile keeps fields the form does not show (MB-STORE-STUB-2)", async () => {
+    const user = userEvent.setup();
+    const routed = {
+      ...fast,
+      extra_body: { provider: { order: ["anthropic"], allow_fallbacks: false }, reasoning: { effort: "high" } },
+    };
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${BASE}/llm-profiles`]: [routed],
+      [`PUT ${BASE}/llm-profiles/fast`]: () => json({ ...routed, warnings: [] }),
+    });
+    renderAt("/w/default/llm-profiles");
+    await user.click(await screen.findByRole("button", { name: "Edit fast" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("Model"));
+    await user.type(within(dialog).getByLabelText("Model"), "gpt-large");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const body = JSON.parse(calls.find((c) => c.method === "PUT")?.body ?? "");
+    expect(body.model).toBe("gpt-large");
+    expect(body.extra_body).toEqual(routed.extra_body);
+    expect(body.headers).toEqual({ "x-title": "Mockingbird" });
+    // View-only fields are not sent: the server refuses unknown PUT fields.
+    expect("name" in body).toBe(false);
+    expect("source" in body).toBe(false);
+  });
+
   it("a refused save shows the server's problem detail", async () => {
     const user = userEvent.setup();
     serve({

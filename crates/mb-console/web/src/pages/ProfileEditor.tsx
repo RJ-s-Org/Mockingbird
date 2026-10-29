@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type InputHTMLAttributes } from "react";
-import { usePutProfile, type Profile, type ProfileWriteResult } from "../api/queries";
+import { usePutProfile, type Profile, type ProfileWriteResult, type PutProfile } from "../api/queries";
 import { Drawer } from "../components/Drawer";
 import { ProblemAlert } from "../components/ProblemAlert";
 import { Checkbox, Field as FieldShell, inputClass, primaryButton, secondaryButton } from "../components/ui";
@@ -22,6 +22,19 @@ function Field({
       <input id={id} className={inputClass} aria-describedby={hint ? `${id}-hint` : undefined} {...input} />
     </FieldShell>
   );
+}
+
+/**
+ * The writable fields of a stored profile: the view minus what only the
+ * server reports (`name` is in the path, `source` is not settable). The
+ * server refuses unknown PUT fields, so these two must not be sent.
+ */
+function storedFields(profile: Profile | undefined): Partial<PutProfile> {
+  if (!profile) return { headers: {} };
+  const rest: Partial<Profile> = { ...profile };
+  delete rest.name;
+  delete rest.source;
+  return rest;
 }
 
 /**
@@ -62,6 +75,9 @@ export function ProfileEditor({
       {
         name,
         body: {
+          // Start from the stored profile so fields this form does not edit
+          // (`headers`, `extra_body`, anything added later) survive a save.
+          ...storedFields(profile),
           base_url: baseUrl.trim(),
           model: model.trim(),
           secret_ref: secretRef.trim() || null,
@@ -70,8 +86,6 @@ export function ProfileEditor({
           timeout_ms: Number(timeoutMs),
           max_tokens: Number(maxTokens),
           fallback_profile: fallback || null,
-          // Not edited here: kept as stored so a save does not drop them.
-          headers: profile?.headers ?? {},
         },
       },
       { onSuccess: onSaved },
