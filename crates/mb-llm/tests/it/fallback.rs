@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -194,4 +195,91 @@ async fn fallback_stream_does_not_switch_after_first_delta() {
     assert_eq!(items[0].as_ref().unwrap(), "a");
     assert!(matches!(items[1], Err(LlmError::Transport(_))));
     assert!(secondary.stream_requests().is_empty());
+}
+
+#[tokio::test]
+async fn fallback_stream_uses_secondary_when_primary_ends_without_content() {
+    let primary = Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![])]));
+    let secondary =
+        Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![Ok("z".into())])]));
+    let fallback = FallbackProvider::new(primary.clone(), secondary.clone());
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
+    assert_eq!(items, vec!["z"]);
+    assert_eq!(secondary.stream_requests().len(), 1);
+}
+
+/// An OpenAI-compatible client of the fake server `server`.
+fn openai(server: &wiremock::MockServer) -> Arc<dyn Provider> {
+    Arc::new(
+        mb_llm::OpenAiCompatible::new(mb_llm::OpenAiConfig {
+            base_url: format!("{}/", server.uri()),
+            api_key: Some("k".into()),
+            model: "m".into(),
+            json_schema: false,
+            headers: Vec::new(),
+            extra_body: serde_json::Map::new(),
+            http: mb_llm::HttpOptions::default(),
+        })
+        .unwrap(),
+    )
+}
+
+/// A fake OpenAI-compatible server answering every request with `response`.
+async fn fake_openai(response: wiremock::ResponseTemplate) -> wiremock::MockServer {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/chat/completions"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    server
+}
+
+fn sse(body: &'static str) -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(200).set_body_raw(body, "text/event-stream")
+}
+
+const SECONDARY_SSE: &str = concat!(
+    r#"data: {"choices":[{"delta":{"content":"from secondary"}}]}"#,
+    "\n\n",
+    "data: [DONE]\n\n",
+);
+
+#[tokio::test]
+async fn fallback_stream_fails_over_on_openai_error_status() {
+    let primary = fake_openai(wiremock::ResponseTemplate::new(503).set_body_string("down")).await;
+    let secondary = fake_openai(sse(SECONDARY_SSE)).await;
+    let fallback = FallbackProvider::new(openai(&primary), openai(&secondary));
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
+    assert_eq!(items, vec!["from secondary"]);
+}
+
+#[tokio::test]
+async fn fallback_stream_fails_over_on_openai_error_event() {
+    let primary = fake_openai(sse(concat!(
+        r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#,
+        "\n\n",
+        r#"data: {"error":{"code":429,"message":"rate limited"}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    )))
+    .await;
+    let secondary = fake_openai(sse(SECONDARY_SSE)).await;
+    let fallback = FallbackProvider::new(openai(&primary), openai(&secondary));
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
+    assert_eq!(items, vec!["from secondary"]);
+    assert_eq!(primary.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn fallback_stream_fails_over_on_openai_empty_stream() {
+    let primary = fake_openai(sse("data: [DONE]\n\n")).await;
+    let secondary = fake_openai(sse(SECONDARY_SSE)).await;
+    let fallback = FallbackProvider::new(openai(&primary), openai(&secondary));
+    let items = collect(fallback.stream(request()).await.unwrap()).await;
+    let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
+    assert_eq!(items, vec!["from secondary"]);
 }
