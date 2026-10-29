@@ -12,6 +12,11 @@ pub const RATE_LIMITED_METRIC: &str = "mb_rate_limited_total";
 /// The default request size cap (1 MiB), when no limit is configured.
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
+/// The most query pairs, or form or multipart fields, an HTTP request may
+/// carry. They are decoded before admission and auth, so a request with
+/// more is refused with a 400 problem before any further work.
+pub const MAX_REQUEST_PARAMS: usize = 1_000;
+
 /// A token bucket: `burst` tokens, refilled at `requests_per_second`.
 #[derive(Debug)]
 pub struct RateLimiter {
