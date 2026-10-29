@@ -25,8 +25,8 @@ use mb_llm::{ChatRequest, LlmError, Provider, ScriptedProvider};
 use mb_mcm::Bundle;
 use mb_protocols::grpc::{DynamicCodec, GrpcMock, GrpcServer};
 use mb_protocols::{
-    DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, RequestRecord, RequestRecorder,
-    graphql, http_rest, soap,
+    DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, RequestRecord, graphql,
+    http_rest, soap,
 };
 use mb_state::MemoryStore;
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -38,6 +38,8 @@ use tonic::codegen::http::uri::PathAndQuery;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tower::ServiceExt;
+
+use crate::support::Records;
 
 // ---------------------------------------------------------------- helpers
 
@@ -95,29 +97,6 @@ fn secured(mut rt: MockRuntime, ws: &str, header: &str, keys: Arc<StubKeys>) -> 
     rt.set_data_plane_auth(api_key(header));
     rt.data_plane_keys = Some(keys);
     rt
-}
-
-#[derive(Default)]
-struct Records(Mutex<Vec<RequestRecord>>);
-
-impl RequestRecorder for Records {
-    fn record(&self, r: RequestRecord) {
-        self.0.lock().unwrap().push(r);
-    }
-}
-
-impl Records {
-    /// Waits up to 2 s for at least `n` records and returns them all.
-    async fn wait(&self, n: usize) -> Vec<RequestRecord> {
-        for _ in 0..100 {
-            let got = self.0.lock().unwrap().clone();
-            if got.len() >= n {
-                return got;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        self.0.lock().unwrap().clone()
-    }
 }
 
 #[derive(Default)]

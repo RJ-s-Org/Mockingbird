@@ -286,9 +286,10 @@ fn broker_kind_serves() {
 
 #[test]
 fn param_values_from_context_then_faker() {
-    let bundle = mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/streetlights-kafka-2.6.yaml"
-    ))
+    let bundle = mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/streetlights-kafka-2.6.yaml"
+    )))
     .unwrap();
     let channel = bundle
         .channels

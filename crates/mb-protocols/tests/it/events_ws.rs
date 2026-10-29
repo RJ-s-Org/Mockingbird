@@ -53,16 +53,18 @@ impl Capture {
 }
 
 fn chat() -> Bundle {
-    mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/chat-ws-2.6.yaml"
-    ))
+    mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/chat-ws-2.6.yaml"
+    )))
     .unwrap()
 }
 
 fn orders() -> Bundle {
-    mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/orders-amqp-2.6.yaml"
-    ))
+    mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/orders-amqp-2.6.yaml"
+    )))
     .unwrap()
 }
 

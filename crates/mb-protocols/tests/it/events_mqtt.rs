@@ -188,9 +188,10 @@ impl RequestRecorder for Capture {
 #[tokio::test]
 async fn mqtt_runtime_end_to_end() {
     let port = start_broker();
-    let bundle = mb_import::compile(include_bytes!(
-        "../../../fixtures/asyncapi/sensors-mqtt-3.0.yaml"
-    ))
+    let bundle = mb_import::compile(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/asyncapi/sensors-mqtt-3.0.yaml"
+    )))
     .unwrap();
     let records = Arc::new(Capture::default());
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));

@@ -22,6 +22,8 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::support::wait_until;
+
 fn fast() -> DispatchSettings {
     DispatchSettings {
         backoff_base: Duration::from_millis(10),
@@ -105,13 +107,18 @@ fn record(id: &str) -> DeliveryRecord {
 }
 
 async fn wait_for(log: &DeliveryLog, pred: impl Fn(&DeliveryRecord) -> bool) -> DeliveryRecord {
-    for _ in 0..500 {
-        if let Some(r) = log.list("default", "m", 200).into_iter().find(|r| pred(r)) {
-            return r;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no matching delivery: {:?}", log.list("default", "m", 200));
+    wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        || async {
+            let all = log.list("default", "m", 200);
+            match all.iter().find(|r| pred(r)) {
+                Some(r) => Ok(r.clone()),
+                None => Err(format!("no matching delivery: {all:?}")),
+            }
+        },
+    )
+    .await
 }
 
 #[tokio::test]

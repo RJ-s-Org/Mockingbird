@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![cfg(feature = "graphql")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -9,13 +9,15 @@ use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
 use mb_llm::{Provider, ScriptedProvider};
 use mb_mcm::Bundle;
-use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder, graphql};
+use mb_protocols::{MockRuntime, RequestRecord, graphql};
 use mb_state::MemoryStore;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+use crate::support::Records;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -102,15 +104,6 @@ fn assert_issue(msg: &Value, ty: &str) {
         .map(String::as_str)
         .collect();
     assert_eq!(keys, ["id", "title"], "{msg}");
-}
-
-#[derive(Default)]
-struct Records(Mutex<Vec<RequestRecord>>);
-
-impl RequestRecorder for Records {
-    fn record(&self, r: RequestRecord) {
-        self.0.lock().unwrap().push(r);
-    }
 }
 
 #[tokio::test]
