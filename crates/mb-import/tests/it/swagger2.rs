@@ -190,3 +190,22 @@ fn swagger_produces_event_stream_compiles_to_stream_server() {
         Some(&json!({"$ref": "#/$defs/Tick", "x-mockingbird-sse-event": "tick"}))
     );
 }
+
+#[test]
+fn a_dangling_definition_ref_is_stubbed_with_a_warning() {
+    let bytes = serde_json::to_vec(&json!({
+        "swagger": "2.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"get": {"operationId": "a", "responses": {"200": {"description": "ok",
+            "schema": {"$ref": "#/definitions/Missing"}}}}}}
+    }))
+    .unwrap();
+    let (b, warnings) = mb_import::compile_with_warnings(&bytes).unwrap();
+    assert_eq!(b.defs["Missing"], json!(true));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == "dangling_ref" && w.message.contains("#/definitions/Missing")),
+        "{warnings:?}"
+    );
+}

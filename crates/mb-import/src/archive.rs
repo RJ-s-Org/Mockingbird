@@ -34,9 +34,10 @@ pub(crate) fn is_archive(bytes: &[u8]) -> bool {
 }
 
 /// Unpack a zip (`PK\x03\x04`) or gzip-compressed tar (`1f 8b`) archive into
-/// its member files, sorted by path. Directories are skipped and a leading
-/// `./` is stripped; when every file shares one top-level directory, that
-/// directory is stripped too.
+/// its member files, sorted by path. Directories are skipped, as are
+/// `__MACOSX/` entries and hidden (dot-prefixed) files and directories, and
+/// a leading `./` is stripped; when every file shares one top-level
+/// directory, that directory is stripped too.
 pub fn unpack_archive(bytes: &[u8]) -> Result<Vec<SourceFile>, ImportError> {
     let mut members = Members::default();
     if bytes.starts_with(ZIP_MAGIC) {
@@ -120,6 +121,15 @@ fn too_large() -> ImportError {
     )
 }
 
+/// Whether a normalised entry path is operating-system metadata rather
+/// than content: under `__MACOSX/` (AppleDouble `._*` files), or with a
+/// hidden (dot-prefixed) component such as `.DS_Store` or `.git/`. These
+/// entries are dropped, as [`pack_dir`] skips hidden files.
+fn is_metadata(path: &str) -> bool {
+    path.split('/')
+        .any(|part| part == "__MACOSX" || part.starts_with('.'))
+}
+
 /// Validate an entry name and normalise it to a `/`-separated relative path.
 /// `None` means the entry names the archive root and is skipped.
 fn entry_path(name: &str) -> Result<Option<String>, ImportError> {
@@ -170,6 +180,9 @@ fn unpack_zip(bytes: &[u8], members: &mut Members) -> Result<(), ImportError> {
         let Some(path) = path else {
             return Err(invalid(&name, "unsafe archive entry path: empty"));
         };
+        if is_metadata(&path) {
+            continue;
+        }
         members.add(&name, path, file)?;
     }
     Ok(())
@@ -204,6 +217,9 @@ fn unpack_tar_gz(bytes: &[u8], members: &mut Members) -> Result<(), ImportError>
         let Some(path) = path else {
             return Err(invalid(&name, "unsafe archive entry path: empty"));
         };
+        if is_metadata(&path) {
+            continue;
+        }
         members.add(&name, path, entry)?;
     }
     Ok(())

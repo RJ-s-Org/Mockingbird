@@ -182,24 +182,68 @@ fn sniff_parsed(bytes: &[u8]) -> Result<(SourceFormat, Option<Value>), ImportErr
     }
 }
 
+/// What the deterministic compilers collect besides the bundle: the
+/// warnings about what they skipped or relaxed.
+pub(crate) struct Ctx {
+    warnings: Vec<Warning>,
+    /// Whether a `$ref` naming a missing component schema is stubbed as an
+    /// open schema with a `dangling_ref` warning (contract uploads) rather
+    /// than rejected (smart-import drafts, whose issues go back for repair).
+    pub(crate) stub_dangling_refs: bool,
+}
+
+impl Ctx {
+    /// The context of a contract upload.
+    pub(crate) fn new() -> Self {
+        Self {
+            warnings: Vec::new(),
+            stub_dangling_refs: true,
+        }
+    }
+
+    /// A context that rejects dangling refs.
+    #[cfg(feature = "smart")]
+    pub(crate) fn strict() -> Self {
+        Self {
+            stub_dangling_refs: false,
+            ..Self::new()
+        }
+    }
+
+    /// Records a warning.
+    pub(crate) fn warn(&mut self, code: &str, operation: Option<&str>, message: String) {
+        self.warnings.push(Warning {
+            code: code.to_owned(),
+            operation: operation.map(str::to_owned),
+            message,
+            size: None,
+        });
+    }
+}
+
 /// Detect the format and dispatch to the matching compiler.
 pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
+    compile_in(bytes, &mut Ctx::new())
+}
+
+/// [`compile`], collecting the compilers' warnings in `ctx`.
+fn compile_in(bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let (format, doc) = sniff_parsed(bytes)?;
     // The document sniff parsed, or a fresh parse (not reached in practice:
     // every format below comes with its document).
     let doc = move || doc.map_or_else(|| parse_document(bytes), Ok);
     match format {
-        SourceFormat::OpenApi3 => openapi3::compile(&doc()?, bytes),
-        SourceFormat::Swagger2 => swagger2::compile(&doc()?, bytes),
+        SourceFormat::OpenApi3 => openapi3::compile(&doc()?, bytes, ctx),
+        SourceFormat::Swagger2 => swagger2::compile(&doc()?, bytes, ctx),
         SourceFormat::GraphqlSdl => graphql::compile_sdl(bytes),
         SourceFormat::GraphqlIntrospection => graphql::compile_introspection(&doc()?, bytes),
         SourceFormat::Proto => proto::compile_text(bytes),
         SourceFormat::FileDescriptorSet => proto::compile_descriptor_set(bytes),
-        SourceFormat::Wsdl11 => wsdl::compile_text(bytes),
+        SourceFormat::Wsdl11 => wsdl::compile_text(bytes, ctx),
         SourceFormat::AsyncApi2 => asyncapi::compile_v2(&doc()?, bytes),
         SourceFormat::AsyncApi3 => asyncapi::compile_v3(&doc()?, bytes),
         SourceFormat::Archive => {
-            let mut bundle = compile_files(&unpack_archive(bytes)?)?;
+            let mut bundle = compile_files_in(&unpack_archive(bytes)?, ctx)?;
             bundle.source_digest = proto::hex_digest(bytes);
             Ok(bundle)
         }
@@ -213,7 +257,10 @@ pub const PROMPT_SCHEMA_BUDGET: usize = 64 * 1024;
 /// A non-fatal finding of compilation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Warning {
-    /// `schema_too_large` or `security_scheme_unsupported`.
+    /// `schema_too_large`, `security_scheme_unsupported`,
+    /// `status_range_expanded`, `dangling_ref`, `cookie_param_ignored`,
+    /// `response_header_unresolved`, `xsd_wildcard_ignored` or
+    /// `wsdl_import_ignored` (see `docs/protocols.md`).
     pub code: String,
     /// The operation id the warning is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,11 +271,27 @@ pub struct Warning {
     pub size: Option<u64>,
 }
 
-/// [`compile`], with the bundle's [`bundle_warnings`].
+/// [`compile`], with the warnings of the compiler (what it skipped or
+/// relaxed) followed by the bundle's [`bundle_warnings`].
 pub fn compile_with_warnings(bytes: &[u8]) -> Result<(Bundle, Vec<Warning>), ImportError> {
-    let bundle = compile(bytes)?;
-    let warnings = bundle_warnings(&bundle);
-    Ok((bundle, warnings))
+    let mut ctx = Ctx::new();
+    let bundle = compile_in(bytes, &mut ctx)?;
+    Ok(with_bundle_warnings(bundle, ctx))
+}
+
+/// [`compile_files`], with the warnings [`compile_with_warnings`] gives.
+pub fn compile_files_with_warnings(
+    files: &[SourceFile],
+) -> Result<(Bundle, Vec<Warning>), ImportError> {
+    let mut ctx = Ctx::new();
+    let bundle = compile_files_in(files, &mut ctx)?;
+    Ok(with_bundle_warnings(bundle, ctx))
+}
+
+fn with_bundle_warnings(bundle: Bundle, ctx: Ctx) -> (Bundle, Vec<Warning>) {
+    let mut warnings = ctx.warnings;
+    warnings.extend(bundle_warnings(&bundle));
+    (bundle, warnings)
 }
 
 /// One `security_scheme_unsupported` warning per operation with security
@@ -402,16 +465,56 @@ fn is_graphql_path(path: &str) -> bool {
         .any(|ext| path.ends_with(ext))
 }
 
+/// File extensions of documentation and images, never taken for a
+/// contract in a multi-file upload.
+const INCIDENTAL_EXTENSIONS: [&str; 14] = [
+    ".md",
+    ".markdown",
+    ".txt",
+    ".rst",
+    ".adoc",
+    ".html",
+    ".htm",
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".css",
+];
+
+/// Whether `path` names documentation or an image (case-insensitive), or a
+/// `LICENSE`, `README`, `CHANGELOG` or `NOTICE` file.
+fn is_incidental(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    INCIDENTAL_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+        || ["license", "readme", "changelog", "notice"]
+            .iter()
+            .any(|stem| {
+                name.strip_prefix(stem)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+            })
+}
+
 /// Compile a multi-file contract (an unpacked archive or loose files):
 /// 1. any `.proto` files are compiled together (imports resolve between
 ///    them);
 /// 2. else exactly one `.wsdl` is compiled with the other files available
-///    to its `schemaLocation`s (several `.wsdl` files are invalid);
+///    to its `schemaLocation`s (several `.wsdl` files are invalid:
+///    `wsdl:import` is not followed);
 /// 3. else the `.graphql`/`.graphqls`/`.gql` files are compiled as one SDL,
 ///    joined by `\n` in path order;
-/// 4. else exactly one file is compiled on its own (it may not be another
-///    archive).
+/// 4. else the one file that is a contract ([`sniff`] recognises it, and
+///    it is not documentation, an image, a `README` or a `LICENSE`) is
+///    compiled on its own (it may not be another archive); none or several
+///    such files are invalid, and the error names them.
 pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
+    compile_files_in(files, &mut Ctx::new())
+}
+
+fn compile_files_in(files: &[SourceFile], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let protos: Vec<&SourceFile> = files
         .iter()
         .filter(|f| f.path.ends_with(".proto"))
@@ -427,14 +530,16 @@ pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
                 [one] => proto::hex_digest(&one.bytes),
                 _ => proto::files_digest(&files.iter().collect::<Vec<_>>()),
             };
-            return wsdl::compile_upload(wsdl, files, digest);
+            return wsdl::compile_upload(wsdl, files, digest, ctx);
         }
         many => {
+            let names: Vec<&str> = many.iter().map(|f| f.path.as_str()).collect();
             return Err(ImportError::Invalid {
                 pointer: "/".into(),
                 message: format!(
-                    "the upload contains {} .wsdl files; expected one",
-                    many.len()
+                    "the upload contains {} .wsdl files ({}); expected one: wsdl:import is not supported, so merge the imported definitions into the file that holds wsdl:service",
+                    many.len(),
+                    names.join(", ")
                 ),
             });
         }
@@ -449,15 +554,39 @@ pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
             .join(&b'\n');
         return graphql::compile_sdl(&sdl);
     }
-    match files {
+    // A lone file is compiled whatever its name; among several, only the
+    // contracts count.
+    let contracts: Vec<&SourceFile> = match files {
+        [one] => vec![one],
+        _ => files
+            .iter()
+            .filter(|f| !is_incidental(&f.path) && sniff(&f.bytes).is_ok())
+            .collect(),
+    };
+    match contracts.as_slice() {
         [one] if archive::is_archive(&one.bytes) => Err(ImportError::Invalid {
             pointer: one.path.clone(),
             message: "nested archives are not supported".into(),
         }),
-        [one] => compile(&one.bytes),
-        _ => Err(ImportError::Unsupported(
-            "archive contains no recognised contract".into(),
-        )),
+        [one] => compile_in(&one.bytes, ctx),
+        [] => {
+            let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+            Err(ImportError::Unsupported(format!(
+                "archive contains no recognised contract (files: {})",
+                names.join(", ")
+            )))
+        }
+        many => {
+            let names: Vec<&str> = many.iter().map(|f| f.path.as_str()).collect();
+            Err(ImportError::Invalid {
+                pointer: "/".into(),
+                message: format!(
+                    "the upload contains {} contracts ({}); expected one",
+                    many.len(),
+                    names.join(", ")
+                ),
+            })
+        }
     }
 }
 

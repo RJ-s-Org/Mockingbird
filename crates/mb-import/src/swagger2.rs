@@ -1,14 +1,14 @@
 //! Swagger 2.0 -> MCM compiler.
 
-use crate::ImportError;
 use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::openapi3::{
     CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
-    OperationIds, check_operation_refs, check_refs, deref, escape, invalid, is_event_stream,
+    OperationIds, check_defs_refs, check_operation_refs, deref, escape, invalid, is_event_stream,
     is_json_media, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
+use crate::{Ctx, ImportError};
 use mb_mcm::{Binding, Bundle, InputSchemas, Operation, OutputVariant, Protocol, StatusSelector};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -210,7 +210,7 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
     Ok(outputs)
 }
 
-pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> {
+pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let info = doc.get("info");
     let title = info
         .and_then(|i| i.get("title"))
@@ -293,18 +293,11 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportError> 
                     .extend(tags.iter().filter_map(Value::as_str).map(str::to_owned));
             }
 
-            check_operation_refs(&op_out, &defs)?;
+            check_operation_refs(&op_out, &mut defs, REF_PREFIX, ctx)?;
             operations.push(op_out);
         }
     }
-    for (name, s) in &defs {
-        check_refs(
-            s,
-            &defs,
-            &format!("schema {name}"),
-            &format!("/definitions/{}", escape(name)),
-        )?;
-    }
+    check_defs_refs(&mut defs, "/definitions/", REF_PREFIX, ctx)?;
 
     let digest = Sha256::digest(bytes);
     let source_digest = digest.iter().map(|b| format!("{b:02x}")).collect();
