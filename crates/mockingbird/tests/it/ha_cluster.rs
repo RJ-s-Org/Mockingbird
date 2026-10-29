@@ -325,7 +325,23 @@ async fn cluster_end_to_end() {
     .await
     .unwrap();
     assert_eq!(feed.status(), 200);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Calls served before the feed subscribed are not replayed: prime it
+    // with fresh markers until one arrives.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut primed = String::new();
+    let mut n = 0;
+    while !primed.contains("prime-") {
+        assert!(Instant::now() < deadline, "the live feed never subscribed");
+        let r = reqwest::Client::new()
+            .get(format!("{}/{mock}/orders?marker=prime-{n}", data1.data()))
+            .header("x-mockingbird-session", "cluster-prime")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        n += 1;
+        primed.push_str(&read_until(&mut feed, &["prime-"], Duration::from_millis(200)).await);
+    }
 
     // A resource created through data 1 is visible through data 2 in the
     // same session.

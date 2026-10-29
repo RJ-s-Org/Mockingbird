@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::support::serve;
+use crate::support::{serve, wait_until};
 use futures::StreamExt;
 use mb_mcm::ChannelBinding;
 use mb_protocols::events::InMessage;
@@ -114,8 +114,13 @@ async fn consumed_message_replied_through_app() {
         mb_import::compile(&std::fs::read(fixture("orders-amqp-2.6.yaml")).unwrap()).unwrap();
     let binding = bundle.channel("cancelOrder").unwrap().binding.clone();
     let broker = r.app.brokers.memory("mem").unwrap();
-    // Let the consumer subscribe.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A message injected before the consumer subscribes is lost.
+    wait_until(
+        "the cancelOrder consumer subscribes",
+        Duration::from_secs(5),
+        || !broker.subscribed_groups().is_empty(),
+    )
+    .await;
 
     broker.inject(
         &binding,

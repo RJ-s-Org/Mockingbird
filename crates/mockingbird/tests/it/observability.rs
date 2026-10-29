@@ -1078,15 +1078,35 @@ async fn unreachable_state_database_fails_fast() {
     let data = serve(registry.router()).await;
     let ops = serve(ops::router(ops_state(store, state, registry))).await;
 
-    let started = Instant::now();
-    let r = reqwest::get(format!("{data}/orders/orders/o1"))
-        .await
-        .unwrap();
+    // The first request and a readyz probe each wait out one bounded store
+    // timeout; they run at once (each timed on its own) so the test waits
+    // for one timeout, not two.
+    let timed = |url: String| async move {
+        let started = Instant::now();
+        let r = reqwest::get(url).await.unwrap();
+        (r, started.elapsed())
+    };
+    let ((r, first), (ready, readyz)) = tokio::join!(
+        timed(format!("{data}/orders/orders/o1")),
+        timed(format!("{ops}/readyz"))
+    );
     assert_eq!(r.status(), 200);
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "first request took {:?}",
-        started.elapsed()
+        first < Duration::from_secs(3),
+        "first request took {first:?}"
+    );
+    assert!(readyz < Duration::from_secs(3), "readyz took {readyz:?}");
+    // Degraded, not unavailable: the control store answers.
+    assert_eq!(ready.status(), 200);
+    let body: Value = ready.json().await.unwrap();
+    assert_eq!(body["status"], "degraded", "{body}");
+    assert!(
+        body["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().starts_with("state store unreachable")),
+        "{body}"
     );
 
     let started = Instant::now();
@@ -1099,16 +1119,6 @@ async fn unreachable_state_database_fails_fast() {
         "a degraded mock must skip the store; took {:?}",
         started.elapsed()
     );
-
-    let started = Instant::now();
-    let r = reqwest::get(format!("{ops}/readyz")).await.unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "readyz took {:?}",
-        started.elapsed()
-    );
-    let body: Value = r.json().await.unwrap();
-    assert_eq!(body["status"], "degraded", "{body}");
 }
 
 /// `/readyz` reports an unreachable control database within 3s.

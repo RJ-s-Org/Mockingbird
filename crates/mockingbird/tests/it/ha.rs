@@ -246,18 +246,28 @@ async fn request_logged_on_b_appears_in_live_feed_on_a() {
         .await
         .unwrap();
     assert_eq!(tail.status(), 200);
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let r = reqwest::Client::new()
-        .post(format!("{}/events/ticks?marker=from-b", p.b.data))
-        .json(&json!({"price": 1.5}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 201);
-
-    let text = read_until(&mut tail, "from-b", Duration::from_secs(2)).await;
-    assert!(text.contains("from-b"), "{text}");
+    // A request logged before A's feed subscribed is not replayed, so B is
+    // called again (with a fresh marker) until one shows up.
+    let http = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut text = String::new();
+    let mut n = 0;
+    while !text.contains("from-b-") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "nothing from B reached A's live feed: {text}"
+        );
+        let r = http
+            .post(format!("{}/events/ticks?marker=from-b-{n}", p.b.data))
+            .json(&json!({"price": 1.5}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201);
+        n += 1;
+        text.push_str(&read_until(&mut tail, "from-b-", Duration::from_millis(200)).await);
+    }
     assert!(text.contains("POST"), "{text}");
 }
 

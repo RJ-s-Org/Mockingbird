@@ -524,11 +524,23 @@ fn mcp_drives_a_background_server() {
         let doctor = mcp.tool("doctor", json!({}));
         assert_eq!(doctor["admin"]["reachable"], true);
     }));
+    let stopping = std::time::Instant::now();
     let stopped = mcp.tool("stop_server", json!({}));
     assert_eq!(stopped["stopped"], true);
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+    // The MCP server started this server, so it reaps it: SIGTERM is enough,
+    // and the exited server is not mistaken for a live one (a zombie) until
+    // the 10 s SIGKILL fallback.
+    assert_eq!(stopped["forced"], false, "{stopped}");
+    assert!(
+        stopping.elapsed() < std::time::Duration::from_secs(5),
+        "stop_server took {:?}",
+        stopping.elapsed()
+    );
+    let status = mcp.tool("server_status", json!({}));
+    assert_eq!(status["running"], false, "{status}");
 }
 
 #[test]

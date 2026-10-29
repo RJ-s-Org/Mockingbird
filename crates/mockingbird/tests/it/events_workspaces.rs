@@ -9,6 +9,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::wait_until;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
@@ -469,8 +471,14 @@ async fn twins() -> Twins {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    // Let the consumers subscribe.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A message injected before `team-a`'s consumer subscribes is lost
+    // (`default`'s is disabled, so there is one).
+    wait_until(
+        "the cancelOrder consumer subscribes",
+        Duration::from_secs(5),
+        || !broker.subscribed_groups().is_empty(),
+    )
+    .await;
 
     Twins {
         store,
@@ -641,18 +649,27 @@ async fn state_change_triggers_fire_only_in_their_workspace() {
     let publish = entries.iter().find(|e| e.method == "PUBLISH").unwrap();
     assert_eq!(publish.request["trigger"]["kind"], "on_state_change");
     assert_eq!(publish.session, "s1");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(t.count(&t.default_mock, "PUBLISH").await, 0);
-    assert_eq!(t.broker.published().len(), 1);
 
-    // And the other way round.
+    // And the other way round. Each mock's trigger handles the changes in
+    // order, so once `default` published for its own change it has already
+    // passed over `team-a`'s: no fixed wait is needed to see it did not fire.
     t.state
         .upsert(&order_key(DEFAULT_WORKSPACE, "s1"), order("42"))
         .await
         .unwrap();
     t.wait_events(&t.default_mock, "PUBLISH", 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(t.count(&t.team_mock, "PUBLISH").await, 1);
+    assert_eq!(t.count(&t.default_mock, "PUBLISH").await, 1);
+
+    // Likewise `team-a` has passed over `default`'s change once it published
+    // for a later change of its own.
+    t.state
+        .upsert(&order_key(TEAM_A, "s1"), order("43"))
+        .await
+        .unwrap();
+    t.wait_events(&t.team_mock, "PUBLISH", 2).await;
+    assert_eq!(t.count(&t.team_mock, "PUBLISH").await, 2);
+    assert_eq!(t.count(&t.default_mock, "PUBLISH").await, 1);
+    assert_eq!(t.broker.published().len(), 3);
 }
 
 #[tokio::test]

@@ -236,21 +236,30 @@ async fn leader_gain_starts_watch() {
         node.reconciles.load(Ordering::SeqCst) == 1
     })
     .await;
-    // Let the watcher start.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
+    // The watcher starts after the reconcile; an edit made before it
+    // watches is missed, so the edit is repeated until it is applied.
     let mocks = mocks_section(&[("orders", "openapi/orders-3.0.yaml")]);
-    std::fs::write(
-        dir.path().join("mockingbird.yaml"),
-        sqlite_config(dir.path(), &mocks),
-    )
-    .unwrap();
-    wait_status(
-        &format!("{data}/orders/orders/o1"),
-        200,
-        Duration::from_secs(5),
-    )
-    .await;
+    let url = format!("{data}/orders/orders/o1");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut rewrite = Instant::now();
+    loop {
+        if Instant::now() >= rewrite {
+            std::fs::write(
+                dir.path().join("mockingbird.yaml"),
+                sqlite_config(dir.path(), &mocks),
+            )
+            .unwrap();
+            rewrite = Instant::now() + mockingbird::watch::DEBOUNCE * 2;
+        }
+        if status(&url).await == 200 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the leader's watch never applied the edit"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Losing leadership stops the watch: a later change is not applied.
     leader_tx.send(false).unwrap();
@@ -260,8 +269,9 @@ async fn leader_gain_starts_watch() {
         sqlite_config(dir.path(), ""),
     )
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(status(&format!("{data}/orders/orders/o1")).await, 200);
+    // Nothing to wait for: twice the debounce, and the edit stays unapplied.
+    tokio::time::sleep(mockingbird::watch::DEBOUNCE * 2).await;
+    assert_eq!(status(&url).await, 200);
 }
 
 #[tokio::test]
@@ -285,9 +295,16 @@ async fn readyz_reports_role_and_leader() {
     assert_eq!(body["leader"], false, "{body}");
 
     leader_tx.send(true).unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let body = readyz(&node.admin).await;
-    assert_eq!(body["leader"], true, "{body}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let body = readyz(&node.admin).await;
+        if body["leader"] == true {
+            assert_eq!(body["role"], "all", "{body}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "leader never reported: {body}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 // --- Split roles over Postgres -------------------------------------------
