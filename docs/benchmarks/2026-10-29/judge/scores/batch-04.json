@@ -1,0 +1,21 @@
+{
+  "batch_id": "batch-04",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "c55e5a3cdc", "realism": 3, "coherence": 5, "rationale": "id 'raven' echoed; fields consistent. Generic values: name 'Raven' is just the id capitalized, email raven@example.com, round 10:00:00Z timestamp."},
+    {"opaque_id": "bf7393cf15", "realism": 3, "coherence": 5, "rationale": "id and @id 'garnet' echoed consistently. Tag 'synthetic' gives the mock away; name 'Garnet' and garnet@example.com are just the id reused."},
+    {"opaque_id": "acd53584e4", "realism": 4, "coherence": 5, "rationale": "'Juniper Labs' with team@juniperlabs.example and a non-round createdAt read plausibly; id echoed and email domain matches the name. Tags beta/analytics are a bit generic."},
+    {"opaque_id": "c557637d58", "realism": 4, "coherence": 5, "rationale": "'Delta Analytics', ops@delta-analytics.example, and a non-round timestamp are plausible; partner/enterprise tags fit. id echoed and email domain matches the name."},
+    {"opaque_id": "b84d229985", "realism": 4, "coherence": 5, "rationale": "@id 'urn:example:accounts:lumen' uses the contract namespace, which is a nice touch. 'Lumen Analytics' and ops@lumen-analytics.example match, and the id is echoed. Bland but believable."},
+    {"opaque_id": "d3aac03911", "realism": 4, "coherence": 5, "rationale": "Person account 'Iris Thorne' with iris.thorne@example.org; @id URN in the contract namespace matches the id. Round 14:30:00Z timestamp is slightly bland."},
+    {"opaque_id": "cf65cec90f", "realism": 4, "coherence": 5, "rationale": "'Bravo Industrial Supplies' with support@bravo-supplies.example.com and wholesale/verified tags is a varied, domain-plausible record; @id and id both 'bravo'."},
+    {"opaque_id": "73bcd0f249", "realism": 4, "coherence": 5, "rationale": "'Northwind Logistics' with an ops@ email and a 'billing-review' tag looks like production data; @id and id are 'alpha', consistent. The name is unrelated to the id key, which is acceptable."},
+    {"opaque_id": "a511b141bf", "realism": 4, "coherence": 5, "rationale": "'Nectar Analytics' with support@nectar.example; the 2024 createdAt gives a realistic account age, and the id is echoed. The customer-success tag is plausible."},
+    {"opaque_id": "aedac0d9e6", "realism": 4, "coherence": 5, "rationale": "'Garnet Holdings' with contact@garnetholdings.example and enterprise/premium tags; @id and id both 'garnet'. Plausible, if bland."},
+    {"opaque_id": "ed1f53ed44", "realism": 3, "coherence": 4, "rationale": "Stray top-level '$id' field duplicates the id, an artifact. Name 'Garnet Account' is generic, and support@example.com does not relate to the account."},
+    {"opaque_id": "b491a7ea1f", "realism": 3, "coherence": 4, "rationale": "account @id 'acct_9' does not match the requested id 'nectar'. Name 'Nectar Account' is generic, and hello@nectar.com uses a real-looking domain."},
+    {"opaque_id": "2d688dc0dc", "realism": 3, "coherence": 5, "rationale": "@id and id 'raven' consistent. Values are generic: name 'Raven' is the capitalized id, email raven@example.com, round 09:30:00Z timestamp."},
+    {"opaque_id": "cb837e6d5b", "realism": 4, "coherence": 5, "rationale": "'Delta Corp' with contact@delta.example and enterprise/priority/billing tags; @id and id are 'delta'. Somewhat stock company name but nothing a developer would flag."},
+    {"opaque_id": "412fa56c56", "realism": 3, "coherence": 5, "rationale": "id and @id 'juniper' echoed. 'Juniper Account' reads as a placeholder name, and the single 'standard' tag is thin."}
+  ]
+}

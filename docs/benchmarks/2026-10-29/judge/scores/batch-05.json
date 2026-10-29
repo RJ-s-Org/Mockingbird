@@ -1,0 +1,21 @@
+{
+  "batch_id": "batch-05",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "f4909bf4af", "realism": 5, "coherence": 5, "rationale": "Prefixed random id ord_8f3a2c71 and plausible total 129.99; status placed fits an orderCreated event."},
+    {"opaque_id": "3a727315ba", "realism": 4, "coherence": 5, "rationale": "id order_5001 reads as a sequential counter; timestamp 2026-10-29T18:09:15Z is sensible; status placed fits orderCreated; total 145.99 plausible."},
+    {"opaque_id": "4721e438c9", "realism": 5, "coherence": 5, "rationale": "id ord_98234715 looks production-like; total 129.99 plausible; status placed is right for a newly created order."},
+    {"opaque_id": "7c55705d03", "realism": 5, "coherence": 5, "rationale": "ULID-style id ord_01h8x9p3kd72vm40e9zb1q8a72 is very realistic; total 124.95 non-round; status placed fits orderCreated."},
+    {"opaque_id": "8df0aa71a5", "realism": 4, "coherence": 5, "rationale": "id order-20261029-003 is a date plus a tiny sequential counter, a bit synthetic; total 145.5 fine; status placed fits orderCreated."},
+    {"opaque_id": "6203356bcf", "realism": 5, "coherence": 5, "rationale": "Date-time based id order-20261029-193818 is a plausible real scheme; total 129.99; status placed fits orderCreated."},
+    {"opaque_id": "15dbb3e84c", "realism": 4, "coherence": 5, "rationale": "Short id ord-8291 is low-entropy and looks sequential; total 124.5 plausible; status placed consistent with orderCreated."},
+    {"opaque_id": "d52716d19f", "realism": 5, "coherence": 5, "rationale": "Hex id ord_8a7b3c9d2e1f looks production-like; total 149.99 plausible; status placed fits orderCreated."},
+    {"opaque_id": "96f1961bd8", "realism": 5, "coherence": 5, "rationale": "id ord_8f3c21a7 realistic; total 149.9 plausible; status placed fits orderCreated."},
+    {"opaque_id": "58e3cf870f", "realism": 5, "coherence": 5, "rationale": "id ord_7f3a91c2 realistic; total 84.5 varied and plausible; status placed fits orderCreated."},
+    {"opaque_id": "13ec7e8209", "realism": 5, "coherence": 5, "rationale": "Mixed-case random id ord_7Q2mX9aT4kLp looks like a real token id; total 84.5; status placed fits orderCreated."},
+    {"opaque_id": "1aea9a1098", "realism": 4, "coherence": 5, "rationale": "id ORD-7723 is short and counter-like; total 149.99 plausible; status placed consistent with orderCreated."},
+    {"opaque_id": "c9f8ebdaed", "realism": 5, "coherence": 5, "rationale": "id ord-8f21c4a9 realistic; total 74.99 plausible; status placed fits orderCreated."},
+    {"opaque_id": "1e560b43d9", "realism": 5, "coherence": 5, "rationale": "Hex id ord_8f3a2c1e9b4d7a6 looks production-like; total 129.99 plausible; status placed fits orderCreated."},
+    {"opaque_id": "d9e6ad9e23", "realism": 5, "coherence": 5, "rationale": "id ord_8f3c2a71 realistic; total 149.99 plausible; status placed fits orderCreated."}
+  ]
+}

@@ -1,0 +1,254 @@
+{
+  "started": "2026-10-29T18:07:16+00:00",
+  "finished": "2026-10-29T20:09:28+00:00",
+  "repeat": 3,
+  "parallel": 3,
+  "concurrency": 4,
+  "budget_usd": 9.0,
+  "manifest": "docs/benchmarks/workloads.json",
+  "order": [
+    "nvidia/nemotron-3.5-lightning",
+    "deepseek/deepseek-v4.1-flash",
+    "inception/mercury-3",
+    "anthropic/claude-haiku-5.5",
+    "openai/gpt-6-luna",
+    "qwen/qwen3.8-flash",
+    "nvidia/nemotron-3.5-super-vl",
+    "z-ai/glm-5.3-flash",
+    "deepseek/deepseek-v4.1-flash-1017",
+    "minimax/minimax-m3.1-flash",
+    "reflection/beam-1.0-501b-a23b",
+    "google/gemini-3.8-flash",
+    "thinkingmachines/inkling-small@nojson",
+    "thinkingmachines/inkling-small",
+    "thinkingmachines/inkling@nojson",
+    "thinkingmachines/inkling"
+  ],
+  "models": {
+    "deepseek/deepseek-v4.1-flash": {
+      "status": "done",
+      "projected_usd": 0.0515,
+      "projection_source": "pilot",
+      "started": "2026-10-29T18:07:16+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.081862,
+      "wall_s": 216.4,
+      "finished": "2026-10-29T18:10:52+00:00",
+      "stop_reason": null
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "status": "done",
+      "projected_usd": 0.127,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:20:13+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.094037,
+      "wall_s": 289.7,
+      "finished": "2026-10-29T18:25:03+00:00",
+      "stop_reason": null
+    },
+    "nvidia/nemotron-3.5-super-vl": {
+      "status": "done",
+      "projected_usd": 0.1149,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:14:04+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.107962,
+      "wall_s": 368.9,
+      "finished": "2026-10-29T18:20:13+00:00",
+      "stop_reason": null
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "status": "done",
+      "projected_usd": 0.0496,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:07:16+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.04758,
+      "wall_s": 202.1,
+      "finished": "2026-10-29T18:10:38+00:00",
+      "stop_reason": null
+    },
+    "inception/mercury-3": {
+      "status": "done",
+      "projected_usd": 0.0786,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:07:16+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.07893,
+      "wall_s": 188.5,
+      "finished": "2026-10-29T18:10:25+00:00",
+      "stop_reason": null
+    },
+    "anthropic/claude-haiku-5.5": {
+      "status": "done",
+      "projected_usd": 0.0968,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:10:25+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.103847,
+      "wall_s": 219.8,
+      "finished": "2026-10-29T18:14:04+00:00",
+      "stop_reason": null
+    },
+    "qwen/qwen3.8-flash": {
+      "status": "done",
+      "projected_usd": 0.1113,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:10:52+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.074347,
+      "wall_s": 730.9,
+      "finished": "2026-10-29T18:23:03+00:00",
+      "stop_reason": null
+    },
+    "z-ai/glm-5.3-flash": {
+      "status": "done",
+      "projected_usd": 0.1149,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:15:28+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.053983,
+      "wall_s": 749.4,
+      "finished": "2026-10-29T18:27:58+00:00",
+      "stop_reason": null
+    },
+    "minimax/minimax-m3.1-flash": {
+      "status": "done",
+      "projected_usd": 0.127,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:23:03+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.100933,
+      "wall_s": 207.1,
+      "finished": "2026-10-29T18:26:30+00:00",
+      "stop_reason": null
+    },
+    "openai/gpt-6-luna": {
+      "status": "done",
+      "projected_usd": 0.0968,
+      "projection_source": "roster",
+      "started": "2026-10-29T18:10:38+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.047746,
+      "wall_s": 290.1,
+      "finished": "2026-10-29T18:15:28+00:00",
+      "stop_reason": null
+    },
+    "google/gemini-3.8-flash": {
+      "status": "done",
+      "projected_usd": 0.9428,
+      "projection_source": "pilot",
+      "started": "2026-10-29T19:34:42+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 1.158092,
+      "wall_s": 624.2,
+      "finished": "2026-10-29T19:45:07+00:00",
+      "stop_reason": null
+    },
+    "reflection/beam-1.0-501b-a23b": {
+      "status": "done",
+      "projected_usd": 0.3526,
+      "projection_source": "pilot",
+      "started": "2026-10-29T19:34:42+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.387261,
+      "wall_s": 383.3,
+      "finished": "2026-10-29T19:41:06+00:00",
+      "stop_reason": null
+    },
+    "thinkingmachines/inkling-small": {
+      "status": "done",
+      "projected_usd": 0.2866,
+      "projection_source": "pilot",
+      "started": "2026-10-29T19:47:01+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.269384,
+      "wall_s": 254.9,
+      "finished": "2026-10-29T19:51:16+00:00",
+      "stop_reason": null
+    },
+    "thinkingmachines/inkling-small@nojson": {
+      "status": "done",
+      "projected_usd": 0.2017,
+      "projection_source": "pilot",
+      "started": "2026-10-29T19:45:07+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.198064,
+      "wall_s": 114.6,
+      "finished": "2026-10-29T19:47:01+00:00",
+      "stop_reason": null
+    },
+    "thinkingmachines/inkling": {
+      "status": "done",
+      "projected_usd": 0.5279,
+      "projection_source": "pilot",
+      "started": "2026-10-29T19:54:43+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 1.283405,
+      "wall_s": 884.9,
+      "finished": "2026-10-29T20:09:28+00:00",
+      "stop_reason": null
+    },
+    "thinkingmachines/inkling@nojson": {
+      "status": "done",
+      "projected_usd": 0.3336,
+      "projection_source": "pilot",
+      "started": "2026-10-29T19:51:16+00:00",
+      "engine_exit": 1,
+      "server_exit": 0,
+      "spent_usd": 0.495126,
+      "wall_s": 206.7,
+      "finished": "2026-10-29T19:54:43+00:00",
+      "stop_reason": null
+    }
+  },
+  "skipped": [],
+  "aborted": false,
+  "invocations": [
+    {
+      "started": "2026-10-29T18:07:16+00:00",
+      "finished": "2026-10-29T18:30:26+00:00"
+    },
+    {
+      "started": "2026-10-29T19:33:51+00:00",
+      "models": [
+        "google/gemini-3.8-flash",
+        "reflection/beam-1.0-501b-a23b",
+        "thinkingmachines/inkling-small",
+        "thinkingmachines/inkling-small@nojson",
+        "thinkingmachines/inkling",
+        "thinkingmachines/inkling@nojson"
+      ]
+    },
+    {
+      "started": "2026-10-29T19:34:42+00:00",
+      "models": [
+        "google/gemini-3.8-flash",
+        "reflection/beam-1.0-501b-a23b",
+        "thinkingmachines/inkling-small",
+        "thinkingmachines/inkling-small@nojson",
+        "thinkingmachines/inkling",
+        "thinkingmachines/inkling@nojson"
+      ]
+    }
+  ],
+  "spent_usd": 5.387821,
+  "calls": 3375,
+  "tripped": false
+}

@@ -1,0 +1,7 @@
+[
+  "GET /v1/properties",
+  "GET /v1/properties/{property_id}",
+  "POST /v1/reservations",
+  "GET /v1/reservations/{reservation_id}",
+  "POST /v1/reservations/{reservation_id}/cancellations"
+]

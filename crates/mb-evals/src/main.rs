@@ -1,13 +1,15 @@
 //! `mb-evals run` and `mb-evals bench`.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use mb_evals::report::{EvalReport, Thresholds, run_evals};
-use mb_evals::{bench, corpus};
+use mb_evals::report::{EvalContract, EvalReport, RunOptions, Sample, Thresholds, run_contracts};
+use mb_evals::{bench, corpus, manifest};
 use mb_llm::{OpenAiCompatible, OpenAiConfig};
 
 /// Exit code of a usage error (clap's own code for bad arguments).
@@ -42,12 +44,30 @@ enum Cmd {
 #[derive(clap::Args, Debug)]
 struct RunArgs {
     /// Directory of contracts to evaluate.
-    #[arg(long, default_value = "fixtures")]
+    #[arg(long, default_value = "fixtures", conflicts_with = "manifest")]
     corpus: PathBuf,
+    /// A workload manifest (JSON) to evaluate instead of `--corpus`; its
+    /// contract paths are relative to the current directory.
+    #[arg(long)]
+    manifest: Option<PathBuf>,
+    /// Calls per target, each with a fresh faker-built request.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    repeat: u32,
+    /// Calls in flight at most.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    concurrency: u32,
+    /// Writes one JSON line per call (body, validated schema, request,
+    /// source, latency, tokens) to this file.
+    #[arg(long)]
+    samples: Option<PathBuf>,
+    /// The engine's per-request LLM timeout, in seconds.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
+    llm_timeout_secs: u64,
     /// Directory `report.json` and `report.md` are written to.
     #[arg(long, default_value = "eval-report")]
     out: PathBuf,
-    /// Calls per contract, at most.
+    /// Calls per contract, at most (before `--repeat`); a manifest entry's
+    /// `max_ops` overrides it.
     #[arg(long, default_value_t = 10)]
     max_ops_per_contract: usize,
     #[arg(long, default_value_t = Thresholds::default().min_schema_valid_rate)]
@@ -151,10 +171,16 @@ fn main() -> ExitCode {
 }
 
 async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
-    let entries = corpus::load(&args.corpus)?;
+    let contracts: Vec<EvalContract> = match &args.manifest {
+        Some(path) => manifest::load(path, Path::new("."), args.max_ops_per_contract)?,
+        None => corpus::load(&args.corpus)?
+            .iter()
+            .map(|e| EvalContract::from_corpus(e, args.max_ops_per_contract))
+            .collect(),
+    };
     eprintln!(
         "evaluating {} contracts with {} at {}",
-        entries.len(),
+        contracts.len(),
         env.model,
         env.base_url
     );
@@ -170,15 +196,30 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         http: mb_llm::HttpOptions::default(),
     })
     .context("building the LLM client")?;
-    let mut report = run_evals(
-        &entries,
+    let opts = RunOptions {
+        repeat: args.repeat as usize,
+        concurrency: args.concurrency as usize,
+        llm_timeout: Duration::from_secs(args.llm_timeout_secs),
+    };
+    let mut sink = SampleSink::open(args.samples.as_deref())?;
+    let outcome = run_contracts(
+        &contracts,
         Arc::new(provider),
         &env.model,
-        args.max_ops_per_contract,
+        &opts,
+        &mut |s: &Sample| sink.write(s),
     )
     .await;
+    let (mut report, sample_error) = match outcome {
+        Ok(report) => (report, None),
+        Err((report, e)) => (report, Some(e)),
+    };
     report.base_url = env.base_url;
     write_reports(&args.out, &report)?;
+    if let Some(e) = sample_error {
+        let path = args.samples.unwrap_or_default();
+        return Err(anyhow::Error::new(e).context(format!("cannot write {}", path.display())));
+    }
     print!("{}", report.to_markdown());
 
     let thresholds = Thresholds {
@@ -195,6 +236,33 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         eprintln!("threshold violated: {v}");
     }
     Ok(ExitCode::from(EXIT_THRESHOLD))
+}
+
+/// Where samples go: a JSON-lines file, flushed per line, or nowhere.
+struct SampleSink(Option<std::io::LineWriter<std::fs::File>>);
+
+impl SampleSink {
+    fn open(path: Option<&Path>) -> anyhow::Result<Self> {
+        let Some(path) = path else {
+            return Ok(Self(None));
+        };
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("cannot create {}", dir.display()))?;
+        }
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
+        Ok(Self(Some(std::io::LineWriter::new(file))))
+    }
+
+    fn write(&mut self, sample: &Sample) -> std::io::Result<()> {
+        let Some(out) = &mut self.0 else {
+            return Ok(());
+        };
+        let mut line = serde_json::to_vec(sample)?;
+        line.push(b'\n');
+        out.write_all(&line)
+    }
 }
 
 fn write_reports(out: &Path, report: &EvalReport) -> anyhow::Result<()> {

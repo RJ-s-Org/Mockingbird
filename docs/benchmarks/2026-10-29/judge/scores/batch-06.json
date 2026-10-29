@@ -1,0 +1,19 @@
+{
+  "batch_id": "batch-06",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "849640fb9e", "realism": 3, "coherence": 3, "rationale": "Id echoed, FRA-JFK LH400/401 plausible, but tax currency 'SXA' is not ISO 4217 and mismatches EUR total; placeholder passenger id a1b2c3d4-..., ticket 1234567890123, FF 1234567. Westbound 375 vs eastbound 450 min reversed."},
+    {"opaque_id": "3fd9bba2b7", "realism": 3, "coherence": 4, "rationale": "Id echoed; durationMinutes 735 matches timestamps but a 12h15 JFK-LHR nonstop is unrealistic; ticket 1234567890123 and patterned passenger id; Delta SkyMiles card on an AA flight is a minor mismatch."},
+    {"opaque_id": "86994fbf48", "realism": 3, "coherence": 3, "rationale": "Varied names, tickets, ids, but Eurostar from Heathrow T5 to St Pancras is a domain slip and ZYR is Brussels-Midi; tax code 'UK'. TP1024 durationMinutes 150 vs 07:25Z-08:55Z (90 min) is a material mismatch."},
+    {"opaque_id": "1d7cdca1f6", "realism": 3, "coherence": 4, "rationale": "Id echoed, duration 315 matches timestamps, child DOB fits type; but LHR-JFK in 5h15 is unrealistic, offerId a1b2c3d4-e5f6-7890-..., tickets 1234567890123/124 sequential, phone +14155551234. Status confirmed yet tickets issued."},
+    {"opaque_id": "3f2734659f", "realism": 5, "coherence": 5, "rationale": "Realistic LIS-CDG-LIS round trip: TP/AF A320s, 155-min durations match timestamps, varied random UUIDs and ticket numbers, TAP Miles&Bonus FF, EUR taxes and plausible 428.60 total for two adults; id echoed."},
+    {"opaque_id": "b0597261d6", "realism": 3, "coherence": 3, "rationale": "Passenger id '9g2h3i4j-5k6l-...' is not a valid UUID; offerId a1b2c3d4-..., tickets 1234567890123/124 placeholders. BA287 duration 405 vs 10:30Z-13:15Z (165 min) material mismatch; return only matches if times are local."},
+    {"opaque_id": "360d40285b", "realism": 5, "coherence": 3, "rationale": "Values look production-grade: random UUIDs, ticket 1764829301456, last4 4821, LH 747-8 JFK-FRA, USD taxes and 684.20 total. But durationMinutes 505 vs 18:30Z-07:55Z (805 min) is a material mismatch."},
+    {"opaque_id": "71f24d52f7", "realism": 3, "coherence": 3, "rationale": "YQ/YR/GB taxes and A350 plausible, but tickets 1234567890123/124, patterned passenger ids, BA178/179 direction reversed. Outbound duration 435 vs 10:30Z-13:45Z (195 min) material; return only fits as local times."},
+    {"opaque_id": "4274730a9c", "realism": 2, "coherence": 2, "rationale": "Placeholder-heavy: Jane Doe, reference ABC123, AA123, total 899.99, ticket 1234567890123, FF program 'SkyTeam' (an alliance). Duration 435 vs 10:15Z-18:30Z (495), stops 1 on a single JFK-LHR segment, flight 10-27 already past yet confirmed."},
+    {"opaque_id": "f149b0d848", "realism": 4, "coherence": 5, "rationale": "LIS-AMS TP flight plus NS Intercity Schiphol-Utrecht, durations 135/38 match timestamps, TAP Victoria FF, Mastercard, EUR taxes PT/NL. Ticket numbers 0741234567890/891 semi-sequential and 'UTC' is not Utrecht Centraal's code."},
+    {"opaque_id": "f55bfa5c08", "realism": 3, "coherence": 5, "rationale": "Timestamps, durations (215/195) and EUR taxes all consistent and id echoed, but invented carrier NW 'Northwind Miles' and 'NordRail', rail into Aarhus Airport (no station), patterned passenger ids a1b2c3d4-1111-4222-8333-..."},
+    {"opaque_id": "595df89f64", "realism": 4, "coherence": 4, "rationale": "Realistic LIS-OSL TP A320neo plus Vy train Gardermoen-Vaernes, random UUIDs, varied tickets. Fictional 'Nordic Miles', XF (US PFC) tax code. Flight duration 225 vs 07:35Z-12:20Z (285) implies arrival written in local time."},
+    {"opaque_id": "127f207385", "realism": 3, "coherence": 4, "rationale": "LIS-FRA flight plus ICE to BER coherent, durations match timestamps; but placeholder passenger ids a1b2c3d4-e5f6-7890-... and b2c3d4e5-..., TP1234, FF TP12345678. 'US' tax line on an all-Europe itinerary is a minor slip."}
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "batch_id": "batch-01",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "f045ed7ac4", "realism": 3, "coherence": 3, "rationale": "Request echoed. ticketNumber 1234567890123 and patterned passenger id b3e8f1c2-4a5d-6b7e... are placeholders. JFK-LHR 14:30Z to 02:15Z is 705 min but durationMinutes is 345."},
+    {"opaque_id": "1c673e47cc", "realism": 3, "coherence": 5, "rationale": "LIS-ORY on TP with PT/FR taxes in EUR is plausible, and the 08:15Z-10:05Z times match 110 min. Synthetic spots: ticketNumber 1234567890123, passenger id a1b2c3d4-e5f6..., flight TP1234."},
+    {"opaque_id": "4c9fd089a6", "realism": 3, "coherence": 5, "rationale": "Times 08:40Z-12:05Z match 205 min and the request is echoed. ticketNumber 0000000000000 is a placeholder, and carrier HR (Hahn Air) does not operate LIS-AMS."},
+    {"opaque_id": "f9d1da0826", "realism": 4, "coherence": 5, "rationale": "LIS-BRU times match 150 min, a realistic ticket number, and status pending fits a bank_transfer payment. Tax codes '97' and '6K' are odd for airline taxes."},
+    {"opaque_id": "33866aba6b", "realism": 5, "coherence": 5, "rationale": "CDG-LIS AF1142 times match 150 min. Taxes YQ/FR/QX in EUR are real codes. Status ticketed is consistent with ticketNumber 1254928109482, and ids look random. Request fully echoed."},
+    {"opaque_id": "1044bac42f", "realism": 2, "coherence": 5, "rationale": "Passenger id p1a2b3c4-...-j1k2l3m4n5o6 is a fake non-hex UUID, ticketNumber is 0000000000000, the booking id is sequential and 450.00/45.00 are round. A 210-min KEF-JFK flight is implausible, though the times are internally consistent."},
+    {"opaque_id": "bb2e9f9e97", "realism": 4, "coherence": 5, "rationale": "FRA-LIS LH1047 times match 150 min, a DE tax in EUR, and status pending fits the bank transfer. Minor slips: 150 min is a little short for this route, and the 057 ticket prefix is not LH's."},
+    {"opaque_id": "7b9648e64a", "realism": 3, "coherence": 5, "rationale": "Times match 195 min, but a 3h15 LHR-JFK flight is unrealistic. ticketNumber is 1234567890123, and a 1240.00 business fare with 140.00/80.00 taxes uses round numbers."},
+    {"opaque_id": "c1387ca30a", "realism": 3, "coherence": 3, "rationale": "08:30Z-12:45Z is 255 min but durationMinutes is 495. Carrier AB (defunct Air Berlin) on LHR-JFK, ticketNumber 0123456789012, placeholder passenger id ...ef1234567890, round total 1240.00."},
+    {"opaque_id": "3ffe121757", "realism": 5, "coherence": 3, "rationale": "Realistic BA482 LHR-CDG with YQ/FR taxes, random ids and ticket 0741592638014. But 09:15Z-11:35Z is 140 min while durationMinutes is 80 (looks like a local/UTC mix-up)."},
+    {"opaque_id": "23cc45e481", "realism": 3, "coherence": 3, "rationale": "LHR-JFK 09:15Z-12:45Z is 210 min but durationMinutes is 450. ticketNumber 1234567890123 is a placeholder, and an A320 on a transatlantic route is a domain slip."},
+    {"opaque_id": "3d050b4f24", "realism": 2, "coherence": 3, "rationale": "Sequential booking id b7a1c2d3-4e5f-6a7b..., patterned passenger id ...10fedcba9876, ticket 9876543210123, round 100.00/50.00/1250.00, and carrier OA on LHR-JFK. 09:30Z-11:15Z is 105 min vs durationMinutes 435."},
+    {"opaque_id": "2d38970532", "realism": 2, "coherence": 2, "rationale": "Reference A1B2C3, passenger id a1b2c3d4-..., ticket 1234567890123 and BA123/BA124 read as placeholders. Both segment durations contradict the timestamps: 210 vs 390 and 810 vs 410 min."}
+  ]
+}

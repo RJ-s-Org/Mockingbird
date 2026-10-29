@@ -1,0 +1,21 @@
+{
+  "batch_id": "batch-07",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "35619c971f", "realism": 5, "coherence": 5, "rationale": "id re_7tSzb2uhIR9apfQMQgGE0QEb looks genuinely random; usd, plausible created timestamp, succeeded. amount 62, charge, payment_intent and reason duplicate all echoed from request."},
+    {"opaque_id": "5f6bb4136b", "realism": 5, "coherence": 5, "rationale": "Random-looking id re_hpAsnQTygXY8XxWn7W54k8CI, usd, sensible created. amount 7, charge pebble, PI onyx, reason requested_by_customer echoed; succeeded status fine."},
+    {"opaque_id": "ffeade7f0f", "realism": 5, "coherence": 5, "rationale": "id re_ff2QzOpImzcdm7LhSLTMHiRU random-looking; usd, plausible timestamp. All request fields (47, garnet, raven, duplicate) echoed exactly; succeeded is consistent."},
+    {"opaque_id": "d93c1a180c", "realism": 5, "coherence": 5, "rationale": "id re_1NTuUosE2XQvwm7A0ovvCA4n mimics real Stripe ids (leading 1N); usd, plausible created. amount 60, nectar, fjord, duplicate echoed; succeeded."},
+    {"opaque_id": "2c0fd08b66", "realism": 3, "coherence": 5, "rationale": "id re_1A2b3C4d5E6f7G8h9I0jK1lM is an obvious sequential placeholder pattern. Otherwise fields echo the request (46, harbor, juniper, duplicate) with usd and succeeded."},
+    {"opaque_id": "79e2a8f9af", "realism": 4, "coherence": 5, "rationale": "id re_7fK2mQ9vL3aX8pR5tN1cD6sB alternates letter/digit in a slightly LLM-patterned way but would not be flagged. Request values (11, juniper, harbor, requested_by_customer) echoed."},
+    {"opaque_id": "9abf415d1c", "realism": 3, "coherence": 5, "rationale": "id re_1234567890abcdefghijklmn is a sequential placeholder a developer would notice. amount 57, lumen, harbor, requested_by_customer echoed; usd, succeeded."},
+    {"opaque_id": "98124c4579", "realism": 5, "coherence": 5, "rationale": "Random-looking id re_RqGCxjqOXnNueIJaD36qq7Hf; pending status is a plausible varied choice for a fraudulent refund. amount 21, delta, onyx, fraudulent echoed."},
+    {"opaque_id": "4e405f3af2", "realism": 5, "coherence": 5, "rationale": "id re_Pn2lGBVt9qSNJxq1DEuemiet random-looking; usd, plausible created, succeeded. amount 70, quartz, iris, fraudulent all echoed from request."},
+    {"opaque_id": "757369d293", "realism": 4, "coherence": 5, "rationale": "id re_8fGh2kL9mN0pQ1rS3tU5vW7x walks the alphabet (fGh..kL..mN..pQ..rS..tU..vW) and digits, mildly patterned. Request echoed (13, sable, delta); pending status plausible."},
+    {"opaque_id": "c7f097f21f", "realism": 5, "coherence": 5, "rationale": "id re_prfdkxkXrP8QAFEuSlynItbs random-looking; usd, plausible created, succeeded. amount 82, pebble, iris, requested_by_customer echoed exactly."},
+    {"opaque_id": "f9a46b44bf", "realism": 4, "coherence": 5, "rationale": "id re_3Nq8KdLk2vRtYx7WbZ1pFs6c fairly random with slight letter/digit rhythm; pending status for fraudulent is plausible. Request fields (30, alpha, iris) echoed."},
+    {"opaque_id": "399e8a8f87", "realism": 4, "coherence": 5, "rationale": "id re_9xK2mQ4pL7vN3sT8wY6aB1cD ends in an aB1cD pattern, mildly synthetic. amount 62, fjord, juniper, fraudulent echoed; usd and succeeded consistent."},
+    {"opaque_id": "068785e943", "realism": 4, "coherence": 5, "rationale": "id re_3Lk9mN2pQ7rS4tU8vW1xYzAb has an alphabet walk ending xYzAb, mildly patterned. Request (1, sable, pebble, fraudulent) echoed; usd, succeeded."},
+    {"opaque_id": "4fe9f6b058", "realism": 3, "coherence": 5, "rationale": "id re_abcdefghijklmnopqrstuvwx is the alphabet, a clear placeholder. amount 29, iris, tundra, duplicate echoed; usd and succeeded consistent."}
+  ]
+}

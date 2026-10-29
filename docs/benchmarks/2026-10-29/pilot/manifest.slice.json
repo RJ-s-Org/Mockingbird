@@ -1,0 +1,104 @@
+{
+  "entries": [
+    {
+      "name": "rest/payments-stripe",
+      "path": "examples/apis/stripe/stripe.openapi.yaml",
+      "api_type": "rest",
+      "domain": "payments",
+      "operations": [
+        "GetPaymentIntentsIntent"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "graphql/ecommerce-shopify-admin",
+      "path": "examples/apis/shopify-admin-graphql/shopify-admin.graphql",
+      "api_type": "graphql",
+      "domain": "ecommerce",
+      "operations": [
+        "Query.shop"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "grpc/route-guide",
+      "path": "fixtures/proto/route_guide.proto",
+      "api_type": "grpc",
+      "domain": "generic",
+      "operations": [
+        "RouteGuide.GetFeature"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "soap/calculator",
+      "path": "fixtures/wsdl/calculator.wsdl",
+      "api_type": "soap",
+      "domain": "generic",
+      "operations": [
+        "Add"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "asyncapi/commerce-events-kafka",
+      "path": "examples/apis/kafka-events/commerce-events.asyncapi.yaml",
+      "api_type": "asyncapi",
+      "domain": "ecommerce",
+      "operations": [
+        "orderCreated"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "rest/payments-paypal-orders",
+      "path": "examples/apis/paypal/paypal-orders.openapi.yaml",
+      "api_type": "rest",
+      "domain": "payments",
+      "operations": [
+        "orders.create"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "graphql/devtools-github",
+      "path": "examples/apis/github-graphql/github.graphql",
+      "api_type": "graphql",
+      "domain": "devtools",
+      "operations": [
+        "Query.viewer"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "grpc/otlp-trace-service",
+      "path": "examples/apis/grpc/otlp_trace_service.proto",
+      "api_type": "grpc",
+      "domain": "devtools",
+      "operations": [
+        "TraceService.Export"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "soap/accounts-rpc",
+      "path": "fixtures/wsdl/accounts-rpc.wsdl",
+      "api_type": "soap",
+      "domain": "generic",
+      "operations": [
+        "GetAccount"
+      ],
+      "max_ops": 1
+    },
+    {
+      "name": "asyncapi/orders-amqp-2.6",
+      "path": "fixtures/asyncapi/orders-amqp-2.6.yaml",
+      "api_type": "asyncapi",
+      "domain": "ecommerce",
+      "operations": [
+        "orderCreated"
+      ],
+      "max_ops": 1
+    }
+  ]
+}

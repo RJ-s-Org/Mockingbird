@@ -1,0 +1,148 @@
+{
+  "entries": [
+    {
+      "name": "rest/payments-stripe",
+      "path": "examples/apis/stripe/stripe.openapi.yaml",
+      "api_type": "rest",
+      "domain": "payments",
+      "operations": ["GetPaymentIntentsIntent", "PostPaymentIntentsIntentConfirm", "GetCustomersCustomer", "PostRefunds"],
+      "max_ops": 4
+    },
+    {
+      "name": "rest/payments-paypal-orders",
+      "path": "examples/apis/paypal/paypal-orders.openapi.yaml",
+      "api_type": "rest",
+      "domain": "payments",
+      "operations": ["orders.create", "orders.get", "orders.capture"],
+      "max_ops": 3
+    },
+    {
+      "name": "rest/ecommerce-square",
+      "path": "examples/apis/square/square.openapi.yaml",
+      "api_type": "rest",
+      "domain": "ecommerce",
+      "operations": ["GetPayment", "ListCatalog", "RetrieveCustomer", "ListLocations"],
+      "max_ops": 4
+    },
+    {
+      "name": "rest/ecommerce-orders-3.1",
+      "path": "fixtures/openapi/orders-3.1.yaml",
+      "api_type": "rest",
+      "domain": "ecommerce",
+      "operations": ["getOrder", "listOrders", "createOrder"],
+      "max_ops": 3
+    },
+    {
+      "name": "graphql/ecommerce-shopify-admin",
+      "path": "examples/apis/shopify-admin-graphql/shopify-admin.graphql",
+      "api_type": "graphql",
+      "domain": "ecommerce",
+      "operations": ["Query.shop", "Query.order", "Query.products", "Mutation.productCreate"],
+      "max_ops": 4
+    },
+    {
+      "name": "rest/social-tmdb",
+      "path": "examples/apis/tmdb/tmdb.openapi.yaml",
+      "api_type": "rest",
+      "domain": "social-media",
+      "operations": ["movie-details", "movie-credits", "tv-series-details", "person-details"],
+      "max_ops": 4
+    },
+    {
+      "name": "rest/social-spotify",
+      "path": "examples/apis/spotify/spotify.openapi.yaml",
+      "api_type": "rest",
+      "domain": "social-media",
+      "operations": ["get-playlist", "get-an-artists-top-tracks", "get-track"],
+      "max_ops": 3
+    },
+    {
+      "name": "rest/social-discord",
+      "path": "examples/apis/discord/discord.openapi.yaml",
+      "api_type": "rest",
+      "domain": "social-media",
+      "operations": ["get_message", "list_messages", "get_guild"],
+      "max_ops": 3
+    },
+    {
+      "name": "rest/devtools-github",
+      "path": "examples/apis/github-rest/github-rest.openapi.yaml",
+      "api_type": "rest",
+      "domain": "devtools",
+      "operations": ["repos/get", "pulls/get", "issues/get", "search/repos"],
+      "max_ops": 4
+    },
+    {
+      "name": "graphql/devtools-github",
+      "path": "examples/apis/github-graphql/github.graphql",
+      "api_type": "graphql",
+      "domain": "devtools",
+      "operations": ["Query.viewer", "Query.repository", "Query.user", "Mutation.createIssue"],
+      "max_ops": 4
+    },
+    {
+      "name": "rest/travel-booking",
+      "path": "docs/benchmarks/contracts/travel.openapi.yaml",
+      "api_type": "rest",
+      "domain": "travel",
+      "operations": ["searchFlights", "getOffer", "createBooking", "getBooking"],
+      "max_ops": 4
+    },
+    {
+      "name": "rest/travel-hotels",
+      "path": "docs/benchmarks/contracts/travel.openapi.yaml",
+      "api_type": "rest",
+      "domain": "travel",
+      "operations": ["listHotels", "cancelBooking"],
+      "max_ops": 2
+    },
+    {
+      "name": "grpc/route-guide",
+      "path": "fixtures/proto/route_guide.proto",
+      "api_type": "grpc",
+      "domain": "generic",
+      "operations": ["RouteGuide.GetFeature"],
+      "max_ops": 1
+    },
+    {
+      "name": "grpc/otlp-trace-service",
+      "path": "examples/apis/grpc/otlp_trace_service.proto",
+      "api_type": "grpc",
+      "domain": "devtools",
+      "operations": ["TraceService.Export"],
+      "max_ops": 1
+    },
+    {
+      "name": "soap/calculator",
+      "path": "fixtures/wsdl/calculator.wsdl",
+      "api_type": "soap",
+      "domain": "generic",
+      "operations": ["Add", "Subtract", "Divide"],
+      "max_ops": 3
+    },
+    {
+      "name": "soap/accounts-rpc",
+      "path": "fixtures/wsdl/accounts-rpc.wsdl",
+      "api_type": "soap",
+      "domain": "generic",
+      "operations": ["GetAccount", "CreateAccount"],
+      "max_ops": 2
+    },
+    {
+      "name": "asyncapi/commerce-events-kafka",
+      "path": "examples/apis/kafka-events/commerce-events.asyncapi.yaml",
+      "api_type": "asyncapi",
+      "domain": "ecommerce",
+      "operations": ["orderCreated", "paymentAuthorized", "shipmentDispatched"],
+      "max_ops": 3
+    },
+    {
+      "name": "asyncapi/orders-amqp-2.6",
+      "path": "fixtures/asyncapi/orders-amqp-2.6.yaml",
+      "api_type": "asyncapi",
+      "domain": "ecommerce",
+      "operations": ["orderCreated", "orderCancelled"],
+      "max_ops": 2
+    }
+  ]
+}

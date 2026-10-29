@@ -1,0 +1,11 @@
+{
+  "seed": "mb-bench-2026-10-29",
+  "batches": [
+    "batch-02",
+    "batch-04"
+  ],
+  "items": 30,
+  "judge_order_mad": 0.0167,
+  "limit": 0.5,
+  "noisy": false
+}
