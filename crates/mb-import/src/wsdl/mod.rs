@@ -14,8 +14,8 @@ use crate::openapi3::{invalid, slug};
 use crate::proto::hex_digest;
 use crate::{Ctx, ImportError, SourceFile, SourceFormat};
 use mb_mcm::{
-    Binding, Bundle, Identity, InputSchemas, Operation, OperationKind, OutputVariant, Protocol,
-    ProtocolPayload, SoapVersion, StatusSelector,
+    Binding, Bundle, EMBEDDED_SCHEMAS_NS, Identity, InputSchemas, Operation, OperationKind,
+    OutputVariant, Protocol, ProtocolPayload, SoapVersion, StatusSelector,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -192,7 +192,12 @@ fn compile_root(
         operations,
         defs,
         protocol_payload: Some(ProtocolPayload::Soap {
-            wsdl: text.strip_prefix('\u{feff}').unwrap_or(text).to_owned(),
+            wsdl: embed_schemas(
+                text.strip_prefix('\u{feff}').unwrap_or(text),
+                &wsdl.path,
+                &loaded,
+                &uploads,
+            )?,
         }),
         channels: Vec::new(),
         webhooks: Vec::new(),
@@ -202,6 +207,73 @@ fn compile_root(
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
+
+/// `wsdl` with the uploaded schemas in `loaded` embedded before the end
+/// tag of its root element (see [`ProtocolPayload::Soap`]), so `?wsdl`
+/// can serve them; `wsdl` itself when nothing was loaded.
+fn embed_schemas(
+    wsdl: &str,
+    wsdl_path: &str,
+    loaded: &[Loaded],
+    uploads: &BTreeMap<&str, &[u8]>,
+) -> Result<String, ImportError> {
+    if loaded.is_empty() {
+        return Ok(wsdl.to_owned());
+    }
+    let end = root_end_tag(wsdl)
+        .ok_or_else(|| ImportError::Parse(format!("{wsdl_path}: no root end tag")))?;
+    let mut block = format!(
+        r#"<mb:schemas xmlns:mb="{EMBEDDED_SCHEMAS_NS}" wsdl="{}">"#,
+        xml_attr(wsdl_path)
+    );
+    for l in loaded {
+        let bytes = uploads.get(l.path.as_str()).copied().unwrap_or_default();
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| ImportError::Parse(format!("{}: not valid UTF-8: {e}", l.path)))?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        block.push_str(&format!(
+            r#"<mb:schema path="{}"><![CDATA[{}]]></mb:schema>"#,
+            xml_attr(&l.path),
+            text.replace("]]>", "]]]]><![CDATA[>")
+        ));
+    }
+    block.push_str("</mb:schemas>");
+    let mut out = String::with_capacity(wsdl.len() + block.len());
+    out.push_str(&wsdl[..end]);
+    out.push_str(&block);
+    out.push_str(&wsdl[end..]);
+    Ok(out)
+}
+
+/// The byte offset of the root element's end tag in `xml`; `None` for a
+/// document without one (an empty root element) or malformed XML.
+fn root_end_tag(xml: &str) -> Option<usize> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::reader::Reader::from_str(xml);
+    let mut depth = 0usize;
+    loop {
+        let before = usize::try_from(reader.buffer_position()).ok()?;
+        match reader.read_event().ok()? {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(before);
+                }
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
+/// `value` escaped for a double-quoted attribute.
+fn xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
+}
 
 fn inline_schemas(root: &Element) -> impl Iterator<Item = &Element> {
     root.children_named(WSDL_NS, "types")

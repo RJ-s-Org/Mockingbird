@@ -623,3 +623,105 @@ async fn wsdl_rejects_bad_forwarded_host() {
     let text = wsdl_with(rt, &[("forwarded", "host=\"x/y\";proto=https")]).await;
     assert_location(&text, "https://127.0.0.1:1234");
 }
+
+/// The external-schema fixture laid out as `api/service.wsdl` importing
+/// `../schemas/types.xsd`, which includes `common.xsd` next to it.
+fn external_upload() -> Arc<Bundle> {
+    let dir = format!(
+        "{}/../../fixtures/wsdl/external",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let wsdl = std::fs::read_to_string(format!("{dir}/service.wsdl"))
+        .unwrap()
+        .replace(
+            r#"schemaLocation="types.xsd""#,
+            r#"schemaLocation="../schemas/types.xsd""#,
+        );
+    let types = std::fs::read_to_string(format!("{dir}/types.xsd"))
+        .unwrap()
+        .replacen(
+            r#"elementFormDefault="qualified">"#,
+            r#"elementFormDefault="qualified">
+  <xs:include schemaLocation="common.xsd"/>"#,
+            1,
+        );
+    let common = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:example:orders:types">
+  <xs:simpleType name="Note"><xs:restriction base="xs:string"/></xs:simpleType>
+</xs:schema>
+"#;
+    let files = [
+        ("api/service.wsdl", wsdl),
+        ("schemas/types.xsd", types),
+        ("schemas/common.xsd", common.to_string()),
+    ]
+    .into_iter()
+    .map(|(path, text)| mb_import::SourceFile {
+        path: path.into(),
+        bytes: text.into_bytes(),
+    })
+    .collect::<Vec<_>>();
+    Arc::new(mb_import::compile_files(&files).unwrap())
+}
+
+/// Status, content type and body of `GET url`.
+async fn get_text(url: &str) -> (u16, String, String) {
+    let resp = reqwest::Client::new()
+        .get(url)
+        .header("host", "127.0.0.1:1234")
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    (status, content_type, resp.text().await.unwrap())
+}
+
+/// `?wsdl` points the uploaded schemas' `schemaLocation`s at `?xsd=<path>`,
+/// which serves them, their own references rewritten the same way
+/// (MB-PROTOCOLS-STUB-2).
+#[tokio::test]
+async fn wsdl_serves_uploaded_schemas() {
+    let rt = runtime(external_upload(), &scripted(vec![]));
+    let base = serve(rt, "/m").await;
+    let (status, content_type, wsdl) = get_text(&format!("{base}/orders?wsdl")).await;
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "text/xml; charset=utf-8");
+    assert!(
+        wsdl.contains(r#"schemaLocation="http://127.0.0.1:1234/m/orders?xsd=schemas/types.xsd""#),
+        "{wsdl}"
+    );
+    assert!(!wsdl.contains("mockingbird"), "{wsdl}");
+    assert!(wsdl.contains(r#"<wsdl:service name="OrderService">"#));
+
+    let (status, content_type, types) =
+        get_text(&format!("{base}/orders?xsd=schemas/types.xsd")).await;
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "text/xml; charset=utf-8");
+    assert!(
+        types.contains(r#"<xs:complexType name="Order">"#),
+        "{types}"
+    );
+    assert!(
+        types.contains(
+            r#"<xs:include schemaLocation="http://127.0.0.1:1234/m/orders?xsd=schemas/common.xsd"/>"#
+        ),
+        "{types}"
+    );
+
+    let (status, _, common) = get_text(&format!("{base}/orders?xsd=schemas%2Fcommon.xsd")).await;
+    assert_eq!(status, 200);
+    assert!(
+        common.contains(r#"<xs:simpleType name="Note">"#),
+        "{common}"
+    );
+
+    let (status, content_type, _) = get_text(&format!("{base}/orders?xsd=nope.xsd")).await;
+    assert_eq!(status, 404);
+    assert_eq!(content_type, "application/problem+json");
+}

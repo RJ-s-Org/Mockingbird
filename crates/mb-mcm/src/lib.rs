@@ -5,6 +5,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// The namespace of the uploaded XML Schemas embedded in a
+/// [`ProtocolPayload::Soap`] WSDL.
+pub const EMBEDDED_SCHEMAS_NS: &str = "urn:mockingbird:embedded-schemas";
+
 /// The shortest interval a [`Trigger::Schedule`] may fire at.
 pub const MIN_SCHEDULE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -61,7 +65,11 @@ pub enum ProtocolPayload {
     },
     /// GraphQL SDL.
     Graphql { sdl: String },
-    /// The WSDL document, with imported schemas inlined.
+    /// The WSDL document. The schemas uploaded with it that its
+    /// `schemaLocation`s reach are embedded at the end of its root element,
+    /// in one `<schemas wsdl="<the WSDL's upload path>">` element of
+    /// namespace [`EMBEDDED_SCHEMAS_NS`] holding a `<schema path="…">`
+    /// element per schema, its text in CDATA sections.
     Soap { wsdl: String },
 }
 

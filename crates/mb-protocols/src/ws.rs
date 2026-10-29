@@ -33,6 +33,26 @@ pub enum Outbound {
     Close { code: u16, reason: String },
 }
 
+/// A data frame from the client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Inbound {
+    /// A text frame.
+    Text(String),
+    /// A binary frame.
+    Binary(Vec<u8>),
+}
+
+/// The handler's side of an open channel that takes binary frames too
+/// (see [`serve_frames`]).
+pub(crate) struct FrameIo {
+    /// The negotiated subprotocol, if any.
+    pub(crate) protocol: Option<String>,
+    /// The client's data frames; ends when the client closes.
+    pub(crate) incoming: BoxStream<'static, Inbound>,
+    /// Frames to send. Dropping every sender closes the socket.
+    pub(crate) outgoing: mpsc::Sender<Outbound>,
+}
+
 /// The handler's side of an open channel.
 pub struct ChannelIo {
     /// The negotiated subprotocol, if any.
@@ -82,6 +102,35 @@ where
     H: FnOnce(ChannelIo) -> F + Send + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
+    serve_frames(upgrade, cfg, move |io: FrameIo| {
+        let incoming = io
+            .incoming
+            .filter_map(|frame| async move {
+                match frame {
+                    Inbound::Text(text) => Some(text),
+                    Inbound::Binary(_) => None,
+                }
+            })
+            .boxed();
+        handler(ChannelIo {
+            protocol: io.protocol,
+            incoming,
+            outgoing: io.outgoing,
+        })
+    })
+}
+
+/// [`serve_channel`] for a handler that takes binary frames too: they are
+/// queued to `incoming` as [`Inbound::Binary`].
+pub(crate) fn serve_frames<H, F>(
+    upgrade: WebSocketUpgrade,
+    cfg: ChannelConfig,
+    handler: H,
+) -> Response
+where
+    H: FnOnce(FrameIo) -> F + Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
     upgrade
         .protocols(cfg.subprotocols.clone())
         .max_message_size(cfg.max_message_bytes)
@@ -91,7 +140,7 @@ where
 
 async fn run<H, F>(socket: WebSocket, keepalive: Duration, handler: H)
 where
-    H: FnOnce(ChannelIo) -> F,
+    H: FnOnce(FrameIo) -> F,
     F: Future<Output = ()>,
 {
     let protocol = socket
@@ -99,13 +148,13 @@ where
         .and_then(|p| p.to_str().ok())
         .map(str::to_string);
     let (mut sink, mut frames) = socket.split();
-    let (in_tx, in_rx) = mpsc::channel::<String>(QUEUE);
+    let (in_tx, in_rx) = mpsc::channel::<Inbound>(QUEUE);
     let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(QUEUE);
     let incoming = stream::unfold(in_rx, |mut rx| async move {
-        rx.recv().await.map(|text| (text, rx))
+        rx.recv().await.map(|frame| (frame, rx))
     })
     .boxed();
-    let handler = handler(ChannelIo {
+    let handler = handler(FrameIo {
         protocol,
         incoming,
         outgoing: out_tx,
@@ -113,9 +162,9 @@ where
     tokio::pin!(handler);
 
     let mut in_tx = Some(in_tx);
-    // A text frame waiting for room in `incoming`; the socket is not read
+    // A data frame waiting for room in `incoming`; the socket is not read
     // meanwhile.
-    let mut pending: Option<String> = None;
+    let mut pending: Option<Inbound> = None;
     // Whether the client may still send frames.
     let mut socket_open = true;
     let mut pings = tokio::time::interval_at(tokio::time::Instant::now() + keepalive, keepalive);
@@ -154,11 +203,11 @@ where
             },
             permit = reserve(in_tx.as_ref()), if pending.is_some() => match permit {
                 Some(permit) => {
-                    if let Some(text) = pending.take() {
-                        permit.send(text);
+                    if let Some(frame) = pending.take() {
+                        permit.send(frame);
                     }
                 }
-                // The handler dropped `incoming`: later texts are dropped.
+                // The handler dropped `incoming`: later frames are dropped.
                 None => {
                     pending = None;
                     end_incoming = true;
@@ -167,10 +216,15 @@ where
             frame = frames.next(), if reading => match frame {
                 Some(Ok(Message::Text(t))) => {
                     if in_tx.is_some() {
-                        pending = Some(t.to_string());
+                        pending = Some(Inbound::Text(t.to_string()));
                     }
                 }
-                Some(Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(Message::Binary(b))) => {
+                    if in_tx.is_some() {
+                        pending = Some(Inbound::Binary(b.to_vec()));
+                    }
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                 Some(Ok(Message::Close(_))) | None => {
                     socket_open = false;
                     end_incoming = true;
@@ -207,8 +261,8 @@ where
     let _ = sink.close().await;
 }
 
-/// A permit to queue one incoming text, or `None` once the handler dropped
-/// `incoming`.
-async fn reserve(tx: Option<&mpsc::Sender<String>>) -> Option<mpsc::Permit<'_, String>> {
+/// A permit to queue one incoming frame, or `None` once the handler
+/// dropped `incoming`.
+async fn reserve(tx: Option<&mpsc::Sender<Inbound>>) -> Option<mpsc::Permit<'_, Inbound>> {
     tx?.reserve().await.ok()
 }

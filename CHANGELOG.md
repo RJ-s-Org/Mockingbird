@@ -17,6 +17,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Smart import converts Swagger 2.0 blocks embedded in documentation pages to OpenAPI 3.0 and takes their operations as written, as it does for OpenAPI 3 blocks; the `embedded_swagger2` warning is gone.
 - `DELETE /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}` deletes a contract version that is not active (rejected imported drafts were kept forever, up to 20 MiB each), with the finished import jobs that produced it; the active version and mocks from the config file are a `409`. It needs the edit permission and records `contract.delete` in the audit log. The console's contract list has a **Discard** button for it. `mockingbird-store` gains a defaulted `ControlStore::delete_contract_version`.
 - Console logins log, at info, the `<prefix>:` groups of the identity provider that grant nothing (an unknown role, a missing segment or an invalid workspace name), which were dropped silently; bearer tokens log them at debug. `RoleMapping::ignored_groups` returns them.
+- SOAP: `GET ?wsdl` points the `schemaLocation` of every XSD uploaded with the WSDL at `GET <address path>?xsd=<upload path>`, which serves that XSD with its own references rewritten the same way, so WSDL tools can resolve a multi-file contract from the mock. The importer embeds the uploaded schemas in the stored WSDL; contracts imported earlier gain this when imported again.
+- gRPC: gzip-compressed requests are accepted, and responses are gzipped for clients that send `grpc-accept-encoding: gzip`; they were refused with `UNIMPLEMENTED` ("Content is compressed with `gzip` which isn't supported").
+- WebSocket event channels receive binary frames like text frames: a JSON frame is validated, recorded and replied to, anything else is recorded as a `400`. They were dropped without a trace.
 
 ### Changed
 
@@ -26,6 +29,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- MQTT shared subscriptions (with a shared, non-`local` bus) use each mock's consumer group, `$share/<client_id_prefix>-<mock>/<topic>`, instead of `$share/<client_id_prefix>/<topic>` for every mock: two mocks consuming one topic split its messages between them (each got about half); each now gets every message, and the instances of one mock still share them. Messages are told apart per mock with MQTT 5 subscription identifiers when the broker supports them.
 - GraphQL: queries using a custom executable directive the schema declares, such as Shopify Storefront's `@inContext(country: …)`, failed validation with `Unknown directive`; the directive definitions were dropped when the schema was built (and, for an introspection upload, when it was rendered to SDL). Such directives are now accepted and ignored, as are the variables only they use; undeclared directives still fail validation.
 - GraphQL: a stored schema defining a field, argument, input field, enum value, union member or implemented interface twice in one type (possible in bundles imported before duplicates were refused at import) no longer panics when the mock is served; the mock fails to load with an `invalid GraphQL schema: … is defined more than once` error naming the type and member.
 - A `$ref` to a missing component schema (`#/components/schemas/X`, `#/definitions/X`) no longer fails the whole contract (Square's spec): the schema is stubbed as an open schema, with a `dangling_ref` warning. Refs to files that were not uploaded are still refused, with an error that says to upload them or bundle the spec.

@@ -234,6 +234,36 @@ async fn ws_invalid_frame_recorded_and_socket_stays_open() {
     assert_eq!(ok.path, "/chat");
 }
 
+/// A binary frame is received like a text frame: JSON bytes are
+/// validated, recorded and replied to (MB-PROTOCOLS-STUB-11).
+#[tokio::test]
+async fn ws_binary_json_frame_is_received() {
+    let h = runtime(chat());
+    let base = serve(&h).await;
+    let mut ws = connect(&base).await;
+    ws.send(Message::binary(br#"{"user":"a","text":"bin"}"#.to_vec()))
+        .await
+        .unwrap();
+    let reply = next_text(&mut ws).await;
+    assert!(is_chat_message(&h, &reply), "invalid reply {reply}");
+    let record = h.records.find(|r| r.method == "RECEIVE").await;
+    assert_eq!(record.status, 200);
+    assert_eq!(record.operation_id.as_deref(), Some("sendMessage"));
+}
+
+/// A binary frame that is not JSON is recorded as a 400, not dropped.
+#[tokio::test]
+async fn ws_binary_non_json_frame_recorded_as_400() {
+    let h = runtime(chat());
+    let base = serve(&h).await;
+    let mut ws = connect(&base).await;
+    ws.send(Message::binary(vec![0xff, 0x00, 0x01]))
+        .await
+        .unwrap();
+    let record = h.records.find(|r| r.method == "RECEIVE").await;
+    assert_eq!(record.status, 400);
+}
+
 #[tokio::test]
 async fn ws_oversized_frame_closes_1009() {
     let h = runtime(chat());

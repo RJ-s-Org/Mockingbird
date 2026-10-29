@@ -1,6 +1,6 @@
 # Console and auth
 
-The admin port serves a web console at `/` (for example http://127.0.0.1:9090): mocks, contracts, scenarios, sessions, the live request tail, LLM profiles, API keys, the audit log and server status. It is built from `crates/mb-console/web` and embedded in the binary.
+The admin port serves a web console at `/` (for example http://127.0.0.1:9090): mocks, contracts, scenarios, sessions, the live request tail, event channels (a mock's Channels tab: its channels, brokers, triggers, live event feed and manual publish), LLM profiles, API keys, the audit log and server status. It is built from `crates/mb-console/web` and embedded in the binary.
 
 ## Auth modes
 

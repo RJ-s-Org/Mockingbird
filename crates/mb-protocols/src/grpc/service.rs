@@ -24,6 +24,7 @@ use mb_state::SessionKey;
 use prost_reflect::{DescriptorPool, DynamicMessage, Kind, MessageDescriptor, MethodDescriptor};
 use serde_json::{Value, json};
 use tokio::time::Instant;
+use tonic::codec::CompressionEncoding;
 use tonic::codegen::Bytes;
 use tonic::server::{
     ClientStreamingService, Grpc, ServerStreamingService, StreamingService, UnaryService,
@@ -182,7 +183,11 @@ impl GrpcMock {
         let limit = self.rt.protocols.grpc_max_message_bytes;
         let decoding_limit = limit.min(self.rt.limits.max_request_bytes);
         let codec = DynamicCodec::new(method.desc.output(), method.desc.input());
+        // gzip requests are decoded; responses are gzipped for clients
+        // that accept it (`grpc-accept-encoding`), others get them plain.
         let mut grpc = Grpc::new(codec)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip)
             .max_decoding_message_size(decoding_limit)
             .max_encoding_message_size(limit);
         let headers = req.headers().clone();

@@ -211,6 +211,40 @@ async fn unary_get_feature() {
     assert!(records[0].response.as_ref().unwrap().is_object());
 }
 
+/// A gzip client gets its compressed request decoded and a gzip response
+/// back (MB-PROTOCOLS-STUB-4).
+#[tokio::test]
+async fn gzip_compressed_calls_are_served() {
+    use tonic::codec::CompressionEncoding;
+    let bundle = route_guide();
+    let (_server, channel) = serve(vec![runtime("routes", Arc::clone(&bundle), None)]).await;
+    let mut client = Client::new(channel, &bundle);
+    client.grpc = client
+        .grpc
+        .send_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Gzip);
+    let path = PathAndQuery::from_static("/routeguide.RouteGuide/GetFeature");
+
+    client.ready().await;
+    let point = client.msg("routeguide.Point", json!({"latitude": 1, "longitude": 2}));
+    let codec = client.codec("routeguide.Point", "routeguide.Feature");
+    let resp = client
+        .grpc
+        .unary(request(point, &[]), path, codec)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.metadata()
+            .get("grpc-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip")
+    );
+    assert_eq!(
+        resp.into_inner().descriptor().full_name(),
+        "routeguide.Feature"
+    );
+}
+
 #[tokio::test]
 async fn server_streaming_list_features_yields_n() {
     let bundle = route_guide();

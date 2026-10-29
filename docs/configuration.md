@@ -223,7 +223,7 @@ Message brokers the AsyncAPI mocks' channels use, by name. Read at startup.
 | `brokers.<name>.sasl.mechanism` | string | | `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` | | SASL mechanism. |
 | `brokers.<name>.sasl.username` | string | | | | User name. |
 | `brokers.<name>.sasl.password` | secret reference | | A reference, never a password | | Password. |
-| `brokers.<name>.client_id_prefix` | string | `mockingbird` | | | Prefix of client ids and consumer groups: a mock's Kafka group (and AMQP shared queue) is `<prefix>-<mock>` (`<prefix>-<workspace>.<mock>` outside `default`). With a shared bus, MQTT consumers subscribe to `$share/<prefix>/<topic>`. |
+| `brokers.<name>.client_id_prefix` | string | `mockingbird` | | | Prefix of client ids and consumer groups: a mock's Kafka group (and AMQP shared queue) is `<prefix>-<mock>` (`<prefix>-<workspace>.<mock>` outside `default`). With a shared (non-`local`) bus, MQTT consumers subscribe to `$share/<group>/<topic>` with that same per-mock group, so the instances of one mock share the messages while every other mock gets them all. |
 
 ## `mocks`
 
