@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use mb_auth::Permission;
 use mb_import::SourceFormat;
 use mb_mcm::{Binding, Bundle, Direction, HttpMethod, Protocol};
-use mb_store::{ContractStatus, ContractVersion, Mock, NewContractVersion};
+use mb_store::{ContractStatus, ContractVersion, ContractVersionInfo, Mock, NewContractVersion};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -102,9 +102,13 @@ impl From<&mb_import::Warning> for ContractWarningView {
 
 /// The warnings stored on `v`; an unparseable value counts as none.
 fn version_warnings(v: &ContractVersion) -> Vec<ContractWarningView> {
-    v.warnings
-        .as_ref()
-        .and_then(|w| serde_json::from_value::<Vec<mb_import::Warning>>(w.clone()).ok())
+    warning_views(v.warnings.as_ref())
+}
+
+/// Stored `warnings` as views; an unparseable value counts as none.
+fn warning_views(warnings: Option<&serde_json::Value>) -> Vec<ContractWarningView> {
+    warnings
+        .and_then(|w| Vec::<mb_import::Warning>::deserialize(w).ok())
         .map(|ws| ws.iter().map(ContractWarningView::from).collect())
         .unwrap_or_default()
 }
@@ -200,16 +204,22 @@ pub struct ContractVersionDetail {
 
 impl From<&ContractVersion> for ContractVersionSummary {
     fn from(v: &ContractVersion) -> Self {
+        Self::from(&ContractVersionInfo::from(v))
+    }
+}
+
+impl From<&ContractVersionInfo> for ContractVersionSummary {
+    fn from(v: &ContractVersionInfo) -> Self {
         Self {
             version: v.version,
             status: VersionStatus::from(&v.status),
             source_digest: v.source_digest.clone(),
             created_by: v.created_by.clone(),
             created_at: v.created_at,
-            operations: v.bundle.operations.len(),
-            imported: v.draft_meta.is_some(),
-            channels: v.bundle.channels.len(),
-            warnings: version_warnings(v),
+            operations: v.operations,
+            imported: v.imported,
+            channels: v.channels,
+            warnings: warning_views(v.warnings.as_ref()),
         }
     }
 }
@@ -379,8 +389,8 @@ pub async fn upload(
         compiled.map_err(|e| Problem::unprocessable(format!("contract does not compile: {e}")))?;
     let operations = bundle.operations.len();
     let channels = bundle.channels.len();
-    let activate =
-        params.activate.unwrap_or(false) || st.store.active_contract(m.id).await?.is_none();
+    let activate = params.activate.unwrap_or(false)
+        || !st.store.active_versions(&[m.id]).await?.contains_key(&m.id);
     if activate {
         ensure_grpc_services_free(&st, &m, &bundle).await?;
     }
@@ -440,7 +450,7 @@ pub(crate) async fn ensure_grpc_services_free(
         if other.id == mock.id {
             continue;
         }
-        let Some(active) = st.store.active_contract(other.id).await? else {
+        let Some(active) = st.store.active_bundle(other.id).await? else {
             continue;
         };
         if let Some(service) = active.bundle.grpc_services().intersection(&services).next() {
@@ -473,7 +483,7 @@ pub async fn list(
 ) -> ApiResult<Json<Vec<ContractVersionSummary>>> {
     access.require(Permission::Read)?;
     let m = st.mock(&access.ws, &mock).await?;
-    let versions = st.store.list_contract_versions(m.id).await?;
+    let versions = st.store.list_contract_version_infos(m.id).await?;
     Ok(Json(versions.iter().map(Into::into).collect()))
 }
 

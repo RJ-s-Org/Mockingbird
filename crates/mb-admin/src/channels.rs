@@ -316,7 +316,7 @@ fn view(
 
 /// The mock's active bundle, or `None`.
 async fn active_bundle(st: &AdminState, m: &Mock) -> ApiResult<Option<Bundle>> {
-    Ok(st.store.active_contract(m.id).await?.map(|c| c.bundle))
+    Ok(st.store.active_bundle(m.id).await?.map(|c| c.bundle))
 }
 
 /// The active bundle's channel `id`, or a 404.

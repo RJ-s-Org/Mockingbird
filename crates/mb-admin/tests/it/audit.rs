@@ -19,7 +19,7 @@ use mb_store::{AuditEvent, AuditFilter, ControlStore, NewAuditEvent};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::support::wait_until;
@@ -898,8 +898,12 @@ async fn webhook_retries_then_gives_up() {
     );
     sink.send(stored(1));
     assert_eq!(wait_for(&server, 4).await.len(), 4);
-    // No fifth attempt: delivery is sequential, so the next request the
-    // server sees after event 1 is given up on is event 2's first.
+    // No fifth attempt: one would follow the fourth after 80 ms of backoff.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        4
+    );
     sink.send(stored(2));
     let got = wait_for(&server, 5).await;
     let ids: Vec<i64> = got
@@ -912,6 +916,41 @@ async fn webhook_retries_then_gives_up() {
         .collect();
     assert_eq!(ids[..5], [1, 1, 1, 1, 2], "{ids:?}");
     assert!(got[0].headers.get("x-mockingbird-signature").is_none());
+}
+
+#[tokio::test]
+async fn webhook_retries_do_not_hold_up_later_events() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "id": 1 })))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    // Event 1's first retry is a minute away; event 2 must not wait for it.
+    let sink = WebhookSink::spawn_with(
+        server.uri(),
+        None,
+        reqwest::Client::new(),
+        Duration::from_secs(60),
+    );
+    sink.send(stored(1));
+    sink.send(stored(2));
+    sink.send(stored(3));
+    let got = wait_for(&server, 3).await;
+    let ids: Vec<i64> = got
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    // First attempts keep the queue's order.
+    assert_eq!(ids, [1, 2, 3]);
 }
 
 #[tokio::test]

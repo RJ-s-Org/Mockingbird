@@ -250,14 +250,11 @@ async fn merge_into_base(
     if job.mode.as_deref() == Some("replace") {
         return Ok(draft);
     }
-    let versions = st
+    let Some(base) = st
         .store
-        .list_contract_versions(mock.id)
+        .latest_contract_version(mock.id, &[ContractStatus::Draft, ContractStatus::Active])
         .await
-        .map_err(|e| format!("cannot read the contract versions: {e}"))?;
-    let Some(base) = versions
-        .into_iter()
-        .find(|v| matches!(v.status, ContractStatus::Draft | ContractStatus::Active))
+        .map_err(|e| format!("cannot read the contract versions: {e}"))?
     else {
         return Ok(draft);
     };

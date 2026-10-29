@@ -587,6 +587,55 @@ pub struct ContractVersion {
     pub warnings: Option<Value>,
 }
 
+/// A [`ContractVersion`] without its source and bundle: what a listing
+/// shows ([`crate::ControlStore::list_contract_version_infos`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ContractVersionInfo {
+    pub id: Uuid,
+    pub mock_id: Uuid,
+    pub version: i64,
+    /// Hex sha256 of the source.
+    pub source_digest: String,
+    pub status: ContractStatus,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// Whether the version has `draft_meta` (it was produced by an import).
+    pub imported: bool,
+    /// As [`ContractVersion::warnings`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Value>,
+    /// Number of operations in the bundle.
+    pub operations: usize,
+    /// Number of event channels in the bundle.
+    pub channels: usize,
+}
+
+impl From<&ContractVersion> for ContractVersionInfo {
+    fn from(v: &ContractVersion) -> Self {
+        Self {
+            id: v.id,
+            mock_id: v.mock_id,
+            version: v.version,
+            source_digest: v.source_digest.clone(),
+            status: v.status.clone(),
+            created_by: v.created_by.clone(),
+            created_at: v.created_at,
+            imported: v.draft_meta.is_some(),
+            warnings: v.warnings.clone(),
+            operations: v.bundle.operations.len(),
+            channels: v.bundle.channels.len(),
+        }
+    }
+}
+
+/// The active version of a mock with its bundle but not its source
+/// ([`crate::ControlStore::active_bundle`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ActiveBundle {
+    pub version: i64,
+    pub bundle: Bundle,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NewContractVersion {
     pub source: Vec<u8>,
@@ -758,6 +807,60 @@ pub struct RequestLogEntry {
     pub at: DateTime<Utc>,
     #[serde(default)]
     pub kind: RequestKind,
+}
+
+/// A [`RequestLogEntry`] without its bodies, with their sizes instead
+/// ([`crate::ControlStore::list_request_log_summaries`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RequestLogSummary {
+    pub id: i64,
+    pub mock_id: Uuid,
+    pub operation_id: Option<String>,
+    pub session: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub source: Option<String>,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
+    pub latency_ms: u64,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub at: DateTime<Utc>,
+    #[serde(default)]
+    pub kind: RequestKind,
+    /// Bytes of the stored request as compact JSON.
+    pub request_bytes: u64,
+    /// Bytes of the stored response as compact JSON; 0 without one.
+    pub response_bytes: u64,
+}
+
+/// Bytes of `v` as compact JSON.
+fn json_len(v: &Value) -> u64 {
+    serde_json::to_vec(v).map_or(0, |b| b.len() as u64)
+}
+
+impl From<&RequestLogEntry> for RequestLogSummary {
+    fn from(e: &RequestLogEntry) -> Self {
+        Self {
+            id: e.id,
+            mock_id: e.mock_id,
+            operation_id: e.operation_id.clone(),
+            session: e.session.clone(),
+            method: e.method.clone(),
+            path: e.path.clone(),
+            status: e.status,
+            source: e.source.clone(),
+            fallback_reason: e.fallback_reason.clone(),
+            latency_ms: e.latency_ms,
+            prompt_tokens: e.prompt_tokens,
+            completion_tokens: e.completion_tokens,
+            at: e.at,
+            kind: e.kind,
+            request_bytes: json_len(&e.request),
+            response_bytes: e.response.as_ref().map_or(0, json_len),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

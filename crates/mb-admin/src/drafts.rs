@@ -12,7 +12,7 @@ use mb_import::smart::assemble::{
 };
 use mb_import::smart::model::DraftMeta;
 use mb_mcm::Binding;
-use mb_store::{ContractStatus, ContractVersion, Mock, StoreError};
+use mb_store::{ActiveBundle, ContractStatus, ContractVersion, Mock, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -296,8 +296,26 @@ fn operation_views(v: &ContractVersion, meta: &DraftMeta) -> Vec<DraftOperationV
 async fn draft_view(
     st: &AdminState,
     mock: &Mock,
+    v: ContractVersion,
+    meta: DraftMeta,
+) -> ApiResult<DraftView> {
+    let active = st
+        .store
+        .active_bundle(mock.id)
+        .await?
+        .filter(|active| active.version != v.version);
+    // Parsing a large source and diffing two bundles is CPU-bound: keep it
+    // off the runtime.
+    tokio::task::spawn_blocking(move || build_draft_view(&v, &meta, active))
+        .await
+        .map_err(|e| internal(format!("the draft view did not finish: {e}")))?
+}
+
+/// The view of draft `v`, diffed against `active` (another version).
+fn build_draft_view(
     v: &ContractVersion,
     meta: &DraftMeta,
+    active: Option<ActiveBundle>,
 ) -> ApiResult<DraftView> {
     let document: Value = serde_json::from_slice(&v.source).map_err(|e| {
         internal(format!(
@@ -305,18 +323,15 @@ async fn draft_view(
             v.version
         ))
     })?;
-    let diff = match st.store.active_contract(mock.id).await? {
-        Some(active) if active.version != v.version => {
-            let d = diff_bundles(&active.bundle, &v.bundle);
-            Some(DraftDiffView {
-                against_version: active.version,
-                added: d.added,
-                removed: d.removed,
-                changed: d.changed,
-            })
+    let diff = active.map(|active| {
+        let d = diff_bundles(&active.bundle, &v.bundle);
+        DraftDiffView {
+            against_version: active.version,
+            added: d.added,
+            removed: d.removed,
+            changed: d.changed,
         }
-        _ => None,
-    };
+    });
     Ok(DraftView {
         version: v.version,
         status: VersionStatus::from(&v.status),
@@ -353,7 +368,7 @@ pub async fn get_draft(
     let m = st.mock(&access.ws, &mock).await?;
     let v = version(&st, &m, number).await?;
     let meta = draft_meta(&mock, &v)?;
-    Ok(Json(draft_view(&st, &m, &v, &meta).await?))
+    Ok(Json(draft_view(&st, &m, v, meta).await?))
 }
 
 #[utoipa::path(
@@ -419,7 +434,7 @@ pub async fn put_draft(
             snapshot(&ContractVersionSummary::from(&updated)),
         )
         .await;
-    Ok(Json(draft_view(&st, &m, &updated, &new_meta).await?))
+    Ok(Json(draft_view(&st, &m, updated, new_meta).await?))
 }
 
 #[utoipa::path(

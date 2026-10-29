@@ -104,6 +104,52 @@ pub trait ControlStore: Send + Sync {
         version: i64,
     ) -> Result<ContractVersion, StoreError>;
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError>;
+    /// The active version number of each of `mock_ids` that has one, in
+    /// one query (mocks without an active version, or unknown, are left
+    /// out). The default calls [`Self::active_contract`] per mock.
+    async fn active_versions(&self, mock_ids: &[Uuid]) -> Result<HashMap<Uuid, i64>, StoreError> {
+        let mut out = HashMap::with_capacity(mock_ids.len());
+        for &id in mock_ids {
+            if let Some(v) = self.active_contract(id).await? {
+                out.insert(id, v.version);
+            }
+        }
+        Ok(out)
+    }
+    /// The active version's number and bundle, without reading its source.
+    /// The default calls [`Self::active_contract`].
+    async fn active_bundle(&self, mock_id: Uuid) -> Result<Option<ActiveBundle>, StoreError> {
+        Ok(self.active_contract(mock_id).await?.map(|v| ActiveBundle {
+            version: v.version,
+            bundle: v.bundle,
+        }))
+    }
+    /// [`Self::list_contract_versions`] without sources and bundles, newest
+    /// first. The default lists the full versions.
+    async fn list_contract_version_infos(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Vec<ContractVersionInfo>, StoreError> {
+        Ok(self
+            .list_contract_versions(mock_id)
+            .await?
+            .iter()
+            .map(ContractVersionInfo::from)
+            .collect())
+    }
+    /// The newest version whose status is one of `statuses`. The default
+    /// lists every version.
+    async fn latest_contract_version(
+        &self,
+        mock_id: Uuid,
+        statuses: &[ContractStatus],
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        Ok(self
+            .list_contract_versions(mock_id)
+            .await?
+            .into_iter()
+            .find(|v| statuses.contains(&v.status)))
+    }
     async fn list_scenarios(&self, mock_id: Uuid) -> Result<Vec<Scenario>, StoreError>;
     /// Upserts by `(mock_id, name)`. `Invalid` when `rules.chaos` is out of
     /// range.
@@ -129,6 +175,20 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError>;
+    /// [`Self::list_request_log`] without the bodies, with their sizes as
+    /// compact JSON instead. The default lists the full entries.
+    async fn list_request_log_summaries(
+        &self,
+        mock_id: Uuid,
+        f: &RequestLogFilter,
+    ) -> Result<Vec<RequestLogSummary>, StoreError> {
+        Ok(self
+            .list_request_log(mock_id, f)
+            .await?
+            .iter()
+            .map(RequestLogSummary::from)
+            .collect())
+    }
     /// The entry with `id`, of any mock.
     async fn get_request_log(&self, id: i64) -> Result<Option<RequestLogEntry>, StoreError>;
     /// Adds `tokens` to the mock's usage for `day` (UTC) and returns the new total.

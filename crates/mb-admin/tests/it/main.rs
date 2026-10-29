@@ -21,6 +21,7 @@ mod imports;
 mod live;
 mod login_limit;
 mod mocks;
+mod perf;
 mod rbac;
 mod scenarios;
 mod webhook_deliveries;

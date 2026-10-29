@@ -432,7 +432,7 @@ async fn ensure_route_free(
 }
 
 async fn view(st: &AdminState, m: Mock) -> ApiResult<MockView> {
-    let active = st.store.active_contract(m.id).await?.map(|c| c.version);
+    let active = st.store.active_versions(&[m.id]).await?.get(&m.id).copied();
     Ok(MockView::new(m, active))
 }
 
@@ -448,11 +448,18 @@ pub async fn list(
     access: WsAccess,
 ) -> ApiResult<Json<Vec<MockView>>> {
     access.require(Permission::Read)?;
-    let mut out = Vec::new();
-    for m in st.store.list_mocks(&access.ws).await? {
-        out.push(view(&st, m).await?);
-    }
-    Ok(Json(out))
+    let mocks = st.store.list_mocks(&access.ws).await?;
+    let ids: Vec<uuid::Uuid> = mocks.iter().map(|m| m.id).collect();
+    let active = st.store.active_versions(&ids).await?;
+    Ok(Json(
+        mocks
+            .into_iter()
+            .map(|m| {
+                let version = active.get(&m.id).copied();
+                MockView::new(m, version)
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(

@@ -4,6 +4,7 @@
 //! Change notifications are in-process only, like SQLite; cross-node
 //! `LISTEN/NOTIFY` arrives with HA.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -18,15 +19,15 @@ use mb_mcm::Bundle;
 use serde_json::Value;
 
 use crate::{
-    ACQUIRE_TIMEOUT, AdminSession, ApiKey, AuditEvent, AuditFilter, CHANGE_CHANNEL_CAPACITY,
-    ChannelSettings, ContractStatus, ContractVersion, ControlChange, ControlStore,
-    DEFAULT_WORKSPACE, ImportJob, ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile,
-    MAX_IMPORT_JOB_LIST, Mock, MockEventSettings, NewAuditEvent, NewContractVersion, NewImportJob,
-    NewMock, NewRequestLogEntry, PruneCounter, RequestKind, RequestLogEntry, RequestLogFilter,
-    ResourceSource, STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace,
-    lease_times, missing_workspace, not_a_draft, now, queued_progress, require_draft_status,
-    sha256_hex, validate_header_name, validate_hosts, validate_mock_name, validate_mock_settings,
-    validate_route_prefix, validate_workspace_name,
+    ACQUIRE_TIMEOUT, ActiveBundle, AdminSession, ApiKey, AuditEvent, AuditFilter,
+    CHANGE_CHANNEL_CAPACITY, ChannelSettings, ContractStatus, ContractVersion, ContractVersionInfo,
+    ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob, ImportJobStatus, ImportOutcome,
+    ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST, Mock, MockEventSettings, NewAuditEvent,
+    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, PruneCounter, RequestKind,
+    RequestLogEntry, RequestLogFilter, RequestLogSummary, ResourceSource, STALE_IMPORT_ERROR,
+    Scenario, ScenarioRules, StoreError, Workspace, lease_times, missing_workspace, not_a_draft,
+    now, queued_progress, require_draft_status, sha256_hex, validate_header_name, validate_hosts,
+    validate_mock_name, validate_mock_settings, validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -64,6 +65,16 @@ const AUDIT_SELECT: &str = "id, workspace, actor_subject, actor_kind, action, ta
      before_value::text AS before_value, after_value::text AS after_value, request_id, at";
 const LOG_SELECT: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
      prompt_tokens, completion_tokens, request::text AS request, response::text AS response, at, kind, fallback_reason";
+/// [`LOG_SELECT`] with the bodies' byte lengths instead of the bodies.
+const LOG_SUMMARY_SELECT: &str = "id, mock_id, operation_id, session, method, path, status, source, latency_ms, \
+     prompt_tokens, completion_tokens, octet_length(request::text)::bigint AS request_bytes, \
+     COALESCE(octet_length(response::text), 0)::bigint AS response_bytes, at, kind, fallback_reason";
+/// [`VERSION_SELECT`] without the source and bundle, with the bundle's
+/// operation and channel counts.
+const VERSION_INFO_SELECT: &str = "id, mock_id, version, source_digest, status, created_by, created_at, \
+     draft_meta IS NOT NULL AS imported, warnings::text AS warnings, \
+     COALESCE(json_array_length(bundle -> 'operations'), 0)::bigint AS operations, \
+     COALESCE(json_array_length(bundle -> 'channels'), 0)::bigint AS channels";
 const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
 /// [`CHANNEL_COLUMNS`] with JSON read back as text.
 const CHANNEL_SELECT: &str =
@@ -395,6 +406,75 @@ fn log_from_row(row: &PgRow) -> Result<RequestLogEntry, StoreError> {
         at: row.try_get("at")?,
         kind: RequestKind::parse(&kind)
             .ok_or_else(|| StoreError::Db(format!("unknown request kind {kind:?}")))?,
+    })
+}
+
+/// The mock's request-log rows matching `f` (newest first), selecting
+/// `columns`.
+fn log_query(columns: &str, mock_id: Uuid, f: &RequestLogFilter) -> QueryBuilder<Postgres> {
+    let mut qb = QueryBuilder::<Postgres>::new(format!(
+        "SELECT {columns} FROM request_log WHERE mock_id = "
+    ));
+    qb.push_bind(mock_id);
+    if let Some(op) = &f.operation_id {
+        qb.push(" AND operation_id = ").push_bind(op.clone());
+    }
+    if let Some(session) = &f.session {
+        qb.push(" AND session = ").push_bind(session.clone());
+    }
+    if let Some(source) = &f.source {
+        qb.push(" AND source = ").push_bind(source.clone());
+    }
+    if let Some(kind) = f.kind {
+        qb.push(" AND kind = ").push_bind(kind.as_str());
+    }
+    if let Some(before) = f.before_id {
+        qb.push(" AND id < ").push_bind(before);
+    }
+    qb.push(" ORDER BY id DESC LIMIT ")
+        .push_bind(i64::from(f.effective_limit()));
+    qb
+}
+
+fn log_summary_from_row(row: &PgRow) -> Result<RequestLogSummary, StoreError> {
+    let status: i32 = row.try_get("status")?;
+    let kind: String = row.try_get("kind")?;
+    Ok(RequestLogSummary {
+        id: row.try_get("id")?,
+        mock_id: row.try_get("mock_id")?,
+        operation_id: row.try_get("operation_id")?,
+        session: row.try_get("session")?,
+        method: row.try_get("method")?,
+        path: row.try_get("path")?,
+        status: from_i64(i64::from(status), "status")?,
+        source: row.try_get("source")?,
+        fallback_reason: row.try_get("fallback_reason")?,
+        latency_ms: from_i64(row.try_get("latency_ms")?, "latency_ms")?,
+        prompt_tokens: from_i64(row.try_get("prompt_tokens")?, "prompt_tokens")?,
+        completion_tokens: from_i64(row.try_get("completion_tokens")?, "completion_tokens")?,
+        at: row.try_get("at")?,
+        kind: RequestKind::parse(&kind)
+            .ok_or_else(|| StoreError::Db(format!("unknown request kind {kind:?}")))?,
+        request_bytes: from_i64(row.try_get("request_bytes")?, "request_bytes")?,
+        response_bytes: from_i64(row.try_get("response_bytes")?, "response_bytes")?,
+    })
+}
+
+fn version_info_from_row(row: &PgRow) -> Result<ContractVersionInfo, StoreError> {
+    let status: String = row.try_get("status")?;
+    let warnings: Option<String> = row.try_get("warnings")?;
+    Ok(ContractVersionInfo {
+        id: row.try_get("id")?,
+        mock_id: row.try_get("mock_id")?,
+        version: row.try_get("version")?,
+        source_digest: row.try_get("source_digest")?,
+        status: ContractStatus::parse(&status)?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        imported: row.try_get("imported")?,
+        warnings: warnings.map(|w| serde_json::from_str(&w)).transpose()?,
+        operations: from_i64(row.try_get("operations")?, "operations")?,
+        channels: from_i64(row.try_get("channels")?, "channels")?,
     })
 }
 
@@ -892,6 +972,73 @@ impl ControlStore for PgStore {
             .transpose()
     }
 
+    async fn active_versions(&self, mock_ids: &[Uuid]) -> Result<HashMap<Uuid, i64>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT mock_id, version FROM contract_versions \
+             WHERE status = 'active' AND mock_id = ANY($1)",
+        )
+        .bind(mock_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("mock_id")?, row.try_get("version")?)))
+            .collect()
+    }
+
+    async fn active_bundle(&self, mock_id: Uuid) -> Result<Option<ActiveBundle>, StoreError> {
+        let row = sqlx::query(
+            "SELECT version, bundle::text AS bundle FROM contract_versions \
+             WHERE mock_id = $1 AND status = 'active'",
+        )
+        .bind(mock_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let bundle: String = row.try_get("bundle")?;
+        Ok(Some(ActiveBundle {
+            version: row.try_get("version")?,
+            bundle: serde_json::from_str(&bundle)?,
+        }))
+    }
+
+    async fn list_contract_version_infos(
+        &self,
+        mock_id: Uuid,
+    ) -> Result<Vec<ContractVersionInfo>, StoreError> {
+        let sql = format!(
+            "SELECT {VERSION_INFO_SELECT} FROM contract_versions WHERE mock_id = $1 ORDER BY version DESC"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(version_info_from_row)
+            .collect()
+    }
+
+    async fn latest_contract_version(
+        &self,
+        mock_id: Uuid,
+        statuses: &[ContractStatus],
+    ) -> Result<Option<ContractVersion>, StoreError> {
+        let statuses: Vec<&str> = statuses.iter().map(ContractStatus::as_str).collect();
+        let sql = format!(
+            "SELECT {VERSION_SELECT} FROM contract_versions WHERE mock_id = $1 AND status = ANY($2) \
+             ORDER BY version DESC LIMIT 1"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id)
+            .bind(statuses)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(version_from_row)
+            .transpose()
+    }
+
     async fn list_scenarios(&self, mock_id: Uuid) -> Result<Vec<Scenario>, StoreError> {
         sqlx::query(
             "SELECT mock_id, name, instructions, rules::text AS rules, source FROM scenarios \
@@ -1072,32 +1219,26 @@ impl ControlStore for PgStore {
         mock_id: Uuid,
         f: &RequestLogFilter,
     ) -> Result<Vec<RequestLogEntry>, StoreError> {
-        let mut qb = QueryBuilder::<Postgres>::new(format!(
-            "SELECT {LOG_SELECT} FROM request_log WHERE mock_id = "
-        ));
-        qb.push_bind(mock_id);
-        if let Some(op) = &f.operation_id {
-            qb.push(" AND operation_id = ").push_bind(op.clone());
-        }
-        if let Some(session) = &f.session {
-            qb.push(" AND session = ").push_bind(session.clone());
-        }
-        if let Some(source) = &f.source {
-            qb.push(" AND source = ").push_bind(source.clone());
-        }
-        if let Some(kind) = f.kind {
-            qb.push(" AND kind = ").push_bind(kind.as_str());
-        }
-        if let Some(before) = f.before_id {
-            qb.push(" AND id < ").push_bind(before);
-        }
-        qb.push(" ORDER BY id DESC LIMIT ")
-            .push_bind(i64::from(f.effective_limit()));
-        qb.build()
+        log_query(LOG_SELECT, mock_id, f)
+            .build()
             .fetch_all(&self.pool)
             .await?
             .iter()
             .map(log_from_row)
+            .collect()
+    }
+
+    async fn list_request_log_summaries(
+        &self,
+        mock_id: Uuid,
+        f: &RequestLogFilter,
+    ) -> Result<Vec<RequestLogSummary>, StoreError> {
+        log_query(LOG_SUMMARY_SELECT, mock_id, f)
+            .build()
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(log_summary_from_row)
             .collect()
     }
 
