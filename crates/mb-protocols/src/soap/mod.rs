@@ -6,7 +6,9 @@
 //! Body's first child, decoded to JSON (see `xml_json`), validated and
 //! run through the shared `call` pipeline. Responses use
 //! the request's SOAP version; every failure is a SOAP Fault. `GET ?wsdl`
-//! serves the stored WSDL with its addresses pointing at this mock.
+//! serves the stored WSDL with its addresses pointing at this mock, and
+//! its uploaded schemas' `schemaLocation`s at `GET ?xsd=<path>`, which
+//! serves them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -36,7 +38,7 @@ use crate::{MockRuntime, MountPrefix};
 mod envelope;
 mod xml_json;
 
-use envelope::{Element, Version};
+use envelope::{Element, Schemas, Version};
 pub use xml_json::envelope_body_to_json;
 pub(crate) use xml_json::json_to_xml;
 
@@ -70,7 +72,10 @@ struct Endpoint {
 
 struct SoapState {
     rt: Arc<MockRuntime>,
+    /// The stored WSDL without its embedded schemas.
     wsdl: String,
+    /// The schemas uploaded with the WSDL, served at `?xsd=<path>`.
+    schemas: Schemas,
     /// `address_path` → the operations served there.
     endpoints: HashMap<String, Vec<Endpoint>>,
     /// Service name → its `address_path`, for the `?wsdl` rewrite.
@@ -83,7 +88,11 @@ pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, SoapError> {
     let Some(ProtocolPayload::Soap { wsdl }) = &rt.bundle.protocol_payload else {
         return Err(SoapError::MissingWsdl);
     };
-    let wsdl = wsdl.clone();
+    let (wsdl, schemas) = match envelope::split_schemas(wsdl) {
+        Ok(split) => split,
+        // `?wsdl` reports the malformed WSDL.
+        Err(_) => (wsdl.clone(), Schemas::default()),
+    };
     let mut endpoints: HashMap<String, Vec<Endpoint>> = HashMap::new();
     let mut services: BTreeMap<String, String> = BTreeMap::new();
     for (i, op) in rt.bundle.operations.iter().enumerate() {
@@ -128,6 +137,7 @@ pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, SoapError> {
     let state = Arc::new(SoapState {
         rt,
         wsdl,
+        schemas,
         endpoints,
         services: services.into_iter().collect(),
     });
@@ -166,9 +176,12 @@ async fn handle(State(st): State<Arc<SoapState>>, req: Request) -> Response {
                 .instrument(span)
                 .await
         }
-        Method::GET if is_wsdl_query(parts.uri.query()) => {
+        Method::GET
+            if is_wsdl_query(parts.uri.query()) || xsd_query(parts.uri.query()).is_some() =>
+        {
             // The WSDL describes every operation: it needs the same
-            // credentials as calling them (HTTP headers only).
+            // credentials as calling them (HTTP headers only), and so do
+            // its schemas.
             if let Err(u) = authenticate_contract(&st.rt, &parts.headers, &[]).await {
                 let mut resp = problem(401, "Unauthorized", u.detail);
                 if let Ok(v) = HeaderValue::from_str(&u.challenge) {
@@ -180,14 +193,18 @@ async fn handle(State(st): State<Arc<SoapState>>, req: Request) -> Response {
                 .extensions
                 .get::<MountPrefix>()
                 .map_or("", |p| p.0.as_str());
-            serve_wsdl(&st, &wsdl_base(&st.rt, &parts.headers, prefix))
+            let base = wsdl_base(&st.rt, &parts.headers, prefix);
+            match xsd_query(parts.uri.query()) {
+                Some(xsd) => serve_xsd(&st, &base, &path, &xsd),
+                None => serve_wsdl(&st, &base, &path),
+            }
         }
         _ => {
             let mut resp = problem(
                 405,
                 "Method Not Allowed",
                 format!(
-                    "{} is not supported; POST a SOAP envelope or GET ?wsdl",
+                    "{} is not supported; POST a SOAP envelope, GET ?wsdl or GET ?xsd=<path>",
                     parts.method
                 ),
             );
@@ -285,17 +302,99 @@ fn is_wsdl_query(query: Option<&str>) -> bool {
     query.is_some_and(|q| q.split('&').any(|p| p == "wsdl" || p == "WSDL"))
 }
 
-fn serve_wsdl(st: &SoapState, base: &str) -> Response {
-    match envelope::rewrite_wsdl(&st.wsdl, base, &st.services) {
-        Ok(text) => {
-            let mut resp = (StatusCode::OK, text).into_response();
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(Version::V11.content_type()),
-            );
-            resp
+/// The upload path asked for by `xsd=<path>` (percent-decoded).
+fn xsd_query(query: Option<&str>) -> Option<String> {
+    query?
+        .split('&')
+        .find_map(|p| p.strip_prefix("xsd="))
+        .map(percent_decode)
+}
+
+/// `s` with its `%XX` escapes decoded; invalid escapes are kept as they
+/// are.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied(),
+            bytes.get(i + 2).copied(),
+        ) {
+            (b'%', Some(h), Some(l)) if hex(h).is_some() && hex(l).is_some() => {
+                let value = hex(h).unwrap_or_default() * 16 + hex(l).unwrap_or_default();
+                out.push(u8::try_from(value).unwrap_or_default());
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
         }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `path` with everything but unreserved characters and `/` escaped, for
+/// an `xsd=` query value.
+fn percent_encode(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The URL serving schema `target` next to the WSDL at `base` + `path`.
+fn xsd_url(base: &str, path: &str, target: &str) -> String {
+    format!("{base}{path}?xsd={}", percent_encode(target))
+}
+
+/// A `200` XML document.
+fn xml_document(text: String) -> Response {
+    let mut resp = (StatusCode::OK, text).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(Version::V11.content_type()),
+    );
+    resp
+}
+
+fn serve_wsdl(st: &SoapState, base: &str, path: &str) -> Response {
+    let url = |target: &str| xsd_url(base, path, target);
+    let text = envelope::rewrite_wsdl(&st.wsdl, base, &st.services).and_then(|text| {
+        envelope::rewrite_schema_locations(&text, &st.schemas.wsdl_path, &st.schemas, &url)
+    });
+    match text {
+        Ok(text) => xml_document(text),
         Err(e) => problem(500, "Internal Server Error", format!("stored WSDL: {e}")),
+    }
+}
+
+/// Serves the uploaded schema `xsd` with its own `schemaLocation`s
+/// rewritten like the WSDL's.
+fn serve_xsd(st: &SoapState, base: &str, path: &str, xsd: &str) -> Response {
+    let Some(text) = st.schemas.files.get(xsd) else {
+        return problem(
+            404,
+            "Not Found",
+            format!("no schema {xsd} was uploaded with the WSDL"),
+        );
+    };
+    let url = |target: &str| xsd_url(base, path, target);
+    match envelope::rewrite_schema_locations(text, xsd, &st.schemas, &url) {
+        Ok(text) => xml_document(text),
+        Err(e) => problem(
+            500,
+            "Internal Server Error",
+            format!("stored schema {xsd}: {e}"),
+        ),
     }
 }
 

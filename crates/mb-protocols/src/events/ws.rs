@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 use super::runtime::{ChannelInner, DEFAULT_SESSION, WsClient};
 use super::{InMessage, address_matches};
 use crate::dp_auth::{Unauthorized, verify_key};
-use crate::ws::{ChannelConfig, ChannelIo, Outbound, serve_channel};
+use crate::ws::{ChannelConfig, FrameIo, Inbound, Outbound, serve_frames};
 use crate::{RequestKind, RequestRecord};
 
 /// Close code sent when the mock's channel runtime is replaced or dropped.
@@ -154,7 +154,7 @@ async fn upgrade_channel(
     // Publish channels' messages) so its close reaches every socket.
     let hub = stream::select_all(matched.iter().map(|t| hub_stream(inner.hub.subscribe(t))));
     let cfg = ChannelConfig::for_mock(&inner.rt, vec![]);
-    serve_channel(upgrade, cfg, move |io| {
+    serve_frames(upgrade, cfg, move |io| {
         session(
             inner,
             Arc::new(subscribers),
@@ -272,9 +272,9 @@ async fn session(
     mut hub: stream::SelectAll<BoxStream<'static, Option<String>>>,
     tenancy: mb_ext::Tenancy,
     headers: HeaderMap,
-    io: ChannelIo,
+    io: FrameIo,
 ) {
-    let ChannelIo {
+    let FrameIo {
         mut incoming,
         outgoing,
         ..
@@ -304,14 +304,18 @@ async fn session(
                 }
             },
             () = run(&mut handling) => handling = None,
-            text = incoming.next(), if handling.is_none() => match text {
-                Some(text) => {
+            frame = incoming.next(), if handling.is_none() => match frame {
+                Some(frame) => {
+                    let payload = match frame {
+                        Inbound::Text(text) => text.into_bytes(),
+                        Inbound::Binary(bytes) => bytes,
+                    };
                     handling = Some(
-                        handle_text(
+                        handle_frame(
                             Arc::clone(&inner),
                             Arc::clone(&subscribers),
                             path.clone(),
-                            text,
+                            payload,
                             Arc::clone(&client),
                         )
                         .boxed(),
@@ -323,19 +327,20 @@ async fn session(
     }
 }
 
-/// Receive one client frame on the first Subscribe channel that accepts
-/// it, else the first; a WebSocket reply goes back to this client only.
-async fn handle_text(
+/// Receive one client frame (text or binary) on the first Subscribe
+/// channel that accepts it, else the first; a WebSocket reply goes back to
+/// this client only.
+async fn handle_frame(
     inner: Arc<ChannelInner>,
     subscribers: Arc<Vec<Channel>>,
     path: String,
-    text: String,
+    payload: Vec<u8>,
     client: Arc<WsClient>,
 ) {
     let Some(first) = subscribers.first() else {
         return;
     };
-    let channel = match (subscribers.len(), serde_json::from_str::<Value>(&text)) {
+    let channel = match (subscribers.len(), serde_json::from_slice::<Value>(&payload)) {
         (2.., Ok(payload)) => subscribers
             .iter()
             .find(|c| {
@@ -352,7 +357,7 @@ async fn handle_text(
         address: path,
         key: None,
         headers: Vec::new(),
-        payload: text.into_bytes(),
+        payload,
     };
     inner.receive_from(channel, msg, Some(&client)).await;
 }

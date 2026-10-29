@@ -73,7 +73,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, optional = true }
-tonic = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true, features = ["gzip"] }
 tonic-health = { workspace = true, optional = true }
 tonic-reflection = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }

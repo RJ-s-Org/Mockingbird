@@ -588,3 +588,68 @@ async fn shutdown_flushes_queued_publishes() {
     }
     assert_eq!(received, 50);
 }
+
+/// A JSON message whose payload is `payload`.
+fn json_message(payload: &str) -> OutMessage {
+    OutMessage {
+        key: None,
+        headers: Vec::new(),
+        payload: payload.as_bytes().to_vec(),
+        content_type: "application/json".into(),
+    }
+}
+
+/// Publishes `"warm"` until `stream` gets one, so its subscription is in
+/// place.
+async fn warm_up(stream: &mut MessageStream, client: &mb_protocols::events::MqttClient) {
+    let target = binding("orders/created");
+    publish_until_received(stream, || client.publish(&target, json_message("\"warm\""))).await;
+}
+
+/// The non-warm-up payloads `stream` yields until 300 ms pass without one.
+async fn drain(stream: &mut MessageStream) -> Vec<String> {
+    let mut got = Vec::new();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_millis(300), stream.next()).await
+    {
+        let payload = String::from_utf8(item.unwrap().payload).unwrap();
+        if payload != "\"warm\"" {
+            got.push(payload);
+        }
+    }
+    got
+}
+
+/// Two mocks consuming one topic over shared subscriptions each get every
+/// message: the share group is the mock's consumer group, not the
+/// broker's client id prefix (MB-PROTOCOLS-STUB-6).
+#[tokio::test]
+async fn shared_subscriptions_use_the_mock_group() {
+    let port = start_broker();
+    let cfg = mqtt_config("m", port);
+    let a = mb_protocols::events::MqttClient::connect(&cfg, None)
+        .await
+        .unwrap();
+    let b = mb_protocols::events::MqttClient::connect(&cfg, None)
+        .await
+        .unwrap();
+    let mut a_stream = a
+        .subscribe_shared(&binding("orders/created"), "mockingbird-a")
+        .await
+        .unwrap();
+    let mut b_stream = b
+        .subscribe_shared(&binding("orders/created"), "mockingbird-b")
+        .await
+        .unwrap();
+    warm_up(&mut a_stream, &a).await;
+    warm_up(&mut b_stream, &b).await;
+    drain(&mut a_stream).await;
+    drain(&mut b_stream).await;
+
+    let target = binding("orders/created");
+    let sent: Vec<String> = (0..10).map(|i| format!("{i}")).collect();
+    for payload in &sent {
+        a.publish(&target, json_message(payload)).await.unwrap();
+    }
+    assert_eq!(drain(&mut a_stream).await, sent);
+    assert_eq!(drain(&mut b_stream).await, sent);
+}

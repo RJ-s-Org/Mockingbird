@@ -21,6 +21,7 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const WSDL_NS: &str = "http://schemas.xmlsoap.org/wsdl/";
 const WSDL_SOAP11_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap/";
 const WSDL_SOAP12_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap12/";
+const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
 /// Deeper documents are rejected.
 const MAX_DEPTH: usize = 256;
 /// More namespace declarations on one element are rejected.
@@ -407,14 +408,20 @@ fn attr_value(e: &BytesStart<'_>, local: &str) -> Result<Option<String>, String>
 
 /// The tag `e` with its `location` attribute set to `location`.
 fn address_tag(e: &BytesStart<'_>, location: &str, empty: bool) -> Result<String, String> {
+    tag_with(e, "location", location, empty)
+}
+
+/// Start tag `e` with attribute `name` set to `value` (added when absent);
+/// the other attributes are copied.
+fn tag_with(e: &BytesStart<'_>, name: &str, value: &str, empty: bool) -> Result<String, String> {
     let mut tag = format!("<{}", e.name().as_ref());
     let mut found = false;
     for attr in e.attributes() {
         let attr = attr.map_err(syntax)?;
         let key = attr.key.as_ref();
-        if key == "location" {
+        if key == name {
             found = true;
-            tag.push_str(&format!(" location=\"{}\"", escape(location)));
+            tag.push_str(&format!(" {name}=\"{}\"", escape(value)));
         } else {
             // Raw (still escaped) value; a `"` can only come from a
             // single-quoted value.
@@ -423,10 +430,147 @@ fn address_tag(e: &BytesStart<'_>, location: &str, empty: bool) -> Result<String
         }
     }
     if !found {
-        tag.push_str(&format!(" location=\"{}\"", escape(location)));
+        tag.push_str(&format!(" {name}=\"{}\"", escape(value)));
     }
     tag.push_str(if empty { "/>" } else { ">" });
     Ok(tag)
+}
+
+/// The uploaded schemas embedded in a stored WSDL (see
+/// [`mb_mcm::ProtocolPayload::Soap`]).
+#[derive(Debug, Default)]
+pub(crate) struct Schemas {
+    /// The WSDL's path in the upload, which its `schemaLocation`s are
+    /// relative to.
+    pub wsdl_path: String,
+    /// Upload path → schema text.
+    pub files: HashMap<String, String>,
+}
+
+/// `wsdl` without its embedded schemas, and those schemas.
+pub(crate) fn split_schemas(wsdl: &str) -> Result<(String, Schemas), String> {
+    let mut reader = NsReader::from_str(wsdl);
+    let mut schemas = Schemas::default();
+    // The byte range of the `<schemas>` element.
+    let mut span: Option<(usize, usize)> = None;
+    let mut inside = false;
+    // The schema being read: its path and text.
+    let mut current: Option<(String, String)> = None;
+    loop {
+        let before = usize::try_from(reader.buffer_position()).map_err(syntax)?;
+        let (resolved, event) = reader.read_resolved_event().map_err(syntax)?;
+        let embedded =
+            matches!(resolved, ResolveResult::Bound(ns) if ns.0 == mb_mcm::EMBEDDED_SCHEMAS_NS);
+        match event {
+            Event::Start(ref e) if embedded && e.local_name().as_ref() == "schemas" => {
+                inside = true;
+                schemas.wsdl_path = attr_value(e, "wsdl")?.unwrap_or_default();
+                span = Some((before, before));
+            }
+            Event::Start(ref e) if inside && embedded && e.local_name().as_ref() == "schema" => {
+                current = Some((attr_value(e, "path")?.unwrap_or_default(), String::new()));
+            }
+            Event::CData(ref c) => {
+                if let Some((_, text)) = current.as_mut() {
+                    text.push_str(c.as_ref());
+                }
+            }
+            Event::End(ref e) if embedded && e.local_name().as_ref() == "schema" => {
+                if let Some((path, text)) = current.take() {
+                    schemas.files.insert(path, text);
+                }
+            }
+            Event::End(ref e) if embedded && e.local_name().as_ref() == "schemas" => {
+                let after = usize::try_from(reader.buffer_position()).map_err(syntax)?;
+                if let Some((start, _)) = span {
+                    span = Some((start, after));
+                }
+                break;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let clean = match span {
+        Some((start, end)) if end > start => format!("{}{}", &wsdl[..start], &wsdl[end..]),
+        _ => wsdl.to_string(),
+    };
+    Ok((clean, schemas))
+}
+
+/// `location` relative to the directory of `importer`, normalized (as the
+/// import resolved it).
+pub(crate) fn join_location(importer: &str, location: &str) -> String {
+    let dir = importer.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut parts: Vec<&str> = if location.starts_with('/') {
+        Vec::new()
+    } else {
+        dir.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    for seg in location.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// `doc` (the document at upload path `doc_path`) with every XSD
+/// `import`/`include`/`redefine` `schemaLocation` that names one of
+/// `schemas` set to `url(<its upload path>)`. Everything else is copied
+/// byte for byte.
+pub(crate) fn rewrite_schema_locations(
+    doc: &str,
+    doc_path: &str,
+    schemas: &Schemas,
+    url: &dyn Fn(&str) -> String,
+) -> Result<String, String> {
+    if schemas.files.is_empty() {
+        return Ok(doc.to_string());
+    }
+    let mut reader = NsReader::from_str(doc);
+    let mut out = String::with_capacity(doc.len() + 256);
+    let mut copied = 0usize;
+    loop {
+        let before = usize::try_from(reader.buffer_position()).map_err(syntax)?;
+        let (resolved, event) = reader.read_resolved_event().map_err(syntax)?;
+        let in_xsd = matches!(resolved, ResolveResult::Bound(ns) if ns.0 == XSD_NS);
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e)
+                if in_xsd
+                    && matches!(e.local_name().as_ref(), "import" | "include" | "redefine") =>
+            {
+                let Some(location) = attr_value(e, "schemaLocation")? else {
+                    continue;
+                };
+                let target = join_location(doc_path, location.trim());
+                if !schemas.files.contains_key(&target) {
+                    continue;
+                }
+                let after = usize::try_from(reader.buffer_position()).map_err(syntax)?;
+                let start = doc[before..after]
+                    .find('<')
+                    .map(|i| before + i)
+                    .ok_or_else(|| syntax("schema reference tag not found"))?;
+                out.push_str(&doc[copied..start]);
+                out.push_str(&tag_with(
+                    e,
+                    "schemaLocation",
+                    &url(&target),
+                    matches!(event, Event::Empty(_)),
+                )?);
+                copied = after;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    out.push_str(&doc[copied..]);
+    Ok(out)
 }
 
 /// The path of an absolute URL (`/` when it has none); a relative
@@ -546,6 +690,39 @@ mod tests {
         assert_eq!(url_path("http://h"), "/");
         assert_eq!(url_path("http://h?x"), "/");
         assert_eq!(url_path("/rel"), "/rel");
+    }
+
+    #[test]
+    fn splits_embedded_schemas() {
+        let wsdl = r#"<d:definitions xmlns:d="http://schemas.xmlsoap.org/wsdl/"><d:types/><mb:schemas xmlns:mb="urn:mockingbird:embedded-schemas" wsdl="a/s.wsdl"><mb:schema path="a/t.xsd"><![CDATA[<x>]]]]><![CDATA[></x>]]></mb:schema></mb:schemas></d:definitions>"#;
+        let (clean, schemas) = split_schemas(wsdl).unwrap();
+        assert_eq!(
+            clean,
+            r#"<d:definitions xmlns:d="http://schemas.xmlsoap.org/wsdl/"><d:types/></d:definitions>"#
+        );
+        assert_eq!(schemas.wsdl_path, "a/s.wsdl");
+        assert_eq!(schemas.files["a/t.xsd"], "<x>]]></x>");
+        assert_eq!(join_location("a/s.wsdl", "../b/./c.xsd"), "b/c.xsd");
+
+        let plain = r#"<d:definitions xmlns:d="http://schemas.xmlsoap.org/wsdl/"/>"#;
+        let (clean, schemas) = split_schemas(plain).unwrap();
+        assert_eq!(clean, plain);
+        assert!(schemas.files.is_empty());
+    }
+
+    #[test]
+    fn rewrites_only_known_schema_locations() {
+        let doc = r#"<s:schema xmlns:s="http://www.w3.org/2001/XMLSchema"><s:import namespace="a" schemaLocation="t.xsd"/><s:import namespace="b" schemaLocation="u.xsd"/><x:include xmlns:x="other" schemaLocation="t.xsd"/></s:schema>"#;
+        let schemas = Schemas {
+            wsdl_path: "d/s.wsdl".into(),
+            files: HashMap::from([("d/t.xsd".to_string(), String::new())]),
+        };
+        let out =
+            rewrite_schema_locations(doc, "d/s.wsdl", &schemas, &|t| format!("U?{t}")).unwrap();
+        assert_eq!(
+            out,
+            r#"<s:schema xmlns:s="http://www.w3.org/2001/XMLSchema"><s:import namespace="a" schemaLocation="U?d/t.xsd"/><s:import namespace="b" schemaLocation="u.xsd"/><x:include xmlns:x="other" schemaLocation="t.xsd"/></s:schema>"#
+        );
     }
 
     #[test]

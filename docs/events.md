@@ -126,7 +126,7 @@ mockingbird brokers list
 
 ## WebSocket channels
 
-A `ws` channel is served on the data plane at `<prefix><path>`, the mock's route prefix followed by the channel's address. Messages the mock publishes go to every client connected to that path; messages clients send are consumed like broker messages, and their replies go back to the sending client only.
+A `ws` channel is served on the data plane at `<prefix><path>`, the mock's route prefix followed by the channel's address. Messages the mock publishes go to every client connected to that path; messages clients send are consumed like broker messages, and their replies go back to the sending client only. Text and binary frames are both received; a frame that is not a JSON document is recorded as a `400`, like a broker message that is not.
 
 WebSocket channels are admitted like a call of every other protocol: the upgrade first goes through tenant resolution and the quota (a rejection is answered with its status, e.g. `429` with `Retry-After`, and recorded as a refused `event` call), and each reply generated for a client's frame is admitted again against the tenancy resolved at the upgrade (a refused reply is not sent, and the received message's record notes `rejected`) and metered to that tenant. They honour the mock's `data_plane_auth` too: in `api_key` mode the upgrade request needs a data-plane key of the mock's workspace in the key header (default `x-api-key`) or the `api_key` query parameter; without one it is answered `401` (with a `WWW-Authenticate` challenge) and recorded in the mock's request log as a refused `event` call. Event records (produced, consumed and refused) belong to the mock's workspace and are listed under `/api/v1/workspaces/{ws}/mocks/{mock}/requests?kind=event`.
 
@@ -149,8 +149,7 @@ A plain `cargo build` includes MQTT and AMQP (pure Rust). Kafka is opt-in: `carg
 ## Known limits
 
 - Payloads are always JSON-encoded; Avro schemas are used for generation and validation, but Avro binary encoding is not produced.
-- MQTT subscriptions are not shared across instances: every instance consumes every message.
+- MQTT subscriptions are shared only with a shared (non-`local`) [bus](configuration.md#bus): then each mock's instances subscribe to `$share/<consumer group>/<topic>` and split its messages. With the in-process bus every instance consumes every message. Two mocks with the same topic on one connection are told apart by MQTT 5 subscription identifiers; a broker without them may deliver such messages twice.
 - Kafka GSSAPI (Kerberos) authentication is unsupported; use PLAIN or SCRAM.
 - MQTT over TLS is unsupported (see [Brokers](#brokers)); use a TLS-terminating proxy or plain MQTT.
 - State-change triggers fire on the instance that observed the change.
-- The console Channels tab comes in P6; until then use the Admin API and the CLI.
