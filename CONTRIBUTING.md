@@ -25,8 +25,10 @@ is merged only when all of them pass.
 # Rust
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo nextest run --workspace --all-features   # CI adds --profile ci
+cargo test --doc --workspace --all-features    # nextest skips doctests
 cargo check -p mockingbird-cli --no-default-features   # the slim binary
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 # Postgres- and Redis-gated tests, against throwaway local servers
 scripts/test-postgres.sh
@@ -44,7 +46,13 @@ npm run check:api     # the generated Admin API client matches the server
 npm run e2e           # Playwright; run `npx playwright install chromium` once
 ```
 
-`cargo test` without the scripts skips the Postgres and Redis tests (they read
+[cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`) is the
+recommended runner: it runs each test in its own process, test binaries in parallel,
+and reads `.config/nextest.toml`, whose `cross-node` test group runs the tests that
+share one Postgres or Redis server-wide resource one at a time.
+`cargo test --workspace --all-features` still works and runs the same tests.
+
+Run without the scripts, the tests skip the Postgres and Redis ones (they read
 `MB_TEST_POSTGRES_URL` and `MB_TEST_REDIS_URL`). After any Admin API change, run
 `npm run gen:api` and commit the regenerated `src/api/schema.d.ts`; never edit it by hand.
 

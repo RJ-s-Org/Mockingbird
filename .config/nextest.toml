@@ -1,0 +1,43 @@
+# cargo-nextest configuration: `cargo nextest run --workspace --all-features`
+# locally, `--profile ci` in CI. nextest does not run doctests; run
+# `cargo test --doc --workspace --all-features` for those.
+#
+# nextest runs every test in its own process and runs test binaries in
+# parallel with each other, so an in-binary `static` lock no longer
+# serialises tests. Tests that share one external resource without per-test
+# isolation go in a test group instead.
+
+[test-groups]
+# Tests that share a server-wide resource on the Postgres or Redis test
+# servers:
+# - mb-state tests/bus.rs: every bus uses the one `mockingbird_bus` channel,
+#   and the Redis reconnect test runs `CLIENT KILL TYPE pubsub`, which cuts
+#   every pub/sub connection on the server (including other binaries' buses);
+# - mockingbird-cli tests/ha_cluster.rs: the Redis bus channel, the leader
+#   key, and the same server-wide `CLIENT KILL TYPE pubsub` in the outage test;
+# - mockingbird-cli tests/roles.rs: the Postgres tests contend for the one
+#   `control` leader lock.
+# Each binary serialised these with a process-local mutex under `cargo test`.
+# The tests that do not touch Postgres or Redis in these binaries are fast,
+# so the whole binary joins the group.
+cross-node = { max-threads = 1 }
+
+# Each filter matches both the current `tests/<name>.rs` binaries and the
+# planned single `tests/it` binary whose modules keep the file names.
+[[profile.default.overrides]]
+filter = """
+    (package(mockingbird-state) & (binary(bus) | (kind(test) & test(/^bus::/))))
+  | (package(mockingbird-cli) & (binary(ha_cluster) | (kind(test) & test(/^ha_cluster::/))))
+  | (package(mockingbird-cli) & (binary(roles) | (kind(test) & test(/^roles::/))))
+"""
+test-group = "cross-node"
+
+[profile.ci]
+# Report every failure, not only the first.
+fail-fast = false
+# No retries: a flaky test fails the run instead of passing on a rerun.
+retries = 0
+# A test is reported slow after 60 s and killed after 5 periods, so a hang
+# fails the job instead of running until the job timeout.
+slow-timeout = { period = "60s", terminate-after = 5 }
+failure-output = "immediate-final"

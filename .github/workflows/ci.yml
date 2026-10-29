@@ -6,10 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A newer push to the same PR or branch cancels the run it supersedes.
+# A newer push to the same PR cancels the run it supersedes. Runs on main
+# are never cancelled, so every main commit reports a result and saves its
+# cache.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -85,17 +87,20 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
-      - name: Test the custom extension example
-        run: cargo test -p mockingbird-custom-ext-example
-      - name: Build the API docs
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-      - name: Check the slim binary
-        run: cargo check -p mockingbird-cli --no-default-features
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      # Profile and test groups: .config/nextest.toml. nextest skips
+      # doctests, so they run on their own.
+      - run: cargo nextest run --workspace --all-features --profile ci
+      - run: cargo test --doc --workspace --all-features
 
   # Each mb-protocols feature (and none) must build on its own, warnings
   # included (P4 Global Constraints; P5 adds the event features). One job
-  # checks them in turn, so the shared dependencies compile once.
+  # checks them in turn, so the shared dependencies compile once. It also
+  # checks the slim binary and builds the API docs, off the critical path of
+  # `check`; RUSTFLAGS denies warnings in every step. No Node: mb-console's
+  # build.rs writes a placeholder console page when dist/ is missing.
   protocol-features:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
@@ -118,6 +123,12 @@ jobs:
             cargo check -p mockingbird-protocols --no-default-features --features "$features"
             echo "::endgroup::"
           done
+      - name: Check the slim binary
+        run: cargo check -p mockingbird-cli --no-default-features
+      - name: Build the API docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features
 
   console:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -242,7 +253,8 @@ jobs:
       - uses: actions/checkout@v7
       # Builds the full image once: it is smoke-tested and scanned here, and
       # the Compose services run it (mockingbird:local). The slim image is
-      # built by the release workflow; `check` compiles the slim binary.
+      # built by the release workflow; `protocol-features` checks the slim
+      # binary.
       - uses: docker/setup-buildx-action@v4
       - name: Build the Mockingbird image
         uses: docker/build-push-action@v7

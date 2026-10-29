@@ -278,14 +278,37 @@ fn ci_gates_present() {
         scalar(&check["env"]["MB_TEST_REDIS_URL"]),
         "redis://localhost:6379"
     );
+    // nextest runs the tests (the custom-ext example is a workspace member),
+    // cargo test the doctests nextest skips.
     assert!(runs(
         "check",
+        "cargo nextest run --workspace --all-features --profile ci"
+    ));
+    assert!(runs("check", "cargo test --doc --workspace --all-features"));
+    assert!(
+        all.iter().any(|(id, step)| id == "check"
+            && uses(step).starts_with("taiki-e/install-action@")
+            && scalar(&step["with"]["tool"]) == "cargo-nextest"),
+        "the check job installs cargo-nextest"
+    );
+    assert!(
+        repo().join(".config/nextest.toml").is_file(),
+        "the ci nextest profile is in .config/nextest.toml"
+    );
+    // Off the critical path of check.
+    assert!(runs(
+        "protocol-features",
         "cargo doc --workspace --no-deps --all-features"
     ));
     assert!(runs(
-        "check",
-        "cargo test -p mockingbird-custom-ext-example"
+        "protocol-features",
+        "cargo check -p mockingbird-cli --no-default-features"
     ));
+    // Pull requests cancel superseded runs; main runs always finish.
+    assert_eq!(
+        scalar(&doc["concurrency"]["cancel-in-progress"]),
+        "${{ github.event_name == 'pull_request' }}"
+    );
 
     assert!(runs("helm", "scripts/check-helm.sh"));
     assert!(runs("semver", "scripts/semver-check.sh"));
