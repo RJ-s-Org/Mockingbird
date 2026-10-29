@@ -26,6 +26,7 @@ import argparse
 import copy
 import datetime
 import http.client
+import gzip
 import json
 import os
 import signal
@@ -190,7 +191,8 @@ class Ledger:
     def _read(path: str) -> Iterator[Dict[str, Any]]:
         if not os.path.exists(path):
             return
-        with open(path, encoding="utf-8") as f:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

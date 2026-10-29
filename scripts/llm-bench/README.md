@@ -33,6 +33,10 @@ python3 scripts/llm-bench/run.py full --repeat 3 --parallel 3 --concurrency 4
 # 4. Grade and aggregate (see grade.py / aggregate.py --help)
 ```
 
+mb-evals runs with a default LLM profile's settings, as the server does: a 60 s timeout, `max_tokens` 16,384, temperature 0.7 and the default output budget (1,500 tokens). `--llm-timeout-secs`, `--max-tokens` and `--output-budget` override them. GraphQL targets are called with the selection set their manifest entry gives (`selections` in `docs/benchmarks/workloads.json`, see `crates/mb-evals/src/selection.rs`), as a real client's query would. `--prior-ledger <earlier calls.jsonl(.gz)>` (repeatable) counts an earlier run's spend toward `--budget-usd`.
+
+The 2026-10-29 run predates these settings: it ran at 2,048 tokens and 30 s, with no GraphQL selections.
+
 All results go to `--out`, which defaults to `docs/benchmarks/2026-10-29`. Relative paths resolve against the repository root, and children run with the root as their working directory.
 
 | path under `--out` | contents |

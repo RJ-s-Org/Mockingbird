@@ -376,6 +376,28 @@ def tally(items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]], has_grad
     }
 
 
+FALLBACK_CAUSES = ("truncated", "non_json", "schema", "timeout", "guard", "other")
+
+
+def fallback_cause(sample: Dict[str, Any]) -> str:
+    """One of FALLBACK_CAUSES for a fallback sample, from the engine's
+    reason: cut at max_tokens, not JSON (after the repair), invalid against
+    the schema after the repair, the LLM timeout, a guard (budget, slots,
+    size cap), or anything else (an HTTP error, no reason given)."""
+    r = str(sample.get("fallback_reason") or sample.get("error") or "")
+    if "stopped at max_tokens" in r or "truncated" in r:
+        return "truncated"
+    if "not valid JSON" in r:
+        return "non_json"
+    if "still invalid" in r:
+        return "schema"
+    if "timed out" in r and "generation slot" not in r:
+        return "timeout"
+    if any(k in r for k in ("budget exhausted", "generation slot", "-byte cap")):
+        return "guard"
+    return "other"
+
+
 def engine_block(items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]], has_grades: bool,
                  kw_categories: Dict[str, List[str]]) -> Dict[str, Any]:
     excluded = sum(1 for s, _ in items if s.get("source") not in ENGINE_SOURCES)
@@ -413,11 +435,13 @@ def engine_block(items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]], h
                           and "timed out" in str(s.get("fallback_reason") or ""))
     truncated = sum(1 for s, _ in items if s.get("source") == "fallback"
                     and "stopped at max_tokens" in str(s.get("fallback_reason") or ""))
+    causes = Counter(fallback_cause(s) for s, _ in items if s.get("source") == "fallback")
     return {
         **overall,
         "engine_timeouts": engine_timeouts,
         "engine_timeout_rate": rate(engine_timeouts, len(items)),
         "fallback_truncated_max_tokens": truncated,
+        "fallback_causes": dict(sorted(causes.items())),
         "excluded_sources": excluded,
         "macro": {"first_try": macro_ft, "schema_valid": macro_sv, "conformance": macro_k,
                   "apis": len(apis)},

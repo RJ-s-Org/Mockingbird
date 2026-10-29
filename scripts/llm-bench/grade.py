@@ -578,6 +578,56 @@ class Validator:
 # --------------------------------------------------------------------------
 
 
+def _request_values(request: Any) -> set[str]:
+    """Every string in the request's `path` and `query` parts."""
+    out: set[str] = set()
+
+    def walk(v: Any) -> None:
+        if isinstance(v, str):
+            out.add(v)
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+
+    if isinstance(request, dict):
+        walk(request.get("path"))
+        walk(request.get("query"))
+    return out
+
+
+def _at_pointer(doc: Any, pointer: str) -> Any:
+    cur = doc
+    for raw in pointer.split("/")[1:] if pointer else []:
+        token = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(cur, dict) and token in cur:
+            cur = cur[token]
+        elif isinstance(cur, list) and token.isdigit() and int(token) < len(cur):
+            cur = cur[int(token)]
+        else:
+            return None
+    return cur
+
+
+def split_echoes(violations: list[dict], body: Any, request: Any) -> tuple[list[dict], list[dict]]:
+    """(echoed, rest): a `format` violation whose value is one of the
+    request's path or query values is an echo, not an invalid answer. The
+    response repeats the id the client asked for (`GET /orders/{id}`), which
+    is what a real API does, even when the contract gave the parameter no
+    format."""
+    values = _request_values(request)
+    echoed, rest = [], []
+    for v in violations:
+        value = _at_pointer(body, v.get("path", ""))
+        if v.get("keyword") == "format" and isinstance(value, str) and value in values:
+            echoed.append(v)
+        else:
+            rest.append(v)
+    return echoed, rest
+
+
 def grade_sample(sample: dict, model: str, key: str) -> dict:
     """Grade one sample. Never includes the body or schema in the output."""
     api_type = sample.get("api_type") or "unknown"
@@ -599,6 +649,7 @@ def grade_sample(sample: dict, model: str, key: str) -> dict:
             "reason": "no_schema",
             "valid": None,
             "violations": [],
+            "echoed": [],
             "checked_keywords": {},
             "failed_keywords": {},
             "skipped": {},
@@ -612,17 +663,20 @@ def grade_sample(sample: dict, model: str, key: str) -> dict:
             "reason": "no_body",
             "valid": False,
             "violations": [{"path": "", "keyword": "no_body", "message": "no body returned"}],
+            "echoed": [],
             "checked_keywords": {},
             "failed_keywords": {},
             "skipped": {},
         }
     result = Validator(schema).validate(body)
+    echoed, violations = split_echoes(result.violations, body, sample.get("request"))
     return {
         **base,
         "graded": True,
         "reason": None,
-        "valid": not result.violations,
-        "violations": result.violations,
+        "valid": not violations,
+        "violations": violations,
+        "echoed": echoed,
         "checked_keywords": dict(result.checked),
         "failed_keywords": dict(result.failed),
         "skipped": dict(result.skipped),

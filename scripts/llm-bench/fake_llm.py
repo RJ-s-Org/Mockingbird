@@ -185,7 +185,9 @@ class Handler(BaseHTTPRequestHandler):
         if ARGS.log:
             with LOCK, open(ARGS.log, "a") as f:
                 f.write(json.dumps({"path": self.path, "model": body.get("model"), "stream": bool(body.get("stream")),
-                                    "kind": kind, "response_format": body.get("response_format")}) + "\n")
+                                    "kind": kind, "response_format": body.get("response_format"),
+                                    "max_tokens": body.get("max_tokens"),
+                                    "temperature": body.get("temperature")}) + "\n")
         usage = {"prompt_tokens": len(raw) // 4, "completion_tokens": len(content) // 4,
                  "total_tokens": len(raw) // 4 + len(content) // 4}
         if body.get("stream"):
