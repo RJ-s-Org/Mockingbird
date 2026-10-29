@@ -272,6 +272,70 @@ fn named_type(ty: &Type) -> &str {
     }
 }
 
+/// The first name that occurs more than once in `names`, if any.
+fn first_duplicate<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let mut seen = std::collections::BTreeSet::new();
+    names.into_iter().find(|n| !seen.insert(*n))
+}
+
+/// Reject a name defined more than once within one type (after `extend`
+/// blocks are merged): SDL forbids it, and async-graphql's dynamic schema
+/// panics on a duplicate field at serve time.
+fn unique<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    at: impl Fn(&str) -> String,
+    what: &str,
+) -> Result<(), ImportError> {
+    match first_duplicate(names) {
+        Some(n) => Err(invalid(
+            at(n),
+            format!("the {what} is defined more than once"),
+        )),
+        None => Ok(()),
+    }
+}
+
+fn validate_unique(name: &str, kind: &Kind) -> Result<(), ImportError> {
+    match kind {
+        Kind::Object { implements, fields } | Kind::Interface { implements, fields } => {
+            unique(
+                implements.iter().map(String::as_str),
+                |i| format!("/types/{name}/interfaces/{i}"),
+                "interface",
+            )?;
+            unique(
+                fields.iter().map(|f| f.name.as_str()),
+                |f| format!("/types/{name}/fields/{f}"),
+                "field",
+            )?;
+            for f in fields {
+                unique(
+                    f.args.iter().map(|a| a.name.as_str()),
+                    |a| format!("/types/{name}/fields/{}/arguments/{a}", f.name),
+                    "argument",
+                )?;
+            }
+            Ok(())
+        }
+        Kind::Input { fields } => unique(
+            fields.iter().map(|f| f.name.as_str()),
+            |f| format!("/types/{name}/fields/{f}"),
+            "input field",
+        ),
+        Kind::Enum { values } => unique(
+            values.iter().map(String::as_str),
+            |v| format!("/types/{name}/values/{v}"),
+            "enum value",
+        ),
+        Kind::Union { members } => unique(
+            members.iter().map(String::as_str),
+            |m| format!("/types/{name}/members/{m}"),
+            "union member",
+        ),
+        Kind::Scalar => Ok(()),
+    }
+}
+
 fn validate(schema: &Schema) -> Result<(), ImportError> {
     let types = &schema.types;
     let known = |ty: &Type| {
@@ -314,6 +378,7 @@ fn validate(schema: &Schema) -> Result<(), ImportError> {
     }
 
     for (name, def) in types {
+        validate_unique(name, &def.kind)?;
         match &def.kind {
             Kind::Object { implements, fields } | Kind::Interface { implements, fields } => {
                 if let Some(i) = implements.iter().find(|i| !is_kind(i, is_interface)) {
