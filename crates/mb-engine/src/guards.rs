@@ -228,17 +228,19 @@ impl Engine {
         }
         let faker = crate::Faker::new(self.config.faker_depth).with_hints(fill.hints.clone());
         let mut rng = rand::rng();
-        validator.fill_required(
+        validator.fill_required_nodes(
             value,
             |location, property| fill.shaped.fills(location, property),
-            |schema| faker.fake(schema, &mut rng),
+            |node| faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng),
         )
     }
 
     fn patch(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
         let mut rng = rand::rng();
-        validator.patch(value, |schema| faker.fake(schema, &mut rng))
+        validator.patch_nodes(value, |node| {
+            faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng)
+        })
     }
 }
 
@@ -262,7 +264,7 @@ fn wrap_single_item(validator: &SchemaValidator, value: &Value) -> Option<Value>
         return None;
     }
     let wrapped = Value::Array(vec![value.clone()]);
-    validator.validate(&wrapped).is_ok().then_some(wrapped)
+    validator.is_valid(&wrapped).then_some(wrapped)
 }
 
 /// The value inside one or two nested one-key objects, when it is valid and
@@ -282,7 +284,7 @@ fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> 
             return None;
         };
         value = inner;
-        if validator.validate(value).is_ok() {
+        if validator.is_valid(value) {
             return Some(value.clone());
         }
     }

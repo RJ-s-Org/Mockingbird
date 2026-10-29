@@ -3,7 +3,9 @@ use mb_mcm::{Operation, OperationKind};
 use rand::{Rng, RngExt};
 use serde_json::{Map, Number, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+use dashmap::DashMap;
 
 use crate::OperationCall;
 
@@ -97,15 +99,57 @@ struct Ctx<'a> {
     root: &'a Value,
     costs: &'a Costs,
     generated: usize,
-    /// Compiled `pattern`s by repeat cap and source text; `None` when
-    /// unsupported.
-    patterns: HashMap<String, Option<Arc<Pattern>>>,
 }
 
 /// A `pattern` ready to draw from, with the regex its draws must match.
 struct Pattern {
     generator: rand_regex::Regex,
-    check: regex::Regex,
+    check: Arc<regex::Regex>,
+}
+
+/// Entries each compiled-pattern cache keeps; a full cache is emptied.
+const PATTERN_CACHE_MAX: usize = 1024;
+
+/// Compiled `pattern`s shared by every fake call, by repeat cap and source
+/// text; `None` when unsupported. Compiling is a pure function of the key.
+static PATTERNS: LazyLock<PatternCache> = LazyLock::new(DashMap::new);
+
+/// Compiled patterns by (repeat cap, source text).
+type PatternCache = DashMap<(u32, String), Option<Arc<Pattern>>>;
+
+/// The regexes of `pattern`s (what a draw or an echoed value must match),
+/// by source text; `None` when it does not compile.
+static CHECKS: LazyLock<DashMap<String, Option<Arc<regex::Regex>>>> = LazyLock::new(DashMap::new);
+
+/// `map[key]`, computed by `make` and kept (emptying a full map first).
+fn cached<K, V>(map: &DashMap<K, V>, key: K, make: impl FnOnce() -> V) -> V
+where
+    K: std::hash::Hash + Eq,
+    V: Clone,
+{
+    if let Some(hit) = map.get(&key) {
+        return hit.clone();
+    }
+    let value = make();
+    if map.len() >= PATTERN_CACHE_MAX {
+        map.clear();
+    }
+    map.insert(key, value.clone());
+    value
+}
+
+/// The compiled regex of `pattern`, cached.
+fn check_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
+    cached(&CHECKS, pattern.to_string(), || {
+        regex::Regex::new(pattern).ok().map(Arc::new)
+    })
+}
+
+/// `pattern` compiled for drawing with `max_repeat`, cached.
+fn cached_pattern(pattern: &str, max_repeat: u32) -> Option<Arc<Pattern>> {
+    cached(&PATTERNS, (max_repeat, pattern.to_string()), || {
+        compile_pattern(pattern, max_repeat).map(Arc::new)
+    })
 }
 
 impl Faker {
@@ -149,13 +193,26 @@ impl Faker {
         costs: &Costs,
         rng: &mut impl Rng,
     ) -> Value {
+        self.fake_node(schema_with_defs, schema_with_defs, branch, costs, rng)
+    }
+
+    /// A value for `node`, a schema inside `root` whose `$ref`s resolve
+    /// against `root`; `costs` is `root`'s table. Saves copying `root`'s
+    /// `$defs` into each node faked.
+    pub(crate) fn fake_node(
+        &self,
+        root: &Value,
+        node: &Value,
+        branch: Option<usize>,
+        costs: &Costs,
+        rng: &mut impl Rng,
+    ) -> Value {
         let mut ctx = Ctx {
-            root: schema_with_defs,
+            root,
             costs,
             generated: 0,
-            patterns: HashMap::new(),
         };
-        self.gen_value(&mut ctx, schema_with_defs, None, 0, branch, rng)
+        self.gen_value(&mut ctx, node, None, 0, branch, rng)
     }
 
     /// A value for `schema`; `field` is the object member it fills, if any.
@@ -221,7 +278,7 @@ impl Faker {
             "boolean" => Value::Bool(rng.random_bool(0.5)),
             "integer" => fake_integer(s, field, rng),
             "number" => fake_number(s, rng),
-            "string" => Value::String(fake_string(ctx, s, rng)),
+            "string" => Value::String(fake_string(s, rng)),
             "array" if hard_limit => Value::Array(Vec::new()),
             "object" if hard_limit => Value::Object(Map::new()),
             "array" => self.fake_array(ctx, s, depth, at_limit, rng),
@@ -324,7 +381,7 @@ fn echo_as(value: &Value, chosen: &str, s: &Map<String, Value>) -> Option<Value>
                 && num("maxLength").is_none_or(|m| n <= m)
                 && s.get("pattern")
                     .and_then(Value::as_str)
-                    .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(&text)));
+                    .is_none_or(|p| check_regex(p).is_some_and(|re| re.is_match(&text)));
             fits.then_some(Value::String(text))
         }
         "integer" => text.parse::<i64>().ok().map(Value::from),
@@ -783,7 +840,7 @@ fn word<R: Rng>(rng: &mut R) -> String {
     WORDS[rng.random_range(0..WORDS.len())].to_string()
 }
 
-fn fake_string<R: Rng>(ctx: &mut Ctx<'_>, s: &Map<String, Value>, rng: &mut R) -> String {
+fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
     match s.get("format").and_then(Value::as_str) {
         Some("uuid") => {
             let mut bytes = [0u8; 16];
@@ -850,7 +907,7 @@ fn fake_string<R: Rng>(ctx: &mut Ctx<'_>, s: &Map<String, Value>, rng: &mut R) -
             .get("maxLength")
             .and_then(Value::as_u64)
             .map(|m| m as usize);
-        if let Some(out) = pattern_string(ctx, pattern, min, declared_max, rng) {
+        if let Some(out) = pattern_string(pattern, min, declared_max, rng) {
             return out;
         }
         if let Some(lit) = fixed_literal(pattern) {
@@ -909,7 +966,6 @@ fn timestamp_field(field: &str) -> bool {
 /// `rand_regex`; `None` when the pattern is unsupported (lookaround,
 /// backreferences) or no draw fits.
 fn pattern_string<R: Rng>(
-    ctx: &mut Ctx<'_>,
     pattern: &str,
     min: usize,
     max: Option<usize>,
@@ -925,11 +981,7 @@ fn pattern_string<R: Rng>(
         None => vec![PATTERN_MAX_REPEAT],
     };
     for repeat in repeats {
-        let compiled = ctx
-            .patterns
-            .entry(format!("{repeat}:{pattern}"))
-            .or_insert_with(|| compile_pattern(pattern, repeat).map(Arc::new))
-            .clone()?;
+        let compiled = cached_pattern(pattern, repeat)?;
         let found = (0..PATTERN_DRAWS).find_map(|_| {
             let drawn: Result<String, std::string::FromUtf8Error> =
                 rand::distr::Distribution::sample(&compiled.generator, rng);
@@ -949,7 +1001,7 @@ fn pattern_string<R: Rng>(
 const PATTERN_DRAWS: usize = 8;
 
 fn compile_pattern(pattern: &str, max_repeat: u32) -> Option<Pattern> {
-    let check = regex::Regex::new(pattern).ok()?;
+    let check = check_regex(pattern)?;
     let body = pattern.strip_prefix('^').unwrap_or(pattern);
     let body = match body.strip_suffix('$') {
         // An escaped `\$` is a literal dollar sign.

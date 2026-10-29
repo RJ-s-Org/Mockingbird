@@ -424,7 +424,7 @@ impl StreamState {
             return value;
         }
         let patched = apply_set(&value, set);
-        if self.validator.validate(&patched).is_ok() {
+        if self.validator.is_valid(&patched) {
             patched
         } else {
             value
