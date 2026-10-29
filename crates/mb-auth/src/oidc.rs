@@ -1,20 +1,23 @@
 //! The OIDC relying party: Authorization Code + PKCE login against the
-//! configured provider.
+//! configured provider, and RP-initiated logout when the provider offers it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
+use mb_store::{ControlStore, OidcPendingLogin};
 use openidconnect::core::{
     CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
     CoreGenderClaim, CoreIdTokenVerifier, CoreJsonWebKey, CoreJsonWebKeySet,
-    CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm, CoreProviderMetadata,
-    CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
+    CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm, CoreRevocableToken,
+    CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
 };
 use openidconnect::{
     AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl, JsonWebKeySetUrl,
-    Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+    EndSessionUrl, EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl,
+    JsonWebKeySetUrl, LogoutRequest, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
+    PkceCodeVerifier, PostLogoutRedirectUrl, ProviderMetadataWithLogout, RedirectUrl,
     RequestTokenError, Scope, StandardErrorResponse, StandardTokenResponse, TokenResponse,
     UserInfoClaims,
 };
@@ -31,6 +34,10 @@ use crate::principal::Principal;
 const PENDING_TTL: Duration = Duration::from_secs(600);
 /// The most logins in flight at once; the oldest is evicted beyond this.
 const MAX_PENDING: usize = 10_000;
+/// The refusal of the in-memory-only methods on a client whose pending
+/// logins live in the control store.
+const STORE_BACKED: &str = "this OIDC client keeps pending logins in the control store; \
+                            use start_login, login_pending and cancel_login";
 /// The longest `return_to` accepted, in bytes.
 pub const MAX_RETURN_TO: usize = 2048;
 /// Minimum time between JWKS refetches for ID-token verification.
@@ -123,6 +130,35 @@ struct Pending {
     created: Instant,
 }
 
+/// What a started login keeps until its callback: the PKCE verifier and
+/// nonce are secrets, so this is only ever stored, never logged.
+#[derive(Serialize, Deserialize)]
+struct StoredPending {
+    pkce_verifier: String,
+    nonce: String,
+    return_to: String,
+}
+
+/// Where started logins wait for their callback.
+enum PendingLogins {
+    /// This process only: lost on restart, unknown to other nodes.
+    Memory(Mutex<HashMap<String, Pending>>),
+    /// The control store, keyed by the hex sha256 of the `state`: shared by
+    /// every node and kept across restarts.
+    Store(Arc<dyn ControlStore>),
+}
+
+/// A pending login taken out for its callback.
+struct Taken {
+    pkce_verifier: PkceCodeVerifier,
+    nonce: Nonce,
+    return_to: String,
+}
+
+fn state_hash(state: &str) -> String {
+    crate::sha256_hex(state.as_bytes())
+}
+
 /// The keys ID tokens are verified with: the JWKS from discovery, replaced
 /// when an ID token fails verification and the last refetch (if any) is
 /// older than [`ID_TOKEN_JWKS_REFETCH`], so a provider key rotation does not
@@ -197,7 +233,9 @@ pub struct OidcClient {
     scopes: Vec<String>,
     mapping: RoleMapping,
     bearer: Arc<JwtVerifier>,
-    pending: Mutex<HashMap<String, Pending>>,
+    pending: PendingLogins,
+    end_session: Option<EndSessionUrl>,
+    post_logout_redirect: Option<PostLogoutRedirectUrl>,
 }
 
 fn upstream(context: &str, e: impl std::fmt::Display) -> AuthError {
@@ -206,7 +244,9 @@ fn upstream(context: &str, e: impl std::fmt::Display) -> AuthError {
 
 impl OidcClient {
     /// Fetches the provider's discovery document (and JWKS) from
-    /// `<issuer>/.well-known/openid-configuration`.
+    /// `<issuer>/.well-known/openid-configuration`. Started logins are kept
+    /// in this process until [`Self::with_store`] moves them to the control
+    /// store.
     pub async fn discover(
         settings: OidcSettings,
         http: reqwest::Client,
@@ -216,10 +256,11 @@ impl OidcClient {
         let redirect = RedirectUrl::new(settings.redirect_url.clone())
             .map_err(|e| AuthError::Invalid(format!("invalid OIDC redirect URL: {e}")))?;
         let call = OidcHttp(&http);
-        let metadata = CoreProviderMetadata::discover_async(issuer, &call)
+        let metadata = ProviderMetadataWithLogout::discover_async(issuer, &call)
             .await
             .map_err(|e| upstream("OIDC discovery failed", error_chain(&e)))?;
         let jwks_uri = metadata.jwks_uri().url().to_string();
+        let end_session = metadata.additional_metadata().end_session_endpoint.clone();
         let id_keys = IdTokenKeys {
             jwks_uri: metadata.jwks_uri().clone(),
             client_id: ClientId::new(settings.client_id.clone()),
@@ -255,13 +296,99 @@ impl OidcClient {
             scopes: settings.scopes,
             mapping: settings.mapping,
             bearer,
-            pending: Mutex::new(HashMap::new()),
+            pending: PendingLogins::Memory(Mutex::new(HashMap::new())),
+            end_session,
+            post_logout_redirect: None,
         })
     }
 
+    /// Keeps started logins in `store` instead of this process, so a login
+    /// survives a restart and its callback may reach any node sharing the
+    /// store. Each is single use and expires after 600 s; at most 10 000 are
+    /// kept (the oldest is evicted first). Logins already started in memory
+    /// are dropped.
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<dyn ControlStore>) -> Self {
+        self.pending = PendingLogins::Store(store);
+        self
+    }
+
+    /// Where the provider sends the browser after an RP-initiated logout
+    /// (see [`Self::end_session_url`]); it must be registered with the
+    /// provider as a post-logout redirect URI.
+    pub fn with_post_logout_redirect(mut self, url: &str) -> Result<Self, AuthError> {
+        let url = PostLogoutRedirectUrl::new(url.to_string()).map_err(|e| {
+            AuthError::Invalid(format!("invalid OIDC post-logout redirect URL: {e}"))
+        })?;
+        self.post_logout_redirect = Some(url);
+        Ok(self)
+    }
+
+    /// The provider's RP-initiated logout URL (its discovered
+    /// `end_session_endpoint` with `client_id` and, when set,
+    /// `post_logout_redirect_uri`), or `None` when the provider does not
+    /// advertise one.
+    pub fn end_session_url(&self) -> Option<String> {
+        let mut req = LogoutRequest::from(self.end_session.clone()?)
+            .set_client_id(self.client.client_id().clone());
+        if let Some(url) = &self.post_logout_redirect {
+            req = req.set_post_logout_redirect_uri(url.clone());
+        }
+        Some(req.http_get_url().to_string())
+    }
+
     /// Starts an Authorization Code + PKCE (S256) login that returns the
-    /// browser to `return_to` once it completes.
+    /// browser to `return_to` once it completes, keeping it in memory.
+    ///
+    /// Refused with `Invalid` on a client built [`Self::with_store`].
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `start_login`, which also works with `with_store`"
+    )]
     pub fn begin_login(&self, return_to: &str) -> Result<LoginRedirect, AuthError> {
+        let PendingLogins::Memory(memory) = &self.pending else {
+            return Err(AuthError::Invalid(STORE_BACKED.to_string()));
+        };
+        let (redirect, pending) = self.authorize(return_to)?;
+        remember(memory, redirect.state.clone(), pending);
+        Ok(redirect)
+    }
+
+    /// Starts an Authorization Code + PKCE (S256) login that returns the
+    /// browser to `return_to` once it completes. The login is kept (in the
+    /// store with [`Self::with_store`], otherwise in memory) for 600 s.
+    pub async fn start_login(&self, return_to: &str) -> Result<LoginRedirect, AuthError> {
+        let (redirect, pending) = self.authorize(return_to)?;
+        match &self.pending {
+            PendingLogins::Memory(memory) => remember(memory, redirect.state.clone(), pending),
+            PendingLogins::Store(store) => {
+                let now = Utc::now();
+                let ttl = chrono::Duration::from_std(PENDING_TTL)
+                    .map_err(|e| AuthError::Invalid(format!("pending login ttl: {e}")))?;
+                let data = serde_json::to_value(StoredPending {
+                    pkce_verifier: pending.pkce_verifier.secret().clone(),
+                    nonce: pending.nonce.secret().clone(),
+                    return_to: pending.return_to,
+                })
+                .map_err(|e| AuthError::Invalid(format!("pending login: {e}")))?;
+                store
+                    .put_oidc_pending_login(
+                        &OidcPendingLogin {
+                            state_hash: state_hash(&redirect.state),
+                            data,
+                            created_at: now,
+                            expires_at: now + ttl,
+                        },
+                        MAX_PENDING as u64,
+                    )
+                    .await?;
+            }
+        }
+        Ok(redirect)
+    }
+
+    /// The authorization URL for a new login and what its callback needs.
+    fn authorize(&self, return_to: &str) -> Result<(LoginRedirect, Pending), AuthError> {
         let return_to = validate_return_to(return_to)?;
         let (challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let scopes = self
@@ -280,35 +407,49 @@ impl OidcClient {
             .add_scopes(scopes)
             .set_pkce_challenge(challenge)
             .url();
-        let state = state.secret().clone();
-
-        let now = Instant::now();
-        let mut pending = self.lock_pending();
-        pending.retain(|_, p| now.duration_since(p.created) < PENDING_TTL);
-        while pending.len() >= MAX_PENDING {
-            let oldest = pending
-                .iter()
-                .min_by_key(|(_, p)| p.created)
-                .map(|(k, _)| k.clone());
-            match oldest {
-                Some(k) => pending.remove(&k),
-                None => break,
-            };
-        }
-        pending.insert(
-            state.clone(),
+        Ok((
+            LoginRedirect {
+                url: url.to_string(),
+                state: state.secret().clone(),
+            },
             Pending {
                 pkce_verifier,
                 nonce,
                 return_to,
-                created: now,
+                created: Instant::now(),
             },
-        );
+        ))
+    }
 
-        Ok(LoginRedirect {
-            url: url.to_string(),
-            state,
-        })
+    /// Removes the login identified by `state` and returns it unless it
+    /// had expired.
+    async fn take(&self, state: &str) -> Result<Option<Taken>, AuthError> {
+        match &self.pending {
+            PendingLogins::Memory(memory) => Ok(lock(memory)
+                .remove(state)
+                .filter(|p| p.created.elapsed() < PENDING_TTL)
+                .map(|p| Taken {
+                    pkce_verifier: p.pkce_verifier,
+                    nonce: p.nonce,
+                    return_to: p.return_to,
+                })),
+            PendingLogins::Store(store) => {
+                let Some(row) = store
+                    .take_oidc_pending_login(&state_hash(state), Utc::now())
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let p: StoredPending = serde_json::from_value(row.data).map_err(|e| {
+                    AuthError::Unauthenticated(format!("unreadable pending login: {e}"))
+                })?;
+                Ok(Some(Taken {
+                    pkce_verifier: PkceCodeVerifier::new(p.pkce_verifier),
+                    nonce: Nonce::new(p.nonce),
+                    return_to: p.return_to,
+                }))
+            }
+        }
     }
 
     /// Finishes the login identified by `state`: exchanges `code`, verifies
@@ -320,9 +461,8 @@ impl OidcClient {
         code: &str,
     ) -> Result<CompletedLogin, AuthError> {
         let pending = self
-            .lock_pending()
-            .remove(state)
-            .filter(|p| p.created.elapsed() < PENDING_TTL)
+            .take(state)
+            .await?
             .ok_or_else(|| AuthError::Unauthenticated("unknown login state".to_string()))?;
 
         let call = OidcHttp(&self.http);
@@ -395,33 +535,90 @@ impl OidcClient {
         })
     }
 
+    /// Whether `state` identifies a login that was started in memory and
+    /// has neither completed nor expired. Always `false` on a client built
+    /// [`Self::with_store`].
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `login_pending`, which also works with `with_store`"
+    )]
+    pub fn is_pending(&self, state: &str) -> bool {
+        match &self.pending {
+            PendingLogins::Memory(memory) => lock(memory)
+                .get(state)
+                .is_some_and(|p| p.created.elapsed() < PENDING_TTL),
+            PendingLogins::Store(_) => false,
+        }
+    }
+
     /// Whether `state` identifies a login that was started and has neither
     /// completed nor expired.
-    pub fn is_pending(&self, state: &str) -> bool {
-        self.lock_pending()
-            .get(state)
-            .is_some_and(|p| p.created.elapsed() < PENDING_TTL)
+    pub async fn login_pending(&self, state: &str) -> Result<bool, AuthError> {
+        match &self.pending {
+            PendingLogins::Memory(memory) => Ok(lock(memory)
+                .get(state)
+                .is_some_and(|p| p.created.elapsed() < PENDING_TTL)),
+            PendingLogins::Store(store) => Ok(store
+                .get_oidc_pending_login(&state_hash(state), Utc::now())
+                .await?
+                .is_some()),
+        }
+    }
+
+    /// Ends the login identified by `state`, started in memory, without
+    /// completing it; returns whether it was pending. Always `false` on a
+    /// client built [`Self::with_store`].
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `cancel_login`, which also works with `with_store`"
+    )]
+    pub fn abandon_login(&self, state: &str) -> bool {
+        match &self.pending {
+            PendingLogins::Memory(memory) => lock(memory)
+                .remove(state)
+                .is_some_and(|p| p.created.elapsed() < PENDING_TTL),
+            PendingLogins::Store(_) => false,
+        }
     }
 
     /// Ends the login identified by `state` without completing it (the
     /// provider answered with an error); returns whether it was pending.
-    pub fn abandon_login(&self, state: &str) -> bool {
-        self.lock_pending()
-            .remove(state)
-            .is_some_and(|p| p.created.elapsed() < PENDING_TTL)
+    pub async fn cancel_login(&self, state: &str) -> Result<bool, AuthError> {
+        Ok(self.take(state).await?.is_some())
     }
 
     /// The bearer-JWT verifier for this provider (JWKS URI from discovery).
     pub fn bearer(&self) -> Arc<JwtVerifier> {
         Arc::clone(&self.bearer)
     }
+}
 
-    fn lock_pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
-        // A panic while holding the lock cannot leave the map inconsistent.
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock(
+    memory: &Mutex<HashMap<String, Pending>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
+    // A panic while holding the lock cannot leave the map inconsistent.
+    memory
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Keeps a login started in memory, first dropping expired ones and, at
+/// [`MAX_PENDING`], the oldest.
+fn remember(memory: &Mutex<HashMap<String, Pending>>, state: String, p: Pending) {
+    let now = p.created;
+    let mut pending = lock(memory);
+    pending.retain(|_, p| now.duration_since(p.created) < PENDING_TTL);
+    while pending.len() >= MAX_PENDING {
+        let oldest = pending
+            .iter()
+            .min_by_key(|(_, p)| p.created)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => pending.remove(&k),
+            None => break,
+        };
     }
+    pending.insert(state, p);
 }
 
 fn to_map<T: Serialize>(v: &T) -> Result<Map<String, Value>, AuthError> {
@@ -450,7 +647,7 @@ pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
 /// with `/`, must not start with `//` or `/\` (protocol-relative URLs) and
 /// must contain no control characters (browsers strip tabs and newlines,
 /// which would turn `/\t/evil` into `//evil`), and must be at most
-/// [`MAX_RETURN_TO`] bytes (it is held in memory until the login ends).
+/// [`MAX_RETURN_TO`] bytes (it is kept until the login ends).
 pub fn validate_return_to(s: &str) -> Result<String, AuthError> {
     let ok = s.len() <= MAX_RETURN_TO
         && s.starts_with('/')

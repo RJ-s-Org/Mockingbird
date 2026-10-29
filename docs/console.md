@@ -23,6 +23,10 @@ Every `auth`, `auth.oidc` and `audit` key is in the [configuration reference](co
 
 Register `<external_url>/auth/callback` as the client's redirect URI and `<external_url>/` as its post-logout redirect URI. `/healthz`, `/readyz`, `/auth/login`, `/auth/callback` and `/api/openapi.json` are always public, and `/metrics` is too unless `public_metrics: false`. An unauthenticated API call gets a `401` problem; a browser opening a console page is redirected to the login.
 
+**Logging in.** `/auth/login` keeps the started login (its PKCE verifier, nonce and return path) in the control store, keyed by a hash of the `state` in the `mb_login` cookie, so the callback may reach any node sharing `storage.url` and a login survives a restart. A started login must come back within 600 s and completes at most once; at most 10 000 are kept at a time (the oldest is dropped first).
+
+**Signing out.** **Sign out** (`POST /auth/logout`) ends the console session. When the provider's discovery document advertises an `end_session_endpoint` (OpenID Connect RP-Initiated Logout; Rauthy, Keycloak and most providers do), the answer is `200` with `{"end_session_url": "…"}`: that endpoint with `client_id` and `post_logout_redirect_uri=<external_url>/`, and the console sends the browser there so the provider's session ends too and the next visit asks for credentials. Without one the answer stays `204`, the provider's session lives on, and the next visit to the console may sign the user straight back in; sign out at the provider to prevent that. The console session ends locally either way, and the provider is never called by the server.
+
 ## Roles and groups
 
 Each workspace grants one of `viewer < editor < admin < owner`:

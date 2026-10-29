@@ -124,6 +124,23 @@ fn lock(state: &Shared) -> MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The discovery document of a provider at `issuer`.
+fn discovery(issuer: &str) -> Value {
+    json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/authorize"),
+        "token_endpoint": format!("{issuer}/token"),
+        "userinfo_endpoint": format!("{issuer}/userinfo"),
+        "jwks_uri": format!("{issuer}/jwks"),
+        "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "scopes_supported": ["openid", "profile", "email", "groups"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+        "code_challenge_methods_supported": ["S256"],
+    })
+}
+
 pub struct MockOidcProvider {
     pub server: MockServer,
     state: Shared,
@@ -148,19 +165,7 @@ impl MockOidcProvider {
 
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "issuer": issuer,
-                "authorization_endpoint": format!("{issuer}/authorize"),
-                "token_endpoint": format!("{issuer}/token"),
-                "userinfo_endpoint": format!("{issuer}/userinfo"),
-                "jwks_uri": format!("{issuer}/jwks"),
-                "response_types_supported": ["code"],
-                "subject_types_supported": ["public"],
-                "id_token_signing_alg_values_supported": ["RS256"],
-                "scopes_supported": ["openid", "profile", "email", "groups"],
-                "token_endpoint_auth_methods_supported": ["client_secret_basic"],
-                "code_challenge_methods_supported": ["S256"],
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(discovery(&issuer)))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -184,6 +189,25 @@ impl MockOidcProvider {
             state,
             pool_base,
         }
+    }
+
+    /// Makes discovery advertise `end_session_endpoint` `<issuer>/logout`
+    /// (RP-initiated logout) to clients discovered from now on.
+    pub async fn advertise_end_session(&self) {
+        let issuer = self.issuer();
+        let mut doc = discovery(&issuer);
+        if let Some(m) = doc.as_object_mut() {
+            m.insert(
+                "end_session_endpoint".to_string(),
+                json!(format!("{issuer}/logout")),
+            );
+        }
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(doc))
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
     }
 
     /// The issuer URL (the server's base URI, no trailing slash).

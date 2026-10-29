@@ -980,6 +980,29 @@ pub struct AdminSession {
     pub last_seen: DateTime<Utc>,
 }
 
+/// An OIDC console login that was started and has not come back to the
+/// callback yet, keyed by the hex sha256 of its `state`. `data` (the PKCE
+/// verifier, nonce and return path) is opaque to the store. Its `Debug`
+/// output redacts `data`.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct OidcPendingLogin {
+    pub state_hash: String,
+    pub data: Value,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OidcPendingLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcPendingLogin")
+            .field("state_hash", &self.state_hash)
+            .field("data", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AuditEvent {
     pub id: i64,

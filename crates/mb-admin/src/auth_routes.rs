@@ -155,7 +155,7 @@ async fn login(State(st): State<AdminState>, Query(q): Query<LoginQuery>) -> Api
     let Some(web) = &st.web_auth else {
         return redirect(&return_to);
     };
-    let started = web.oidc.begin_login(&return_to)?;
+    let started = web.oidc.start_login(&return_to).await?;
     let resp = redirect(&started.url)?;
     Ok(with_cookies(
         resp,
@@ -298,7 +298,13 @@ async fn complete(
         .as_deref()
         .filter(|s| cookie(headers, LOGIN_STATE_COOKIE) == Some(*s));
     if let Some(e) = &q.error {
-        let attributable = own_state.is_some_and(|s| web.oidc.abandon_login(s));
+        let attributable = match own_state {
+            Some(s) => web.oidc.cancel_login(s).await.unwrap_or_else(|err| {
+                tracing::warn!(%err, "could not end the pending login");
+                false
+            }),
+            None => false,
+        };
         return Err((
             Failure::Provider(e.chars().take(64).collect()),
             attributable,
@@ -310,13 +316,26 @@ async fn complete(
     if own_state.is_none() {
         return Err((Failure::StateMismatch, false));
     }
-    let attributable = web.oidc.is_pending(state);
+    let attributable = web.oidc.login_pending(state).await.unwrap_or_else(|err| {
+        tracing::warn!(%err, "could not look up the pending login");
+        false
+    });
     web.oidc
         .complete_login(state, code)
         .await
         .map_err(|e| (Failure::Rejected(e), attributable))
 }
 
+/// The body of `POST /auth/logout` when the provider supports RP-initiated
+/// logout: the browser goes there next to end the provider's session too.
+#[derive(Serialize, Debug)]
+struct LogoutView {
+    end_session_url: String,
+}
+
+/// Ends the admin session. Answers `204` or, when the provider advertises
+/// an `end_session_endpoint`, `200` with [`LogoutView`]. The local session
+/// ends either way; the provider is not contacted.
 async fn logout(
     State(st): State<AdminState>,
     headers: HeaderMap,
@@ -341,10 +360,13 @@ async fn logout(
             )
             .await;
     }
-    Ok(with_cookies(
-        StatusCode::NO_CONTENT.into_response(),
-        &[web.sessions.clear_cookie()],
-    ))
+    let resp = match web.oidc.end_session_url() {
+        Some(end_session_url) => {
+            (StatusCode::OK, Json(LogoutView { end_session_url })).into_response()
+        }
+        None => StatusCode::NO_CONTENT.into_response(),
+    };
+    Ok(with_cookies(resp, &[web.sessions.clear_cookie()]))
 }
 
 /// Middleware for the console and a private `/metrics`: lets a request with

@@ -1,5 +1,6 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect } from "react";
+import { signOut } from "../api/client";
 import { rememberWorkspace, useWorkspaces } from "../api/queries";
 import { useMe } from "../auth/me";
 import { useTheme, type Theme } from "../lib/theme";
@@ -169,16 +170,8 @@ function ThemeSelect() {
 
 /** The signed-in user's name and, unless they are the local user, Sign out. */
 function UserMenu({ name, local }: { name: string; local: boolean }) {
-  const signOut = async () => {
-    try {
-      await fetch("/auth/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-    } finally {
-      window.location.href = "/auth/login?return_to=/";
-    }
+  const onSignOut = async () => {
+    window.location.href = await signOut();
   };
   const initial = name.trim().charAt(0).toUpperCase() || "?";
   return (
@@ -194,7 +187,7 @@ function UserMenu({ name, local }: { name: string; local: boolean }) {
         <span className="sr-only text-sm font-medium sm:not-sr-only sm:max-w-[10rem] sm:truncate">{name}</span>
       </span>
       {local ? null : (
-        <button type="button" className={`${secondaryButton} py-1`} onClick={() => void signOut()}>
+        <button type="button" className={`${secondaryButton} py-1`} onClick={() => void onSignOut()}>
           Sign out
         </button>
       )}

@@ -44,6 +44,15 @@ pub const MAX_IMPORT_JOB_LIST: u32 = 200;
 /// The error of a job failed by [`ControlStore::fail_stale_import_jobs`].
 pub const STALE_IMPORT_ERROR: &str = "interrupted: the import worker stopped responding";
 
+/// The refusal of the default OIDC pending-login methods.
+fn oidc_pending_unsupported() -> StoreError {
+    StoreError::Invalid(
+        "this control store does not keep OIDC pending logins (implement the \
+         `*_oidc_pending_login*` methods of ControlStore)"
+            .to_string(),
+    )
+}
+
 #[async_trait]
 pub trait ControlStore: Send + Sync {
     async fn ping(&self) -> Result<(), StoreError>;
@@ -263,6 +272,50 @@ pub trait ControlStore: Send + Sync {
     async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError>;
     /// Deletes sessions with `expires_at <= now`; returns how many.
     async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError>;
+    /// Stores a started OIDC login. Expired logins are deleted first, then,
+    /// while `max` or more remain, the oldest (`created_at`), so at most
+    /// `max` are kept. `Conflict` if `state_hash` is taken.
+    ///
+    /// The default implementation refuses with `Invalid`: a store that does
+    /// not override the OIDC pending-login methods cannot back console
+    /// logins.
+    async fn put_oidc_pending_login(
+        &self,
+        p: &OidcPendingLogin,
+        max: u64,
+    ) -> Result<(), StoreError> {
+        let _ = (p, max);
+        Err(oidc_pending_unsupported())
+    }
+    /// The pending login, unless it is unknown or `expires_at <= now`. Does
+    /// not consume it.
+    async fn get_oidc_pending_login(
+        &self,
+        state_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OidcPendingLogin>, StoreError> {
+        let _ = (state_hash, now);
+        Err(oidc_pending_unsupported())
+    }
+    /// Deletes the pending login and returns it unless it had expired
+    /// (`expires_at <= now`). Atomic: of concurrent callers on any node, at
+    /// most one gets it.
+    async fn take_oidc_pending_login(
+        &self,
+        state_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OidcPendingLogin>, StoreError> {
+        let _ = (state_hash, now);
+        Err(oidc_pending_unsupported())
+    }
+    /// Deletes pending logins with `expires_at <= now`; returns how many.
+    async fn delete_expired_oidc_pending_logins(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        let _ = now;
+        Err(oidc_pending_unsupported())
+    }
     /// Assigns the next id.
     async fn append_audit(&self, e: NewAuditEvent) -> Result<AuditEvent, StoreError>;
     /// Newest (highest id) first.
