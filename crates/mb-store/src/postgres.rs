@@ -1041,6 +1041,31 @@ impl ControlStore for PgStore {
         }))
     }
 
+    async fn active_bundles(
+        &self,
+        mock_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, ActiveBundle>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT mock_id, version, bundle::text AS bundle FROM contract_versions \
+             WHERE status = 'active' AND mock_id = ANY($1)",
+        )
+        .bind(mock_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let bundle: String = row.try_get("bundle")?;
+                Ok((
+                    row.try_get("mock_id")?,
+                    ActiveBundle {
+                        version: row.try_get("version")?,
+                        bundle: serde_json::from_str(&bundle)?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     async fn list_contract_version_infos(
         &self,
         mock_id: Uuid,

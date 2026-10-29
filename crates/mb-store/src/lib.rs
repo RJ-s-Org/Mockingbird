@@ -138,6 +138,22 @@ pub trait ControlStore: Send + Sync {
             bundle: v.bundle,
         }))
     }
+    /// The active version's number and bundle of each of `mock_ids` that
+    /// has one, without sources, in one query per batch of ids (mocks
+    /// without an active version, or unknown, are left out). The default
+    /// calls [`Self::active_bundle`] per mock.
+    async fn active_bundles(
+        &self,
+        mock_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, ActiveBundle>, StoreError> {
+        let mut out = HashMap::with_capacity(mock_ids.len());
+        for &id in mock_ids {
+            if let Some(b) = self.active_bundle(id).await? {
+                out.insert(id, b);
+            }
+        }
+        Ok(out)
+    }
     /// [`Self::list_contract_versions`] without sources and bundles, newest
     /// first. The default lists the full versions.
     async fn list_contract_version_infos(
