@@ -10,14 +10,15 @@
 )]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use openidconnect::url::Url;
 use rsa::RsaPrivateKey;
-use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -29,8 +30,60 @@ struct SigningKey {
     encoding: EncodingKey,
 }
 
+/// Test-only RSA keys (PKCS#8 PEM), checked in so tests do not pay for
+/// 2048-bit key generation on every provider start. Under nextest every
+/// test runs in its own process, so an in-process cache alone would not
+/// help. These keys sign nothing but test tokens.
+const POOL_PEMS: [&str; 4] = [
+    include_str!("testing_keys/key-1.pem"),
+    include_str!("testing_keys/key-2.pem"),
+    include_str!("testing_keys/key-3.pem"),
+    include_str!("testing_keys/key-4.pem"),
+];
+
+/// The parsed pool keys, each filled on first use.
+static POOL: [OnceLock<(RsaPrivateKey, EncodingKey)>; 4] = [
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+    OnceLock::new(),
+];
+
+/// Gives each provider started in this process its own starting slot in
+/// the pool, so two providers in one test sign with different keys.
+static NEXT_PROVIDER: AtomicUsize = AtomicUsize::new(0);
+
+fn pool_key(slot: usize) -> (RsaPrivateKey, EncodingKey) {
+    POOL[slot]
+        .get_or_init(|| {
+            let pem = POOL_PEMS[slot];
+            let private =
+                RsaPrivateKey::from_pkcs8_pem(pem).expect("parsing a pooled test RSA key");
+            let encoding =
+                EncodingKey::from_rsa_pem(pem.as_bytes()).expect("loading a pooled test RSA key");
+            (private, encoding)
+        })
+        .clone()
+}
+
 impl SigningKey {
-    fn generate(n: usize) -> Self {
+    /// A provider's `n`th key (1-based). Its first `POOL_PEMS.len()` keys
+    /// come from the pool, starting at its slot `base`, so they differ
+    /// from each other; later rotations generate fresh keys.
+    fn for_provider(base: usize, n: usize) -> Self {
+        let (private, encoding) = if (1..=POOL_PEMS.len()).contains(&n) {
+            pool_key((base + n - 1) % POOL_PEMS.len())
+        } else {
+            Self::generate()
+        };
+        SigningKey {
+            kid: format!("key-{n}"),
+            private,
+            encoding,
+        }
+    }
+
+    fn generate() -> (RsaPrivateKey, EncodingKey) {
         let private =
             RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).expect("generating an RSA key");
         let pem = private
@@ -38,11 +91,7 @@ impl SigningKey {
             .expect("encoding the RSA key as PKCS#8");
         let encoding =
             EncodingKey::from_rsa_pem(pem.as_bytes()).expect("loading the RSA key for signing");
-        SigningKey {
-            kid: format!("key-{n}"),
-            private,
-            encoding,
-        }
+        (private, encoding)
     }
 
     fn jwk(&self) -> Value {
@@ -78,6 +127,8 @@ fn lock(state: &Shared) -> MutexGuard<'_, State> {
 pub struct MockOidcProvider {
     pub server: MockServer,
     state: Shared,
+    /// This provider's starting slot in the key pool.
+    pool_base: usize,
 }
 
 impl MockOidcProvider {
@@ -87,9 +138,8 @@ impl MockOidcProvider {
     /// Starts the provider with one signing key and every endpoint mounted.
     pub async fn start() -> Self {
         let server = MockServer::start().await;
-        let key = tokio::task::spawn_blocking(|| SigningKey::generate(1))
-            .await
-            .expect("key generation task");
+        let pool_base = NEXT_PROVIDER.fetch_add(1, Ordering::Relaxed) % POOL_PEMS.len();
+        let key = SigningKey::for_provider(pool_base, 1);
         let state: Shared = Arc::new(Mutex::new(State {
             keys: vec![key],
             ..State::default()
@@ -129,7 +179,11 @@ impl MockOidcProvider {
             .mount(&server)
             .await;
 
-        MockOidcProvider { server, state }
+        MockOidcProvider {
+            server,
+            state,
+            pool_base,
+        }
     }
 
     /// The issuer URL (the server's base URI, no trailing slash).
@@ -151,7 +205,8 @@ impl MockOidcProvider {
     /// on. Returns the new `kid`.
     pub async fn rotate_key(&self) -> String {
         let n = lock(&self.state).keys.len() + 1;
-        let key = tokio::task::spawn_blocking(move || SigningKey::generate(n))
+        let base = self.pool_base;
+        let key = tokio::task::spawn_blocking(move || SigningKey::for_provider(base, n))
             .await
             .expect("key generation task");
         let kid = key.kid.clone();

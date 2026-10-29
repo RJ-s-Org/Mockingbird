@@ -875,13 +875,53 @@ async fn url_import_stores_and_audits_redacted_url() {
     );
 }
 
+/// Drops a Postgres test schema (with everything in it) when dropped, also
+/// when the test panics. Drop cannot await, so it runs the statement on a
+/// fresh runtime in its own thread.
+struct SchemaGuard {
+    base: String,
+    schema: String,
+}
+
+impl Drop for SchemaGuard {
+    fn drop(&mut self) {
+        let base = std::mem::take(&mut self.base);
+        let schema = std::mem::take(&mut self.schema);
+        let dropped = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                use sqlx::Connection;
+                let mut conn = sqlx::postgres::PgConnection::connect(&base).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE"
+                )))
+                .execute(&mut conn)
+                .await?;
+                conn.close().await
+            })
+        })
+        .join();
+        if !matches!(dropped, Ok(Ok(()))) && !std::thread::panicking() {
+            panic!("dropping the parity-test schema failed: {dropped:?}");
+        }
+    }
+}
+
 /// The control stores to run backend-parity tests on: SQLite, and Postgres
-/// in a fresh schema when `MB_TEST_POSTGRES_URL` is set.
-async fn parity_stores() -> Vec<(&'static str, Arc<dyn ControlStore>)> {
+/// in a fresh schema when `MB_TEST_POSTGRES_URL` is set. Keep the guard
+/// alive for the whole test; dropping it drops the schema.
+async fn parity_stores() -> (
+    Vec<(&'static str, Arc<dyn ControlStore>)>,
+    Option<SchemaGuard>,
+) {
     let mut stores: Vec<(&'static str, Arc<dyn ControlStore>)> = vec![(
         "sqlite",
         mb_store::connect("sqlite::memory:").await.unwrap(),
     )];
+    let mut guard = None;
     if let Ok(base) = std::env::var("MB_TEST_POSTGRES_URL") {
         use sqlx::Connection;
         let schema = format!("mb_admin_{}", Uuid::new_v4().simple());
@@ -893,16 +933,18 @@ async fn parity_stores() -> Vec<(&'static str, Arc<dyn ControlStore>)> {
         conn.close().await.unwrap();
         let sep = if base.contains('?') { '&' } else { '?' };
         let url = format!("{base}{sep}options=-c%20search_path%3D{schema}");
+        guard = Some(SchemaGuard { base, schema });
         stores.push(("postgres", mb_store::connect(&url).await.unwrap()));
     } else {
         println!("postgres skipped: MB_TEST_POSTGRES_URL not set");
     }
-    stores
+    (stores, guard)
 }
 
 #[tokio::test]
 async fn control_characters_in_names_are_stripped_on_every_backend() {
-    for (backend, store) in parity_stores().await {
+    let (stores, _schema) = parity_stores().await;
+    for (backend, store) in stores {
         let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
         let st = AdminState {
             auth: Arc::new(TestAuth),
