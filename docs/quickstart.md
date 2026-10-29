@@ -61,7 +61,7 @@ Check a contract without serving it:
 mockingbird validate orders.yaml
 ```
 
-`validate` ends with a `warning: …` line for each operation whose response schema (with the definitions it reaches) is larger than the 64 KiB the generation prompt shows; the prompt then gets a trimmed schema, while validation still uses the full one. Uploads, the version list, activation and approval return the same warnings (`warnings: [{code: "schema_too_large", operation, message, size}]`).
+`validate` ends with a `warning: …` line for each operation whose response schema (with the definitions it reaches) is larger than the 64 KiB the generation prompt shows; the prompt then gets a trimmed schema, while validation still uses the full one. Uploads, the version list, activation and approval return the same warnings (`warnings: [{code: "schema_too_large", operation, message, size}]`). Other warnings say what the import relaxed or skipped, such as an expanded `4XX` response range or a stubbed dangling `$ref`; see [Import warnings](protocols.md#import-warnings).
 
 Mockingbird listens on three ports: the data plane (REST, SSE, GraphQL and SOAP mocks) on `127.0.0.1:8080`, gRPC mocks on `127.0.0.1:50051` (h2c), and the Admin API plus ops endpoints on `127.0.0.1:9090`. If you did not choose an admin port (`--admin-port`, `MB_ADMIN_PORT` or `server.admin_port`) and 9090 is already taken, Mockingbird logs a warning and serves the data plane without the admin port. The gRPC port (`--grpc-port`, `MB_GRPC_PORT` or `server.grpc_port`) works the same way: when 50051 is taken, gRPC mocks are not served. A port you chose explicitly must be free.
 

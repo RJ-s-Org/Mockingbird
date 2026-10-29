@@ -28,7 +28,7 @@ mockingbird import --as orders protos/          # packs protos/ as tar.gz
 mockingbird import --as calc calculator.zip
 ```
 
-An archive is at most 20 MiB, holds at most 500 files and unpacks to at most 64 MiB. It is unpacked in memory only: absolute paths, `..`, links and devices are rejected, and when every file shares one top-level directory, that directory is stripped. Nested archives are not supported. The CLI picks the upload's media type from the file extension (`.graphql`, `.proto`, `.pb`/`.desc`, `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz`, `.json`, `.yaml`).
+An archive is at most 20 MiB, holds at most 500 files and unpacks to at most 64 MiB. It is unpacked in memory only: absolute paths, `..`, links and devices are rejected, and when every file shares one top-level directory, that directory is stripped. `__MACOSX/` entries and hidden files and directories (`.DS_Store`, `.git/`) are dropped, as packing a directory skips them. Beside one contract, documentation (`.md`, `.txt`, `.html`, …), images and `README`/`LICENSE` files are ignored; several contracts in one archive are refused with an error naming them. Nested archives are not supported. The CLI picks the upload's media type from the file extension (`.graphql`, `.proto`, `.pb`/`.desc`, `.wsdl`/`.xsd`/`.xml`, `.zip`, `.tgz`/`.tar.gz`, `.json`, `.yaml`).
 
 ## Reference
 

@@ -65,6 +65,9 @@ pub(crate) struct Xsd<'a> {
     attr_group_memo: RefCell<BTreeMap<QName, Memo>>,
     /// JSON nodes added so far by replaying memoised expansions.
     expanded: Cell<usize>,
+    /// The files whose schemas use `xs:any` or `xs:anyAttribute`, which
+    /// add no properties.
+    wildcards: RefCell<BTreeSet<String>>,
 }
 
 /// A finished group expansion and its size in JSON nodes.
@@ -293,6 +296,7 @@ impl<'a> Xsd<'a> {
             group_memo: RefCell::new(BTreeMap::new()),
             attr_group_memo: RefCell::new(BTreeMap::new()),
             expanded: Cell::new(0),
+            wildcards: RefCell::new(BTreeSet::new()),
         };
         for (schema, doc) in docs.iter().enumerate() {
             xsd.schemas.push(Ctx {
@@ -337,6 +341,17 @@ impl<'a> Xsd<'a> {
         }
         xsd.def_names = def_names;
         xsd
+    }
+
+    /// The files whose schemas used `xs:any` or `xs:anyAttribute` in what
+    /// was converted so far, in path order.
+    pub(crate) fn wildcard_files(&self) -> Vec<String> {
+        self.wildcards.borrow().iter().cloned().collect()
+    }
+
+    /// Records a wildcard in schema `s`.
+    fn wildcard(&self, s: usize) {
+        self.wildcards.borrow_mut().insert(self.file(s).to_owned());
     }
 
     /// Every `$defs` entry.
@@ -482,6 +497,7 @@ impl<'a> Xsd<'a> {
                 "attributeGroup" => self.attribute_group(child, s, obj, depth + 1)?,
                 "simpleContent" => self.simple_content(child, s, obj, depth + 1)?,
                 "complexContent" => self.complex_content(child, s, obj, depth + 1)?,
+                "anyAttribute" => self.wildcard(s),
                 _ => {}
             }
         }
@@ -508,6 +524,7 @@ impl<'a> Xsd<'a> {
                     self.particles(child, s, obj, optional, in_choice, depth + 1)?;
                 }
                 "group" => self.group_ref(child, s, obj, optional, in_choice, depth + 1)?,
+                "any" => self.wildcard(s),
                 _ => {}
             }
         }
@@ -672,6 +689,7 @@ impl<'a> Xsd<'a> {
                         "attributeGroup" => {
                             self.attribute_group(child, g.schema, &mut sub, depth + 1)?;
                         }
+                        "anyAttribute" => self.wildcard(g.schema),
                         _ => {}
                     }
                 }
@@ -719,6 +737,7 @@ impl<'a> Xsd<'a> {
                 match child.name.local.as_str() {
                     "attribute" => self.attribute(child, s, obj, depth + 1)?,
                     "attributeGroup" => self.attribute_group(child, s, obj, depth + 1)?,
+                    "anyAttribute" => self.wildcard(s),
                     _ => {}
                 }
             }

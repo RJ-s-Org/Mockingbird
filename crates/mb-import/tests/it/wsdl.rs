@@ -691,3 +691,69 @@ fn recursive_group_is_rejected() {
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 }
+
+#[test]
+fn xsd_wildcards_warn() {
+    let wsdl = schema_wsdl(
+        "",
+        r#"<xs:sequence><xs:element name="a" type="xs:string"/><xs:any minOccurs="0"/></xs:sequence><xs:anyAttribute/>"#,
+    );
+    let (b, warnings) = mb_import::compile_with_warnings(wsdl.as_bytes()).unwrap();
+    assert_eq!(b.operations.len(), 1);
+    let wildcard: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "xsd_wildcard_ignored")
+        .collect();
+    assert_eq!(wildcard.len(), 1, "{warnings:?}");
+    assert!(
+        wildcard[0].message.contains("xs:any"),
+        "{}",
+        wildcard[0].message
+    );
+
+    let plain = schema_wsdl(
+        "",
+        r#"<xs:sequence><xs:element name="a" type="xs:string"/></xs:sequence>"#,
+    );
+    let (_, warnings) = mb_import::compile_with_warnings(plain.as_bytes()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn wsdl_import_is_named() {
+    // The binding and service import their portType from another WSDL.
+    let main = r#"<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:tns="urn:main" targetNamespace="urn:main">
+  <wsdl:import namespace="urn:abstract" location="abstract.wsdl"/>
+  <wsdl:binding name="B" type="tns:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Put"><soap:operation soapAction=""/></wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S">
+    <wsdl:port name="Port" binding="tns:B"><soap:address location="http://x/s"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
+"#;
+    let abstract_wsdl = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:abstract"/>"#;
+    let files = [
+        SourceFile {
+            path: "main.wsdl".into(),
+            bytes: main.as_bytes().to_vec(),
+        },
+        SourceFile {
+            path: "abstract.wsdl".into(),
+            bytes: abstract_wsdl.as_bytes().to_vec(),
+        },
+    ];
+    let err = compile_files(&files).unwrap_err().to_string();
+    assert!(err.contains("wsdl:import"), "{err}");
+
+    // On its own, the importing file names the import it cannot follow.
+    let err = compile(main.as_bytes()).unwrap_err().to_string();
+    assert!(
+        err.contains("wsdl:import") && err.contains("abstract.wsdl"),
+        "{err}"
+    );
+}

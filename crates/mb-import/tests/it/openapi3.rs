@@ -67,7 +67,7 @@ fn compiles_recursive_schema() {
 }
 
 #[test]
-fn rejects_dangling_ref() {
+fn stubs_dangling_ref() {
     let doc = r##"
 openapi: 3.0.3
 info: {title: T, version: "1"}
@@ -82,10 +82,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Missing'
 "##;
-    match compile(doc.as_bytes()) {
-        Err(ImportError::Invalid { pointer, .. }) => assert!(pointer.contains("Missing")),
-        other => panic!("expected Invalid, got {other:?}"),
-    }
+    let (b, warnings) = mb_import::compile_with_warnings(doc.as_bytes()).unwrap();
+    assert_eq!(b.defs["Missing"], json!(true));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, "dangling_ref");
+    assert!(warnings[0].message.contains("Missing"));
 }
 
 #[test]
@@ -286,25 +287,24 @@ fn refs_inside_vendor_extensions_are_ignored() {
         json!({"$ref": "#/$defs/file"})
     );
 
-    // A dangling ref under a property named `x-*` is still an error.
+    // A dangling ref under a property named `x-*` is still checked.
     let mut bad = doc.clone();
     bad["components"]["schemas"]["migration"]["properties"]["x-header"]["$ref"] =
         json!("#/components/schemas/gone");
-    match compile(bad.to_string().as_bytes()) {
-        Err(ImportError::Invalid { pointer, message }) => {
-            assert!(pointer.ends_with("/gone"), "{pointer}");
-            assert!(message.contains("schema migration"), "{message}");
-            assert!(
-                message.contains("/components/schemas/migration/properties/x-header"),
-                "{message}"
-            );
-        }
-        other => panic!("expected Invalid, got {other:?}"),
-    }
+    let (b, warnings) = mb_import::compile_with_warnings(bad.to_string().as_bytes()).unwrap();
+    assert_eq!(b.defs["gone"], json!(true));
+    let message = &warnings[0].message;
+    assert_eq!(warnings[0].code, "dangling_ref");
+    assert!(message.contains("#/components/schemas/gone"), "{message}");
+    assert!(message.contains("schema migration"), "{message}");
+    assert!(
+        message.contains("/components/schemas/migration/properties/x-header"),
+        "{message}"
+    );
 }
 
 /// A dangling ref is reported with its referrer and the JSON pointer of the
-/// `$ref` inside it.
+/// `$ref` inside it; a ref that is not a component name is still an error.
 #[test]
 fn dangling_ref_names_referrer_and_location() {
     let src = oas(r#"
@@ -320,9 +320,16 @@ fn dangling_ref_names_referrer_and_location() {
                 tags: {type: array, items: {$ref: '#/components/schemas/Tag'}}
       responses: {"200": {description: OK}}
 "#);
+    let (_, warnings) = mb_import::compile_with_warnings(src.as_bytes()).unwrap();
+    let message = &warnings[0].message;
+    assert!(message.contains("#/components/schemas/Tag"), "{message}");
+    assert!(message.contains("operation makeA"), "{message}");
+    assert!(message.contains("/properties/tags/items"), "{message}");
+
+    let src = src.replace("schemas/Tag", "schemas/Tag/properties/name");
     match compile(src.as_bytes()) {
         Err(ImportError::Invalid { pointer, message }) => {
-            assert!(pointer.ends_with("/Tag"), "{pointer}");
+            assert!(pointer.ends_with("/Tag/properties/name"), "{pointer}");
             assert!(message.contains("operation makeA"), "{message}");
             assert!(message.contains("/properties/tags/items"), "{message}");
         }
@@ -437,10 +444,14 @@ fn webhook_payload_refs_are_checked() {
             "$ref: \"#/components/schemas/PetEvent\"",
             "$ref: \"#/components/schemas/Missing\"",
         );
-    assert!(matches!(
-        compile(src.as_bytes()),
-        Err(ImportError::Invalid { .. })
-    ));
+    let (b, warnings) = mb_import::compile_with_warnings(src.as_bytes()).unwrap();
+    assert_eq!(b.defs["Missing"], json!(true));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == "dangling_ref" && w.message.contains("webhook")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -577,4 +588,162 @@ paths:
             path_field: None,
         })
     );
+}
+
+/// A minimal OpenAPI 3.0 document with `paths` and `components` spliced in.
+fn doc30(paths: serde_json::Value, components: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": paths,
+        "components": components,
+    }))
+    .unwrap()
+}
+
+fn codes(op: &mb_mcm::Operation) -> Vec<String> {
+    op.outputs
+        .iter()
+        .map(|o| match o.status {
+            StatusSelector::Code(c) => c.to_string(),
+            StatusSelector::Default => "default".into(),
+        })
+        .collect()
+}
+
+#[test]
+fn status_ranges_expand_to_the_codes_the_operation_does_not_declare() {
+    let bytes = doc30(
+        json!({
+            "/a": {"get": {"operationId": "a", "responses": {
+                "4XX": {"description": "client", "content": {"application/json": {"schema": {"type": "object", "properties": {"range": {"type": "string"}}}}}},
+                "200": {"description": "ok"},
+                "404": {"description": "missing", "content": {"application/json": {"schema": {"type": "object", "properties": {"explicit": {"type": "string"}}}}}},
+                "5xx": {"description": "server"},
+                "1XX": {"description": "info"}
+            }}},
+            "/b": {"get": {"operationId": "b", "responses": {"2XX": {"description": "ok", "content": {"application/json": {"schema": {"type": "string"}}}}}}},
+            "/c": {"post": {"operationId": "c", "responses": {
+                "2XX": {"description": "ok"},
+                "201": {"description": "created", "content": {"application/json": {"schema": {"type": "integer"}}}}
+            }}}
+        }),
+        json!({}),
+    );
+    let (b, warnings) = mb_import::compile_with_warnings(&bytes).unwrap();
+    let a = b.operation("a").unwrap();
+    let a_codes = codes(a);
+    for code in [
+        "200", "400", "401", "403", "404", "409", "422", "429", "500", "502", "503",
+    ] {
+        assert!(a_codes.contains(&code.to_string()), "{code} in {a_codes:?}");
+    }
+    assert!(!a_codes.iter().any(|c| c.starts_with('1')), "{a_codes:?}");
+    // The explicit 404 wins over the range; 400 comes from the range.
+    let explicit = a.output_for_status(404).unwrap().schema.as_ref().unwrap();
+    assert!(explicit["properties"].get("explicit").is_some());
+    let ranged = a.output_for_status(400).unwrap().schema.as_ref().unwrap();
+    assert!(ranged["properties"].get("range").is_some());
+    assert_eq!(
+        a.success_output().unwrap().status,
+        StatusSelector::Code(200)
+    );
+    // A lone 2XX answers 200.
+    let b_op = b.operation("b").unwrap();
+    assert_eq!(
+        b_op.success_output().unwrap().status,
+        StatusSelector::Code(200)
+    );
+    assert_eq!(
+        b_op.success_output().unwrap().schema,
+        Some(json!({"type": "string"}))
+    );
+    // An explicit 2xx code keeps 2XX from adding 200.
+    let c = b.operation("c").unwrap();
+    assert_eq!(codes(c), ["201"]);
+    let ranged: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "status_range_expanded")
+        .collect();
+    assert_eq!(ranged.len(), 3, "{warnings:?}");
+    assert_eq!(ranged[0].operation.as_deref(), Some("a"));
+    assert!(ranged[0].message.contains("4XX"), "{}", ranged[0].message);
+    assert!(ranged[0].message.contains("1XX"), "{}", ranged[0].message);
+    // `compile` gives the same bundle without the warnings.
+    assert_eq!(compile(&bytes).unwrap(), b);
+}
+
+#[test]
+fn a_dangling_component_ref_is_stubbed_with_a_warning() {
+    let bytes = doc30(
+        json!({"/a": {"get": {"operationId": "a", "responses": {"200": {"description": "ok",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}}}}}}),
+        json!({"schemas": {"Pet": {"type": "object", "properties": {"tag": {"$ref": "#/components/schemas/Tag"}}}}}),
+    );
+    let (b, warnings) = mb_import::compile_with_warnings(&bytes).unwrap();
+    assert_eq!(b.defs["Missing"], json!(true));
+    assert_eq!(b.defs["Tag"], json!(true));
+    let dangling: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "dangling_ref")
+        .collect();
+    assert_eq!(dangling.len(), 2, "{warnings:?}");
+    assert!(
+        dangling
+            .iter()
+            .any(|w| w.message.contains("#/components/schemas/Missing"))
+    );
+
+    // A ref to another file is still refused.
+    let bytes = doc30(
+        json!({"/a": {"get": {"responses": {"200": {"description": "ok",
+            "content": {"application/json": {"schema": {"$ref": "./pet.yaml#/Pet"}}}}}}}}),
+        json!({}),
+    );
+    assert!(matches!(
+        compile(&bytes).unwrap_err(),
+        ImportError::Invalid { .. }
+    ));
+}
+
+#[test]
+fn openapi_30_x_webhooks_are_read() {
+    let bytes = serde_json::to_vec(&json!({
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {},
+        "x-webhooks": {"push": {"post": {"summary": "a push", "requestBody": {"content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/Push"}}}}}}},
+        "components": {"schemas": {"Push": {"type": "object", "properties": {"ref": {"type": "string"}}}}}
+    }))
+    .unwrap();
+    let b = compile(&bytes).unwrap();
+    assert_eq!(b.webhooks.len(), 1);
+    assert_eq!(b.webhooks[0].name, "push");
+    assert_eq!(
+        b.webhooks[0].payload_schema,
+        json!({"$ref": "#/$defs/Push"})
+    );
+    assert_eq!(b.webhooks[0].summary.as_deref(), Some("a push"));
+}
+
+#[test]
+fn cookie_params_and_unresolved_headers_warn() {
+    let bytes = doc30(
+        json!({"/a": {"get": {"operationId": "a",
+            "parameters": [{"name": "session", "in": "cookie", "schema": {"type": "string"}}],
+            "responses": {"200": {"description": "ok",
+                "headers": {"X-Rate": {"$ref": "#/components/headers/Missing"}}}}}}}),
+        json!({}),
+    );
+    let (_, warnings) = mb_import::compile_with_warnings(&bytes).unwrap();
+    let codes: Vec<&str> = warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(codes.contains(&"cookie_param_ignored"), "{codes:?}");
+    assert!(codes.contains(&"response_header_unresolved"), "{codes:?}");
+    let cookie = warnings
+        .iter()
+        .find(|w| w.code == "cookie_param_ignored")
+        .unwrap();
+    assert!(cookie.message.contains("session"), "{}", cookie.message);
+    assert_eq!(cookie.operation.as_deref(), Some("a"));
 }

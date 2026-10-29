@@ -671,7 +671,7 @@ pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> 
             return Err(issues);
         }
     };
-    match compile(doc, &source) {
+    match compile(doc, &source, &mut crate::Ctx::strict()) {
         Ok(bundle) if issues.is_empty() => Ok((source, bundle)),
         Ok(_) => Err(issues),
         Err(e) => {

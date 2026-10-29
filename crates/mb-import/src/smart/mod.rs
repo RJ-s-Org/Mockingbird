@@ -16,6 +16,7 @@ mod pdfscan;
 pub mod postman;
 mod probe;
 pub mod redact;
+mod swagger2;
 pub mod text;
 
 use std::collections::HashSet;

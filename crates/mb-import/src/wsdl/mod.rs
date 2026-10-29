@@ -3,7 +3,8 @@
 //! Each `wsdl:service` is served through its first SOAP 1.1 or SOAP 1.2
 //! port; every operation of that port's portType becomes one operation.
 //! External schemas are never fetched: `schemaLocation`s must resolve
-//! within the upload.
+//! within the upload. `wsdl:import` is not followed: a document that needs
+//! the definitions it imports fails with an error naming the import.
 
 mod xml;
 mod xsd;
@@ -11,7 +12,7 @@ mod xsd;
 use crate::heuristics::{kind_from_name, resource_from_name};
 use crate::openapi3::{invalid, slug};
 use crate::proto::hex_digest;
-use crate::{ImportError, SourceFile, SourceFormat};
+use crate::{Ctx, ImportError, SourceFile, SourceFormat};
 use mb_mcm::{
     Binding, Bundle, Identity, InputSchemas, Operation, OperationKind, OutputVariant, Protocol,
     ProtocolPayload, SoapVersion, StatusSelector,
@@ -72,31 +73,82 @@ pub(crate) fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
 }
 
 /// Compile a single WSDL document.
-pub(crate) fn compile_text(bytes: &[u8]) -> Result<Bundle, ImportError> {
+pub(crate) fn compile_text(bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let file = SourceFile {
         path: MAIN_FILE.into(),
         bytes: bytes.to_vec(),
     };
-    compile_upload(&file, &[], hex_digest(bytes))
+    compile_upload(&file, &[], hex_digest(bytes), ctx)
 }
 
-/// Compile `wsdl`, resolving `schemaLocation`s among `files`.
+/// Compile `wsdl`, resolving `schemaLocation`s among `files`. Its
+/// `wsdl:import`s are not followed: an error is extended to name them, and
+/// a document that compiles without them gets a `wsdl_import_ignored`
+/// warning. Schemas using `xs:any` or `xs:anyAttribute` get an
+/// `xsd_wildcard_ignored` warning per file.
 pub(crate) fn compile_upload(
     wsdl: &SourceFile,
     files: &[SourceFile],
     source_digest: String,
+    ctx: &mut Ctx,
 ) -> Result<Bundle, ImportError> {
     let root = parse(&wsdl.bytes, &wsdl.path)?;
     check_root(&root)?;
+    let imports: Vec<&str> = root
+        .children_named(WSDL_NS, "import")
+        .map(|i| i.attr("location").unwrap_or("(no location)"))
+        .collect();
+    let imported = || {
+        imports
+            .iter()
+            .map(|l| format!("\"{l}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match compile_root(wsdl, &root, files, source_digest, ctx) {
+        Ok(bundle) => {
+            if !imports.is_empty() {
+                ctx.warn(
+                    "wsdl_import_ignored",
+                    None,
+                    format!(
+                        "{}: wsdl:import of {} is not followed; only the definitions in this file are served",
+                        wsdl.path,
+                        imported()
+                    ),
+                );
+            }
+            Ok(bundle)
+        }
+        Err(ImportError::Invalid { pointer, message }) if !imports.is_empty() => {
+            Err(ImportError::Invalid {
+                pointer,
+                message: format!(
+                    "{message} (the document uses wsdl:import of {}, which is not supported; merge the imported definitions into this file)",
+                    imported()
+                ),
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn compile_root(
+    wsdl: &SourceFile,
+    root: &Element,
+    files: &[SourceFile],
+    source_digest: String,
+    ctx: &mut Ctx,
+) -> Result<Bundle, ImportError> {
     let text = std::str::from_utf8(&wsdl.bytes)
         .map_err(|e| ImportError::Parse(format!("{}: not valid UTF-8: {e}", wsdl.path)))?;
     let uploads: BTreeMap<&str, &[u8]> = files
         .iter()
         .map(|f| (f.path.as_str(), f.bytes.as_slice()))
         .collect();
-    let loaded = load_schemas(&wsdl.path, &root, &uploads)?;
+    let loaded = load_schemas(&wsdl.path, root, &uploads)?;
     let mut docs = Vec::new();
-    for schema in inline_schemas(&root) {
+    for schema in inline_schemas(root) {
         docs.push(SchemaDoc {
             el: schema,
             file: wsdl.path.clone(),
@@ -115,8 +167,17 @@ pub(crate) fn compile_upload(
     }
     let xsd = Xsd::new(&docs);
     let defs = xsd.defs()?;
-    let wsdl_doc = Wsdl::new(&root, &wsdl.path);
+    let wsdl_doc = Wsdl::new(root, &wsdl.path);
     let operations = wsdl_doc.operations(&xsd, &defs)?;
+    for file in xsd.wildcard_files() {
+        ctx.warn(
+            "xsd_wildcard_ignored",
+            None,
+            format!(
+                "{file}: xs:any and xs:anyAttribute wildcards are ignored; the elements and attributes they allow are never generated"
+            ),
+        );
+    }
     let title = root
         .attr("name")
         .filter(|n| !n.trim().is_empty())

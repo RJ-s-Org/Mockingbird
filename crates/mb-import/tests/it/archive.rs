@@ -235,7 +235,7 @@ fn several_wsdl_and_unknown_files() {
     let zip = zip_of(&[("a.txt", b"x"), ("b.txt", b"y")]);
     assert!(matches!(
         compile(&zip).unwrap_err(),
-        ImportError::Unsupported(m) if m == "archive contains no recognised contract"
+        ImportError::Unsupported(m) if m.starts_with("archive contains no recognised contract")
     ));
     // A single file is compiled on its own.
     let openapi = std::fs::read(fixtures().join("openapi/orders-3.0.yaml")).unwrap();
@@ -243,4 +243,55 @@ fn several_wsdl_and_unknown_files() {
     let b = compile(&zip).unwrap();
     assert_eq!(b.source_digest, hex(&zip));
     assert!(!b.operations.is_empty());
+}
+
+#[test]
+fn macos_metadata_and_hidden_entries_are_dropped() {
+    let zip = zip_of(&[
+        ("api/a.proto", b"syntax = \"proto3\"; message A { int32 x = 1; } service S { rpc Get(A) returns (A); }"),
+        ("__MACOSX/api/._a.proto", b"\x00\x05\x16\x07 not a proto"),
+        ("api/.DS_Store", b"\x00\x00\x00\x01Bud1"),
+        ("api/.git/config", b"[core]"),
+    ]);
+    let paths: Vec<String> = unpack_archive(&zip)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(paths, ["a.proto"]);
+    assert!(!compile(&zip).unwrap().operations.is_empty());
+}
+
+#[test]
+fn a_single_contract_beside_incidental_files_compiles() {
+    let openapi = std::fs::read(fixtures().join("openapi/orders-3.0.yaml")).unwrap();
+    let zip = zip_of(&[
+        (
+            "README.md",
+            b"# Orders API\n\nThe service and message formats are below.",
+        ),
+        ("LICENSE", b"MIT"),
+        ("openapi.yaml", &openapi),
+    ]);
+    let b = compile(&zip).unwrap();
+    assert!(!b.operations.is_empty());
+    assert_eq!(b.source_digest, hex(&zip));
+
+    // Two contracts are named in the error.
+    let swagger = std::fs::read(fixtures().join("swagger/orders-2.0.json")).unwrap();
+    let zip = zip_of(&[
+        ("a.yaml", &openapi),
+        ("b.json", &swagger),
+        ("README.md", b"x"),
+    ]);
+    match compile(&zip).unwrap_err() {
+        ImportError::Invalid { message, .. } => {
+            assert!(
+                message.contains("a.yaml") && message.contains("b.json"),
+                "{message}"
+            );
+            assert!(!message.contains("README"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
 }

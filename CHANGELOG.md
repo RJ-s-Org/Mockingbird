@@ -8,6 +8,13 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- Contract imports report what they relax or skip as warnings (returned by `mockingbird validate`, uploads and the version list; they never block activation): `status_range_expanded`, `dangling_ref`, `cookie_param_ignored`, `response_header_unresolved`, `xsd_wildcard_ignored` and `wsdl_import_ignored` ([import warnings](docs/protocols.md#import-warnings)). `mb_import::compile_files_with_warnings` is the multi-file counterpart of `compile_with_warnings`.
+- OpenAPI response ranges (`2XX` to `5XX`) are no longer dropped: each stands for the common codes of its class that the operation does not declare itself (`4XX` for 400, 401, 403, 404, …), so scenarios can force them. Explicit codes win, and an explicit 2xx keeps `2XX` from adding `200`.
+- OpenAPI 3.0 `x-webhooks` (GitHub's spec) are read as webhook payloads, like 3.1 `webhooks`.
+- Smart import converts Swagger 2.0 blocks embedded in documentation pages to OpenAPI 3.0 and takes their operations as written, as it does for OpenAPI 3 blocks; the `embedded_swagger2` warning is gone.
+
 ### Changed
 
 - Audit webhook: a failing event is retried in the background (at most 64 at once) instead of holding up the queue, so one event's 7 s of backoff no longer delays every event behind it (the next event went out after 0.7 s with a 100 ms backoff base, now after about 2 ms). First attempts keep the queue's order, but a retried event can now arrive after later ones; order by the event `id`.
@@ -17,6 +24,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 - GraphQL: queries using a custom executable directive the schema declares, such as Shopify Storefront's `@inContext(country: …)`, failed validation with `Unknown directive`; the directive definitions were dropped when the schema was built (and, for an introspection upload, when it was rendered to SDL). Such directives are now accepted and ignored, as are the variables only they use; undeclared directives still fail validation.
 - GraphQL: a stored schema defining a field, argument, input field, enum value, union member or implemented interface twice in one type (possible in bundles imported before duplicates were refused at import) no longer panics when the mock is served; the mock fails to load with an `invalid GraphQL schema: … is defined more than once` error naming the type and member.
+- A `$ref` to a missing component schema (`#/components/schemas/X`, `#/definitions/X`) no longer fails the whole contract (Square's spec): the schema is stubbed as an open schema, with a `dangling_ref` warning. Refs to other files are still refused.
+- Archive uploads drop `__MACOSX/` entries and hidden files (a zip made in Finder no longer breaks a `.proto` upload), and a single contract beside a README, LICENSE or other documentation compiles; several contracts are refused with an error naming them.
+- An upload with several `.wsdl` files, or a WSDL that needs definitions it pulls in with `wsdl:import`, is refused with an error naming `wsdl:import` (which is not followed) instead of "expected one" or "unknown portType" alone.
+
 - `vault:<mount>/<path>#<field>` secret references work wherever `env:` and `file:` do, as documented: an LLM profile's `api_key` and `${…}` header references in the config file, a broker's `sasl.password`, and an Admin API profile's `secret_ref` and headers (still gated by `server.api_secret_refs`) were refused with "must be a secret reference (env:NAME or file:/path)". A malformed `vault:` reference (such as `vault:token#key`, which the Vault resolver cannot read) is now refused when written, including in webhook `secret`s, which accepted any `vault:` text and failed only at delivery.
 - `mb-ext`: `DefaultSecrets` resolving a well-formed `vault:` reference without a usable Vault returns `ExtError::Other` naming the reason (`VAULT_ADDR is not set`, or `Vault is disabled: …` with the configuration error) on every resolve, instead of `ExtError::BadSecretRef` ("invalid secret reference"), which pointed at a correct reference. Malformed references are still `BadSecretRef`.
 

@@ -1,4 +1,5 @@
-//! OpenAPI 3.x documents embedded in documentation pages: their operations
+//! OpenAPI 3.x and Swagger 2.0 documents embedded in documentation pages:
+//! their operations
 //! are taken as written (the formal import path) instead of asking the LLM
 //! to re-derive them from the page's prose.
 //!
@@ -12,12 +13,14 @@
 //! 2. Code blocks (Markdown fences, HTML `<pre>`) that parse as JSON or YAML.
 //! 3. In every value read, depth first (at most 64 deep and
 //!    200 000 nodes): an object with an `openapi` string starting
-//!    `3.` and an object `paths` is a document; a long string that looks
+//!    `3.` (or a `swagger` string `2.0`, converted to OpenAPI 3.0 first)
+//!    and an object `paths` is a document; a long string that looks
 //!    like stringified JSON naming `"openapi"` is parsed and walked too
 //!    (ReadMe's `oasDefinition`). Documents with the same paths count once.
 //!
-//! A Swagger 2.0 block is not converted: its text stays for the LLM, with
-//! an `embedded_swagger2` warning.
+//! The Swagger 2.0 conversion keeps definitions, parameters, bodies, form
+//! fields, responses, headers, security schemes and the base path (as a
+//! server); see `smart::swagger2`.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -95,7 +98,6 @@ pub struct Embedded {
 #[derive(Default)]
 struct Found {
     documents: Vec<Value>,
-    swagger2: bool,
     nodes: usize,
 }
 
@@ -114,7 +116,7 @@ impl Found {
                         return;
                     }
                     if obj.get("swagger").and_then(Value::as_str) == Some("2.0") {
-                        self.swagger2 = true;
+                        self.documents.push(super::swagger2::to_openapi3(obj));
                         return;
                     }
                 }
@@ -130,7 +132,7 @@ impl Found {
             Value::String(s)
                 if s.len() > MIN_STRINGIFIED
                     && s.trim_start().starts_with('{')
-                    && s.contains("\"openapi\"") =>
+                    && (s.contains("\"openapi\"") || s.contains("\"swagger\"")) =>
             {
                 if let Ok(inner) = serde_json::from_str::<Value>(s) {
                     self.walk(&inner, depth + 1);
@@ -187,12 +189,6 @@ pub fn extract_embedded(kind: ImportKind, bytes: &[u8], doc: &mut TextDoc) -> Em
     });
 
     let mut embedded = Embedded::default();
-    if found.swagger2 {
-        embedded.warnings.push(DraftWarning::new(
-            "embedded_swagger2",
-            "a Swagger 2.0 block was found; its operations are read from the text instead",
-        ));
-    }
     let mut seen_documents: HashSet<BTreeSet<String>> = HashSet::new();
     let mut seen_operations = HashSet::new();
     for document in &found.documents {

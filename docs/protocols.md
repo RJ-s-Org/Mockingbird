@@ -11,9 +11,26 @@ The importer detects a contract's format from its bytes (the file name does not 
 | protobuf `FileDescriptorSet` | a binary descriptor set (`protoc --descriptor_set_out`) | As `.proto`. |
 | AsyncAPI 2.0–2.6, 3.0 (JSON or YAML) | an `asyncapi: 2.*` or `asyncapi: 3.0.*` key | Event channels: generated messages published to Kafka, AMQP or MQTT and consumed from them, or WebSocket channels at `<prefix><address>`. See [Events](events.md). |
 | WSDL 1.1 (with inline or bundled XSD) | an XML `definitions` root in the WSDL 1.1 namespace | SOAP 1.1 and 1.2 at `<prefix><address path>`, the path of each service's `soap:address`; `GET <prefix><address path>?wsdl` returns the WSDL with its addresses pointing at the mock. |
-| zip or tar.gz archive | the zip or gzip magic bytes | The contract inside: all `.proto` files compiled together, else the single `.wsdl` with its XSDs, else the `.graphql`/`.graphqls`/`.gql` files joined as one schema, else the single file. See [Archive uploads](cli.md#archive-uploads). |
+| zip or tar.gz archive | the zip or gzip magic bytes | The contract inside: all `.proto` files compiled together, else the single `.wsdl` with its XSDs, else the `.graphql`/`.graphqls`/`.gql` files joined as one schema, else the one file that is a contract (documentation, images, `README` and `LICENSE` files beside it are ignored). See [Archive uploads](cli.md#archive-uploads). |
 
 Operation ids, as scenarios' `operations` lists and the request log use them, are `Query.<field>` / `Mutation.<field>` / `Subscription.<field>` for GraphQL, `<Service>.<Method>` for gRPC (`<package>.<Service>.<Method>` when the short form collides), and `<operation>` for SOAP (`<Service>.<operation>` on collision). Each gRPC service is served by one mock across every workspace (the gRPC listener is shared): uploading with activation, or activating, a contract whose services another mock's active contract serves is a 409, and a config file declaring such a clash is rejected. If a clash reaches the data plane anyway, the mock already serving the service keeps it and the newcomer is reported in `/readyz` as failed. gRPC reflection lists only the services the caller's data-plane key reaches (plus mocks without data-plane auth) and needs a valid key when any gRPC mock is in `api_key` mode.
+
+## Import warnings
+
+Compiling a contract never fails over what the mock cannot represent exactly; it relaxes or skips it and says so. `mockingbird validate` prints each warning, and uploads, the version list, activation and approval return them (`warnings: [{code, operation, message}]`). They never block activation.
+
+| Code | Meaning |
+| --- | --- |
+| `status_range_expanded` | An OpenAPI response range (`2XX` to `5XX`) stands for the codes of its class the operation does not declare itself: `2XX` for `200` (only when no explicit 2xx is declared), `3XX` for 301, 302, 303, 304, 307 and 308, `4XX` for 400, 401, 403, 404, 405, 409, 410, 415, 422 and 429, `5XX` for 500 to 504. Explicit codes win; `1XX` is ignored. So scenarios and `X-Mockingbird-Status` can force those codes. |
+| `dangling_ref` | A `$ref` names a component schema (`#/components/schemas/X`, `#/definitions/X`) the document does not define; it is stubbed as an open schema that accepts any value. A `$ref` to another file or another kind of component is still an error. |
+| `cookie_param_ignored` | The operation declares cookie parameters; the mock neither validates nor requires them. |
+| `response_header_unresolved` | A response header's `$ref` does not resolve; the header is left out. |
+| `security_scheme_unsupported` | A security requirement uses a scheme the mock cannot check (see [the console guide](console.md)). |
+| `schema_too_large` | A response schema is over the 64 KiB prompt budget; the prompt shows a trimmed schema. |
+| `xsd_wildcard_ignored` | An XSD uses `xs:any` or `xs:anyAttribute`; the elements and attributes they allow are never generated. |
+| `wsdl_import_ignored` | The WSDL uses `wsdl:import`, which is not followed; only the definitions in the uploaded file are served. |
+
+OpenAPI 3.0 documents may declare webhooks under `x-webhooks` (GitHub's spec does); they are read as 3.1 `webhooks` are.
 
 ## Examples
 
@@ -114,5 +131,6 @@ Request limits: HTTP/REST requests at most 1,000 query pairs and 1,000 form or m
 - GraphQL directives the schema declares for query locations (`directive @inContext(country: CountryCode) on QUERY`, as Shopify's Storefront schema has; from SDL or from an introspection result's `directives`) are accepted wherever they appear in a query and ignored: the answer is generated as if they were absent. A variable that only such directives use is accepted too. A directive the schema does not declare, or declares only for type-system locations (`on OBJECT`, `on FIELD_DEFINITION`, …), fails validation with `Unknown directive`. `@skip` and `@include` work as usual.
 - WSDL 2.0 is not supported; only WSDL 1.1 with SOAP 1.1/1.2 bindings is.
 - External XSDs are never fetched: a `schemaLocation` must name a file uploaded with the WSDL in the same archive.
+- `wsdl:import` is not followed, and an upload holds one `.wsdl`: merge imported WSDL definitions into the file that holds `wsdl:service`. A document that needs the imported definitions fails with an error naming the import.
 - Complex XSD `pattern` facets may yield faker output that does not validate against them; Mockingbird logs a warning when that happens.
 - Token usage of streamed generations is not metered.
