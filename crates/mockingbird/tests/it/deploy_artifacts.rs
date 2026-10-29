@@ -10,12 +10,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::support::{read, repo};
 use mockingbird::file_config::{self, AuthMode, Role};
 use serde_json::Value;
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
 
 fn chart() -> PathBuf {
     repo().join("deploy/helm/mockingbird")
@@ -23,10 +20,6 @@ fn chart() -> PathBuf {
 
 fn compose_dir() -> PathBuf {
     repo().join("deploy/compose")
-}
-
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 fn yaml(path: &Path) -> Value {

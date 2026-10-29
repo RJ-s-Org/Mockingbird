@@ -3,9 +3,10 @@
 //! no `MB_CHAOS_SEED`.
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::support::{fixture, serve};
 use futures::{SinkExt, StreamExt};
 use mb_engine::SchemaValidator;
 use mb_mcm::ProtocolPayload;
@@ -16,19 +17,6 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tonic::codegen::http::uri::PathAndQuery;
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
-}
 
 /// An offline app built from `config`, written next to any extra files.
 async fn app(dir: &Path, config: &str) -> App {

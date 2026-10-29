@@ -1,6 +1,7 @@
 #![cfg(test)]
 use std::path::PathBuf;
 
+use crate::support::{free_port, serve};
 use assert_cmd::Command;
 use mockingbird::config::{LlmEnv, ServeArgs, build_app};
 use serde_json::{Value, json};
@@ -39,13 +40,6 @@ fn completion(order: Value) -> Value {
 
 fn order(id: &str) -> Value {
     json!({"id": id, "customerId": "c1", "status": "pending", "total": 10})
-}
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
 }
 
 #[tokio::test]
@@ -201,14 +195,6 @@ fn validate_prints_operations() {
         .success()
         .stdout(predicates::str::contains("createOrder"))
         .stdout(predicates::str::contains("getOrder"));
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// Kills the server process when dropped.

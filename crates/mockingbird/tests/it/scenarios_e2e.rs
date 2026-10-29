@@ -1,23 +1,9 @@
 //! Scenarios created through the Admin API, applied on the data plane.
 #![cfg(test)]
 
-use std::path::PathBuf;
-
+use crate::support::{fixture, serve};
 use mockingbird::config::{App, ServeArgs, build_app};
 use serde_json::{Value, json};
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
-}
 
 struct Running {
     data: String,

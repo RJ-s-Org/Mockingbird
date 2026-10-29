@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::support::serve;
 use mb_engine::StreamConfig;
 use mb_ext::{ExtError, Extensions, SecretStore};
 use mb_protocols::ProtocolSettings;
@@ -185,13 +186,6 @@ async fn activate(store: &Arc<dyn ControlStore>, mock: &Mock, source: &str) {
         .activate_contract_version(mock.id, v.version)
         .await
         .unwrap();
-}
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
 }
 
 async fn status_of(base: &str, p: &str) -> u16 {

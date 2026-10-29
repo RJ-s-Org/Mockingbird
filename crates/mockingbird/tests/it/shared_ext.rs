@@ -3,21 +3,15 @@
 //! replies (P5) and admit import jobs (P6).
 #![cfg(test)]
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::support::{repo_path, serve};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use mb_ext::{CallInfo, Extensions, QuotaGuard, Rejection, Tenancy, UsageEvent, UsageSink};
 use mockingbird::config::{ServeArgs, build_app_with};
 use serde_json::{Value, json};
-
-fn repo_path(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(rel)
-}
 
 /// Admits every call and records the operation ids it saw.
 #[derive(Default)]
@@ -38,13 +32,6 @@ impl UsageSink for RecordingUsage {
     fn record(&self, event: &UsageEvent) {
         self.0.lock().unwrap().push(event.operation_id.clone());
     }
-}
-
-async fn serve(router: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    format!("http://{addr}")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

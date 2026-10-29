@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use crate::support::repo_path;
 use assert_cmd::Command;
 use mockingbird::config::{ServeArgs, build_app};
 use serde_json::{Value, json};
@@ -266,12 +267,6 @@ fn empty_or_invalid_workspace_is_a_usage_error() {
         assert!(stderr.contains("--workspace"), "{stderr}");
         assert!(stderr.contains("workspace name"), "{stderr}");
     }
-}
-
-fn repo_path(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(rel)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

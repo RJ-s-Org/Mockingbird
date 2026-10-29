@@ -37,7 +37,7 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tower::ServiceExt;
 
 const TEAM_A: &str = "team-a";
-const CHAT: &[u8] = include_bytes!("../../../fixtures/asyncapi/chat-ws-2.6.yaml");
+const CHAT: &[u8] = include_bytes!("../../../../fixtures/asyncapi/chat-ws-2.6.yaml");
 
 struct Setup {
     store: Arc<dyn ControlStore>,
@@ -310,7 +310,7 @@ async fn event_records_are_listed_under_the_mock_workspace() {
 
 // ------------------------------------------- same-named mocks, two workspaces
 
-const ORDERS: &[u8] = include_bytes!("../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
+const ORDERS: &[u8] = include_bytes!("../../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
 
 struct Twins {
     store: Arc<dyn ControlStore>,
