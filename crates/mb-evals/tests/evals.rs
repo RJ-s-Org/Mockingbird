@@ -539,6 +539,7 @@ fn manifest_selects_publish_channels_by_id() {
         domain: "generic".into(),
         operations: Some(vec![publish]),
         max_ops: None,
+        selections: BTreeMap::new(),
     };
     let contract = manifest::compile_entry(entry, &fixtures, 10).unwrap();
     assert_eq!(contract.targets.len(), 1);
@@ -668,4 +669,42 @@ fn run_rejects_manifest_with_corpus() {
         .args(["run", "--corpus", "fixtures", "--manifest", "m.json"])
         .assert()
         .code(2);
+}
+
+#[test]
+fn benchmark_workloads_load_with_valid_graphql_selections() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let contracts =
+        manifest::load(&root.join("docs/benchmarks/workloads.json"), &root, 10).unwrap();
+    let graphql: Vec<_> = contracts
+        .iter()
+        .filter(|c| c.api_type.as_deref() == Some("graphql"))
+        .collect();
+    assert!(!graphql.is_empty());
+    for c in graphql {
+        assert_eq!(c.response_schemas.len(), c.targets.len(), "{}", c.name);
+        for schema in c.response_schemas.values() {
+            assert!(!schema.to_string().contains("$ref"), "{}", c.name);
+        }
+    }
+}
+
+#[test]
+fn production_engine_settings_match_the_documented_defaults() {
+    let s = mb_evals::report::production_engine_settings();
+    let docs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/configuration.md"),
+    )
+    .unwrap();
+    let row = |key: &str| {
+        docs.lines()
+            .find(|l| l.starts_with(&format!("| `{key}` |")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(row("llm.profiles.<name>.max_tokens").contains(&format!("`{}`", s.max_tokens)));
+    assert!(
+        row("llm.profiles.<name>.timeout").contains(&format!("`{}s`", s.llm_timeout.as_secs()))
+    );
+    assert!(row("limits.output_budget_tokens").contains(&format!("`{}`", s.output_budget)));
 }
