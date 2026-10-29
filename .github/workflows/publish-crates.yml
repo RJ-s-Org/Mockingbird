@@ -1,0 +1,62 @@
+name: Publish crates
+
+# Resumes publishing a release's crates to crates.io when the release run
+# stopped part way (for example on crates.io's limit on new crates). It builds
+# the tag's console and embedded catalog the way release.yml does, then runs
+# scripts/publish-crates.sh from this branch, which skips every crate already
+# on crates.io.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/checkout@v7
+        with:
+          path: .publish-tools
+          sparse-checkout: scripts/publish-crates.sh
+          sparse-checkout-cone-mode: false
+      - run: rustup toolchain install
+      - name: Check the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: scripts/check-version.sh "$TAG"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mb-console/web/package-lock.json
+      - name: Build the console
+        run: npm --prefix crates/mb-console/web ci && npm --prefix crates/mb-console/web run build
+      - name: Put the example catalog and the skills into the package
+        run: |
+          mkdir -p crates/mockingbird/embedded
+          cp -R examples/apis crates/mockingbird/embedded/examples
+          cp -R plugins/mockingbird/skills crates/mockingbird/embedded/skills
+      - name: Publish the crates not yet on crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cp .publish-tools/scripts/publish-crates.sh "$RUNNER_TEMP/"
+          rm -rf .publish-tools
+          "$RUNNER_TEMP/publish-crates.sh"
