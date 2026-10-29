@@ -3,12 +3,8 @@
 
 use std::path::Path;
 
-const PLACEHOLDER: &str = "<!doctype html>
-<html lang=\"en\">
-<head><meta charset=\"utf-8\"><title>Mockingbird</title></head>
-<body><p>Console not built — run npm --prefix crates/mb-console/web run build</p></body>
-</html>
-";
+/// The page also checked by `src/lib.rs` (`is_placeholder` and its tests).
+const PLACEHOLDER: &str = include_str!("src/placeholder.html");
 
 fn main() {
     println!("cargo:rerun-if-changed=dist");

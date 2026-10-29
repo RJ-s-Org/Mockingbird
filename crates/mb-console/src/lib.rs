@@ -46,8 +46,13 @@ pub fn router() -> Router {
 /// Whether the crate was built without a real console (the `build.rs`
 /// placeholder page is embedded).
 pub fn is_placeholder() -> bool {
-    Dist::get("index.html")
-        .is_none_or(|f| std::str::from_utf8(&f.data).is_ok_and(|s| s.contains(PLACEHOLDER_MARKER)))
+    is_placeholder_index(Dist::get("index.html").as_ref().map(|f| f.data.as_ref()))
+}
+
+/// Whether `index` (the embedded `index.html`, `None` when there is none) is
+/// not a real console build.
+fn is_placeholder_index(index: Option<&[u8]>) -> bool {
+    index.is_none_or(|data| std::str::from_utf8(data).is_ok_and(|s| s.contains(PLACEHOLDER_MARKER)))
 }
 
 async fn serve(req: Request<Body>) -> Response {
@@ -114,4 +119,30 @@ fn secured(mut resp: Response) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PLACEHOLDER_MARKER, is_placeholder_index};
+
+    /// The page `build.rs` writes when `dist/` holds no build.
+    const PLACEHOLDER: &str = include_str!("placeholder.html");
+
+    #[test]
+    fn placeholder_page_is_detected_and_names_the_build_command() {
+        assert!(PLACEHOLDER.contains(PLACEHOLDER_MARKER));
+        assert!(
+            PLACEHOLDER.contains("run npm --prefix crates/mb-console/web run build"),
+            "{PLACEHOLDER}"
+        );
+        assert!(is_placeholder_index(Some(PLACEHOLDER.as_bytes())));
+        assert!(is_placeholder_index(None), "no index.html is no build");
+    }
+
+    #[test]
+    fn a_built_index_is_not_the_placeholder() {
+        let built = br#"<!doctype html><html><head><script type="module" src="/assets/index-abc123.js"></script></head><body><div id="root"></div></body></html>"#;
+        assert!(!is_placeholder_index(Some(built)));
+        assert!(!is_placeholder_index(Some(&[0xff, 0xfe])), "not UTF-8");
+    }
 }

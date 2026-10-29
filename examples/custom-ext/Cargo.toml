@@ -26,4 +26,5 @@ tokio = { workspace = true, features = ["signal"] }
 [dev-dependencies]
 axum.workspace = true
 reqwest.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true

@@ -7,8 +7,8 @@ use std::path::Path;
 
 use chrono::Utc;
 use mb_store::{
-    ChannelSettings, ControlStore, NewRequestLogEntry, RequestKind, RequestLogFilter,
-    ResourceSource,
+    ChannelSettings, ControlStore, DataPlaneAuthConfig, NewRequestLogEntry, RequestKind,
+    RequestLogFilter, ResourceSource,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -42,9 +42,30 @@ const LEGACY_ROWS: [&str; 2] = [
      200, 'llm', 1, 0, 0, '{}', NULL, '2026-01-01T00:00:00+00:00')",
 ];
 
+/// P2-only rows (before migration 0002 added `workspaces`): a mock and an
+/// LLM profile in workspaces that 0002 must register. Valid for both
+/// backends.
+const P2_ROWS: [&str; 2] = [
+    "INSERT INTO mocks (id, workspace, name, route_prefix, header_overrides, source, created_at, updated_at) \
+     VALUES ('6f1c1d1e-0000-4000-8000-000000000002', 'legacy', 'old', '/old', FALSE, 'api', \
+     '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+    "INSERT INTO llm_profiles (workspace, name, base_url, model, json_schema, temperature, \
+     timeout_ms, max_tokens, source) VALUES ('profiles-only', 'p', 'http://x', 'm', FALSE, 0, 1, 1, 'api')",
+];
+
+/// The legacy rows a database at `applied` migrations gets.
+fn legacy_rows(applied: usize) -> Vec<&'static str> {
+    let mut rows = LEGACY_ROWS.to_vec();
+    if applied == 1 {
+        rows.extend(P2_ROWS);
+    }
+    rows
+}
+
 /// The upgraded store keeps the legacy row (as `http`) and supports the
-/// P3 and P5 additions.
-async fn check_upgraded(store: &dyn ControlStore) {
+/// P3 and P5 additions. A P2 database (`applied == 1`) also has every
+/// workspace its mocks and profiles used registered (migration 0002).
+async fn check_upgraded(store: &dyn ControlStore, applied: usize) {
     let mock_id = Uuid::parse_str(MOCK_ID).unwrap();
     let mock = store
         .get_mock("default", "legacy")
@@ -52,10 +73,31 @@ async fn check_upgraded(store: &dyn ControlStore) {
         .expect("get")
         .expect("legacy mock kept");
     assert_eq!(mock.id, mock_id);
-    assert!(
-        store.get_workspace("default").await.expect("ws").is_some(),
-        "P3 workspaces backfilled"
-    );
+    assert_eq!(mock.data_plane_auth, DataPlaneAuthConfig::default());
+    let workspaces: Vec<String> = store
+        .list_workspaces()
+        .await
+        .expect("list workspaces")
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    if applied == 1 {
+        assert_eq!(workspaces, ["default", "legacy", "profiles-only"]);
+        let old = store
+            .get_mock("legacy", "old")
+            .await
+            .expect("get")
+            .expect("P2 mock in a non-default workspace kept");
+        assert_eq!(old.data_plane_auth, DataPlaneAuthConfig::default());
+        let profile = store
+            .get_profile("profiles-only", "p")
+            .await
+            .expect("get profile")
+            .expect("P2 profile kept");
+        assert_eq!(profile.model, "m");
+    } else {
+        assert_eq!(workspaces, ["default"]);
+    }
 
     let rows = store
         .list_request_log(mock_id, &RequestLogFilter::default())
@@ -137,13 +179,13 @@ async fn sqlite_upgrade(applied: usize) {
             .expect("migrator");
         migrator.dangerous_set_table_name("_mb_store_migrations");
         migrator.run(&pool).await.expect("old migrations");
-        for sql in LEGACY_ROWS {
+        for sql in legacy_rows(applied) {
             sqlx::query(sql).execute(&pool).await.expect("legacy row");
         }
         pool.close().await;
     }
     let store = mb_store::connect(&url).await.expect("upgrade");
-    check_upgraded(store.as_ref()).await;
+    check_upgraded(store.as_ref(), applied).await;
 }
 
 #[tokio::test]
@@ -159,10 +201,9 @@ async fn sqlite_upgrades_from_p3() {
 async fn postgres_upgrade(applied: usize) {
     use sqlx::postgres::PgPoolOptions;
 
-    use crate::support::{POSTGRES_URL_VAR, drop_schema, url_with_fresh_schema};
+    use crate::support::{drop_schema, postgres_url, url_with_fresh_schema};
 
-    let Ok(base) = std::env::var(POSTGRES_URL_VAR) else {
-        println!("skipped: MB_TEST_POSTGRES_URL not set");
+    let Some(base) = postgres_url() else {
         return;
     };
     let (url, schema) = url_with_fresh_schema(&base).await;
@@ -179,13 +220,13 @@ async fn postgres_upgrade(applied: usize) {
             .expect("migrator");
         migrator.dangerous_set_table_name("_mb_store_migrations");
         migrator.run(&pool).await.expect("old migrations");
-        for sql in LEGACY_ROWS {
+        for sql in legacy_rows(applied) {
             sqlx::query(sql).execute(&pool).await.expect("legacy row");
         }
         pool.close().await;
     }
     let store = mb_store::connect(&url).await.expect("upgrade");
-    check_upgraded(store.as_ref()).await;
+    check_upgraded(store.as_ref(), applied).await;
     drop(store);
     drop_schema(&base, &schema).await;
 }

@@ -7,6 +7,23 @@ use uuid::Uuid;
 /// The variable that names the Postgres test server; tests skip without it.
 pub const POSTGRES_URL_VAR: &str = "MB_TEST_POSTGRES_URL";
 
+/// The Postgres test server's URL, or `None` (the caller skips) when
+/// [`POSTGRES_URL_VAR`] is unset. CI sets it, so a CI run without it fails
+/// instead of passing with no Postgres coverage.
+pub fn postgres_url() -> Option<String> {
+    match std::env::var(POSTGRES_URL_VAR) {
+        Ok(url) => Some(url),
+        Err(_) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "{POSTGRES_URL_VAR} is not set on CI: the Postgres tests would not run"
+            );
+            eprintln!("skipped: {POSTGRES_URL_VAR} not set");
+            None
+        }
+    }
+}
+
 /// Creates schema `mb_<uuid>` and returns `base` with its `search_path` set to
 /// it, so parallel tests never share tables.
 pub async fn url_with_fresh_schema(base: &str) -> (String, String) {

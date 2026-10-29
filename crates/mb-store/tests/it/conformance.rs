@@ -1,5 +1,7 @@
 //! Backend-neutral `ControlStore` conformance suite. Every backend's test file
-//! calls [`run_all`] so all backends run identical assertions.
+//! expands [`conformance_checks`] into one test per check, each on its own
+//! fresh store, so all backends run identical assertions and one failing
+//! check never hides the others.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,70 +20,82 @@ use mb_store::{
 use serde_json::json;
 use uuid::Uuid;
 
-pub async fn run_all(store: Arc<dyn ControlStore>) {
+/// Calls `$callback! { check, ... }` with every check of the suite, so each
+/// backend generates one test per check (each on a fresh store) and a new
+/// check runs on every backend.
+macro_rules! conformance_checks {
+    ($callback:ident) => {
+        $callback! {
+            ping,
+            mock_crud_and_conflict,
+            mock_behavior_round_trips,
+            invalid_mock_name_rejected,
+            mock_hosts_round_trip,
+            mock_webhooks_round_trip,
+            contract_versions_increment,
+            activation_is_exclusive_and_rolls_back,
+            draft_cannot_activate,
+            delete_mock_cascades,
+            scenario_upsert_and_delete,
+            profile_crud,
+            request_log_filters_and_paginates,
+            request_log_retention_prunes,
+            request_log_retention_prunes_interleaved_mocks,
+            changes_are_published,
+            default_workspace_exists,
+            workspace_crud_and_conflict,
+            invalid_workspace_name_rejected,
+            delete_default_workspace_conflicts,
+            delete_nonempty_workspace_requires_force,
+            mock_in_missing_workspace_not_found,
+            same_mock_name_in_two_workspaces,
+            data_plane_auth_round_trips,
+            workspace_changes_are_published,
+            api_key_create_get_list_revoke,
+            api_key_in_missing_workspace_not_found,
+            api_key_touch_updates_last_used,
+            admin_session_lifecycle,
+            expired_admin_sessions_are_swept,
+            audit_append_and_filter,
+            audit_prune_by_age,
+            force_delete_workspace_removes_api_keys_keeps_audit,
+            draft_version_round_trips_meta,
+            add_draft_requires_draft_status,
+            update_draft_replaces_source_and_meta,
+            update_draft_rejects_non_draft,
+            approve_draft_once,
+            draft_writes_publish_nothing,
+            import_job_lifecycle,
+            claim_is_fifo_and_exclusive,
+            progress_and_finish_need_running,
+            cancel_queued_and_running,
+            stale_running_jobs_fail,
+            prune_finished_jobs,
+            jobs_listed_newest_first_and_cascade_with_mock,
+            import_job_for_missing_mock_not_found,
+            complete_import_job_stores_draft_only_while_running,
+            active_import_jobs_counted_per_mock,
+            channel_settings_crud,
+            event_settings_upsert,
+            scheduler_lease_exclusive,
+            delete_mock_cascades_event_tables,
+            request_log_kind_filter,
+            mock_chaos_and_limits_round_trip,
+            invalid_chaos_rejected,
+            scenario_chaos_round_trip,
+            token_usage_accumulates_per_day,
+            token_usage_cascades_with_mock,
+            token_usage_pruned_before_day,
+            get_request_log_by_id,
+            contract_version_warnings_round_trip,
+            import_job_mode_round_trips,
+        }
+    };
+}
+pub(crate) use conformance_checks;
+
+pub(crate) async fn ping(store: &Arc<dyn ControlStore>) {
     store.ping().await.expect("ping");
-    mock_crud_and_conflict(&store).await;
-    mock_behavior_round_trips(&store).await;
-    invalid_mock_name_rejected(&store).await;
-    mock_hosts_round_trip(&store).await;
-    mock_webhooks_round_trip(&store).await;
-    contract_versions_increment(&store).await;
-    activation_is_exclusive_and_rolls_back(&store).await;
-    draft_cannot_activate(&store).await;
-    delete_mock_cascades(&store).await;
-    scenario_upsert_and_delete(&store).await;
-    profile_crud(&store).await;
-    request_log_filters_and_paginates(&store).await;
-    request_log_retention_prunes(&store).await;
-    request_log_retention_prunes_interleaved_mocks(&store).await;
-    changes_are_published(&store).await;
-    default_workspace_exists(&store).await;
-    workspace_crud_and_conflict(&store).await;
-    invalid_workspace_name_rejected(&store).await;
-    delete_default_workspace_conflicts(&store).await;
-    delete_nonempty_workspace_requires_force(&store).await;
-    mock_in_missing_workspace_not_found(&store).await;
-    same_mock_name_in_two_workspaces(&store).await;
-    data_plane_auth_round_trips(&store).await;
-    workspace_changes_are_published(&store).await;
-    api_key_create_get_list_revoke(&store).await;
-    api_key_in_missing_workspace_not_found(&store).await;
-    api_key_touch_updates_last_used(&store).await;
-    admin_session_lifecycle(&store).await;
-    expired_admin_sessions_are_swept(&store).await;
-    audit_append_and_filter(&store).await;
-    audit_prune_by_age(&store).await;
-    force_delete_workspace_removes_api_keys_keeps_audit(&store).await;
-    draft_version_round_trips_meta(&store).await;
-    add_draft_requires_draft_status(&store).await;
-    update_draft_replaces_source_and_meta(&store).await;
-    update_draft_rejects_non_draft(&store).await;
-    approve_draft_once(&store).await;
-    draft_writes_publish_nothing(&store).await;
-    import_job_lifecycle(&store).await;
-    claim_is_fifo_and_exclusive(&store).await;
-    progress_and_finish_need_running(&store).await;
-    cancel_queued_and_running(&store).await;
-    stale_running_jobs_fail(&store).await;
-    prune_finished_jobs(&store).await;
-    jobs_listed_newest_first_and_cascade_with_mock(&store).await;
-    import_job_for_missing_mock_not_found(&store).await;
-    complete_import_job_stores_draft_only_while_running(&store).await;
-    active_import_jobs_counted_per_mock(&store).await;
-    channel_settings_crud(&store).await;
-    event_settings_upsert(&store).await;
-    scheduler_lease_exclusive(&store).await;
-    delete_mock_cascades_event_tables(&store).await;
-    request_log_kind_filter(&store).await;
-    mock_chaos_and_limits_round_trip(&store).await;
-    invalid_chaos_rejected(&store).await;
-    scenario_chaos_round_trip(&store).await;
-    token_usage_accumulates_per_day(&store).await;
-    token_usage_cascades_with_mock(&store).await;
-    token_usage_pruned_before_day(&store).await;
-    get_request_log_by_id(&store).await;
-    contract_version_warnings_round_trip(&store).await;
-    import_job_mode_round_trips(&store).await;
 }
 
 fn new_mock(name: &str) -> NewMock {
@@ -101,7 +115,7 @@ fn new_mock(name: &str) -> NewMock {
     }
 }
 
-async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
     let mut nm = new_mock("hooks");
     nm.webhooks = vec![WebhookTarget {
         url: "http://127.0.0.1:4242/hook".into(),
@@ -171,7 +185,7 @@ async fn mock_webhooks_round_trip(store: &Arc<dyn ControlStore>) {
         .expect("webhooks");
 }
 
-async fn mock_hosts_round_trip(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn mock_hosts_round_trip(store: &Arc<dyn ControlStore>) {
     let mut new = new_mock("hosted");
     new.route_prefix = Some("/".into());
     new.hosts = vec!["api.github.com".into()];
@@ -232,7 +246,7 @@ fn new_version(status: ContractStatus, src: &str) -> NewContractVersion {
     }
 }
 
-async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
     let mut mock = create(store, "behaving").await;
     assert_eq!(mock.behavior, MockBehavior::default());
     mock.behavior = MockBehavior {
@@ -310,7 +324,7 @@ fn log_entry(mock_id: Uuid, session: &str, op: &str, source: &str) -> NewRequest
     }
 }
 
-async fn mock_crud_and_conflict(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn mock_crud_and_conflict(store: &Arc<dyn ControlStore>) {
     let mut nm = new_mock("crud");
     nm.persona = Some("grumpy".into());
     let created = store
@@ -421,7 +435,7 @@ async fn mock_crud_and_conflict(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn invalid_mock_name_rejected(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn invalid_mock_name_rejected(store: &Arc<dyn ControlStore>) {
     let err = store
         .create_mock(DEFAULT_WORKSPACE, new_mock("Bad Name"))
         .await
@@ -436,7 +450,7 @@ async fn invalid_mock_name_rejected(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn contract_versions_increment(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn contract_versions_increment(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "versions").await;
     let v1 = store
         .add_contract_version(mock.id, new_version(ContractStatus::Draft, "one"))
@@ -491,7 +505,7 @@ async fn contract_versions_increment(store: &Arc<dyn ControlStore>) {
     assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
 }
 
-async fn activation_is_exclusive_and_rolls_back(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn activation_is_exclusive_and_rolls_back(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "activation").await;
     for src in ["a", "b"] {
         store
@@ -561,7 +575,7 @@ async fn activation_is_exclusive_and_rolls_back(store: &Arc<dyn ControlStore>) {
     assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
 }
 
-async fn draft_cannot_activate(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn draft_cannot_activate(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "drafty").await;
     store
         .add_contract_version(mock.id, new_version(ContractStatus::Draft, "draft"))
@@ -587,7 +601,7 @@ async fn draft_cannot_activate(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn delete_mock_cascades(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn delete_mock_cascades(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "cascade").await;
     store
         .add_contract_version(mock.id, new_version(ContractStatus::Approved, "c"))
@@ -637,7 +651,7 @@ async fn delete_mock_cascades(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "scenarios").await;
     let mut s = Scenario {
         mock_id: mock.id,
@@ -709,7 +723,7 @@ async fn scenario_upsert_and_delete(store: &Arc<dyn ControlStore>) {
     assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
 }
 
-async fn profile_crud(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn profile_crud(store: &Arc<dyn ControlStore>) {
     let mut p = LlmProfile {
         workspace: DEFAULT_WORKSPACE.into(),
         name: "fast".into(),
@@ -812,7 +826,7 @@ async fn profile_crud(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn request_log_filters_and_paginates(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn request_log_filters_and_paginates(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "logs").await;
     let mut ids = Vec::new();
     for (session, op, source) in [
@@ -935,7 +949,7 @@ async fn request_log_filters_and_paginates(store: &Arc<dyn ControlStore>) {
     assert_eq!(clamped.len(), 1);
 }
 
-async fn request_log_retention_prunes(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn request_log_retention_prunes(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "retention").await;
     let mut newest = 0;
     for i in 0..250 {
@@ -970,7 +984,7 @@ async fn request_log_retention_prunes(store: &Arc<dyn ControlStore>) {
 
 /// Two mocks whose inserts strictly alternate both stay bounded: pruning is
 /// counted per mock, not keyed on the shared id sequence.
-async fn request_log_retention_prunes_interleaved_mocks(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn request_log_retention_prunes_interleaved_mocks(store: &Arc<dyn ControlStore>) {
     let retention = 10;
     let mocks = [
         create(store, "interleave-a").await,
@@ -1015,7 +1029,7 @@ async fn next_change(
         .unwrap_or_else(|e| panic!("{what}: {e}"))
 }
 
-async fn changes_are_published(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn changes_are_published(store: &Arc<dyn ControlStore>) {
     let mut rx = store.subscribe();
     let mock = create(store, "published").await;
     let expected = ControlChange::Mock {
@@ -1055,7 +1069,7 @@ fn profile(ws: &str, name: &str) -> LlmProfile {
     }
 }
 
-async fn default_workspace_exists(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn default_workspace_exists(store: &Arc<dyn ControlStore>) {
     let ws = store
         .get_workspace(DEFAULT_WORKSPACE)
         .await
@@ -1073,7 +1087,7 @@ async fn default_workspace_exists(store: &Arc<dyn ControlStore>) {
     assert!(names.contains(&DEFAULT_WORKSPACE.to_string()), "{names:?}");
 }
 
-async fn workspace_crud_and_conflict(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn workspace_crud_and_conflict(store: &Arc<dyn ControlStore>) {
     let created = store
         .create_workspace("team-a", "Team A")
         .await
@@ -1145,7 +1159,7 @@ async fn workspace_crud_and_conflict(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn invalid_workspace_name_rejected(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn invalid_workspace_name_rejected(store: &Arc<dyn ControlStore>) {
     let err = store
         .create_workspace("Team A", "Team A")
         .await
@@ -1154,7 +1168,7 @@ async fn invalid_workspace_name_rejected(store: &Arc<dyn ControlStore>) {
     assert!(store.get_workspace("Team A").await.expect("get").is_none());
 }
 
-async fn delete_default_workspace_conflicts(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn delete_default_workspace_conflicts(store: &Arc<dyn ControlStore>) {
     for force in [false, true] {
         let err = store
             .delete_workspace(DEFAULT_WORKSPACE, force)
@@ -1171,7 +1185,7 @@ async fn delete_default_workspace_conflicts(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn delete_nonempty_workspace_requires_force(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn delete_nonempty_workspace_requires_force(store: &Arc<dyn ControlStore>) {
     store
         .create_workspace("doomed", "Doomed")
         .await
@@ -1247,7 +1261,7 @@ async fn delete_nonempty_workspace_requires_force(store: &Arc<dyn ControlStore>)
     );
 }
 
-async fn mock_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn mock_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
     let err = store
         .create_mock("no-such-ws", new_mock("orphan-mock"))
         .await
@@ -1267,7 +1281,7 @@ async fn mock_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn same_mock_name_in_two_workspaces(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn same_mock_name_in_two_workspaces(store: &Arc<dyn ControlStore>) {
     store
         .create_workspace("ws-one", "One")
         .await
@@ -1280,28 +1294,41 @@ async fn same_mock_name_in_two_workspaces(store: &Arc<dyn ControlStore>) {
     a.route_prefix = Some("/one/shared".into());
     let mut b = new_mock("shared");
     b.route_prefix = Some("/two/shared".into());
+    // Created out of (workspace, name) order, so the listing must sort.
     let in_two = store.create_mock("ws-two", b).await.expect("two");
+    create(store, "in-default").await;
     let in_one = store.create_mock("ws-one", a).await.expect("one");
     assert_eq!(in_one.workspace, "ws-one");
     assert_eq!(in_two.workspace, "ws-two");
 
     let all = store.list_all_mocks().await.expect("list all");
-    let keys: Vec<(String, String)> = all
+    let keys: Vec<(&str, &str)> = all
         .iter()
-        .map(|m| (m.workspace.clone(), m.name.clone()))
+        .map(|m| (m.workspace.as_str(), m.name.as_str()))
         .collect();
     let mut sorted = keys.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(keys, sorted, "(workspace, name) ascending");
+    // Other checks may share the store (the Postgres suite), so look only at
+    // this check's mocks.
+    let mine: Vec<(&str, &str)> = keys
+        .into_iter()
+        .filter(|&(ws, name)| ws.starts_with("ws-") || name == "in-default")
+        .collect();
+    assert_eq!(
+        mine,
+        [
+            (DEFAULT_WORKSPACE, "in-default"),
+            ("ws-one", "shared"),
+            ("ws-two", "shared")
+        ],
+        "every workspace's mocks, default included"
+    );
     let shared: Vec<&Mock> = all.iter().filter(|m| m.name == "shared").collect();
     assert_eq!(shared, vec![&in_one, &in_two]);
-    assert!(
-        all.iter().any(|m| m.workspace == DEFAULT_WORKSPACE),
-        "default workspace mocks are listed too"
-    );
 }
 
-async fn data_plane_auth_round_trips(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn data_plane_auth_round_trips(store: &Arc<dyn ControlStore>) {
     let fresh = create(store, "dp-default").await;
     assert_eq!(fresh.data_plane_auth, DataPlaneAuthConfig::default());
     assert_eq!(fresh.data_plane_auth.mode, DataPlaneAuthMode::None);
@@ -1365,7 +1392,7 @@ async fn data_plane_auth_round_trips(store: &Arc<dyn ControlStore>) {
     assert_eq!(parsed.header, "x-api-key");
 }
 
-async fn workspace_changes_are_published(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn workspace_changes_are_published(store: &Arc<dyn ControlStore>) {
     let mut rx = store.subscribe();
     let ws_change = ControlChange::Workspace {
         name: "published-ws".into(),
@@ -1426,7 +1453,7 @@ fn api_key(ws: &str, key_id: &str, created_at: DateTime<Utc>) -> ApiKey {
     }
 }
 
-async fn api_key_create_get_list_revoke(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn api_key_create_get_list_revoke(store: &Arc<dyn ControlStore>) {
     store
         .create_workspace("keys-ws", "Keys")
         .await
@@ -1509,7 +1536,7 @@ async fn api_key_create_get_list_revoke(store: &Arc<dyn ControlStore>) {
     assert_eq!(listed[1], older);
 }
 
-async fn api_key_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn api_key_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
     let err = store
         .create_api_key(&api_key("no-such-ws", "dddddddddddd", now_us()))
         .await
@@ -1518,7 +1545,7 @@ async fn api_key_in_missing_workspace_not_found(store: &Arc<dyn ControlStore>) {
     assert_eq!(store.get_api_key("dddddddddddd").await.expect("get"), None);
 }
 
-async fn api_key_touch_updates_last_used(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn api_key_touch_updates_last_used(store: &Arc<dyn ControlStore>) {
     let key = api_key(DEFAULT_WORKSPACE, "eeeeeeeeeeee", now_us());
     store.create_api_key(&key).await.expect("create");
     let at = now_us() + Duration::seconds(5);
@@ -1558,7 +1585,7 @@ fn admin_session(id_hash: &str, expires_at: DateTime<Utc>) -> AdminSession {
     }
 }
 
-async fn admin_session_lifecycle(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn admin_session_lifecycle(store: &Arc<dyn ControlStore>) {
     let s = admin_session(&"1".repeat(64), now_us() + Duration::hours(12));
     store.create_admin_session(&s).await.expect("create");
     let err = store
@@ -1606,7 +1633,7 @@ async fn admin_session_lifecycle(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn expired_admin_sessions_are_swept(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn expired_admin_sessions_are_swept(store: &Arc<dyn ControlStore>) {
     let now = now_us();
     let live = admin_session(&"3".repeat(64), now + Duration::hours(1));
     let expired = admin_session(&"4".repeat(64), now - Duration::seconds(1));
@@ -1656,7 +1683,7 @@ fn audit_event(ws: Option<&str>, actor: &str, action: &str, target: &str) -> New
     }
 }
 
-async fn audit_append_and_filter(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn audit_append_and_filter(store: &Arc<dyn ControlStore>) {
     let mut first = audit_event(Some("audit-a"), "audit-alice", "mock.create", "mock:one");
     first.before = Some(json!({"old": true}));
     first.after = None;
@@ -1781,7 +1808,7 @@ async fn audit_append_and_filter(store: &Arc<dyn ControlStore>) {
     assert_eq!(one.len(), 1, "limit 0 is clamped to 1");
 }
 
-async fn audit_prune_by_age(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn audit_prune_by_age(store: &Arc<dyn ControlStore>) {
     let at = |year| {
         Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0)
             .single()
@@ -1805,7 +1832,9 @@ async fn audit_prune_by_age(store: &Arc<dyn ControlStore>) {
     assert_eq!(store.prune_audit(at(2002)).await.expect("prune again"), 0);
 }
 
-async fn force_delete_workspace_removes_api_keys_keeps_audit(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn force_delete_workspace_removes_api_keys_keeps_audit(
+    store: &Arc<dyn ControlStore>,
+) {
     store
         .create_workspace("keyed-ws", "Keyed")
         .await
@@ -1868,7 +1897,7 @@ fn draft_meta(note: &str) -> serde_json::Value {
     json!({"operations": [{"key": "GET /pets", "confidence": 0.8}], "note": note})
 }
 
-async fn draft_version_round_trips_meta(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn draft_version_round_trips_meta(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "draft-meta").await;
     let meta = draft_meta("first");
     let draft = store
@@ -1904,7 +1933,7 @@ async fn draft_version_round_trips_meta(store: &Arc<dyn ControlStore>) {
     assert_eq!(got.draft_meta, None);
 }
 
-async fn add_draft_requires_draft_status(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn add_draft_requires_draft_status(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "draft-status").await;
     let err = store
         .add_draft_contract_version(
@@ -1924,7 +1953,7 @@ async fn add_draft_requires_draft_status(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn update_draft_replaces_source_and_meta(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn update_draft_replaces_source_and_meta(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "draft-update").await;
     let draft = store
         .add_draft_contract_version(
@@ -1972,7 +2001,7 @@ async fn update_draft_replaces_source_and_meta(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn update_draft_rejects_non_draft(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn update_draft_rejects_non_draft(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "draft-locked").await;
     store
         .add_draft_contract_version(
@@ -2004,7 +2033,7 @@ async fn update_draft_rejects_non_draft(store: &Arc<dyn ControlStore>) {
     assert_eq!(v1.source, b"d".to_vec());
 }
 
-async fn approve_draft_once(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn approve_draft_once(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "draft-approve").await;
     store
         .add_draft_contract_version(
@@ -2038,7 +2067,7 @@ async fn approve_draft_once(store: &Arc<dyn ControlStore>) {
     assert_eq!(active.status, ContractStatus::Active);
 }
 
-async fn draft_writes_publish_nothing(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn draft_writes_publish_nothing(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "draft-quiet").await;
     let mut rx = store.subscribe();
     store
@@ -2111,7 +2140,7 @@ async fn drain_queue(store: &Arc<dyn ControlStore>) {
     }
 }
 
-async fn import_job_lifecycle(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn import_job_lifecycle(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-life").await;
     let job = create_job(store, mock.id, b"# Petstore").await;
@@ -2237,7 +2266,7 @@ async fn import_job_lifecycle(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn claim_is_fifo_and_exclusive(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn claim_is_fifo_and_exclusive(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-fifo").await;
     let first = create_job(store, mock.id, b"1").await;
@@ -2273,7 +2302,7 @@ async fn claim_is_fifo_and_exclusive(store: &Arc<dyn ControlStore>) {
     }
 }
 
-async fn progress_and_finish_need_running(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn progress_and_finish_need_running(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-queued").await;
     let job = create_job(store, mock.id, b"q").await;
@@ -2310,7 +2339,7 @@ async fn progress_and_finish_need_running(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
 }
 
-async fn cancel_queued_and_running(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn cancel_queued_and_running(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-cancel").await;
     let running = create_job(store, mock.id, b"r").await;
@@ -2372,7 +2401,7 @@ async fn cancel_queued_and_running(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn stale_running_jobs_fail(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn stale_running_jobs_fail(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-stale").await;
     let job = create_job(store, mock.id, b"s").await;
@@ -2429,7 +2458,7 @@ async fn stale_running_jobs_fail(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
 }
 
-async fn prune_finished_jobs(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn prune_finished_jobs(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-prune").await;
     let old = create_job(store, mock.id, b"old").await;
@@ -2483,7 +2512,7 @@ async fn prune_finished_jobs(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
 }
 
-async fn jobs_listed_newest_first_and_cascade_with_mock(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn jobs_listed_newest_first_and_cascade_with_mock(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "jobs-list").await;
     let other = create(store, "jobs-other").await;
     let mut ids = Vec::new();
@@ -2544,7 +2573,7 @@ async fn jobs_listed_newest_first_and_cascade_with_mock(store: &Arc<dyn ControlS
     drain_queue(store).await;
 }
 
-async fn import_job_for_missing_mock_not_found(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn import_job_for_missing_mock_not_found(store: &Arc<dyn ControlStore>) {
     let err = store
         .create_import_job(new_job(Uuid::new_v4(), b"x"))
         .await
@@ -2552,7 +2581,9 @@ async fn import_job_for_missing_mock_not_found(store: &Arc<dyn ControlStore>) {
     assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
 }
 
-async fn complete_import_job_stores_draft_only_while_running(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn complete_import_job_stores_draft_only_while_running(
+    store: &Arc<dyn ControlStore>,
+) {
     drain_queue(store).await;
     let mock = create(store, "jobs-complete").await;
     let job = create_job(store, mock.id, b"c").await;
@@ -2619,7 +2650,7 @@ async fn complete_import_job_stores_draft_only_while_running(store: &Arc<dyn Con
     drain_queue(store).await;
 }
 
-async fn active_import_jobs_counted_per_mock(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn active_import_jobs_counted_per_mock(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "jobs-active").await;
     let other = create(store, "jobs-active-other").await;
@@ -2705,7 +2736,7 @@ fn micros_now() -> chrono::DateTime<Utc> {
     Utc::now().trunc_subsecs(6)
 }
 
-async fn channel_settings_crud(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn channel_settings_crud(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "channels").await;
     let mut rx = store.subscribe();
     let expected = ControlChange::Mock {
@@ -2766,7 +2797,7 @@ async fn channel_settings_crud(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn event_settings_upsert(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn event_settings_upsert(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "event-settings").await;
     assert_eq!(store.get_event_settings(mock.id).await.expect("get"), None);
     let mut rx = store.subscribe();
@@ -2800,7 +2831,7 @@ async fn event_settings_upsert(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn scheduler_lease_exclusive(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn scheduler_lease_exclusive(store: &Arc<dyn ControlStore>) {
     use std::time::Duration;
     let mock = create(store, "lease").await;
     let ttl = Duration::from_secs(30);
@@ -2843,7 +2874,7 @@ async fn scheduler_lease_exclusive(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn delete_mock_cascades_event_tables(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn delete_mock_cascades_event_tables(store: &Arc<dyn ControlStore>) {
     use std::time::Duration;
     let mock = create(store, "event-cascade").await;
     store
@@ -2898,7 +2929,7 @@ async fn delete_mock_cascades_event_tables(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn request_log_kind_filter(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn request_log_kind_filter(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "kinds").await;
     let mut event = log_entry(mock.id, "s", "lightMeasured", "llm");
     event.kind = RequestKind::Event;
@@ -2962,7 +2993,7 @@ fn chaos(error_rate: f64) -> ChaosSettings {
     }
 }
 
-async fn mock_chaos_and_limits_round_trip(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn mock_chaos_and_limits_round_trip(store: &Arc<dyn ControlStore>) {
     let mut nm = new_mock("chaos-limits");
     nm.chaos = Some(chaos(0.5));
     nm.limits = MockLimits {
@@ -3024,7 +3055,7 @@ async fn mock_chaos_and_limits_round_trip(store: &Arc<dyn ControlStore>) {
     assert_eq!(got.limits, MockLimits::default());
 }
 
-async fn invalid_chaos_rejected(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn invalid_chaos_rejected(store: &Arc<dyn ControlStore>) {
     let mut nm = new_mock("bad-chaos");
     nm.chaos = Some(chaos(1.5));
     let err = store
@@ -3067,7 +3098,7 @@ async fn invalid_chaos_rejected(store: &Arc<dyn ControlStore>) {
     ));
 }
 
-async fn scenario_chaos_round_trip(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn scenario_chaos_round_trip(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "scenario-chaos").await;
     let mut s = Scenario {
         mock_id: mock.id,
@@ -3097,7 +3128,7 @@ async fn scenario_chaos_round_trip(store: &Arc<dyn ControlStore>) {
     ));
 }
 
-async fn token_usage_pruned_before_day(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn token_usage_pruned_before_day(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "tokens-pruned").await;
     // Long past, so rows other checks wrote are not affected.
     let old = chrono::NaiveDate::from_ymd_opt(2001, 1, 30).expect("date");
@@ -3114,7 +3145,7 @@ async fn token_usage_pruned_before_day(store: &Arc<dyn ControlStore>) {
     assert_eq!(store.prune_token_usage(cutoff).await.expect("prune"), 0);
 }
 
-async fn token_usage_accumulates_per_day(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn token_usage_accumulates_per_day(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "tokens").await;
     let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 18).expect("date");
     let next = day.succ_opt().expect("next day");
@@ -3140,7 +3171,7 @@ async fn token_usage_accumulates_per_day(store: &Arc<dyn ControlStore>) {
     assert_eq!(store.token_usage(other.id, day).await.expect("usage"), 0);
 }
 
-async fn token_usage_cascades_with_mock(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn token_usage_cascades_with_mock(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "tokens-cascade").await;
     let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 18).expect("date");
     store.add_token_usage(mock.id, day, 42).await.expect("add");
@@ -3153,7 +3184,7 @@ async fn token_usage_cascades_with_mock(store: &Arc<dyn ControlStore>) {
     assert_eq!(store.token_usage(mock.id, day).await.expect("usage"), 0);
 }
 
-async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "log-by-id").await;
     let mut entry = log_entry(mock.id, "s1", "getOrder", "llm");
     entry.at = micros_now();
@@ -3192,7 +3223,7 @@ async fn get_request_log_by_id(store: &Arc<dyn ControlStore>) {
     );
 }
 
-async fn contract_version_warnings_round_trip(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn contract_version_warnings_round_trip(store: &Arc<dyn ControlStore>) {
     let mock = create(store, "warned").await;
     let v = store
         .add_contract_version(mock.id, new_version(ContractStatus::Approved, "a"))
@@ -3224,7 +3255,7 @@ async fn contract_version_warnings_round_trip(store: &Arc<dyn ControlStore>) {
     ));
 }
 
-async fn import_job_mode_round_trips(store: &Arc<dyn ControlStore>) {
+pub(crate) async fn import_job_mode_round_trips(store: &Arc<dyn ControlStore>) {
     drain_queue(store).await;
     let mock = create(store, "moded").await;
     let mut j = new_job(mock.id, b"x");

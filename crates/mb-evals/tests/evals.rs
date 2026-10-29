@@ -249,7 +249,7 @@ fn markdown_has_summary_table() {
 
 #[test]
 fn run_without_env_is_usage_error() {
-    Command::cargo_bin("mb-evals")
+    let assert = Command::cargo_bin("mb-evals")
         .unwrap()
         .args(["run", "--corpus"])
         .arg(fixtures())
@@ -258,13 +258,24 @@ fn run_without_env_is_usage_error() {
         .env_remove("MB_EVAL_LLM_API_KEY")
         .assert()
         .code(2);
+    // clap also exits 2 on any argument error, so the code alone does not
+    // prove the missing-environment path ran: check its message too.
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(
+            "missing environment: MB_EVAL_LLM_BASE_URL, MB_EVAL_LLM_MODEL, MB_EVAL_LLM_API_KEY"
+        ),
+        "{stderr}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bench_offline_smoke() {
     let report = bench(
         &fixtures().join("openapi/orders-3.1.yaml"),
-        Duration::from_secs(1),
+        // A smoke test needs only a handful of requests; the load loop runs
+        // until this wall-clock window ends (real sockets, so no paused clock).
+        Duration::from_millis(200),
         4,
     )
     .await
@@ -273,6 +284,10 @@ async fn bench_offline_smoke() {
     assert_eq!(report.errors, 0, "{report:?}");
     assert_eq!(report.concurrency, 4);
     assert!(report.rps > 0.0);
+    // The load ran for the whole window, and rps is requests over that time.
+    assert!(report.duration_s >= 0.2, "{report:?}");
+    let rps = report.requests as f64 / report.duration_s;
+    assert!((report.rps - rps).abs() < 1e-6, "{report:?}");
     assert!(report.p50_ms <= report.p95_ms && report.p95_ms <= report.p99_ms);
 }
 

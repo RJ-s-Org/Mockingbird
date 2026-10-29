@@ -62,21 +62,41 @@ async fn spa_fallback_returns_index() {
     assert_eq!(text(resp).await, index);
 }
 
+/// The first path segments the console never serves (`RESERVED` in
+/// src/lib.rs): the Admin API, the login routes and the ops endpoints.
+const RESERVED: [&str; 5] = ["api", "auth", "healthz", "readyz", "metrics"];
+
 #[tokio::test]
 async fn reserved_paths_and_other_methods_are_not_the_console() {
-    for path in [
-        "/api/v2/nope",
-        "/auth/nope",
-        "/healthz",
-        "/assets/missing-abc123.js",
-    ] {
-        let resp = send(Method::GET, path).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    let index = text(send(Method::GET, "/").await).await;
+    for segment in RESERVED {
+        for path in [format!("/{segment}"), format!("/{segment}/nope")] {
+            let resp = send(Method::GET, &path).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_security_headers(&resp);
+            assert!(
+                !text(resp).await.contains("<html"),
+                "{path} must not get the console page"
+            );
+        }
+        // Only the whole first segment is reserved: `/apix` is a console
+        // route like any other.
+        let lookalike = format!("/{segment}x");
+        let resp = send(Method::GET, &lookalike).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{lookalike}");
+        assert_eq!(text(resp).await, index, "{lookalike}");
+    }
+    let resp = send(Method::GET, "/assets/missing-abc123.js").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_security_headers(&resp);
+    assert!(text(resp).await.is_empty(), "a missing asset is never HTML");
+
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        let resp = send(method.clone(), "/w/default/mocks").await;
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        assert_eq!(header_of(&resp, header::ALLOW), "GET, HEAD");
         assert_security_headers(&resp);
     }
-    let resp = send(Method::POST, "/w/default/mocks").await;
-    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(header_of(&resp, header::ALLOW), "GET, HEAD");
 }
 
 #[tokio::test]
