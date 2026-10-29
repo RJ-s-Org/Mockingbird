@@ -31,11 +31,3 @@ tracing.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-
-[[test]]
-name = "fallback"
-required-features = ["testing"]
-
-[[test]]
-name = "scripted"
-required-features = ["testing"]

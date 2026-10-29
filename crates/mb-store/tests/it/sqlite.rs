@@ -1,5 +1,4 @@
 #![cfg(test)]
-mod common;
 
 use std::str::FromStr;
 
@@ -9,7 +8,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 #[tokio::test]
 async fn sqlite_memory_conformance() {
     let store = connect("sqlite::memory:").await.expect("connect");
-    common::conformance::run_all(store).await;
+    crate::conformance::run_all(store).await;
 }
 
 #[tokio::test]
