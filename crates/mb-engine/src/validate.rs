@@ -1,9 +1,11 @@
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use jsonschema::error::ValidationErrorKind;
 use serde_json::Value;
 
 use crate::EngineError;
+use crate::faker::Costs;
 
 const MAX_ERRORS: usize = 10;
 
@@ -22,6 +24,10 @@ const MAX_SCHEMA_HOPS: usize = 64;
 pub struct SchemaValidator {
     inner: jsonschema::Validator,
     schema: Value,
+    /// [`SchemaValidator::declared_properties`], computed on first use.
+    declared: OnceLock<Option<HashSet<String>>>,
+    /// The faker's cost table of `schema`, computed on first use.
+    costs: OnceLock<Costs>,
 }
 
 impl SchemaValidator {
@@ -31,7 +37,26 @@ impl SchemaValidator {
         Ok(Self {
             inner,
             schema: schema_with_defs.clone(),
+            declared: OnceLock::new(),
+            costs: OnceLock::new(),
         })
+    }
+
+    /// Whether `instance` is valid. Stops at the first error and formats
+    /// none: use it instead of [`SchemaValidator::validate`] when only the
+    /// verdict matters.
+    pub fn is_valid(&self, instance: &Value) -> bool {
+        self.inner.is_valid(instance)
+    }
+
+    /// The schema (with its `$defs`) this validator checks against.
+    pub(crate) fn schema(&self) -> &Value {
+        &self.schema
+    }
+
+    /// The faker's cost table of [`SchemaValidator::schema`].
+    pub(crate) fn costs(&self) -> &Costs {
+        self.costs.get_or_init(|| Costs::compute(&self.schema))
     }
 
     /// `instance` with the errors a fresh value can fix patched locally: a
@@ -44,6 +69,17 @@ impl SchemaValidator {
     /// schema with the root's `$defs`. `None` unless such errors are all that
     /// is wrong and the patched value is valid.
     pub fn patch(&self, instance: &Value, mut fill: impl FnMut(&Value) -> Value) -> Option<Value> {
+        self.patch_nodes(instance, |node| fill(&self.with_root_defs(node)))
+    }
+
+    /// [`SchemaValidator::patch`], with `fill` given the schema node inside
+    /// [`SchemaValidator::schema`] (its `$ref`s resolve against that root)
+    /// instead of a copy that carries the root's `$defs`.
+    pub(crate) fn patch_nodes(
+        &self,
+        instance: &Value,
+        mut fill: impl FnMut(&Value) -> Value,
+    ) -> Option<Value> {
         let mut nulls = Vec::new();
         let mut refills = Vec::new();
         for e in self.inner.iter_errors(instance) {
@@ -107,7 +143,7 @@ impl SchemaValidator {
                 _ => return None,
             }
         }
-        self.validate(&out).ok().map(|()| out)
+        self.is_valid(&out).then_some(out)
     }
 
     /// `instance` with every missing required property that `wanted`
@@ -116,6 +152,18 @@ impl SchemaValidator {
     /// a `$ref` restarts at its target, e.g. `/$defs/user`) and the
     /// property. `None` when nothing was filled.
     pub fn fill_required(
+        &self,
+        instance: &Value,
+        wanted: impl FnMut(&str, &str) -> bool,
+        mut fill: impl FnMut(&Value) -> Value,
+    ) -> Option<Value> {
+        self.fill_required_nodes(instance, wanted, |node| fill(&self.with_root_defs(node)))
+    }
+
+    /// [`SchemaValidator::fill_required`], with `fill` given the schema node
+    /// inside [`SchemaValidator::schema`] (see
+    /// [`SchemaValidator::patch_nodes`]).
+    pub(crate) fn fill_required_nodes(
         &self,
         instance: &Value,
         mut wanted: impl FnMut(&str, &str) -> bool,
@@ -156,7 +204,7 @@ impl SchemaValidator {
                 if let Some(Value::Object(map)) = out.pointer_mut(&pointer)
                     && !map.contains_key(&property)
                 {
-                    map.insert(property, fill(&schema));
+                    map.insert(property, fill(schema));
                     filled = true;
                 }
             }
@@ -193,6 +241,18 @@ impl SchemaValidator {
     /// `$ref`s and the branches of `allOf`/`anyOf`/`oneOf`; `None` when it
     /// declares none (a free-form object).
     pub fn declared_properties(&self) -> Option<HashSet<String>> {
+        self.declared_property_names().cloned()
+    }
+
+    /// [`SchemaValidator::declared_properties`], borrowed: computed once
+    /// per validator.
+    pub fn declared_property_names(&self) -> Option<&HashSet<String>> {
+        self.declared
+            .get_or_init(|| self.compute_declared_properties())
+            .as_ref()
+    }
+
+    fn compute_declared_properties(&self) -> Option<HashSet<String>> {
         let mut names = HashSet::new();
         let mut pending = vec![&self.schema];
         let mut hops = 0;
@@ -221,18 +281,24 @@ impl SchemaValidator {
         (!names.is_empty()).then_some(names)
     }
 
-    /// The schema at `location`, with the root's `$defs`.
-    fn at(&self, location: &str) -> Option<Value> {
-        let mut node = self.schema.pointer(location)?.clone();
+    /// A copy of `node` (a schema inside the root) carrying the root's
+    /// `$defs`, so it stands on its own.
+    fn with_root_defs(&self, node: &Value) -> Value {
+        let mut node = node.clone();
         if let (Value::Object(map), Some(defs)) = (&mut node, self.schema.get("$defs")) {
             map.insert("$defs".into(), defs.clone());
         }
-        Some(node)
+        node
+    }
+
+    /// The schema at `location`.
+    fn at(&self, location: &str) -> Option<&Value> {
+        self.schema.pointer(location)
     }
 
     /// The schema whose keyword failed at `evaluation_path` (which follows
-    /// `$ref`s), with the root's `$defs`.
-    fn subschema(&self, evaluation_path: &str) -> Option<Value> {
+    /// `$ref`s).
+    fn subschema(&self, evaluation_path: &str) -> Option<&Value> {
         let segments: Vec<String> = evaluation_path.split('/').skip(1).map(unescape).collect();
         let (_keyword, path) = segments.split_last()?;
         let mut node = &self.schema;
@@ -248,11 +314,7 @@ impl SchemaValidator {
                 },
             };
         }
-        let mut expected = node.clone();
-        if let (Value::Object(map), Some(defs)) = (&mut expected, self.schema.get("$defs")) {
-            map.insert("$defs".into(), defs.clone());
-        }
-        Some(expected)
+        Some(node)
     }
 
     /// `instance` with every string longer than [`RUNAWAY_CHARS`] whose
@@ -273,7 +335,7 @@ impl SchemaValidator {
                 cut = true;
             }
         }
-        (cut && self.validate(&out).is_ok()).then_some(out)
+        (cut && self.is_valid(&out)).then_some(out)
     }
 
     /// Whether any schema reachable for the instance location `pointer`
@@ -606,6 +668,25 @@ mod tests {
             "{e}"
         );
         assert!(e.len() < 400, "{e}");
+    }
+
+    #[test]
+    fn is_valid_agrees_with_validate_and_declared_names_are_kept() {
+        let v = validator();
+        for value in [
+            json!({"title": "t", "images": []}),
+            json!({"title": 1, "images": []}),
+            json!({"title": "t"}),
+            json!(null),
+        ] {
+            assert_eq!(v.is_valid(&value), v.validate(&value).is_ok(), "{value}");
+        }
+        let names = v.declared_property_names().unwrap();
+        assert_eq!(v.declared_properties().as_ref(), Some(names));
+        assert!(names.contains("collection"), "{names:?}");
+        let free = SchemaValidator::new(&json!({"type": "object"})).unwrap();
+        assert!(free.declared_property_names().is_none());
+        assert!(free.declared_properties().is_none());
     }
 
     #[test]

@@ -53,15 +53,6 @@ impl Class {
         }
     }
 
-    fn pattern(self) -> &'static str {
-        match self {
-            Class::Alphanumeric => "[A-Za-z0-9]",
-            Class::Hex => "[0-9A-Fa-f]",
-            Class::Digit => "[0-9]",
-            Class::Lowercase => "[a-z0-9]",
-        }
-    }
-
     fn draw(self, rng: &mut impl Rng) -> char {
         const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         let set: &[u8] = match self {
@@ -231,7 +222,7 @@ impl PersonaFormats {
         if !self.walk(&mut out, protected, &mut rng) {
             return None;
         }
-        validator.validate(&out).is_ok().then_some(out)
+        validator.is_valid(&out).then_some(out)
     }
 
     fn walk(&self, value: &mut Value, protected: &[&Value], rng: &mut impl Rng) -> bool {
@@ -330,19 +321,40 @@ impl PersonaFormats {
 }
 
 impl Template {
+    /// Whether `current` is exactly the template for `obj`: each literal
+    /// and field value in turn, and exactly `n` characters of the class for
+    /// each random run (what the anchored regex `^lit[class]{n}...$` would
+    /// match, without compiling one per object). `None` when a field part
+    /// is not a string member of `obj`.
+    fn matches(&self, current: &str, obj: &Map<String, Value>) -> Option<bool> {
+        let mut fits = true;
+        let mut rest = current;
+        for part in &self.parts {
+            let next = match part {
+                Part::Literal(l) => rest.strip_prefix(l.as_str()),
+                Part::Field(f) => rest.strip_prefix(obj.get(f)?.as_str()?),
+                Part::Random(n, class) => {
+                    let mut chars = rest.char_indices();
+                    let run = chars
+                        .by_ref()
+                        .take(*n)
+                        .take_while(|(_, c)| class.contains(*c));
+                    (run.count() == *n).then(|| chars.next().map_or("", |(at, _)| &rest[at..]))
+                }
+            };
+            // Keep going after a mismatch: a missing field still answers None.
+            match next {
+                Some(next) if fits => rest = next,
+                _ => fits = false,
+            }
+        }
+        Some(fits && rest.is_empty())
+    }
+
     /// The value of the template for `obj`, keeping what fits of `current`;
     /// `None` when `current` already matches (or a field part is missing).
     fn fix(&self, current: &str, obj: &Map<String, Value>, rng: &mut impl Rng) -> Option<String> {
-        let mut pattern = String::from("^");
-        for part in &self.parts {
-            match part {
-                Part::Literal(l) => pattern.push_str(&regex::escape(l)),
-                Part::Field(f) => pattern.push_str(&regex::escape(obj.get(f)?.as_str()?)),
-                Part::Random(n, class) => pattern.push_str(&format!("{}{{{n}}}", class.pattern())),
-            }
-        }
-        pattern.push('$');
-        if Regex::new(&pattern).ok()?.is_match(current) {
+        if self.matches(current, obj)? {
             return None;
         }
         let mut out = String::new();
@@ -454,6 +466,71 @@ mod tests {
         assert_eq!(out["product"], body["product"]);
         let kept = json!({"cartId": id});
         assert!(f.apply(&any(), &kept, &[]).is_none());
+    }
+
+    /// The anchored regex `Template::fix` compiled before it matched by
+    /// hand: the reference `Template::matches` must agree with.
+    fn reference(t: &Template, obj: &Map<String, Value>) -> Option<Regex> {
+        let mut pattern = String::from("^");
+        for part in &t.parts {
+            match part {
+                Part::Literal(l) => pattern.push_str(&regex::escape(l)),
+                Part::Field(f) => pattern.push_str(&regex::escape(obj.get(f)?.as_str()?)),
+                Part::Random(n, class) => {
+                    let set = match class {
+                        Class::Alphanumeric => "[A-Za-z0-9]",
+                        Class::Hex => "[0-9A-Fa-f]",
+                        Class::Digit => "[0-9]",
+                        Class::Lowercase => "[a-z0-9]",
+                    };
+                    pattern.push_str(&format!("{set}{{{n}}}"));
+                }
+            }
+        }
+        pattern.push('$');
+        Regex::new(&pattern).ok()
+    }
+
+    #[test]
+    fn templates_match_like_the_anchored_regex() {
+        let t = Template {
+            field: "secret".into(),
+            parts: vec![
+                Part::Literal("pi_".into()),
+                Part::Random(4, Class::Alphanumeric),
+                Part::Literal("_s_".into()),
+                Part::Field("id".into()),
+                Part::Random(2, Class::Hex),
+                Part::Random(0, Class::Digit),
+                Part::Random(1, Class::Lowercase),
+            ],
+        };
+        let obj = json!({"id": "a.b"}).as_object().unwrap().clone();
+        let re = reference(&t, &obj).unwrap();
+        let candidates = [
+            "pi_Ab12_s_a.bfFz",
+            "pi_Ab12_s_a.bfF9",
+            "pi_Ab12_s_a.bfFZ",
+            "pi_Ab12_s_a.bfFzz",
+            "pi_Ab1_s_a.bfFz",
+            "pi_Ab12_s_axbfFz",
+            "pi_Ab12_s_a.bgFz",
+            "pi_Ab1é_s_a.bfFz",
+            "pi_Ab12_s_a.bfF",
+            "xpi_Ab12_s_a.bfFz",
+            "pi_Ab12_s_a.bfFz\n",
+            "",
+            "pi_",
+        ];
+        for c in candidates {
+            assert_eq!(t.matches(c, &obj), Some(re.is_match(c)), "{c:?}");
+        }
+        // A field part that is not a string member answers None, as the
+        // regex could not be built.
+        let none = Map::new();
+        assert!(reference(&t, &none).is_none());
+        assert_eq!(t.matches("pi_Ab12_s_a.bfFz", &none), None);
+        assert_eq!(t.matches("nope", &none), None);
     }
 
     #[test]

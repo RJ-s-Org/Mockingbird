@@ -253,6 +253,10 @@ pub struct Engine {
     /// parameter schema), keyed by (`<source digest>`, schema text); at most
     /// [`SCHEMA_VALIDATORS_MAX`], emptied when full.
     schema_validators: DashMap<(String, String), Arc<SchemaValidator>>,
+    /// What the faker needs of a schema (it with the bundle's definitions
+    /// it reaches, and its cost table), keyed and bounded like
+    /// `schema_validators`.
+    fake_setups: DashMap<(String, String), Arc<FakeSetup>>,
     /// The formats the persona declares, kept on every generated body.
     persona_formats: persona::PersonaFormats,
     guards: EngineGuards,
@@ -264,6 +268,24 @@ type ShapeKey = (String, u16, Option<u64>, Vec<String>);
 
 /// Most validators [`Engine::schema_validator`] keeps.
 const SCHEMA_VALIDATORS_MAX: usize = 512;
+
+/// Most faker setups [`Engine::fake_setup`] keeps.
+const FAKE_SETUPS_MAX: usize = 512;
+
+/// A schema ready for the faker: with the definitions it reaches, and the
+/// cost table of that.
+struct FakeSetup {
+    schema: Value,
+    costs: Costs,
+}
+
+impl FakeSetup {
+    fn new(bundle: &Bundle, schema: &Value) -> Self {
+        let schema = bundle.with_reachable_defs(schema);
+        let costs = Costs::compute(&schema);
+        Self { schema, costs }
+    }
+}
 
 impl Engine {
     pub fn new(provider: Option<Arc<dyn Provider>>, config: EngineConfig) -> Self {
@@ -280,6 +302,7 @@ impl Engine {
             shapes: DashMap::new(),
             member_names: DashMap::new(),
             schema_validators: DashMap::new(),
+            fake_setups: DashMap::new(),
             guards: EngineGuards::default(),
         }
     }
@@ -305,7 +328,7 @@ impl Engine {
             return false;
         };
         match self.validator(bundle, op, status, schema) {
-            Ok(validator) => validator.validate(value).is_ok(),
+            Ok(validator) => validator.is_valid(value),
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "stream item schema cannot be validated");
                 false
@@ -478,7 +501,7 @@ impl Engine {
         let keys: Vec<Value> = parts
             .iter()
             .zip(&shapes)
-            .filter(|(_, (_, _, validator))| validator.validate(&Value::Null).is_err())
+            .filter(|(_, (_, _, validator))| !validator.is_valid(&Value::Null))
             .map(|(p, _)| Value::from(p.key))
             .collect();
         let combined = serde_json::json!({
@@ -617,7 +640,7 @@ impl Engine {
                 })
                 .ok()?,
         };
-        validator.validate(stored).ok()?;
+        validator.is_valid(stored).then_some(())?;
         Some(GeneratedResponse {
             status,
             content_type: variant.content_type.clone(),
@@ -772,7 +795,7 @@ impl Engine {
                 obj.insert(field.clone(), fresh);
             }
         }
-        if validator.validate(&fixed).is_ok() {
+        if validator.is_valid(&fixed) {
             response.body = Some(fixed);
         }
         response
@@ -797,7 +820,7 @@ impl Engine {
             }
             let mut candidate = body.clone();
             candidate.as_object_mut()?.insert(field.to_string(), fresh);
-            validator.validate(&candidate).is_ok().then_some(candidate)
+            validator.is_valid(&candidate).then_some(candidate)
         })
     }
 
@@ -844,16 +867,17 @@ impl Engine {
         validator: Option<&SchemaValidator>,
         hints: &FakerHints,
     ) -> Value {
-        let schema = bundle.with_reachable_defs(schema);
+        // One schema and cost table for every attempt (and every call):
+        // building them walks the schema.
+        let setup = self.fake_setup(bundle, schema);
         let faker = Faker::new(self.config.faker_depth).with_hints(hints.clone());
-        // One cost table for every attempt: computing it walks the schema.
-        let costs = Costs::compute(&schema);
         let mut rng = rand::rng();
         let mut first: Option<Value> = None;
         for attempt in 0..FALLBACK_ATTEMPTS {
-            let candidate = faker.fake_with_costs(&schema, Some(attempt), &costs, &mut rng);
+            let candidate =
+                faker.fake_with_costs(&setup.schema, Some(attempt), &setup.costs, &mut rng);
             match validator {
-                Some(v) if v.validate(&candidate).is_err() => {
+                Some(v) if !v.is_valid(&candidate) => {
                     first.get_or_insert(candidate);
                 }
                 _ => return candidate,
@@ -894,6 +918,10 @@ impl Engine {
                 collect_member_names(doc(), &mut names);
                 let names = Arc::new(names);
                 if selection.is_none() {
+                    // Keyed by digest: re-uploads would otherwise pile up.
+                    if self.member_names.len() >= MAX_SHAPES {
+                        self.member_names.clear();
+                    }
                     self.member_names.insert(names_key, Arc::clone(&names));
                 }
                 names
@@ -912,10 +940,12 @@ impl Engine {
         let shaped = tracing::info_span!("mb.shape")
             .in_scope(|| budget::shape(doc(), &words, selected, self.config.output_budget))
             .map(Arc::new);
-        // Narrowed schemas vary per query: bound what they keep.
-        if selection.is_none() || self.shapes.len() < MAX_SELECTION_SHAPES {
-            self.shapes.insert(key, shaped.clone());
+        // Every key counts against the bound: narrowed schemas vary per
+        // query, requested words per call, and digests per upload.
+        if self.shapes.len() >= MAX_SHAPES {
+            self.shapes.clear();
         }
+        self.shapes.insert(key, shaped.clone());
         shaped
     }
 
@@ -960,6 +990,24 @@ impl Engine {
         }
         self.schema_validators.insert(key, Arc::clone(&v));
         Ok(v)
+    }
+
+    /// The faker's setup of `schema`, cached like
+    /// [`Engine::schema_validator`] (never for a bundle without a digest).
+    fn fake_setup(&self, bundle: &Bundle, schema: &Value) -> Arc<FakeSetup> {
+        if bundle.source_digest.is_empty() {
+            return Arc::new(FakeSetup::new(bundle, schema));
+        }
+        let key = (bundle.source_digest.clone(), schema.to_string());
+        if let Some(hit) = self.fake_setups.get(&key) {
+            return Arc::clone(&hit);
+        }
+        let setup = Arc::new(FakeSetup::new(bundle, schema));
+        if self.fake_setups.len() >= FAKE_SETUPS_MAX {
+            self.fake_setups.clear();
+        }
+        self.fake_setups.insert(key, Arc::clone(&setup));
+        setup
     }
 
     /// Ask the LLM, repairing once, under the guards: the budget and a
@@ -1077,8 +1125,8 @@ pub(crate) fn record_usage(span: &tracing::Span, usage: Usage) {
     span.record("llm.tokens.completion", usage.completion_tokens);
 }
 
-/// Shapes cached in all, past which a narrowed schema's is not kept.
-const MAX_SELECTION_SHAPES: usize = 4096;
+/// Shapes (and member-name sets) cached in all; a full cache is emptied.
+const MAX_SHAPES: usize = 4096;
 
 /// Every object member name in `value` (a schema).
 fn collect_member_names(value: &Value, out: &mut HashSet<String>) {
@@ -1160,7 +1208,14 @@ fn apply_scenario(
     } else {
         patched
     };
-    match patched.body.as_ref().map(|b| validator.validate(b)) {
+    // The errors are formatted only for the warning.
+    match patched.body.as_ref().map(|b| {
+        if validator.is_valid(b) {
+            Ok(())
+        } else {
+            validator.validate(b)
+        }
+    }) {
         Some(Ok(())) => patched,
         Some(Err(errors)) => {
             tracing::warn!(
@@ -1191,7 +1246,7 @@ fn encode_base64(
         return response;
     };
     if let Some(patched) = encoded::patch(bundle, schema, body)
-        && validator.validate(&patched).is_ok()
+        && validator.is_valid(&patched)
     {
         tracing::info!("encoded base64 fields from their text");
         response.body = Some(patched);
@@ -1264,7 +1319,7 @@ fn reassert_request(
 /// (all of them when it declares none): an undeclared member, such as a
 /// credential or a field in another casing, is never echoed.
 fn overlay_request(validator: &SchemaValidator, base: Value, body: Option<&Value>) -> Value {
-    let (Some(Value::Object(fields)), Some(declared)) = (body, validator.declared_properties())
+    let (Some(Value::Object(fields)), Some(declared)) = (body, validator.declared_property_names())
     else {
         return overlay(validator, base, body);
     };
@@ -1287,17 +1342,31 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
         merged.insert(k.clone(), v.clone());
     }
     let merged = Value::Object(merged);
-    if validator.validate(&merged).is_ok() {
+    if validator.is_valid(&merged) {
         return merged;
     }
+    // Each member is tried in place and taken back out when it breaks the
+    // object, instead of validating a fresh copy per member.
     let mut best = base;
     for (k, v) in fields {
-        let mut candidate = best.clone();
-        if let Value::Object(obj) = &mut candidate {
-            obj.insert(k.clone(), v.clone());
+        let Value::Object(obj) = &mut best else {
+            return best;
+        };
+        let previous = obj.insert(k.clone(), v.clone());
+        if validator.is_valid(&best) {
+            continue;
         }
-        if validator.validate(&candidate).is_ok() {
-            best = candidate;
+        if let Value::Object(obj) = &mut best {
+            match previous {
+                // Back in its place: the key keeps its position.
+                Some(previous) => {
+                    obj.insert(k.clone(), previous);
+                }
+                // The last key, so removing it moves no other.
+                None => {
+                    obj.remove(k);
+                }
+            }
         }
     }
     best
@@ -1346,7 +1415,7 @@ fn force_identity(
         if let Value::Object(obj) = &mut forced {
             obj.insert(identity.field.clone(), candidate);
         }
-        if validator.validate(&forced).is_ok() {
+        if validator.is_valid(&forced) {
             return forced;
         }
     }
@@ -1365,11 +1434,92 @@ fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generate
         merged.insert(k.clone(), v.clone());
     }
     let merged = Value::Object(merged);
-    if validator.validate(&merged).is_ok() {
+    if validator.is_valid(&merged) {
         merged
-    } else if validator.validate(&target.data).is_ok() {
+    } else if validator.is_valid(&target.data) {
         target.data.clone()
     } else {
         generated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn orders() -> Bundle {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/openapi/orders-3.0.yaml"
+        );
+        mb_import::compile(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Every contract upload has a new digest: the shape caches stay
+    /// bounded however many there were (MB-ENGINE-PERF-1).
+    #[test]
+    fn shape_caches_stay_bounded_across_digests() {
+        let engine = Engine::new(None, EngineConfig::default());
+        let mut bundle = orders();
+        let op = bundle.operation("getOrder").unwrap().clone();
+        let schema = op.success_output().unwrap().schema.clone().unwrap();
+        let call = OperationCall::default();
+        for i in 0..MAX_SHAPES + 100 {
+            bundle.source_digest = format!("digest-{i}");
+            engine.shaped(&bundle, &op, 200, &schema, false, &call);
+        }
+        assert!(engine.shapes.len() <= MAX_SHAPES, "{}", engine.shapes.len());
+        assert!(
+            engine.member_names.len() <= MAX_SHAPES,
+            "{}",
+            engine.member_names.len()
+        );
+        // Still a memo: the same key is answered from it.
+        let before = engine.shapes.len();
+        engine.shaped(&bundle, &op, 200, &schema, false, &call);
+        assert_eq!(engine.shapes.len(), before);
+    }
+
+    /// The per-member fallback keeps each member that leaves the object
+    /// valid, puts back a member it replaced when the new value breaks it,
+    /// and leaves the other keys in place (MB-ENGINE-PERF-10).
+    #[test]
+    fn overlay_falls_back_to_each_member_that_stays_valid() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "integer"},
+                "c": {"type": "string"}
+            },
+            "additionalProperties": {"type": "integer"}
+        }))
+        .unwrap();
+        // The fallback as it was: a validated copy per member.
+        let by_copies = |base: Value, fields: &Value| {
+            let mut best = base;
+            for (k, value) in fields.as_object().unwrap() {
+                let mut candidate = best.clone();
+                candidate
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(k.clone(), value.clone());
+                if v.is_valid(&candidate) {
+                    best = candidate;
+                }
+            }
+            best
+        };
+        let base = json!({"b": 1, "a": "x"});
+        let fields = json!({"a": "y", "b": "bad", "c": "z", "d": 2, "e": "bad"});
+        let out = overlay(&v, base.clone(), Some(&fields));
+        assert_eq!(out, json!({"a": "y", "b": 1, "c": "z", "d": 2}));
+        let old = by_copies(base, &fields);
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&out), keys(&old));
+        // All at once when that validates.
+        let out = overlay(&v, json!({"a": "x"}), Some(&json!({"b": 3})));
+        assert_eq!(out, json!({"a": "x", "b": 3}));
     }
 }
