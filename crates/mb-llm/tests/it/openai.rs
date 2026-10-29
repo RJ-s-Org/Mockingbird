@@ -233,6 +233,93 @@ async fn openai_stream_http_error_before_first_delta() {
     assert!(matches!(r, Err(LlmError::Http { status: 500, .. })));
 }
 
+/// The items of a stream request answered (200) with `sse`.
+async fn stream_items(sse: &'static str) -> Vec<Result<String, LlmError>> {
+    use futures::StreamExt;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .mount(&server)
+        .await;
+    client(&server, false)
+        .stream(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap()
+        .collect()
+        .await
+}
+
+#[tokio::test]
+async fn openai_stream_error_event_before_content_is_an_error() {
+    let items = stream_items(concat!(
+        r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#,
+        "\n\n",
+        r#"data: {"error":{"code":503,"message":"overloaded"}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    match &items[0] {
+        Err(LlmError::Http { status: 503, body }) => assert!(body.contains("overloaded")),
+        other => panic!("expected HTTP 503, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_stream_error_mid_stream_follows_the_content() {
+    let items = stream_items(concat!(
+        r#"data: {"choices":[{"delta":{"content":"{\"a\""}}]}"#,
+        "\n\n",
+        r#"data: {"provider":"P","choices":[{"delta":{},"finish_reason":"error","error":{"code":502,"message":"upstream died"}}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0].as_ref().unwrap(), "{\"a\"");
+    match &items[1] {
+        Err(LlmError::Http { status: 502, body }) => {
+            assert!(body.contains("provider P") && body.contains("upstream died"));
+        }
+        other => panic!("expected HTTP 502, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_stream_finish_length_is_truncated() {
+    let items = stream_items(concat!(
+        r#"data: {"choices":[{"delta":{"content":"{\"a\""}}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"delta":{"content":":"},"finish_reason":"length"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    assert_eq!(items.len(), 3, "{items:?}");
+    assert_eq!(items[0].as_ref().unwrap(), "{\"a\"");
+    assert_eq!(items[1].as_ref().unwrap(), ":");
+    assert!(matches!(items[2], Err(LlmError::Truncated(_))), "{items:?}");
+}
+
+#[tokio::test]
+async fn openai_stream_keepalive_and_stop_chunks_stay_ignored() {
+    let items = stream_items(concat!(
+        r#"data: {"choices":[]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"delta":{"content":"x"}}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"error":null}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    ))
+    .await;
+    let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
+    assert_eq!(items, vec!["x"]);
+}
+
 fn reply(message: Value, finish_reason: &str) -> Value {
     json!({
         "provider": "SomeProvider",

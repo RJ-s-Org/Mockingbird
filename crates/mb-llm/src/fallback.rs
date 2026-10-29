@@ -103,8 +103,9 @@ impl Provider for FallbackProvider {
         }
     }
 
-    /// Opens the primary's stream. When opening it fails, or its first item
-    /// is an error, returns the secondary's stream instead. Once the primary
+    /// Opens the primary's stream. When opening it fails, its first item is
+    /// an error, or it ends before yielding any content, returns the
+    /// secondary's stream instead. Once the primary
     /// has yielded a delta it is never switched, so its later errors reach
     /// the caller.
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
@@ -117,7 +118,7 @@ impl Provider for FallbackProvider {
                     ));
                 }
                 Some(Err(error)) => error,
-                None => return Ok(Box::pin(futures::stream::empty())),
+                None => LlmError::Empty("the stream ended before any content".to_string()),
             },
             Err(error) => error,
         };

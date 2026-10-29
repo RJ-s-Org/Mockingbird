@@ -245,37 +245,55 @@ fn is_openrouter(base_url: &str) -> bool {
 /// 200 (`choices[0].error`, `finish_reason: "error"`, a top-level `error`),
 /// output cut at `max_tokens`, and reasoning models that put the whole
 /// answer in `reasoning` with `content` null.
-fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
-    let provider = v
-        .get("provider")
+/// `"provider <name>, "` when the reply (or chunk) names its provider.
+fn provider_prefix(v: &Value) -> String {
+    v.get("provider")
         .and_then(Value::as_str)
         .map(|p| format!("provider {p}, "))
-        .unwrap_or_default();
-    let choice = v.pointer("/choices/0");
-    let finish = choice
-        .and_then(|c| c.get("finish_reason"))
+        .unwrap_or_default()
+}
+
+/// The `finish_reason` of the first choice, `"none"` without one.
+fn finish_reason(v: &Value) -> &str {
+    v.pointer("/choices/0/finish_reason")
         .and_then(Value::as_str)
-        .unwrap_or("none");
-    let error = choice
-        .and_then(|c| c.get("error"))
+        .unwrap_or("none")
+}
+
+/// The error a reply or stream chunk reports in band: an `error` object (on
+/// the first choice or the top level) or `finish_reason: "error"`. Its
+/// `code` becomes the status when it is an HTTP error code, else 502.
+fn in_band_error(v: &Value) -> Option<LlmError> {
+    let error = v
+        .pointer("/choices/0/error")
         .or_else(|| v.get("error"))
         .filter(|e| !e.is_null());
-    if error.is_some() || finish == "error" {
-        let error = error.cloned().unwrap_or(Value::Null);
-        let status = error
-            .get("code")
-            .and_then(Value::as_u64)
-            .and_then(|c| u16::try_from(c).ok())
-            .filter(|c| (400..600).contains(c))
-            .unwrap_or(502);
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("error reported inside a successful reply");
-        return Err(LlmError::Http {
-            status,
-            body: format!("{provider}{message}"),
-        });
+    if error.is_none() && finish_reason(v) != "error" {
+        return None;
+    }
+    let error = error.cloned().unwrap_or(Value::Null);
+    let status = error
+        .get("code")
+        .and_then(Value::as_u64)
+        .and_then(|c| u16::try_from(c).ok())
+        .filter(|c| (400..600).contains(c))
+        .unwrap_or(502);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("error reported inside a successful reply");
+    Some(LlmError::Http {
+        status,
+        body: format!("{}{message}", provider_prefix(v)),
+    })
+}
+
+fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
+    let provider = provider_prefix(v);
+    let choice = v.pointer("/choices/0");
+    let finish = finish_reason(v);
+    if let Some(error) = in_band_error(v) {
+        return Err(error);
     }
     let message = choice.and_then(|c| c.get("message"));
     let content = message
@@ -405,12 +423,21 @@ impl Provider for OpenAiCompatible {
             Err(_) => return Err(LlmError::Timeout),
         };
         let events = resp.bytes_stream().eventsource();
-        let deltas = futures::stream::unfold(Some(events), |state| async move {
-            let mut events = state?;
+        let max_tokens = req.max_tokens;
+        // The state is the event source plus an error to yield after the
+        // delta just returned (a truncation marked on a chunk with content);
+        // `None` once the stream has ended.
+        let deltas = futures::stream::unfold(Some((events, None)), move |state| async move {
+            let (mut events, pending) = state?;
+            if let Some(error) = pending {
+                return Some((Err(error), None));
+            }
             loop {
                 let event = match events.next().await {
                     None => return None,
-                    Some(Err(e)) => return Some((Err(LlmError::Transport(e.to_string())), None)),
+                    Some(Err(e)) => {
+                        return Some((Err(LlmError::Transport(e.to_string())), None));
+                    }
                     Some(Ok(event)) => event,
                 };
                 let data = event.data.trim();
@@ -421,14 +448,26 @@ impl Provider for OpenAiCompatible {
                     Ok(v) => v,
                     Err(e) => return Some((Err(LlmError::Decode(e.to_string())), None)),
                 };
-                match v
+                if let Some(error) = in_band_error(&v) {
+                    return Some((Err(error), None));
+                }
+                let truncated = (finish_reason(&v) == "length").then(|| {
+                    LlmError::Truncated(format!(
+                        "{}stopped at max_tokens ({max_tokens}); raise the profile's max_tokens",
+                        provider_prefix(&v)
+                    ))
+                });
+                let text = v
                     .pointer("/choices/0/delta/content")
                     .and_then(Value::as_str)
-                {
-                    Some(text) if !text.is_empty() => {
-                        return Some((Ok(text.to_string()), Some(events)));
+                    .filter(|t| !t.is_empty());
+                match (text, truncated) {
+                    (Some(text), truncated) => {
+                        return Some((Ok(text.to_string()), Some((events, truncated))));
                     }
-                    _ => continue,
+                    (None, Some(error)) => return Some((Err(error), None)),
+                    // Keep-alive, role-only and stop chunks carry nothing.
+                    (None, None) => continue,
                 }
             }
         });
