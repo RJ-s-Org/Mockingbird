@@ -28,6 +28,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use crate::support::wait_until;
+
 /// `Bearer viewer|editor` → that role in `default`.
 struct TestAuth;
 
@@ -986,18 +988,10 @@ async fn workers_pick_up_jobs() {
     let _workers = spawn_import_workers(&h.st);
     let view = h.upload_har("pets").await;
     let id = view["id"].as_str().unwrap().to_string();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let job = h.job("pets", &id).await;
-        if job["status"] == "done" {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "job not done in time: {job}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    wait_until("the job to be done", Duration::from_secs(5), || async {
+        (h.job("pets", &id).await["status"] == "done").then_some(())
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1084,24 +1078,18 @@ async fn dropping_workers_aborts_a_running_pipeline() {
     )
     .await
     .expect(StatusCode::ACCEPTED, "create");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !provider.entered.load(Ordering::SeqCst) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "no LLM call started"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until("an LLM call to start", Duration::from_secs(5), || async {
+        provider.entered.load(Ordering::SeqCst).then_some(())
+    })
+    .await;
     drop(workers);
     // Well before the call's own 5 s timeout would drop it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    while !provider.dropped.load(Ordering::SeqCst) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the pipeline outlived its worker"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until(
+        "the pipeline to stop with its worker",
+        Duration::from_secs(1),
+        || async { provider.dropped.load(Ordering::SeqCst).then_some(()) },
+    )
+    .await;
 }
 
 #[tokio::test]

@@ -40,7 +40,3 @@ wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-
-[[test]]
-name = "oidc"
-required-features = ["testing"]
