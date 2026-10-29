@@ -959,6 +959,44 @@ impl ControlStore for PgStore {
         Ok(target)
     }
 
+    async fn delete_contract_version(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let (_, name) = require_locked_mock_key(&mut tx, mock_id, LOCK_FOR_VERSIONS).await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM contract_versions WHERE mock_id = $1 AND version = $2",
+        )
+        .bind(mock_id)
+        .bind(version)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match status.as_deref() {
+            None => return Ok(false),
+            Some("active") => {
+                return Err(StoreError::Conflict(format!(
+                    "contract version {version} of mock {name:?} is active"
+                )));
+            }
+            Some(_) => {}
+        }
+        sqlx::query("DELETE FROM contract_versions WHERE mock_id = $1 AND version = $2")
+            .bind(mock_id)
+            .bind(version)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM import_jobs WHERE mock_id = $1 AND result_version = $2")
+            .bind(mock_id)
+            .bind(version)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        // Only an inactive version goes: the runtime has nothing to reload.
+        Ok(true)
+    }
+
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError> {
         let sql = format!(
             "SELECT {VERSION_SELECT} FROM contract_versions WHERE mock_id = $1 AND status = 'active'"

@@ -153,7 +153,8 @@ fn gallery_configs_load() {
 }
 
 /// Every scenario status in the config at `path` is one its operations
-/// declare (or a 5xx), as `serve` and the Admin API require.
+/// declare (or a 5xx), and every `set` fits a response it can select, as
+/// `serve` and the Admin API require.
 fn assert_scenario_statuses_declared(path: &Path) {
     let cfg = mockingbird::file_config::load(path)
         .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
@@ -168,6 +169,12 @@ fn assert_scenario_statuses_declared(path: &Path) {
             {
                 panic!("{}: mock {mock}, scenario {sname}: {why}", path.display());
             }
+            if let Some(set) = &sc.set
+                && let Some(why) =
+                    mb_admin::invalid_scenario_set(&bundle, &sc.operation_ids(), sc.status, set)
+            {
+                panic!("{}: mock {mock}, scenario {sname}: {why}", path.display());
+            }
         }
     }
 }
@@ -176,5 +183,17 @@ fn assert_scenario_statuses_declared(path: &Path) {
 fn documented_example_scenarios_take_effect() {
     for example in ["mockingbird.yaml", "mockingbird.full.yaml"] {
         assert_scenario_statuses_declared(&repo().join("docs/examples").join(example));
+    }
+}
+
+#[test]
+fn every_example_config_scenario_takes_effect() {
+    for dir in ["examples/apis", "examples/apps", "examples/gallery"] {
+        for entry in std::fs::read_dir(repo().join(dir)).unwrap() {
+            let config = entry.unwrap().path().join("mockingbird.yaml");
+            if config.exists() {
+                assert_scenario_statuses_declared(&config);
+            }
+        }
     }
 }

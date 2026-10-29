@@ -158,6 +158,15 @@ impl BearerVerifier for JwtVerifier {
         validation.validate_nbf = true;
 
         let data = decode::<Map<String, Value>>(token, &key, &validation).map_err(invalid)?;
+        // Per request, so at debug; console logins log these at info.
+        let ignored = self.mapping.ignored_groups(&data.claims);
+        if !ignored.is_empty() {
+            tracing::debug!(
+                claim = %self.mapping.roles_claim,
+                groups = ?ignored,
+                "bearer token: ignoring prefixed groups that grant no role"
+            );
+        }
         self.mapping.principal(&data.claims)
     }
 }

@@ -160,4 +160,32 @@ describe("contracts", () => {
     expect(within(drawer).getByText("GET /orders")).toBeTruthy();
     expect(within(drawer).getByText("http")).toBeTruthy();
   });
+
+  it("discard deletes a version that is not active, after confirmation", async () => {
+    const user = userEvent.setup();
+    let versions = [summary(2, "draft", "2026-10-16T01:00:00Z"), summary(1, "active")];
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${MOCK}`]: mockView("pets", { active_version: 1 }),
+      [`GET ${MOCK}/contracts`]: () => json(versions),
+      [`DELETE ${MOCK}/contracts/2`]: () => {
+        versions = versions.filter((v) => v.version !== 2);
+        return new Response(null, { status: 204 });
+      },
+    });
+    renderAt("/w/default/mocks/pets/contracts");
+
+    const table = await screen.findByRole("table", { name: "Contract versions" });
+    await within(table).findByText("v2");
+    const row = (v: number) => within(table).getByText(`v${v}`).closest("tr") as HTMLElement;
+    // The active version cannot be discarded.
+    expect(within(row(1)).queryByRole("button", { name: /Discard/ })).toBeNull();
+
+    await user.click(within(row(2)).getByRole("button", { name: "Discard version 2" }));
+    const confirm = await screen.findByRole("dialog", { name: "Discard version 2?" });
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    await user.click(within(confirm).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(within(table).queryByText("v2")).toBeNull());
+    expect(calls.some((c) => c.method === "DELETE" && c.path === `${MOCK}/contracts/2`)).toBe(true);
+  });
 });

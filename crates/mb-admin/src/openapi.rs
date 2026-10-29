@@ -34,6 +34,7 @@ use crate::{
         contracts::get_one,
         contracts::source,
         contracts::activate,
+        contracts::delete,
         drafts::get_draft,
         drafts::put_draft,
         drafts::approve,

@@ -387,6 +387,11 @@ fn drop_unanswerable_scenarios(
                 scenario
                     .status
                     .and_then(|status| mb_admin::undeclared_scenario_status(&bundle, &ids, status))
+                    .or_else(|| {
+                        scenario.set.as_ref().and_then(|set| {
+                            mb_admin::invalid_scenario_set(&bundle, &ids, scenario.status, set)
+                        })
+                    })
             };
             if let Some(why) = why {
                 report.push(json!({"mock": mock, "scenario": name, "reason": why}));

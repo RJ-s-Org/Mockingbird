@@ -206,7 +206,8 @@ export interface paths {
         get: operations["contracts_get_one_default"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** @deprecated */
+        delete: operations["contracts_delete_default"];
         options?: never;
         head?: never;
         patch?: never;
@@ -712,7 +713,7 @@ export interface paths {
         get: operations["contracts_get_one"];
         put?: never;
         post?: never;
-        delete?: never;
+        delete: operations["contracts_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1818,7 +1819,11 @@ export interface components {
              *     mock has an active contract, each must be one of its operations.
              */
             operations?: string[];
-            /** @description A JSON object of fields forced into the response body. */
+            /**
+             * @description A JSON object of fields merged (JSON merge patch) into the response
+             *     body. When the mock has an active contract, each key present must fit
+             *     the response schema of at least one operation the scenario applies to.
+             */
             set?: Record<string, never> | null;
             /**
              * Format: int32
@@ -2911,6 +2916,46 @@ export interface operations {
             };
         };
     };
+    contracts_delete_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted, with the finished import jobs whose result it was */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The active version, or managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     contracts_activate_default: {
         parameters: {
             query?: never;
@@ -3770,7 +3815,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid scenario, operations unknown to the active contract, or a status none of its operations declares */
+            /** @description Invalid scenario, operations unknown to the active contract, a status none of its operations declares, or a `set` no response it can select accepts */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4205,7 +4250,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The default workspace, or a non-empty one without `force` */
+            /** @description The default workspace, a non-empty one without `force`, or (with `force`) one holding mocks or LLM profiles declared in the config file */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -5202,6 +5247,48 @@ export interface operations {
             };
         };
     };
+    contracts_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted, with the finished import jobs whose result it was */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The active version, or managed by config file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     contracts_activate: {
         parameters: {
             query?: never;
@@ -6095,7 +6182,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid scenario, operations unknown to the active contract, or a status none of its operations declares */
+            /** @description Invalid scenario, operations unknown to the active contract, a status none of its operations declares, or a `set` no response it can select accepts */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -11,8 +11,8 @@ use mb_state::{
     MemoryStore, SessionInfo, SessionKey, StateChanged, StateError, StateStore, StoredResource,
 };
 use mb_store::{
-    ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion, NewMock,
-    NewRequestLogEntry, RequestKind, ResourceSource, Scenario, ScenarioRules,
+    AuditFilter, ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, NewContractVersion,
+    NewMock, NewRequestLogEntry, RequestKind, ResourceSource, Scenario, ScenarioRules,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -858,6 +858,104 @@ async fn scenario_status_must_be_declared_by_its_operations() {
     // A 5xx is answered natively where it is not declared.
     let r = put(json!({ "status": 503, "operations": ["createOrder"] })).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+}
+
+/// With an active contract, each key present in `set` must fit a response
+/// the scenario can select; absent keys and required-ness are not checked.
+#[tokio::test]
+async fn scenario_set_is_checked_against_the_response_schemas() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let put = |body: Value| {
+        let h = &h;
+        async move {
+            h.json(Method::PUT, "/api/v1/mocks/orders/scenarios/s", body)
+                .await
+        }
+    };
+
+    // No contract yet: nothing to check against.
+    let r = put(json!({ "set": { "total": "lots" } })).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+
+    let r = h
+        .upload("orders", &contract_json("1.0.0"), Some(true))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+
+    for body in [
+        json!({ "set": { "total": "lots" } }),
+        json!({ "set": { "total": "lots" }, "operations": ["getOrder"] }),
+        json!({ "set": { "id": 7 }, "status": 201 }),
+    ] {
+        let p = put(body.clone())
+            .await
+            .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(p["title"], "Invalid scenario", "{p}");
+        let detail = p["detail"].as_str().unwrap();
+        assert!(detail.starts_with("set/"), "{body}: {detail}");
+        assert!(detail.contains("fits no response"), "{body}: {detail}");
+    }
+
+    for body in [
+        json!({ "set": { "total": 9.5 } }),
+        // Keys the schema does not forbid, and null (deletes the field).
+        json!({ "set": { "note": "x", "id": null } }),
+        // listOrders answers an array, which set never patches.
+        json!({ "set": { "total": "lots" }, "operations": ["listOrders"] }),
+        // An undeclared 5xx is answered natively, without the set.
+        json!({ "set": { "total": "lots" }, "status": 503 }),
+    ] {
+        let r = put(body.clone()).await;
+        assert_eq!(r.status, StatusCode::OK, "{body}: {}", r.text);
+    }
+}
+
+/// A contract version that is not active can be deleted; the active one,
+/// unknown versions and file-managed mocks are refused.
+#[tokio::test]
+async fn contract_version_delete() {
+    let h = harness().await;
+    h.create_mock("orders").await;
+    let r = h.upload("orders", &contract_json("1.0"), None).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let r = h.upload("orders", &contract_json("2.0"), Some(false)).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    assert_eq!(h.active_version("orders").await, 1);
+
+    let p = h
+        .delete("/api/v1/mocks/orders/contracts/1")
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    assert!(p["detail"].as_str().unwrap().contains("active"), "{p}");
+    h.delete("/api/v1/mocks/orders/contracts/9")
+        .await
+        .assert_problem(StatusCode::NOT_FOUND);
+
+    let r = h.delete("/api/v1/mocks/orders/contracts/2").await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+    h.get("/api/v1/mocks/orders/contracts/2")
+        .await
+        .assert_problem(StatusCode::NOT_FOUND);
+    h.delete("/api/v1/mocks/orders/contracts/2")
+        .await
+        .assert_problem(StatusCode::NOT_FOUND);
+    let list = h.get("/api/v1/mocks/orders/contracts").await.json();
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(h.active_version("orders").await, 1);
+
+    let events = h
+        .store
+        .list_audit(&AuditFilter {
+            action: Some("contract.delete".into()),
+            ..AuditFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].target, "contract:orders@2");
+    assert!(events[0].before.is_some());
+    assert!(events[0].after.is_none());
 }
 
 #[tokio::test]
@@ -1744,6 +1842,7 @@ async fn file_managed_mock_is_read_only() {
         h.post_empty_json("/api/v1/mocks/filed/contracts/1/activate")
             .await,
     );
+    read_only(h.delete("/api/v1/mocks/filed/contracts/1").await);
     read_only(
         h.json(
             Method::PUT,
@@ -1789,7 +1888,10 @@ async fn openapi_lists_all_paths() {
         ("/api/v1/mocks", &["get", "post"]),
         ("/api/v1/mocks/{mock}", &["get", "patch", "delete"]),
         ("/api/v1/mocks/{mock}/contracts", &["get", "post"]),
-        ("/api/v1/mocks/{mock}/contracts/{version}", &["get"]),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}",
+            &["get", "delete"],
+        ),
         ("/api/v1/mocks/{mock}/contracts/{version}/source", &["get"]),
         (
             "/api/v1/mocks/{mock}/contracts/{version}/activate",

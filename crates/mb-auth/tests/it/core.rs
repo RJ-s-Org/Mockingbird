@@ -160,6 +160,42 @@ fn sysadmin_is_owner_everywhere() {
 }
 
 #[test]
+fn ignored_prefixed_groups_are_reported() {
+    let m = RoleMapping::default();
+    let c = claims(json!({
+        "sub": "u1",
+        "groups": [
+            "mb:default:editor",
+            "mb:sysadmin",
+            "mb:team-a:superuser",
+            "mb:team-a",
+            "mb:Bad_WS:viewer",
+            "mb:",
+            "other:x:viewer",
+            "mbx:team-a:viewer"
+        ]
+    }));
+    assert_eq!(
+        m.ignored_groups(&c),
+        vec![
+            "mb:team-a:superuser",
+            "mb:team-a",
+            "mb:Bad_WS:viewer",
+            "mb:"
+        ]
+    );
+    let p = m.principal(&c).unwrap();
+    assert!(p.sysadmin);
+    assert_eq!(p.roles.len(), 1);
+    assert!(
+        m.ignored_groups(&claims(
+            json!({ "sub": "u1", "groups": "mb:default:viewer" })
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
 fn claims_map_to_roles() {
     let m = RoleMapping::default();
     assert_eq!(m.roles_claim, "groups");

@@ -971,6 +971,44 @@ async fn scenario_status_must_be_declared_like_the_admin_api() {
     }
 }
 
+#[tokio::test]
+async fn scenario_set_must_fit_a_response_like_the_admin_api() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let scenario = |rules: &str| {
+        format!("mocks:\n  orders:\n    contract: orders.yaml\n    scenarios:\n      s: {rules}\n")
+    };
+
+    let err = reconcile(
+        store.as_ref(),
+        no_state().as_ref(),
+        &ws.load(&scenario("{set: {status: lost}, operations: [getOrder]}")),
+    )
+    .await
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(
+        err.starts_with(
+            "mock \"orders\", scenario \"s\": set/status fits no response the scenario can \
+             select (getOrder 200: "
+        ),
+        "{err}"
+    );
+
+    for rules in [
+        "{set: {status: shipped}, operations: [getOrder]}",
+        "{set: {total: 12.5, note: null}}",
+    ] {
+        reconcile(
+            store.as_ref(),
+            no_state().as_ref(),
+            &ws.load(&scenario(rules)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{rules}: {e:#}"));
+    }
+}
+
 /// `vault:` references are secret references like `env:`/`file:` for a
 /// profile's api_key and `${…}` header placeholders (MOCKINGBIRD-STUB-1).
 #[tokio::test]

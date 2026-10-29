@@ -261,6 +261,21 @@ export function useActivate(ws: string, mock: string) {
   });
 }
 
+/** `DELETE …/contracts/{version}`: discards a version that is not active; refreshes the mock. */
+export function useDeleteContract(ws: string, mock: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (version: number): Promise<void> => {
+      unwrap(
+        await api.DELETE("/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}", {
+          params: { path: { ws, mock, version } },
+        }),
+      );
+    },
+    onSuccess: () => invalidateMock(queryClient, ws),
+  });
+}
+
 /** The LLM profiles of `ws`. */
 export function useProfiles(ws: string) {
   return useQuery({

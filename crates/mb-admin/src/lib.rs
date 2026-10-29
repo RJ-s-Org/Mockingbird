@@ -59,7 +59,7 @@ pub use login_limit::{LoginFailureLimiter, SUPPRESSED_METRIC as LOGIN_FAILED_SUP
 pub use openapi::{ApiDoc, openapi_document};
 use problem::ApiResult;
 pub use problem::Problem;
-pub use scenarios::undeclared_scenario_status;
+pub use scenarios::{invalid_scenario_set, undeclared_scenario_status};
 pub use webhook::{WebhookSink, signature};
 pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
 
@@ -216,7 +216,10 @@ pub fn router(st: AdminState) -> Router {
             "/mocks/{mock}/contracts",
             get(contracts::list).post(contracts::upload),
         )
-        .route("/mocks/{mock}/contracts/{version}", get(contracts::get_one))
+        .route(
+            "/mocks/{mock}/contracts/{version}",
+            get(contracts::get_one).delete(contracts::delete),
+        )
         .route(
             "/mocks/{mock}/contracts/{version}/source",
             get(contracts::source),
