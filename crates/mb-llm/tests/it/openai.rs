@@ -164,22 +164,6 @@ async fn maps_http_error() {
     assert!(matches!(r, Err(LlmError::Http { status: 429, .. })));
 }
 
-#[cfg(feature = "testing")]
-#[tokio::test]
-async fn scripted_returns_in_order() {
-    let p = ScriptedProvider::new(vec![Ok("one".into()), Ok("two".into())]);
-    let a = p
-        .complete(req(ResponseFormat::Text, Duration::from_secs(1)))
-        .await
-        .unwrap();
-    let b = p
-        .complete(req(ResponseFormat::Text, Duration::from_secs(1)))
-        .await
-        .unwrap();
-    assert_eq!((a.content.as_str(), b.content.as_str()), ("one", "two"));
-    assert_eq!(p.requests().len(), 2);
-}
-
 #[tokio::test]
 async fn openai_stream_yields_deltas() {
     use futures::StreamExt;

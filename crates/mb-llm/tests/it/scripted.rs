@@ -39,6 +39,23 @@ impl Provider for Once {
 }
 
 #[tokio::test]
+async fn scripted_returns_in_order() {
+    let p = ScriptedProvider::new(vec![Ok("one".into()), Ok("two".into())]);
+    let a = p.complete(request()).await.unwrap();
+    let b = p.complete(request()).await.unwrap();
+    assert_eq!((a.content.as_str(), b.content.as_str()), ("one", "two"));
+    // Every request is recorded, as sent.
+    let sent = p.requests();
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(|r| r.messages[0].content == "hello"));
+    // The script is exhausted now.
+    assert!(matches!(
+        p.complete(request()).await,
+        Err(LlmError::Transport(m)) if m == "script exhausted"
+    ));
+}
+
+#[tokio::test]
 async fn default_stream_yields_complete_once() {
     let items: Vec<Result<String, LlmError>> =
         Once.stream(request()).await.unwrap().collect().await;
