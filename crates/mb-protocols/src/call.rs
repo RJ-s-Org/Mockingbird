@@ -3,6 +3,7 @@
 //! ([`generate_once`], [`open_stream`]), state change feeds
 //! ([`change_feed`]) and usage/request-log reporting ([`report`]).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -934,6 +935,87 @@ async fn unique_create_id(
 /// numbers in use.
 const MAX_SCAN: usize = 500;
 
+/// What the pipeline looks up in a runtime's (fixed) bundle on every call,
+/// computed once when the runtime is built.
+#[derive(Debug, Default)]
+pub(crate) struct BundleIndex {
+    /// Each operation's position in `bundle.operations`, by id (the first
+    /// one of a repeated id, as [`mb_mcm::Bundle::operation`] finds).
+    by_id: HashMap<String, usize>,
+    /// Per resource type: the fields its operations take from the path
+    /// (GitHub's issue `number`), sorted and deduplicated.
+    path_fields: HashMap<String, Vec<String>>,
+    /// The members every query operation's success schema lists.
+    listed: HashSet<String>,
+    /// Per operation, by position: the members its success schema lists.
+    list_members: Vec<Vec<String>>,
+}
+
+impl BundleIndex {
+    pub(crate) fn new(bundle: &mb_mcm::Bundle) -> Self {
+        let mut by_id = HashMap::with_capacity(bundle.operations.len());
+        let mut path_fields: HashMap<String, Vec<String>> = HashMap::new();
+        let mut list_members_of = Vec::with_capacity(bundle.operations.len());
+        let mut listed = HashSet::new();
+        for (i, op) in bundle.operations.iter().enumerate() {
+            by_id.entry(op.id.clone()).or_insert(i);
+            if let (Some(t), Some(field)) = (
+                op.resource_type.as_deref(),
+                op.identity.as_ref().and_then(|i| i.path_field.as_deref()),
+            ) {
+                path_fields
+                    .entry(t.to_string())
+                    .or_default()
+                    .push(field.to_string());
+            }
+            let members = op
+                .success_output()
+                .and_then(|o| o.schema.as_ref())
+                .map(|schema| list_members(bundle, schema))
+                .unwrap_or_default();
+            if matches!(op.kind, OperationKind::Query) {
+                listed.extend(members.iter().cloned());
+            }
+            list_members_of.push(members);
+        }
+        for fields in path_fields.values_mut() {
+            fields.sort_unstable();
+            fields.dedup();
+        }
+        Self {
+            by_id,
+            path_fields,
+            listed,
+            list_members: list_members_of,
+        }
+    }
+
+    /// The position of operation `id`.
+    pub(crate) fn operation(&self, id: &str) -> Option<usize> {
+        self.by_id.get(id).copied()
+    }
+
+    fn path_fields(&self, resource_type: &str) -> &[String] {
+        self.path_fields
+            .get(resource_type)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn list_members(&self, op: usize) -> &[String] {
+        self.list_members.get(op).map_or(&[], Vec::as_slice)
+    }
+}
+
+impl MockRuntime {
+    /// The operation `id` of [`MockRuntime::bundle`] (the first of a
+    /// repeated id), without scanning the operations. (SOAP keeps its own
+    /// operation positions.)
+    #[cfg(any(test, feature = "http-rest", feature = "graphql", feature = "grpc"))]
+    pub(crate) fn operation(&self, id: &str) -> Option<&Operation> {
+        self.bundle.operations.get(self.index.operation(id)?)
+    }
+}
+
 /// Numbers a create's answer must take above those the session holds: each
 /// integer field a read of the resource type takes from its path (GitHub's
 /// issue `number`). A clashing number moves past the highest stored one,
@@ -945,15 +1027,7 @@ async fn next_numbers(
     resource_type: &str,
     generated: &mut GeneratedResponse,
 ) {
-    let mut fields: Vec<&str> = rt
-        .bundle
-        .operations
-        .iter()
-        .filter(|o| o.resource_type.as_deref() == Some(resource_type))
-        .filter_map(|o| o.identity.as_ref()?.path_field.as_deref())
-        .collect();
-    fields.sort_unstable();
-    fields.dedup();
+    let fields = rt.index().path_fields(resource_type);
     if fields.is_empty() {
         return;
     }
@@ -961,7 +1035,7 @@ async fn next_numbers(
         return;
     };
     let stored = state.list(session, resource_type, MAX_SCAN).await;
-    for field in fields {
+    for field in fields.iter().map(String::as_str) {
         let Some(number) = body.get(field).and_then(Value::as_i64) else {
             continue;
         };
@@ -1021,14 +1095,7 @@ async fn store_wrapped(
     let Some(Value::Object(body)) = generated.body.as_ref() else {
         return;
     };
-    let bundle = state.rt.bundle();
-    let listed: Vec<String> = bundle
-        .operations
-        .iter()
-        .filter(|o| matches!(o.kind, OperationKind::Query))
-        .filter_map(|o| o.success_output()?.schema.as_ref())
-        .flat_map(|schema| list_members(bundle, schema))
-        .collect();
+    let listed = &state.rt.index().listed;
     for (member, value) in body {
         let plural = format!("{member}s");
         if !value.is_object() || !listed.contains(&plural) {
@@ -1639,11 +1706,11 @@ async fn related(
         out = state.list(session, t, LIST_CONTEXT_LIMIT).await;
         // Lists the answer holds that other reads stored: Plaid's
         // `/auth/get` answers the `accounts` that `/accounts/get` seeded.
-        let bundle = state.rt.bundle();
-        let members = op
-            .success_output()
-            .and_then(|o| o.schema.as_ref())
-            .map(|schema| list_members(bundle, schema))
+        let members = state
+            .rt
+            .index()
+            .operation(&op.id)
+            .map(|i| state.rt.index().list_members(i))
             .unwrap_or_default();
         let others = members
             .iter()
@@ -2137,5 +2204,252 @@ paths:
             .await
             .unwrap();
         assert_eq!(plan.stream_items, Some(3));
+    }
+
+    /// An example contract, compiled.
+    fn example(path: &str) -> Bundle {
+        let path = format!("{}/../../examples/apis/{path}", env!("CARGO_MANIFEST_DIR"));
+        compile(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    fn runtime_of(bundle: Bundle) -> MockRuntime {
+        let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        MockRuntime::new(
+            "m",
+            Arc::new(bundle),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            state,
+        )
+    }
+
+    /// What `next_numbers` used to compute per create.
+    fn scanned_path_fields<'a>(bundle: &'a Bundle, resource_type: &str) -> Vec<&'a str> {
+        let mut fields: Vec<&str> = bundle
+            .operations
+            .iter()
+            .filter(|o| o.resource_type.as_deref() == Some(resource_type))
+            .filter_map(|o| o.identity.as_ref()?.path_field.as_deref())
+            .collect();
+        fields.sort_unstable();
+        fields.dedup();
+        fields
+    }
+
+    /// What `store_wrapped` used to compute per create.
+    fn scanned_listed(bundle: &Bundle) -> Vec<String> {
+        bundle
+            .operations
+            .iter()
+            .filter(|o| matches!(o.kind, OperationKind::Query))
+            .filter_map(|o| o.success_output()?.schema.as_ref())
+            .flat_map(|schema| list_members(bundle, schema))
+            .collect()
+    }
+
+    /// The runtime's index answers what scanning the bundle answers.
+    #[test]
+    fn bundle_index_matches_a_scan() {
+        let mut bundles = vec![
+            example("github-rest/github-rest.openapi.yaml"),
+            example("slack/slack.openapi.yaml"),
+        ];
+        // A repeated id resolves to its first operation, as a scan does.
+        let mut repeated = bundles[0].clone();
+        let mut twin = repeated.operations[1].clone();
+        twin.id = repeated.operations[0].id.clone();
+        repeated.operations.push(twin);
+        bundles.push(repeated);
+        for bundle in bundles {
+            let rt = runtime_of(bundle);
+            let bundle = rt.bundle();
+            let mut types = HashSet::new();
+            for op in &bundle.operations {
+                assert!(std::ptr::eq(
+                    rt.operation(&op.id).unwrap(),
+                    bundle.operation(&op.id).unwrap()
+                ));
+                let members = op
+                    .success_output()
+                    .and_then(|o| o.schema.as_ref())
+                    .map(|schema| list_members(bundle, schema))
+                    .unwrap_or_default();
+                let i = rt.index().operation(&op.id).unwrap();
+                if std::ptr::eq(&bundle.operations[i], op) {
+                    assert_eq!(rt.index().list_members(i), members.as_slice());
+                }
+                types.extend(op.resource_type.clone());
+            }
+            assert!(rt.operation("noSuchOperation").is_none());
+            for t in types.iter().map(String::as_str).chain(["noSuchType"]) {
+                let indexed: Vec<&str> = rt
+                    .index()
+                    .path_fields(t)
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(indexed, scanned_path_fields(bundle, t), "{t}");
+            }
+            let scanned: HashSet<String> = scanned_listed(bundle).into_iter().collect();
+            assert_eq!(rt.index().listed, scanned);
+        }
+    }
+
+    /// Timing harness: `cargo test -p mockingbird-protocols --lib --
+    /// --ignored --nocapture index_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn index_timing() {
+        let github = example("github-rest/github-rest.openapi.yaml");
+        for copies in [10usize, 100] {
+            let mut bundle = github.clone();
+            bundle.operations = (0..copies)
+                .flat_map(|c| {
+                    github.operations.iter().map(move |op| {
+                        let mut op = op.clone();
+                        op.id = format!("{}{c}", op.id);
+                        op
+                    })
+                })
+                .collect();
+            let ops = bundle.operations.len();
+            let last = bundle.operations[ops - 1].id.clone();
+            let issue_type = bundle
+                .operations
+                .iter()
+                .find_map(|o| {
+                    o.identity
+                        .as_ref()?
+                        .path_field
+                        .as_ref()
+                        .and(o.resource_type.clone())
+                })
+                .unwrap_or_default();
+            let rt = runtime_of(bundle);
+            let bundle = rt.bundle();
+            let n = 2000u32;
+            let time = |f: &dyn Fn()| {
+                let started = std::time::Instant::now();
+                for _ in 0..n {
+                    f();
+                }
+                started.elapsed() / n
+            };
+            let scan = time(&|| {
+                std::hint::black_box(bundle.operation(std::hint::black_box(&last)));
+            });
+            let indexed = time(&|| {
+                std::hint::black_box(rt.operation(std::hint::black_box(&last)));
+            });
+            println!("{ops} operations: lookup scan {scan:?}, index {indexed:?}");
+            let scan = time(&|| {
+                std::hint::black_box(scanned_path_fields(bundle, &issue_type));
+                std::hint::black_box(scanned_listed(bundle));
+            });
+            let indexed = time(&|| {
+                std::hint::black_box(rt.index().path_fields(&issue_type));
+                std::hint::black_box(&rt.index().listed);
+            });
+            println!("{ops} operations: per-create walk {scan:?}, index {indexed:?}");
+        }
+    }
+
+    /// Timing harness for what a gRPC call's plan used to copy (its
+    /// operation and scenario) against finding them again:
+    /// `cargo test -p mockingbird-protocols --lib -- --ignored --nocapture
+    /// owned_plan_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn owned_plan_timing() {
+        let mut rt = runtime_of(example("github-rest/github-rest.openapi.yaml"));
+        let ids: Vec<String> = rt
+            .bundle()
+            .operations
+            .iter()
+            .map(|o| o.id.clone())
+            .collect();
+        for variants in [2usize, 20] {
+            let instructions = ids
+                .iter()
+                .take(variants)
+                .map(|id| (id.clone(), "be terse".to_string()))
+                .collect();
+            let scenario = ScenarioRuntime {
+                spec: ScenarioSpec {
+                    name: "s".into(),
+                    instructions: Some("x".repeat(500)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .with_operation_instructions(instructions);
+            rt.scenarios.insert("s".into(), scenario);
+            let op_id = &ids[0];
+            let n = 2000u32;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let op = rt.operation(op_id).unwrap().clone();
+                let s = rt.scenarios["s"].for_operation(op_id).clone();
+                std::hint::black_box((op, s));
+            }
+            let copied = started.elapsed() / n;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let op = rt.operation(op_id).unwrap();
+                let s = rt.scenarios.get("s").unwrap().for_operation(op_id);
+                std::hint::black_box((op, s));
+            }
+            let found = started.elapsed() / n;
+            println!("{variants} scenario variants: copy {copied:?}, find again {found:?}");
+        }
+    }
+
+    /// Timing harness for the copies an offline bidi message (20 earlier
+    /// bodies and its own) and a consumed event without a recorder (its
+    /// payload and headers) no longer make: `cargo test -p
+    /// mockingbird-protocols --lib -- --ignored --nocapture
+    /// skipped_copies_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn skipped_copies_timing() {
+        let body = |fields: usize| -> Value {
+            (0..fields)
+                .map(|i| (format!("field{i}"), json!({"text": "some words", "n": i})))
+                .collect::<Map<String, Value>>()
+                .into()
+        };
+        let n = 1000u32;
+        for fields in [20usize, 200] {
+            let earlier: Vec<Value> = (0..20).map(|_| body(fields)).collect();
+            let current = body(fields);
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let copies: Vec<Value> = earlier.to_vec();
+                std::hint::black_box((copies, current.clone()));
+            }
+            let size = current.to_string().len();
+            println!(
+                "bidi message of {size} bytes: {:?} of copies",
+                started.elapsed() / n
+            );
+        }
+        let headers: Vec<(String, String)> = (0..10)
+            .map(|i| (format!("x-header-{i}"), "value".repeat(4)))
+            .collect();
+        for fields in [200usize, 2000] {
+            let payload = body(fields);
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let map: Map<String, Value> = headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                std::hint::black_box((map, payload.clone()));
+            }
+            let size = payload.to_string().len();
+            println!(
+                "consumed message of {size} bytes: {:?} of copies",
+                started.elapsed() / n
+            );
+        }
     }
 }

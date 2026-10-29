@@ -301,7 +301,7 @@ async fn serve(
     };
     tracing::Span::current().record("operation", op_id.as_str());
     log.operation_id = Some(op_id.clone());
-    let Some(op) = rt.bundle.operation(&op_id) else {
+    let Some(op) = rt.operation(&op_id) else {
         return log.problem(
             500,
             "Internal Server Error",

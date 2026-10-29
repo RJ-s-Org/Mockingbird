@@ -338,12 +338,58 @@ fn lock(active: &Active) -> std::sync::MutexGuard<'_, HashSet<String>> {
     active.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// `type` and `id` of a protocol message, when it has both.
+/// `type` and `id` of a protocol message, when it has both (as strings).
+/// The payload is skipped, not built into a [`Value`]; a repeated member
+/// counts by its last value, as when the frame is parsed into a `Value`.
 fn operation_message(text: &str) -> Option<(String, String)> {
-    let msg: Value = serde_json::from_str(text).ok()?;
-    let ty = msg.get("type")?.as_str()?.to_string();
-    let id = msg.get("id")?.as_str()?.to_string();
-    Some((ty, id))
+    let head: Head = serde_json::from_str(text).ok()?;
+    Some((head.ty?, head.id?))
+}
+
+/// The `type` and `id` members of a protocol message; `None` for one that
+/// is missing or not a string.
+#[derive(Default)]
+struct Head {
+    ty: Option<String>,
+    id: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for Head {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct HeadVisitor;
+        impl<'de> serde::de::Visitor<'de> for HeadVisitor {
+            type Value = Head;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a protocol message object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Head, A::Error> {
+                let mut head = Head::default();
+                while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                    match key.as_ref() {
+                        "type" => head.ty = map.next_value::<MaybeString>()?.0,
+                        "id" => head.id = map.next_value::<MaybeString>()?.0,
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(head)
+            }
+        }
+        deserializer.deserialize_map(HeadVisitor)
+    }
+}
+
+/// A string, or `None` for any other JSON value (which is skipped).
+struct MaybeString(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for MaybeString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Value::deserialize(deserializer)? {
+            Value::String(s) => MaybeString(Some(s)),
+            _ => MaybeString(None),
+        })
+    }
 }
 
 /// The client's messages, with operations past the connection's
@@ -597,7 +643,7 @@ async fn open(
         status = Empty,
         source = Empty,
     );
-    let Some(op) = rt.bundle.operation(&op_id).cloned() else {
+    let Some(op) = rt.operation(&op_id).cloned() else {
         return Err(Failure::new(500, format!("unknown operation {op_id}")).error);
     };
     let mut report = ReportOnDrop {
@@ -884,6 +930,73 @@ impl Drop for ReportOnDrop {
                 );
             }
             Err(_) => tracing::warn!(mock = %rt.name, "subscription not reported: no runtime"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `Value`-based reading `operation_message` replaces.
+    fn by_value(text: &str) -> Option<(String, String)> {
+        let msg: Value = serde_json::from_str(text).ok()?;
+        let ty = msg.get("type")?.as_str()?.to_string();
+        let id = msg.get("id")?.as_str()?.to_string();
+        Some((ty, id))
+    }
+
+    #[test]
+    fn operation_message_reads_type_and_id_like_a_value() {
+        let frames = [
+            r#"{"type":"next","id":"1","payload":{"data":{"a":[1,2,{"b":null}]}}}"#,
+            r#"{"id":"op\"2","type":"complete"}"#,
+            r#"{"type":"connection_ack"}"#,
+            r#"{"type":"next","id":7}"#,
+            r#"{"type":null,"id":"1"}"#,
+            r#"{"type":"next","id":"1","type":"error"}"#,
+            r#"{"type":"next","id":"1","id":2}"#,
+            r#"{"type":"next","id":"1"} trailing"#,
+            r#"["type","id"]"#,
+            r#""type""#,
+            "not json",
+            "",
+        ];
+        for frame in frames {
+            assert_eq!(operation_message(frame), by_value(frame), "{frame}");
+        }
+        assert_eq!(
+            operation_message(frames[1]),
+            Some(("complete".into(), "op\"2".into()))
+        );
+    }
+
+    /// Timing harness: `cargo test -p mockingbird-protocols --lib --
+    /// --ignored --nocapture operation_message_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn operation_message_timing() {
+        for items in [100usize, 1000] {
+            let rows: Vec<Value> = (0..items)
+                .map(|i| json!({"id": i, "title": "an issue title", "labels": ["a", "b"]}))
+                .collect();
+            let frame =
+                json!({"type": "next", "id": "1", "payload": {"data": {"rows": rows}}}).to_string();
+            let n = 2000u32;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(by_value(std::hint::black_box(&frame)));
+            }
+            let before = started.elapsed() / n;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(operation_message(std::hint::black_box(&frame)));
+            }
+            let after = started.elapsed() / n;
+            println!(
+                "frame of {} bytes: Value {before:?}, head only {after:?}",
+                frame.len()
+            );
         }
     }
 }

@@ -232,7 +232,7 @@ impl CallState {
     }
 
     fn op(&self) -> Option<&Operation> {
-        self.rt().bundle.operation(&self.method.op_id)
+        self.rt().operation(&self.method.op_id)
     }
 
     fn source_slot(&self) -> MutexGuard<'_, Option<Source>> {
@@ -307,7 +307,7 @@ impl CallState {
             sleep(plan.delay).await;
             return Err(Failure::forced(status));
         }
-        Ok(OwnedPlan::new(&plan))
+        Ok(OwnedPlan::new(self.rt(), &plan))
     }
 
     /// Admits one more client message of a call admitted with `plan`.
@@ -334,7 +334,6 @@ impl CallState {
     /// was built from and its source.
     fn response(
         &self,
-        plan: &OwnedPlan,
         call: &OperationCall,
         body: Option<Value>,
         source: Source,
@@ -349,7 +348,9 @@ impl CallState {
             Err(reason) => reason,
         };
         tracing::warn!(operation = %self.method.op_id, %reason, "generated JSON does not fit {}; using the fallback", desc.full_name());
-        let op = &plan.op;
+        let op = self
+            .op()
+            .ok_or_else(|| Failure::internal(format!("unknown operation {}", self.method.op_id)))?;
         let variant = op
             .success_output()
             .ok_or_else(|| Failure::internal(EngineError::NoOutput.to_string()))?;
@@ -385,7 +386,7 @@ impl CallState {
         call: OperationCall,
         request_stream: Vec<Value>,
     ) -> Result<((DynamicMessage, Value, Source), Usage), Failure> {
-        let mut single = plan.plan();
+        let mut single = plan.plan(self)?;
         single.stream_items = Some(1);
         let mut items = call::open_stream(self.rt(), &single, call.clone(), request_stream)
             .await
@@ -400,7 +401,7 @@ impl CallState {
             }) => (Some(value), source, usage),
             None => (None, Source::Fallback, Usage::default()),
         };
-        Ok((self.response(plan, &call, body, source)?, usage))
+        Ok((self.response(&call, body, source)?, usage))
     }
 
     async fn unary(self: Arc<Self>, req: tonic::Request<DynamicMessage>) -> UnaryResult {
@@ -412,12 +413,12 @@ impl CallState {
         let outcome = async {
             let plan = self.start(&mut rep).await?;
             let call = self.operation_call(&rep.headers, Some(body));
-            let generated = call::generate_once(self.rt(), &plan.plan(), &call)
+            let generated = call::generate_once(self.rt(), &plan.plan(&self)?, &call)
                 .await
                 .map_err(engine_failure)?;
             rep.usage = generated.usage;
             let (message, json, source) = tracing::info_span!("mb.encode")
-                .in_scope(|| self.response(&plan, &call, generated.body, generated.source))?;
+                .in_scope(|| self.response(&call, generated.body, generated.source))?;
             sleep(plan.delay).await;
             Ok((message, json, source))
         }
@@ -452,7 +453,7 @@ impl CallState {
         let opened = async {
             let plan = self.start(&mut rep).await?;
             let call = self.operation_call(&rep.headers, Some(body));
-            let items = call::open_stream(self.rt(), &plan.plan(), call.clone(), Vec::new())
+            let items = call::open_stream(self.rt(), &plan.plan(&self)?, call.clone(), Vec::new())
                 .await
                 .map_err(engine_failure)?;
             Ok((plan, call, items))
@@ -470,7 +471,6 @@ impl CallState {
             call: Arc::clone(&self),
             delay: plan.delay,
             drop_after: plan.chaos.drop_after,
-            plan,
             op_call: call,
             items,
             rep,
@@ -570,7 +570,6 @@ type StreamResult = Result<tonic::Response<MessageStream>, Status>;
 /// A server-streaming call's remaining engine items.
 struct ServerStream {
     call: Arc<CallState>,
-    plan: OwnedPlan,
     op_call: OperationCall,
     items: BoxStream<'static, StreamItem>,
     rep: Reporter,
@@ -600,7 +599,7 @@ impl ServerStream {
         sleep(self.delay.take()).await;
         match self
             .call
-            .response(&self.plan, &self.op_call, Some(item.value), item.source)
+            .response(&self.op_call, Some(item.value), item.source)
         {
             Ok((message, _, source)) => {
                 self.rep.items += 1;
@@ -657,15 +656,22 @@ impl Bidi {
             }
             let body = message_json(&message);
             self.rep.set_body(&body);
-            let call = self
-                .call
-                .operation_call(&self.rep.headers, Some(body.clone()));
-            let request_stream = self.earlier.iter().cloned().collect();
+            // The earlier messages only go in the LLM prompt: without a
+            // provider they are neither kept nor copied.
+            let prompted = self.call.rt().engine.has_provider();
+            let (request_stream, kept) = if prompted {
+                (self.earlier.iter().cloned().collect(), Some(body.clone()))
+            } else {
+                (Vec::new(), None)
+            };
+            let call = self.call.operation_call(&self.rep.headers, Some(body));
             let reply = self.call.one_item(&self.plan, call, request_stream).await?;
-            if self.earlier.len() == REQUEST_STREAM_ITEMS {
-                self.earlier.pop_front();
+            if let Some(body) = kept {
+                if self.earlier.len() == REQUEST_STREAM_ITEMS {
+                    self.earlier.pop_front();
+                }
+                self.earlier.push_back(body);
             }
-            self.earlier.push_back(body);
             sleep(self.delay.take()).await;
             Ok(Some((reply, started.elapsed())))
         }
@@ -740,11 +746,11 @@ impl StreamingService<DynamicMessage> for Svc {
 }
 
 /// A [`CallPlan`] that owns what it borrows, so streams can outlive the
-/// handler.
+/// handler. The operation and the scenario are not copied: they are found
+/// again in the call's (fixed) runtime.
 struct OwnedPlan {
-    op: Operation,
     session: SessionKey,
-    scenario: Option<ScenarioRuntime>,
+    scenario: Option<PlanScenario>,
     delay: Option<Duration>,
     stream_items: Option<usize>,
     tenancy: Tenancy,
@@ -752,12 +758,29 @@ struct OwnedPlan {
     chaos: ChaosDecision,
 }
 
+/// The scenario of an [`OwnedPlan`].
+enum PlanScenario {
+    /// The runtime's scenario of this name, as it applies to the operation.
+    Named(String),
+    /// A scenario that is not the runtime's (not expected: plans select
+    /// the runtime's scenarios), copied.
+    Owned(Box<ScenarioRuntime>),
+}
+
 impl OwnedPlan {
-    fn new(plan: &CallPlan<'_>) -> Self {
+    fn new(rt: &MockRuntime, plan: &CallPlan<'_>) -> Self {
+        let scenario = plan.scenario.map(|selected| {
+            rt.scenarios
+                .iter()
+                .find(|(_, s)| std::ptr::eq(s.for_operation(&plan.op.id), selected))
+                .map_or_else(
+                    || PlanScenario::Owned(Box::new(selected.clone())),
+                    |(name, _)| PlanScenario::Named(name.clone()),
+                )
+        });
         Self {
-            op: plan.op.clone(),
             session: plan.session.clone(),
-            scenario: plan.scenario.cloned(),
+            scenario,
             delay: plan.delay,
             stream_items: plan.stream_items,
             tenancy: plan.tenancy.clone(),
@@ -766,17 +789,33 @@ impl OwnedPlan {
         }
     }
 
-    fn plan(&self) -> CallPlan<'_> {
-        CallPlan {
-            op: &self.op,
+    /// The plan again, borrowing the operation and scenario from `call`'s
+    /// runtime.
+    fn plan<'a>(&'a self, call: &'a CallState) -> Result<CallPlan<'a>, Failure> {
+        let op = call
+            .op()
+            .ok_or_else(|| Failure::internal(format!("unknown operation {}", call.method.op_id)))?;
+        let scenario = match &self.scenario {
+            None => None,
+            Some(PlanScenario::Owned(s)) => Some(s.as_ref()),
+            Some(PlanScenario::Named(name)) => Some(
+                call.rt()
+                    .scenarios
+                    .get(name)
+                    .ok_or_else(|| Failure::internal(format!("unknown scenario {name}")))?
+                    .for_operation(&op.id),
+            ),
+        };
+        Ok(CallPlan {
+            op,
             session: self.session.clone(),
-            scenario: self.scenario.as_ref(),
+            scenario,
             forced_status: self.forced_status,
             delay: self.delay,
             stream_items: self.stream_items,
             tenancy: self.tenancy.clone(),
             chaos: self.chaos,
-        }
+        })
     }
 }
 

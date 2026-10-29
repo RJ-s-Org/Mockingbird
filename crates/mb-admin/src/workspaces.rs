@@ -5,6 +5,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::{Permission, Principal, Role};
+use mb_protocols::webhooks::log::SharedDeliveryLog;
 use mb_store::{DEFAULT_WORKSPACE, Workspace};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -226,6 +227,7 @@ pub async fn patch(
 pub async fn delete(
     State(st): State<AdminState>,
     access: WsAccess,
+    deliveries: Option<axum::Extension<SharedDeliveryLog>>,
     Query(params): Query<DeleteParams>,
 ) -> ApiResult<StatusCode> {
     access.require(Permission::ManageWorkspace)?;
@@ -247,6 +249,10 @@ pub async fn delete(
         }
     }
     if st.store.delete_workspace(ws, force).await? {
+        // The webhook deliveries of its mocks (kept on this node) go too.
+        if let Some(axum::Extension(log)) = deliveries {
+            log.forget_workspace(ws);
+        }
         access
             .audit(
                 &st.audit,

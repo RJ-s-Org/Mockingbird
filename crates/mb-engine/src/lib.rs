@@ -248,6 +248,11 @@ pub struct Engine {
     /// The member names of each (`<source digest>/<operation id>`, status)
     /// schema, which decide which requested words matter for its shape.
     member_names: DashMap<(String, u16), Arc<HashSet<String>>>,
+    /// Validators of schemas that are not an operation's own (a narrowed
+    /// GraphQL selection, a joint answer, an event key, header or address
+    /// parameter schema), keyed by (`<source digest>`, schema text); at most
+    /// [`SCHEMA_VALIDATORS_MAX`], emptied when full.
+    schema_validators: DashMap<(String, String), Arc<SchemaValidator>>,
     /// The formats the persona declares, kept on every generated body.
     persona_formats: persona::PersonaFormats,
     guards: EngineGuards,
@@ -256,6 +261,9 @@ pub struct Engine {
 /// (`<source digest>/<operation id>`, status, narrowed schema digest,
 /// requested member names).
 type ShapeKey = (String, u16, Option<u64>, Vec<String>);
+
+/// Most validators [`Engine::schema_validator`] keeps.
+const SCHEMA_VALIDATORS_MAX: usize = 512;
 
 impl Engine {
     pub fn new(provider: Option<Arc<dyn Provider>>, config: EngineConfig) -> Self {
@@ -271,12 +279,20 @@ impl Engine {
             validators: DashMap::new(),
             shapes: DashMap::new(),
             member_names: DashMap::new(),
+            schema_validators: DashMap::new(),
             guards: EngineGuards::default(),
         }
     }
 
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Whether the engine has an LLM provider; without one every response
+    /// comes from the faker, and prompt-only inputs (such as
+    /// [`StreamContext::request_stream`]) are never read.
+    pub fn has_provider(&self) -> bool {
+        self.provider.is_some()
     }
 
     /// Whether `value` is a valid stream item of `op`; `false` when `op`
@@ -330,9 +346,10 @@ impl Engine {
             });
         };
 
-        // A narrowed schema varies per query, so its validator is not cached.
+        // A narrowed schema varies per query: its validator is cached by
+        // the schema itself.
         let validator = match narrowed {
-            Some(schema) => Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(schema))?),
+            Some(schema) => self.schema_validator(bundle, schema)?,
             None => self.validator(bundle, op, status, schema)?,
         };
         let mut usage = Usage::default();
@@ -450,7 +467,7 @@ impl Engine {
             let status = success_status(variant.status);
             let schema = part.ctx.response_schema.or(variant.schema.as_ref())?;
             let validator = match part.ctx.response_schema {
-                Some(s) => Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(s)).ok()?),
+                Some(s) => self.schema_validator(bundle, s).ok()?,
                 None => self.validator(bundle, part.op, status, schema).ok()?,
             };
             properties.insert(part.key.to_string(), schema.clone());
@@ -469,7 +486,7 @@ impl Engine {
             "properties": properties,
             "required": keys,
         });
-        let validator = SchemaValidator::new(&bundle.with_reachable_defs(&combined)).ok()?;
+        let validator = self.schema_validator(bundle, &combined).ok()?;
         let prompt_schema = compact::response_prompt_schema(bundle, &combined);
         let messages = tracing::info_span!("mb.prompt").in_scope(|| {
             prompt::build_joint_messages(
@@ -587,13 +604,12 @@ impl Engine {
         let status = success_status(variant.status);
         let schema = variant.schema.as_ref()?;
         let validator = match response_schema {
-            Some(narrowed) => Arc::new(
-                SchemaValidator::new(&bundle.with_reachable_defs(narrowed))
-                    .inspect_err(|e| {
-                        tracing::warn!(operation = %op.id, error = %e, "narrowed schema cannot be validated");
-                    })
-                    .ok()?,
-            ),
+            Some(narrowed) => self
+                .schema_validator(bundle, narrowed)
+                .inspect_err(|e| {
+                    tracing::warn!(operation = %op.id, error = %e, "narrowed schema cannot be validated");
+                })
+                .ok()?,
             None => self
                 .validator(bundle, op, status, schema)
                 .inspect_err(|e| {
@@ -916,6 +932,33 @@ impl Engine {
         }
         let v = Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(schema))?);
         self.validators.insert(key, Arc::clone(&v));
+        Ok(v)
+    }
+
+    /// The validator of `schema` (with the bundle's definitions it
+    /// reaches), cached by the schema's text under the bundle's source
+    /// digest. A bundle without a digest (built by hand, not imported) is
+    /// never cached: its definitions are not known to be fixed. Compile
+    /// errors are not cached.
+    pub(crate) fn schema_validator(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+    ) -> Result<Arc<SchemaValidator>, EngineError> {
+        let compile = || SchemaValidator::new(&bundle.with_reachable_defs(schema)).map(Arc::new);
+        if bundle.source_digest.is_empty() {
+            return compile();
+        }
+        let key = (bundle.source_digest.clone(), schema.to_string());
+        if let Some(v) = self.schema_validators.get(&key) {
+            return Ok(Arc::clone(&v));
+        }
+        let v = compile()?;
+        // Selections are client-controlled: bound the cache.
+        if self.schema_validators.len() >= SCHEMA_VALIDATORS_MAX {
+            self.schema_validators.clear();
+        }
+        self.schema_validators.insert(key, Arc::clone(&v));
         Ok(v)
     }
 

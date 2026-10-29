@@ -152,7 +152,7 @@ async fn generate(
     let mut joint = Vec::with_capacity(parts.len());
     let mut unknown = Vec::new();
     for part in &parts {
-        match rt.bundle.operation(&part.op_id) {
+        match rt.operation(&part.op_id) {
             Some(op) => joint.push(JointPart {
                 key: &part.key,
                 op,

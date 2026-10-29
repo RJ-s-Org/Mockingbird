@@ -121,27 +121,14 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             }
         };
     }
-    let request = match method {
-        Method::GET => {
-            let request = match async_graphql::http::parse_query_string(uri.query().unwrap_or("")) {
-                Ok(r) => r,
-                Err(e) => {
-                    let resp = problem(400, "Invalid GraphQL request", e.to_string());
-                    return refused(rt, &method, &headers, resp, None).await;
-                }
-            };
-            if is_mutation(&request) {
-                let mut resp = problem(
-                    405,
-                    "Method Not Allowed",
-                    "mutations must be sent with POST",
-                );
-                resp.headers_mut()
-                    .insert(header::ALLOW, HeaderValue::from_static("POST"));
+    let mut request = match method {
+        Method::GET => match async_graphql::http::parse_query_string(uri.query().unwrap_or("")) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = problem(400, "Invalid GraphQL request", e.to_string());
                 return refused(rt, &method, &headers, resp, None).await;
             }
-            request
-        }
+        },
         Method::POST => {
             let parsed = match read_body(&headers, body, rt.limits.max_request_bytes).await {
                 Ok(bytes) => parse_post(&headers, &bytes)
@@ -164,13 +151,30 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             return refused(rt, &method, &headers, resp, None).await;
         }
     };
+    // Parsed once: the checks below read the document and the executor
+    // reuses it. One that does not parse is left to the executor to report.
+    let doc = async_graphql::parser::parse_query(&request.query).ok();
+    let operation_name = request.operation_name.as_deref();
+    if method == Method::GET
+        && doc
+            .as_ref()
+            .is_some_and(|doc| is_mutation(doc, operation_name))
+    {
+        let mut resp = problem(
+            405,
+            "Method Not Allowed",
+            "mutations must be sent with POST",
+        );
+        resp.headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("POST"));
+        return refused(rt, &method, &headers, resp, None).await;
+    }
     // Each root field is one engine call, and validation walks the document
     // with every fragment spread expanded: bound both before anything runs.
-    if let Some(oversize) = oversize(
-        &request.query,
-        request.operation_name.as_deref(),
-        rt.protocols.graphql_max_root_fields,
-    ) {
+    let too_large = doc
+        .as_ref()
+        .and_then(|doc| oversize_doc(doc, operation_name, rt.protocols.graphql_max_root_fields));
+    if let Some(oversize) = too_large {
         let (message, code) = oversize.describe();
         let body = json!({"errors": [{
             "message": message,
@@ -196,6 +200,9 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
     } else {
         None
     };
+    if let Some(doc) = doc {
+        request.set_parsed_query(doc);
+    }
     execute(&st, request, &method, headers, admitted).await
 }
 
@@ -442,13 +449,11 @@ fn parse_post(headers: &HeaderMap, body: &[u8]) -> Result<Request, String> {
     serde_json::from_slice::<Request>(body).map_err(|e| format!("body: {e}"))
 }
 
-/// Whether the operation `request` selects is a mutation. Anything that
-/// does not parse or select is left to the executor to report.
-fn is_mutation(request: &Request) -> bool {
-    let Ok(doc) = async_graphql::parser::parse_query(&request.query) else {
-        return false;
-    };
-    let selected = match (&doc.operations, request.operation_name.as_deref()) {
+/// Whether the operation `doc` selects (by `operation_name`) is a
+/// mutation. Anything that does not select is left to the executor to
+/// report.
+fn is_mutation(doc: &ExecutableDocument, operation_name: Option<&str>) -> bool {
+    let selected = match (&doc.operations, operation_name) {
         (DocumentOperations::Single(op), _) => Some(op),
         (DocumentOperations::Multiple(ops), Some(name)) => ops.get(name),
         (DocumentOperations::Multiple(ops), None) if ops.len() == 1 => ops.values().next(),
@@ -526,8 +531,17 @@ pub(crate) fn oversize(
     max_root_fields: usize,
 ) -> Option<Oversize> {
     let doc = async_graphql::parser::parse_query(query).ok()?;
+    oversize_doc(&doc, operation_name, max_root_fields)
+}
+
+/// [`oversize`] of a parsed document.
+fn oversize_doc(
+    doc: &ExecutableDocument,
+    operation_name: Option<&str>,
+    max_root_fields: usize,
+) -> Option<Oversize> {
     let mut expander = Expander {
-        doc: &doc,
+        doc,
         memo: HashMap::new(),
         visiting: Vec::new(),
         depth: 0,
@@ -761,18 +775,42 @@ mod tests {
 
     #[test]
     fn mutation_detection() {
-        let req = |q: &str, name: Option<&str>| {
-            let mut r = Request::new(q);
-            r.operation_name = name.map(str::to_string);
-            r
+        let is = |q: &str, name: Option<&str>| {
+            async_graphql::parser::parse_query(q).is_ok_and(|doc| is_mutation(&doc, name))
         };
-        assert!(is_mutation(&req("mutation { a }", None)));
-        assert!(!is_mutation(&req("{ a }", None)));
-        assert!(!is_mutation(&req("query Q { a }", None)));
+        assert!(is("mutation { a }", None));
+        assert!(!is("{ a }", None));
+        assert!(!is("query Q { a }", None));
         let both = "query Q { a } mutation M { b }";
-        assert!(is_mutation(&req(both, Some("M"))));
-        assert!(!is_mutation(&req(both, Some("Q"))));
-        assert!(!is_mutation(&req(both, None)));
-        assert!(!is_mutation(&req("mutation {", None)));
+        assert!(is(both, Some("M")));
+        assert!(!is(both, Some("Q")));
+        assert!(!is(both, None));
+        assert!(!is("mutation {", None));
+    }
+
+    /// Timing harness for one parse of a GitHub-sized query (a request
+    /// used to parse it once per check, then once more to execute):
+    /// `cargo test -p mockingbird-protocols --lib -- --ignored --nocapture
+    /// parse_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn parse_timing() {
+        for fields in [20usize, 200] {
+            let selection: Vec<String> = (0..fields)
+                .map(|i| format!("f{i}: issue(number: {i}) {{ id title author {{ login }} }}"))
+                .collect();
+            let query = format!("query Q {{ repository {{ {} }} }}", selection.join(" "));
+            let n = 500u32;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let doc = async_graphql::parser::parse_query(std::hint::black_box(&query));
+                std::hint::black_box(doc.is_ok());
+            }
+            println!(
+                "query of {} bytes: {:?} per parse",
+                query.len(),
+                started.elapsed() / n
+            );
+        }
     }
 }

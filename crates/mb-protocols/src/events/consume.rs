@@ -153,32 +153,27 @@ impl ChannelInner {
     ) -> Option<Value> {
         let started = Instant::now();
         let bytes = msg.payload.len();
-        // Recorded like HTTP headers: credential-like names (and the mock's
-        // data-plane key header) are left out.
-        let headers: Map<String, Value> = msg
-            .headers
-            .iter()
-            .filter(|(k, _)| crate::call::is_recordable_header(&self.rt, k))
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
-        let key = msg
-            .key
-            .as_deref()
-            .map(|k| String::from_utf8_lossy(k).into_owned());
         let session = find_header(&msg.headers, SESSION_HEADER)
             .map(str::trim)
             .filter(|s| is_session_id(s))
             .unwrap_or(DEFAULT_SESSION)
             .to_string();
 
+        // The recorded body; `None` when it is the valid payload, which is
+        // copied for the record only when there is a recorder.
         let (status, body, mut response, valid) = if bytes > MAX_MESSAGE_BYTES {
-            (413, json!({"truncated": true, "bytes": bytes}), None, None)
+            (
+                413,
+                Some(json!({"truncated": true, "bytes": bytes})),
+                None,
+                None,
+            )
         } else {
             match serde_json::from_slice::<Value>(&msg.payload) {
                 Err(_) => {
                     let preview = &msg.payload[..bytes.min(RAW_PREVIEW_BYTES)];
                     let raw = String::from_utf8_lossy(preview).into_owned();
-                    (400, json!({"raw": raw}), None, None)
+                    (400, Some(json!({"raw": raw})), None, None)
                 }
                 Ok(payload) => {
                     match self
@@ -188,16 +183,11 @@ impl ChannelInner {
                     {
                         Err(errors) => (
                             422,
-                            payload,
+                            Some(payload),
                             Some(json!({"valid": false, "errors": errors})),
                             None,
                         ),
-                        Ok(()) => (
-                            200,
-                            payload.clone(),
-                            Some(json!({"valid": true})),
-                            Some(payload),
-                        ),
+                        Ok(()) => (200, None, Some(json!({"valid": true})), Some(payload)),
                     }
                 }
             }
@@ -217,6 +207,19 @@ impl ChannelInner {
         }
 
         if let Some(recorder) = &self.rt.recorder {
+            // Recorded like HTTP headers: credential-like names (and the
+            // mock's data-plane key header) are left out.
+            let headers: Map<String, Value> = msg
+                .headers
+                .iter()
+                .filter(|(k, _)| crate::call::is_recordable_header(&self.rt, k))
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            let key = msg
+                .key
+                .as_deref()
+                .map(|k| String::from_utf8_lossy(k).into_owned());
+            let body = body.or_else(|| valid.clone()).unwrap_or(Value::Null);
             recorder.record(RequestRecord {
                 workspace: self.rt.workspace.clone(),
                 mock: self.rt.name.clone(),
