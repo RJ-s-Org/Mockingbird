@@ -92,8 +92,7 @@ impl ChannelConfig {
 /// Upgrades the connection and runs `handler` on it.
 ///
 /// The subprotocol is the first of `cfg.subprotocols` the client offered.
-/// Text frames are queued to `incoming`; binary frames are ignored (see
-/// [`serve_frames`] for a handler that takes them); the
+/// Text frames are queued to `incoming`; binary frames are ignored; the
 /// server pings every `cfg.keepalive`. The socket closes (1000) when the
 /// handler returns or drops `outgoing`, with the handler's own code on
 /// [`Outbound::Close`], and with 1009 on an oversized frame. The handler
