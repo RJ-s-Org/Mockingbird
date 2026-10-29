@@ -288,6 +288,70 @@ async fn client_streaming_record_route() {
     assert!(items[2].contains("20"), "{}", items[2]);
 }
 
+/// A selected scenario (here its per-operation variant) shapes unary and
+/// streamed answers: the plan a call keeps finds it again in the runtime.
+#[tokio::test]
+async fn scenario_applies_to_unary_and_streamed_calls() {
+    let bundle = route_guide();
+    let list_features = bundle
+        .operations
+        .iter()
+        .find(|o| o.id.ends_with("ListFeatures"))
+        .unwrap()
+        .id
+        .clone();
+    let mut rt = runtime("routes", Arc::clone(&bundle), None);
+    let scenario = mb_protocols::ScenarioRuntime {
+        spec: mb_engine::ScenarioSpec {
+            name: "named".into(),
+            set: Some(json!({"name": "from-scenario"})),
+            ..Default::default()
+        },
+        stream_items: Some(2),
+        ..Default::default()
+    }
+    .with_operation_instructions([(list_features, "list two".to_string())].into());
+    rt.scenarios.insert("named".into(), scenario);
+    let (_server, channel) = serve(vec![rt]).await;
+    let mut client = Client::new(channel, &bundle);
+    let scenario = [("x-mockingbird-scenario", "named")];
+
+    client.ready().await;
+    let point = client.msg("routeguide.Point", json!({"latitude": 1, "longitude": 2}));
+    let feature = client
+        .grpc
+        .unary(
+            request(point, &scenario),
+            PathAndQuery::from_static("/routeguide.RouteGuide/GetFeature"),
+            client.codec("routeguide.Point", "routeguide.Feature"),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(json(&feature)["name"], "from-scenario");
+
+    client.ready().await;
+    let rect = client.msg(
+        "routeguide.Rectangle",
+        json!({"lo": {"latitude": 1, "longitude": 2}, "hi": {"latitude": 3, "longitude": 4}}),
+    );
+    let mut stream = client
+        .grpc
+        .server_streaming(
+            request(rect, &scenario),
+            PathAndQuery::from_static("/routeguide.RouteGuide/ListFeatures"),
+            client.codec("routeguide.Rectangle", "routeguide.Feature"),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+    let mut names = Vec::new();
+    while let Some(feature) = stream.message().await.unwrap() {
+        names.push(json(&feature)["name"].clone());
+    }
+    assert_eq!(names, vec![json!("from-scenario"); 2]);
+}
+
 #[tokio::test]
 async fn bidi_route_chat_replies_per_message() {
     let bundle = route_guide();

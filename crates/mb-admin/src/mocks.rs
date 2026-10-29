@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
+use mb_protocols::webhooks::log::SharedDeliveryLog;
 use mb_store::{
     ChaosSettings, Consistency, DataPlaneAuthConfig, Mock, MockBehavior, MockLimits, NewMock,
     PathRewrite, ResourceSource, StoreError, UnknownIds, WebhookTarget, routes_collide,
@@ -680,6 +681,7 @@ pub async fn patch(
 pub async fn delete(
     State(st): State<AdminState>,
     access: WsAccess,
+    deliveries: Option<axum::Extension<SharedDeliveryLog>>,
     Path(MockPath { mock }): Path<MockPath>,
 ) -> ApiResult<StatusCode> {
     access.require(Permission::Edit)?;
@@ -691,6 +693,10 @@ pub async fn delete(
     st.state.reset_mock(&access.ws, &mock).await?;
     if !st.store.delete_mock(&access.ws, &mock).await? {
         return Err(Problem::not_found(format!("mock {mock:?} does not exist")));
+    }
+    // Its webhook deliveries (kept on this node) go with it.
+    if let Some(axum::Extension(log)) = deliveries {
+        log.forget(&access.ws, &mock);
     }
     access
         .audit(

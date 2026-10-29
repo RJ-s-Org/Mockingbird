@@ -112,11 +112,11 @@ impl Engine {
     /// `oneOf`/`anyOf` branches and fresh draws are tried before an invalid
     /// value is accepted. An uncompilable schema is faked unvalidated.
     pub fn fake(&self, bundle: &Bundle, schema: &Value) -> Value {
-        match SchemaValidator::new(&bundle.with_reachable_defs(schema)) {
+        match self.schema_validator(bundle, schema) {
             Ok(validator) => self.fake_value(
                 bundle,
                 schema,
-                Some(&validator),
+                Some(validator.as_ref()),
                 &crate::FakerHints::default(),
             ),
             Err(e) => {

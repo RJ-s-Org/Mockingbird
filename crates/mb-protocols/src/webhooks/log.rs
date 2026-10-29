@@ -98,6 +98,24 @@ impl DeliveryLog {
         }
     }
 
+    /// Forgets every delivery of mock `mock` (a deleted mock). Deliveries
+    /// still in flight for it are no longer updated.
+    pub fn forget(&self, workspace: &str, mock: &str) {
+        self.lock()
+            .remove(&(workspace.to_string(), mock.to_string()));
+    }
+
+    /// Forgets the deliveries of every mock of `workspace` (a deleted
+    /// workspace).
+    pub fn forget_workspace(&self, workspace: &str) {
+        self.lock().retain(|(ws, _), _| ws != workspace);
+    }
+
+    /// The number of mocks with deliveries kept.
+    pub fn mocks(&self) -> usize {
+        self.lock().len()
+    }
+
     /// Newest first, at most `limit`.
     pub fn list(&self, workspace: &str, mock: &str, limit: usize) -> Vec<DeliveryRecord> {
         self.lock()
@@ -119,4 +137,53 @@ pub fn redacted_url(url: &str) -> String {
     u.set_query(None);
     u.set_fragment(None);
     u.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: &str) -> DeliveryRecord {
+        DeliveryRecord {
+            id: id.into(),
+            event_id: "evt".into(),
+            event_type: "order.created".into(),
+            operation: "createOrder".into(),
+            session: "default".into(),
+            url: "https://h.test/x".into(),
+            status: DeliveryStatus::Delivered,
+            attempts: 1,
+            response_status: Some(200),
+            error: None,
+            created_at: SystemTime::now(),
+            finished_at: None,
+        }
+    }
+
+    /// Mocks created and deleted over and over leave nothing behind.
+    #[test]
+    fn forgotten_mocks_leave_no_entries() {
+        let log = DeliveryLog::default();
+        for n in [100usize, 1000] {
+            for i in 0..n {
+                let mock = format!("m{i}");
+                log.push("ws", &mock, record("whd_1"));
+                log.forget("ws", &mock);
+            }
+            assert_eq!(log.mocks(), 0, "after {n} create/delete cycles");
+        }
+    }
+
+    #[test]
+    fn forgetting_a_workspace_keeps_the_others() {
+        let log = DeliveryLog::default();
+        for (ws, mock) in [("a", "x"), ("a", "y"), ("b", "x")] {
+            log.push(ws, mock, record("whd_1"));
+        }
+        log.forget_workspace("a");
+        assert_eq!(log.mocks(), 1);
+        assert_eq!(log.list("b", "x", 10).len(), 1);
+        log.forget("b", "nope");
+        assert_eq!(log.mocks(), 1);
+    }
 }

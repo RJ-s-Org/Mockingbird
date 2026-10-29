@@ -299,6 +299,8 @@ pub struct MockRuntime {
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
     credential_names: CredentialNames,
+    /// Lookups into `bundle`, computed once with it.
+    index: call::BundleIndex,
 }
 
 /// How a read of a path id the session holds no resource for is answered.
@@ -350,6 +352,7 @@ impl MockRuntime {
     ) -> Self {
         let data_plane_auth = DataPlaneAuth::default();
         let credential_names = CredentialNames::new(&data_plane_auth, &bundle);
+        let index = call::BundleIndex::new(&bundle);
         Self {
             name: name.into(),
             workspace: "default".into(),
@@ -372,6 +375,7 @@ impl MockRuntime {
             default_scenario: None,
             webhooks: None,
             credential_names,
+            index,
         }
     }
 
@@ -404,5 +408,10 @@ impl MockRuntime {
     /// change through [`MockRuntime::set_data_plane_auth`].
     pub(crate) fn credential_names(&self) -> &CredentialNames {
         &self.credential_names
+    }
+
+    /// Lookups into [`MockRuntime::bundle`], computed with it.
+    pub(crate) fn index(&self) -> &call::BundleIndex {
+        &self.index
     }
 }

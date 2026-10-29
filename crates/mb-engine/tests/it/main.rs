@@ -12,6 +12,7 @@ mod faker;
 mod generate;
 mod guards;
 mod message;
+mod perf;
 mod pii;
 mod scenario;
 mod stream;

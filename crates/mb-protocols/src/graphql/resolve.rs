@@ -319,7 +319,7 @@ async fn generate_in(
     batch: &mut Option<&super::batch::Batch>,
 ) -> Result<Value, Error> {
     let started = Instant::now();
-    let Some(op) = rt.bundle.operation(op_id) else {
+    let Some(op) = rt.operation(op_id) else {
         return Err(Failure::new(500, format!("unknown operation {op_id}")).error);
     };
     let mut report = Report {

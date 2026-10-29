@@ -200,3 +200,56 @@ async fn no_log_lists_nothing() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
+
+/// A deleted mock's deliveries are forgotten: the process-wide log does
+/// not keep them, and a new mock of the same name starts with none.
+#[tokio::test]
+async fn deleting_a_mock_forgets_its_deliveries() {
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
+    let mut st = AdminState::new(store, state);
+    st.auth = Arc::new(TestAuth);
+    let log = SharedDeliveryLog::default();
+    let app = router(st).layer(Extension(log.clone()));
+    for name in ["shop", "other"] {
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/api/v1/mocks",
+            Some(json!({"name": name})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        log.push(
+            DEFAULT_WORKSPACE,
+            name,
+            record("whd_1", DeliveryStatus::Delivered, 1, 200),
+        );
+    }
+    assert_eq!(log.mocks(), 2);
+    let (status, _) = send(&app, "DELETE", "/api/v1/mocks/shop", None, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(log.mocks(), 1);
+    assert!(log.list(DEFAULT_WORKSPACE, "shop", 10).is_empty());
+    assert_eq!(log.list(DEFAULT_WORKSPACE, "other", 10).len(), 1);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/mocks",
+        Some(json!({"name": "shop"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/api/v1/mocks/shop/webhooks/deliveries",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
