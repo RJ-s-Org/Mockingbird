@@ -10,6 +10,9 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- `vault:<mount>/<path>#<field>` secret references work wherever `env:` and `file:` do, as documented: an LLM profile's `api_key` and `${…}` header references in the config file, a broker's `sasl.password`, and an Admin API profile's `secret_ref` and headers (still gated by `server.api_secret_refs`) were refused with "must be a secret reference (env:NAME or file:/path)". A malformed `vault:` reference (such as `vault:token#key`, which the Vault resolver cannot read) is now refused when written, including in webhook `secret`s, which accepted any `vault:` text and failed only at delivery.
+- `mb-ext`: `DefaultSecrets` resolving a well-formed `vault:` reference without a usable Vault returns `ExtError::Other` naming the reason (`VAULT_ADDR is not set`, or `Vault is disabled: …` with the configuration error) on every resolve, instead of `ExtError::BadSecretRef` ("invalid secret reference"), which pointed at a correct reference. Malformed references are still `BadSecretRef`.
+
 - HTTP/REST query strings and form or multipart bodies decode in linear time: they were O(k^2) in the number of keys (50k keys took about 11 s) and are decoded before auth, so an unauthenticated request could burn CPU. A request with more than 1,000 query pairs, or more than 1,000 form or multipart fields, is now refused with a 400 `application/problem+json` ("Too many parameters"), and the request log keeps at most 1,000 recorded query or form fields.
 - The MCP `stop_server` tool stops a server the same MCP server started at once with SIGTERM: it no longer waits 10 s and reports `forced: true` because the exited server lingered as an unreaped (zombie) child, and `server_status` no longer reports such a server as running.
 

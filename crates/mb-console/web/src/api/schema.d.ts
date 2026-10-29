@@ -1487,7 +1487,7 @@ export interface components {
             max_tokens: number;
             model: string;
             name: string;
-            /** @description `env:NAME` or `file:/path`. */
+            /** @description `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`. */
             secret_ref?: string | null;
             source: components["schemas"]["Source"];
             /** Format: float */
@@ -1775,8 +1775,8 @@ export interface components {
              * @description A secret reference, never a raw key. Through the API it must match
              *     the server's `server.api_secret_refs` globs; by default
              *     env:MB_LLM_* or env:*_API_KEY (* matches any characters). Other
-             *     `env:` names and `file:` paths are rejected unless the server allows
-             *     them.
+             *     `env:` names, `file:` paths and `vault:<mount>/<path>#<field>`
+             *     references are rejected unless the server allows them.
              */
             secret_ref?: string | null;
             /**
@@ -2055,8 +2055,8 @@ export interface components {
              */
             events: string[] | null;
             /**
-             * @description A secret reference (`env:NAME`, `file:/path`, `vault:path#key`)
-             *     matching `server.api_webhook_secret_refs`; never a value.
+             * @description A secret reference (`env:NAME`, `file:/path`,
+             *     `vault:<mount>/<path>#<field>`) matching `server.api_webhook_secret_refs`; never a value.
              */
             secret?: string | null;
             signing?: components["schemas"]["WebhookSigning"] | null;

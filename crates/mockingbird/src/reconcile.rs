@@ -286,7 +286,7 @@ async fn validate<'a>(
             && !valid_secret_ref(reference)
         {
             bail!(
-                "LLM profile {label:?}: api_key must be a secret reference (env:NAME or file:/path), not a key"
+                "LLM profile {label:?}: api_key must be a secret reference ({SECRET_REF_FORMS}), not a key"
             );
         }
         mb_store::validate_profile_headers(&p.headers)
@@ -297,7 +297,7 @@ async fn validate<'a>(
             for reference in mb_store::header_secret_refs(value)? {
                 if !valid_secret_ref(reference) {
                     bail!(
-                        "LLM profile {label:?}: headers: ${{{reference}}} must be a secret reference (env:NAME or file:/path)"
+                        "LLM profile {label:?}: headers: ${{{reference}}} must be a secret reference ({SECRET_REF_FORMS})"
                     );
                 }
             }
@@ -798,13 +798,18 @@ fn valid_identifier(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// `env:NAME` or `file:/path` with a non-empty name or path.
+/// `env:NAME` or `file:/path` with a non-empty name or path, or a
+/// well-formed `vault:<mount>/<path>#<field>` ([`mb_store::is_vault_reference`]).
 pub(crate) fn valid_secret_ref(reference: &str) -> bool {
-    reference
-        .strip_prefix("env:")
-        .or_else(|| reference.strip_prefix("file:"))
-        .is_some_and(|rest| !rest.is_empty())
+    mb_store::is_vault_reference(reference)
+        || reference
+            .strip_prefix("env:")
+            .or_else(|| reference.strip_prefix("file:"))
+            .is_some_and(|rest| !rest.is_empty())
 }
+
+/// The secret-reference forms [`valid_secret_ref`] accepts, for messages.
+pub(crate) const SECRET_REF_FORMS: &str = "env:NAME, file:/path or vault:<mount>/<path>#<field>";
 
 /// Hex sha256, as the store computes `source_digest`.
 fn sha256_hex(bytes: &[u8]) -> String {

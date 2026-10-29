@@ -41,7 +41,10 @@ fn extensions_default_with_vault_addr_does_no_io_and_logs_nothing() {
     let _guard = tracing::subscriber::set_default(counter.subscriber());
     for _ in 0..3 {
         let err = rt.block_on(ext.secrets.resolve("vault:secret/app#k"));
-        assert!(matches!(err, Err(ExtError::BadSecretRef(_))), "{err:?}");
+        assert!(
+            matches!(&err, Err(ExtError::Other(m)) if m.contains("Vault is disabled") && m.contains("VAULT_CACERT")),
+            "{err:?}"
+        );
     }
     assert_eq!(
         counter.count(),

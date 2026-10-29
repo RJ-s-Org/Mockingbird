@@ -83,7 +83,7 @@ llm:
       workspace: default              # workspace the profile belongs to (created if missing)
       base_url: https://openrouter.ai/api/v1
       model: deepseek/deepseek-v4.1-flash
-      api_key: env:OPENROUTER_API_KEY # a secret reference (env:NAME or file:/path), never the key itself
+      api_key: env:OPENROUTER_API_KEY # a secret reference (env:NAME, file:/path or vault:<mount>/<path>#<field>), never the key itself
       json_schema: false
       timeout: 3s
       temperature: 0.7

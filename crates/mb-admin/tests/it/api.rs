@@ -1046,6 +1046,59 @@ async fn api_secret_refs_are_restricted() {
     .assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// `vault:` references are secret references like `env:`/`file:`: accepted
+/// when well-formed and allowed by `server.api_secret_refs`, in `secret_ref`
+/// and in `${…}` header placeholders (MB-STORE-STUB-1).
+#[tokio::test]
+async fn vault_secret_refs_pass_when_allowed() {
+    let h = harness_with(vec!["vault:secret/mockingbird*".into()]).await;
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/p",
+            json!({
+                "base_url": "https://x",
+                "model": "m",
+                "secret_ref": "vault:secret/mockingbird#openai",
+                "headers": { "cf-aig-authorization": "Bearer ${vault:secret/mockingbird/gw#token}" },
+            }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()["secret_ref"], "vault:secret/mockingbird#openai");
+
+    // Malformed vault refs stay invalid even when a glob would match them.
+    let h = harness_with(vec!["vault:*".into()]).await;
+    for bad in [
+        "vault:x",
+        "vault:token#key",
+        "vault:secret/mockingbird",
+        "vault:",
+    ] {
+        let r = h
+            .json(
+                Method::PUT,
+                "/api/v1/llm-profiles/p",
+                json!({ "base_url": "https://x", "model": "m", "secret_ref": bad }),
+            )
+            .await;
+        let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(p["title"], "Invalid secret reference", "{bad}: {p}");
+    }
+    // A well-formed vault ref outside the allow-list is refused by policy.
+    let h = harness().await;
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/p",
+            json!({ "base_url": "https://x", "model": "m", "secret_ref": "vault:secret/other#k" }),
+        )
+        .await;
+    let p = r.assert_problem(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(p["title"], "Secret reference not allowed", "{p}");
+    assert!(!r.text.contains("vault:secret/other#k"), "{}", r.text);
+}
+
 /// The accepted-forms wording for the default `server.api_secret_refs`; the
 /// console shows the same text.
 const DEFAULT_SECRET_REF_FORMS: &str = "env:MB_LLM_* or env:*_API_KEY (* matches any characters)";

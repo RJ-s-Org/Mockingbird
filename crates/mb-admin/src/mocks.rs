@@ -30,8 +30,8 @@ pub struct WebhookTargetSchema {
     /// Operation ids, event types (`customer.created`) or `*`.
     #[schema(default = json!(["*"]))]
     events: Option<Vec<String>>,
-    /// A secret reference (`env:NAME`, `file:/path`, `vault:path#key`)
-    /// matching `server.api_webhook_secret_refs`; never a value.
+    /// A secret reference (`env:NAME`, `file:/path`,
+    /// `vault:<mount>/<path>#<field>`) matching `server.api_webhook_secret_refs`; never a value.
     secret: Option<String>,
     /// `stripe`, `hmac-sha256` or `none`; default `hmac-sha256` with a
     /// secret, else `none`.

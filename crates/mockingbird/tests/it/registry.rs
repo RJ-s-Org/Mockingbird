@@ -404,6 +404,65 @@ fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
     }
 }
 
+/// A profile's `vault:` api_key and `${vault:…}` header resolve through the
+/// default secret store when the mock is built, like `env:` and `file:`.
+#[tokio::test]
+async fn profile_vault_refs_resolved_at_mock_build() {
+    let vault = MockServer::start().await;
+    wiremock::Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .and(header("X-Vault-Token", "vault-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "data": { "openai": "from-vault", "gw": "gw-vault" }, "metadata": { "version": 1 } }
+        })))
+        .mount(&vault)
+        .await;
+    let llm = MockServer::start().await;
+    let order = json!({"id": "6f1c0f0e-2f7b-4a59-9d55-3d1c2b1a0e9f", "customerId": "vault",
+                       "status": "shipped", "total": 7});
+    wiremock::Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer from-vault"))
+        .and(header("cf-aig-authorization", "Bearer gw-vault"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": order.to_string()}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        })))
+        .mount(&llm)
+        .await;
+
+    let store = store().await;
+    let mut p = profile("vaulted", llm.uri(), None);
+    p.secret_ref = Some("vault:secret/mockingbird#openai".into());
+    p.headers.insert(
+        "cf-aig-authorization".into(),
+        "Bearer ${vault:secret/mockingbird#gw}".into(),
+    );
+    store.put_profile(&p).await.unwrap();
+    let mock = create_mock(&store, "orders", "/orders", Some("vaulted")).await;
+    activate(&store, &mock, &fixture_source()).await;
+
+    let mut deps = deps(store);
+    deps.offline = false;
+    let addr = vault.uri();
+    deps.ext.secrets = Arc::new(mb_ext::DefaultSecrets::from_vars(move |name| match name {
+        "VAULT_ADDR" => Some(addr.clone()),
+        "VAULT_TOKEN" => Some("vault-token".into()),
+        _ => None,
+    }));
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+
+    let r = reqwest::get(format!("{base}/orders/orders/o1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["x-mockingbird-source"], "llm");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["customerId"], "vault");
+}
+
 #[tokio::test]
 async fn profile_secret_resolved_and_fallback_chain() {
     let primary = MockServer::start().await;

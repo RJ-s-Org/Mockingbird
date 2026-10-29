@@ -1,5 +1,6 @@
-//! `/api/v1/workspaces/{ws}/llm-profiles…`. Profiles hold a `secret_ref` (`env:NAME` or
-//! `file:/path`), never a raw key, and the API never resolves it. A ref
+//! `/api/v1/workspaces/{ws}/llm-profiles…`. Profiles hold a `secret_ref` (`env:NAME`,
+//! `file:/path` or `vault:<mount>/<path>#<field>`), never a raw key, and the
+//! API never resolves it. A ref
 //! written through the API must match one of the `server.api_secret_refs`
 //! globs; profiles from the config file are not restricted.
 //!
@@ -40,7 +41,7 @@ pub struct LlmProfileView {
     pub name: String,
     pub base_url: String,
     pub model: String,
-    /// `env:NAME` or `file:/path`.
+    /// `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`.
     pub secret_ref: Option<String>,
     pub json_schema: bool,
     pub temperature: f32,
@@ -85,8 +86,8 @@ pub struct PutProfile {
     /// A secret reference, never a raw key. Through the API it must match
     /// the server's `server.api_secret_refs` globs; by default
     /// env:MB_LLM_* or env:*_API_KEY (* matches any characters). Other
-    /// `env:` names and `file:` paths are rejected unless the server allows
-    /// them.
+    /// `env:` names, `file:` paths and `vault:<mount>/<path>#<field>`
+    /// references are rejected unless the server allows them.
     pub secret_ref: Option<String>,
     /// Use the provider's `json_schema` response format.
     #[serde(default)]
@@ -147,12 +148,13 @@ pub fn accepted_secret_refs(globs: &[String]) -> String {
     }
 }
 
-/// `env:NAME` or `file:/path` with a non-empty remainder, matching one of
-/// `allowed` (`server.api_secret_refs`). The rejection never echoes the
+/// `env:NAME` or `file:/path` with a non-empty remainder, or a well-formed
+/// `vault:<mount>/<path>#<field>` ([`mb_store::is_vault_reference`]),
+/// matching one of `allowed` (`server.api_secret_refs`). The rejection never echoes the
 /// value, which may be a pasted secret, and names the accepted forms.
 fn check_secret_ref(r: &str, allowed: &[String]) -> ApiResult<()> {
     let rest = r.strip_prefix("env:").or_else(|| r.strip_prefix("file:"));
-    if !rest.is_some_and(|rest| !rest.trim().is_empty()) {
+    if !rest.is_some_and(|rest| !rest.trim().is_empty()) && !mb_store::is_vault_reference(r) {
         return Err(Problem::invalid(
             "Invalid secret reference",
             format!(
