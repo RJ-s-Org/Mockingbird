@@ -16,6 +16,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - HTTP/REST query strings and form or multipart bodies decode in linear time: they were O(k^2) in the number of keys (50k keys took about 11 s) and are decoded before auth, so an unauthenticated request could burn CPU. A request with more than 1,000 query pairs, or more than 1,000 form or multipart fields, is now refused with a 400 `application/problem+json` ("Too many parameters"), and the request log keeps at most 1,000 recorded query or form fields.
 - The MCP `stop_server` tool stops a server the same MCP server started at once with SIGTERM: it no longer waits 10 s and reports `forced: true` because the exited server lingered as an unreaped (zombie) child, and `server_status` no longer reports such a server as running.
 
+### Changed
+
+- Faster contract and smart imports, with identical results: saving or assembling a draft checks its schemas in one compile instead of one per schema location (a 400-component draft went from 1.8 s to 15 ms), the `schema_too_large` check measures schema sizes without cloning or serializing the reachable definitions (1.8 s to 83 ms for 1,000 operations that each reach 1,000 definitions), `compile` parses a JSON or YAML document once instead of twice, recognising a HAR or Postman upload no longer builds the whole JSON tree (20 MiB in 39 ms instead of 125 ms), and the extra roots of `outbound.ca_file` are parsed once per bundle instead of on every fetch hop.
+
 ## [0.1.0] - 2026-10-28
 
 The first release. Since 0.1.0-rc.1, in short:

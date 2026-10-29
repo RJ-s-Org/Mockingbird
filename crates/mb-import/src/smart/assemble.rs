@@ -533,6 +533,55 @@ fn with_defs(mut schema: Value, defs: &Map<String, Value>) -> Value {
     schema
 }
 
+/// How far into a definition a `$ref` of a [`combinable`] schema may point.
+#[derive(Clone, Copy, PartialEq)]
+enum RefDepth {
+    /// `#/$defs/<name>` only: the definition itself, which a component
+    /// checked on its own sees stubbed as `true`.
+    Definition,
+    /// `#/$defs/<name>` or anything inside it.
+    Any,
+}
+
+/// Whether `schema` compiles inside [`compiles_together`]'s combined
+/// document exactly when it compiles on its own with the same `$defs`
+/// attached: it has no `$defs` of its own, every `$ref` points into
+/// `#/$defs/`, and nothing in it changes the base URI, the dialect or the
+/// anchors that references resolve against. Conservative: any doubt, and
+/// the schema is compiled on its own.
+fn combinable(schema: &Value, depth: RefDepth) -> bool {
+    fn walk(v: &Value, depth: RefDepth) -> bool {
+        match v {
+            Value::Object(m) => m.iter().all(|(k, v)| match k.as_str() {
+                "$ref" => v
+                    .as_str()
+                    .and_then(|r| r.strip_prefix("#/$defs/"))
+                    .is_some_and(|rest| depth == RefDepth::Any || !rest.contains('/')),
+                "$id" | "$schema" | "$anchor" | "$dynamicAnchor" | "$dynamicRef"
+                | "$recursiveAnchor" | "$recursiveRef" | "$vocabulary" => false,
+                _ => walk(v, depth),
+            }),
+            Value::Array(items) => items.iter().all(|v| walk(v, depth)),
+            _ => true,
+        }
+    }
+    schema.get("$defs").is_none() && walk(schema, depth)
+}
+
+/// Whether one document with `defs` as its `$defs` and every schema under
+/// `allOf` compiles. For [`combinable`] schemas, a success means each
+/// compiles on its own; a failure says nothing about which one fails.
+fn compiles_together<'a>(
+    defs: &Map<String, Value>,
+    schemas: impl Iterator<Item = &'a Value>,
+) -> bool {
+    let all = json!({
+        "$defs": defs,
+        "allOf": schemas.collect::<Vec<_>>(),
+    });
+    jsonschema::validator_for(&all).is_ok()
+}
+
 /// Validates and compiles an (edited) draft document; Ok((pretty JSON
 /// source bytes, bundle)).
 pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> {
@@ -579,21 +628,39 @@ pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> 
         .map(|k| (k.clone(), Value::Bool(true)))
         .collect();
     let mut defs = components.clone();
-    for (name, schema) in &components {
-        let mut own = stubs.clone();
-        own.insert(name.clone(), schema.clone());
-        if let Err(e) = jsonschema::validator_for(&with_defs(schema.clone(), &own)) {
-            issues.push(DraftIssue::new(
-                format!("/components/schemas/{}", escape(name)),
-                format!("invalid schema: {e}"),
-            ));
-            defs.insert(name.clone(), Value::Bool(true));
+    // One compile of all components together usually shows that each
+    // compiles on its own; only when it does not are they compiled one by
+    // one, to name the failing ones.
+    let components_valid = components
+        .values()
+        .all(|s| combinable(s, RefDepth::Definition))
+        && compiles_together(&components, components.values());
+    if !components_valid {
+        for (name, schema) in &components {
+            let mut own = stubs.clone();
+            own.insert(name.clone(), schema.clone());
+            if let Err(e) = jsonschema::validator_for(&with_defs(schema.clone(), &own)) {
+                issues.push(DraftIssue::new(
+                    format!("/components/schemas/{}", escape(name)),
+                    format!("invalid schema: {e}"),
+                ));
+                defs.insert(name.clone(), Value::Bool(true));
+            }
         }
     }
-    for (pointer, schema) in schema_locations(doc) {
-        let schema = with_defs(normalize_schema(schema, COMPONENTS_PREFIX, false), &defs);
-        if let Err(e) = jsonschema::validator_for(&schema) {
-            issues.push(DraftIssue::new(pointer, format!("invalid schema: {e}")));
+    // Likewise for the schema locations against the definitions.
+    let locations: Vec<(String, Value)> = schema_locations(doc)
+        .into_iter()
+        .map(|(pointer, schema)| (pointer, normalize_schema(schema, COMPONENTS_PREFIX, false)))
+        .collect();
+    let locations_valid = defs.values().all(|s| combinable(s, RefDepth::Any))
+        && locations.iter().all(|(_, s)| combinable(s, RefDepth::Any))
+        && compiles_together(&defs, locations.iter().map(|(_, s)| s));
+    if !locations_valid {
+        for (pointer, schema) in locations {
+            if let Err(e) = jsonschema::validator_for(&with_defs(schema, &defs)) {
+                issues.push(DraftIssue::new(pointer, format!("invalid schema: {e}")));
+            }
         }
     }
 
@@ -625,13 +692,22 @@ pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> 
 /// [`crate::bundle_warnings`]), each naming its operation's target
 /// (`"GET /big"`).
 pub fn schema_warnings(bundle: &Bundle) -> Vec<DraftWarning> {
-    crate::bundle_warnings(bundle)
+    let warnings = crate::bundle_warnings(bundle);
+    if warnings.is_empty() {
+        return Vec::new();
+    }
+    // The first operation of each id, as a linear search would find it.
+    let mut by_id: std::collections::HashMap<&str, &Operation> = std::collections::HashMap::new();
+    for op in &bundle.operations {
+        by_id.entry(op.id.as_str()).or_insert(op);
+    }
+    warnings
         .into_iter()
         .map(|w| {
             let target = w
                 .operation
                 .as_deref()
-                .and_then(|id| bundle.operations.iter().find(|o| o.id == id))
+                .and_then(|id| by_id.get(id).copied())
                 .map(Operation::target);
             let warning = DraftWarning::new(&w.code, w.message);
             match target {

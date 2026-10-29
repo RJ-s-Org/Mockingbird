@@ -72,7 +72,7 @@ enum Seg {
 
 /// The rough shape of a recorded JSON response: its type and, for an
 /// object (or an array's first object), its keys.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Shape {
     kind: &'static str,
     keys: BTreeSet<String>,
@@ -106,7 +106,8 @@ impl Shape {
             return true;
         }
         let shared = self.keys.intersection(&other.keys).count();
-        shared * 2 >= self.keys.union(&other.keys).count()
+        // |A ∪ B| = |A| + |B| - |A ∩ B|, without walking the union.
+        shared * 2 >= self.keys.len() + other.keys.len() - shared
     }
 }
 
@@ -201,20 +202,11 @@ fn templatize_position(segs: &mut [Vec<Seg>], shapes: &[Option<&Shape>], pos: us
         if members.iter().any(is_collection) {
             continue;
         }
-        let mut seen: Vec<&Shape> = Vec::new();
-        for shape in members
-            .iter()
-            .filter_map(|&i| shapes.get(i).copied().flatten())
-        {
-            if !seen.contains(&shape) {
-                seen.push(shape);
-            }
-        }
-        let compatible = seen
-            .iter()
-            .enumerate()
-            .all(|(i, a)| seen.iter().skip(i + 1).all(|b| a.compatible(b)));
-        if !compatible {
+        if !shapes_compatible(
+            members
+                .iter()
+                .filter_map(|&i| shapes.get(i).copied().flatten()),
+        ) {
             continue;
         }
         for index in members {
@@ -223,6 +215,23 @@ fn templatize_position(segs: &mut [Vec<Seg>], shapes: &[Option<&Shape>], pos: us
         }
     }
     changed
+}
+
+/// Whether every two distinct shapes are [`Shape::compatible`]. Duplicates
+/// are dropped first, and differing kinds fail before any key comparison.
+fn shapes_compatible<'a>(shapes: impl Iterator<Item = &'a Shape>) -> bool {
+    let distinct: BTreeSet<&Shape> = shapes.collect();
+    let mut kinds = distinct.iter().map(|s| s.kind);
+    if let Some(first) = kinds.next()
+        && kinds.any(|k| k != first)
+    {
+        return false;
+    }
+    let distinct: Vec<&Shape> = distinct.into_iter().collect();
+    distinct
+        .iter()
+        .enumerate()
+        .all(|(i, a)| distinct[i + 1..].iter().all(|b| a.compatible(b)))
 }
 
 /// The warning for an operation whose path parameters were inferred from

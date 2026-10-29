@@ -572,6 +572,65 @@ fn compile_draft_reports_pointers() {
     assert_eq!(pointers, vec!["/components/schemas/Bad"]);
 }
 
+/// Schemas are checked together first; each issue still names exactly the
+/// schemas that fail on their own, including those that would resolve in
+/// a combined document.
+#[test]
+fn compile_draft_names_each_failing_schema() {
+    let response = |schema: Value| {
+        json!({"responses": {"200": {
+            "description": "OK",
+            "content": {"application/json": {"schema": schema}}
+        }}})
+    };
+    let doc = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Pets", "version": "1"},
+        "components": {"schemas": {
+            "Pet": {"type": "object", "properties": {"id": {"type": "string"}}},
+            // Checked on its own, Pet is stubbed: the pointer into it fails.
+            "PetId": {"$ref": "#/components/schemas/Pet/properties/id"},
+            "Tag": {"type": "string", "$dynamicAnchor": "tag"}
+        }},
+        "paths": {
+            "/a": {"get": response(json!({"$ref": "#/components/schemas/Pet"}))},
+            "/b": {"get": response(json!({"$ref": "#/components/schemas/Missing"}))},
+            "/c": {"get": response(json!({"$ref": "#/components/schemas/Pet/properties/id"}))},
+            "/d": {"get": response(json!({"type": "array", "items": {"$ref": "#/components/schemas/Tag"}}))},
+            "/e": {"get": response(json!({"type": "object", "minProperties": "two"}))}
+        }
+    });
+    let issues = compile_draft(&doc).unwrap_err();
+    let pointers: Vec<&str> = issues.iter().map(|i| i.pointer.as_str()).collect();
+    assert_eq!(
+        pointers,
+        vec![
+            "/components/schemas/PetId",
+            "/paths/~1b/get/responses/200/content/application~1json/schema",
+            "/paths/~1e/get/responses/200/content/application~1json/schema",
+            // From compiling the draft into a bundle.
+            "#/$defs/Missing",
+        ]
+    );
+
+    // All valid: the combined check passes and nothing is reported.
+    let mut valid = doc.clone();
+    let schemas = valid["components"]["schemas"].as_object_mut().unwrap();
+    schemas.remove("PetId");
+    let paths = valid["paths"].as_object_mut().unwrap();
+    paths.remove("/b");
+    paths.remove("/c");
+    paths.remove("/e");
+    compile_draft(&valid).unwrap();
+    // Without the anchor, the schemas are checked together only.
+    valid["components"]["schemas"]
+        .as_object_mut()
+        .unwrap()
+        .remove("Tag");
+    valid["paths"].as_object_mut().unwrap().remove("/d");
+    compile_draft(&valid).unwrap();
+}
+
 fn meta_for(ids: &[&str]) -> DraftMeta {
     DraftMeta {
         source_kind: ImportKind::Markdown,

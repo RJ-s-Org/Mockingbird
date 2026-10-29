@@ -12,6 +12,7 @@ mod archive;
 mod asyncapi;
 mod graphql;
 mod openapi3;
+mod perf;
 mod proto;
 mod security;
 mod swagger2;

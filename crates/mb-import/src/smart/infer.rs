@@ -30,12 +30,7 @@ pub fn infer_schema(samples: &[Value]) -> Value {
 /// The schema of a body set: inferred from at most `MAX_SCHEMA_SAMPLES`
 /// values, in the given order.
 pub(crate) fn schema_of(values: &[&Value]) -> Value {
-    let samples: Vec<Value> = values
-        .iter()
-        .take(MAX_SCHEMA_SAMPLES)
-        .map(|v| (*v).clone())
-        .collect();
-    infer_schema(&samples)
+    infer(&values[..values.len().min(MAX_SCHEMA_SAMPLES)], 1)
 }
 
 /// The first `MAX_EXAMPLES` distinct values, in the given order.
@@ -326,4 +321,58 @@ fn is_email(s: &str) -> bool {
 
 fn is_uri(s: &str) -> bool {
     s.contains("://") && url::Url::parse(s).is_ok()
+}
+
+#[cfg(test)]
+mod perf {
+    use super::{MAX_SCHEMA_SAMPLES, infer_schema, schema_of};
+    use serde_json::{Value, json};
+
+    /// MB-IMPORT-PERF-9: `schema_of` over twenty bodies of `n` and `10n`
+    /// array items. Run with
+    /// `cargo test -p mockingbird-import --all-features --release --lib perf -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn perf_9_schema_of() {
+        for n in [1_000, 10_000] {
+            let bodies: Vec<Value> = (0..MAX_SCHEMA_SAMPLES)
+                .map(|b| {
+                    Value::Array(
+                        (0..n)
+                            .map(|i| json!({"id": i, "name": format!("n{b}-{i}"), "tags": ["x"]}))
+                            .collect(),
+                    )
+                })
+                .collect();
+            let refs: Vec<&Value> = bodies.iter().collect();
+            let t = (0..3)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    std::hint::black_box(schema_of(&refs));
+                    start.elapsed()
+                })
+                .min()
+                .unwrap_or_default();
+            println!("PERF-9 n={n}: schema_of {t:?}");
+        }
+    }
+
+    #[test]
+    fn schema_of_uses_the_first_samples_only() {
+        let values: Vec<Value> = (0..MAX_SCHEMA_SAMPLES + 5)
+            .map(|i| {
+                if i < MAX_SCHEMA_SAMPLES {
+                    json!(i)
+                } else {
+                    json!("late")
+                }
+            })
+            .collect();
+        let refs: Vec<&Value> = values.iter().collect();
+        assert_eq!(
+            schema_of(&refs),
+            infer_schema(&values[..MAX_SCHEMA_SAMPLES])
+        );
+        assert_eq!(schema_of(&refs[..3]), infer_schema(&values[..3]));
+    }
 }
