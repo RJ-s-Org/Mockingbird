@@ -8,7 +8,9 @@ use crate::{
     TextStream, Usage,
 };
 
-#[derive(Clone, Debug)]
+/// An OpenAI-compatible endpoint. Its `Debug` output redacts `api_key` and
+/// the header values (header names are kept).
+#[derive(Clone)]
 pub struct OpenAiConfig {
     pub base_url: String,
     pub api_key: Option<String>,
@@ -22,6 +24,26 @@ pub struct OpenAiConfig {
     pub extra_body: serde_json::Map<String, Value>,
     /// Extra CA roots and the proxy (`outbound:`).
     pub http: HttpOptions,
+}
+
+impl std::fmt::Debug for OpenAiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, _)| (name.as_str(), REDACTED))
+            .collect();
+        f.debug_struct("OpenAiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| REDACTED))
+            .field("model", &self.model)
+            .field("json_schema", &self.json_schema)
+            .field("headers", &headers)
+            .field("extra_body", &self.extra_body)
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 pub struct OpenAiCompatible {

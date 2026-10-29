@@ -17,6 +17,43 @@ use mb_store::{AdminSession, ControlStore, connect};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+#[test]
+fn generated_key_debug_redacts_the_token() {
+    let key = generate_key();
+    let secret = key.token.rsplit('_').next().unwrap().to_string();
+    let shown = format!("{key:?}");
+    assert!(!shown.contains(&key.token), "token leaked: {shown}");
+    assert!(!shown.contains(&secret), "secret part leaked: {shown}");
+    assert!(shown.contains(&key.key_id), "key_id kept: {shown}");
+    assert!(shown.contains("<redacted>"), "{shown}");
+}
+
+#[test]
+fn oidc_settings_debug_redacts_the_client_secret() {
+    let sentinel = "s3ntinel-client-secret-value";
+    let settings = mb_auth::OidcSettings {
+        issuer: "https://idp.example".into(),
+        client_id: "mockingbird".into(),
+        client_secret: Some(sentinel.into()),
+        scopes: vec!["openid".into()],
+        audience: None,
+        redirect_url: "https://mb.example/auth/callback".into(),
+        mapping: RoleMapping::default(),
+    };
+    let shown = format!("{settings:?}");
+    assert!(!shown.contains(sentinel), "client secret leaked: {shown}");
+    assert!(shown.contains("<redacted>"), "{shown}");
+    assert!(
+        shown.contains("https://idp.example"),
+        "issuer kept: {shown}"
+    );
+    let without = mb_auth::OidcSettings {
+        client_secret: None,
+        ..settings
+    };
+    assert!(format!("{without:?}").contains("client_secret: None"));
+}
+
 async fn store() -> Arc<dyn ControlStore> {
     connect("sqlite::memory:").await.unwrap()
 }

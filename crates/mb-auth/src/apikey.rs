@@ -44,11 +44,22 @@ impl KeyScope {
 }
 
 /// A freshly generated key. `token` is shown once; only `secret_hash` is stored.
-#[derive(Clone, Debug)]
+/// Its `Debug` output redacts `token`.
+#[derive(Clone)]
 pub struct GeneratedKey {
     pub key_id: String,
     pub token: String,
     pub secret_hash: String,
+}
+
+impl std::fmt::Debug for GeneratedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedKey")
+            .field("key_id", &self.key_id)
+            .field("token", &"<redacted>")
+            .field("secret_hash", &self.secret_hash)
+            .finish()
+    }
 }
 
 /// Generates `mbk_<key_id>_<secret>` from a CSPRNG.
