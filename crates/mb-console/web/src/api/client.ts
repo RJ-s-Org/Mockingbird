@@ -28,6 +28,29 @@ export function loginUrl(location: Pick<Location, "pathname" | "search">): strin
   return "/auth/login?return_to=" + encodeURIComponent(location.pathname + location.search);
 }
 
+/**
+ * Ends the console session (`POST /auth/logout`) and returns where the browser
+ * goes next: the identity provider's end-session URL when the server returns
+ * one (so the provider's session ends too), otherwise the login page. A failed
+ * logout still leads to the login page.
+ */
+export async function signOut(): Promise<string> {
+  const login = "/auth/login?return_to=/";
+  try {
+    const response = await fetch("/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (response.status !== 200) return login;
+    const body = (await response.json()) as { end_session_url?: unknown };
+    const url = body.end_session_url;
+    return typeof url === "string" && /^https?:\/\//i.test(url) ? url : login;
+  } catch {
+    return login;
+  }
+}
+
 function isProblem(v: unknown): v is Problem {
   return typeof v === "object" && v !== null && "title" in v && "status" in v;
 }

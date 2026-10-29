@@ -10,6 +10,7 @@ use mb_auth::{
     AuthError, BearerVerifier, JwtVerifier, OidcClient, OidcSettings, PrincipalKind, Role,
     RoleMapping, http_client, validate_return_to,
 };
+use mb_store::ControlStore;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -24,6 +25,15 @@ fn settings(p: &MockOidcProvider) -> OidcSettings {
         redirect_url: "http://127.0.0.1:9999/auth/callback".to_string(),
         mapping: RoleMapping::default(),
     }
+}
+
+async fn store() -> Arc<dyn ControlStore> {
+    mb_store::connect("sqlite::memory:").await.unwrap()
+}
+
+/// A client keeping its pending logins in `store`, as every node does.
+async fn store_client(p: &MockOidcProvider, store: &Arc<dyn ControlStore>) -> OidcClient {
+    client(p).await.with_store(store.clone())
 }
 
 async fn client(p: &MockOidcProvider) -> OidcClient {
@@ -88,7 +98,7 @@ async fn wait_for_jwks_requests(p: &MockOidcProvider, n: usize) {
 async fn discovery_and_login_round_trip() {
     let p = MockOidcProvider::start().await;
     let c = client(&p).await;
-    let login = c.begin_login("/mocks").unwrap();
+    let login = c.start_login("/mocks").await.unwrap();
 
     assert!(login.url.starts_with(&format!("{}/authorize?", p.issuer())));
     assert_eq!(
@@ -141,7 +151,7 @@ async fn roles_from_userinfo_when_absent_in_id_token() {
         .mount(&p.server)
         .await;
     let c = client(&p).await;
-    let login = c.begin_login("/").unwrap();
+    let login = c.start_login("/").await.unwrap();
     let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
     let mut claims = p.claims("bob", &[], Some(&nonce));
     claims.as_object_mut().unwrap().remove("groups");
@@ -155,7 +165,7 @@ async fn roles_from_userinfo_when_absent_in_id_token() {
 async fn state_mismatch_rejected() {
     let p = MockOidcProvider::start().await;
     let c = client(&p).await;
-    let login = c.begin_login("/").unwrap();
+    let login = c.start_login("/").await.unwrap();
     let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
     p.issue_code("c1", p.claims("alice", &[], Some(&nonce)))
         .await;
@@ -166,7 +176,7 @@ async fn state_mismatch_rejected() {
 async fn state_is_single_use() {
     let p = MockOidcProvider::start().await;
     let c = client(&p).await;
-    let login = c.begin_login("/").unwrap();
+    let login = c.start_login("/").await.unwrap();
     let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
     p.issue_code("c1", p.claims("alice", &[], Some(&nonce)))
         .await;
@@ -180,7 +190,7 @@ async fn state_is_single_use() {
 async fn nonce_mismatch_rejected() {
     let p = MockOidcProvider::start().await;
     let c = client(&p).await;
-    let login = c.begin_login("/").unwrap();
+    let login = c.start_login("/").await.unwrap();
     p.issue_code("c1", p.claims("alice", &[], Some("another-nonce")))
         .await;
     assert_unauthenticated(c.complete_login(&login.state, "c1").await);
@@ -211,7 +221,7 @@ async fn return_to_validation() {
     let p = MockOidcProvider::start().await;
     let c = client(&p).await;
     assert!(matches!(
-        c.begin_login("//evil.example"),
+        c.start_login("//evil.example").await,
         Err(AuthError::Invalid(_))
     ));
 }
@@ -233,7 +243,7 @@ async fn login(
     c: &OidcClient,
     code: &str,
 ) -> Result<mb_auth::CompletedLogin, AuthError> {
-    let login = c.begin_login("/").unwrap();
+    let login = c.start_login("/").await.unwrap();
     let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
     p.issue_code(code, p.claims("alice", &[], Some(&nonce)))
         .await;
@@ -524,4 +534,144 @@ async fn concurrent_unknown_kids_share_one_refetch() {
         assert_unauthenticated(t.await.unwrap());
     }
     assert_eq!(jwks_requests(&p).await, 1);
+}
+
+#[tokio::test]
+async fn store_backed_login_survives_a_restart_and_crosses_nodes() {
+    let p = MockOidcProvider::start().await;
+    let shared = store().await;
+    // Node A starts the login, then goes away (a restart, or the callback
+    // reaching another replica): node B shares only the store.
+    let a = store_client(&p, &shared).await;
+    let login = a.start_login("/w/default/mocks").await.unwrap();
+    drop(a);
+    let b = store_client(&p, &shared).await;
+    assert!(b.login_pending(&login.state).await.unwrap());
+
+    let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
+    p.issue_code(
+        "c1",
+        p.claims("alice", &["mb:default:viewer"], Some(&nonce)),
+    )
+    .await;
+    let done = b.complete_login(&login.state, "c1").await.unwrap();
+    assert_eq!(done.return_to, "/w/default/mocks");
+    assert_eq!(done.principal.subject, "alice");
+    assert!(!b.login_pending(&login.state).await.unwrap());
+}
+
+#[tokio::test]
+async fn store_backed_state_is_single_use_across_nodes() {
+    let p = MockOidcProvider::start().await;
+    let shared = store().await;
+    let a = store_client(&p, &shared).await;
+    let b = store_client(&p, &shared).await;
+    let login = a.start_login("/").await.unwrap();
+    let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
+    p.issue_code("c1", p.claims("alice", &[], Some(&nonce)))
+        .await;
+    p.issue_code("c2", p.claims("alice", &[], Some(&nonce)))
+        .await;
+    b.complete_login(&login.state, "c1").await.unwrap();
+    assert_unauthenticated(a.complete_login(&login.state, "c2").await);
+    assert_unauthenticated(b.complete_login(&login.state, "c2").await);
+}
+
+#[tokio::test]
+async fn store_backed_login_can_be_cancelled_once() {
+    let p = MockOidcProvider::start().await;
+    let shared = store().await;
+    let a = store_client(&p, &shared).await;
+    let b = store_client(&p, &shared).await;
+    let login = a.start_login("/").await.unwrap();
+    assert!(b.cancel_login(&login.state).await.unwrap());
+    assert!(!a.cancel_login(&login.state).await.unwrap());
+    assert!(!a.login_pending(&login.state).await.unwrap());
+    assert!(!a.login_pending("never-started").await.unwrap());
+}
+
+#[tokio::test]
+async fn store_backed_pending_login_keeps_no_plain_state() {
+    let p = MockOidcProvider::start().await;
+    let shared = store().await;
+    let c = store_client(&p, &shared).await;
+    let login = c.start_login("/").await.unwrap();
+    // Rows are keyed by the state's hash, never the state itself.
+    let now = chrono::Utc::now();
+    assert!(
+        shared
+            .get_oidc_pending_login(&login.state, now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    use sha2::Digest;
+    let hash: String = sha2::Sha256::digest(login.state.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let row = shared
+        .get_oidc_pending_login(&hash, now)
+        .await
+        .unwrap()
+        .unwrap();
+    let ttl = row.expires_at - row.created_at;
+    assert_eq!(ttl.num_seconds(), 600);
+    assert_eq!(row.data["return_to"], "/");
+}
+
+#[tokio::test]
+#[expect(deprecated, reason = "checks the in-memory methods' refusal")]
+async fn in_memory_methods_refuse_a_store_backed_client() {
+    let p = MockOidcProvider::start().await;
+    let shared = store().await;
+    let c = store_client(&p, &shared).await;
+    match c.begin_login("/") {
+        Err(AuthError::Invalid(msg)) => assert!(msg.contains("start_login"), "{msg}"),
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+    let login = c.start_login("/").await.unwrap();
+    assert!(!c.is_pending(&login.state));
+    assert!(!c.abandon_login(&login.state));
+    assert!(c.login_pending(&login.state).await.unwrap());
+
+    // Without a store, the old methods keep working in memory.
+    let m = client(&p).await;
+    let login = m.begin_login("/").unwrap();
+    assert!(m.is_pending(&login.state));
+    assert!(m.login_pending(&login.state).await.unwrap());
+    assert!(m.abandon_login(&login.state));
+}
+
+#[tokio::test]
+async fn end_session_url_from_discovery() {
+    let p = MockOidcProvider::start().await;
+    // The default mock provider advertises no end_session_endpoint.
+    assert_eq!(client(&p).await.end_session_url(), None);
+
+    p.advertise_end_session().await;
+    let c = client(&p)
+        .await
+        .with_post_logout_redirect("http://127.0.0.1:9999/")
+        .unwrap();
+    let url = c.end_session_url().unwrap();
+    assert!(url.starts_with(&format!("{}/logout?", p.issuer())), "{url}");
+    assert_eq!(
+        MockOidcProvider::query_param(&url, "client_id").as_deref(),
+        Some(MockOidcProvider::CLIENT_ID)
+    );
+    assert_eq!(
+        MockOidcProvider::query_param(&url, "post_logout_redirect_uri").as_deref(),
+        Some("http://127.0.0.1:9999/")
+    );
+
+    let bare = client(&p).await.end_session_url().unwrap();
+    assert_eq!(
+        MockOidcProvider::query_param(&bare, "post_logout_redirect_uri"),
+        None
+    );
+    assert!(matches!(
+        client(&p).await.with_post_logout_redirect("not a url"),
+        Err(AuthError::Invalid(_))
+    ));
 }

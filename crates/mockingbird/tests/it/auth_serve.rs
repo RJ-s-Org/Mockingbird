@@ -1,6 +1,7 @@
 //! `serve` with `auth.mode: oidc`: authentication of the Admin API, API
 //! keys from the command line, the host guard, a private `/metrics`, OIDC
-//! discovery at startup and the `openapi` subcommand.
+//! discovery at startup, console logins kept in the store, RP-initiated
+//! logout and the `openapi` subcommand.
 #![cfg(test)]
 
 use std::sync::Arc;
@@ -49,6 +50,19 @@ async fn build(
     extra_auth: &str,
 ) -> (anyhow::Result<App>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
+    let app = build_in(&dir, provider_issuer, external_host, extra_auth, "").await;
+    (app, dir)
+}
+
+/// [`build`] with the config in `dir` and `top` YAML (top-level keys)
+/// prepended.
+async fn build_in(
+    dir: &tempfile::TempDir,
+    provider_issuer: &str,
+    external_host: &str,
+    extra_auth: &str,
+    top: &str,
+) -> anyhow::Result<App> {
     let var = format!(
         "MB_TEST_OIDC_SECRET_{}_{}",
         std::process::id(),
@@ -56,7 +70,7 @@ async fn build(
     );
     let reference = format!("env:{var}");
     let yaml = format!(
-        "auth:\n  mode: oidc\n  external_url: http://{external_host}\n{extra_auth}  oidc:\n    issuer: {provider_issuer}\n    client_id: {}\n    client_secret: {reference}\n",
+        "{top}auth:\n  mode: oidc\n  external_url: http://{external_host}\n{extra_auth}  oidc:\n    issuer: {provider_issuer}\n    client_id: {}\n    client_secret: {reference}\n",
         MockOidcProvider::CLIENT_ID
     );
     let path = dir.path().join("mockingbird.yaml");
@@ -67,7 +81,7 @@ async fn build(
         ..ServeArgs::default()
     };
     let ext = Extensions::default().with_secrets(Arc::new(OneSecret(reference)));
-    (build_app_with(&args, None, ext).await, dir)
+    build_app_with(&args, None, ext).await
 }
 
 async fn harness_with(external_host: &str, extra_auth: &str) -> Harness {
@@ -422,4 +436,106 @@ async fn admin_hook_routes_are_authenticated() {
     assert_eq!(resp.status(), StatusCode::FOUND);
     let (status, _) = h.send("GET", "/healthz", None, None, None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// Sends `req` (with `Host: host`) to `app`'s admin router; returns the
+/// status, headers and body.
+async fn call(
+    app: &App,
+    host: &str,
+    req: axum::http::request::Builder,
+    body: Body,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let req = req.header(header::HOST, host).body(body).unwrap();
+    let resp = app.admin.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn console_login_survives_a_restart() {
+    let provider = MockOidcProvider::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = "mb.example.com:9090";
+    let storage = "storage:\n  url: sqlite://mb.db\n";
+    let first = build_in(&dir, &provider.issuer(), host, "", storage)
+        .await
+        .unwrap();
+    let (status, headers, body) = call(
+        &first,
+        host,
+        Request::get("/auth/login?return_to=/w/default/mocks"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    let idp = headers[header::LOCATION].to_str().unwrap().to_string();
+    let state = MockOidcProvider::query_param(&idp, "state").unwrap();
+    let nonce = MockOidcProvider::query_param(&idp, "nonce").unwrap();
+    drop(first);
+
+    // The callback reaches a node that did not start the login (here the
+    // same config after a restart; in `split` mode, another replica).
+    let second = build_in(&dir, &provider.issuer(), host, "", storage)
+        .await
+        .unwrap();
+    provider
+        .issue_code(
+            "restart-code",
+            provider.claims("alice", &["mb:default:viewer"], Some(&nonce)),
+        )
+        .await;
+    let (status, headers, body) = call(
+        &second,
+        host,
+        Request::get(format!("/auth/callback?code=restart-code&state={state}"))
+            .header(header::COOKIE, format!("mb_login={state}")),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "{body}");
+    assert_eq!(headers[header::LOCATION], "/w/default/mocks");
+    assert!(
+        headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|c| c.to_str().unwrap().starts_with("mb_session=")),
+        "no session cookie: {headers:?}"
+    );
+}
+
+#[tokio::test]
+async fn logout_returns_the_provider_end_session_url() {
+    let provider = MockOidcProvider::start().await;
+    provider.advertise_end_session().await;
+    let host = "mb.example.com:9090";
+    let (app, _dir) = build(&provider.issuer(), host, "").await;
+    let app = app.unwrap();
+    let (status, headers, body) = call(
+        &app,
+        host,
+        Request::post("/auth/logout").header(header::CONTENT_TYPE, "application/json"),
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    let url = body["end_session_url"].as_str().unwrap();
+    assert!(
+        url.starts_with(&format!("{}/logout?", provider.issuer())),
+        "{url}"
+    );
+    assert_eq!(
+        MockOidcProvider::query_param(url, "post_logout_redirect_uri").as_deref(),
+        Some("http://mb.example.com:9090/")
+    );
+    assert_eq!(
+        MockOidcProvider::query_param(url, "client_id").as_deref(),
+        Some(MockOidcProvider::CLIENT_ID)
+    );
 }

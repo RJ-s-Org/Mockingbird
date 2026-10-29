@@ -112,8 +112,33 @@ async fn stores() -> (Arc<dyn ControlStore>, Arc<dyn StateStore>) {
 /// An `oidc`-mode admin router against a fresh [`MockOidcProvider`];
 /// `secure` stands for an `https://` external URL.
 async fn harness_with(secure: bool) -> Harness {
+    harness_opts(secure, false).await
+}
+
+/// [`harness_with`]; with `end_session`, the provider advertises an
+/// `end_session_endpoint`.
+async fn harness_opts(secure: bool, end_session: bool) -> Harness {
     let provider = MockOidcProvider::start().await;
+    if end_session {
+        provider.advertise_end_session().await;
+    }
     let (store, state) = stores().await;
+    let app = node(&provider, &store, &state, secure).await;
+    Harness {
+        app: router(app.clone()),
+        st: app,
+        provider,
+        store,
+    }
+}
+
+/// One admin node: its own OIDC client, the shared stores.
+async fn node(
+    provider: &MockOidcProvider,
+    store: &Arc<dyn ControlStore>,
+    state: &Arc<dyn StateStore>,
+    secure: bool,
+) -> AdminState {
     let settings = OidcSettings {
         issuer: provider.issuer(),
         client_id: MockOidcProvider::CLIENT_ID.to_string(),
@@ -123,27 +148,27 @@ async fn harness_with(secure: bool) -> Harness {
         redirect_url: "http://127.0.0.1:9090/auth/callback".to_string(),
         mapping: RoleMapping::default(),
     };
-    let oidc = Arc::new(OidcClient::discover(settings, http_client()).await.unwrap());
+    let oidc = OidcClient::discover(settings, http_client())
+        .await
+        .unwrap()
+        .with_store(store.clone())
+        .with_post_logout_redirect("http://127.0.0.1:9090/")
+        .unwrap();
+    let oidc = Arc::new(oidc);
     let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), secure);
     let auth = Authenticator {
         api_keys: ApiKeys::new(store.clone()),
         sessions: Some(sessions.clone()),
         bearer: Some(oidc.bearer()),
     };
-    let st = AdminState {
+    AdminState {
         auth: Arc::new(auth),
         web_auth: Some(WebAuth {
             oidc,
             sessions,
             secure_cookies: secure,
         }),
-        ..AdminState::new(store.clone(), state)
-    };
-    Harness {
-        app: router(st.clone()),
-        st,
-        provider,
-        store,
+        ..AdminState::new(store.clone(), state.clone())
     }
 }
 
@@ -499,6 +524,72 @@ async fn logout_invalidates_session() {
         StatusCode::NO_CONTENT
     );
     assert_eq!(h.audit("auth.logout").await.len(), 1);
+}
+
+#[tokio::test]
+async fn logout_returns_the_end_session_url_when_advertised() {
+    let h = harness_opts(false, true).await;
+    let session = h.login("alice", &["mb:default:viewer"], None).await;
+    let r = h.logout(Some(&session), true).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.headers[header::CONTENT_TYPE], "application/json");
+    let url = r.json()["end_session_url"].as_str().unwrap().to_string();
+    assert!(
+        url.starts_with(&format!("{}/logout?", h.provider.issuer())),
+        "{url}"
+    );
+    assert_eq!(
+        MockOidcProvider::query_param(&url, "post_logout_redirect_uri").as_deref(),
+        Some("http://127.0.0.1:9090/")
+    );
+    // The local session ended all the same.
+    assert_eq!(
+        r.set_cookie(SESSION_COOKIE).unwrap(),
+        "mb_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+    );
+    h.me(&session).await.problem(StatusCode::UNAUTHORIZED);
+    assert_eq!(h.audit("auth.logout").await.len(), 1);
+    // Without a session the browser is still sent to the provider.
+    assert_eq!(h.logout(None, true).await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn callback_completes_on_another_node() {
+    let h = harness().await;
+    let (_, state) = stores().await;
+    let peer = router(node(&h.provider, &h.store, &state, false).await);
+    let started = h.start_login("/w/default/mocks").await;
+    let nonce = MockOidcProvider::query_param(&started.url, "nonce").unwrap();
+    let state = MockOidcProvider::query_param(&started.url, "state").unwrap();
+    h.provider
+        .issue_code(
+            "peer-code",
+            h.provider
+                .claims("alice", &["mb:default:viewer"], Some(&nonce)),
+        )
+        .await;
+    let cookie = format!(
+        "{LOGIN_STATE_COOKIE}={}",
+        cookie_value(&started.state_cookie)
+    );
+    let r = get_with(
+        &peer,
+        &format!("/auth/callback?code=peer-code&state={state}"),
+        &[("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(r.location(), "/w/default/mocks");
+    let session = cookie_value(&r.set_cookie(SESSION_COOKIE).expect("session cookie"));
+    // The session works on the node that started the login too.
+    assert_eq!(h.me(&session).await.status, StatusCode::OK);
+    // And the state is spent everywhere.
+    let again = get_with(
+        &h.app,
+        &format!("/auth/callback?code=peer-code&state={state}"),
+        &[("cookie", &cookie)],
+    )
+    .await;
+    again.problem(StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

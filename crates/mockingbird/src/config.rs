@@ -1056,7 +1056,12 @@ async fn admin_auth(
     let client = mb_auth::OidcClient::discover(settings, http)
         .await
         .map_err(|e| anyhow!("{e}"))
-        .with_context(|| format!("cannot set up OIDC with issuer {}", oidc.issuer))?;
+        .with_context(|| format!("cannot set up OIDC with issuer {}", oidc.issuer))?
+        // Every node shares started logins, and they survive restarts.
+        .with_store(store.clone())
+        .with_post_logout_redirect(&format!("{}/", auth.external_base()))
+        .map_err(|e| anyhow!("{e}"))
+        .context("auth.external_url")?;
     let client = Arc::new(client);
     let secure = auth.secure_cookies();
     let sessions = mb_auth::SessionManager::new(store.clone(), auth.session_ttl, secure);

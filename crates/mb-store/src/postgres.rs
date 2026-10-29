@@ -23,11 +23,12 @@ use crate::{
     CHANGE_CHANNEL_CAPACITY, ChannelSettings, ContractStatus, ContractVersion, ContractVersionInfo,
     ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob, ImportJobStatus, ImportOutcome,
     ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST, Mock, MockEventSettings, NewAuditEvent,
-    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, PruneCounter, RequestKind,
-    RequestLogEntry, RequestLogFilter, RequestLogSummary, ResourceSource, STALE_IMPORT_ERROR,
-    Scenario, ScenarioRules, StoreError, Workspace, lease_times, missing_workspace, not_a_draft,
-    now, queued_progress, require_draft_status, sha256_hex, validate_header_name, validate_hosts,
-    validate_mock_name, validate_mock_settings, validate_route_prefix, validate_workspace_name,
+    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, OidcPendingLogin, PruneCounter,
+    RequestKind, RequestLogEntry, RequestLogFilter, RequestLogSummary, ResourceSource,
+    STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace, lease_times,
+    missing_workspace, not_a_draft, now, queued_progress, require_draft_status, sha256_hex,
+    validate_header_name, validate_hosts, validate_mock_name, validate_mock_settings,
+    validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -59,6 +60,7 @@ const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, 
 /// [`API_KEY_COLUMNS`] with JSON read back as text.
 const API_KEY_SELECT: &str = "key_id, workspace, name, role, scopes::text AS scopes, sysadmin, secret_hash, \
      created_by, created_at, expires_at, last_used_at, revoked_at";
+const PENDING_LOGIN_COLUMNS: &str = "state_hash, data, created_at, expires_at";
 const SESSION_SELECT: &str =
     "id_hash, principal::text AS principal, created_at, expires_at, last_seen";
 const AUDIT_SELECT: &str = "id, workspace, actor_subject, actor_kind, action, target, \
@@ -527,6 +529,16 @@ fn session_from_row(row: &PgRow) -> Result<AdminSession, StoreError> {
         created_at: row.try_get("created_at")?,
         expires_at: row.try_get("expires_at")?,
         last_seen: row.try_get("last_seen")?,
+    })
+}
+
+fn pending_login_from_row(row: &PgRow) -> Result<OidcPendingLogin, StoreError> {
+    let data: String = row.try_get("data")?;
+    Ok(OidcPendingLogin {
+        state_hash: row.try_get("state_hash")?,
+        data: serde_json::from_str(&data)?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
     })
 }
 
@@ -1583,6 +1595,100 @@ impl ControlStore for PgStore {
     async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
         Ok(
             sqlx::query("DELETE FROM admin_sessions WHERE expires_at <= $1")
+                .bind(now)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
+    async fn put_oidc_pending_login(
+        &self,
+        p: &OidcPendingLogin,
+        max: u64,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM oidc_pending_logins WHERE expires_at <= $1")
+            .bind(p.created_at)
+            .execute(&mut *tx)
+            .await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_pending_logins")
+            .fetch_one(&mut *tx)
+            .await?;
+        let excess = count.saturating_sub(i64::try_from(max).unwrap_or(i64::MAX).saturating_sub(1));
+        if excess > 0 {
+            sqlx::query(
+                "DELETE FROM oidc_pending_logins WHERE state_hash IN (SELECT state_hash FROM \
+                 oidc_pending_logins ORDER BY created_at, state_hash LIMIT $1)",
+            )
+            .bind(excess)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let sql = format!(
+            "INSERT INTO oidc_pending_logins ({PENDING_LOGIN_COLUMNS}) VALUES ($1, $2, $3, $4)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&p.state_hash)
+            .bind(serde_json::to_string(&p.data)?)
+            .bind(p.created_at)
+            .bind(p.expires_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match StoreError::from(e) {
+                StoreError::Conflict(_) => {
+                    StoreError::Conflict("OIDC pending login already exists".into())
+                }
+                other => other,
+            })?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_oidc_pending_login(
+        &self,
+        state_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OidcPendingLogin>, StoreError> {
+        let sql = format!(
+            "SELECT {PENDING_LOGIN_COLUMNS} FROM oidc_pending_logins \
+             WHERE state_hash = $1 AND expires_at > $2"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(state_hash)
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(pending_login_from_row)
+            .transpose()
+    }
+
+    async fn take_oidc_pending_login(
+        &self,
+        state_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OidcPendingLogin>, StoreError> {
+        let sql = format!(
+            "DELETE FROM oidc_pending_logins WHERE state_hash = $1 \
+             RETURNING {PENDING_LOGIN_COLUMNS}"
+        );
+        let taken = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(state_hash)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(pending_login_from_row)
+            .transpose()?;
+        Ok(taken.filter(|p| p.expires_at > now))
+    }
+
+    async fn delete_expired_oidc_pending_logins(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        Ok(
+            sqlx::query("DELETE FROM oidc_pending_logins WHERE expires_at <= $1")
                 .bind(now)
                 .execute(&self.pool)
                 .await?

@@ -14,8 +14,9 @@ use mb_store::{
     ControlChange, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
     ImportJobStatus, ImportOutcome, ImportProgress, LatencyJitter, LlmProfile, Mock, MockBehavior,
     MockEventSettings, MockLimits, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
-    NewRequestLogEntry, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter,
-    ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds, WebhookSigning, WebhookTarget,
+    NewRequestLogEntry, OidcPendingLogin, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind,
+    RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds,
+    WebhookSigning, WebhookTarget,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -57,6 +58,9 @@ macro_rules! conformance_checks {
             api_key_touch_updates_last_used,
             admin_session_lifecycle,
             expired_admin_sessions_are_swept,
+            oidc_pending_login_is_taken_once,
+            expired_oidc_pending_logins_are_not_returned,
+            oidc_pending_logins_are_bounded,
             audit_append_and_filter,
             audit_prune_by_age,
             force_delete_workspace_removes_api_keys_keeps_audit,
@@ -1729,6 +1733,182 @@ pub(crate) async fn expired_admin_sessions_are_swept(store: &Arc<dyn ControlStor
             .expect("sweep again"),
         0
     );
+}
+
+fn pending_login(state_hash: &str, created_at: DateTime<Utc>, ttl: Duration) -> OidcPendingLogin {
+    OidcPendingLogin {
+        state_hash: state_hash.into(),
+        data: json!({"pkce_verifier": "v", "nonce": "n", "return_to": "/mocks"}),
+        created_at,
+        expires_at: created_at + ttl,
+    }
+}
+
+pub(crate) async fn oidc_pending_login_is_taken_once(store: &Arc<dyn ControlStore>) {
+    let now = now_us();
+    let p = pending_login(&"a".repeat(64), now, Duration::minutes(10));
+    store.put_oidc_pending_login(&p, 100).await.expect("put");
+    let err = store
+        .put_oidc_pending_login(&p, 100)
+        .await
+        .expect_err("duplicate state");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    assert_eq!(
+        store
+            .get_oidc_pending_login(&p.state_hash, now)
+            .await
+            .expect("get"),
+        Some(p.clone())
+    );
+    assert_eq!(
+        store
+            .get_oidc_pending_login(&"b".repeat(64), now)
+            .await
+            .expect("get unknown"),
+        None
+    );
+    // `get` does not consume it; `take` does, exactly once.
+    assert_eq!(
+        store
+            .take_oidc_pending_login(&p.state_hash, now)
+            .await
+            .expect("take"),
+        Some(p.clone())
+    );
+    assert_eq!(
+        store
+            .take_oidc_pending_login(&p.state_hash, now)
+            .await
+            .expect("take again"),
+        None
+    );
+    assert_eq!(
+        store
+            .get_oidc_pending_login(&p.state_hash, now)
+            .await
+            .expect("get after take"),
+        None
+    );
+}
+
+pub(crate) async fn expired_oidc_pending_logins_are_not_returned(store: &Arc<dyn ControlStore>) {
+    let now = now_us();
+    let expired = pending_login(
+        &"c".repeat(64),
+        now - Duration::minutes(11),
+        Duration::minutes(10),
+    );
+    store
+        .put_oidc_pending_login(&expired, 100)
+        .await
+        .expect("put expired");
+    assert_eq!(
+        store
+            .get_oidc_pending_login(&expired.state_hash, now)
+            .await
+            .expect("get"),
+        None
+    );
+    assert_eq!(
+        store
+            .take_oidc_pending_login(&expired.state_hash, now)
+            .await
+            .expect("take"),
+        None
+    );
+    // Taking an expired login still removes it.
+    assert_eq!(
+        store
+            .get_oidc_pending_login(&expired.state_hash, expired.created_at)
+            .await
+            .expect("get at creation time"),
+        None
+    );
+
+    let old = pending_login(
+        &"d".repeat(64),
+        now - Duration::minutes(11),
+        Duration::minutes(10),
+    );
+    store
+        .put_oidc_pending_login(&old, 100)
+        .await
+        .expect("put old");
+    assert_eq!(
+        store
+            .delete_expired_oidc_pending_logins(now)
+            .await
+            .expect("sweep"),
+        1
+    );
+    assert_eq!(
+        store
+            .delete_expired_oidc_pending_logins(now)
+            .await
+            .expect("sweep again"),
+        0
+    );
+}
+
+pub(crate) async fn oidc_pending_logins_are_bounded(store: &Arc<dyn ControlStore>) {
+    let now = now_us();
+    let ttl = Duration::minutes(10);
+    let logins: Vec<OidcPendingLogin> = (0..4)
+        .map(|i| pending_login(&format!("{i:064}"), now + Duration::seconds(i), ttl))
+        .collect();
+    for p in &logins {
+        store.put_oidc_pending_login(p, 3).await.expect("put");
+    }
+    // The oldest was evicted to make room for the fourth.
+    assert_eq!(
+        store
+            .get_oidc_pending_login(&logins[0].state_hash, now)
+            .await
+            .expect("get oldest"),
+        None
+    );
+    for p in &logins[1..] {
+        assert!(
+            store
+                .get_oidc_pending_login(&p.state_hash, now)
+                .await
+                .expect("get")
+                .is_some(),
+            "{} was evicted",
+            p.state_hash
+        );
+    }
+    // Expired logins are dropped before anything live is evicted.
+    let expired = pending_login(&"e".repeat(64), now - Duration::minutes(20), ttl);
+    store
+        .delete_expired_oidc_pending_logins(now)
+        .await
+        .expect("sweep");
+    let fresh = pending_login(&"f".repeat(64), now + Duration::seconds(10), ttl);
+    store
+        .put_oidc_pending_login(&fresh, 5)
+        .await
+        .expect("put fresh");
+    store
+        .put_oidc_pending_login(&expired, 5)
+        .await
+        .expect("put expired");
+    let newest = pending_login(&"9".repeat(64), now + Duration::seconds(11), ttl);
+    store
+        .put_oidc_pending_login(&newest, 5)
+        .await
+        .expect("put newest");
+    for p in logins[1..].iter().chain([&fresh, &newest]) {
+        assert!(
+            store
+                .get_oidc_pending_login(&p.state_hash, now)
+                .await
+                .expect("get")
+                .is_some(),
+            "{} was evicted",
+            p.state_hash
+        );
+    }
 }
 
 fn audit_event(ws: Option<&str>, actor: &str, action: &str, target: &str) -> NewAuditEvent {
