@@ -1,0 +1,99 @@
+{
+  "batch_id": "batch-05",
+  "contract": "asyncapi/orders-amqp-2.6",
+  "api_type": "asyncapi",
+  "domain": "ecommerce",
+  "target": "orderCreated",
+  "items": [
+    {
+      "opaque_id": "f4909bf4af",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8f3a2c71\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    },
+    {
+      "opaque_id": "3a727315ba",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"order_5001\",\n  \"status\": \"placed\",\n  \"timestamp\": \"2026-10-29T18:09:15Z\",\n  \"total\": 145.99\n}"
+    },
+    {
+      "opaque_id": "4721e438c9",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_98234715\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    },
+    {
+      "opaque_id": "7c55705d03",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_01h8x9p3kd72vm40e9zb1q8a72\",\n  \"status\": \"placed\",\n  \"total\": 124.95\n}"
+    },
+    {
+      "opaque_id": "8df0aa71a5",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"order-20261029-003\",\n  \"status\": \"placed\",\n  \"total\": 145.5\n}"
+    },
+    {
+      "opaque_id": "6203356bcf",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"order-20261029-193818\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    },
+    {
+      "opaque_id": "15dbb3e84c",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord-8291\",\n  \"status\": \"placed\",\n  \"total\": 124.5\n}"
+    },
+    {
+      "opaque_id": "d52716d19f",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8a7b3c9d2e1f\",\n  \"status\": \"placed\",\n  \"total\": 149.99\n}"
+    },
+    {
+      "opaque_id": "96f1961bd8",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8f3c21a7\",\n  \"status\": \"placed\",\n  \"total\": 149.9\n}"
+    },
+    {
+      "opaque_id": "58e3cf870f",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_7f3a91c2\",\n  \"status\": \"placed\",\n  \"total\": 84.5\n}"
+    },
+    {
+      "opaque_id": "13ec7e8209",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_7Q2mX9aT4kLp\",\n  \"status\": \"placed\",\n  \"total\": 84.5\n}"
+    },
+    {
+      "opaque_id": "1aea9a1098",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ORD-7723\",\n  \"status\": \"placed\",\n  \"total\": 149.99\n}"
+    },
+    {
+      "opaque_id": "c9f8ebdaed",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord-8f21c4a9\",\n  \"status\": \"placed\",\n  \"total\": 74.99\n}"
+    },
+    {
+      "opaque_id": "1e560b43d9",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8f3a2c1e9b4d7a6\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    },
+    {
+      "opaque_id": "d9e6ad9e23",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8f3c2a71\",\n  \"status\": \"placed\",\n  \"total\": 149.99\n}"
+    }
+  ]
+}

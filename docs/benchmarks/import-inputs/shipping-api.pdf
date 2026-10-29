@@ -1,0 +1,91 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 2185 >>
+stream
+BT
+/F2 18 Tf 1 0 0 1 50 770 Tm (Lumen Freight Shipping API) Tj
+/F1 10 Tf 1 0 0 1 50 742 Tm (Version 2026-10. Create rates, book shipments and follow parcels from pickup to delivery.) Tj
+/F2 13 Tf 1 0 0 1 50 710 Tm (Authentication) Tj
+/F1 10 Tf 1 0 0 1 50 687 Tm (Every request must carry your API key in the Authorization header as Bearer followed by the key.) Tj
+/F1 10 Tf 1 0 0 1 50 671 Tm (Keys starting with lmn_test_ run against the sandbox and never create a real pickup.) Tj
+/F2 13 Tf 1 0 0 1 50 639 Tm (Conventions) Tj
+/F1 10 Tf 1 0 0 1 50 616 Tm (Bodies and responses are JSON. Weights are in kilograms and dimensions in centimetres.) Tj
+/F1 10 Tf 1 0 0 1 50 600 Tm (Timestamps are RFC 3339 in UTC. Postal codes are strings, never numbers.) Tj
+/F1 10 Tf 1 0 0 1 50 584 Tm (Errors return a JSON object with code, message and, where useful, the offending field.) Tj
+/F2 13 Tf 1 0 0 1 50 552 Tm (1. Get rates) Tj
+/F3 10 Tf 1 0 0 1 50 529 Tm (POST /v1/rates) Tj
+/F1 10 Tf 1 0 0 1 50 513 Tm (Quotes every carrier service for a parcel between two addresses. Send origin and destination) Tj
+/F1 10 Tf 1 0 0 1 50 497 Tm (objects with country \(ISO 3166-1 alpha-2\), postal_code and city, plus a parcels array. Each) Tj
+/F1 10 Tf 1 0 0 1 50 481 Tm (parcel has weight_kg and dimensions_cm with length, width and height. The response lists) Tj
+/F1 10 Tf 1 0 0 1 50 465 Tm (rates with carrier, service, price \(a decimal string with currency\), transit_days and quote_id.) Tj
+/F1 10 Tf 1 0 0 1 50 449 Tm (A quote_id is valid for 30 minutes and is required to create a shipment.) Tj
+/F2 13 Tf 1 0 0 1 50 417 Tm (2. Create a shipment) Tj
+/F3 10 Tf 1 0 0 1 50 394 Tm (POST /v1/shipments) Tj
+/F1 10 Tf 1 0 0 1 50 378 Tm (Books the parcel using a quote_id from the rates call. The body also takes the sender and) Tj
+/F1 10 Tf 1 0 0 1 50 362 Tm (recipient contact details, a label_format of pdf or zpl, and an optional pickup_window with) Tj
+/F1 10 Tf 1 0 0 1 50 346 Tm (start and end timestamps. A successful call returns 201 with the shipment, its id in the form) Tj
+/F1 10 Tf 1 0 0 1 50 330 Tm (shp_ followed by 12 characters, a tracking_number, status set to booked, and a label_url.) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 1409 >>
+stream
+BT
+/F2 13 Tf 1 0 0 1 50 770 Tm (3. Retrieve a shipment) Tj
+/F3 10 Tf 1 0 0 1 50 747 Tm (GET /v1/shipments/{shipment_id}) Tj
+/F1 10 Tf 1 0 0 1 50 731 Tm (Returns one shipment with its status, parcels, carrier, service, cost and the timestamps of its) Tj
+/F1 10 Tf 1 0 0 1 50 715 Tm (booking and last update. A shipment that was never booked returns 404.) Tj
+/F2 13 Tf 1 0 0 1 50 683 Tm (4. Track a parcel) Tj
+/F3 10 Tf 1 0 0 1 50 660 Tm (GET /v1/tracking/{tracking_number}) Tj
+/F1 10 Tf 1 0 0 1 50 644 Tm (Public tracking for a tracking number issued by any carrier. No API key is needed. The response) Tj
+/F1 10 Tf 1 0 0 1 50 628 Tm (carries the current status \(one of pre_transit, in_transit, out_for_delivery, delivered or) Tj
+/F1 10 Tf 1 0 0 1 50 612 Tm (exception\), an estimated_delivery date, and an events array. Each event has a timestamp, a city,) Tj
+/F1 10 Tf 1 0 0 1 50 596 Tm (a country code and a description written for the recipient.) Tj
+/F2 13 Tf 1 0 0 1 50 564 Tm (Webhooks) Tj
+/F1 10 Tf 1 0 0 1 50 541 Tm (Register an HTTPS endpoint in the dashboard to receive tracking.updated events. Each delivery is) Tj
+/F1 10 Tf 1 0 0 1 50 525 Tm (signed with an HMAC-SHA256 digest of the body in the X-Lumen-Signature header.) Tj
+/F2 13 Tf 1 0 0 1 50 493 Tm (Rate limits) Tj
+/F1 10 Tf 1 0 0 1 50 470 Tm (Each key may make 60 requests per minute. Above that the API answers 429 with Retry-After.) Tj
+ET
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000127 00000 n 
+0000000197 00000 n 
+0000000272 00000 n 
+0000000340 00000 n 
+0000000486 00000 n 
+0000002723 00000 n 
+0000002869 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+4330
+%%EOF

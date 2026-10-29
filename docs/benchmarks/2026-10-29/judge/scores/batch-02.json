@@ -1,0 +1,21 @@
+{
+  "batch_id": "batch-02",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "7af805fe59", "realism": 2, "coherence": 5, "rationale": "Placeholder values throughout: name 'Example Store', contact@example.com, example-store domain, id Shop/1. Internally consistent: Basic plan with shopifyPlus false, url matches myshopifyDomain."},
+    {"opaque_id": "7e9717a1b8", "realism": 4, "coherence": 5, "rationale": "Plausible brand 'Aurora & Co.' with matching domain and email; id 123456789 is a bland sequential value and .example TLD. 'Shopify Plus' displayName agrees with shopifyPlus true."},
+    {"opaque_id": "f17e748f1a", "realism": 4, "coherence": 5, "rationale": "Realistic name, email and domain (greenleaf.studio, 'Basic Shopify' plan); id gid://shopify/Shop/1 is a bland placeholder id. Name, email, domain and url all agree; plan flags consistent."},
+    {"opaque_id": "be155b79a7", "realism": 4, "coherence": 5, "rationale": "Varied, real-looking name 'Timber & Moss Supply Co.' and id 6842910471; only tell is the .example.com email domain. Plus plan matches shopifyPlus true; url equals myshopifyDomain."},
+    {"opaque_id": "7d74b2bcb2", "realism": 4, "coherence": 5, "rationale": "Realistic name, id 89452173 and America/Chicago timezone; email uses .example TLD. Email, domain and url consistently derived from 'Northstar Supply Co.'; Basic plan flags consistent."},
+    {"opaque_id": "3d9b557855", "realism": 4, "coherence": 5, "rationale": "Plausible 'Minimalist Studio' with matching .com email and domain; id 987654321 is an obvious descending-digit filler. All fields agree; 'Basic Shopify' with shopifyPlus false."},
+    {"opaque_id": "3709da408e", "realism": 4, "coherence": 5, "rationale": "'Northwind Outfitters' is a stock sample-company name and email/url use .example TLD; id 84231957 realistic. Custom url domain matches email domain; Shopify Plus flags agree."},
+    {"opaque_id": "79690edd88", "realism": 5, "coherence": 5, "rationale": "Production-looking: 'Aurora Home Goods', admin@aurorahomegoods.com, 11-digit shop id, real plan name 'Advanced Shopify'. All identity fields agree; shopifyPlus false fits Advanced plan."},
+    {"opaque_id": "23c919da2e", "realism": 4, "coherence": 5, "rationale": "Stock 'Northwind' name and .example email/url, otherwise realistic id 8421376 and Chicago timezone. Custom url domain matches email domain; Basic plan flags consistent."},
+    {"opaque_id": "b45cdc086c", "realism": 3, "coherence": 4, "rationale": "Email store@example.test is a generic placeholder unrelated to 'Northstar Supply Co.'; id and timezone realistic. Minor inconsistency: email domain does not match shop name or url northstar-supply.example."},
+    {"opaque_id": "a36e8c2d69", "realism": 5, "coherence": 5, "rationale": "Production-looking: 'Willow & Birch Home Goods', store@willowbirchhome.com, id 548392017, 'Advanced' plan. Name, email, domain and url all agree; plan flags consistent."},
+    {"opaque_id": "7b2d206fb6", "realism": 4, "coherence": 5, "rationale": "Plausible 'Bright Home Goods' and real plan name 'Shopify', but id Shop/1001 is a bland sequential value and domains use example.com. Email, domain and url consistent; flags agree."},
+    {"opaque_id": "47dd2b0e7a", "realism": 4, "coherence": 5, "rationale": "Stock 'Northwind Outfitters' name with .example email/url; id 61284073 and 'Shopify' plan realistic. Email and url domains match; shopifyPlus false fits plan."},
+    {"opaque_id": "94c61966db", "realism": 2, "coherence": 5, "rationale": "Placeholder-like: name 'Example Shop', admin@example-shop.com, example-shop domain, id 1234567890. Consistent across fields; 'Basic Shopify' with shopifyPlus false."},
+    {"opaque_id": "ed2eafeebc", "realism": 3, "coherence": 5, "rationale": "Generic 'Acme Store' with acme.example email and id Shop/1 read clearly synthetic. Fields consistent: url equals myshopifyDomain, Basic plan flags agree."}
+  ]
+}

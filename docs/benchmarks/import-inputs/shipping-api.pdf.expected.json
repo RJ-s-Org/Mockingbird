@@ -1,0 +1,6 @@
+[
+  "POST /v1/rates",
+  "POST /v1/shipments",
+  "GET /v1/shipments/{shipment_id}",
+  "GET /v1/tracking/{tracking_number}"
+]

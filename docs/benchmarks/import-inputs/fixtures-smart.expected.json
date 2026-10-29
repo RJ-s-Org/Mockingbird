@@ -1,0 +1,4 @@
+{
+  "petstore.md": ["GET /pets", "GET /pets/{petId}", "POST /pets"],
+  "tmdb-readme.html": ["GET /3/movie/{movie_id}"]
+}

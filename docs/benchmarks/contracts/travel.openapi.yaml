@@ -1,0 +1,779 @@
+openapi: 3.1.0
+info:
+  title: Harbor Travel API
+  version: 2026-10-01
+  summary: Flight and hotel search, offers and bookings for a travel agency back end.
+  description: |
+    A fictional travel-booking API written for Mockingbird's LLM benchmark
+    (docs/benchmarks/). It exercises nested objects, allOf composition (offers
+    and bookings extend a shared base), oneOf (a flight or rail segment, and a
+    card or bank-transfer payment method), enums, the date, date-time, email,
+    uri and uuid formats, numeric bounds and string patterns (IATA codes,
+    booking references, ISO currency and country codes).
+servers:
+  - url: https://api.harbor-travel.example/v1
+paths:
+  /flights/search:
+    post:
+      operationId: searchFlights
+      summary: Search flight offers for a set of passengers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchFlightsRequest"
+      responses:
+        "200":
+          description: Matching offers.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchFlightsResponse"
+        "422":
+          $ref: "#/components/responses/Problem"
+  /offers/{offerId}:
+    get:
+      operationId: getOffer
+      summary: Get a priced offer with its fare rules and baggage allowance.
+      parameters:
+        - name: offerId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The offer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Offer"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /bookings:
+    post:
+      operationId: createBooking
+      summary: Book an offer for the listed passengers and take payment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBookingRequest"
+      responses:
+        "201":
+          description: The booking was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+  /bookings/{bookingId}:
+    get:
+      operationId: getBooking
+      summary: Get a booking with its passengers, segments and payment method.
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The booking.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /bookings/{bookingId}/cancel:
+    post:
+      operationId: cancelBooking
+      summary: Cancel a booking and return the refund decision.
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  enum: [customer_request, schedule_change, payment_failed]
+      responses:
+        "200":
+          description: The cancellation and its refund.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cancellation"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /hotels:
+    get:
+      operationId: listHotels
+      summary: List hotels in a city with rates for the requested stay.
+      parameters:
+        - name: city
+          in: query
+          required: true
+          description: IATA city code.
+          schema:
+            type: string
+            pattern: "^[A-Z]{3}$"
+        - name: checkIn
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: checkOut
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: guests
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 9
+            default: 2
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: One page of hotels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HotelPage"
+        "400":
+          $ref: "#/components/responses/Problem"
+components:
+  responses:
+    Problem:
+      description: An RFC 9457 problem.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    Iata:
+      type: string
+      pattern: "^[A-Z]{3}$"
+      description: A three-letter IATA airport or city code.
+    CurrencyCode:
+      type: string
+      pattern: "^[A-Z]{3}$"
+      description: An ISO 4217 currency code.
+    CountryCode:
+      type: string
+      pattern: "^[A-Z]{2}$"
+      description: An ISO 3166-1 alpha-2 country code.
+    Money:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: "^[0-9]+\\.[0-9]{2}$"
+          description: Decimal amount as a string, two fraction digits.
+          examples: ["129.90"]
+        currency:
+          $ref: "#/components/schemas/CurrencyCode"
+    Passenger:
+      type: object
+      required: [givenName, familyName, dateOfBirth, type]
+      properties:
+        givenName:
+          type: string
+          minLength: 1
+          maxLength: 64
+        familyName:
+          type: string
+          minLength: 1
+          maxLength: 64
+        dateOfBirth:
+          type: string
+          format: date
+        type:
+          type: string
+          enum: [adult, child, infant]
+        frequentFlyer:
+          type: object
+          required: [program, number]
+          properties:
+            program:
+              type: string
+              maxLength: 32
+            number:
+              type: string
+              pattern: "^[A-Z0-9]{4,20}$"
+    PassengerRecord:
+      allOf:
+        - $ref: "#/components/schemas/Passenger"
+        - type: object
+          required: [id, ticketNumber]
+          properties:
+            id:
+              type: string
+              format: uuid
+            ticketNumber:
+              type: string
+              pattern: "^[0-9]{13}$"
+              description: Ticket number, present once the booking is ticketed.
+    Contact:
+      type: object
+      additionalProperties: false
+      required: [email, phone]
+      properties:
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          pattern: "^\\+[1-9][0-9]{6,14}$"
+          description: E.164 phone number.
+    Airport:
+      type: object
+      additionalProperties: false
+      required: [iata, name, city, countryCode, timezone]
+      properties:
+        iata:
+          $ref: "#/components/schemas/Iata"
+        name:
+          type: string
+        city:
+          type: string
+        countryCode:
+          $ref: "#/components/schemas/CountryCode"
+        timezone:
+          type: string
+          description: IANA time zone name, for example Europe/Lisbon.
+    FlightSegment:
+      type: object
+      additionalProperties: false
+      required: [type, carrierCode, flightNumber, origin, destination, departureAt, arrivalAt, durationMinutes, cabin, stops]
+      properties:
+        type:
+          type: string
+          const: flight
+        carrierCode:
+          type: string
+          pattern: "^[A-Z0-9]{2}$"
+        flightNumber:
+          type: string
+          pattern: "^[A-Z0-9]{2}[0-9]{1,4}$"
+        origin:
+          $ref: "#/components/schemas/Airport"
+        destination:
+          $ref: "#/components/schemas/Airport"
+        departureAt:
+          type: string
+          format: date-time
+        arrivalAt:
+          type: string
+          format: date-time
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 4320
+        cabin:
+          $ref: "#/components/schemas/Cabin"
+        stops:
+          type: integer
+          minimum: 0
+          maximum: 3
+        aircraft:
+          type: string
+          description: Aircraft type, for example A320.
+    RailSegment:
+      type: object
+      additionalProperties: false
+      required: [type, operator, trainNumber, origin, destination, departureAt, arrivalAt, durationMinutes, coach]
+      properties:
+        type:
+          type: string
+          const: rail
+        operator:
+          type: string
+        trainNumber:
+          type: string
+          maxLength: 12
+        origin:
+          $ref: "#/components/schemas/Airport"
+        destination:
+          $ref: "#/components/schemas/Airport"
+        departureAt:
+          type: string
+          format: date-time
+        arrivalAt:
+          type: string
+          format: date-time
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 4320
+        coach:
+          type: string
+          enum: [standard, first, sleeper]
+    Segment:
+      description: One leg of a journey, either a flight or a rail journey.
+      oneOf:
+        - $ref: "#/components/schemas/FlightSegment"
+        - $ref: "#/components/schemas/RailSegment"
+      discriminator:
+        propertyName: type
+        mapping:
+          flight: "#/components/schemas/FlightSegment"
+          rail: "#/components/schemas/RailSegment"
+    Cabin:
+      type: string
+      enum: [economy, premium_economy, business, first]
+    OfferBase:
+      type: object
+      required: [id, expiresAt, price]
+      properties:
+        id:
+          type: string
+          format: uuid
+        expiresAt:
+          type: string
+          format: date-time
+        price:
+          $ref: "#/components/schemas/Money"
+    FlightOffer:
+      allOf:
+        - $ref: "#/components/schemas/OfferBase"
+        - type: object
+          required: [segments, cabin, refundable, seatsRemaining]
+          properties:
+            segments:
+              type: array
+              minItems: 1
+              maxItems: 8
+              items:
+                $ref: "#/components/schemas/Segment"
+            cabin:
+              $ref: "#/components/schemas/Cabin"
+            refundable:
+              type: boolean
+            seatsRemaining:
+              type: integer
+              minimum: 0
+              maximum: 9
+    TaxLine:
+      type: object
+      additionalProperties: false
+      required: [code, amount]
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z0-9]{2}$"
+        amount:
+          $ref: "#/components/schemas/Money"
+    Baggage:
+      type: object
+      additionalProperties: false
+      required: [type, quantity]
+      properties:
+        type:
+          type: string
+          enum: [carry_on, checked]
+        quantity:
+          type: integer
+          minimum: 0
+          maximum: 5
+        maxWeightKg:
+          type: number
+          minimum: 0
+          maximum: 40
+    Offer:
+      allOf:
+        - $ref: "#/components/schemas/FlightOffer"
+        - type: object
+          required: [taxes, baggage, fareRules]
+          properties:
+            taxes:
+              type: array
+              maxItems: 12
+              items:
+                $ref: "#/components/schemas/TaxLine"
+            baggage:
+              type: array
+              maxItems: 4
+              items:
+                $ref: "#/components/schemas/Baggage"
+            fareRules:
+              type: object
+              required: [changeable, cancellable]
+              properties:
+                changeable:
+                  type: boolean
+                cancellable:
+                  type: boolean
+                changeFee:
+                  $ref: "#/components/schemas/Money"
+                notes:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: string
+                    maxLength: 240
+    SearchFlightsRequest:
+      type: object
+      additionalProperties: false
+      required: [origin, destination, departureDate, passengers]
+      properties:
+        origin:
+          $ref: "#/components/schemas/Iata"
+        destination:
+          $ref: "#/components/schemas/Iata"
+        departureDate:
+          type: string
+          format: date
+        returnDate:
+          type: string
+          format: date
+        passengers:
+          type: array
+          minItems: 1
+          maxItems: 9
+          items:
+            type: object
+            additionalProperties: false
+            required: [type]
+            properties:
+              type:
+                type: string
+                enum: [adult, child, infant]
+        cabin:
+          $ref: "#/components/schemas/Cabin"
+        maxStops:
+          type: integer
+          minimum: 0
+          maximum: 2
+        currency:
+          $ref: "#/components/schemas/CurrencyCode"
+    SearchFlightsResponse:
+      type: object
+      additionalProperties: false
+      required: [searchId, currency, total, offers]
+      properties:
+        searchId:
+          type: string
+          format: uuid
+        currency:
+          $ref: "#/components/schemas/CurrencyCode"
+        total:
+          type: integer
+          minimum: 0
+        offers:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/FlightOffer"
+    PaymentCard:
+      type: object
+      additionalProperties: false
+      required: [type, brand, last4, expMonth, expYear, holderName]
+      properties:
+        type:
+          type: string
+          const: card
+        brand:
+          type: string
+          enum: [visa, mastercard, amex]
+        last4:
+          type: string
+          pattern: "^[0-9]{4}$"
+        expMonth:
+          type: integer
+          minimum: 1
+          maximum: 12
+        expYear:
+          type: integer
+          minimum: 2026
+          maximum: 2050
+        holderName:
+          type: string
+          minLength: 1
+          maxLength: 80
+    PaymentBankTransfer:
+      type: object
+      additionalProperties: false
+      required: [type, iban, reference]
+      properties:
+        type:
+          type: string
+          const: bank_transfer
+        iban:
+          type: string
+          pattern: "^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$"
+        bic:
+          type: string
+          pattern: "^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$"
+        reference:
+          type: string
+          maxLength: 35
+    PaymentMethod:
+      description: How the booking is paid for, a card or a bank transfer.
+      oneOf:
+        - $ref: "#/components/schemas/PaymentCard"
+        - $ref: "#/components/schemas/PaymentBankTransfer"
+      discriminator:
+        propertyName: type
+        mapping:
+          card: "#/components/schemas/PaymentCard"
+          bank_transfer: "#/components/schemas/PaymentBankTransfer"
+    CreateBookingRequest:
+      type: object
+      additionalProperties: false
+      required: [offerId, passengers, contact, payment]
+      properties:
+        offerId:
+          type: string
+          format: uuid
+        passengers:
+          type: array
+          minItems: 1
+          maxItems: 9
+          items:
+            $ref: "#/components/schemas/Passenger"
+        contact:
+          $ref: "#/components/schemas/Contact"
+        payment:
+          $ref: "#/components/schemas/PaymentMethod"
+    BookingBase:
+      type: object
+      required: [id, reference, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+          pattern: "^[A-Z0-9]{6}$"
+          description: Six-character booking reference shown to the traveller.
+        status:
+          type: string
+          enum: [pending, confirmed, ticketed, cancelled, failed]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Booking:
+      allOf:
+        - $ref: "#/components/schemas/BookingBase"
+        - type: object
+          required: [offerId, passengers, segments, contact, price, payment]
+          properties:
+            offerId:
+              type: string
+              format: uuid
+            passengers:
+              type: array
+              minItems: 1
+              items:
+                $ref: "#/components/schemas/PassengerRecord"
+            segments:
+              type: array
+              minItems: 1
+              items:
+                $ref: "#/components/schemas/Segment"
+            contact:
+              $ref: "#/components/schemas/Contact"
+            price:
+              type: object
+              required: [total, taxes]
+              properties:
+                total:
+                  $ref: "#/components/schemas/Money"
+                taxes:
+                  type: array
+                  maxItems: 12
+                  items:
+                    $ref: "#/components/schemas/TaxLine"
+            payment:
+              $ref: "#/components/schemas/PaymentMethod"
+    Cancellation:
+      type: object
+      additionalProperties: false
+      required: [bookingId, status, cancelledAt, refund, reason]
+      properties:
+        bookingId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [cancelled, refund_pending, refunded]
+        cancelledAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          enum: [customer_request, schedule_change, payment_failed]
+        refund:
+          type: object
+          additionalProperties: false
+          required: [amount, fee]
+          properties:
+            amount:
+              $ref: "#/components/schemas/Money"
+            fee:
+              $ref: "#/components/schemas/Money"
+            expectedBy:
+              type: string
+              format: date
+    GeoPoint:
+      type: object
+      additionalProperties: false
+      required: [lat, lon]
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        lon:
+          type: number
+          minimum: -180
+          maximum: 180
+    HotelAmenity:
+      type: string
+      enum: [wifi, pool, spa, gym, parking, pet_friendly, restaurant, airport_shuttle]
+    Hotel:
+      type: object
+      additionalProperties: false
+      required: [id, name, address, starRating, amenities, checkInTime, cheapestRate, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        address:
+          type: object
+          additionalProperties: false
+          required: [line1, city, postalCode, countryCode, geo]
+          properties:
+            line1:
+              type: string
+            city:
+              type: string
+            postalCode:
+              type: string
+              maxLength: 12
+            countryCode:
+              $ref: "#/components/schemas/CountryCode"
+            geo:
+              $ref: "#/components/schemas/GeoPoint"
+        starRating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+        amenities:
+          type: array
+          uniqueItems: true
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/HotelAmenity"
+        website:
+          type: string
+          format: uri
+        checkInTime:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          description: Local check-in time, 24-hour HH:MM.
+        cheapestRate:
+          type: object
+          additionalProperties: false
+          required: [perNight, currency, breakfastIncluded]
+          properties:
+            perNight:
+              type: string
+              pattern: "^[0-9]+\\.[0-9]{2}$"
+            currency:
+              $ref: "#/components/schemas/CurrencyCode"
+            breakfastIncluded:
+              type: boolean
+        updatedAt:
+          type: string
+          format: date-time
+    HotelPage:
+      type: object
+      additionalProperties: false
+      required: [data, page, pageSize, total]
+      properties:
+        data:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Hotel"
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          minimum: 0
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri

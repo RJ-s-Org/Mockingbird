@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use mb_engine::{Engine, EngineConfig, GenerationContext, MessageContext, OperationCall, Source};
 use mb_llm::Usage;
-use mb_mcm::{Bundle, Channel, Direction, Operation};
+use mb_mcm::{Bundle, Direction, Operation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -36,8 +36,14 @@ pub struct EvalReport {
     pub p95_ms: u64,
     pub prompt_tokens_per_call: f64,
     pub completion_tokens_per_call: f64,
-    /// Keyed by [`CorpusEntry::name`].
+    /// Keyed by [`CorpusEntry::name`] (or the manifest entry name).
     pub per_contract: BTreeMap<String, ContractStats>,
+    /// Keyed by the manifest's `api_type`; empty for a corpus run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_api_type: BTreeMap<String, ContractStats>,
+    /// Keyed by the manifest's `domain`; empty for a corpus run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_domain: BTreeMap<String, ContractStats>,
 }
 
 /// The calls of one contract, by source.
@@ -102,7 +108,8 @@ impl EvalReport {
         out
     }
 
-    /// A Markdown summary: a metric table, then one row per contract.
+    /// A Markdown summary: a metric table, then one row per contract, then
+    /// (for a manifest run) one row per API type and per domain.
     pub fn to_markdown(&self) -> String {
         let pct = |r: f64| format!("{:.1}%", r * 100.0);
         let mut md = String::new();
@@ -136,20 +143,28 @@ impl EvalReport {
         for (metric, value) in rows {
             let _ = writeln!(md, "| {metric} | {value} |");
         }
-        let _ = writeln!(md, "\n## Per contract\n");
-        let _ = writeln!(
-            md,
-            "| Contract | Calls | LLM | Repaired | Fallback | p95 ms |"
-        );
-        let _ = writeln!(md, "| --- | --- | --- | --- | --- | --- |");
-        for (name, s) in &self.per_contract {
-            let _ = writeln!(
-                md,
-                "| {name} | {} | {} | {} | {} | {} |",
-                s.calls, s.llm, s.repaired, s.fallback, s.p95_ms
-            );
+        stats_table(&mut md, "Per contract", "Contract", &self.per_contract);
+        if !self.per_api_type.is_empty() {
+            stats_table(&mut md, "Per API type", "API type", &self.per_api_type);
+        }
+        if !self.per_domain.is_empty() {
+            stats_table(&mut md, "Per domain", "Domain", &self.per_domain);
         }
         md
+    }
+}
+
+/// A `## {title}` section with one row per key of `rows`.
+fn stats_table(md: &mut String, title: &str, key: &str, rows: &BTreeMap<String, ContractStats>) {
+    let _ = writeln!(md, "\n## {title}\n");
+    let _ = writeln!(md, "| {key} | Calls | LLM | Repaired | Fallback | p95 ms |");
+    let _ = writeln!(md, "| --- | --- | --- | --- | --- | --- |");
+    for (name, s) in rows {
+        let _ = writeln!(
+            md,
+            "| {name} | {} | {} | {} | {} | {} |",
+            s.calls, s.llm, s.repaired, s.fallback, s.p95_ms
+        );
     }
 }
 
@@ -171,27 +186,150 @@ fn rate(n: u64, calls: u64) -> f64 {
     }
 }
 
-/// What an eval call exercises.
-enum Target<'a> {
-    Operation(&'a Operation),
-    Channel(&'a Channel),
+/// What an eval call exercises: an index into the bundle's `operations` or
+/// `channels`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetRef {
+    Operation(usize),
+    Channel(usize),
+}
+
+/// One contract of an eval run, with the targets it calls.
+#[derive(Clone, Debug)]
+pub struct EvalContract {
+    /// Keys `per_contract` in the report.
+    pub name: String,
+    pub bundle: Arc<Bundle>,
+    /// Set by a manifest; keys `per_api_type`.
+    pub api_type: Option<String>,
+    /// Set by a manifest; keys `per_domain`.
+    pub domain: Option<String>,
+    pub targets: Vec<TargetRef>,
+}
+
+impl EvalContract {
+    /// A corpus contract with the targets of [`default_targets`].
+    pub fn from_corpus(entry: &CorpusEntry, max_ops: usize) -> Self {
+        Self {
+            name: entry.name.clone(),
+            targets: default_targets(&entry.bundle, max_ops),
+            bundle: Arc::new(entry.bundle.clone()),
+            api_type: None,
+            domain: None,
+        }
+    }
+}
+
+/// How an eval run calls its targets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunOptions {
+    /// Calls per target (each with a fresh faker-built request).
+    pub repeat: usize,
+    /// Calls in flight at most.
+    pub concurrency: usize,
+    /// The engine's per-request LLM timeout.
+    pub llm_timeout: Duration,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            repeat: 1,
+            concurrency: 1,
+            llm_timeout: EVAL_LLM_TIMEOUT,
+        }
+    }
+}
+
+/// One eval call, as written to the samples file.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Sample {
+    pub contract: String,
+    pub api_type: Option<String>,
+    pub domain: Option<String>,
+    /// The operation or channel id.
+    pub target: String,
+    /// `operation` or `channel`.
+    pub target_kind: String,
+    /// 0-based repetition of this target.
+    pub rep: usize,
+    /// `llm`, `repaired`, `fallback`, or `error` when the engine rejected
+    /// the call (see `error`).
+    pub source: String,
+    pub latency_ms: u64,
+    /// The response body or message payload; null on error.
+    pub body: Value,
+    /// The schema the engine validated `body` against, self-contained: the
+    /// success response (or message payload) schema with its reachable
+    /// definitions attached as `$defs`.
+    pub schema: Value,
+    /// The faker-built call (`path`, `query`, `body`) or the message
+    /// `trigger`.
+    pub request: Value,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// Why the engine rejected the call.
+    pub error: Option<String>,
+    /// Why the faker answered instead of the LLM, when the engine says.
+    pub fallback_reason: Option<String>,
 }
 
 /// The unary operations with a success schema, then the publish channels,
 /// of `bundle`, at most `max_ops` in all.
-fn targets(bundle: &Bundle, max_ops: usize) -> Vec<Target<'_>> {
+pub fn default_targets(bundle: &Bundle, max_ops: usize) -> Vec<TargetRef> {
     let ops = bundle
         .operations
         .iter()
-        .filter(|op| !op.kind.streams_request() && !op.kind.streams_response())
-        .filter(|op| op.success_output().is_some_and(|o| o.schema.is_some()))
-        .map(Target::Operation);
+        .enumerate()
+        .filter(|(_, op)| eligible_operation(op))
+        .map(|(i, _)| TargetRef::Operation(i));
     let channels = bundle
         .channels
         .iter()
-        .filter(|c| c.direction == Direction::Publish)
-        .map(Target::Channel);
+        .enumerate()
+        .filter(|(_, c)| c.direction == Direction::Publish)
+        .map(|(i, _)| TargetRef::Channel(i));
     ops.chain(channels).take(max_ops).collect()
+}
+
+/// The targets named by `ids`, in order: each an operation id (unary, with
+/// a success schema) or else a publish channel id. `Err` names the first id
+/// that is unknown or not eligible.
+pub fn select_targets(bundle: &Bundle, ids: &[String]) -> Result<Vec<TargetRef>, String> {
+    ids.iter()
+        .map(|id| {
+            if let Some((i, op)) = bundle
+                .operations
+                .iter()
+                .enumerate()
+                .find(|(_, op)| &op.id == id)
+            {
+                return if eligible_operation(op) {
+                    Ok(TargetRef::Operation(i))
+                } else {
+                    Err(format!(
+                        "operation {id} streams or has no success schema, so it cannot be evaluated"
+                    ))
+                };
+            }
+            match bundle
+                .channels
+                .iter()
+                .enumerate()
+                .find(|(_, c)| &c.id == id)
+            {
+                Some((i, c)) if c.direction == Direction::Publish => Ok(TargetRef::Channel(i)),
+                Some(_) => Err(format!("channel {id} is not a publish channel")),
+                None => Err(format!("unknown operation or channel id {id}")),
+            }
+        })
+        .collect()
+}
+
+fn eligible_operation(op: &Operation) -> bool {
+    !op.kind.streams_request()
+        && !op.kind.streams_response()
+        && op.success_output().is_some_and(|o| o.schema.is_some())
 }
 
 /// A faker-built object for an input schema (path, query or body part).
@@ -213,6 +351,135 @@ fn fake_call(engine: &Engine, bundle: &Bundle, op: &Operation) -> OperationCall 
     }
 }
 
+/// One call to make.
+#[derive(Clone, Copy, Debug)]
+struct Job {
+    contract: usize,
+    target: TargetRef,
+    rep: usize,
+}
+
+/// What one call produced.
+struct Done {
+    source: Source,
+    usage: Usage,
+    body: Option<Value>,
+    fallback_reason: Option<String>,
+}
+
+/// One finished call.
+struct Finished {
+    job: Job,
+    latency_ms: u64,
+    target_id: String,
+    request: Value,
+    outcome: Result<Done, String>,
+}
+
+/// Makes the call of `job`; `None` when its target index is out of range.
+async fn call(engine: &Engine, bundle: &Bundle, job: Job) -> Option<Finished> {
+    let start = Instant::now();
+    let (target_id, request, outcome) = match job.target {
+        TargetRef::Operation(i) => {
+            let op = bundle.operations.get(i)?;
+            let call = fake_call(engine, bundle, op);
+            let request = json!({
+                "path": call.path_params,
+                "query": call.query,
+                "body": call.body,
+            });
+            let outcome = engine
+                .generate(bundle, op, &call, GenerationContext::default())
+                .await
+                .map(|r| Done {
+                    source: r.source,
+                    usage: r.usage,
+                    body: r.body,
+                    fallback_reason: r.fallback_reason,
+                })
+                .map_err(|e| e.to_string());
+            (op.id.clone(), request, outcome)
+        }
+        TargetRef::Channel(i) => {
+            let channel = bundle.channels.get(i)?;
+            let ctx = MessageContext {
+                trigger: json!({"kind": "eval"}),
+                ..MessageContext::default()
+            };
+            let request = json!({ "trigger": ctx.trigger });
+            let outcome = engine
+                .generate_message(bundle, channel, &ctx)
+                .await
+                .map(|m| Done {
+                    source: m.source,
+                    usage: m.usage,
+                    body: Some(m.payload),
+                    fallback_reason: None,
+                })
+                .map_err(|e| e.to_string());
+            (channel.id.clone(), request, outcome)
+        }
+    };
+    Some(Finished {
+        job,
+        latency_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        target_id,
+        request,
+        outcome,
+    })
+}
+
+/// The schema the engine validates `target`'s answers against, with its
+/// reachable definitions attached; null when there is none.
+fn validated_schema(bundle: &Bundle, target: TargetRef) -> Value {
+    let schema = match target {
+        TargetRef::Operation(i) => bundle
+            .operations
+            .get(i)
+            .and_then(|op| op.success_output())
+            .and_then(|o| o.schema.as_ref()),
+        TargetRef::Channel(i) => bundle.channels.get(i).map(|c| &c.message_schema),
+    };
+    schema.map_or(Value::Null, |s| bundle.with_reachable_defs(s))
+}
+
+/// Stats and latencies being gathered for one group of calls.
+#[derive(Default)]
+struct Tally {
+    stats: ContractStats,
+    latencies: Vec<u64>,
+}
+
+impl Tally {
+    fn add(&mut self, source: Source, latency_ms: u64) {
+        self.stats.calls += 1;
+        match source {
+            Source::Llm => self.stats.llm += 1,
+            Source::Repaired => self.stats.repaired += 1,
+            Source::Fallback => self.stats.fallback += 1,
+            // `Engine::generate` never answers from state or the cache.
+            Source::State | Source::Cache | Source::Rejected => {}
+        }
+        self.latencies.push(latency_ms);
+    }
+
+    fn finish(self) -> ContractStats {
+        self.finish_with_p50().0
+    }
+
+    /// The stats, with their p95, and the p50 latency.
+    fn finish_with_p50(mut self) -> (ContractStats, u64) {
+        self.latencies.sort_unstable();
+        self.stats.p95_ms = percentile(&self.latencies, 0.95);
+        let p50 = percentile(&self.latencies, 0.50);
+        (self.stats, p50)
+    }
+}
+
+fn finish_all(tallies: BTreeMap<String, Tally>) -> BTreeMap<String, ContractStats> {
+    tallies.into_iter().map(|(k, t)| (k, t.finish())).collect()
+}
+
 /// Runs every eval call against `provider`, one at a time, and summarises
 /// them. Each contract contributes at most `max_ops` calls (its unary
 /// operations with a success schema, then its publish channels); a call the
@@ -224,77 +491,169 @@ pub async fn run_evals(
     model: &str,
     max_ops: usize,
 ) -> EvalReport {
+    let contracts: Vec<EvalContract> = entries
+        .iter()
+        .map(|e| EvalContract::from_corpus(e, max_ops))
+        .collect();
+    let mut no_samples = |_: &Sample| Ok(());
+    match run_contracts(
+        &contracts,
+        provider,
+        model,
+        &RunOptions::default(),
+        &mut no_samples,
+    )
+    .await
+    {
+        Ok(report) => report,
+        // The sink above never fails.
+        Err((report, _)) => report,
+    }
+}
+
+/// Runs `opts.repeat` calls of every target of `contracts` against
+/// `provider`, at most `opts.concurrency` in flight, hands each call to
+/// `on_sample` as it finishes, and summarises them. A call the engine
+/// rejects outright is logged, sampled with source `error` and not counted.
+/// `per_api_type`/`per_domain` cover the contracts that set them.
+/// `base_url` is left empty for the caller to fill in.
+///
+/// After `on_sample` first fails it is not called again, the run still
+/// finishes, and `Err` carries the report with that error.
+pub async fn run_contracts(
+    contracts: &[EvalContract],
+    provider: Arc<dyn mb_llm::Provider>,
+    model: &str,
+    opts: &RunOptions,
+    on_sample: &mut (dyn FnMut(&Sample) -> std::io::Result<()> + Send),
+) -> Result<EvalReport, (EvalReport, std::io::Error)> {
     let started_at = chrono::Utc::now();
-    let engine = Engine::new(
+    let engine = Arc::new(Engine::new(
         Some(provider),
         EngineConfig {
-            timeout: EVAL_LLM_TIMEOUT,
+            timeout: opts.llm_timeout,
             ..EngineConfig::default()
         },
-    );
-    let mut latencies: Vec<u64> = Vec::new();
-    let mut usage = Usage::default();
-    let mut per_contract = BTreeMap::new();
-    let mut totals = ContractStats::default();
+    ));
+    let repeat = opts.repeat.max(1);
+    let concurrency = opts.concurrency.max(1);
+    let mut jobs = contracts
+        .iter()
+        .enumerate()
+        .flat_map(|(contract, c)| {
+            c.targets.iter().flat_map(move |&target| {
+                (0..repeat).map(move |rep| Job {
+                    contract,
+                    target,
+                    rep,
+                })
+            })
+        })
+        .peekable();
 
-    for entry in entries {
-        let bundle = &entry.bundle;
-        let mut stats = ContractStats::default();
-        let mut contract_latencies = Vec::new();
-        for target in targets(bundle, max_ops) {
-            let start = Instant::now();
-            let outcome = match target {
-                Target::Operation(op) => {
-                    let call = fake_call(&engine, bundle, op);
-                    engine
-                        .generate(bundle, op, &call, GenerationContext::default())
-                        .await
-                        .map(|r| (r.source, r.usage))
-                        .map_err(|e| (op.id.clone(), e))
-                }
-                Target::Channel(channel) => {
-                    let ctx = MessageContext {
-                        trigger: json!({"kind": "eval"}),
-                        ..MessageContext::default()
-                    };
-                    engine
-                        .generate_message(bundle, channel, &ctx)
-                        .await
-                        .map(|m| (m.source, m.usage))
-                        .map_err(|e| (channel.id.clone(), e))
-                }
+    let mut usage = Usage::default();
+    let mut totals = Tally::default();
+    let mut per_contract: BTreeMap<String, Tally> = contracts
+        .iter()
+        .map(|c| (c.name.clone(), Tally::default()))
+        .collect();
+    let mut per_api_type: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut per_domain: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut sample_error: Option<std::io::Error> = None;
+
+    let mut in_flight = tokio::task::JoinSet::new();
+    loop {
+        while in_flight.len() < concurrency {
+            let Some(job) = jobs.next() else { break };
+            let Some(contract) = contracts.get(job.contract) else {
+                continue;
             };
-            let elapsed = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let (source, call_usage) = match outcome {
-                Ok(done) => done,
-                Err((id, e)) => {
-                    tracing::warn!(contract = %entry.name, target = %id, error = %e, "eval call skipped");
-                    continue;
-                }
-            };
-            stats.calls += 1;
-            match source {
-                Source::Llm => stats.llm += 1,
-                Source::Repaired => stats.repaired += 1,
-                Source::Fallback => stats.fallback += 1,
-                // `Engine::generate` never answers from state or the cache.
-                Source::State | Source::Cache | Source::Rejected => {}
-            }
-            usage = usage + call_usage;
-            contract_latencies.push(elapsed);
+            let engine = Arc::clone(&engine);
+            let bundle = Arc::clone(&contract.bundle);
+            in_flight.spawn(async move { call(&engine, &bundle, job).await });
         }
-        contract_latencies.sort_unstable();
-        stats.p95_ms = percentile(&contract_latencies, 0.95);
-        totals.calls += stats.calls;
-        totals.llm += stats.llm;
-        totals.repaired += stats.repaired;
-        totals.fallback += stats.fallback;
-        latencies.extend(contract_latencies);
-        tracing::info!(contract = %entry.name, ?stats, "contract evaluated");
-        per_contract.insert(entry.name.clone(), stats);
+        let Some(joined) = in_flight.join_next().await else {
+            if jobs.peek().is_none() {
+                break;
+            }
+            continue;
+        };
+        let finished = match joined {
+            Ok(Some(finished)) => finished,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(error = %e, "eval call task failed");
+                continue;
+            }
+        };
+        let Some(contract) = contracts.get(finished.job.contract) else {
+            continue;
+        };
+        let target_kind = match finished.job.target {
+            TargetRef::Operation(_) => "operation",
+            TargetRef::Channel(_) => "channel",
+        };
+        let mut sample = Sample {
+            contract: contract.name.clone(),
+            api_type: contract.api_type.clone(),
+            domain: contract.domain.clone(),
+            target: finished.target_id,
+            target_kind: target_kind.to_owned(),
+            rep: finished.job.rep,
+            source: "error".to_owned(),
+            latency_ms: finished.latency_ms,
+            body: Value::Null,
+            schema: validated_schema(&contract.bundle, finished.job.target),
+            request: finished.request,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: None,
+            fallback_reason: None,
+        };
+        match finished.outcome {
+            Ok(done) => {
+                sample.source = done.source.as_str().to_owned();
+                sample.body = done.body.unwrap_or(Value::Null);
+                sample.prompt_tokens = done.usage.prompt_tokens;
+                sample.completion_tokens = done.usage.completion_tokens;
+                sample.fallback_reason = done.fallback_reason;
+                usage = usage + done.usage;
+                let latency = finished.latency_ms;
+                totals.add(done.source, latency);
+                per_contract
+                    .entry(contract.name.clone())
+                    .or_default()
+                    .add(done.source, latency);
+                if let Some(t) = &contract.api_type {
+                    per_api_type
+                        .entry(t.clone())
+                        .or_default()
+                        .add(done.source, latency);
+                }
+                if let Some(d) = &contract.domain {
+                    per_domain
+                        .entry(d.clone())
+                        .or_default()
+                        .add(done.source, latency);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(contract = %contract.name, target = %sample.target, error = %e, "eval call skipped");
+                sample.error = Some(e);
+            }
+        }
+        if sample_error.is_none()
+            && let Err(e) = on_sample(&sample)
+        {
+            sample_error = Some(e);
+        }
     }
 
-    latencies.sort_unstable();
+    let per_contract = finish_all(per_contract);
+    for (name, stats) in &per_contract {
+        tracing::info!(contract = %name, ?stats, "contract evaluated");
+    }
+    let (totals, p50_ms) = totals.finish_with_p50();
     let calls = totals.calls;
     let per_call = |tokens: u32| {
         if calls == 0 {
@@ -303,7 +662,7 @@ pub async fn run_evals(
             f64::from(tokens) / calls as f64
         }
     };
-    EvalReport {
+    let report = EvalReport {
         model: model.to_owned(),
         base_url: String::new(),
         started_at,
@@ -312,11 +671,17 @@ pub async fn run_evals(
         first_pass_rate: rate(totals.llm, calls),
         repair_rate: rate(totals.repaired, calls),
         fallback_rate: rate(totals.fallback, calls),
-        p50_ms: percentile(&latencies, 0.50),
-        p95_ms: percentile(&latencies, 0.95),
+        p50_ms,
+        p95_ms: totals.p95_ms,
         prompt_tokens_per_call: per_call(usage.prompt_tokens),
         completion_tokens_per_call: per_call(usage.completion_tokens),
         per_contract,
+        per_api_type: finish_all(per_api_type),
+        per_domain: finish_all(per_domain),
+    };
+    match sample_error {
+        None => Ok(report),
+        Some(e) => Err((report, e)),
     }
 }
 

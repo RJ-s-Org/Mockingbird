@@ -1,0 +1,19 @@
+{
+  "batch_id": "batch-03",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "f8b199025d", "realism": 3, "coherence": 4, "rationale": "errorMessage carries a success note ('Trace data successfully exported.') with rejectedSpans '0'; real servers leave it empty or use it for warnings, so the field is misused, though the count is consistent."},
+    {"opaque_id": "3405027a6f", "realism": 4, "coherence": 4, "rationale": "rejectedSpans '1' matches the single span sent; the reason (invalid resource attribute set) ties to the empty-valued resource attribute, but rejecting spans for a resource-level issue is a slight stretch."},
+    {"opaque_id": "618fa1c037", "realism": 4, "coherence": 5, "rationale": "Plain full success: errorMessage '' and rejectedSpans '0', exactly what a collector returns. Accepting the empty span is consistent; the body is minimal."},
+    {"opaque_id": "4541435feb", "realism": 3, "coherence": 3, "rationale": "errorMessage says 'Some spans dropped' while rejectedSpans is '0', and the request has only one span: the message contradicts the count."},
+    {"opaque_id": "5025a2fe48", "realism": 5, "coherence": 5, "rationale": "The request's span is {}, so the rejection 'missing required trace_id and span_id' with rejectedSpans '1' matches the input exactly; the message reads like a real validating receiver."},
+    {"opaque_id": "764683313d", "realism": 4, "coherence": 5, "rationale": "Full success with errorMessage '' and rejectedSpans '0' (int64 as string); realistic and consistent, just minimal."},
+    {"opaque_id": "2d90ad19d8", "realism": 5, "coherence": 5, "rationale": "'1 span rejected: missing required trace_id, span_id, and name.' matches the single empty span in the request, and rejectedSpans '1' agrees."},
+    {"opaque_id": "cdd46c2c1b", "realism": 4, "coherence": 5, "rationale": "partialSuccess has only rejectedSpans '0', the idiomatic full-success form with errorMessage omitted. Consistent with the request; minimal."},
+    {"opaque_id": "b70d4d5dd5", "realism": 4, "coherence": 5, "rationale": "Empty errorMessage with rejectedSpans '0' is a valid full-success response; realistic and consistent, nothing request-specific."},
+    {"opaque_id": "496c92c6c8", "realism": 5, "coherence": 5, "rationale": "Full acceptance (rejectedSpans '0') plus a warning that names the request's empty-valued attribute 'meadow', which is how the spec says to use errorMessage on full success."},
+    {"opaque_id": "75e8df9b5e", "realism": 4, "coherence": 5, "rationale": "errorMessage '' and rejectedSpans '0': the standard full-success shape, consistent with the request but generic."},
+    {"opaque_id": "48c254613f", "realism": 4, "coherence": 5, "rationale": "Full success with an empty errorMessage and rejectedSpans '0'; plausible and consistent, minimal content."},
+    {"opaque_id": "8bf2013e41", "realism": 4, "coherence": 5, "rationale": "rejectedSpans '0' with errorMessage omitted, an idiomatic full-success response; consistent with the one-span request."}
+  ]
+}

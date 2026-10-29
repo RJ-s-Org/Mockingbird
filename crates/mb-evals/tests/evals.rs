@@ -6,7 +6,10 @@ use std::time::Duration;
 use assert_cmd::Command;
 use mb_evals::bench::bench;
 use mb_evals::corpus::{self, CorpusEntry};
-use mb_evals::report::{ContractStats, EvalReport, Thresholds, run_evals};
+use mb_evals::manifest;
+use mb_evals::report::{
+    ContractStats, EvalReport, RunOptions, Sample, TargetRef, Thresholds, run_contracts, run_evals,
+};
 use mb_llm::ScriptedProvider;
 
 fn fixtures() -> PathBuf {
@@ -78,6 +81,8 @@ fn sample_report() -> EvalReport {
         prompt_tokens_per_call: 512.0,
         completion_tokens_per_call: 128.0,
         per_contract,
+        per_api_type: BTreeMap::new(),
+        per_domain: BTreeMap::new(),
     }
 }
 
@@ -290,4 +295,305 @@ fn evals_workflow_is_weekly_and_read_only() {
     assert!(wf.contains("MB_EVAL_LLM_API_KEY: ${{ secrets.MB_EVAL_LLM_API_KEY }}"));
     assert!(wf.contains("if: always()"));
     assert!(wf.contains("GITHUB_STEP_SUMMARY"));
+}
+
+/// Two unary operations, one answering through a component `$ref`.
+const WITH_REFS: &str = r##"
+openapi: 3.1.0
+info: {title: Refs, version: "1"}
+paths:
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      parameters:
+        - {name: petId, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pet"}
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, required: [ok], properties: {ok: {type: boolean}}}
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, owner]
+      properties:
+        id: {type: string}
+        owner: {$ref: "#/components/schemas/Owner"}
+    Owner:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+"##;
+
+fn write_contracts(dir: &Path) -> std::io::Result<()> {
+    std::fs::write(dir.join("permissive.yaml"), PERMISSIVE)?;
+    std::fs::write(dir.join("refs.yaml"), WITH_REFS)
+}
+
+#[test]
+fn manifest_parse_validates_entries() {
+    let ok = manifest::parse(
+        r#"{"entries":[
+            {"name":"rest/a","path":"a.yaml","api_type":"rest","domain":"generic"},
+            {"name":"rest/b","path":"b.yaml","api_type":"rest","domain":"travel",
+             "operations":["x"],"max_ops":2}
+        ]}"#,
+    )
+    .unwrap();
+    assert_eq!(ok.entries.len(), 2);
+    assert_eq!(ok.entries[0].operations, None);
+    assert_eq!(ok.entries[0].max_ops, None);
+    assert_eq!(
+        ok.entries[1].operations.as_deref(),
+        Some(&["x".to_string()][..])
+    );
+    assert_eq!(ok.entries[1].max_ops, Some(2));
+
+    let dup = manifest::parse(
+        r#"{"entries":[
+            {"name":"a","path":"a.yaml","api_type":"rest","domain":"generic"},
+            {"name":"a","path":"b.yaml","api_type":"rest","domain":"generic"}
+        ]}"#,
+    );
+    assert!(format!("{:#}", dup.unwrap_err()).contains("twice"));
+    let missing = manifest::parse(r#"{"entries":[{"name":"a","path":"a.yaml","domain":"x"}]}"#);
+    assert!(missing.is_err());
+    let empty_type =
+        manifest::parse(r#"{"entries":[{"name":"a","path":"a","api_type":"","domain":"x"}]}"#);
+    assert!(empty_type.is_err());
+}
+
+#[test]
+fn manifest_selects_named_operations_or_the_capped_default() {
+    let dir = tempfile::tempdir().unwrap();
+    write_contracts(dir.path()).unwrap();
+    let path = dir.path().join("workloads.json");
+    std::fs::write(
+        &path,
+        r#"{"entries":[
+            {"name":"named","path":"permissive.yaml","api_type":"rest","domain":"generic",
+             "operations":["postC","getA"]},
+            {"name":"capped","path":"permissive.yaml","api_type":"rest","domain":"generic",
+             "max_ops":2},
+            {"name":"default","path":"refs.yaml","api_type":"rest","domain":"travel"}
+        ]}"#,
+    )
+    .unwrap();
+    let contracts = manifest::load(&path, dir.path(), 10).unwrap();
+    let names: Vec<&str> = contracts.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["named", "capped", "default"]);
+
+    let ids = |i: usize| -> Vec<String> {
+        let c = &contracts[i];
+        c.targets
+            .iter()
+            .map(|t| match *t {
+                TargetRef::Operation(n) => c.bundle.operations[n].id.clone(),
+                TargetRef::Channel(n) => c.bundle.channels[n].id.clone(),
+            })
+            .collect()
+    };
+    assert_eq!(
+        ids(0),
+        ["postC", "getA"],
+        "exactly the named targets, in order"
+    );
+    assert_eq!(ids(1).len(), 2, "max_ops caps the default rule");
+    assert_eq!(ids(2).len(), 2);
+    assert_eq!(contracts[2].domain.as_deref(), Some("travel"));
+    assert_eq!(contracts[2].api_type.as_deref(), Some("rest"));
+
+    // The run default applies when the entry has no max_ops.
+    let capped = manifest::load(&path, dir.path(), 1).unwrap();
+    assert_eq!(capped[2].targets.len(), 1);
+}
+
+#[test]
+fn manifest_rejects_unknown_ids_and_missing_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    write_contracts(dir.path()).unwrap();
+    let unknown = dir.path().join("unknown.json");
+    std::fs::write(
+        &unknown,
+        r#"{"entries":[{"name":"x","path":"permissive.yaml","api_type":"rest",
+            "domain":"generic","operations":["getA","nope"]}]}"#,
+    )
+    .unwrap();
+    let err = format!(
+        "{:#}",
+        manifest::load(&unknown, dir.path(), 10).unwrap_err()
+    );
+    assert!(err.contains("nope"), "{err}");
+
+    let missing = dir.path().join("missing.json");
+    std::fs::write(
+        &missing,
+        r#"{"entries":[{"name":"x","path":"absent.yaml","api_type":"rest","domain":"generic"}]}"#,
+    )
+    .unwrap();
+    assert!(manifest::load(&missing, dir.path(), 10).is_err());
+}
+
+#[test]
+fn manifest_selects_publish_channels_by_id() {
+    let fixtures = fixtures();
+    let bundle = mb_import::compile(
+        &std::fs::read(fixtures.join("asyncapi/streetlights-kafka-3.0.yaml")).unwrap(),
+    )
+    .unwrap();
+    let publish = bundle
+        .channels
+        .iter()
+        .find(|c| c.direction == mb_mcm::Direction::Publish)
+        .unwrap()
+        .id
+        .clone();
+    let entry = manifest::ManifestEntry {
+        name: "streetlights".into(),
+        path: "asyncapi/streetlights-kafka-3.0.yaml".into(),
+        api_type: "asyncapi".into(),
+        domain: "generic".into(),
+        operations: Some(vec![publish]),
+        max_ops: None,
+    };
+    let contract = manifest::compile_entry(entry, &fixtures, 10).unwrap();
+    assert_eq!(contract.targets.len(), 1);
+    assert!(matches!(contract.targets[0], TargetRef::Channel(_)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_contracts_repeats_samples_and_breaks_down() {
+    let dir = tempfile::tempdir().unwrap();
+    write_contracts(dir.path()).unwrap();
+    let path = dir.path().join("workloads.json");
+    std::fs::write(
+        &path,
+        r#"{"entries":[
+            {"name":"pets","path":"refs.yaml","api_type":"rest","domain":"travel",
+             "operations":["getPet"]},
+            {"name":"perm","path":"permissive.yaml","api_type":"graphql","domain":"generic",
+             "operations":["getA"]}
+        ]}"#,
+    )
+    .unwrap();
+    let contracts = manifest::load(&path, dir.path(), 10).unwrap();
+    // Four calls: every answer below is valid for both schemas, so the
+    // order the concurrent calls take them in does not matter.
+    let answer = r#"{"id":"p1","owner":{"name":"Ada"}}"#;
+    let provider = Arc::new(ScriptedProvider::with_usage(
+        (0..4)
+            .map(|_| {
+                Ok((
+                    answer.to_string(),
+                    mb_llm::Usage {
+                        prompt_tokens: 50,
+                        completion_tokens: 5,
+                    },
+                ))
+            })
+            .collect(),
+    ));
+    let opts = RunOptions {
+        repeat: 2,
+        concurrency: 3,
+        ..RunOptions::default()
+    };
+    let mut samples: Vec<Sample> = Vec::new();
+    let report = run_contracts(
+        &contracts,
+        provider,
+        "scripted",
+        &opts,
+        &mut |s: &Sample| {
+            samples.push(s.clone());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.calls, 4);
+    assert_eq!(report.first_pass_rate, 1.0);
+    assert_eq!(report.per_contract["pets"].calls, 2);
+    assert_eq!(report.per_contract["perm"].calls, 2);
+    assert_eq!(report.per_api_type["rest"].calls, 2);
+    assert_eq!(report.per_api_type["graphql"].calls, 2);
+    assert_eq!(report.per_domain["travel"].llm, 2);
+    assert_eq!(report.per_domain["generic"].llm, 2);
+    assert!((report.prompt_tokens_per_call - 50.0).abs() < 1e-9);
+
+    assert_eq!(samples.len(), 4);
+    let mut reps: Vec<(String, usize)> = samples
+        .iter()
+        .map(|s| (s.contract.clone(), s.rep))
+        .collect();
+    reps.sort();
+    assert_eq!(
+        reps,
+        [
+            ("perm".to_string(), 0),
+            ("perm".to_string(), 1),
+            ("pets".to_string(), 0),
+            ("pets".to_string(), 1)
+        ]
+    );
+    let pet = samples.iter().find(|s| s.contract == "pets").unwrap();
+    assert_eq!(pet.target, "getPet");
+    assert_eq!(pet.target_kind, "operation");
+    assert_eq!(pet.source, "llm");
+    assert_eq!(pet.api_type.as_deref(), Some("rest"));
+    assert_eq!(pet.domain.as_deref(), Some("travel"));
+    assert_eq!(pet.body["owner"]["name"], "Ada");
+    assert_eq!(pet.prompt_tokens, 50);
+    assert!(pet.error.is_none());
+    assert!(pet.request["path"]["petId"].is_string(), "{}", pet.request);
+    // The validated schema is self-contained: every reference it makes,
+    // transitively, is attached under `$defs`.
+    let schema = serde_json::to_string(&pet.schema).unwrap();
+    let defs = pet.schema["$defs"].as_object().unwrap();
+    for name in ["Pet", "Owner"] {
+        let key = defs
+            .keys()
+            .find(|k| k.ends_with(name))
+            .unwrap_or_else(|| panic!("no {name} in {schema}"));
+        assert!(schema.contains(&format!("#/$defs/{key}")), "{schema}");
+    }
+
+    let md = report.to_markdown();
+    assert!(md.contains("## Per API type"), "{md}");
+    assert!(md.contains("| graphql | 2 | 2 | 0 | 0 |"), "{md}");
+    assert!(md.contains("## Per domain"), "{md}");
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(json.contains("per_api_type"));
+    let back: EvalReport = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, report);
+}
+
+#[test]
+fn corpus_report_omits_breakdowns() {
+    let json = serde_json::to_string(&sample_report()).unwrap();
+    assert!(!json.contains("per_api_type"), "{json}");
+    assert!(!json.contains("per_domain"), "{json}");
+    assert!(!sample_report().to_markdown().contains("Per API type"));
+}
+
+#[test]
+fn run_rejects_manifest_with_corpus() {
+    Command::cargo_bin("mb-evals")
+        .unwrap()
+        .args(["run", "--corpus", "fixtures", "--manifest", "m.json"])
+        .assert()
+        .code(2);
 }

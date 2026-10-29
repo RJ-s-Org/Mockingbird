@@ -45,6 +45,7 @@
 - [Running in production](operations/production.md)
 - [Runbook](operations/runbook.md)
 - [Performance](performance.md)
+- [Model benchmarks](benchmarks.md)
 - [Upgrading](upgrading.md)
 
 # Project

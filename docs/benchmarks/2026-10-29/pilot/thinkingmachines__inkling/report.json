@@ -1,0 +1,83 @@
+{
+  "model": "thinkingmachines/inkling",
+  "base_url": "http://127.0.0.1:62314/r/thinkingmachines__inkling~pilot/api/v1",
+  "started_at": "2026-10-29T18:05:10.886106Z",
+  "calls": 3,
+  "schema_valid_rate": 0.0,
+  "first_pass_rate": 0.0,
+  "repair_rate": 0.0,
+  "fallback_rate": 1.0,
+  "p50_ms": 3842,
+  "p95_ms": 4310,
+  "prompt_tokens_per_call": 1363.3333333333333,
+  "completion_tokens_per_call": 308.6666666666667,
+  "per_contract": {
+    "graphql/ecommerce-shopify-admin": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 3842
+    },
+    "grpc/route-guide": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 1828
+    },
+    "rest/payments-stripe": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 4310
+    }
+  },
+  "per_api_type": {
+    "graphql": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 3842
+    },
+    "grpc": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 1828
+    },
+    "rest": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 4310
+    }
+  },
+  "per_domain": {
+    "ecommerce": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 3842
+    },
+    "generic": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 1828
+    },
+    "payments": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 0,
+      "fallback": 1,
+      "p95_ms": 4310
+    }
+  }
+}

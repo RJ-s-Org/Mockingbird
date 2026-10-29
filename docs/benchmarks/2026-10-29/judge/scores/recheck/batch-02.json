@@ -1,0 +1,21 @@
+{
+  "batch_id": "batch-02",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {"opaque_id": "ed2eafeebc", "realism": 3, "coherence": 5, "rationale": "Generic 'Acme Store' name and gid://shopify/Shop/1 read as placeholder; otherwise well-formed myshopifyDomain, url and Basic plan. Email, domain and plan flags all consistent."},
+    {"opaque_id": "94c61966db", "realism": 2, "coherence": 5, "rationale": "Name 'Example Shop', email admin@example-shop.com and example-shop.myshopify.com: placeholder 'example' across several fields. Fields agree with each other; Basic Shopify plan with shopifyPlus false is consistent."},
+    {"opaque_id": "47dd2b0e7a", "realism": 4, "coherence": 5, "rationale": "Plausible brand 'Northwind Outfitters', realistic shop id 61284073 and 'Shopify' plan; .example TLD on email and custom url is the only synthetic tell. Email and url share the brand domain; plan flags consistent."},
+    {"opaque_id": "7b2d206fb6", "realism": 4, "coherence": 5, "rationale": "Believable 'Bright Home Goods' store; low round id Shop/1001 and example.com domains are slightly synthetic. Email and custom url domains match; plan 'Shopify' with Plus false consistent."},
+    {"opaque_id": "a36e8c2d69", "realism": 5, "coherence": 5, "rationale": "'Willow & Birch Home Goods', real-looking email domain willowbirchhome.com, plausible id 548392017, Advanced plan: production-like. myshopifyDomain matches url; plan flags consistent."},
+    {"opaque_id": "b45cdc086c", "realism": 3, "coherence": 4, "rationale": "Email store@example.test is a test placeholder and does not match the Northstar brand or its northstar-supply.example url; rest (Chicago tz, id 4827319056, Basic plan) is plausible."},
+    {"opaque_id": "23c919da2e", "realism": 4, "coherence": 5, "rationale": "'Northwind Supply Co.' with Chicago tz and id 8421376 looks plausible; .example TLD in email and url is the synthetic tell. Email, url and myshopifyDomain share one brand; plan consistent."},
+    {"opaque_id": "79690edd88", "realism": 5, "coherence": 5, "rationale": "'Aurora Home Goods', real-looking email domain, 11-digit shop id typical of modern shops, legacy 'Advanced Shopify' plan name: production-like. Domains and plan flags all consistent."},
+    {"opaque_id": "3709da408e", "realism": 4, "coherence": 5, "rationale": "Plausible 'Northwind Outfitters' on Shopify Plus, id 84231957; .example TLD on email and url is mildly synthetic. displayName 'Shopify Plus' matches shopifyPlus true; email and url domains match."},
+    {"opaque_id": "3d9b557855", "realism": 4, "coherence": 5, "rationale": "'Minimalist Studio' and hello@minimaliststudio.com look real, but id 987654321 is an obvious descending placeholder. Domain, url and Basic Shopify plan with Plus false are consistent."},
+    {"opaque_id": "7d74b2bcb2", "realism": 4, "coherence": 5, "rationale": "'Northstar Supply Co.' with Chicago tz, id 89452173, Basic plan is plausible; email at northstarsupply.example is synthetic. url equals myshopifyDomain; plan flags consistent."},
+    {"opaque_id": "be155b79a7", "realism": 4, "coherence": 5, "rationale": "'Timber & Moss Supply Co.' on Shopify Plus with id 6842910471 is believable; example.com email domain is the only tell. shopifyPlus true matches displayName; url matches myshopifyDomain."},
+    {"opaque_id": "f17e748f1a", "realism": 4, "coherence": 5, "rationale": "'Greenleaf Studio' with hello@greenleaf.studio reads real; gid://shopify/Shop/1 is a bland placeholder id. url matches myshopifyDomain; Basic Shopify with Plus false consistent."},
+    {"opaque_id": "7e9717a1b8", "realism": 4, "coherence": 5, "rationale": "'Aurora & Co.' on Shopify Plus is plausible, but id 123456789 is sequential and email uses .example. shopifyPlus true matches displayName 'Shopify Plus'; domains consistent."},
+    {"opaque_id": "7af805fe59", "realism": 2, "coherence": 5, "rationale": "'Example Store', contact@example.com, example-store.myshopify.com and Shop/1: placeholder values across most fields. Fields are mutually consistent; Basic plan flags consistent."}
+  ]
+}
