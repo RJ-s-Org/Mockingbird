@@ -157,21 +157,15 @@ async fn sqlite_upgrades_from_p3() {
 }
 
 async fn postgres_upgrade(applied: usize) {
-    use sqlx::Connection;
-    use sqlx::postgres::{PgConnection, PgPoolOptions};
+    use sqlx::postgres::PgPoolOptions;
 
-    let Ok(base) = std::env::var("MB_TEST_POSTGRES_URL") else {
+    use crate::support::{POSTGRES_URL_VAR, drop_schema, url_with_fresh_schema};
+
+    let Ok(base) = std::env::var(POSTGRES_URL_VAR) else {
         println!("skipped: MB_TEST_POSTGRES_URL not set");
         return;
     };
-    let schema = format!("mb_{}", Uuid::new_v4().simple());
-    let mut conn = PgConnection::connect(&base).await.expect("connect");
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .execute(&mut conn)
-        .await
-        .expect("create schema");
-    let sep = if base.contains('?') { '&' } else { '?' };
-    let url = format!("{base}{sep}options=-c%20search_path%3D{schema}");
+    let (url, schema) = url_with_fresh_schema(&base).await;
     {
         let dir = tempfile::tempdir().expect("tempdir");
         first_migrations("postgres", applied, dir.path());
@@ -193,10 +187,7 @@ async fn postgres_upgrade(applied: usize) {
     let store = mb_store::connect(&url).await.expect("upgrade");
     check_upgraded(store.as_ref()).await;
     drop(store);
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-        .execute(&mut conn)
-        .await
-        .expect("drop schema");
+    drop_schema(&base, &schema).await;
 }
 
 #[tokio::test]

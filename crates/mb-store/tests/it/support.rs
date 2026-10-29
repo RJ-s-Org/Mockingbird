@@ -1,15 +1,15 @@
-#![cfg(test)]
-mod common;
+//! Helpers shared by the test modules.
 
 use sqlx::Connection;
 use sqlx::postgres::PgConnection;
 use uuid::Uuid;
 
-const URL_VAR: &str = "MB_TEST_POSTGRES_URL";
+/// The variable that names the Postgres test server; tests skip without it.
+pub const POSTGRES_URL_VAR: &str = "MB_TEST_POSTGRES_URL";
 
 /// Creates schema `mb_<uuid>` and returns `base` with its `search_path` set to
 /// it, so parallel tests never share tables.
-async fn url_with_fresh_schema(base: &str) -> (String, String) {
+pub async fn url_with_fresh_schema(base: &str) -> (String, String) {
     let schema = format!("mb_{}", Uuid::new_v4().simple());
     let mut conn = PgConnection::connect(base)
         .await
@@ -24,7 +24,8 @@ async fn url_with_fresh_schema(base: &str) -> (String, String) {
     (url, schema)
 }
 
-async fn drop_schema(base: &str, schema: &str) {
+/// Drops a schema made by [`url_with_fresh_schema`].
+pub async fn drop_schema(base: &str, schema: &str) {
     let mut conn = PgConnection::connect(base)
         .await
         .expect("connect to postgres");
@@ -32,16 +33,4 @@ async fn drop_schema(base: &str, schema: &str) {
         .execute(&mut conn)
         .await
         .expect("drop schema");
-}
-
-#[tokio::test]
-async fn postgres_conformance() {
-    let Ok(base) = std::env::var(URL_VAR) else {
-        println!("skipped: MB_TEST_POSTGRES_URL not set");
-        return;
-    };
-    let (url, schema) = url_with_fresh_schema(&base).await;
-    let store = mb_store::connect(&url).await.expect("connect");
-    common::conformance::run_all(store).await;
-    drop_schema(&base, &schema).await;
 }

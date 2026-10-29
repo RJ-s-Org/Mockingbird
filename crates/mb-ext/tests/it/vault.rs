@@ -1,7 +1,5 @@
 //! `vault:` secret references against a wiremock'd Vault KV v2 API.
 
-mod support;
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -188,7 +186,7 @@ async fn malformed_vault_refs_are_bad_refs() {
 
 #[tokio::test]
 async fn default_secrets_builds_vault_lazily_and_warns_once() {
-    let counter = support::EventCounter::default();
+    let counter = crate::support::EventCounter::default();
     let _guard = tracing::subscriber::set_default(counter.subscriber());
     // VAULT_ADDR set but no token: unusable, which eager construction would
     // have logged immediately.

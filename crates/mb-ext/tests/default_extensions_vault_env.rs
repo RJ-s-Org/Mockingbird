@@ -2,8 +2,10 @@
 //! logs nothing: the Vault client is only built on the first `vault:` resolve.
 //!
 //! This is its own test binary with a single test because it sets process
-//! environment variables.
+//! environment variables (`set_var` would race with the other tests' threads
+//! under `cargo test`), so it is not a module of `tests/it`.
 
+#[path = "it/support.rs"]
 mod support;
 
 use mb_ext::{ExtError, Extensions};
