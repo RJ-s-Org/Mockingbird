@@ -7,6 +7,7 @@ use std::fs::OpenOptions;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
@@ -226,9 +227,36 @@ pub fn default_profile_env_names(config: &Path) -> Vec<String> {
     names
 }
 
-/// `server start`.
+/// `server start`. The server process stays this process's child: it is
+/// kept so that [`stop`] and [`status`] in a long-lived caller (the MCP
+/// server) reap it once it exits, instead of seeing the exited process (a
+/// zombie) as still running.
 pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
-    start_child(args).await.map(|(info, _child)| info)
+    let (info, child) = start_child(args).await?;
+    if let Ok(mut started) = STARTED.lock() {
+        started.push(child);
+    }
+    Ok(info)
+}
+
+/// The servers [`start`] spawned from this process.
+static STARTED: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
+
+/// Whether `pid` is a server [`start`] spawned here: `Some(true)` while it
+/// runs, `Some(false)` once it exited (it is then reaped), `None` for any
+/// other process.
+fn started_alive(pid: u32) -> Option<bool> {
+    let mut started = STARTED.lock().ok()?;
+    let at = started.iter().position(|c| c.id() == pid)?;
+    match started[at].try_wait() {
+        Ok(None) => Some(true),
+        Ok(Some(_)) => {
+            // Already reaped: `wait` returns the recorded status at once.
+            let _ = started.swap_remove(at).wait();
+            Some(false)
+        }
+        Err(_) => None,
+    }
 }
 
 /// [`start`], also returning the server process, which the caller reaps
@@ -377,13 +405,17 @@ fn quiet(cmd: &mut Command) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-#[cfg(unix)]
 fn alive(pid: u32) -> bool {
+    started_alive(pid).unwrap_or_else(|| process_alive(pid))
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
     quiet(Command::new("kill").arg("-0").arg(pid.to_string()))
 }
 
 #[cfg(not(unix))]
-fn alive(pid: u32) -> bool {
+fn process_alive(pid: u32) -> bool {
     Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::{ephemeral, fixture};
+use crate::support::{ephemeral, fixture, wait_until};
 use mb_engine::StreamConfig;
 use mb_ext::Extensions;
 use mb_protocols::ProtocolSettings;
@@ -430,8 +430,13 @@ async fn standalone_proxy_forwards_to_a_running_server() {
         },
         rx,
     ));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let ca = std::fs::read(ca_dir.path().join("ca.pem")).unwrap();
+    // The proxy writes its CA as it starts.
+    let ca_pem = ca_dir.path().join("ca.pem");
+    wait_until("the proxy writes ca.pem", Duration::from_secs(5), || {
+        std::fs::read_to_string(&ca_pem).is_ok_and(|pem| pem.contains("-----END CERTIFICATE-----"))
+    })
+    .await;
+    let ca = std::fs::read(&ca_pem).unwrap();
     let r = client(&proxy_url, &ca)
         .get("https://api.orders.test/orders")
         .send()
@@ -633,6 +638,12 @@ fn python_with_urllib3() -> Option<PathBuf> {
 #[tokio::test(flavor = "multi_thread")]
 async fn python_preload_routes_plain_urllib3_pool_managers() {
     let Some(python) = python_with_urllib3() else {
+        // CI runners have them (ubuntu-latest ships python3-urllib3 and
+        // python3-certifi): a CI run that lost them must not pass silently.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "python3 with urllib3 and certifi is missing on CI (set MB_TEST_PYTHON)"
+        );
         eprintln!("skipped: python3 with urllib3 and certifi is not installed");
         return;
     };

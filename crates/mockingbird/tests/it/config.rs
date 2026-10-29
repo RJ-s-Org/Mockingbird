@@ -1174,7 +1174,8 @@ async fn invalid_reload_keeps_previous_state() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     ws.write("mocks: [this is: not: valid\n");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // The watcher tried the edit and rejected it.
+    wait_for_reload_error(&app.admin, |e| !e.is_empty()).await;
 
     let r = reqwest::get(format!("{}/orders/orders", app.data))
         .await
@@ -1214,7 +1215,10 @@ async fn reload_changing_brokers_is_rejected() {
         &format!("{local}  extra:\n    kind: memory\n"),
         "sold-out",
     ));
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    wait_for_reload_error(&app.admin, |e| {
+        e.starts_with("brokers changed: restart required (added [\"extra\"]")
+    })
+    .await;
     assert_eq!(scenario_names(&app.admin).await, ["out-of-stock"]);
     assert_eq!(app._app.brokers.names(), ["local"]);
 
@@ -1223,8 +1227,12 @@ async fn reload_changing_brokers_is_rejected() {
         "  local:\n    kind: memory\n    client_id_prefix: other\n",
         "sold-out",
     ));
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    wait_for_reload_error(&app.admin, |e| {
+        e.starts_with("brokers changed") && e.contains("changed [\"local\"]")
+    })
+    .await;
     assert_eq!(scenario_names(&app.admin).await, ["out-of-stock"]);
+    assert_eq!(app._app.brokers.names(), ["local"]);
 
     // The same brokers again: the watch is still running and applies it.
     ws.write(&with_brokers(local, "sold-out"));
@@ -3210,6 +3218,21 @@ async fn wait_for_readyz(admin: &str, pred: impl Fn(&Value) -> bool) -> Value {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("readyz never matched: {last}");
+}
+
+/// Waits until `/readyz` reports a failed config reload whose error
+/// matches `pred`; the watcher has then tried (and rejected) the edit.
+async fn wait_for_reload_error(admin: &str, pred: impl Fn(&str) -> bool) {
+    wait_for_readyz(admin, |b| {
+        b["reasons"].as_array().is_some_and(|reasons| {
+            reasons.iter().any(|r| {
+                r.as_str()
+                    .and_then(|r| r.strip_prefix("config_reload: "))
+                    .is_some_and(&pred)
+            })
+        })
+    })
+    .await;
 }
 
 #[tokio::test]

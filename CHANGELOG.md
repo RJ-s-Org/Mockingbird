@@ -8,6 +8,10 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- The MCP `stop_server` tool stops a server the same MCP server started at once with SIGTERM: it no longer waits 10 s and reports `forced: true` because the exited server lingered as an unreaped (zombie) child, and `server_status` no longer reports such a server as running.
+
 ## [0.1.0] - 2026-10-28
 
 The first release. Since 0.1.0-rc.1, in short:

@@ -337,29 +337,38 @@ async fn swap_during_inflight_requests() {
     registry.reload_all(&deps).await.unwrap();
     let base = serve(registry.router()).await;
     let http = reqwest::Client::new();
+    // `/orders/ping` exists only in v2.
+    assert_eq!(status_of(&base, "/orders/ping").await, 404);
 
     let mut inflight = Vec::new();
     for _ in 0..20 {
         let http = http.clone();
         let url = format!("{base}/orders/orders");
         inflight.push(tokio::spawn(async move {
-            http.get(url)
-                .header("X-Mockingbird-Latency", "200ms")
+            let status = http
+                .get(url)
+                .header("X-Mockingbird-Latency", "400ms")
                 .send()
                 .await
                 .unwrap()
                 .status()
-                .as_u16()
+                .as_u16();
+            (status, Instant::now())
         }));
     }
+    // Let the requests reach the handler (they then wait out the latency).
     tokio::time::sleep(Duration::from_millis(50)).await;
     activate(&store, &mock, &fixture_v2_source()).await;
     registry
         .reload_mock(&deps, DEFAULT_WORKSPACE, "orders")
         .await;
+    let swapped = Instant::now();
 
     for h in inflight {
-        assert_eq!(h.await.unwrap(), 200);
+        let (status, done) = h.await.unwrap();
+        assert_eq!(status, 200);
+        // Each request straddled the swap (sent before it, answered after).
+        assert!(done > swapped, "a request finished before the swap");
     }
     assert_eq!(status_of(&base, "/orders/ping").await, 200);
 }
