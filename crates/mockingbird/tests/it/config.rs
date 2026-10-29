@@ -971,6 +971,68 @@ async fn scenario_status_must_be_declared_like_the_admin_api() {
     }
 }
 
+/// `vault:` references are secret references like `env:`/`file:` for a
+/// profile's api_key and `${…}` header placeholders (MOCKINGBIRD-STUB-1).
+#[tokio::test]
+async fn vault_refs_are_accepted_for_profile_keys_and_headers() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(
+        "llm:\n  profiles:\n    v:\n      base_url: http://x\n      model: m\n      api_key: vault:secret/mockingbird#openai\n      headers: {cf-aig-authorization: \"Bearer ${vault:secret/mockingbird/gw#token}\"}\n",
+    );
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    let p = store
+        .get_profile(DEFAULT_WORKSPACE, "v")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        p.secret_ref.as_deref(),
+        Some("vault:secret/mockingbird#openai")
+    );
+
+    // A malformed vault ref is still refused, naming the accepted forms.
+    for (yaml, bad) in [
+        (
+            "llm:\n  profiles:\n    v: {base_url: http://x, model: m, api_key: \"vault:x\"}\n",
+            "vault:x",
+        ),
+        (
+            "llm:\n  profiles:\n    v: {base_url: http://x, model: m, headers: {cf-aig-authorization: \"Bearer ${vault:token#k}\"}}\n",
+            "vault:token#k",
+        ),
+    ] {
+        let store = self::store().await;
+        let e = reconcile(store.as_ref(), no_state().as_ref(), &ws.load(yaml))
+            .await
+            .unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("vault:<mount>/<path>#<field>"), "{bad}: {e}");
+    }
+}
+
+#[cfg(feature = "mqtt")]
+#[test]
+fn broker_sasl_password_accepts_vault_refs() {
+    let ws = Workspace::new();
+    let cfg = ws.load(
+        "brokers:\n  m:\n    kind: mqtt\n    url: mqtt://user@127.0.0.1:1883\n    client_id_prefix: mb\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: vault:secret/mockingbird#mqtt\n",
+    );
+    let configs = file_config::broker_configs(&cfg).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(
+        configs[0].sasl.as_ref().unwrap().password_ref,
+        "vault:secret/mockingbird#mqtt"
+    );
+    let e = broker_error(
+        &ws,
+        "    kind: mqtt\n    url: mqtt://127.0.0.1:1883\n    sasl:\n      mechanism: PLAIN\n      username: u\n      password: vault:hunter2\n",
+    );
+    assert!(e.contains("vault:<mount>/<path>#<field>"), "{e}");
+    assert!(!e.contains("hunter2"), "{e}");
+}
+
 #[tokio::test]
 async fn invalid_config_applies_nothing() {
     let ws = Workspace::new();

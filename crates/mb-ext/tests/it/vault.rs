@@ -154,10 +154,18 @@ async fn default_secrets_without_vault_addr_rejects_vault_refs() {
     assert!(matches!(none, Ok(None)));
 
     let store = DefaultSecrets::from_vars(|_| None);
+    // A well-formed reference is not "invalid": the error names the missing
+    // configuration (MB-STORE-STUB-6).
     let reference = "vault:secret/mockingbird#k";
     let err = store.resolve(reference).await;
     assert!(
-        matches!(&err, Err(ExtError::BadSecretRef(r)) if r == reference),
+        matches!(&err, Err(ExtError::Other(m)) if m.contains("VAULT_ADDR is not set")),
+        "{err:?}"
+    );
+    // A malformed one still is.
+    let err = store.resolve("vault:token#k").await;
+    assert!(
+        matches!(&err, Err(ExtError::BadSecretRef(r)) if r == "vault:token#k"),
         "{err:?}"
     );
     // env:/file: still work through the defaults.
@@ -197,9 +205,11 @@ async fn default_secrets_builds_vault_lazily_and_warns_once() {
 
     let reference = "vault:secret/mockingbird#k";
     for _ in 0..3 {
+        // Every resolve names why Vault is disabled, not just the first log.
         let err = store.resolve(reference).await;
         assert!(
-            matches!(&err, Err(ExtError::BadSecretRef(r)) if r == reference),
+            matches!(&err, Err(ExtError::Other(m))
+                if m.contains("Vault is disabled") && m.contains("neither VAULT_TOKEN nor VAULT_TOKEN_FILE")),
             "{err:?}"
         );
     }

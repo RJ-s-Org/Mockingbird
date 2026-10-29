@@ -226,8 +226,10 @@ const VAULT_VARS: [&str; 5] = [
 
 /// The self-hosted [`SecretStore`]: `env:` and `file:` through
 /// [`EnvFileSecrets`], and `vault:` through [`VaultSecrets`] when `VAULT_ADDR`
-/// is set. Without Vault, `vault:` references are
-/// [`ExtError::BadSecretRef`].
+/// is set. A malformed `vault:` reference is [`ExtError::BadSecretRef`]; a
+/// well-formed one without a usable Vault (`VAULT_ADDR` unset, or a Vault
+/// configuration that cannot be used) is [`ExtError::Other`], naming the
+/// reason.
 ///
 /// Construction only snapshots the `VAULT_*` variables: the Vault client
 /// (CA bundle, HTTP client) is built on the first `vault:` resolve, so
@@ -237,7 +239,8 @@ const VAULT_VARS: [&str; 5] = [
 pub struct DefaultSecrets {
     files: EnvFileSecrets,
     vars: Vec<(&'static str, String)>,
-    vault: tokio::sync::OnceCell<Option<VaultSecrets>>,
+    /// The Vault client, or why there is none.
+    vault: tokio::sync::OnceCell<Result<VaultSecrets, String>>,
 }
 
 impl fmt::Debug for DefaultSecrets {
@@ -272,8 +275,9 @@ impl DefaultSecrets {
         }
     }
 
-    /// The Vault client, built (off the async workers) on first use.
-    async fn vault(&self) -> Option<&VaultSecrets> {
+    /// The Vault client, built (off the async workers) on first use, or
+    /// why Vault is unavailable.
+    async fn vault(&self) -> Result<&VaultSecrets, &str> {
         self.vault
             .get_or_init(|| async {
                 let vars = self.vars.clone();
@@ -288,15 +292,17 @@ impl DefaultSecrets {
                         Err(ExtError::Other(format!("building the Vault client: {e}")))
                     });
                 match built {
-                    Ok(vault) => vault,
+                    Ok(Some(vault)) => Ok(vault),
+                    Ok(None) => Err("VAULT_ADDR is not set".to_string()),
                     Err(e) => {
                         tracing::warn!(error = %e, "Vault secret references disabled");
-                        None
+                        Err(format!("Vault is disabled: {e}"))
                     }
                 }
             })
             .await
             .as_ref()
+            .map_err(String::as_str)
     }
 }
 
@@ -304,9 +310,14 @@ impl DefaultSecrets {
 impl SecretStore for DefaultSecrets {
     async fn resolve(&self, reference: &str) -> Result<String, ExtError> {
         if reference.starts_with("vault:") {
+            if parse_ref(reference).is_none() {
+                return Err(ExtError::BadSecretRef(reference.to_string()));
+            }
             return match self.vault().await {
-                Some(vault) => vault.resolve(reference).await,
-                None => Err(ExtError::BadSecretRef(reference.to_string())),
+                Ok(vault) => vault.resolve(reference).await,
+                Err(reason) => Err(ExtError::Other(format!(
+                    "cannot resolve {reference}: {reason}"
+                ))),
             };
         }
         self.files.resolve(reference).await

@@ -119,7 +119,7 @@ For explicit history, use `mockingbird_contract_version` instead of `contract` (
 
 Nothing secret is sent to Mockingbird or stored in the state, with one exception:
 
-- `mockingbird_llm_profile.secret_ref` and `webhooks[*].secret` are references (`env:NAME`, `file:/path`, `vault:path#key`) that the Mockingbird server resolves. The provider rejects anything else at plan time, and the server only accepts references matching `server.api_secret_refs` / `server.api_webhook_secret_refs` (by default `env:MB_LLM_*` or `env:*_API_KEY`, and `env:*_WEBHOOK_SECRET` or `env:MB_WEBHOOK_*`).
+- `mockingbird_llm_profile.secret_ref` and `webhooks[*].secret` are references (`env:NAME`, `file:/path`, `vault:<mount>/<path>#<field>`) that the Mockingbird server resolves. The provider rejects anything else at plan time, and the server only accepts references matching `server.api_secret_refs` / `server.api_webhook_secret_refs` (by default `env:MB_LLM_*` or `env:*_API_KEY`, and `env:*_WEBHOOK_SECRET` or `env:MB_WEBHOOK_*`).
 - `mockingbird_api_key.token` is a real credential. It is marked sensitive but is stored in the state, like every generated secret, so keep the state in an encrypted backend and hand the token to a secret store rather than printing it. It is null after an import (the API never shows a token again). Every change of the key's attributes replaces it, revoking the old key.
 - The provider's `token` is never stored.
 

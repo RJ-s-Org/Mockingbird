@@ -481,8 +481,8 @@ impl AuthConfig {
 pub struct OidcConfig {
     pub issuer: String,
     pub client_id: String,
-    /// A secret reference (`env:NAME` or `file:/path`); `None` for a
-    /// public client.
+    /// A secret reference (`env:NAME`, `file:/path` or
+    /// `vault:<mount>/<path>#<field>`); `None` for a public client.
     #[serde(default)]
     pub client_secret: Option<String>,
     #[serde(default = "OidcConfig::default_scopes")]
@@ -666,7 +666,8 @@ pub struct FileProfile {
     pub workspace: String,
     pub base_url: String,
     pub model: String,
-    /// A secret reference (`env:NAME` or `file:/path`), never a raw key.
+    /// A secret reference (`env:NAME`, `file:/path` or
+    /// `vault:<mount>/<path>#<field>`), never a raw key.
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -910,7 +911,8 @@ fn default_client_id_prefix() -> String {
 pub struct FileSasl {
     pub mechanism: String,
     pub username: String,
-    /// A secret reference (`env:NAME` or `file:/path`), never a password.
+    /// A secret reference (`env:NAME`, `file:/path` or
+    /// `vault:<mount>/<path>#<field>`), never a password.
     pub password: String,
 }
 
@@ -952,7 +954,8 @@ fn broker_config(name: &str, broker: &FileBroker) -> anyhow::Result<BrokerConfig
         Some(sasl) => {
             if !crate::reconcile::valid_secret_ref(&sasl.password) {
                 bail!(
-                    "brokers.{name}.sasl.password: must be a secret reference (env:NAME or file:/path), not a password"
+                    "brokers.{name}.sasl.password: must be a secret reference ({}), not a password",
+                    crate::reconcile::SECRET_REF_FORMS
                 );
             }
             Some(SaslConfig {
@@ -1073,7 +1076,8 @@ pub struct FileWebhook {
     /// Operation ids, event types (`customer.created`) or `"*"`.
     #[serde(default = "WebhookTarget::all_events")]
     pub events: Vec<String>,
-    /// A secret reference (`env:NAME`, `file:/path`, `vault:path#key`).
+    /// A secret reference (`env:NAME`, `file:/path`,
+    /// `vault:<mount>/<path>#<field>`).
     #[serde(default)]
     pub secret: Option<String>,
     /// `stripe`, `hmac-sha256` or `none`; default `hmac-sha256` with a

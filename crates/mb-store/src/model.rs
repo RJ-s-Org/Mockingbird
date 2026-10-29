@@ -192,7 +192,7 @@ impl WebhookTarget {
             && !is_secret_reference(secret)
         {
             return Err(
-                "secret must be a secret reference (env:NAME, file:/path or vault:path#key), not a value"
+                "secret must be a secret reference (env:NAME, file:/path or vault:<mount>/<path>#<field>), not a value"
                     .into(),
             );
         }
@@ -210,12 +210,35 @@ impl WebhookTarget {
     }
 }
 
-/// `env:`, `file:` or `vault:` followed by a non-blank remainder.
+/// `env:` or `file:` followed by a non-blank remainder without whitespace,
+/// or a well-formed [`is_vault_reference`].
 fn is_secret_reference(s: &str) -> bool {
-    ["env:", "file:", "vault:"].iter().any(|p| {
-        s.strip_prefix(p)
-            .is_some_and(|rest| !rest.trim().is_empty() && !rest.contains(char::is_whitespace))
-    })
+    is_vault_reference(s)
+        || ["env:", "file:"].iter().any(|p| {
+            s.strip_prefix(p)
+                .is_some_and(|rest| !rest.trim().is_empty() && !rest.contains(char::is_whitespace))
+        })
+}
+
+/// Whether `s` is a well-formed `vault:<mount>/<path>#<field>` reference,
+/// the shape the Vault resolver in `mb-ext` reads: a non-empty field, and a
+/// mount and `/`-separated path whose segments are non-empty, not `.` or
+/// `..` and without `?`. No part may contain whitespace.
+pub fn is_vault_reference(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("vault:") else {
+        return false;
+    };
+    let Some((location, field)) = rest.split_once('#') else {
+        return false;
+    };
+    let Some((mount, path)) = location.split_once('/') else {
+        return false;
+    };
+    let segment_ok = |s: &str| !s.is_empty() && s != "." && s != ".." && !s.contains('?');
+    !field.is_empty()
+        && !rest.contains(char::is_whitespace)
+        && segment_ok(mount)
+        && path.split('/').all(segment_ok)
 }
 
 /// At most [`WebhookTarget::MAX_TARGETS`] targets, each valid; messages
@@ -656,7 +679,8 @@ pub struct LlmProfile {
     pub name: String,
     pub base_url: String,
     pub model: String,
-    /// `env:NAME` or `file:/path`; never a raw secret.
+    /// `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`; never a
+    /// raw secret.
     pub secret_ref: Option<String>,
     pub json_schema: bool,
     pub temperature: f32,
@@ -1080,7 +1104,45 @@ impl ImportJobStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::PathRewrite;
+    use super::{PathRewrite, WebhookTarget, validate_webhooks};
+
+    fn hook(secret: &str) -> WebhookTarget {
+        WebhookTarget {
+            url: "https://example.com/hook".into(),
+            events: WebhookTarget::all_events(),
+            secret: Some(secret.into()),
+            signing: None,
+            delay_ms: 0,
+        }
+    }
+
+    #[test]
+    fn webhook_vault_secret_needs_mount_path_and_field() {
+        for ok in [
+            "vault:secret/mockingbird#webhook",
+            "vault:kv/apps/shop#signing_key",
+            "env:SHOP_WEBHOOK_SECRET",
+            "file:/run/secrets/hook",
+        ] {
+            assert_eq!(validate_webhooks(&[hook(ok)]), Ok(()), "{ok}");
+        }
+        // What the Vault resolver cannot parse is refused at write time.
+        for bad in [
+            "vault:token#key",
+            "vault:secret/mockingbird",
+            "vault:secret/mockingbird#",
+            "vault:/mockingbird#k",
+            "vault:secret//x#k",
+            "vault:secret/../x#k",
+            "vault:secret/x?y#k",
+            "vault:secret/a b#k",
+            "vault:",
+        ] {
+            let err = validate_webhooks(&[hook(bad)]).unwrap_err();
+            assert!(err.contains("vault:<mount>/<path>#<field>"), "{bad}: {err}");
+            assert!(bad == "vault:" || !err.contains(bad), "{bad} echoed: {err}");
+        }
+    }
 
     fn rewrite(strip: Option<&str>, add: Option<&str>) -> PathRewrite {
         PathRewrite {
