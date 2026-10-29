@@ -13,7 +13,7 @@ use mb_auth::{
     Permission, Principal, PrincipalKind, Role, RoleMapping, SESSION_COOKIE, SessionManager,
     generate_key, hash_secret, parse_token,
 };
-use mb_store::{ControlStore, connect};
+use mb_store::{AdminSession, ControlStore, connect};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -493,18 +493,71 @@ async fn session_create_lookup_destroy() {
 
 #[tokio::test]
 async fn expired_session_is_none_and_deleted() {
+    // `lookup` compares against the wall clock, so instead of waiting out a
+    // TTL the test stores sessions whose expiry is already past (or exactly
+    // now, which counts as expired) next to one that is still valid.
     let s = store().await;
-    let sm = SessionManager::new(s.clone(), Duration::from_secs(1), false);
-    let cookie = sm.create(&Principal::local()).await.unwrap();
-    assert!(sm.lookup(&cookie).await.unwrap().is_some());
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert_eq!(sm.lookup(&cookie).await.unwrap(), None);
+    let sm = SessionManager::new(s.clone(), Duration::from_secs(3600), false);
+    let now = Utc::now();
+    let insert = |cookie: &'static str, expires_at| {
+        let s = s.clone();
+        async move {
+            s.create_admin_session(&AdminSession {
+                id_hash: sha_hex(cookie),
+                principal: serde_json::to_value(Principal::local()).unwrap(),
+                created_at: now - chrono::Duration::hours(2),
+                expires_at,
+                last_seen: now - chrono::Duration::hours(2),
+            })
+            .await
+            .unwrap();
+        }
+    };
+    insert("expired", now - chrono::Duration::seconds(1)).await;
+    insert("expires-now", now).await;
+    insert("valid", now + chrono::Duration::hours(1)).await;
+
+    for cookie in ["expired", "expires-now"] {
+        assert!(
+            s.get_admin_session(&sha_hex(cookie))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(sm.lookup(cookie).await.unwrap(), None, "{cookie}");
+        assert!(
+            s.get_admin_session(&sha_hex(cookie))
+                .await
+                .unwrap()
+                .is_none(),
+            "{cookie} was not deleted"
+        );
+    }
+    assert_eq!(sm.lookup("valid").await.unwrap(), Some(Principal::local()));
     assert!(
-        s.get_admin_session(&sha_hex(&cookie))
+        s.get_admin_session(&sha_hex("valid"))
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
+}
+
+#[tokio::test]
+async fn session_expiry_is_created_at_plus_ttl() {
+    let s = store().await;
+    let ttl = Duration::from_secs(90);
+    let sm = SessionManager::new(s.clone(), ttl, false);
+    let cookie = sm.create(&Principal::local()).await.unwrap();
+    let row = s
+        .get_admin_session(&sha_hex(&cookie))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.expires_at - row.created_at,
+        chrono::Duration::seconds(90)
+    );
+    assert_eq!(row.last_seen, row.created_at);
 }
 
 #[tokio::test]

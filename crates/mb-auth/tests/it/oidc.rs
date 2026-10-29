@@ -70,6 +70,20 @@ async fn jwks_requests(p: &MockOidcProvider) -> usize {
         .count()
 }
 
+/// Waits (at most 5 s) until the provider has received `n` JWKS requests.
+/// wiremock records a request when it arrives, before any response delay.
+async fn wait_for_jwks_requests(p: &MockOidcProvider, n: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while jwks_requests(p).await < n {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {n} JWKS requests (saw {})",
+            jwks_requests(p).await
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test]
 async fn discovery_and_login_round_trip() {
     let p = MockOidcProvider::start().await;
@@ -377,21 +391,23 @@ async fn jwks_refetch_does_not_block_cached_kids() {
     let cached = p.sign(p.claims("carol", &[], None));
     v.verify(&cached).await.unwrap();
 
-    // From now on the JWKS endpoint takes 3 s to answer.
+    // From now on the JWKS endpoint takes 30 s to answer; the test never
+    // waits for it.
     Mock::given(method("GET"))
         .and(path("/jwks"))
-        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(3)))
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(30)))
         .with_priority(1)
         .mount(&p.server)
         .await;
+    assert_eq!(jwks_requests(&p).await, 1);
     p.rotate_key().await;
     let unknown = p.sign(p.claims("carol", &[], None));
     let slow = {
         let v = Arc::clone(&v);
         tokio::spawn(async move { v.verify(&unknown).await })
     };
-    // Let the refetch start.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The refetch has reached the provider and is waiting for its answer.
+    wait_for_jwks_requests(&p, 2).await;
     assert!(!slow.is_finished());
 
     let started = std::time::Instant::now();
@@ -403,7 +419,86 @@ async fn jwks_refetch_does_not_block_cached_kids() {
         "cached-kid verifications waited {:?} for the refetch",
         started.elapsed()
     );
-    assert!(matches!(slow.await.unwrap(), Err(AuthError::Upstream(_))));
+    // They ran while the refetch was still in flight, and started no other.
+    assert!(!slow.is_finished());
+    assert_eq!(jwks_requests(&p).await, 2);
+    slow.abort();
+}
+
+#[tokio::test]
+async fn failed_jwks_refetch_is_upstream_error() {
+    let p = MockOidcProvider::start().await;
+    let v = verifier(&p).with_refetch_interval(Duration::ZERO);
+    v.verify(&p.sign(p.claims("carol", &[], None)))
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&p.server)
+        .await;
+    p.rotate_key().await;
+    let unknown = p.sign(p.claims("carol", &[], None));
+    assert!(matches!(
+        v.verify(&unknown).await,
+        Err(AuthError::Upstream(_))
+    ));
+    assert_eq!(jwks_requests(&p).await, 2);
+}
+
+#[tokio::test]
+async fn providers_and_rotations_sign_with_distinct_keys() {
+    let jwk = |p: &MockOidcProvider| {
+        let token = p.sign(p.claims("carol", &[], None));
+        let p_uri = p.issuer();
+        async move {
+            let jwks: Value = reqwest::get(format!("{p_uri}/jwks"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(jwks["keys"].as_array().map(Vec::len), Some(1));
+            let kid = jsonwebtoken::decode_header(&token).unwrap().kid.unwrap();
+            assert_eq!(jwks["keys"][0]["kid"], json!(kid));
+            jwks["keys"][0]["n"].as_str().unwrap().to_string()
+        }
+    };
+    let a = MockOidcProvider::start().await;
+    let b = MockOidcProvider::start().await;
+    let mut moduli = vec![jwk(&a).await, jwk(&b).await];
+    for _ in 0..4 {
+        a.rotate_key().await;
+        moduli.push(jwk(&a).await);
+    }
+    // Two providers in one process, and a provider across its first five
+    // keys (the fifth is generated, not pooled), never share a key.
+    let a_keys = [&moduli[..1], &moduli[2..]].concat();
+    let mut unique = a_keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), a_keys.len(), "provider reused a key");
+    assert_ne!(moduli[0], moduli[1], "two providers share a key");
+}
+
+#[tokio::test]
+async fn token_signed_by_another_provider_with_same_kid_401() {
+    // Both providers' first key has kid `key-1`; only the key differs.
+    let a = MockOidcProvider::start().await;
+    let b = MockOidcProvider::start().await;
+    let mut claims = b.claims("carol", &[], None);
+    claims["iss"] = json!(b.issuer());
+    let forged = a.sign(claims);
+    assert_eq!(
+        jsonwebtoken::decode_header(&forged).unwrap().kid.as_deref(),
+        Some("key-1")
+    );
+    assert_unauthenticated(verifier(&b).verify(&forged).await);
+    verifier(&b)
+        .verify(&b.sign(b.claims("carol", &[], None)))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

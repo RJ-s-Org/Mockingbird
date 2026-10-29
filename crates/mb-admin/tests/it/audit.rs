@@ -16,6 +16,7 @@ use mb_admin::{
 use mb_auth::{AuthError, Authenticate, Principal, PrincipalKind, Role};
 use mb_state::{MemoryStore, StateStore};
 use mb_store::{AuditEvent, AuditFilter, ControlStore, NewAuditEvent};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};
@@ -723,9 +724,12 @@ async fn audit_jsonl_export() {
     assert!(r.text.ends_with('\n'));
     assert_eq!(lines[0]["target"], "mock:m1202");
     assert_eq!(lines[1202]["target"], "mock:m0");
-    let mut ids: Vec<i64> = lines.iter().map(|l| l["id"].as_i64().unwrap()).collect();
-    ids.dedup();
-    assert_eq!(ids.len(), 1203);
+    // Newest first and no id twice, across the page boundary too.
+    let ids: Vec<i64> = lines.iter().map(|l| l["id"].as_i64().unwrap()).collect();
+    assert!(
+        ids.windows(2).all(|w| w[0] > w[1]),
+        "ids are not strictly decreasing"
+    );
 
     // Filters apply to the export too.
     let r = h
@@ -894,10 +898,19 @@ async fn webhook_retries_then_gives_up() {
     );
     sink.send(stored(1));
     assert_eq!(wait_for(&server, 4).await.len(), 4);
-    // No fifth attempt.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let got = server.received_requests().await.unwrap();
-    assert_eq!(got.len(), 4);
+    // No fifth attempt: delivery is sequential, so the next request the
+    // server sees after event 1 is given up on is event 2's first.
+    sink.send(stored(2));
+    let got = wait_for(&server, 5).await;
+    let ids: Vec<i64> = got
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(ids[..5], [1, 1, 1, 1, 2], "{ids:?}");
     assert!(got[0].headers.get("x-mockingbird-signature").is_none());
 }
 
@@ -937,14 +950,31 @@ async fn webhook_queue_full_drops() {
         .mount(&server)
         .await;
     let sink = WebhookSink::spawn(server.uri(), None, reqwest::Client::new());
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let start = Instant::now();
-    for i in 0..2000 {
-        sink.send(stored(i));
-    }
+    metrics::with_local_recorder(&recorder, || {
+        for i in 0..2000 {
+            sink.send(stored(i));
+        }
+    });
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "{:?}",
         start.elapsed()
+    );
+    let dropped: Vec<_> = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == "mb_audit_webhook_dropped_total")
+        .map(|(.., value)| value)
+        .collect();
+    // The queue holds 1024 (QUEUE_CAPACITY) events; the delivery task may
+    // already have taken one out.
+    assert!(
+        dropped == [DebugValue::Counter(976)] || dropped == [DebugValue::Counter(975)],
+        "{dropped:?}"
     );
 }
 
@@ -982,7 +1012,12 @@ fn retention_cutoff_never_overflows() {
 async fn retention_with_huge_days_does_not_panic() {
     let h = harness().await;
     let task = spawn_retention(h.store.clone(), u32::MAX);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // On the test's current-thread runtime the task runs when this one
+    // yields; its first tick fires at once and, with no representable
+    // cutoff, does no I/O before waiting for the next tick.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
     assert!(!task.is_finished(), "retention task died");
     task.abort();
 }
