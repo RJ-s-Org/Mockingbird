@@ -15,6 +15,7 @@ use async_graphql::parser::types::{
 use mb_mcm::{Binding, GraphqlOperationType, ProtocolPayload};
 
 use super::GraphqlError;
+use super::directives::{self, Served};
 use super::resolve::{self, Shape, Shapes};
 use super::subscription;
 use crate::MockRuntime;
@@ -128,6 +129,8 @@ fn merge(name: &str, base: &mut Kind, ext: Kind) -> Result<(), GraphqlError> {
 struct Sdl {
     types: BTreeMap<String, Def>,
     roots: [Option<String>; 3],
+    /// The custom executable directives declared (see [`directives`]).
+    directives: HashSet<async_graphql::Name>,
 }
 
 fn parse(sdl: &str) -> Result<Sdl, GraphqlError> {
@@ -136,6 +139,7 @@ fn parse(sdl: &str) -> Result<Sdl, GraphqlError> {
     let mut types: BTreeMap<String, Def> = BTreeMap::new();
     let mut extensions = Vec::new();
     let mut declared: Option<[Option<String>; 3]> = None;
+    let mut executable = HashSet::new();
     for def in doc.definitions {
         match def {
             TypeSystemDefinition::Schema(s) => {
@@ -165,7 +169,9 @@ fn parse(sdl: &str) -> Result<Sdl, GraphqlError> {
                     types.insert(name, def);
                 }
             }
-            TypeSystemDefinition::Directive(_) => {}
+            TypeSystemDefinition::Directive(d) => {
+                executable.extend(directives::executable(&d.node));
+            }
         }
     }
     for (name, ext) in extensions {
@@ -173,6 +179,9 @@ fn parse(sdl: &str) -> Result<Sdl, GraphqlError> {
             .get_mut(&name)
             .ok_or_else(|| GraphqlError::Schema(format!("extension of undefined type {name}")))?;
         merge(&name, &mut base.kind, ext)?;
+    }
+    for (name, def) in &types {
+        unique(name, &def.kind)?;
     }
     let roots = declared.unwrap_or_else(|| {
         ["Query", "Mutation", "Subscription"].map(|default| {
@@ -183,7 +192,57 @@ fn parse(sdl: &str) -> Result<Sdl, GraphqlError> {
             .then(|| default.to_string())
         })
     });
-    Ok(Sdl { types, roots })
+    Ok(Sdl {
+        types,
+        roots,
+        directives: executable,
+    })
+}
+
+/// Rejects a name defined more than once within one type (after `extend`
+/// blocks are merged). SDL forbids it and the importer refuses it, but a
+/// bundle imported before it did can still carry one, and async-graphql's
+/// dynamic schema panics on a duplicate field or interface.
+fn unique(name: &str, kind: &Kind) -> Result<(), GraphqlError> {
+    fn check<'a>(
+        names: impl IntoIterator<Item = &'a str>,
+        what: impl Fn(&str) -> String,
+    ) -> Result<(), GraphqlError> {
+        let mut seen = HashSet::new();
+        match names.into_iter().find(|n| !seen.insert(*n)) {
+            Some(n) => Err(GraphqlError::Schema(format!(
+                "{} is defined more than once",
+                what(n)
+            ))),
+            None => Ok(()),
+        }
+    }
+    match kind {
+        Kind::Object { implements, fields } | Kind::Interface { implements, fields } => {
+            check(implements.iter().map(String::as_str), |i| {
+                format!("interface {i} of {name}")
+            })?;
+            check(fields.iter().map(|f| f.name.node.as_str()), |f| {
+                format!("field \"{name}.{f}\"")
+            })?;
+            for f in fields {
+                check(f.arguments.iter().map(|a| a.node.name.node.as_str()), |a| {
+                    format!("argument \"{a}\" of \"{name}.{}\"", f.name.node)
+                })?;
+            }
+            Ok(())
+        }
+        Kind::Input { fields } => check(fields.iter().map(|f| f.name.node.as_str()), |f| {
+            format!("input field \"{name}.{f}\"")
+        }),
+        Kind::Enum { values } => check(values.iter().map(|v| v.value.node.as_str()), |v| {
+            format!("enum value \"{name}.{v}\"")
+        }),
+        Kind::Union { members } => check(members.iter().map(String::as_str), |m| {
+            format!("member {m} of union {name}")
+        }),
+        Kind::Scalar => Ok(()),
+    }
 }
 
 pub(super) fn type_ref(ty: &Type) -> TypeRef {
@@ -368,8 +427,9 @@ pub(super) fn input_value(v: &InputValueDefinition) -> InputValue {
 
 /// A dynamic schema answering `rt.bundle`'s queries, mutations and
 /// subscriptions, with
-/// the depth, complexity and introspection settings of `rt.protocols`.
-pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Schema, GraphqlError> {
+/// the depth, complexity and introspection settings of `rt.protocols`, and
+/// the custom executable directives its SDL declares.
+pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Served, GraphqlError> {
     let Some(ProtocolPayload::Graphql { sdl }) = &rt.bundle.protocol_payload else {
         return Err(GraphqlError::MissingSdl);
     };
@@ -424,9 +484,10 @@ pub(crate) fn build_schema(rt: &Arc<MockRuntime>) -> Result<Schema, GraphqlError
     if !p.graphql_introspection {
         builder = builder.disable_introspection();
     }
-    builder
+    let schema = builder
         .finish()
-        .map_err(|e| GraphqlError::Schema(e.to_string()))
+        .map_err(|e| GraphqlError::Schema(e.to_string()))?;
+    Ok(Served::new(schema, sdl.directives))
 }
 
 /// The subscription root type: one streaming field per object field.

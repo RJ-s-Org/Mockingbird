@@ -111,6 +111,7 @@ Request limits: HTTP/REST requests at most 1,000 query pairs and 1,000 form or m
 
 ## Known limits
 
+- GraphQL directives the schema declares for query locations (`directive @inContext(country: CountryCode) on QUERY`, as Shopify's Storefront schema has; from SDL or from an introspection result's `directives`) are accepted wherever they appear in a query and ignored: the answer is generated as if they were absent. A variable that only such directives use is accepted too. A directive the schema does not declare, or declares only for type-system locations (`on OBJECT`, `on FIELD_DEFINITION`, …), fails validation with `Unknown directive`. `@skip` and `@include` work as usual.
 - WSDL 2.0 is not supported; only WSDL 1.1 with SOAP 1.1/1.2 bindings is.
 - External XSDs are never fetched: a `schemaLocation` must name a file uploaded with the WSDL in the same archive.
 - Complex XSD `pattern` facets may yield faker output that does not validate against them; Mockingbird logs a warning when that happens.

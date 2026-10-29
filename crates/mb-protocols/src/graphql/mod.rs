@@ -31,6 +31,7 @@ use mb_ext::Tenancy;
 use crate::{DataPlaneAuthMode, MockRuntime, ScenarioRuntime, call};
 
 mod batch;
+mod directives;
 mod ledger;
 mod resolve;
 mod schema;
@@ -55,7 +56,7 @@ pub enum GraphqlError {
 
 struct GraphqlState {
     rt: Arc<MockRuntime>,
-    schema: async_graphql::dynamic::Schema,
+    schema: directives::Served,
     /// Open subscription WebSocket connections to this mock.
     connections: Arc<AtomicUsize>,
 }
@@ -200,7 +201,8 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
     } else {
         None
     };
-    if let Some(doc) = doc {
+    if let Some(mut doc) = doc {
+        st.schema.strip(&mut doc);
         request.set_parsed_query(doc);
     }
     execute(&st, request, &method, headers, admitted).await
@@ -284,7 +286,11 @@ async fn execute(
         variables,
         admitted,
     ));
-    let mut response = st.schema.execute(request.data(Arc::clone(&call))).await;
+    let mut response = st
+        .schema
+        .schema
+        .execute(request.data(Arc::clone(&call)))
+        .await;
     let mut collected = call.collected();
     let reports = std::mem::take(&mut collected.reports);
     // The scenario's headers, when it applies to a root field answered.

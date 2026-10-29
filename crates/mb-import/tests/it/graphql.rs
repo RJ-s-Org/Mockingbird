@@ -473,3 +473,55 @@ fn duplicate_members_are_rejected_at_import() {
         assert!(message.contains("more than once"), "{sdl}: {message}");
     }
 }
+
+/// MB-PROTOCOLS-STUB-1: an introspection result's custom executable
+/// directives (Storefront's `@inContext`) are rendered into the stored SDL,
+/// so the GraphQL adapter accepts queries using them. Built-in and
+/// type-system-only directives are left out.
+#[test]
+fn introspection_keeps_custom_executable_directives() {
+    let doc = json!({"__schema": {
+        "queryType": {"name": "Query"},
+        "types": [
+            {"kind": "OBJECT", "name": "Query", "fields": [
+                {"name": "shop", "args": [], "type": {"kind": "SCALAR", "name": "String"}}
+            ], "interfaces": []},
+            {"kind": "ENUM", "name": "CountryCode", "enumValues": [{"name": "CA"}]}
+        ],
+        "directives": [
+            {"name": "inContext", "description": "Contextualizes data.",
+             "locations": ["QUERY", "MUTATION"], "isRepeatable": false,
+             "args": [
+                {"name": "country", "type": {"kind": "ENUM", "name": "CountryCode"}},
+                {"name": "buyer", "type": {"kind": "NON_NULL", "ofType":
+                    {"kind": "SCALAR", "name": "String"}}, "defaultValue": "\"x\""}
+             ]},
+            {"name": "tag", "locations": ["FIELD", "OBJECT"], "isRepeatable": true, "args": []},
+            {"name": "deprecated", "locations": ["FIELD_DEFINITION"], "args": []},
+            {"name": "skip", "locations": ["FIELD"], "args": [
+                {"name": "if", "type": {"kind": "NON_NULL", "ofType":
+                    {"kind": "SCALAR", "name": "Boolean"}}}
+            ]},
+            {"name": "key", "locations": ["OBJECT"], "args": []}
+        ]
+    }});
+    let b = compile(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let Some(ProtocolPayload::Graphql { sdl }) = &b.protocol_payload else {
+        panic!("expected a GraphQL payload");
+    };
+    assert!(
+        sdl.contains(
+            "\"Contextualizes data.\"\ndirective @inContext(country: CountryCode, buyer: String! = \"x\") on QUERY | MUTATION\n"
+        ),
+        "{sdl}"
+    );
+    assert!(
+        sdl.contains("directive @tag repeatable on FIELD\n"),
+        "{sdl}"
+    );
+    for absent in ["@deprecated", "@skip", "@key"] {
+        assert!(!sdl.contains(absent), "{absent}: {sdl}");
+    }
+    // The rendered SDL compiles the same way.
+    assert_eq!(compile(sdl.as_bytes()).unwrap().operations, b.operations);
+}
