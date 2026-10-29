@@ -7,6 +7,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -297,9 +298,10 @@ async fn fetch_hops(
     resolver: &dyn Resolver,
 ) -> Result<Fetched, FetchError> {
     let mut url = validate_url(raw)?;
+    let roots = extra_roots(&policy.extra_roots_pem)?;
     let mut redirects = 0usize;
     loop {
-        let client = pinned_client(&url, policy, resolver).await?;
+        let client = pinned_client(&url, &roots, policy, resolver).await?;
         let mut response = client
             .get(url.clone())
             .header(USER_AGENT, USER_AGENT_VALUE)
@@ -355,9 +357,38 @@ async fn fetch_hops(
     }
 }
 
+/// Parsed extra roots.
+type Roots = Arc<Vec<reqwest::Certificate>>;
+
+/// The last PEM bundle parsed by [`extra_roots`] and its certificates. The
+/// configured bundle rarely changes, so one entry serves every fetch.
+static PARSED_ROOTS: Mutex<Option<(Vec<u8>, Roots)>> = Mutex::new(None);
+
+/// The certificates of `pem` (none when it is empty), parsed once per
+/// distinct bundle rather than for every hop.
+fn extra_roots(pem: &[u8]) -> Result<Roots, FetchError> {
+    if pem.is_empty() {
+        return Ok(Arc::default());
+    }
+    let cached = PARSED_ROOTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .filter(|(bytes, _)| bytes.as_slice() == pem)
+        .map(|(_, roots)| Arc::clone(roots));
+    if let Some(roots) = cached {
+        return Ok(roots);
+    }
+    let roots: Roots = Arc::new(reqwest::Certificate::from_pem_bundle(pem).map_err(transport)?);
+    *PARSED_ROOTS.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some((pem.to_vec(), Arc::clone(&roots)));
+    Ok(roots)
+}
+
 /// Checks the hop's addresses and builds a client pinned to them.
 async fn pinned_client(
     url: &Url,
+    roots: &[reqwest::Certificate],
     policy: &FetchPolicy,
     resolver: &dyn Resolver,
 ) -> Result<reqwest::Client, FetchError> {
@@ -365,9 +396,7 @@ async fn pinned_client(
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
     if !policy.extra_roots_pem.is_empty() {
-        let roots =
-            reqwest::Certificate::from_pem_bundle(&policy.extra_roots_pem).map_err(transport)?;
-        builder = builder.tls_certs_merge(roots);
+        builder = builder.tls_certs_merge(roots.iter().cloned());
     }
     let builder = match url.host() {
         Some(Host::Ipv4(v4)) => {
@@ -430,4 +459,23 @@ fn transport(err: reqwest::Error) -> FetchError {
         source = cause.source();
     }
     FetchError::Transport(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, extra_roots};
+
+    #[test]
+    fn extra_roots_are_parsed_once_per_bundle() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tls/ca.pem");
+        let pem = std::fs::read(path).unwrap();
+        let first = extra_roots(&pem).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(Arc::ptr_eq(&first, &extra_roots(&pem).unwrap()));
+        assert!(extra_roots(b"").unwrap().is_empty());
+        let bad = b"-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n";
+        assert!(extra_roots(bad).is_err());
+        // A failed parse is not cached and does not evict the last bundle.
+        assert!(Arc::ptr_eq(&first, &extra_roots(&pem).unwrap()));
+    }
 }

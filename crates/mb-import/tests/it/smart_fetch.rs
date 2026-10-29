@@ -224,6 +224,37 @@ async fn redirect_followed_and_rechecked() {
 }
 
 #[tokio::test]
+async fn extra_roots_apply_to_every_hop_and_bad_ones_fail() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/a"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/b"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/b"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("landed"))
+        .mount(&server)
+        .await;
+    let url = format!("{}/a", server.uri());
+    let mut policy = allow(&["127.0.0.1"]);
+    policy.extra_roots_pem = crate::support::fixture("tls/ca.pem");
+    // Twice: the second fetch reuses the parsed bundle.
+    for _ in 0..2 {
+        let fetched = fetch(&url, &policy).await.unwrap();
+        assert_eq!(fetched.bytes, b"landed");
+    }
+    policy.extra_roots_pem =
+        b"-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n".to_vec();
+    for _ in 0..2 {
+        let err = fetch(&url, &policy).await.unwrap_err();
+        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+    policy.extra_roots_pem = crate::support::fixture("tls/ca.pem");
+    assert_eq!(fetch(&url, &policy).await.unwrap().bytes, b"landed");
+}
+
+#[tokio::test]
 async fn redirect_limit() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

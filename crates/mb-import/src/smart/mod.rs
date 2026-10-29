@@ -14,6 +14,7 @@ pub mod model;
 pub mod paths;
 mod pdfscan;
 pub mod postman;
+mod probe;
 pub mod redact;
 pub mod text;
 
@@ -102,15 +103,12 @@ fn json_kind(bytes: &[u8]) -> Option<ImportKind> {
     if *first != b'{' {
         return None;
     }
-    let doc: Value = serde_json::from_slice(bytes).ok()?;
-    if doc.pointer("/log/entries").is_some_and(Value::is_array) {
+    // Only the markers are read: no `Value` tree of up to MAX_IMPORT_BYTES.
+    let doc = probe::markers(bytes)?;
+    if doc.log_entries {
         return Some(ImportKind::Har);
     }
-    let postman_schema = doc
-        .pointer("/info/schema")
-        .and_then(Value::as_str)
-        .is_some_and(|s| s.contains("schema.getpostman.com"));
-    if postman_schema || (doc.pointer("/info/_postman_id").is_some() && doc.get("item").is_some()) {
+    if doc.postman_schema || (doc.postman_id && doc.item) {
         return Some(ImportKind::Postman);
     }
     None

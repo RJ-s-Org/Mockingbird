@@ -551,28 +551,38 @@ fn one_of(mut names: Vec<&str>) -> Map<String, Value> {
     obj
 }
 
-fn def_schema(schema: &Schema, name: &str, def: &TypeDef) -> Value {
+/// The object types implementing each interface, by interface name, in
+/// type-name order.
+fn implementors(schema: &Schema) -> BTreeMap<&str, Vec<&str>> {
+    let mut out: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, def) in &schema.types {
+        if let Kind::Object { implements, .. } = &def.kind {
+            for interface in implements {
+                out.entry(interface.as_str())
+                    .or_default()
+                    .push(name.as_str());
+            }
+        }
+    }
+    out
+}
+
+fn def_schema(
+    schema: &Schema,
+    implementors: &BTreeMap<&str, Vec<&str>>,
+    name: &str,
+    def: &TypeDef,
+) -> Value {
     let mut obj = match &def.kind {
         Kind::Scalar => {
             return json!({ "description": format!("GraphQL scalar {name}") });
         }
         Kind::Object { fields, .. } => fields_schema(schema, fields, Some(name)),
-        Kind::Interface { fields, .. } => {
-            let implementors: Vec<&str> = schema
-                .types
-                .iter()
-                .filter(|(_, t)| {
-                    matches!(&t.kind, Kind::Object { implements, .. } if implements.iter().any(|i| i == name))
-                })
-                .map(|(n, _)| n.as_str())
-                .collect();
-            if implementors.is_empty() {
-                // No concrete type to pick from: describe the shared fields.
-                fields_schema(schema, fields, None)
-            } else {
-                one_of(implementors)
-            }
-        }
+        Kind::Interface { fields, .. } => match implementors.get(name) {
+            Some(names) if !names.is_empty() => one_of(names.clone()),
+            // No concrete type to pick from: describe the shared fields.
+            _ => fields_schema(schema, fields, None),
+        },
         Kind::Union { members } => one_of(members.iter().map(String::as_str).collect()),
         Kind::Enum { values } => {
             let mut obj = Map::new();
@@ -672,10 +682,11 @@ fn operation(
 
 fn compile_text(sdl: &str, bytes: &[u8], title: Option<String>) -> Result<Bundle, ImportError> {
     let schema = build(sdl)?;
+    let implementors = implementors(&schema);
     let defs: Map<String, Value> = schema
         .types
         .iter()
-        .map(|(name, def)| (name.clone(), def_schema(&schema, name, def)))
+        .map(|(name, def)| (name.clone(), def_schema(&schema, &implementors, name, def)))
         .collect();
     let mut operations = Vec::new();
     for ((operation_type, label), root) in ROOTS.iter().zip(&schema.roots) {

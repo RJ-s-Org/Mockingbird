@@ -1,5 +1,7 @@
 //! Shared JSON Schema normalisation: ref rewriting and OpenAPI 3.0 dialect fixes.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value};
 
 const DEFS_PREFIX: &str = "#/$defs/";
@@ -147,26 +149,45 @@ const NAME_MAPS: [&str; 5] = [
 /// are annotations and are skipped: their refs are neither rewritten by
 /// [`normalize_schema`] nor resolved by anything downstream.
 pub(crate) fn collect_refs<'a>(value: &'a Value, out: &mut Vec<(String, &'a str)>) {
-    walk_refs(value, String::new(), false, out);
+    walk_refs(value, &mut String::new(), false, out);
 }
 
-fn walk_refs<'a>(value: &'a Value, at: String, names: bool, out: &mut Vec<(String, &'a str)>) {
+/// Walks `value`, whose pointer is `at`. `at` is one buffer extended and
+/// truncated around each child, so a pointer `String` is allocated only
+/// for a collected `$ref`.
+fn walk_refs<'a>(value: &'a Value, at: &mut String, names: bool, out: &mut Vec<(String, &'a str)>) {
+    let len = at.len();
     match value {
         Value::Object(m) => {
             for (k, v) in m {
-                let child = || format!("{at}/{}", k.replace('~', "~0").replace('/', "~1"));
-                match (k.as_str(), v) {
-                    _ if names => walk_refs(v, child(), false, out),
-                    ("$ref", Value::String(r)) => out.push((at.clone(), r)),
-                    ("enum" | "const" | "default" | "examples", _) => {}
-                    (k, _) if k.starts_with("x-") => {}
-                    (k, _) => walk_refs(v, child(), NAME_MAPS.contains(&k), out),
+                let recurse_names = match (k.as_str(), v) {
+                    _ if names => false,
+                    ("$ref", Value::String(r)) => {
+                        out.push((at.clone(), r));
+                        continue;
+                    }
+                    ("enum" | "const" | "default" | "examples", _) => continue,
+                    (k, _) if k.starts_with("x-") => continue,
+                    (k, _) => NAME_MAPS.contains(&k),
+                };
+                at.push('/');
+                for c in k.chars() {
+                    match c {
+                        '~' => at.push_str("~0"),
+                        '/' => at.push_str("~1"),
+                        c => at.push(c),
+                    }
                 }
+                walk_refs(v, at, recurse_names, out);
+                at.truncate(len);
             }
         }
         Value::Array(a) => {
             for (i, v) in a.iter().enumerate() {
-                walk_refs(v, format!("{at}/{i}"), false, out);
+                // Writing to a String cannot fail.
+                let _ = write!(at, "/{i}");
+                walk_refs(v, at, false, out);
+                at.truncate(len);
             }
         }
         _ => {}
@@ -176,4 +197,71 @@ fn walk_refs<'a>(value: &'a Value, at: String, names: bool, out: &mut Vec<(Strin
 /// Resolve a `#/$defs/Name` ref to its definition name, if it has that shape.
 pub(crate) fn defs_name(r: &str) -> Option<&str> {
     r.strip_prefix(DEFS_PREFIX)
+}
+
+#[cfg(test)]
+mod perf {
+    use super::collect_refs;
+    use serde_json::{Map, Value, json};
+
+    /// A schema tree of about `n` nodes with one `$ref` in each property.
+    fn wide(n: usize) -> Value {
+        let mut props = Map::new();
+        for i in 0..n / 8 {
+            props.insert(
+                format!("p/{i}~x"),
+                json!({"type": "object", "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "array", "items": [{"type": "integer"}, {"type": "number"}]},
+                    "c": {"$ref": "#/$defs/C"}
+                }}),
+            );
+        }
+        json!({"type": "object", "properties": props})
+    }
+
+    /// MB-IMPORT-PERF-8: `collect_refs` over `n` and `10n` nodes. Run with
+    /// `cargo test -p mockingbird-import --release --lib perf -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn perf_8_collect_refs() {
+        for n in [100_000, 1_000_000] {
+            let schema = wide(n);
+            let t = (0..3)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    let mut refs = Vec::new();
+                    collect_refs(&schema, &mut refs);
+                    std::hint::black_box(refs);
+                    start.elapsed()
+                })
+                .min()
+                .unwrap_or_default();
+            println!("PERF-8 n={n}: collect_refs {t:?}");
+        }
+    }
+
+    #[test]
+    fn collect_refs_escapes_pointer_segments() {
+        let schema = json!({
+            "properties": {"a/b~c": {"items": [{"$ref": "#/$defs/X"}]}},
+            "allOf": [{"$ref": "#/$defs/Y"}],
+            "x-skip": {"$ref": "#/$defs/Z"},
+            "enum": [{"$ref": "#/$defs/E"}],
+            "$defs": {"$ref": {"$ref": "#/$defs/D"}},
+            "$ref": "#/$defs/R"
+        });
+        let mut refs = Vec::new();
+        collect_refs(&schema, &mut refs);
+        refs.sort();
+        assert_eq!(
+            refs,
+            vec![
+                (String::new(), "#/$defs/R"),
+                ("/$defs/$ref".to_string(), "#/$defs/D"),
+                ("/allOf/0".to_string(), "#/$defs/Y"),
+                ("/properties/a~1b~0c/items/0".to_string(), "#/$defs/X"),
+            ]
+        );
+    }
 }
