@@ -1,6 +1,3 @@
-#![cfg(test)]
-mod common;
-
 use std::time::Duration;
 
 use sqlx::Connection;
@@ -15,7 +12,7 @@ async fn sqlite_memory_conformance() {
     let store = mb_state::connect("sqlite::memory:", LONG_TTL)
         .await
         .expect("connect");
-    common::conformance::run_all(store).await;
+    crate::conformance::run_all(store).await;
 }
 
 #[tokio::test]
@@ -23,7 +20,7 @@ async fn sqlite_ttl_expiry() {
     let store = mb_state::connect("sqlite::memory:", Duration::from_secs(1))
         .await
         .expect("connect");
-    common::conformance::ttl_expiry(store).await;
+    crate::conformance::ttl_expiry(store).await;
 }
 
 #[tokio::test]
@@ -95,7 +92,7 @@ async fn postgres_conformance() {
     };
     let (url, schema) = url_with_fresh_schema(&base).await;
     let store = mb_state::connect(&url, LONG_TTL).await.expect("connect");
-    common::conformance::run_all(store).await;
+    crate::conformance::run_all(store).await;
     drop_schema(&base, &schema).await;
 }
 
@@ -109,7 +106,7 @@ async fn postgres_ttl_expiry() {
     let store = mb_state::connect(&url, Duration::from_secs(1))
         .await
         .expect("connect");
-    common::conformance::ttl_expiry(store).await;
+    crate::conformance::ttl_expiry(store).await;
     drop_schema(&base, &schema).await;
 }
 

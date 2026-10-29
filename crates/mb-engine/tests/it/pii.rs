@@ -1,4 +1,3 @@
-#![cfg(test)]
 use std::collections::BTreeMap;
 
 use mb_engine::pii::{BuiltinPattern, CustomPattern, PiiError, Scrubber, ScrubberConfig};

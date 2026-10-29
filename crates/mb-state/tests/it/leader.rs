@@ -1,7 +1,6 @@
 //! Leader election. The Postgres and Redis tests are gated by
 //! `MB_TEST_POSTGRES_URL` / `MB_TEST_REDIS_URL`; each uses its own random lock
 //! name so tests share one server safely.
-#![cfg(test)]
 
 use std::time::Duration;
 
@@ -15,6 +14,8 @@ use tokio::sync::watch;
 use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
 
+use crate::support::env_url;
+
 const PG_VAR: &str = "MB_TEST_POSTGRES_URL";
 const REDIS_VAR: &str = "MB_TEST_REDIS_URL";
 
@@ -24,16 +25,6 @@ fn timings() -> LeaderTimings {
     LeaderTimings {
         renew_interval: RENEW,
         lease_ttl: Duration::from_millis(1000),
-    }
-}
-
-fn env_url(var: &str) -> Option<String> {
-    match std::env::var(var) {
-        Ok(url) => Some(url),
-        Err(_) => {
-            eprintln!("skipped: {var} not set");
-            None
-        }
     }
 }
 

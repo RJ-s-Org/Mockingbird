@@ -24,9 +24,11 @@ cross-node = { max-threads = 1 }
 
 # Each filter matches both the current `tests/<name>.rs` binaries and the
 # planned single `tests/it` binary whose modules keep the file names.
+# (mockingbird-state has only the `tests/it` binary now: nextest rejects a
+# `binary(...)` name that matches no binary.)
 [[profile.default.overrides]]
 filter = """
-    (package(mockingbird-state) & (binary(bus) | (kind(test) & test(/^bus::/))))
+    (package(mockingbird-state) & kind(test) & test(/^bus::/))
   | (package(mockingbird-cli) & (binary(ha_cluster) | (kind(test) & test(/^ha_cluster::/))))
   | (package(mockingbird-cli) & (binary(roles) | (kind(test) & test(/^roles::/))))
 """

@@ -1,10 +1,9 @@
-#![cfg(test)]
-use std::sync::Arc;
-
 use mb_engine::{Engine, EngineConfig, MessageContext, SchemaValidator, Source};
-use mb_llm::{LlmError, Provider, ResponseFormat, Role, ScriptedProvider};
+use mb_llm::{ResponseFormat, Role};
 use mb_mcm::{Bundle, Channel, ChannelBinding, Direction};
 use serde_json::{Map, Value, json};
+
+use crate::support::scripted;
 
 fn message_schema() -> Value {
     json!({
@@ -49,15 +48,6 @@ fn message_bundle() -> Bundle {
         channels: vec![channel],
         webhooks: Vec::new(),
     }
-}
-
-fn scripted(script: Vec<Result<String, LlmError>>) -> (Arc<ScriptedProvider>, Engine) {
-    let provider = Arc::new(ScriptedProvider::new(script));
-    let dyn_provider: Arc<dyn Provider> = provider.clone();
-    (
-        provider,
-        Engine::new(Some(dyn_provider), EngineConfig::default()),
-    )
 }
 
 fn ctx() -> MessageContext {

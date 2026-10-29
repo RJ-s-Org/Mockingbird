@@ -1,5 +1,4 @@
 //! The output budget and persona formats, through `Engine::generate`.
-#![cfg(test)]
 
 use std::sync::Arc;
 

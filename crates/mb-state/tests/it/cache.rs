@@ -6,6 +6,8 @@ use mb_state::{
 };
 use serde_json::json;
 
+use crate::support::wait_until;
+
 fn key(session: &str) -> SessionKey {
     SessionKey {
         workspace: "default".into(),
@@ -81,13 +83,13 @@ async fn changes_made_below_the_wrapper_invalidate() {
     let c = st.response_cache().unwrap();
     c.put(&key("a"), "list".into(), Some("orders"), answer(1));
     inner.upsert(&key("a"), order("o1")).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while c.get(&key("a"), "list").is_some() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_until(
+        Duration::from_secs(1),
+        Duration::ZERO,
+        "the cached answer is invalidated",
+        || c.get(&key("a"), "list").is_none(),
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]

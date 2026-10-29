@@ -1,35 +1,18 @@
-#![cfg(test)]
 use std::sync::Arc;
 
 use mb_engine::{
     Engine, EngineConfig, GenerationContext, OperationCall, ScenarioSpec, SchemaValidator, Source,
     apply_set,
 };
-use mb_import::compile;
 use mb_llm::{Provider, Role, ScriptedProvider, Usage};
 use mb_mcm::Bundle;
 use mb_state::StoredResource;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, json};
 
-fn orders() -> Bundle {
-    let path = format!(
-        "{}/../../fixtures/openapi/orders-3.0.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    compile(&std::fs::read(path).unwrap()).unwrap()
-}
+use crate::support::{orders, valid_order};
 
 fn order_validator(bundle: &Bundle) -> SchemaValidator {
     SchemaValidator::new(&bundle.with_defs(&json!({"$ref": "#/$defs/Order"}))).unwrap()
-}
-
-fn valid_order() -> Value {
-    json!({
-        "id": "7f9c2ba4-e88f-4c1b-9f4a-3d2f0c6b1a10",
-        "customerId": "c1",
-        "status": "pending",
-        "total": 42.5
-    })
 }
 
 fn call() -> OperationCall {
