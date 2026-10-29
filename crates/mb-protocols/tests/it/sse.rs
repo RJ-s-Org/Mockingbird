@@ -15,7 +15,7 @@ use mb_protocols::http_rest;
 use mb_state::MemoryStore;
 use serde_json::{Value, json};
 
-use crate::support::Records;
+use crate::support::{Records, stable_count};
 
 fn events() -> Arc<Bundle> {
     let path = format!(
@@ -216,10 +216,11 @@ async fn sse_disconnect_stops_generation() {
         assert_eq!(frame.event.as_deref(), Some("tick"));
     }
     drop(reader);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let after_drop = provider.chunks_yielded();
+    // Chunks come every 20 ms: a count steady over 40 ms has stopped.
+    let after_drop = stable_count(Duration::from_millis(40), || provider.chunks_yielded()).await;
     assert!(after_drop <= 5, "{after_drop}");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // And it stays stopped (an absence check, five chunk intervals long).
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(provider.chunks_yielded(), after_drop);
 }
 

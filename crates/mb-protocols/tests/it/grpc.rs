@@ -19,7 +19,7 @@ use tonic::codegen::http::uri::PathAndQuery;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
-use crate::support::Records;
+use crate::support::{Records, wait_until};
 
 fn route_guide() -> Arc<Bundle> {
     let path = format!(
@@ -672,18 +672,21 @@ impl mb_ext::UsageSink for Usage {
 }
 
 impl Usage {
-    /// The events seen once no more arrive for 100 ms (reports of a
-    /// finished stream are sent from a spawned task).
-    async fn settled(&self) -> Vec<mb_ext::UsageEvent> {
-        let mut seen = usize::MAX;
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let now = self.0.lock().unwrap().len();
-            if now == seen {
-                return self.0.lock().unwrap().clone();
+    /// The events seen once there are `n` (waiting up to 5 s; reports of a
+    /// finished stream are sent from a spawned task) and no more arrive in
+    /// a further 50 ms, so a caller checking for exactly `n` sees extras.
+    async fn settled(&self, n: usize) -> Vec<mb_ext::UsageEvent> {
+        wait_until(Duration::from_secs(5), Duration::from_millis(2), || async {
+            let events = self.0.lock().unwrap().clone();
+            if events.len() >= n {
+                Ok(())
+            } else {
+                Err(format!("wanted {n} usage events, got {events:?}"))
             }
-            seen = now;
-        }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.0.lock().unwrap().clone()
     }
 }
 
@@ -779,7 +782,7 @@ async fn bidi_stream_meters_each_item() {
     }
     drop(tx);
     assert!(replies.message().await.unwrap().is_none());
-    let events = usage.settled().await;
+    let events = usage.settled(4).await;
     assert_eq!(events.len(), 4, "{events:?}");
     for e in &events {
         assert_eq!(e.operation_id, "RouteGuide.RouteChat");
@@ -811,7 +814,7 @@ async fn bidi_stream_meters_each_items_tokens() {
     }
     drop(tx);
     assert!(replies.message().await.unwrap().is_none());
-    let events = usage.settled().await;
+    let events = usage.settled(3).await;
     assert_eq!(events.len(), 3, "{events:?}");
     for e in &events {
         assert_eq!(e.source, "llm", "{e:?}");
@@ -846,7 +849,7 @@ async fn client_stream_admits_each_item() {
         .unwrap();
     assert_eq!(quota.count(), 3);
     // One engine call, one usage event.
-    assert_eq!(usage.settled().await.len(), 1);
+    assert_eq!(usage.settled(1).await.len(), 1);
 
     // The mock's rate limit applies to each message too: a burst of 2
     // admits the call (its first message) and one more.
@@ -892,7 +895,7 @@ async fn bidi_quota_refusal_ends_stream_resource_exhausted() {
     assert_eq!(err.message(), "quota spent");
     drop(tx);
     // The two items sent were metered; the refused one was not.
-    let events = usage.settled().await;
+    let events = usage.settled(2).await;
     assert_eq!(events.len(), 2, "{events:?}");
     assert!(events.iter().all(|e| e.status == 200));
     let recs = records.0.lock().unwrap().clone();

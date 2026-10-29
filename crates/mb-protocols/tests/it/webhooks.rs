@@ -419,9 +419,24 @@ async fn reads_errors_and_forced_failures_fire_nothing() {
         .await
         .unwrap();
     assert_eq!(forced.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(log.list("default", "m", 10).is_empty());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    // A successful create is the sentinel: each call spawns its event task
+    // before it responds, and this current-thread runtime runs tasks in
+    // spawn order, so once the create's delivery is in, an event of any
+    // call above would be logged too.
+    let created = router
+        .clone()
+        .oneshot(post_json(
+            "/orders",
+            json!({"customerId": "c1", "total": 5}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    let deliveries = log.list("default", "m", 10);
+    assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+    assert_eq!(deliveries[0].operation, "createOrder");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -457,8 +472,8 @@ async fn events_filter_by_operation_or_type() {
         ))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(log.list("default", "m", 10).is_empty());
+    // The create matches neither target; the update below is the sentinel,
+    // and the single delivery checked after it shows the create sent none.
     let req = Request::put("/orders/o1")
         .header("content-type", "application/json")
         .body(Body::from(

@@ -950,21 +950,41 @@ async fn soap_wsdl_requires_the_operations_credentials() {
     assert!(String::from_utf8_lossy(&body).contains("definitions"));
 }
 
+/// With data-plane auth explicitly off, the WSDL is served to a caller with
+/// no credentials, and the key store is never asked.
 #[tokio::test]
 async fn soap_wsdl_open_without_data_plane_auth() {
-    let app = soap::try_router(Arc::new(runtime(
-        "calc",
-        fixture("wsdl/calculator.wsdl"),
-        None,
-    )))
-    .unwrap();
+    let mut rt = runtime("calc", fixture("wsdl/calculator.wsdl"), None);
+    rt.workspace = "team-a".into();
+    rt.set_data_plane_auth(DataPlaneAuth {
+        mode: DataPlaneAuthMode::None,
+        header: "x-api-key".into(),
+    });
+    let keys = keys(&[("team-a", "soap-good")]);
+    rt.data_plane_keys = Some(keys.clone());
+    let app = soap::try_router(Arc::new(rt)).unwrap();
     let resp = app
         .oneshot(
             Request::get("/calculator.asmx?wsdl")
+                .header("host", "example.test")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "text/xml; charset=utf-8");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("<wsdl:portType name=\"CalculatorSoap\">"),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"location="http://example.test/calculator.asmx""#),
+        "{text}"
+    );
+    assert_eq!(keys.calls.load(Ordering::Relaxed), 0);
 }

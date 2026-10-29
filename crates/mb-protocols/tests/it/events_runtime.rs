@@ -16,6 +16,8 @@ use mb_protocols::{MockRuntime, RequestKind, RequestRecord, RequestRecorder};
 use mb_state::{MemoryStore, SessionKey, StateStore};
 use serde_json::{Value, json};
 
+use crate::support::{subscribed, wait_until};
+
 #[derive(Default)]
 struct Capture(Mutex<Vec<RequestRecord>>);
 
@@ -30,15 +32,18 @@ impl Capture {
         self.0.lock().unwrap().clone()
     }
 
-    async fn wait(&self, n: usize, timeout: Duration) -> Vec<RequestRecord> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
+    /// Every record once there are at least `n`; fails the test with what
+    /// arrived if that takes over 5 s.
+    async fn wait(&self, n: usize) -> Vec<RequestRecord> {
+        wait_until(Duration::from_secs(5), Duration::from_millis(2), || async {
             let records = self.records();
-            if records.len() >= n || tokio::time::Instant::now() >= deadline {
-                return records;
+            if records.len() >= n {
+                Ok(records)
+            } else {
+                Err(format!("wanted {n} records, got {records:?}"))
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        })
+        .await
     }
 }
 
@@ -104,11 +109,6 @@ fn runtime_with(bundle: Bundle, setup: EventSetup) -> Harness {
     runtime_with_brokers(bundle, setup, memory_brokers())
 }
 
-/// Let the consumer tasks subscribe.
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
 fn cancel_binding(bundle: &Bundle) -> ChannelBinding {
     bundle.channel("cancelOrder").unwrap().binding.clone()
 }
@@ -123,6 +123,37 @@ fn incoming(payload: &[u8], headers: &[(&str, &str)]) -> InMessage {
             .collect(),
         payload: payload.to_vec(),
     }
+}
+
+/// Injects a valid message after the ones a test sent, waits until it is
+/// handled, checks that its reply is the only message published, and
+/// returns every record.
+///
+/// A consumer handles its messages in order and publishes a reply before it
+/// records the message, so once the sentinel's receive is recorded, every
+/// earlier message is fully handled: a reply to one of them would show.
+async fn sentinel_handled(h: &Harness, binding: &ChannelBinding) -> Vec<RequestRecord> {
+    h.broker
+        .inject(binding, incoming(br#"{"orderId":"sentinel"}"#, &[]));
+    let records = wait_until(Duration::from_secs(5), Duration::from_millis(2), || async {
+        let records = h.records.records();
+        let handled = records.iter().any(|r| {
+            r.method == "RECEIVE" && r.status == 200 && r.request["body"]["orderId"] == "sentinel"
+        });
+        if handled {
+            Ok(records)
+        } else {
+            Err(format!("sentinel not handled: {records:?}"))
+        }
+    })
+    .await;
+    let published = h.broker.published();
+    assert_eq!(
+        published.len(),
+        1,
+        "only the sentinel is answered: {published:?}"
+    );
+    records
 }
 
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -270,7 +301,7 @@ async fn consumed_message_validated_recorded_and_replied() {
     let bundle = orders();
     let binding = cancel_binding(&bundle);
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     h.broker.inject(
         &binding,
@@ -290,7 +321,7 @@ async fn consumed_message_validated_recorded_and_replied() {
     assert_eq!(header(&msg.headers, "other"), None);
     assert_eq!(header(&msg.headers, "x-mockingbird-hop"), Some("1"));
 
-    let records = h.records.wait(2, Duration::from_secs(5)).await;
+    let records = h.records.wait(2).await;
     let received = records.iter().find(|r| r.method == "RECEIVE").unwrap();
     assert_eq!(received.status, 200);
     assert_eq!(received.kind, RequestKind::Event);
@@ -338,7 +369,7 @@ async fn consumer_group_uses_the_client_id_prefix() {
         EventSetup::default(),
         memory_brokers_with_prefix("acme"),
     );
-    settle().await;
+    subscribed(&h.broker, 1).await;
     let groups = h.broker.subscribed_groups();
     assert!(!groups.is_empty());
     assert!(groups.iter().all(|g| g == "acme-orders"), "{groups:?}");
@@ -351,7 +382,7 @@ async fn consumed_message_headers_are_redacted_in_the_record() {
     let bundle = orders();
     let binding = cancel_binding(&bundle);
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     h.broker.inject(
         &binding,
@@ -370,7 +401,7 @@ async fn consumed_message_headers_are_redacted_in_the_record() {
         ),
     );
     h.broker.wait_published(1, Duration::from_secs(5)).await;
-    let records = h.records.wait(2, Duration::from_secs(5)).await;
+    let records = h.records.wait(2).await;
     let received = records.iter().find(|r| r.method == "RECEIVE").unwrap();
     let headers = received.request["headers"].as_object().unwrap();
     assert_eq!(headers["correlation_id"], "c9");
@@ -396,7 +427,7 @@ async fn poison_message_recorded_not_crash() {
     let bundle = orders();
     let binding = cancel_binding(&bundle);
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     h.broker.inject(&binding, incoming(b"not json", &[]));
     h.broker
@@ -404,7 +435,7 @@ async fn poison_message_recorded_not_crash() {
     let replies = h.broker.wait_published(1, Duration::from_secs(5)).await;
     assert_eq!(replies.len(), 1);
 
-    let records = h.records.wait(3, Duration::from_secs(5)).await;
+    let records = h.records.wait(3).await;
     let received: Vec<&RequestRecord> = records.iter().filter(|r| r.method == "RECEIVE").collect();
     assert_eq!(received.len(), 2);
     assert_eq!(received[0].status, 400);
@@ -417,19 +448,20 @@ async fn schema_invalid_message_422_no_reply() {
     let bundle = orders();
     let binding = cancel_binding(&bundle);
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     h.broker
         .inject(&binding, incoming(br#"{"reason":"no id"}"#, &[]));
-    let records = h.records.wait(1, Duration::from_secs(5)).await;
+    let records = h.records.wait(1).await;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, 422);
     let response = records[0].response.as_ref().unwrap();
     assert_eq!(response["valid"], false);
     assert!(!response["errors"].as_array().unwrap().is_empty());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(h.broker.published().is_empty());
-    assert_eq!(h.records.records().len(), 1);
+    let records = sentinel_handled(&h, &binding).await;
+    // The 422, then the sentinel's reply and receive: nothing else.
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0].status, 422);
 }
 
 #[tokio::test]
@@ -437,7 +469,7 @@ async fn oversized_consumed_message_recorded_413() {
     let bundle = orders();
     let binding = cancel_binding(&bundle);
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     let big = format!(
         r#"{{"orderId":"o3","reason":"{}"}}"#,
@@ -445,7 +477,7 @@ async fn oversized_consumed_message_recorded_413() {
     );
     let n = big.len();
     h.broker.inject(&binding, incoming(big.as_bytes(), &[]));
-    let records = h.records.wait(1, Duration::from_secs(5)).await;
+    let records = h.records.wait(1).await;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].status, 413);
     assert_eq!(
@@ -453,8 +485,8 @@ async fn oversized_consumed_message_recorded_413() {
         json!({"truncated": true, "bytes": n})
     );
     assert_eq!(records[0].request_body_bytes, Some(n));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(h.broker.published().is_empty());
+    let records = sentinel_handled(&h, &binding).await;
+    assert_eq!(records.len(), 3, "{records:?}");
 }
 
 #[tokio::test]
@@ -568,18 +600,22 @@ async fn reply_hop_limit_stops_loop() {
     }
     let binding = consumed.binding.clone();
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     h.broker
         .inject(&binding, incoming(br#"{"orderId":"o9"}"#, &[]));
-    let replies = h.broker.wait_published(4, Duration::from_millis(500)).await;
+    let replies = h.broker.wait_published(3, Duration::from_secs(5)).await;
+    assert_eq!(replies.len(), 3);
+    // The loop has stopped: no fourth reply follows (a hop takes well
+    // under a millisecond here).
+    let replies = h.broker.wait_published(4, Duration::from_millis(100)).await;
     assert_eq!(replies.len(), 3);
     let hops: Vec<&str> = replies
         .iter()
         .map(|(_, m)| header(&m.headers, "x-mockingbird-hop").unwrap())
         .collect();
     assert_eq!(hops, vec!["1", "2", "3"]);
-    let records = h.records.wait(7, Duration::from_millis(500)).await;
+    let records = h.records.wait(7).await;
     let last_receive = records.iter().rfind(|r| r.method == "RECEIVE").unwrap();
     assert_eq!(
         last_receive.response.as_ref().unwrap()["reply"],
@@ -592,33 +628,31 @@ async fn dropping_runtime_stops_consumers() {
     let bundle = orders();
     let binding = cancel_binding(&bundle);
     let h = runtime_with(bundle, EventSetup::default());
-    settle().await;
+    subscribed(&h.broker, 1).await;
 
     drop(h.channels);
     tokio::task::yield_now().await;
     h.broker
         .inject(&binding, incoming(br#"{"orderId":"o5"}"#, &[]));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // An absence check: with no consumer left there is no later event to
+    // wait for. A live consumer records within a few milliseconds.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(h.records.records().is_empty());
 }
 
 #[tokio::test]
 async fn publish_only_runtime_starts_nothing_but_publishes_to_brokers() {
-    let bundle = orders();
-    let binding = cancel_binding(&bundle);
     let h = runtime_with(
-        bundle,
+        orders(),
         EventSetup {
             mode: ChannelMode::PublishOnly,
             ..EventSetup::default()
         },
     );
-    settle().await;
+    // An absence check: a consumer would subscribe within a millisecond or
+    // two of the start (see `subscribed`).
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(h.broker.subscribed_groups().is_empty());
-    h.broker
-        .inject(&binding, incoming(br#"{"orderId":"o1"}"#, &[]));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(h.broker.published().is_empty());
 
     let published = h
         .channels

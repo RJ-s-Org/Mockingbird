@@ -1,5 +1,5 @@
 #![cfg(test)]
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -431,7 +431,10 @@ async fn degraded_state_is_retried_once_per_interval() {
 
 /// A degraded mock's probe goes to the first call that actually uses the
 /// store: a stateless call in the same interval does not consume it.
-#[tokio::test]
+///
+/// Paused: the retry interval runs on tokio's clock, so the wait below
+/// passes no real time.
+#[tokio::test(start_paused = true)]
 async fn stateless_calls_do_not_consume_the_state_probe() {
     let store = Arc::new(FlakyStore {
         inner: MemoryStore::new(Duration::from_secs(3600)),
@@ -667,7 +670,6 @@ fn new_runtime_defaults() {
     assert!(rt.scenarios.is_empty());
     assert!(rt.recorder.is_none());
     assert!(!rt.state_health.is_degraded());
-    let _: &HashMap<String, ScenarioRuntime> = &rt.scenarios;
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mb_engine::{Engine, ScenarioSpec};
 use mb_ext::Extensions;
@@ -177,11 +177,15 @@ impl ScenarioRuntime {
 /// mock degraded; from then on at most one call per retry interval tries
 /// the store (the others are served statelessly at once), until one
 /// succeeds and clears the mark.
+///
+/// The retry interval is measured on tokio's clock (`tokio::time::Instant`),
+/// like every other timer of the adapters: outside a paused test runtime it
+/// is the monotonic system clock, and a paused runtime can advance it.
 #[derive(Debug)]
 pub struct StateHealth {
     degraded: AtomicBool,
     /// When a call last tried the store while degraded.
-    last_attempt: Mutex<Option<Instant>>,
+    last_attempt: Mutex<Option<tokio::time::Instant>>,
     retry_interval: Duration,
 }
 
@@ -211,7 +215,7 @@ impl StateHealth {
         let Ok(mut last) = self.last_attempt.lock() else {
             return true;
         };
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
         match *last {
             Some(at) if now.duration_since(at) < self.retry_interval => false,
             _ => {
@@ -230,7 +234,7 @@ impl StateHealth {
     /// waits a full retry interval from now.
     pub fn record_failure(&self) {
         if let Ok(mut last) = self.last_attempt.lock() {
-            *last = Some(Instant::now());
+            *last = Some(tokio::time::Instant::now());
         }
         self.degraded.store(true, Ordering::Relaxed);
     }
