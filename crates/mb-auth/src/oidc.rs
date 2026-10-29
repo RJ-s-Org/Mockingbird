@@ -69,8 +69,9 @@ type Client = openidconnect::Client<
     EndpointMaybeSet,
 >;
 
-/// The resolved `auth.oidc` configuration.
-#[derive(Clone, Debug)]
+/// The resolved `auth.oidc` configuration. Its `Debug` output redacts
+/// `client_secret`.
+#[derive(Clone)]
 pub struct OidcSettings {
     pub issuer: String,
     pub client_id: String,
@@ -81,6 +82,23 @@ pub struct OidcSettings {
     pub audience: Option<String>,
     pub redirect_url: String,
     pub mapping: RoleMapping,
+}
+
+impl std::fmt::Debug for OidcSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcSettings")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("scopes", &self.scopes)
+            .field("audience", &self.audience)
+            .field("redirect_url", &self.redirect_url)
+            .field("mapping", &self.mapping)
+            .finish()
+    }
 }
 
 /// Where to send the browser to log in, and the `state` that identifies

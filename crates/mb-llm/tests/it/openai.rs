@@ -19,6 +19,37 @@ fn req(format: ResponseFormat, timeout: Duration) -> ChatRequest {
     }
 }
 
+#[test]
+fn config_debug_redacts_the_api_key_and_header_values() {
+    let key = "sk-s3ntinel-api-key";
+    let config = OpenAiConfig {
+        base_url: "https://api.example/v1/".into(),
+        api_key: Some(key.into()),
+        model: "m".into(),
+        json_schema: true,
+        headers: vec![(
+            "cf-aig-authorization".into(),
+            "Bearer s3ntinel-gateway-token".into(),
+        )],
+        extra_body: serde_json::Map::new(),
+        http: HttpOptions::default(),
+    };
+    let shown = format!("{config:?}");
+    assert!(!shown.contains(key), "api key leaked: {shown}");
+    assert!(
+        !shown.contains("s3ntinel-gateway-token"),
+        "header value leaked: {shown}"
+    );
+    assert!(
+        shown.contains("cf-aig-authorization"),
+        "header name kept: {shown}"
+    );
+    assert!(
+        shown.contains("https://api.example/v1/"),
+        "base_url kept: {shown}"
+    );
+}
+
 fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
     OpenAiCompatible::new(OpenAiConfig {
         base_url: format!("{}/", server.uri()),
