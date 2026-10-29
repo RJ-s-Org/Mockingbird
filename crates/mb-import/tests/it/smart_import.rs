@@ -2,7 +2,6 @@
 #![cfg(test)]
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,12 +23,7 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn fixture(rel: &str) -> Vec<u8> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel);
-    std::fs::read(p).unwrap()
-}
+use crate::support::fixture;
 
 fn op(method: &str, path: &str) -> DraftOperation {
     DraftOperation {

@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/asyncapi.rs
+source: crates/mb-import/tests/it/asyncapi.rs
 expression: sensors()
 ---
 id: sensors

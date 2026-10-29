@@ -6,16 +6,17 @@ use std::time::Duration;
 
 use mb_import::smart::chunk::Chunk;
 use mb_import::smart::llm::{
-    ExtractLlm, TokenBudget, extract_chunk, extraction_messages, parse_extraction,
-    summarize_operations,
+    TokenBudget, extract_chunk, extraction_messages, parse_extraction, summarize_operations,
 };
 use mb_import::smart::merge::merge_operations;
 use mb_import::smart::model::{
     DraftOperation, DraftParam, DraftResponse, DraftWarning, ParamLocation, Provenance,
 };
 use mb_import::smart::{ImportObserver, NoopObserver, Phase, SmartError};
-use mb_llm::{HopSettings, LlmError, ResponseFormat, Role, ScriptedProvider, Usage};
+use mb_llm::{LlmError, ResponseFormat, Role, ScriptedProvider, Usage};
 use serde_json::{Value, json};
+
+use crate::support::llm;
 
 const PETS_TEXT: &str = "The Pets API.\n\nGET /pets/{id} returns the pet with the given id.\n\
 It answers 200 with the pet as JSON.";
@@ -26,17 +27,6 @@ fn chunk(text: &str) -> Chunk {
         heading: "Pets".to_string(),
         text: text.to_string(),
         tokens: text.len().div_ceil(4),
-    }
-}
-
-fn llm(provider: Arc<ScriptedProvider>) -> ExtractLlm {
-    ExtractLlm {
-        provider,
-        settings: HopSettings {
-            timeout: Duration::from_secs(5),
-            temperature: 0.1,
-            max_tokens: 1000,
-        },
     }
 }
 

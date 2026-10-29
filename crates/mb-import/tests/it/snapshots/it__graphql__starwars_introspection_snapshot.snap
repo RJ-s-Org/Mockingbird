@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/graphql.rs
+source: crates/mb-import/tests/it/graphql.rs
 expression: b
 ---
 id: the-star-wars-api

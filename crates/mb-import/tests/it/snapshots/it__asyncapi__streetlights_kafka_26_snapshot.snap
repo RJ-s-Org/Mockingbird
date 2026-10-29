@@ -1,6 +1,6 @@
 ---
-source: crates/mb-import/tests/asyncapi.rs
-expression: streetlights_30()
+source: crates/mb-import/tests/it/asyncapi.rs
+expression: streetlights()
 ---
 id: streetlights-kafka-api
 title: Streetlights Kafka API

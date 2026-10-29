@@ -2,10 +2,7 @@
 use mb_import::compile;
 use mb_mcm::{ApiKeyLocation, Bundle, SecurityRequirement, SecurityScheme};
 
-fn fixture(rel: &str) -> Vec<u8> {
-    let path = format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(path).unwrap()
-}
+use crate::support::fixture;
 
 fn req(schemes: Vec<SecurityScheme>) -> SecurityRequirement {
     SecurityRequirement { schemes }
@@ -102,6 +99,6 @@ fn orders_snapshot_unchanged() {
     let b = compile(&fixture("openapi/orders-3.0.yaml")).unwrap();
     assert!(b.operations.iter().all(|o| o.security.is_empty()));
     insta::with_settings!({prepend_module_to_snapshot => false}, {
-        insta::assert_yaml_snapshot!("openapi3__orders_30_snapshot", b, {".source_digest" => "[digest]"});
+        insta::assert_yaml_snapshot!("it__openapi3__orders_30_snapshot", b, {".source_digest" => "[digest]"});
     });
 }

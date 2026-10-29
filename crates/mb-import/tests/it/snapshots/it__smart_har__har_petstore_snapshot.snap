@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/smart_har.rs
+source: crates/mb-import/tests/it/smart_har.rs
 expression: petstore()
 ---
 title: petstore.example.com (HAR import)

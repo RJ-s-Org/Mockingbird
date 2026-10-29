@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/smart_postman.rs
+source: crates/mb-import/tests/it/smart_postman.rs
 expression: petstore()
 ---
 title: Petstore

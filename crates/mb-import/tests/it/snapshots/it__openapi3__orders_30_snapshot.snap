@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/openapi3.rs
+source: crates/mb-import/tests/it/openapi3.rs
 expression: b
 ---
 id: orders-api
