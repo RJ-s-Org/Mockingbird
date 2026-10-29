@@ -21,12 +21,16 @@ use mb_store::{
     validate_workspace_name,
 };
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::file_config::{FileConfig, FileMock, FileProfile};
 use crate::registry::mock_label;
 
 /// `(workspace, name)` of a mock or profile.
 type Key = (String, String);
+
+/// API mocks whose active bundles the gRPC check reads per query.
+const ACTIVE_BUNDLE_BATCH: usize = 64;
 
 /// What a [`reconcile`] changed.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -447,23 +451,29 @@ async fn validate<'a>(
         }
     }
     if !grpc.is_empty() {
-        for api_mock in existing_mocks
+        let api_mocks: Vec<&Mock> = existing_mocks
             .values()
             .filter(|m| m.source == ResourceSource::Api)
-        {
-            let api_label = mock_label(&api_mock.workspace, &api_mock.name);
-            let Some(active) = store
-                .active_contract(api_mock.id)
+            .collect();
+        // A batch of bundles per query (no sources), so the bundles held
+        // at once stay bounded.
+        for batch in api_mocks.chunks(ACTIVE_BUNDLE_BATCH) {
+            let ids: Vec<Uuid> = batch.iter().map(|m| m.id).collect();
+            let active = store
+                .active_bundles(&ids)
                 .await
-                .with_context(|| format!("loading the active contract of mock {api_label:?}"))?
-            else {
-                continue;
-            };
-            for service in active.bundle.grpc_services() {
-                if let Some(label) = grpc.get(&service) {
-                    bail!(
-                        "mock {label:?}: gRPC service {service:?} is already served by mock {api_label:?}, which is managed through the API"
-                    );
+                .context("loading the active contracts of the mocks managed through the API")?;
+            for api_mock in batch {
+                let Some(active) = active.get(&api_mock.id) else {
+                    continue;
+                };
+                let api_label = mock_label(&api_mock.workspace, &api_mock.name);
+                for service in active.bundle.grpc_services() {
+                    if let Some(label) = grpc.get(&service) {
+                        bail!(
+                            "mock {label:?}: gRPC service {service:?} is already served by mock {api_label:?}, which is managed through the API"
+                        );
+                    }
                 }
             }
         }

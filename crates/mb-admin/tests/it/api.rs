@@ -2056,6 +2056,37 @@ fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
     w.finish().unwrap().into_inner()
 }
 
+/// A gRPC service has one active holder across all mocks, found among
+/// more mocks than one store batch reads; the holder itself may re-upload.
+#[tokio::test]
+async fn grpc_service_has_one_active_holder() {
+    let h = harness().await;
+    for i in 0..70 {
+        h.create_mock(&format!("filler-{i}")).await;
+    }
+    let proto = fixture("proto/route_guide.proto");
+    h.create_mock("holder").await;
+    let r = h
+        .upload_bytes("holder", proto.clone(), "text/x-protobuf")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    let r = h
+        .upload_bytes("holder", proto.clone(), "text/x-protobuf")
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "re-upload: {}", r.text);
+
+    h.create_mock("taker").await;
+    let p = h
+        .upload_bytes("taker", proto, "text/x-protobuf")
+        .await
+        .assert_problem(StatusCode::CONFLICT);
+    let detail = p["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("routeguide.RouteGuide") && detail.contains("default/holder"),
+        "{p}"
+    );
+}
+
 #[tokio::test]
 async fn upload_graphql_proto_wsdl_and_archive() {
     let h = harness().await;

@@ -96,6 +96,8 @@ macro_rules! conformance_checks {
             import_job_mode_round_trips,
             active_versions_in_one_call,
             active_bundle_leaves_out_the_source,
+            active_bundles_in_one_call,
+            request_log_prune_keeps_exactly_the_newest,
             contract_version_infos_match_the_versions,
             latest_contract_version_by_status,
             request_log_summaries_match_the_entries,
@@ -3613,6 +3615,105 @@ pub(crate) async fn active_bundle_leaves_out_the_source(store: &Arc<dyn ControlS
         .expect("exists");
     assert_eq!(got.version, full.version);
     assert_eq!(got.bundle, full.bundle);
+}
+
+pub(crate) async fn active_bundles_in_one_call(store: &Arc<dyn ControlStore>) {
+    let active = create(store, "bundles-active").await;
+    let inactive = create(store, "bundles-inactive").await;
+    let empty = create(store, "bundles-empty").await;
+    let mut first = new_version(ContractStatus::Approved, "first");
+    first.bundle = sized_bundle("first", 1, 0);
+    let mut second = new_version(ContractStatus::Approved, "second");
+    second.bundle = sized_bundle("second", 3, 2);
+    for v in [first, second] {
+        store.add_contract_version(active.id, v).await.expect("add");
+    }
+    store
+        .activate_contract_version(active.id, 2)
+        .await
+        .expect("activate");
+    store
+        .add_contract_version(inactive.id, new_version(ContractStatus::Approved, "c"))
+        .await
+        .expect("add");
+
+    assert!(store.active_bundles(&[]).await.expect("none").is_empty());
+    // More ids than one SQLite statement binds, unknown ones included.
+    let mut ids: Vec<Uuid> = (0..1200).map(|_| Uuid::new_v4()).collect();
+    ids.extend([empty.id, inactive.id, active.id]);
+    let got = store.active_bundles(&ids).await.expect("active bundles");
+    assert_eq!(got.len(), 1, "{:?}", got.keys().collect::<Vec<_>>());
+    let expected = store
+        .active_bundle(active.id)
+        .await
+        .expect("active")
+        .expect("exists");
+    assert_eq!(got.get(&active.id), Some(&expected));
+    assert_eq!(expected.version, 2);
+}
+
+/// A prune keeps exactly the `retention` newest rows of its mock (none
+/// with a retention of 0), and leaves other mocks' rows alone.
+pub(crate) async fn request_log_prune_keeps_exactly_the_newest(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "prune-exact").await;
+    let other = create(store, "prune-other").await;
+    let interval = usize::try_from(RETENTION_PRUNE_INTERVAL).expect("interval");
+    let mut other_ids = Vec::new();
+    for _ in 0..30 {
+        other_ids.push(
+            store
+                .append_request_log(log_entry(other.id, "s", "op", "faker"), 1000)
+                .await
+                .expect("append other"),
+        );
+    }
+    // The first append prunes (below retention: nothing goes), the next
+    // prune is the (interval + 1)-th append.
+    let mut ids = Vec::new();
+    for _ in 0..=interval {
+        ids.push(
+            store
+                .append_request_log(log_entry(mock.id, "s", "op", "faker"), 10)
+                .await
+                .expect("append"),
+        );
+    }
+    let all = RequestLogFilter {
+        limit: 1000,
+        ..RequestLogFilter::default()
+    };
+    let kept: Vec<i64> = store
+        .list_request_log(mock.id, &all)
+        .await
+        .expect("list")
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    let newest: Vec<i64> = ids.iter().rev().take(10).copied().collect();
+    assert_eq!(kept, newest);
+    let mut others: Vec<i64> = store
+        .list_request_log(other.id, &all)
+        .await
+        .expect("list other")
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    others.reverse();
+    assert_eq!(others, other_ids, "another mock's rows are untouched");
+
+    let zero = create(store, "prune-zero").await;
+    store
+        .append_request_log(log_entry(zero.id, "s", "op", "faker"), 0)
+        .await
+        .expect("append zero");
+    assert!(
+        store
+            .list_request_log(zero.id, &all)
+            .await
+            .expect("list zero")
+            .is_empty(),
+        "a retention of 0 keeps nothing"
+    );
 }
 
 pub(crate) async fn contract_version_infos_match_the_versions(store: &Arc<dyn ControlStore>) {

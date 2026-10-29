@@ -1049,6 +1049,37 @@ impl ControlStore for SqliteControlStore {
         }))
     }
 
+    async fn active_bundles(
+        &self,
+        mock_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, ActiveBundle>, StoreError> {
+        let mut out = HashMap::with_capacity(mock_ids.len());
+        // Well under SQLite's bound-parameter limit.
+        for chunk in mock_ids.chunks(500) {
+            let mut qb = QueryBuilder::<Sqlite>::new(
+                "SELECT mock_id, version, bundle FROM contract_versions \
+                 WHERE status = 'active' AND mock_id IN (",
+            );
+            let mut ids = qb.separated(", ");
+            for id in chunk {
+                ids.push_bind(id.to_string());
+            }
+            qb.push(")");
+            for row in qb.build().fetch_all(&self.pool).await? {
+                let mock_id: String = row.try_get("mock_id")?;
+                let bundle: String = row.try_get("bundle")?;
+                out.insert(
+                    parse_uuid(&mock_id)?,
+                    ActiveBundle {
+                        version: row.try_get("version")?,
+                        bundle: serde_json::from_str(&bundle)?,
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
     async fn list_contract_version_infos(
         &self,
         mock_id: Uuid,
@@ -1241,9 +1272,12 @@ impl ControlStore for SqliteControlStore {
         .fetch_one(&self.pool)
         .await?;
         if self.prune.tick(e.mock_id) {
+            // Everything at or below the (retention + 1)-th newest id: an
+            // index seek and a range delete on (mock_id, id). With fewer
+            // rows than that the subquery is NULL and nothing goes.
             sqlx::query(
-                "DELETE FROM request_log WHERE mock_id = ?1 AND id NOT IN \
-                 (SELECT id FROM request_log WHERE mock_id = ?1 ORDER BY id DESC LIMIT ?2)",
+                "DELETE FROM request_log WHERE mock_id = ?1 AND id <= \
+                 (SELECT id FROM request_log WHERE mock_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
             )
             .bind(e.mock_id.to_string())
             .bind(i64::from(retention))

@@ -24,6 +24,9 @@ use crate::{AdminState, VersionStatus, ensure_api_managed};
 /// Largest accepted contract upload (an archive may be this large too).
 pub const MAX_CONTRACT_BYTES: usize = 20 * 1024 * 1024;
 
+/// Mocks whose active bundles the gRPC conflict check reads per query.
+const ACTIVE_BUNDLE_BATCH: usize = 64;
+
 /// Media types a contract upload may declare. None is CORS-safelisted (in
 /// particular not `text/plain`), so a cross-site page cannot upload without
 /// a preflight.
@@ -446,18 +449,27 @@ pub(crate) async fn ensure_grpc_services_free(
     if services.is_empty() {
         return Ok(());
     }
-    for other in st.store.list_all_mocks().await? {
-        if other.id == mock.id {
-            continue;
-        }
-        let Some(active) = st.store.active_bundle(other.id).await? else {
-            continue;
-        };
-        if let Some(service) = active.bundle.grpc_services().intersection(&services).next() {
-            return Err(Problem::conflict(format!(
-                "gRPC service {service:?} is already served by mock {}/{}",
-                other.workspace, other.name
-            )));
+    let others: Vec<Mock> = st
+        .store
+        .list_all_mocks()
+        .await?
+        .into_iter()
+        .filter(|other| other.id != mock.id)
+        .collect();
+    // A batch of bundles per query, so the bundles held at once stay bounded.
+    for batch in others.chunks(ACTIVE_BUNDLE_BATCH) {
+        let ids: Vec<uuid::Uuid> = batch.iter().map(|other| other.id).collect();
+        let active = st.store.active_bundles(&ids).await?;
+        for other in batch {
+            let Some(bundle) = active.get(&other.id) else {
+                continue;
+            };
+            if let Some(service) = bundle.bundle.grpc_services().intersection(&services).next() {
+                return Err(Problem::conflict(format!(
+                    "gRPC service {service:?} is already served by mock {}/{}",
+                    other.workspace, other.name
+                )));
+            }
         }
     }
     Ok(())

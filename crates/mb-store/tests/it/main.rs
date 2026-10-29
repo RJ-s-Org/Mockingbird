@@ -3,6 +3,7 @@
 #![cfg(test)]
 
 mod conformance;
+mod perf;
 mod postgres;
 mod sqlite;
 mod support;
