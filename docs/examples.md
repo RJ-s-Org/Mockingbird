@@ -111,7 +111,7 @@ the app against it through the proxy. They are tested in CI.
    contracts, hosts, scenarios, upstream spec (source, licence, commit, URL, SHA-256) and
    the request the smoke test sends.
 2. Add it to `EXAMPLES` in [`crates/mockingbird/src/examples.rs`](../crates/mockingbird/src/examples.rs);
-   `cargo test -p mockingbird-cli --test examples_catalog` fails until every file is embedded.
+   `cargo test -p mockingbird-cli --test it -- examples_catalog::` fails until every file is embedded.
 3. Run `scripts/smoke-examples.sh target/debug/mockingbird <name>`: it validates the
    contracts, serves the example offline and sends the smoke request. The
    [Examples workflow](../.github/workflows/examples.yml) runs it for every example, and

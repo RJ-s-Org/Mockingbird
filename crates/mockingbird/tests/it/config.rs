@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::support::{repo, serve};
 use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use mb_store::{
     ContractStatus, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
@@ -15,10 +16,6 @@ use mockingbird::config::{
 use mockingbird::file_config::{self, AuthConfig, AuthMode, FileConfig, OidcConfig, ServerConfig};
 use mockingbird::reconcile::{ReconcileReport, reconcile};
 use serde_json::{Value, json};
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
 
 fn fixture() -> PathBuf {
     repo().join("fixtures/openapi/orders-3.0.yaml")
@@ -1054,13 +1051,6 @@ async fn invalid_config_applies_nothing() {
 }
 
 // ---- through the app ----
-
-async fn serve(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
-}
 
 struct Running {
     data: String,

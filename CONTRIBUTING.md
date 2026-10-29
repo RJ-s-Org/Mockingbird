@@ -111,7 +111,7 @@ call, run it through the shared pipeline and encode the generated response.
    quotas, overrides, scenarios, the request log and metrics behave like every other
    protocol. Map override headers and forced statuses to the protocol's native form.
 4. Mount it in `crates/mockingbird` where the other adapters are mounted, and add an
-   end-to-end test to `crates/mockingbird/tests/protocols_e2e.rs`.
+   end-to-end test to `crates/mockingbird/tests/it/protocols_e2e.rs`.
 5. Document it in the README's protocol table and add a gallery example under
    `examples/gallery/`.
 

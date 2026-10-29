@@ -2,10 +2,11 @@
 //! SQLite file (role `all`) joined by a [`MemoryBusHub`].
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::support::{fixture, serve};
 use async_trait::async_trait;
 use mb_ext::Extensions;
 use mb_state::{Bus, BusEvent, LocalBus, MemoryBusHub, SessionKey, StateError, StoredResource};
@@ -13,19 +14,6 @@ use mb_store::{ControlStore, DEFAULT_WORKSPACE, SqliteControlStore};
 use mockingbird::config::{App, ServeArgs, build_app_with_bus};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
-
-async fn serve(router: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    format!("http://{addr}")
-}
 
 /// One running node: its app and its data and admin base URLs.
 struct Node {

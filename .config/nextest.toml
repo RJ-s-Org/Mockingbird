@@ -13,22 +13,23 @@
 # - mb-state tests/bus.rs: every bus uses the one `mockingbird_bus` channel,
 #   and the Redis reconnect test runs `CLIENT KILL TYPE pubsub`, which cuts
 #   every pub/sub connection on the server (including other binaries' buses);
-# - mockingbird-cli tests/ha_cluster.rs: the Redis bus channel, the leader
+# - mockingbird-cli tests/it/ha_cluster.rs: the Redis bus channel, the leader
 #   key, and the same server-wide `CLIENT KILL TYPE pubsub` in the outage test;
-# - mockingbird-cli tests/roles.rs: the Postgres tests contend for the one
+# - mockingbird-cli tests/it/roles.rs: the Postgres tests contend for the one
 #   `control` leader lock.
-# Each binary serialised these with a process-local mutex under `cargo test`.
-# The tests that do not touch Postgres or Redis in these binaries are fast,
-# so the whole binary joins the group.
+# Each serialises these with a process-local mutex under `cargo test`.
+# The tests that do not touch Postgres or Redis in these files are fast, so
+# the whole binary (or module) joins the group.
 cross-node = { max-threads = 1 }
 
-# Each filter matches both the current `tests/<name>.rs` binaries and the
-# planned single `tests/it` binary whose modules keep the file names.
+# The mb-state filter matches both its current `tests/bus.rs` binary and a
+# planned single `tests/it` binary whose modules keep the file names;
+# mockingbird-cli already has that layout (nextest rejects a `binary()`
+# that matches no binary, so its filters name only the modules).
 [[profile.default.overrides]]
 filter = """
     (package(mockingbird-state) & (binary(bus) | (kind(test) & test(/^bus::/))))
-  | (package(mockingbird-cli) & (binary(ha_cluster) | (kind(test) & test(/^ha_cluster::/))))
-  | (package(mockingbird-cli) & (binary(roles) | (kind(test) & test(/^roles::/))))
+  | (package(mockingbird-cli) & kind(test) & test(/^(ha_cluster|roles)::/))
 """
 test-group = "cross-node"
 

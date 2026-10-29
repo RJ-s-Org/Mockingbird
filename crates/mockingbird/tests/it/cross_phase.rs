@@ -2,9 +2,9 @@
 //! gRPC adapters (P4), and a gRPC mock in a non-default workspace.
 #![cfg(test)]
 
-use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::support::fixture;
 use mb_mcm::ProtocolPayload;
 use mb_protocols::grpc::DynamicCodec;
 use mockingbird::config::{App, ServeArgs, build_app};
@@ -13,12 +13,6 @@ use serde_json::{Value, json};
 use tonic::codegen::http::uri::PathAndQuery;
 
 const WS: &str = "team-a";
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
 
 async fn serve(app: axum::Router) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::{ephemeral, fixture};
 use mb_engine::StreamConfig;
 use mb_ext::Extensions;
 use mb_protocols::ProtocolSettings;
@@ -26,12 +27,6 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
 
 fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
     let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
@@ -258,10 +253,6 @@ async fn forwarding_ignores_proxy_environment() {
         .await
         .unwrap();
     assert_eq!(r.status(), 204);
-}
-
-async fn ephemeral() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0").await.unwrap()
 }
 
 #[tokio::test]

@@ -2,13 +2,15 @@
 //! (`outbound.ca_file`, `outbound.proxy`, `outbound.no_proxy`). The
 //! certificates are the test-only ones in `fixtures/tls` (see its README):
 //! `server.pem` and `server2.pem` for `localhost`/`127.0.0.1`, both signed
-//! by `ca.pem`.
+//! by `ca.pem`. The outbound LLM test makes its own short-lived
+//! certificates instead ([`short_lived_pki`]).
 #![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::support::{ephemeral, fixture};
 use mb_llm::{
     ChatMessage, ChatRequest, HttpOptions, OpenAiCompatible, OpenAiConfig, Provider, ResponseFormat,
 };
@@ -22,12 +24,6 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
 
 fn ca_pem() -> Vec<u8> {
     std::fs::read(fixture("tls/ca.pem")).unwrap()
@@ -57,10 +53,6 @@ fn args(path: &Path) -> ServeArgs {
         offline: true,
         ..ServeArgs::default()
     }
-}
-
-async fn ephemeral() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0").await.unwrap()
 }
 
 /// The addresses of a served app (data, admin, gRPC).
@@ -302,15 +294,63 @@ fn provider(base_url: String, http: HttpOptions) -> OpenAiCompatible {
     .unwrap()
 }
 
+/// A CA and a `localhost`/`127.0.0.1` server certificate signed by it, both
+/// valid for a day, written to `dir`; returns the CA PEM and the server's
+/// [`TlsConfig`]. For clients that verify through the platform verifier:
+/// Apple's rejects server certificates valid for more than 825 days, which
+/// rules out the long-lived fixtures.
+fn short_lived_pki(dir: &Path) -> (Vec<u8>, TlsConfig) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
+    };
+    let now = time::OffsetDateTime::now_utc();
+    let (not_before, not_after) = (
+        now - time::Duration::hours(1),
+        now + time::Duration::days(1),
+    );
+
+    let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.distinguished_name
+        .push(DnType::CommonName, "Mockingbird test CA");
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    ca.not_before = not_before;
+    ca.not_after = not_after;
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_pem = ca.self_signed(&ca_key).unwrap().pem();
+    let issuer = Issuer::new(ca, ca_key);
+
+    let mut leaf = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+    leaf.distinguished_name
+        .push(DnType::CommonName, "localhost");
+    leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf.use_authority_key_identifier_extension = true;
+    leaf.not_before = not_before;
+    leaf.not_after = not_after;
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf_cert = leaf.signed_by(&leaf_key, &issuer).unwrap();
+
+    let (cert_file, key_file) = (dir.join("server.pem"), dir.join("server-key.pem"));
+    std::fs::write(&cert_file, leaf_cert.pem()).unwrap();
+    std::fs::write(&key_file, leaf_key.serialize_pem()).unwrap();
+    (
+        ca_pem.into_bytes(),
+        TlsConfig {
+            cert_file,
+            key_file,
+        },
+    )
+}
+
 #[tokio::test]
 async fn llm_client_trusts_outbound_ca() {
-    // An HTTPS stub LLM with the fixture certificate.
-    let rustls = tls::load_rustls(&TlsConfig {
-        cert_file: fixture("tls/server.pem"),
-        key_file: fixture("tls/server-key.pem"),
-    })
-    .await
-    .unwrap();
+    // An HTTPS stub LLM with a certificate from a CA made for this test (the
+    // LLM client verifies through the platform verifier).
+    let dir = tempfile::tempdir().unwrap();
+    let (ca_pem, server_tls) = short_lived_pki(dir.path());
+    let rustls = tls::load_rustls(&server_tls).await.unwrap();
     let router = axum::Router::new().route(
         "/v1/chat/completions",
         axum::routing::post(|| async { axum::Json(completion()) }),
@@ -325,7 +365,7 @@ async fn llm_client_trusts_outbound_ca() {
     let trusting = provider(
         base.clone(),
         HttpOptions {
-            extra_roots_pem: ca_pem(),
+            extra_roots_pem: ca_pem,
             ..HttpOptions::default()
         },
     );

@@ -3,12 +3,13 @@
 //! Redis bus, so leader election uses the Redis lease) and served with
 //! `server::serve_app` on ephemeral ports. Gated on both
 //! `MB_TEST_POSTGRES_URL` and `MB_TEST_REDIS_URL`; run with
-//! `MB_TEST_RUNNER=scripts/test-postgres.sh scripts/test-redis.sh -p mockingbird-cli --test ha_cluster`.
+//! `MB_TEST_RUNNER=scripts/test-postgres.sh scripts/test-redis.sh -p mockingbird-cli --test it -- ha_cluster::`.
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::support::{ephemeral, fixture, wait_until};
 use mb_ext::Extensions;
 use mb_store::DEFAULT_WORKSPACE;
 use mockingbird::config::{ServeArgs, build_app_with};
@@ -22,12 +23,6 @@ use tokio::task::JoinHandle;
 /// outage test) every pub/sub connection on the server, so they run one at
 /// a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
 
 /// The test's Postgres schema, dropped (with everything in it) when the
 /// test ends, passed or not.
@@ -126,10 +121,6 @@ impl Node {
     }
 }
 
-async fn ephemeral() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0").await.unwrap()
-}
-
 fn url(listener: &TcpListener) -> String {
     format!("http://{}", listener.local_addr().unwrap())
 }
@@ -198,14 +189,6 @@ async fn wait_status(url: &str, want: u16, within: Duration) {
             Instant::now() < deadline,
             "{url} answered {got}, not {want}, within {within:?}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-async fn wait_until(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + within;
-    while !done() {
-        assert!(Instant::now() < deadline, "{what} within {within:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

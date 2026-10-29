@@ -6,11 +6,12 @@
 //! (`MB_TEST_POSTGRES_URL`, see `scripts/test-postgres.sh`).
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::support::{ephemeral, fixture, wait_until};
 use mb_ext::Extensions;
 use mb_state::{Bus, LeaderBackend, MemoryBusHub};
 use mockingbird::config::{App, ServeArgs, build_app_with, build_app_with_leader};
@@ -20,12 +21,6 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
-
 /// A node served by `serve_app`: its base URLs (the data URL only when
 /// its role binds a data listener) and its reconcile counter.
 struct Running {
@@ -33,10 +28,6 @@ struct Running {
     admin: String,
     reconciles: Arc<AtomicU64>,
     _stop: watch::Sender<bool>,
-}
-
-async fn ephemeral() -> TcpListener {
-    TcpListener::bind("127.0.0.1:0").await.unwrap()
 }
 
 fn url(listener: &TcpListener) -> String {
@@ -145,14 +136,6 @@ async fn wait_status(url: &str, want: u16, within: Duration) {
             "{url} answered {got}, not {want}, within {within:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-async fn wait_until(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + within;
-    while !done() {
-        assert!(Instant::now() < deadline, "{what} within {within:?}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 

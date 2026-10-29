@@ -3,21 +3,8 @@
 //! server again.
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
-
-fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel)
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+use crate::support::{fixture, free_port};
+use std::path::Path;
 
 /// A config serving `orders` for `api.orders.test` on free ports; returns
 /// the admin port.
