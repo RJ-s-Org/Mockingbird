@@ -203,7 +203,7 @@ pub const PROMPT_SCHEMA_BUDGET: usize = 64 * 1024;
 /// A non-fatal finding of compilation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Warning {
-    /// `schema_too_large`.
+    /// `schema_too_large` or `security_scheme_unsupported`.
     pub code: String,
     /// The operation id the warning is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,11 +221,25 @@ pub fn compile_with_warnings(bytes: &[u8]) -> Result<(Bundle, Vec<Warning>), Imp
     Ok((bundle, warnings))
 }
 
-/// One `schema_too_large` warning per operation whose largest response
-/// schema, with its reachable definitions, exceeds [`PROMPT_SCHEMA_BUDGET`].
+/// One `security_scheme_unsupported` warning per operation with security
+/// requirements the mock cannot check (they are never satisfied in
+/// `passthrough_validate` mode), and one `schema_too_large` warning per
+/// operation whose largest response schema, with its reachable
+/// definitions, exceeds [`PROMPT_SCHEMA_BUDGET`].
 pub fn bundle_warnings(bundle: &Bundle) -> Vec<Warning> {
     let mut warnings = Vec::new();
     for op in &bundle.operations {
+        if let Some(names) = security::unsupported_schemes(&op.security) {
+            let id = &op.id;
+            warnings.push(Warning {
+                code: "security_scheme_unsupported".into(),
+                operation: Some(id.clone()),
+                message: format!(
+                    "operation {id}: security requirements using {names} cannot be checked by the mock (supported: http bearer and basic, apiKey in header, query or cookie, oauth2, openIdConnect); in passthrough_validate mode they are never satisfied, other alternatives still apply"
+                ),
+                size: None,
+            });
+        }
         let largest = op
             .outputs
             .iter()

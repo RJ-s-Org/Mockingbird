@@ -150,11 +150,28 @@ paths:
   /admin:
     get:
       operationId: getAdmin
-      summary: Admin (unknown mutualTLS scheme is skipped)
+      summary: Admin (only unsupported mutualTLS alternatives, so never satisfiable)
       security:
         - mtls: []
         - basicAuth: []
           mtls: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+  /reports:
+    get:
+      operationId: getReports
+      summary: Reports (mutualTLS AND bearer, or basic alone)
+      security:
+        - mtls: []
+          bearerAuth: []
+        - basicAuth: []
       responses:
         "200":
           description: OK
