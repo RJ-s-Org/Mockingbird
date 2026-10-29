@@ -3,24 +3,33 @@ name: Integrations
 # Runs the GitHub Action (integrations/github-action) on a tiny offline
 # example: a source build of the slim binary, the action's setup step, an
 # app that calls a real API host through the proxy, and the report step
-# with its checks. Only when the action or the CLI changes.
+# with its checks. Only when the action, the CLI or a crate on its proxy,
+# report and verify path changes.
 on:
   pull_request:
     paths:
       - integrations/**
-      - crates/mockingbird/src/**
+      - crates/mb-admin/**
+      - crates/mb-engine/**
+      - crates/mb-protocols/**
+      - crates/mockingbird/**
+      - Cargo.lock
       - .github/workflows/integrations.yml
   push:
     branches: [main]
     paths:
       - integrations/**
-      - crates/mockingbird/src/**
+      - crates/mb-admin/**
+      - crates/mb-engine/**
+      - crates/mb-protocols/**
+      - crates/mockingbird/**
+      - Cargo.lock
       - .github/workflows/integrations.yml
   workflow_dispatch:
 
 concurrency:
   group: integrations-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
