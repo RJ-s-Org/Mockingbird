@@ -1,6 +1,3 @@
-#![cfg(test)]
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,16 +9,16 @@ use tokio::sync::broadcast;
 
 #[tokio::test]
 async fn memory_conformance() {
-    common::conformance::run_all(Arc::new(MemoryStore::new(Duration::from_secs(60)))).await;
+    crate::conformance::run_all(Arc::new(MemoryStore::new(Duration::from_secs(60)))).await;
 }
 
 #[tokio::test]
 async fn state_session_count_default_matches_sessions() {
     let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(60)));
-    common::conformance::session_count_default_matches_sessions(&store, "default").await;
+    crate::conformance::session_count_default_matches_sessions(&store, "default").await;
     // The trait's default (a store that only lists sessions).
     let store: Arc<dyn StateStore> = Arc::new(ListOnly(MemoryStore::new(Duration::from_secs(60))));
-    common::conformance::session_count_default_matches_sessions(&store, "default").await;
+    crate::conformance::session_count_default_matches_sessions(&store, "default").await;
 }
 
 /// Forwards everything but `session_count`, which keeps the default.
@@ -84,7 +81,7 @@ impl StateStore for ListOnly {
 
 #[tokio::test]
 async fn memory_ttl_expiry() {
-    common::conformance::ttl_expiry(Arc::new(MemoryStore::new(Duration::from_secs(1)))).await;
+    crate::conformance::ttl_expiry(Arc::new(MemoryStore::new(Duration::from_secs(1)))).await;
 }
 
 #[tokio::test]
@@ -92,7 +89,7 @@ async fn connect_memory_url() {
     let store = mb_state::connect("memory", Duration::from_secs(60))
         .await
         .expect("connect");
-    common::conformance::run_all(store).await;
+    crate::conformance::run_all(store).await;
 }
 
 #[tokio::test(start_paused = true)]

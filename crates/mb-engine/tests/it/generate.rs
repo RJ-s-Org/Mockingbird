@@ -1,35 +1,17 @@
-#![cfg(test)]
-use std::sync::Arc;
-
 use mb_engine::{
     Engine, EngineConfig, EngineError, GenerationContext, JointPart, OperationCall,
     SchemaValidator, Source,
 };
 use mb_import::compile;
-use mb_llm::{LlmError, Provider, Role, ScriptedProvider};
+use mb_llm::{LlmError, Role};
 use mb_mcm::Bundle;
 use mb_state::StoredResource;
 use serde_json::{Map, Value, json};
 
-fn orders() -> Bundle {
-    let path = format!(
-        "{}/../../fixtures/openapi/orders-3.0.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    compile(&std::fs::read(path).unwrap()).unwrap()
-}
+use crate::support::{orders, scripted, valid_order};
 
 fn validator(bundle: &Bundle, def: &str) -> SchemaValidator {
     SchemaValidator::new(&bundle.with_defs(&json!({"$ref": format!("#/$defs/{def}")}))).unwrap()
-}
-
-fn valid_order() -> Value {
-    json!({
-        "id": "7f9c2ba4-e88f-4c1b-9f4a-3d2f0c6b1a10",
-        "customerId": "c1",
-        "status": "pending",
-        "total": 42.5
-    })
 }
 
 /// `valid_order()` as served for path id `o1`: the identity field follows
@@ -50,15 +32,6 @@ fn call(op: &str) -> OperationCall {
         headers: Map::new(),
         body: None,
     }
-}
-
-fn scripted(script: Vec<Result<String, LlmError>>) -> (Arc<ScriptedProvider>, Engine) {
-    let provider = Arc::new(ScriptedProvider::new(script));
-    let dyn_provider: Arc<dyn Provider> = provider.clone();
-    (
-        provider,
-        Engine::new(Some(dyn_provider), EngineConfig::default()),
-    )
 }
 
 fn ctx() -> GenerationContext<'static> {

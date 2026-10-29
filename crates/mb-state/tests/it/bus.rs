@@ -1,7 +1,6 @@
 //! Cross-node bus. The Postgres and Redis tests are gated by
 //! `MB_TEST_POSTGRES_URL` / `MB_TEST_REDIS_URL` (see `scripts/test-postgres.sh`
 //! and `scripts/test-redis.sh`).
-#![cfg(test)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,6 +17,8 @@ use tokio::sync::broadcast;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::support::env_url;
+
 const PG_VAR: &str = "MB_TEST_POSTGRES_URL";
 const REDIS_VAR: &str = "MB_TEST_REDIS_URL";
 const WAIT: Duration = Duration::from_secs(10);
@@ -25,16 +26,6 @@ const WAIT: Duration = Duration::from_secs(10);
 /// The reconnect tests kill listener connections server-wide, so the gated
 /// tests of this binary run one at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn env_url(var: &str) -> Option<String> {
-    match std::env::var(var) {
-        Ok(url) => Some(url),
-        Err(_) => {
-            eprintln!("skipped: {var} not set");
-            None
-        }
-    }
-}
 
 fn node() -> String {
     format!("node-{}", Uuid::new_v4().simple())

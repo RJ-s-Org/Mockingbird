@@ -1,20 +1,12 @@
-#![cfg(test)]
 use mb_engine::faker::Costs;
 use mb_engine::{Engine, EngineConfig, Faker, GenerationContext, OperationCall, SchemaValidator};
 use mb_import::compile;
-use mb_mcm::Bundle;
 use proptest::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde_json::{Value, json};
 
-fn orders() -> Bundle {
-    let path = format!(
-        "{}/../../fixtures/openapi/orders-3.0.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    compile(&std::fs::read(path).unwrap()).unwrap()
-}
+use crate::support::orders;
 
 fn check_def(name: &str) -> Vec<Value> {
     let schema = orders().with_defs(&json!({"$ref": format!("#/$defs/{name}")}));

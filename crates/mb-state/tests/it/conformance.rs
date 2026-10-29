@@ -11,7 +11,6 @@ use tokio::sync::broadcast;
 /// Runs every behaviour except TTL expiry, which needs a store built with a
 /// short TTL (see [`ttl_expiry`]). Each check uses its own mock name, so they
 /// can share one store.
-#[allow(dead_code)] // Not every test binary uses both entry points.
 pub async fn run_all(store: Arc<dyn StateStore>) {
     run_all_in(store, "default").await;
 }
@@ -436,7 +435,6 @@ async fn export_then_seed_round_trips(st: &Arc<dyn StateStore>, ws: &str) {
 /// Real-time TTL check. `store` must have been built with a 1 s TTL.
 ///
 /// `touch` extends a session's life; reads alone do not.
-#[allow(dead_code)] // Not every test binary uses both entry points.
 pub async fn ttl_expiry(store: Arc<dyn StateStore>) {
     ttl_expiry_in(store, "default").await;
 }

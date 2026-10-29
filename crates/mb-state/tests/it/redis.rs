@@ -1,8 +1,5 @@
 //! Redis backend. Gated by `MB_TEST_REDIS_URL` (see `scripts/test-redis.sh`);
 //! each test uses its own random workspace so tests share one server safely.
-#![cfg(test)]
-
-mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,18 +8,10 @@ use mb_state::{RedisStateStore, SessionKey, StateStore, StoredResource};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::support::env_url;
+
 const URL_VAR: &str = "MB_TEST_REDIS_URL";
 const LONG_TTL: Duration = Duration::from_secs(3600);
-
-fn redis_url() -> Option<String> {
-    match std::env::var(URL_VAR) {
-        Ok(url) => Some(url),
-        Err(_) => {
-            eprintln!("skipped: {URL_VAR} not set");
-            None
-        }
-    }
-}
 
 fn workspace() -> String {
     format!("ws-{}", Uuid::new_v4().simple())
@@ -60,30 +49,30 @@ async fn keys_of(url: &str, ws: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn redis_conformance() {
-    let Some(url) = redis_url() else { return };
+    let Some(url) = env_url(URL_VAR) else { return };
     let store = mb_state::connect(&url, LONG_TTL).await.expect("connect");
-    common::conformance::run_all_in(store, &workspace()).await;
+    crate::conformance::run_all_in(store, &workspace()).await;
 }
 
 #[tokio::test]
 async fn state_session_count_default_matches_sessions() {
-    let Some(url) = redis_url() else { return };
+    let Some(url) = env_url(URL_VAR) else { return };
     let store = mb_state::connect(&url, LONG_TTL).await.expect("connect");
-    common::conformance::session_count_default_matches_sessions(&store, &workspace()).await;
+    crate::conformance::session_count_default_matches_sessions(&store, &workspace()).await;
 }
 
 #[tokio::test]
 async fn redis_ttl_expiry() {
-    let Some(url) = redis_url() else { return };
+    let Some(url) = env_url(URL_VAR) else { return };
     let store = RedisStateStore::connect(&url, Duration::from_secs(1))
         .await
         .expect("connect");
-    common::conformance::ttl_expiry_in(Arc::new(store), &workspace()).await;
+    crate::conformance::ttl_expiry_in(Arc::new(store), &workspace()).await;
 }
 
 #[tokio::test]
 async fn redis_reset_mock_removes_all_sessions() {
-    let Some(url) = redis_url() else { return };
+    let Some(url) = env_url(URL_VAR) else { return };
     let ws = workspace();
     let store = RedisStateStore::connect(&url, LONG_TTL)
         .await
@@ -119,7 +108,7 @@ async fn redis_reset_mock_removes_all_sessions() {
 
 #[tokio::test]
 async fn redis_survives_reconnect() {
-    let Some(url) = redis_url() else { return };
+    let Some(url) = env_url(URL_VAR) else { return };
     let ws = workspace();
     let k = key(&ws, "m", "a");
     {

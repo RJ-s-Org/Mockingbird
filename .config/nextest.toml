@@ -10,7 +10,7 @@
 [test-groups]
 # Tests that share a server-wide resource on the Postgres or Redis test
 # servers:
-# - mb-state tests/bus.rs: every bus uses the one `mockingbird_bus` channel,
+# - mb-state tests/it/bus.rs: every bus uses the one `mockingbird_bus` channel,
 #   and the Redis reconnect test runs `CLIENT KILL TYPE pubsub`, which cuts
 #   every pub/sub connection on the server (including other binaries' buses);
 # - mockingbird-cli tests/it/ha_cluster.rs: the Redis bus channel, the leader
@@ -22,13 +22,12 @@
 # the whole binary (or module) joins the group.
 cross-node = { max-threads = 1 }
 
-# The mb-state filter matches both its current `tests/bus.rs` binary and a
-# planned single `tests/it` binary whose modules keep the file names;
-# mockingbird-cli already has that layout (nextest rejects a `binary()`
-# that matches no binary, so its filters name only the modules).
+# Both packages have the single `tests/it` layout, whose modules keep the
+# old file names (nextest rejects a `binary()` that matches no binary, so
+# the filters name only the modules).
 [[profile.default.overrides]]
 filter = """
-    (package(mockingbird-state) & (binary(bus) | (kind(test) & test(/^bus::/))))
+    (package(mockingbird-state) & kind(test) & test(/^bus::/))
   | (package(mockingbird-cli) & kind(test) & test(/^(ha_cluster|roles)::/))
 """
 test-group = "cross-node"
