@@ -1085,9 +1085,28 @@ async fn subscription_cap_per_connection() {
         );
         // The connection stays open: stopping one makes room for another.
         ws_send(&mut ws, json!({"type": stop, "id": "1"})).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        ws_send(&mut ws, start("4")).await;
-        ws_recv_for(&mut ws, item, "4").await;
+        // The slot is freed once the server has processed the stop, which
+        // the client cannot observe: start with fresh ids until one is
+        // accepted. A refusal is an `error` for that id.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        for n in 4.. {
+            let id = n.to_string();
+            ws_send(&mut ws, start(&id)).await;
+            let reply = loop {
+                let msg = ws_recv(&mut ws).await;
+                if msg["id"] == id.as_str() && (msg["type"] == item || msg["type"] == "error") {
+                    break msg;
+                }
+            };
+            if reply["type"] == item {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{protocol}: stopping a subscription freed no slot: {reply}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let recs = records.wait(2).await;
         assert!(
             recs.iter()

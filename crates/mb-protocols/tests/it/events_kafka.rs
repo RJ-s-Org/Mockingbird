@@ -45,8 +45,6 @@ async fn kafka_round_trip() {
         partitions_hint: None,
     };
     let mut stream = client.subscribe(&binding, "mb-test-group").await.unwrap();
-    // Let the consumer group assign partitions.
-    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let msg = OutMessage {
         key: Some(b"k1".to_vec()),
@@ -71,13 +69,24 @@ async fn kafka_round_trip() {
     assert_eq!(header(&received.headers, "x-mockingbird-hop"), Some("0"));
 }
 
+/// Nothing listens on port 1: the metadata probe gives up at its timeout
+/// with a Connect error. `connect` uses the same path with a 10 s timeout;
+/// a short one keeps the test fast.
 #[tokio::test]
 async fn kafka_unreachable_connect_error() {
+    let timeout = Duration::from_millis(300);
     let started = Instant::now();
-    let result = KafkaClient::connect(&kafka_config("127.0.0.1:1"), None).await;
+    let result =
+        KafkaClient::connect_with_timeout(&kafka_config("127.0.0.1:1"), None, timeout).await;
+    match result {
+        Err(BrokerError::Connect(message)) => assert!(!message.is_empty()),
+        Err(other) => panic!("expected a Connect error, got {other}"),
+        Ok(_) => panic!("expected a Connect error, got a client"),
+    }
+    // The timeout bounds the wait: well under `connect`'s 10 s.
     assert!(
-        matches!(result, Err(BrokerError::Connect(_))),
-        "expected a Connect error"
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
     );
-    assert!(started.elapsed() < Duration::from_secs(15));
 }

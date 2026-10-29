@@ -18,6 +18,8 @@ use mb_protocols::{MockRuntime, RequestRecord, RequestRecorder};
 use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use serde_json::json;
 
+use crate::support::subscribed;
+
 #[derive(Default)]
 struct Capture(Mutex<Vec<RequestRecord>>);
 
@@ -255,8 +257,15 @@ async fn state_change_trigger_publishes_with_key() {
         ..session("s1")
     };
     h.state.upsert(&other, order("43")).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(h.broker.published().len(), 2);
+    // A later change of this mock is the sentinel: the watcher handles
+    // changes in order, so once 44 is out, 43 was passed over.
+    h.state.upsert(&session("s1"), order("44")).await.unwrap();
+    let published = h.broker.wait_published(3, Duration::from_secs(5)).await;
+    let keys: Vec<_> = published.iter().map(|(_, m)| m.key.clone()).collect();
+    assert_eq!(
+        keys,
+        [b"41".to_vec(), b"42".to_vec(), b"44".to_vec()].map(Some)
+    );
 }
 
 #[tokio::test]
@@ -269,10 +278,9 @@ async fn state_change_kind_filter() {
         }],
         ScriptedLease::new(vec![Ok(true)]),
     );
+    // The upsert is filtered out; the delete after it is the sentinel (the
+    // watcher handles changes in order), checked by the record below.
     h.state.upsert(&session("s1"), order("42")).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(h.broker.published().len(), 0);
-
     h.state
         .delete(&session("s1"), "orders", "42")
         .await
@@ -367,8 +375,7 @@ async fn state_effect_and_trigger_on_one_topic_stay_bounded() {
         mode: Default::default(),
     };
     let _channels = ChannelRuntime::start(Arc::new(rt), deps, setup);
-    // Let the consumer subscribe.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed(&broker, 1).await;
     let binding = mb_mcm::ChannelBinding::Kafka {
         topic: "orders".into(),
         partitions_hint: None,
@@ -382,10 +389,13 @@ async fn state_effect_and_trigger_on_one_topic_stay_bounded() {
             payload: br#"{"id":"o-1"}"#.to_vec(),
         },
     );
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let published = broker.published();
     // One publish per hop (1, 2, 3); a message at the hop limit changes
     // state but triggers nothing.
+    let published = broker.wait_published(3, Duration::from_secs(5)).await;
+    assert_eq!(published.len(), 3, "got {} publishes", published.len());
+    // The loop has stopped: no fourth publish follows (each hop takes
+    // well under a millisecond, so 150 ms is ample).
+    let published = broker.wait_published(4, Duration::from_millis(150)).await;
     assert_eq!(published.len(), 3, "got {} publishes", published.len());
     let hops: Vec<String> = published
         .iter()

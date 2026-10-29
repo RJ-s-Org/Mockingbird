@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::support::Records;
+use crate::support::{Records, stable_count};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -124,14 +124,7 @@ async fn subscription_transport_ws_receives_n_items() {
     // The stream stays open for state changes until the client completes.
     send(&mut ws, json!({"type": "complete", "id": "1"})).await;
     drop(ws);
-    let mut reported = Vec::new();
-    for _ in 0..50 {
-        reported = records.0.lock().unwrap().drain(..).collect();
-        if !reported.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let reported = reported(&records, 1).await;
     assert_eq!(reported.len(), 1);
     let r = &reported[0];
     assert_eq!(r.operation_id.as_deref(), Some("Subscription.issueAdded"));
@@ -254,10 +247,12 @@ async fn complete_stops_engine_stream() {
     assert_issue(&first, "next");
     assert_eq!(first["payload"]["data"]["issueAdded"]["title"], "Issue 1");
     send(&mut ws, json!({"type": "complete", "id": "1"})).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let after_complete = provider.chunks_yielded();
+    // Chunks come every 20 ms: a count steady over 40 ms has stopped.
+    let after_complete =
+        stable_count(Duration::from_millis(40), || provider.chunks_yielded()).await;
     assert!(after_complete <= 8, "{after_complete}");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // And it stays stopped (an absence check, five chunk intervals long).
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(provider.chunks_yielded(), after_complete);
 }
 
@@ -362,14 +357,10 @@ async fn shutdown_completes_open_subscriptions() {
     assert_eq!(recv(&mut ws).await, json!({"type": "complete", "id": "1"}));
 }
 
-/// Waits for at least `n` reported calls; returns them.
+/// Waits up to 2 s for at least `n` reported calls and takes them all out
+/// of `records`; fails the test if fewer arrive.
 async fn reported(records: &Records, n: usize) -> Vec<RequestRecord> {
-    for _ in 0..100 {
-        if records.0.lock().unwrap().len() >= n {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    records.wait(n).await;
     records.0.lock().unwrap().drain(..).collect()
 }
 

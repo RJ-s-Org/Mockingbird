@@ -85,3 +85,46 @@ impl Records {
         .await
     }
 }
+
+/// Waits up to 5 s until `broker` has at least `n` subscriptions.
+///
+/// [`MemoryBroker::inject`] reaches only the subscribers that exist when it
+/// runs, so a test injects only once the consumers it expects are in place.
+///
+/// [`MemoryBroker::inject`]: mb_protocols::events::MemoryBroker::inject
+#[cfg(feature = "events")]
+pub async fn subscribed(broker: &mb_protocols::events::MemoryBroker, n: usize) {
+    wait_until(Duration::from_secs(5), Duration::from_millis(2), || async {
+        let groups = broker.subscribed_groups();
+        if groups.len() >= n {
+            Ok(())
+        } else {
+            Err(format!("wanted {n} subscriptions, got {groups:?}"))
+        }
+    })
+    .await;
+}
+
+/// Waits up to 5 s until two readings of `count` taken `poll` apart agree,
+/// and returns that count.
+///
+/// For a producer that should stop: once the count holds still, a test can
+/// bound it and then check that it stays put.
+#[cfg(any(feature = "graphql", feature = "sse"))]
+pub async fn stable_count(poll: Duration, count: impl Fn() -> usize) -> usize {
+    let mut last = count();
+    // `wait_until` checks at once: the first reading to compare is `poll` on.
+    tokio::time::sleep(poll).await;
+    wait_until(Duration::from_secs(5), poll, || {
+        let now = count();
+        let previous = std::mem::replace(&mut last, now);
+        async move {
+            if now == previous {
+                Ok(now)
+            } else {
+                Err(format!("still moving: {previous} -> {now}"))
+            }
+        }
+    })
+    .await
+}

@@ -172,10 +172,22 @@ fn kafka_topic(binding: &ChannelBinding) -> Result<&str, BrokerError> {
 
 impl KafkaClient {
     /// Create the producer and check that the cluster answers a metadata
-    /// request.
+    /// request within 10 s.
     pub async fn connect(
         cfg: &BrokerConfig,
         password: Option<String>,
+    ) -> Result<Self, BrokerError> {
+        Self::connect_with_timeout(cfg, password, METADATA_TIMEOUT).await
+    }
+
+    /// [`KafkaClient::connect`], waiting at most `metadata_timeout` for the
+    /// cluster to answer the metadata request. librdkafka retries an
+    /// unreachable bootstrap server until then, so a refused connection
+    /// fails only once the timeout has passed.
+    pub async fn connect_with_timeout(
+        cfg: &BrokerConfig,
+        password: Option<String>,
+        metadata_timeout: Duration,
     ) -> Result<Self, BrokerError> {
         let config = kafka_client_config(cfg, password.as_deref());
         let producer: FutureProducer = config
@@ -185,7 +197,7 @@ impl KafkaClient {
         tokio::task::spawn_blocking(move || {
             probe
                 .client()
-                .fetch_metadata(None, METADATA_TIMEOUT)
+                .fetch_metadata(None, metadata_timeout)
                 .map(|_| ())
         })
         .await

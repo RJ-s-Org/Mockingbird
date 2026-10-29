@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![cfg(feature = "mqtt")]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +12,7 @@ use mb_ext::EnvFileSecrets;
 use mb_mcm::ChannelBinding;
 use mb_protocols::events::{
     BrokerClient, BrokerConfig, BrokerError, BrokerKind, Brokers, ChannelRuntime, EventDeps,
-    EventSetup, OutMessage,
+    EventSetup, InMessage, MessageStream, OutMessage,
 };
 use mb_protocols::{MockRuntime, RequestKind, RequestRecord, RequestRecorder};
 use mb_state::{MemoryStore, StateStore};
@@ -21,14 +21,49 @@ use rumqttc::v5::mqttbytes::v5::{Packet, PublishProperties};
 use rumqttc::v5::{AsyncClient, Event, MqttOptions};
 use tokio::sync::mpsc;
 
+use crate::support::wait_until;
+
+/// The ports [`start_broker`] has tried in this process; none is tried twice.
+static TRIED_PORTS: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
+
 /// Start an embedded MQTT 5 broker on a free local port.
+///
+/// rumqttd binds the port itself, so the port is found by binding port 0
+/// and releasing it, and another process (another test) can take it in
+/// between. A port that already answers is skipped, and a broker that
+/// stops right away (rumqttd logs a failed bind and returns from `start`)
+/// means the listener that answers is someone else's: another port is
+/// tried, so a test never talks to another test's broker.
 fn start_broker() -> u16 {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    for _ in 0..5 {
+        if let Some(port) = try_start_broker(untried_port()) {
+            return port;
+        }
+    }
+    panic!("the embedded broker could not bind any of 5 ports");
+}
+
+/// A free local port this process has not tried before.
+fn untried_port() -> u16 {
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if TRIED_PORTS.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
+}
+
+/// Start the broker on `port`; `None` when the port turns out to be taken.
+fn try_start_broker(port: u16) -> Option<u16> {
     let listen: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    if TcpStream::connect(listen).is_ok() {
+        eprintln!("port {port} is in use; trying another");
+        return None;
+    }
     let server = rumqttd::ServerSettings {
         name: "v5-test".into(),
         listen,
@@ -55,19 +90,34 @@ fn start_broker() -> u16 {
         v5: Some(HashMap::from([("1".to_string(), server)])),
         ..Default::default()
     };
+    // `start` blocks while the broker serves; it returns only once the
+    // listener is gone, for instance because the bind failed.
+    let (stopped_tx, stopped) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut broker = rumqttd::Broker::new(config);
-        let _ = broker.start();
+        let _ = stopped_tx.send(broker.start().map_err(|e| e.to_string()));
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while TcpStream::connect(listen).is_err() {
+        if let Ok(result) = stopped.try_recv() {
+            eprintln!("the embedded broker on port {port} stopped: {result:?}");
+            return None;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "embedded broker did not start"
         );
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(5));
     }
-    port
+    // Something answers. A broker whose bind failed stops within moments;
+    // one that bound keeps serving.
+    match stopped.recv_timeout(Duration::from_millis(50)) {
+        Ok(result) => {
+            eprintln!("port {port} was taken; the broker stopped: {result:?}");
+            None
+        }
+        Err(_) => Some(port),
+    }
 }
 
 fn mqtt_config(name: &str, port: u16) -> BrokerConfig {
@@ -97,20 +147,60 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// A plain rumqttc client for the test side: received publishes arrive
-/// on the returned channel as `(topic, payload)`.
-async fn test_client(
-    port: u16,
-    id: &str,
-) -> (
-    AsyncClient,
-    mpsc::UnboundedReceiver<(String, Vec<u8>)>,
-    tokio::task::JoinHandle<()>,
-) {
+/// Calls `publish` every 100 ms until `stream` yields a message (up to
+/// 5 s), and returns that message: for a subscription whose SUBACK the
+/// test cannot see.
+async fn publish_until_received<F, Fut, E>(stream: &mut MessageStream, mut publish: F) -> InMessage
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+    E: std::fmt::Debug,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        publish().await.unwrap();
+        match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
+            Ok(item) => return item.unwrap().unwrap(),
+            Err(_) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "nothing received within 5 s"
+            ),
+        }
+    }
+}
+
+/// A plain rumqttc client for the test side.
+struct TestClient {
+    client: AsyncClient,
+    /// Received publishes, as `(topic, payload)`.
+    received: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    /// One item per SUBACK.
+    subacks: mpsc::UnboundedReceiver<()>,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+impl TestClient {
+    /// Subscribe to `topic` and wait for the broker's SUBACK, after which
+    /// the broker routes the topic's publishes to this client.
+    async fn subscribe(&mut self, topic: &str) {
+        self.client
+            .subscribe(topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), self.subacks.recv())
+            .await
+            .expect("no SUBACK within 5 s")
+            .unwrap();
+    }
+}
+
+/// A connected [`TestClient`] named `id`.
+async fn test_client(port: u16, id: &str) -> TestClient {
     let mut options = MqttOptions::new(id, "127.0.0.1", port);
     options.set_keep_alive(Duration::from_secs(30));
     let (client, mut eventloop) = AsyncClient::new(options, 64);
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, received) = mpsc::unbounded_channel();
+    let (suback_tx, subacks) = mpsc::unbounded_channel();
     let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         let mut connected = Some(connected_tx);
@@ -120,6 +210,9 @@ async fn test_client(
                     if let Some(c) = connected.take() {
                         let _ = c.send(());
                     }
+                }
+                Ok(Event::Incoming(Packet::SubAck(_))) => {
+                    let _ = suback_tx.send(());
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
                     let topic = String::from_utf8_lossy(&p.topic).into_owned();
@@ -134,7 +227,12 @@ async fn test_client(
         .await
         .unwrap()
         .unwrap();
-    (client, rx, task)
+    TestClient {
+        client,
+        received,
+        subacks,
+        _task: task,
+    }
 }
 
 #[tokio::test]
@@ -147,8 +245,6 @@ async fn mqtt_round_trip_with_headers() {
         .subscribe(&binding("sensors/{sensorId}/temperature"), "g")
         .await
         .unwrap();
-    // Let the SUBSCRIBE reach the broker.
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let msg = OutMessage {
         key: Some(b"ignored".to_vec()),
@@ -159,16 +255,11 @@ async fn mqtt_round_trip_with_headers() {
         payload: br#"{"celsius":21.5}"#.to_vec(),
         content_type: "application/json".into(),
     };
-    client
-        .publish(&binding("sensors/s1/temperature"), msg)
-        .await
-        .unwrap();
-
-    let received = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    // The client does not wait for the SUBACK: publish until the
+    // subscription is in place and one arrives.
+    let target = binding("sensors/s1/temperature");
+    let received =
+        publish_until_received(&mut stream, || client.publish(&target, msg.clone())).await;
     assert_eq!(received.address, "sensors/s1/temperature");
     assert_eq!(received.payload, br#"{"celsius":21.5}"#.to_vec());
     assert_eq!(received.key, None);
@@ -210,31 +301,31 @@ async fn mqtt_runtime_end_to_end() {
     let channels = ChannelRuntime::start(Arc::new(rt), deps, EventSetup::default());
     assert_eq!(channels.broker_name().as_deref(), Some("mqtt"));
 
-    let (client, mut received, _task) = test_client(port, "test-client").await;
-    client
-        .subscribe("sensors/s1/acks", QoS::AtLeastOnce)
-        .await
-        .unwrap();
-    // Let the runtime's consumer and the test subscription settle.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut test = test_client(port, "test-client").await;
+    test.subscribe("sensors/s1/acks").await;
 
+    // The runtime's consumer subscribes on its own schedule, unseen by the
+    // test: publish the command every 100 ms until one is received.
     let properties = PublishProperties {
         user_properties: vec![("replyTo".into(), "sensors/s1/acks".into())],
         ..PublishProperties::default()
     };
-    client
-        .publish_with_properties(
-            "sensors/s1/commands",
-            QoS::AtLeastOnce,
-            false,
-            br#"{"command":"reset"}"#.to_vec(),
-            properties,
-        )
-        .await
-        .unwrap();
-
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut next_publish = tokio::time::Instant::now();
     let receive = loop {
+        if tokio::time::Instant::now() >= next_publish {
+            test.client
+                .publish_with_properties(
+                    "sensors/s1/commands",
+                    QoS::AtLeastOnce,
+                    false,
+                    br#"{"command":"reset"}"#.to_vec(),
+                    properties.clone(),
+                )
+                .await
+                .unwrap();
+            next_publish += Duration::from_millis(100);
+        }
         let found = records
             .0
             .lock()
@@ -258,7 +349,7 @@ async fn mqtt_runtime_end_to_end() {
 
     let (topic, payload) = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let (topic, payload) = received.recv().await.unwrap();
+            let (topic, payload) = test.received.recv().await.unwrap();
             if topic == "sensors/s1/acks" {
                 return (topic, payload);
             }
@@ -274,11 +365,7 @@ async fn mqtt_runtime_end_to_end() {
 
 #[tokio::test]
 async fn broker_down_reports_error() {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = untried_port();
     match mb_protocols::events::MqttClient::connect(&mqtt_config("down", port), None).await {
         Err(BrokerError::Connect(_)) => {}
         Err(e) => panic!("unexpected error {e}"),
@@ -364,18 +451,6 @@ impl Proxy {
     }
 }
 
-/// Wait up to `timeout` for `cond`.
-async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    cond()
-}
-
 #[tokio::test]
 async fn broker_lost_after_connect_reaches_issues() {
     let proxy = Proxy::start(start_broker()).await;
@@ -384,10 +459,18 @@ async fn broker_lost_after_connect_reaches_issues() {
     assert!(brokers.issues().is_empty());
 
     proxy.cut();
-    assert!(
-        eventually(Duration::from_secs(5), || !brokers.issues().is_empty()).await,
-        "a lost connection must show in issues"
-    );
+    wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        || async {
+            if brokers.issues().is_empty() {
+                Err("a lost connection must show in issues".to_string())
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await;
     assert_eq!(brokers.issues()[0].0, "m");
     assert!(brokers.infos()[0].status.starts_with("error: "));
     // Publishing fails fast while disconnected.
@@ -403,11 +486,19 @@ async fn broker_lost_after_connect_reaches_issues() {
     ));
 
     proxy.restore().await;
-    assert!(
-        eventually(Duration::from_secs(10), || brokers.issues().is_empty()).await,
-        "issues: {:?}",
-        brokers.issues()
-    );
+    wait_until(
+        Duration::from_secs(10),
+        Duration::from_millis(10),
+        || async {
+            let issues = brokers.issues();
+            if issues.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("issues: {issues:?}"))
+            }
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -419,15 +510,25 @@ async fn slow_subscriber_drops_instead_of_queueing() {
     // Never read: its queue must stay bounded.
     let _slow = client.subscribe(&binding("flood/x"), "g").await.unwrap();
     let mut other = client.subscribe(&binding("other/x"), "g").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let (sender, _rx, _task) = test_client(port, "flooder").await;
+    let sender = test_client(port, "flooder").await;
+    // The broker handles one connection's SUBSCRIBEs in order: once
+    // `other` receives, the flood subscription is in place too.
+    publish_until_received(&mut other, || {
+        sender
+            .client
+            .publish("other/x", QoS::AtLeastOnce, false, "{}")
+    })
+    .await;
     for i in 0..500 {
         sender
+            .client
             .publish("flood/x", QoS::AtMostOnce, false, format!("{{\"i\":{i}}}"))
             .await
             .unwrap();
     }
+    // Kept as a fixed wait: it gives the whole flood time to reach the
+    // client, so the bound below is checked against all 500 messages.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let mut slow = _slow;
     let mut queued = 0;
@@ -436,26 +537,30 @@ async fn slow_subscriber_drops_instead_of_queueing() {
     }
     assert!(queued > 0 && queued <= 65, "queued {queued}");
 
-    // The event loop keeps delivering to other subscriptions.
+    // The event loop keeps delivering to other subscriptions: a message
+    // sent after the flood arrives (past any repeats of the probe).
     sender
-        .publish("other/x", QoS::AtLeastOnce, false, "{}")
+        .client
+        .publish("other/x", QoS::AtLeastOnce, false, r#"{"after":true}"#)
         .await
         .unwrap();
-    let got = tokio::time::timeout(Duration::from_secs(5), other.next())
-        .await
-        .unwrap();
-    assert!(matches!(got, Some(Ok(_))));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = other.next().await.unwrap().unwrap();
+            if msg.payload == br#"{"after":true}"# {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the message sent after the flood did not arrive");
 }
 
 #[tokio::test]
 async fn shutdown_flushes_queued_publishes() {
     let port = start_broker();
-    let (watcher, mut rx, _task) = test_client(port, "watcher").await;
-    watcher
-        .subscribe("flush/x", QoS::AtLeastOnce)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut watcher = test_client(port, "watcher").await;
+    watcher.subscribe("flush/x").await;
 
     let brokers = Brokers::new(vec![mqtt_config("m", port)], Arc::new(EnvFileSecrets));
     let client = brokers.client("m").await.unwrap();
@@ -473,7 +578,9 @@ async fn shutdown_flushes_queued_publishes() {
     drop(brokers);
 
     let mut received = 0;
-    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+    while let Ok(Some(_)) =
+        tokio::time::timeout(Duration::from_secs(2), watcher.received.recv()).await
+    {
         received += 1;
         if received == 50 {
             break;
