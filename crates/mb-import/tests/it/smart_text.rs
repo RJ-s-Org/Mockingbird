@@ -653,7 +653,7 @@ fn pdf_nested_flate_bomb_is_refused() {
     use std::io::Write;
     // The bomb compressed once more: only the second layer explodes.
     let inner = zlib_zeros(100 * 1024 * 1024 / 258);
-    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
     enc.write_all(&inner).unwrap();
     let outer = enc.finish().unwrap();
     let filters = vec![Object::from("FlateDecode"), Object::from("FlateDecode")];

@@ -92,13 +92,29 @@ fn swagger2_security_compiled() {
     assert!(security(&b, "deleteItem").is_empty());
 }
 
-/// A contract without security compiles exactly as before: the stored
-/// `openapi3` snapshot of the orders fixture still matches.
+/// A contract without security compiles every operation unsecured, and
+/// security only adds requirements: the same contract with a document-level
+/// bearer requirement compiles to the same bundle plus that requirement on
+/// every operation. (`openapi3::orders_30_snapshot` owns the full snapshot
+/// of this fixture.)
 #[test]
-fn orders_snapshot_unchanged() {
-    let b = compile(&fixture("openapi/orders-3.0.yaml")).unwrap();
-    assert!(b.operations.iter().all(|o| o.security.is_empty()));
-    insta::with_settings!({prepend_module_to_snapshot => false}, {
-        insta::assert_yaml_snapshot!("it__openapi3__orders_30_snapshot", b, {".source_digest" => "[digest]"});
-    });
+fn security_adds_requirements_only() {
+    let source = String::from_utf8(fixture("openapi/orders-3.0.yaml")).unwrap();
+    let plain = compile(source.as_bytes()).unwrap();
+    assert!(!plain.operations.is_empty());
+    assert!(plain.operations.iter().all(|o| o.security.is_empty()));
+
+    let secured = source.replacen(
+        "\ncomponents:\n",
+        "\ncomponents:\n  securitySchemes:\n    bearer: {type: http, scheme: bearer}\n",
+        1,
+    ) + "security:\n  - bearer: []\n";
+    assert_ne!(secured, source, "the fixture has a components section");
+    let mut b = compile(secured.as_bytes()).unwrap();
+    for o in &mut b.operations {
+        assert_eq!(o.security, [req(vec![SecurityScheme::Bearer])], "{}", o.id);
+        o.security.clear();
+    }
+    b.source_digest.clone_from(&plain.source_digest);
+    assert_eq!(b, plain);
 }

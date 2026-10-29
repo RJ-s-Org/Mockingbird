@@ -461,7 +461,12 @@ fn doctype_rejected() {
     );
     // An undeclared entity is never expanded.
     let entity = br#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" name="&ext;"/>"#;
-    assert!(compile(entity).is_err());
+    let err = compile(entity).unwrap_err();
+    assert!(
+        matches!(&err, ImportError::Parse(message)
+            if message.contains("entity") && message.contains("ext")),
+        "{err:?}"
+    );
 }
 
 fn external_files() -> Vec<SourceFile> {
