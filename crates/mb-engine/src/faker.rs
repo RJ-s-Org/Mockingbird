@@ -373,9 +373,24 @@ struct Parts<'a> {
     terminal: bool,
 }
 
+thread_local! {
+    /// Cost tables computed on this thread; read by
+    /// [`Costs::computed_on_this_thread`].
+    static COSTS_COMPUTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl Costs {
+    /// How many cost tables [`Costs::compute`] has built on the calling
+    /// thread. Test support: lets a test check that a caller computes the
+    /// table once instead of timing it. Not part of the stable API.
+    #[doc(hidden)]
+    pub fn computed_on_this_thread() -> u64 {
+        COSTS_COMPUTED.with(std::cell::Cell::get)
+    }
+
     /// The cost table for `root` (a schema with its `$defs` attached).
     pub fn compute(root: &Value) -> Self {
+        COSTS_COMPUTED.with(|n| n.set(n.get().wrapping_add(1)));
         let mut refs = Vec::new();
         collect_refs(root, &mut refs);
         refs.sort_unstable();

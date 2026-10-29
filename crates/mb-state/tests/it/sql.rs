@@ -17,10 +17,13 @@ async fn sqlite_memory_conformance() {
 
 #[tokio::test]
 async fn sqlite_ttl_expiry() {
-    let store = mb_state::connect("sqlite::memory:", Duration::from_secs(1))
+    // Wall-clock store, real waits: 300 ms keeps a 90 ms margin before each
+    // "still alive" check (in-memory SQLite calls take well under 1 ms).
+    let ttl = Duration::from_millis(300);
+    let store = mb_state::connect("sqlite::memory:", ttl)
         .await
         .expect("connect");
-    crate::conformance::ttl_expiry(store).await;
+    crate::conformance::ttl_expiry(store, ttl).await;
 }
 
 #[tokio::test]
@@ -103,10 +106,9 @@ async fn postgres_ttl_expiry() {
         return;
     };
     let (url, schema) = url_with_fresh_schema(&base).await;
-    let store = mb_state::connect(&url, Duration::from_secs(1))
-        .await
-        .expect("connect");
-    crate::conformance::ttl_expiry(store).await;
+    let ttl = Duration::from_secs(1);
+    let store = mb_state::connect(&url, ttl).await.expect("connect");
+    crate::conformance::ttl_expiry(store, ttl).await;
     drop_schema(&base, &schema).await;
 }
 

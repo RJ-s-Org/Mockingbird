@@ -446,13 +446,16 @@ fn costs_computed_once_per_response() {
         ..OperationCall::default()
     };
     let ctx = GenerationContext::default();
-    let start = std::time::Instant::now();
+    // Counted, not timed: every faker attempt is cut off by the depth limit,
+    // so a fallback that recomputed the table per attempt would build it
+    // FALLBACK_ATTEMPTS times.
+    let before = Costs::computed_on_this_thread();
     let out = engine.fallback(&bundle, op, variant, 200, &call, &ctx);
-    let elapsed = start.elapsed();
+    let computed = Costs::computed_on_this_thread() - before;
     assert!(out.body.is_some());
-    assert!(
-        elapsed < std::time::Duration::from_millis(300),
-        "{elapsed:?}"
+    assert_eq!(
+        computed, 1,
+        "cost table built {computed} times for one response"
     );
 }
 

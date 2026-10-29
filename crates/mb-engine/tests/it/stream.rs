@@ -430,7 +430,9 @@ async fn scenario_set_patches_items() {
     assert!(items.iter().all(|i| i.value["n"].is_i64()), "{items:?}");
 }
 
-#[tokio::test]
+// Paused clock: the chunk delay is a tokio timer, so the 200 ms watch after
+// the drop is virtual and covers ten chunk intervals.
+#[tokio::test(start_paused = true)]
 async fn dropping_stream_stops_provider() {
     let bundle = stream_bundle();
     let provider = Arc::new(
