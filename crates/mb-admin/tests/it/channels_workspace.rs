@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const WS: &str = "team-a";
-const ORDERS: &str = include_str!("../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
+const ORDERS: &str = include_str!("../../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
 
 /// `Bearer team-viewer|team-editor` → that role in `team-a`;
 /// `Bearer sysadmin` → sysadmin.

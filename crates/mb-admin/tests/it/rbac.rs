@@ -94,7 +94,7 @@ impl ChannelControl for FakeControl {
     }
 }
 
-const EVENTS: &str = include_str!("../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
+const EVENTS: &str = include_str!("../../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
 
 struct Harness {
     app: Router,

@@ -19,7 +19,7 @@ use mb_store::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const ORDERS: &str = include_str!("../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
+const ORDERS: &str = include_str!("../../../../fixtures/asyncapi/orders-amqp-2.6.yaml");
 
 /// `(workspace, mock, channel, count, context)`.
 type Call = (String, String, String, usize, Option<Value>);

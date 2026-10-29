@@ -21,6 +21,8 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::support::wait_until;
+
 /// No header → the Local principal (sysadmin, subject `local`);
 /// `Bearer viewer|editor` → that role in `default`.
 struct TestAuth;
@@ -831,16 +833,17 @@ fn stored(id: i64) -> AuditEvent {
     }
 }
 
-/// Polls until `server` has received `n` requests (or 5 s pass).
+/// Polls until `server` has received `n` requests (panics after 5 s).
 async fn wait_for(server: &MockServer, n: usize) -> Vec<wiremock::Request> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let got = server.received_requests().await.unwrap_or_default();
-        if got.len() >= n || Instant::now() > deadline {
-            return got;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until(
+        &format!("{n} webhook requests"),
+        Duration::from_secs(5),
+        || async {
+            let got = server.received_requests().await.unwrap_or_default();
+            (got.len() >= n).then_some(got)
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -955,12 +958,11 @@ async fn retention_prunes_old_events() {
     recent.at = Utc::now() - chrono::Duration::days(300);
     h.store.append_audit(recent).await.unwrap();
     let task = spawn_retention(h.store.clone(), 365);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut left = h.events().await;
-    while left.len() != 1 && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        left = h.events().await;
-    }
+    let left = wait_until("retention to prune", Duration::from_secs(5), || async {
+        let left = h.events().await;
+        (left.len() == 1).then_some(left)
+    })
+    .await;
     task.abort();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].target, "mock:m2");
