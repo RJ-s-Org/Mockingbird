@@ -133,6 +133,20 @@ opt-level = 3
 [profile.dev.package.rsa]
 opt-level = 3
 
+# The import tests inflate deflate bombs up to the 64 MiB caps (zip and PDF
+# streams) and parse MiB-sized HTML; unoptimized, these backends made single
+# tests take seconds.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.zlib-rs]
+opt-level = 3
+[profile.dev.package.html5ever]
+opt-level = 3
+[profile.dev.package.markup5ever]
+opt-level = 3
+[profile.dev.package.tendril]
+opt-level = 3
+
 # Full debuginfo made the ~50 workspace test binaries about 9.5 GB, enough to
 # fill the disk mid-link (ld then dies with SIGBUS). Line tables keep file:line
 # in backtraces for workspace code; dependencies carry no debuginfo.

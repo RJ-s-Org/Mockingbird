@@ -362,15 +362,28 @@ async fn blocked_destination_does_not_echo_the_address() {
 
 #[tokio::test]
 async fn transport_errors_do_not_echo_the_url() {
-    // Nothing listens on port 9 of the (allowlisted) loopback address.
+    // A server on the (allowlisted) loopback address that hangs up on every
+    // connection before answering: the fetch fails in transport. The
+    // listener stays bound, so no other process can take the port.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        while let Ok((conn, _)) = listener.accept().await {
+            drop(conn);
+        }
+    });
     let err = fetch(
-        "http://127.0.0.1:9/doc.md?sig=s3cret",
+        &format!("http://127.0.0.1:{port}/doc.md?sig=s3cret"),
         &allow(&["127.0.0.1/32"]),
     )
     .await
     .unwrap_err();
+    server.abort();
+    assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
     let shown = SmartError::from(err).to_string();
+    assert!(shown.contains("transport error"), "{shown}");
     assert!(!shown.contains("s3cret"), "{shown}");
+    assert!(!shown.contains("doc.md"), "{shown}");
 }
 
 #[test]

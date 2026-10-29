@@ -704,46 +704,109 @@ fn nested(levels: usize) -> Value {
     v
 }
 
-/// Runs `fut` on a current-thread runtime next to a task ticking every
-/// millisecond; returns the longest the ticker went unpolled and the output.
-fn longest_stall<F: std::future::Future>(fut: F) -> (Duration, F::Output) {
+/// What a ticker task saw while an import ran next to it.
+#[derive(Debug)]
+struct Stall {
+    /// The longest the ticker went unpolled while the import ran.
+    longest: Duration,
+    /// How long the import took.
+    elapsed: Duration,
+    /// How many times the ticker ran while the import ran.
+    ticks: u32,
+}
+
+/// The ticker's last poll, its longest gap and its poll count.
+struct Ticks {
+    last: std::time::Instant,
+    longest: Duration,
+    count: u32,
+}
+
+/// Runs `fut` on its own current-thread runtime next to a task ticking every
+/// millisecond, and reports the longest the ticker went unpolled.
+///
+/// The work being checked runs on the blocking pool, so the ticker keeps
+/// running unless that work moves onto the runtime thread. The verdict
+/// ([`assert_runtime_kept_running`]) compares the longest gap with the
+/// import's own duration rather than with a fixed budget: CPU-bound work on
+/// the runtime thread leaves one gap spanning most of the import however
+/// loaded the machine is, while scheduler noise does not grow with it.
+fn measure_stall<F: std::future::Future>(fut: F) -> (Stall, F::Output) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        let worst = Arc::new(std::sync::Mutex::new(Duration::ZERO));
+        let state = Arc::new(std::sync::Mutex::new(Ticks {
+            last: std::time::Instant::now(),
+            longest: Duration::ZERO,
+            count: 0,
+        }));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let ticker = tokio::spawn({
-            let worst = worst.clone();
+            let state = state.clone();
             async move {
-                let mut last = std::time::Instant::now();
+                let mut started = Some(started_tx);
                 loop {
+                    {
+                        let mut s = state.lock().unwrap();
+                        let now = std::time::Instant::now();
+                        s.longest = s.longest.max(now - s.last);
+                        s.last = now;
+                        s.count += 1;
+                    }
+                    if let Some(tx) = started.take() {
+                        let _ = tx.send(());
+                    }
                     tokio::time::sleep(Duration::from_millis(1)).await;
-                    let gap = last.elapsed();
-                    let mut w = worst.lock().unwrap();
-                    *w = (*w).max(gap);
-                    last = std::time::Instant::now();
                 }
             }
         });
-        // Let the ticker start before the work does.
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        // The ticker is running; measure from here.
+        started_rx.await.unwrap();
+        {
+            let mut s = state.lock().unwrap();
+            s.last = std::time::Instant::now();
+            s.longest = Duration::ZERO;
+            s.count = 0;
+        }
+        let begun = std::time::Instant::now();
         let out = fut.await;
-        // Let the ticker see the gap a blocking stretch left behind.
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        let elapsed = begun.elapsed();
         ticker.abort();
-        let w = *worst.lock().unwrap();
-        (w, out)
+        let s = state.lock().unwrap();
+        // Count the gap still open when the import finished, too.
+        let longest = s.longest.max(s.last.elapsed().min(elapsed));
+        let stall = Stall {
+            longest,
+            elapsed,
+            ticks: s.count,
+        };
+        (stall, out)
     })
 }
 
-/// The longest stall the async runtime may see while an import runs.
-const MAX_STALL: Duration = Duration::from_millis(100);
+/// Fails when the runtime thread was blocked for half the import or more.
+/// With the CPU-bound stages inline on the runtime thread, the longest gap is
+/// 80-99% of the import; on the blocking pool it is a few milliseconds.
+fn assert_runtime_kept_running(stall: &Stall) {
+    assert!(stall.ticks > 0, "the ticker never ran: {stall:?}");
+    assert!(
+        stall.longest < stall.elapsed / 2,
+        "the runtime stalled for {:?} of the import's {:?}: CPU-bound work ran on the runtime thread",
+        stall.longest,
+        stall.elapsed
+    );
+}
+
+/// The HTML extraction test's input size. Extraction takes about 0.35 s per
+/// MiB in a dev build, which keeps the import long next to scheduler noise.
+const LARGE_HTML_BYTES: usize = 1024 * 1024;
 
 #[test]
 fn large_html_extraction_does_not_block_the_runtime() {
     let mut html = String::from("<!doctype html><html><head><title>Big</title></head><body>");
-    while html.len() < 8 * 1024 * 1024 {
+    while html.len() < LARGE_HTML_BYTES {
         html.push_str("<h2>GET /things/{id}</h2><p>Returns the thing with the given id, as JSON.</p><table><tr><td>id</td><td>integer</td></tr></table>\n");
     }
     html.push_str("</body></html>");
@@ -758,24 +821,31 @@ fn large_html_extraction_does_not_block_the_runtime() {
         max_tokens: 1,
         ..ImportOptions::default()
     };
-    let started = std::time::Instant::now();
-    let (stall, result) = longest_stall(async {
-        run_import(input, Some(&llm(provider, 1000)), &opts, &NoopObserver).await
+    let (stall, result) = measure_stall(async {
+        run_import(
+            input,
+            Some(&llm(provider.clone(), 1000)),
+            &opts,
+            &NoopObserver,
+        )
+        .await
     });
     assert!(
         matches!(result, Err(SmartError::NoOperations(_))),
         "{result:?}"
     );
-    assert!(
-        stall < MAX_STALL,
-        "the runtime stalled for {stall:?} of {:?}",
-        started.elapsed()
-    );
+    assert!(provider.requests().is_empty(), "no chunk fits the budget");
+    assert_runtime_kept_running(&stall);
 }
+
+/// The HAR test's entry count. Parsing the HAR dominates its import (about
+/// 0.07 ms per entry in a dev build), so this test guards the parse stage;
+/// assembling its one operation takes a few milliseconds.
+const LARGE_HAR_ENTRIES: usize = 3000;
 
 #[test]
 fn large_har_assembly_does_not_block_the_runtime() {
-    let entries: Vec<(&str, String, String)> = (0..1500)
+    let entries: Vec<(&str, String, String)> = (0..LARGE_HAR_ENTRIES)
         .map(|i| {
             (
                 "GET",
@@ -791,16 +861,19 @@ fn large_har_assembly_does_not_block_the_runtime() {
         name: None,
         bytes: har(&entries),
     };
-    let started = std::time::Instant::now();
-    let (stall, result) = longest_stall(async {
+    let (stall, result) = measure_stall(async {
         run_import(input, None, &ImportOptions::default(), &NoopObserver).await
     });
-    assert!(result.is_ok(), "{:?}", result.err());
-    assert!(
-        stall < MAX_STALL,
-        "the runtime stalled for {stall:?} of {:?}",
-        started.elapsed()
+    let draft = result.unwrap();
+    // The varying first segment is a path parameter: one operation, sampled
+    // by every entry.
+    assert_eq!(
+        draft.meta.operations.len(),
+        1,
+        "{:?}",
+        draft.meta.operations
     );
+    assert_runtime_kept_running(&stall);
 }
 
 /// Every stored form of a draft parses back: the source, the bundle and the

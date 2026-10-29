@@ -550,13 +550,21 @@ async fn summarize_reports_each_batch_and_honours_cancel() {
 #[tokio::test]
 async fn extraction_prompt_asks_for_required_nullable_and_real_ids() {
     let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer(json!([])))]));
-    let _ = extract_chunk(
+    let extracted = extract_chunk(
         &llm(provider.clone()),
         &chunk("GET /pets lists pets."),
         1,
         "doc",
     )
     .await;
+    assert!(
+        extracted.operations.is_empty(),
+        "{:?}",
+        extracted.operations
+    );
+    // The answer parsed: a skipped chunk would carry a warning.
+    assert!(extracted.warnings.is_empty(), "{:?}", extracted.warnings);
+    assert_eq!(provider.requests().len(), 1);
     let system = &provider.requests()[0].messages[0].content;
     assert!(
         system.contains(r#"Give every object schema a "required" list"#),

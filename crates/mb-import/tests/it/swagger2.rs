@@ -1,5 +1,5 @@
 #![cfg(test)]
-use mb_import::compile;
+use mb_import::{SourceFormat, compile, sniff};
 use mb_mcm::Bundle;
 use serde_json::json;
 
@@ -88,8 +88,10 @@ fn swagger_produces_controls_response_schema() {
 #[test]
 fn unquoted_numeric_versions_are_detected() {
     let y = b"swagger: 2.0\ninfo: {title: T, version: '1'}\npaths: {}\n";
+    assert_eq!(sniff(y).unwrap(), SourceFormat::Swagger2);
     assert!(compile(y).is_ok());
     let y = b"openapi: 3.1\ninfo: {title: T, version: '1'}\npaths: {}\n";
+    assert_eq!(sniff(y).unwrap(), SourceFormat::OpenApi3);
     assert!(compile(y).is_ok());
 }
 
