@@ -423,3 +423,53 @@ fn output_list_items_that_cannot_be_null_are_required() {
         json!({"anyOf": [{"type": "array", "items": {"anyOf": [color, nil]}}, nil]})
     );
 }
+
+/// MB-IMPORT-STUB-1: duplicate definitions inside a type compiled and then
+/// panicked async-graphql's dynamic schema at serve time ("Field … already
+/// exists"). SDL forbids them, so import rejects them and names the culprit.
+#[test]
+fn duplicate_members_are_rejected_at_import() {
+    let cases: [(&str, &str); 9] = [
+        ("type Query { a: Int a: String }", "/types/Query/fields/a"),
+        (
+            "type Query { a: Int } extend type Query { a: Int }",
+            "/types/Query/fields/a",
+        ),
+        (
+            "type Query { a: Int } interface Node { id: ID id: ID }",
+            "/types/Node/fields/id",
+        ),
+        (
+            "type Query { a(x: Int, x: Int): Int }",
+            "/types/Query/fields/a/arguments/x",
+        ),
+        (
+            "type Query { a: Int } input In { x: Int } extend input In { x: Int }",
+            "/types/In/fields/x",
+        ),
+        (
+            "type Query { a: Int } enum E { A B A }",
+            "/types/E/values/A",
+        ),
+        (
+            "type Query { a: Int } type T { b: Int } union U = T | T",
+            "/types/U/members/T",
+        ),
+        (
+            "type Query { a: Int } type T { b: Int } union U = T extend union U = T",
+            "/types/U/members/T",
+        ),
+        (
+            "type Query { a: Int } interface I { b: Int } type T implements I & I { b: Int }",
+            "/types/T/interfaces/I",
+        ),
+    ];
+    for (sdl, want) in cases {
+        let err = compile(sdl.as_bytes()).unwrap_err();
+        let ImportError::Invalid { pointer, message } = &err else {
+            panic!("{sdl}: expected an Invalid error, got {err:?}");
+        };
+        assert_eq!(pointer, want, "{sdl}");
+        assert!(message.contains("more than once"), "{sdl}: {message}");
+    }
+}
