@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/wsdl.rs
+source: crates/mb-import/tests/it/wsdl.rs
 expression: b
 ---
 id: accountservice

@@ -1,5 +1,5 @@
 ---
-source: crates/mb-import/tests/proto.rs
+source: crates/mb-import/tests/it/proto.rs
 expression: b
 ---
 id: helloworld

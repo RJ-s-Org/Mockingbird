@@ -1,40 +1,20 @@
 //! Operations taken from OpenAPI blocks embedded in documentation pages.
 #![cfg(test)]
 
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mb_import::smart::embedded::extract_embedded;
-use mb_import::smart::{
-    ExtractLlm, ImportInput, ImportKind, ImportOptions, NoopObserver, run_import,
-};
-use mb_llm::{HopSettings, ScriptedProvider};
+use mb_import::smart::{ImportInput, ImportKind, ImportOptions, NoopObserver, run_import};
+use mb_llm::ScriptedProvider;
 use serde_json::json;
 
-fn fixture(rel: &str) -> Vec<u8> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures")
-        .join(rel);
-    std::fs::read(p).unwrap()
-}
+use crate::support::{fixture, llm};
 
 fn md(name: &str) -> ImportInput {
     ImportInput::Bytes {
         kind: ImportKind::Markdown,
         name: Some(name.to_string()),
         bytes: fixture(&format!("smart/{name}")),
-    }
-}
-
-fn llm(provider: Arc<ScriptedProvider>) -> ExtractLlm {
-    ExtractLlm {
-        provider,
-        settings: HopSettings {
-            timeout: Duration::from_secs(5),
-            temperature: 0.1,
-            max_tokens: 1000,
-        },
     }
 }
 
