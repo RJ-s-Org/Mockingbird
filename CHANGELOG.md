@@ -8,6 +8,11 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ## [Unreleased]
 
+### Changed
+
+- Audit webhook: a failing event is retried in the background (at most 64 at once) instead of holding up the queue, so one event's 7 s of backoff no longer delays every event behind it (the next event went out after 0.7 s with a 100 ms backoff base, now after about 2 ms). First attempts keep the queue's order, but a retried event can now arrive after later ones; order by the event `id`.
+- Admin API reads fetch less from the store: listing mocks reads every active version number in one query instead of one full contract per mock (100 mocks with 256 KiB contracts: 10 to 1.0 ms on SQLite, 23 to 1.1 ms on Postgres); listing contract versions and `requests?fields=summary` no longer read sources and bodies (500 entries with 32 KiB bodies: 365 to 5 ms on SQLite, 481 to 13 ms on Postgres); drafts, channels, scenarios and uploads read the active bundle without its source, and a draft's parse and diff run off the async runtime; scenario validation checks operation names through hash sets (5,000 operations: 86 to 16 ms). `mockingbird-store` gains defaulted `ControlStore` methods for this (`active_versions`, `active_bundle`, `list_contract_version_infos`, `latest_contract_version`, `list_request_log_summaries`) and the `ActiveBundle`, `ContractVersionInfo` and `RequestLogSummary` types.
+
 ### Fixed
 
 - `vault:<mount>/<path>#<field>` secret references work wherever `env:` and `file:` do, as documented: an LLM profile's `api_key` and `${…}` header references in the config file, a broker's `sasl.password`, and an Admin API profile's `secret_ref` and headers (still gated by `server.api_secret_refs`) were refused with "must be a secret reference (env:NAME or file:/path)". A malformed `vault:` reference (such as `vault:token#key`, which the Vault resolver cannot read) is now refused when written, including in webhook `secret`s, which accepted any `vault:` text and failed only at delivery.

@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use mb_auth::Permission;
-use mb_store::{RequestKind, RequestLogEntry, RequestLogFilter};
+use mb_store::{RequestKind, RequestLogEntry, RequestLogFilter, RequestLogSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
@@ -104,16 +104,18 @@ pub struct RequestLogSummaryView {
     pub response_bytes: u64,
 }
 
-fn json_len(v: &Value) -> u64 {
-    serde_json::to_vec(v).map_or(0, |b| b.len() as u64)
-}
-
 impl From<RequestLogEntry> for RequestLogSummaryView {
     fn from(e: RequestLogEntry) -> Self {
+        RequestLogSummary::from(&e).into()
+    }
+}
+
+impl From<RequestLogSummary> for RequestLogSummaryView {
+    fn from(e: RequestLogSummary) -> Self {
         Self {
             id: e.id,
-            request_bytes: json_len(&e.request),
-            response_bytes: e.response.as_ref().map_or(0, json_len),
+            request_bytes: e.request_bytes,
+            response_bytes: e.response_bytes,
             operation_id: e.operation_id,
             session: e.session,
             method: e.method,
@@ -178,8 +180,9 @@ pub async fn list(
         before_id: q.before,
         kind,
     };
-    let entries = st.store.list_request_log(m.id, &filter).await?;
     Ok(if summary {
+        // The store measures the bodies without returning them.
+        let entries = st.store.list_request_log_summaries(m.id, &filter).await?;
         Json(
             entries
                 .into_iter()
@@ -188,6 +191,7 @@ pub async fn list(
         )
         .into_response()
     } else {
+        let entries = st.store.list_request_log(m.id, &filter).await?;
         Json(
             entries
                 .into_iter()

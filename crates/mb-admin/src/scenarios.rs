@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use mb_auth::Permission;
 use mb_mcm::{Bundle, Operation, StatusSelector};
 use mb_store::{ChaosSettings, ResourceSource, Scenario, ScenarioRules};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -150,9 +150,10 @@ pub fn undeclared_scenario_status(
     let ops: Vec<&Operation> = if operations.is_empty() {
         bundle.operations.iter().collect()
     } else {
+        let index = operation_index(bundle);
         operations
             .iter()
-            .filter_map(|id| bundle.operation(id))
+            .filter_map(|id| index.get(id.as_str()).copied())
             .collect()
     };
     if ops.iter().any(|op| op.output_for_status(status).is_some()) {
@@ -183,6 +184,16 @@ pub fn undeclared_scenario_status(
         "status {status} is not declared by {whom}, so the scenario could never answer it; \
          declare a {status} response, or use {alternatives}"
     ))
+}
+
+/// `bundle`'s operations by id; the first of a repeated id wins, as in
+/// [`Bundle::operation`].
+fn operation_index(bundle: &Bundle) -> HashMap<&str, &Operation> {
+    let mut index = HashMap::with_capacity(bundle.operations.len());
+    for op in &bundle.operations {
+        index.entry(op.id.as_str()).or_insert(op);
+    }
+    index
 }
 
 /// Path of one scenario.
@@ -294,11 +305,12 @@ pub async fn put(
         chaos.validate().map_err(Problem::unprocessable)?;
     }
     if !body.operations.is_empty() {
+        let applies: HashSet<&str> = body.operations.iter().map(String::as_str).collect();
         let outside: Vec<&str> = body
             .operation_instructions
             .keys()
             .map(String::as_str)
-            .filter(|op| !body.operations.iter().any(|o| o == op))
+            .filter(|op| !applies.contains(op))
             .collect();
         if !outside.is_empty() {
             return Err(Problem::invalid(
@@ -310,13 +322,19 @@ pub async fn put(
         }
     }
     // Without an active contract there is nothing to check against yet.
-    if let Some(contract) = st.store.active_contract(m.id).await? {
+    if let Some(contract) = st.store.active_bundle(m.id).await? {
+        let known: HashSet<&str> = contract
+            .bundle
+            .operations
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect();
         let mut unknown: Vec<&str> = body
             .operations
             .iter()
             .chain(body.operation_instructions.keys())
             .map(String::as_str)
-            .filter(|op| contract.bundle.operation(op).is_none())
+            .filter(|op| !known.contains(op))
             .collect();
         if !unknown.is_empty() {
             unknown.sort_unstable();

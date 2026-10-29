@@ -89,6 +89,11 @@ macro_rules! conformance_checks {
             get_request_log_by_id,
             contract_version_warnings_round_trip,
             import_job_mode_round_trips,
+            active_versions_in_one_call,
+            active_bundle_leaves_out_the_source,
+            contract_version_infos_match_the_versions,
+            latest_contract_version_by_status,
+            request_log_summaries_match_the_entries,
         }
     };
 }
@@ -3279,4 +3284,280 @@ pub(crate) async fn import_job_mode_round_trips(store: &Arc<dyn ControlStore>) {
         .expect("queued");
     assert_eq!(claimed.id, created.id);
     assert_eq!(claimed.mode.as_deref(), Some("replace"));
+}
+
+/// A bundle with `ops` HTTP operations and `channels` Kafka channels.
+fn sized_bundle(title: &str, ops: usize, channels: usize) -> Bundle {
+    let mut b = bundle(title);
+    b.operations = (0..ops)
+        .map(|i| {
+            serde_json::from_value(json!({
+                "id": format!("op{i}"),
+                "protocol": "http",
+                "binding": { "http": { "method": "get", "path": format!("/r{i}") } },
+                "kind": "query",
+                "summary": null,
+                "input": { "path": null, "query": null, "headers": null, "body": null },
+                "outputs": [],
+                "resource_type": null,
+                "identity": null,
+                "semantic_hints": [],
+            }))
+            .expect("operation")
+        })
+        .collect();
+    b.channels = (0..channels)
+        .map(|i| {
+            serde_json::from_value(json!({
+                "id": format!("ch{i}"),
+                "title": format!("Channel {i}"),
+                "address": format!("topic{i}"),
+                "binding": { "kafka": { "topic": format!("topic{i}") } },
+                "direction": "publish",
+                "message_schema": { "type": "object" },
+                "message_names": ["m"],
+                "content_type": "application/json",
+            }))
+            .expect("channel")
+        })
+        .collect();
+    b
+}
+
+pub(crate) async fn active_versions_in_one_call(store: &Arc<dyn ControlStore>) {
+    let active = create(store, "active").await;
+    let inactive = create(store, "inactive").await;
+    let empty = create(store, "empty").await;
+    for src in ["a", "b"] {
+        store
+            .add_contract_version(active.id, new_version(ContractStatus::Approved, src))
+            .await
+            .expect("add");
+    }
+    store
+        .activate_contract_version(active.id, 2)
+        .await
+        .expect("activate");
+    store
+        .add_contract_version(inactive.id, new_version(ContractStatus::Approved, "c"))
+        .await
+        .expect("add");
+
+    assert!(store.active_versions(&[]).await.expect("none").is_empty());
+    // More ids than one SQLite statement binds, unknown ones included.
+    let mut ids: Vec<Uuid> = (0..1200).map(|_| Uuid::new_v4()).collect();
+    ids.extend([empty.id, inactive.id, active.id]);
+    let got = store.active_versions(&ids).await.expect("active versions");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got.get(&active.id), Some(&2));
+    let expected = store
+        .active_contract(active.id)
+        .await
+        .expect("active")
+        .map(|v| v.version);
+    assert_eq!(got.get(&active.id).copied(), expected);
+}
+
+pub(crate) async fn active_bundle_leaves_out_the_source(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "bundled").await;
+    assert_eq!(store.active_bundle(mock.id).await.expect("none"), None);
+    let mut v = new_version(ContractStatus::Active, "src");
+    v.bundle = sized_bundle("src", 3, 2);
+    store.add_contract_version(mock.id, v).await.expect("add");
+    let full = store
+        .active_contract(mock.id)
+        .await
+        .expect("active")
+        .expect("exists");
+    let got = store
+        .active_bundle(mock.id)
+        .await
+        .expect("bundle")
+        .expect("exists");
+    assert_eq!(got.version, full.version);
+    assert_eq!(got.bundle, full.bundle);
+}
+
+pub(crate) async fn contract_version_infos_match_the_versions(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "infos").await;
+    assert!(
+        store
+            .list_contract_version_infos(mock.id)
+            .await
+            .expect("empty")
+            .is_empty()
+    );
+    let mut plain = new_version(ContractStatus::Approved, "plain");
+    plain.bundle = sized_bundle("plain", 4, 0);
+    store
+        .add_contract_version(mock.id, plain)
+        .await
+        .expect("add");
+    let mut events = new_version(ContractStatus::Active, "events");
+    events.bundle = sized_bundle("events", 1, 3);
+    events.created_by = None;
+    store
+        .add_contract_version(mock.id, events)
+        .await
+        .expect("add");
+    store
+        .set_contract_version_warnings(mock.id, 2, json!([{ "code": "w", "message": "m" }]))
+        .await
+        .expect("warnings");
+    let mut draft = new_version(ContractStatus::Draft, "draft");
+    draft.bundle = sized_bundle("draft", 2, 1);
+    store
+        .add_draft_contract_version(mock.id, draft, draft_meta("note"))
+        .await
+        .expect("draft");
+
+    let infos = store
+        .list_contract_version_infos(mock.id)
+        .await
+        .expect("infos");
+    let expected: Vec<mb_store::ContractVersionInfo> = store
+        .list_contract_versions(mock.id)
+        .await
+        .expect("versions")
+        .iter()
+        .map(Into::into)
+        .collect();
+    assert_eq!(infos, expected);
+    assert_eq!(
+        infos
+            .iter()
+            .map(|i| (i.version, i.operations, i.channels, i.imported))
+            .collect::<Vec<_>>(),
+        vec![(3, 2, 1, true), (2, 1, 3, false), (1, 4, 0, false)]
+    );
+    assert!(infos[1].warnings.is_some() && infos[0].warnings.is_none());
+}
+
+pub(crate) async fn latest_contract_version_by_status(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "latest").await;
+    let wanted = [ContractStatus::Draft, ContractStatus::Active];
+    assert_eq!(
+        store
+            .latest_contract_version(mock.id, &wanted)
+            .await
+            .expect("none"),
+        None
+    );
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Active, "one"))
+        .await
+        .expect("v1");
+    store
+        .add_draft_contract_version(
+            mock.id,
+            new_version(ContractStatus::Draft, "two"),
+            draft_meta("n"),
+        )
+        .await
+        .expect("v2");
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Approved, "three"))
+        .await
+        .expect("v3");
+    for (statuses, want) in [
+        (wanted.to_vec(), Some(2)),
+        (vec![ContractStatus::Active], Some(1)),
+        (vec![ContractStatus::Approved], Some(3)),
+        (vec![ContractStatus::Archived], None),
+        (vec![], None),
+    ] {
+        let got = store
+            .latest_contract_version(mock.id, &statuses)
+            .await
+            .expect("latest");
+        assert_eq!(got.as_ref().map(|v| v.version), want, "{statuses:?}");
+        if let Some(v) = got {
+            assert_eq!(
+                Some(v),
+                store
+                    .get_contract_version(mock.id, want.unwrap_or_default())
+                    .await
+                    .expect("get")
+            );
+        }
+    }
+}
+
+pub(crate) async fn request_log_summaries_match_the_entries(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "summaries").await;
+    let other = create(store, "other").await;
+    let bodies = [
+        (json!({"q": 1}), Some(json!({"ok": true}))),
+        (
+            json!({"name": "Zo\u{eb} \u{2713} \u{1F426}", "esc": "a\"b\\c\n\u{1}"}),
+            None,
+        ),
+        (
+            json!({"n": [1.5, -0.0, 1e300, 12_345_678_901_234_567_u64], "z": null}),
+            Some(json!(null)),
+        ),
+        (
+            json!({"b": {"a": [], "c": {}}, "a": "x".repeat(10_000)}),
+            Some(json!("y")),
+        ),
+    ];
+    for (i, (request, response)) in bodies.into_iter().enumerate() {
+        let mut e = log_entry(mock.id, &format!("s{}", i % 2), "op", "llm");
+        e.request = request;
+        e.response = response;
+        if i == 0 {
+            e.kind = RequestKind::Event;
+        }
+        store.append_request_log(e, 1000).await.expect("append");
+    }
+    store
+        .append_request_log(log_entry(other.id, "s0", "op", "llm"), 1000)
+        .await
+        .expect("append");
+
+    for f in [
+        RequestLogFilter::default(),
+        RequestLogFilter {
+            session: Some("s1".into()),
+            ..RequestLogFilter::default()
+        },
+        RequestLogFilter {
+            kind: Some(RequestKind::Event),
+            ..RequestLogFilter::default()
+        },
+        RequestLogFilter {
+            limit: 2,
+            ..RequestLogFilter::default()
+        },
+    ] {
+        let summaries = store
+            .list_request_log_summaries(mock.id, &f)
+            .await
+            .expect("summaries");
+        let expected: Vec<mb_store::RequestLogSummary> = store
+            .list_request_log(mock.id, &f)
+            .await
+            .expect("entries")
+            .iter()
+            .map(Into::into)
+            .collect();
+        assert!(!summaries.is_empty(), "{f:?}");
+        assert_eq!(summaries, expected, "{f:?}");
+    }
+    let all = store
+        .list_request_log_summaries(mock.id, &RequestLogFilter::default())
+        .await
+        .expect("all");
+    // Newest first: the 10 KB request, then null, none and `{"ok":true}`.
+    let sizes: Vec<(u64, u64)> = all
+        .iter()
+        .map(|s| (s.request_bytes, s.response_bytes))
+        .collect();
+    assert_eq!(sizes.len(), 4);
+    assert!(sizes[0].0 > 10_000, "{sizes:?}");
+    assert_eq!(
+        (sizes[0].1, sizes[1].1, sizes[2].1, sizes[3]),
+        (3, 4, 0, (7, 11)),
+        "{sizes:?}"
+    );
 }
