@@ -25,6 +25,7 @@ use crate::call::{
     self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
     public_query, recorded_headers,
 };
+use crate::limits::MAX_REQUEST_PARAMS;
 use crate::{MockRuntime, ScenarioRuntime};
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
@@ -334,6 +335,9 @@ async fn serve(
                 Vec::new()
             }
         };
+    if raw_query.len() > MAX_REQUEST_PARAMS {
+        return too_many_params(log, "query pairs", raw_query.len());
+    }
     let query = form::decode(
         public_query(rt, &raw_query),
         op.input.query.as_ref(),
@@ -347,9 +351,12 @@ async fn serve(
     let decode = decode_span.entered();
     let body = match decoded {
         Ok(body) => body,
-        Err(e) => {
+        Err(BodyDecodeError::Invalid(e)) => {
             errors.push(e);
             None
+        }
+        Err(BodyDecodeError::TooManyFields(n)) => {
+            return too_many_params(log, "body fields", n);
         }
     };
     // The record shows the body as decoded, as the engine sees it.
@@ -680,13 +687,18 @@ pub(super) fn method_name(m: HttpMethod) -> &'static str {
     }
 }
 
-/// Group repeated query keys, keeping first-seen order.
-fn group(pairs: Vec<(String, String)>) -> Vec<(String, Vec<String>)> {
+/// Group repeated query keys, keeping first-seen order (linear: keys are
+/// found through an index, not by scanning the groups so far).
+fn group(pairs: impl IntoIterator<Item = (String, String)>) -> Vec<(String, Vec<String>)> {
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
     for (k, v) in pairs {
-        match out.iter_mut().find(|(key, _)| *key == k) {
+        match index.get(&k).and_then(|&i| out.get_mut(i)) {
             Some((_, values)) => values.push(v),
-            None => out.push((k, vec![v])),
+            None => {
+                index.insert(k.clone(), out.len());
+                out.push((k, vec![v]));
+            }
         }
     }
     out
@@ -758,7 +770,7 @@ async fn decode_body(
     defs: &Map<String, Value>,
     headers: &HeaderMap,
     raw: &[u8],
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, BodyDecodeError> {
     let schema = op.input.body.as_ref();
     let declared = schema
         .and_then(|s| s.get("x-content-type"))
@@ -771,27 +783,54 @@ async fn decode_body(
         .unwrap_or(BodyKind::Json);
     if raw.iter().all(u8::is_ascii_whitespace) {
         return if op.input.body_required {
-            Err("body: a request body is required".into())
+            Err(BodyDecodeError::Invalid(
+                "body: a request body is required".into(),
+            ))
         } else {
             Ok(None)
         };
     }
-    match kind {
-        BodyKind::Form => form_pairs(raw)
-            .map(|pairs| Some(Value::Object(form::decode(pairs, schema, defs))))
-            .map_err(|e| format!("body: not valid form data: {e}")),
+    let fields = match kind {
+        BodyKind::Form => form_pairs(raw).map_err(|e| format!("body: not valid form data: {e}")),
         BodyKind::Multipart => multipart_fields(headers, raw)
             .await
-            .map(|pairs| Some(Value::Object(form::decode(pairs, schema, defs))))
             .map_err(|e| format!("body: not valid multipart data: {e}")),
-        BodyKind::Json => match serde_json::from_slice(raw) {
-            Ok(v) => Ok(Some(v)),
-            Err(e) if schema.is_some() => Err(format!("body: not valid JSON: {e}")),
-            Err(_) => Ok(Some(Value::String(
-                String::from_utf8_lossy(raw).into_owned(),
-            ))),
-        },
+        BodyKind::Json => {
+            return match serde_json::from_slice(raw) {
+                Ok(v) => Ok(Some(v)),
+                Err(e) if schema.is_some() => Err(BodyDecodeError::Invalid(format!(
+                    "body: not valid JSON: {e}"
+                ))),
+                Err(_) => Ok(Some(Value::String(
+                    String::from_utf8_lossy(raw).into_owned(),
+                ))),
+            };
+        }
     }
+    .map_err(BodyDecodeError::Invalid)?;
+    if fields.len() > MAX_REQUEST_PARAMS {
+        return Err(BodyDecodeError::TooManyFields(fields.len()));
+    }
+    Ok(Some(Value::Object(form::decode(fields, schema, defs))))
+}
+
+/// Why a request body did not decode.
+enum BodyDecodeError {
+    /// Not valid for its media type, or missing though required.
+    Invalid(String),
+    /// A form or multipart body with more than [`MAX_REQUEST_PARAMS`]
+    /// fields (counted up to one past the cap).
+    TooManyFields(usize),
+}
+
+/// The 400 problem for a request carrying more than
+/// [`MAX_REQUEST_PARAMS`] query pairs or body fields.
+fn too_many_params(log: &mut CallLog, what: &str, n: usize) -> Response {
+    log.problem(
+        400,
+        "Too many parameters",
+        format!("the request has {n} {what}; at most {MAX_REQUEST_PARAMS} are accepted"),
+    )
 }
 
 /// The fields of a `multipart/form-data` body: a file part as its file
@@ -818,6 +857,10 @@ async fn multipart_fields(
             None => field.text().await?,
         };
         fields.push((name, value));
+        // One past the cap is enough to refuse the body.
+        if fields.len() > MAX_REQUEST_PARAMS {
+            break;
+        }
     }
     Ok(fields)
 }
@@ -994,8 +1037,9 @@ fn recorded_query(rt: &MockRuntime, uri: &Uri) -> Value {
 }
 
 /// `pairs` as an object of strings; repeated keys become arrays of strings.
+/// Only the first [`MAX_REQUEST_PARAMS`] pairs are kept.
 fn string_params(pairs: Vec<(String, String)>) -> Map<String, Value> {
-    group(pairs)
+    group(pairs.into_iter().take(MAX_REQUEST_PARAMS))
         .into_iter()
         .map(|(k, mut values)| {
             let v = if values.len() == 1 {
@@ -1133,6 +1177,33 @@ mod tests {
         assert_eq!(
             out,
             json!({"n": 3, "x": 1.5, "b": true, "s": "7", "tags": [1, 2], "free": "b"})
+        );
+    }
+
+    /// Grouping 50k pairs (distinct keys, then one repeated key) is
+    /// linear, not O(k^2), and keeps first-seen order.
+    #[test]
+    fn group_is_linear_and_keeps_first_seen_order() {
+        const N: usize = 50_000;
+        let distinct: Vec<_> = (0..N).map(|i| (format!("k{i}"), "v".to_string())).collect();
+        let started = std::time::Instant::now();
+        let out = group(distinct);
+        let took = started.elapsed();
+        assert_eq!(out.len(), N);
+        assert_eq!(out[N - 1].0, format!("k{}", N - 1));
+        assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+
+        let out = group(vec![
+            ("b".into(), "1".into()),
+            ("a".into(), "2".into()),
+            ("b".into(), "3".into()),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                ("b".to_string(), vec!["1".to_string(), "3".to_string()]),
+                ("a".to_string(), vec!["2".to_string()]),
+            ]
         );
     }
 

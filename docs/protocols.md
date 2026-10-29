@@ -107,7 +107,7 @@ GraphQL answers `200` with a field error whose `extensions.code` stands for the 
 | any other 4xx | `BAD_REQUEST` |
 | 5xx | `INTERNAL_SERVER_ERROR` |
 
-Request limits: GraphQL bodies 1 MiB, query depth 15 and complexity 1000 (`protocols.graphql`); gRPC messages 4 MiB (`protocols.grpc.max_message_bytes`); SOAP bodies 4 MiB.
+Request limits: HTTP/REST requests at most 1,000 query pairs and 1,000 form or multipart fields (more is a 400 problem); GraphQL bodies 1 MiB, query depth 15 and complexity 1000 (`protocols.graphql`); gRPC messages 4 MiB (`protocols.grpc.max_message_bytes`); SOAP bodies 4 MiB.
 
 ## Known limits
 

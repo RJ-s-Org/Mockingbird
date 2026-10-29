@@ -10,6 +10,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- HTTP/REST query strings and form or multipart bodies decode in linear time: they were O(k^2) in the number of keys (50k keys took about 11 s) and are decoded before auth, so an unauthenticated request could burn CPU. A request with more than 1,000 query pairs, or more than 1,000 form or multipart fields, is now refused with a 400 `application/problem+json` ("Too many parameters"), and the request log keeps at most 1,000 recorded query or form fields.
 - The MCP `stop_server` tool stops a server the same MCP server started at once with SIGTERM: it no longer waits 10 s and reports `forced: true` because the exited server lingered as an unreaped (zombie) child, and `server_status` no longer reports such a server as running.
 
 ## [0.1.0] - 2026-10-28

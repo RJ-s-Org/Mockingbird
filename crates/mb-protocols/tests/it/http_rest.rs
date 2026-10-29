@@ -572,6 +572,53 @@ async fn form_data_bodies_are_decoded() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
+const MAX_PARAMS: usize = mb_protocols::limits::MAX_REQUEST_PARAMS;
+
+fn many_pairs(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("k{i}=v"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+async fn assert_too_many(resp: Response) {
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(body["title"], "Too many parameters", "{body}");
+}
+
+/// Query and form decoding runs before auth, so the number of pairs is
+/// capped: one past the cap is a problem+json 400, the cap itself is served.
+#[tokio::test]
+async fn too_many_query_or_form_pairs_are_rejected() {
+    let h = offline();
+    let resp = send(&h, get(&format!("/orders?{}", many_pairs(MAX_PARAMS)))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send(&h, get(&format!("/orders?{}", many_pairs(MAX_PARAMS + 1)))).await;
+    assert_too_many(resp).await;
+
+    let h = offline_contract(FORM_CONTRACT);
+    let form = "application/x-www-form-urlencoded";
+    let body = format!("name=rex&{}", many_pairs(MAX_PARAMS - 1));
+    let resp = send(&h, post_form("/pets", form, &body)).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = format!("name=rex&{}", many_pairs(MAX_PARAMS));
+    assert_too_many(send(&h, post_form("/pets", form, &body)).await).await;
+
+    let part = "--XyZ\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n";
+    let multipart = format!("{}--XyZ--\r\n", part.repeat(MAX_PARAMS + 1));
+    let resp = send(
+        &h,
+        post_form("/upload", "multipart/form-data; boundary=XyZ", &multipart),
+    )
+    .await;
+    assert_too_many(resp).await;
+}
+
 #[tokio::test]
 async fn cors_preflight_and_simple_requests() {
     let h = offline();

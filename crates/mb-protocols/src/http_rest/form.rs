@@ -3,6 +3,8 @@
 //! nests into objects and arrays, and every value is coerced to the type the
 //! schema declares for it.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Number, Value};
 
 /// How deep `$ref`s and combinators are followed to find a value's schema.
@@ -11,7 +13,31 @@ const MAX_SCHEMA_DEPTH: usize = 16;
 /// Decoded keys: the values of a key, or its bracketed children in order.
 enum Node {
     Leaf(Vec<String>),
-    Map(Vec<(String, Node)>),
+    Map(Children),
+}
+
+/// Keys in first-seen order, indexed by name so each insert is O(1)
+/// rather than a scan of the keys before it.
+#[derive(Default)]
+struct Children {
+    entries: Vec<(String, Node)>,
+    index: HashMap<String, usize>,
+}
+
+impl Children {
+    /// The node at `key`, created by `new` if absent.
+    fn slot(&mut self, key: String, new: impl FnOnce() -> Node) -> &mut Node {
+        let i = match self.index.get(&key) {
+            Some(&i) => i,
+            None => {
+                let i = self.entries.len();
+                self.index.insert(key.clone(), i);
+                self.entries.push((key, new()));
+                i
+            }
+        };
+        &mut self.entries[i].1
+    }
 }
 
 /// `pairs` as an object, nested by bracket notation and coerced through
@@ -29,14 +55,14 @@ pub(super) fn decode(
         root.iter()
             .any(|b| b.get("properties").and_then(|p| p.get(key)).is_some())
     };
-    let mut entries = Vec::new();
+    let mut entries = Children::default();
     for (key, value) in pairs {
         match split_key(&key).filter(|_| !declared(&key)) {
             Some(path) => insert(&mut entries, &path, value),
             None => insert(&mut entries, &[key], value),
         }
     }
-    object(entries, &root, defs)
+    object(entries.entries, &root, defs)
 }
 
 /// `base[a][b]` as `[base, a, b]`; `None` for a key without brackets or
@@ -63,34 +89,28 @@ fn split_key(key: &str) -> Option<Vec<String>> {
 
 /// Inserts `value` at `path` below `entries`; an empty segment (`a[]`)
 /// appends a new element.
-fn insert(entries: &mut Vec<(String, Node)>, path: &[String], value: String) {
+fn insert(entries: &mut Children, path: &[String], value: String) {
     let Some((first, rest)) = path.split_first() else {
         return;
     };
     let key = if first.is_empty() {
-        entries.len().to_string()
+        entries.entries.len().to_string()
     } else {
         first.clone()
     };
-    let slot = match entries.iter().position(|(k, _)| *k == key) {
-        Some(i) => &mut entries[i].1,
-        None => {
-            let node = if rest.is_empty() {
-                Node::Leaf(Vec::new())
-            } else {
-                Node::Map(Vec::new())
-            };
-            entries.push((key, node));
-            let last = entries.len() - 1;
-            &mut entries[last].1
+    let slot = entries.slot(key, || {
+        if rest.is_empty() {
+            Node::Leaf(Vec::new())
+        } else {
+            Node::Map(Children::default())
         }
-    };
+    });
     match (slot, rest.is_empty()) {
         (Node::Leaf(values), true) => values.push(value),
         // A key given both a value and children keeps its children.
         (Node::Map(_), true) => {}
         (slot @ Node::Leaf(_), false) => {
-            let mut children = Vec::new();
+            let mut children = Children::default();
             insert(&mut children, rest, value);
             *slot = Node::Map(children);
         }
@@ -206,7 +226,7 @@ fn to_json(node: Node, schema: Option<&Value>, defs: &Map<String, Value>) -> Val
             .last()
             .map(|v| coerce(v, &types(&branches)))
             .unwrap_or(Value::Null),
-        Node::Map(entries) => {
+        Node::Map(Children { entries, .. }) => {
             let indexed = entries.iter().all(|(k, _)| k.parse::<usize>().is_ok());
             let wants_object = branches
                 .iter()
@@ -274,6 +294,43 @@ mod tests {
         assert_eq!(
             Value::Object(out),
             json!({"a": {"b": {"c": "1"}}, "l": ["x", "y"], "e": ["p", "q"], "flat": ["1", "2"], "odd[": "z"})
+        );
+    }
+
+    /// 50k pairs, the most a 1 MiB body can hold at ~20 bytes each, as
+    /// distinct keys, `a[]` appends and nested children: each shape decodes
+    /// in bounded time (linear, not O(k^2) in the number of keys).
+    #[test]
+    fn many_keys_decode_in_bounded_time() {
+        const N: usize = 50_000;
+        let shapes: [fn(usize) -> (String, String); 3] = [
+            |i| (format!("k{i}"), "v".into()),
+            |_| ("a[]".into(), "v".into()),
+            |i| (format!("m[k{i}]"), "v".into()),
+        ];
+        for shape in shapes {
+            let input: Vec<_> = (0..N).map(shape).collect();
+            let started = std::time::Instant::now();
+            let out = decode(input, None, &Map::new());
+            let took = started.elapsed();
+            let len = match out.values().next() {
+                Some(Value::Array(a)) if out.len() == 1 => a.len(),
+                Some(Value::Object(o)) if out.len() == 1 => o.len(),
+                _ => out.len(),
+            };
+            assert_eq!(len, N);
+            assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+        }
+    }
+
+    #[test]
+    fn appends_and_repeats_keep_their_order() {
+        // `a[1]` then `a[]`: the append lands on the next index, which
+        // already exists, and joins it; the last value wins.
+        let out = decode(pairs("a[1]=x&a[]=y&a[0]=z&k=1&j=2&k=3"), None, &Map::new());
+        assert_eq!(
+            Value::Object(out),
+            json!({"a": ["z", ["x", "y"]], "k": ["1", "3"], "j": "2"})
         );
     }
 
