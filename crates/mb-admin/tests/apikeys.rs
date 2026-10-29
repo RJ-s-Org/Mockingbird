@@ -1,5 +1,5 @@
 //! `/api/v1/workspaces/{ws}/api-keys`: create, list and revoke API keys.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

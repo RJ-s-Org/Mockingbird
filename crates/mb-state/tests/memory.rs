@@ -1,3 +1,4 @@
+#![cfg(test)]
 mod common;
 
 use std::sync::Arc;

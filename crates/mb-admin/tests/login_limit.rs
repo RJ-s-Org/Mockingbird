@@ -1,5 +1,4 @@
 //! The `auth.login_failed` audit rate limit.
-#![allow(clippy::unwrap_used)]
 
 use std::net::IpAddr;
 use std::time::{Duration, Instant};

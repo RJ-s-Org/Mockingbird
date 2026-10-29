@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
 //! One real call per protocol family through a built app: GraphQL, gRPC
 //! (on its own h2c listener), SOAP 1.1 and SSE.
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::time::Duration;

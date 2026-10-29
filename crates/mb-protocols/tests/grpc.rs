@@ -1,5 +1,5 @@
+#![cfg(test)]
 #![cfg(feature = "grpc")]
-#![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

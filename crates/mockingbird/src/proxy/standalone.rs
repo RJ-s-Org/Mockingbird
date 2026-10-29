@@ -283,7 +283,6 @@ pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::upstream_url;
 

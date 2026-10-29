@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! Community and repository files: they exist, the changelog script works,
 //! dependabot covers every ecosystem and the example gallery loads.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

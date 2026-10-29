@@ -1,5 +1,5 @@
+#![cfg(test)]
 #![cfg(feature = "graphql")]
-#![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};

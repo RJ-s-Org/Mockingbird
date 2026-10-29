@@ -1,7 +1,7 @@
 //! `serve` with `auth.mode: oidc`: authentication of the Admin API, API
 //! keys from the command line, the host guard, a private `/metrics`, OIDC
 //! discovery at startup and the `openapi` subcommand.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

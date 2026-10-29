@@ -1,5 +1,5 @@
 //! `GET …/mocks/{mock}/webhooks/deliveries`: the in-memory delivery log.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

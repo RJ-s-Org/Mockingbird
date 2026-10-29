@@ -1,5 +1,5 @@
+#![cfg(test)]
 #![cfg(feature = "websocket")]
-#![allow(clippy::unwrap_used)]
 
 use std::time::Duration;
 

@@ -1,9 +1,8 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! The release pipeline (`.github/workflows/release.yml`) and its version
 //! gate (`scripts/check-version.sh`). The workflow runs only in CI, so this
 //! parses it and checks the jobs, targets, scanning, signing, permissions and
 //! action pins it must keep.
+#![cfg(test)]
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

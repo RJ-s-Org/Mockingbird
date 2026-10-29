@@ -1,6 +1,6 @@
 //! Mocks from every workspace: isolation, per-workspace profiles and
 //! data-plane API keys.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

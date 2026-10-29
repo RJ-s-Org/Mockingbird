@@ -2118,7 +2118,6 @@ async fn http_post(State(st): State<HttpState>, headers: HeaderMap, body: String
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

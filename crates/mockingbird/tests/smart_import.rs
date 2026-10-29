@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
 //! P6 through a built app: a Markdown import answered by a wiremock
 //! OpenAI-compatible LLM, reviewed, approved, activated and served.
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

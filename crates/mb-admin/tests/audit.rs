@@ -1,6 +1,6 @@
 //! The audit log: one event per successful mutation, filtering, JSONL export,
 //! the signed webhook and retention.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

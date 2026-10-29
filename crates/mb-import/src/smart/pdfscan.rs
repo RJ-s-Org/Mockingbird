@@ -388,7 +388,6 @@ fn ascii85(data: &[u8], growth_left: &usize) -> Result<(Vec<u8>, usize), Refusal
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]

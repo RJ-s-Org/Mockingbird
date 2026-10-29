@@ -1,7 +1,7 @@
 //! Console login over OIDC (Authorization Code + PKCE against a wiremock
 //! provider), admin sessions, logout, `/api/v1/me`, bearer JWTs and the
 //! console gate.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

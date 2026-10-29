@@ -1,5 +1,5 @@
 //! Operations taken from OpenAPI blocks embedded in documentation pages.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

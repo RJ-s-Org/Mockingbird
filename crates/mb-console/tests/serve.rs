@@ -1,6 +1,5 @@
-#![allow(clippy::unwrap_used)]
-
 //! The console router: index, SPA fallback, hashed assets and the placeholder.
+#![cfg(test)]
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};

@@ -1,7 +1,7 @@
 //! One `Extensions` instance serves the whole binary: the quota guard and
 //! usage sink handed to `build_app_with` admit and meter WebSocket channel
 //! replies (P5) and admit import jobs (P6).
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

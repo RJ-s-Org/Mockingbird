@@ -1,6 +1,5 @@
-#![allow(clippy::unwrap_used)]
-
 //! Scenarios created through the Admin API, applied on the data plane.
+#![cfg(test)]
 
 use std::path::PathBuf;
 

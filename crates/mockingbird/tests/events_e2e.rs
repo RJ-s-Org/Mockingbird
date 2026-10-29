@@ -1,5 +1,5 @@
 //! End to end: AsyncAPI mocks served by `build_app` with configured brokers.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

@@ -1,5 +1,6 @@
 //! Redis backend. Gated by `MB_TEST_REDIS_URL` (see `scripts/test-redis.sh`);
 //! each test uses its own random workspace so tests share one server safely.
+#![cfg(test)]
 
 mod common;
 

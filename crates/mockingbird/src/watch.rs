@@ -285,7 +285,6 @@ fn contract_paths(cfg: &FileConfig) -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

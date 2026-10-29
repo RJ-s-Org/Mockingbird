@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
 //! HA change propagation, in process: two `build_app_with_bus` nodes on one
 //! SQLite file (role `all`) joined by a [`MemoryBusHub`].
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

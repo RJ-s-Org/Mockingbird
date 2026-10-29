@@ -324,7 +324,6 @@ fn save(opts: &PageOptions, key: &str) -> anyhow::Result<SavedKey> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::Path;

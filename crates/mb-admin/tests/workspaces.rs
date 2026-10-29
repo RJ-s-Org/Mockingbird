@@ -1,6 +1,6 @@
 //! Workspace endpoints, workspace-scoped resources and the P2 alias paths,
 //! as the Local principal (`auth.mode: none`).
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -307,7 +307,6 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]

@@ -745,7 +745,6 @@ pub fn workspace_of(dir: &Path) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use mb_llm::ChatMessage;

@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use mb_engine::faker::Costs;
 use mb_engine::{Engine, EngineConfig, Faker, GenerationContext, OperationCall, SchemaValidator};
 use mb_import::compile;

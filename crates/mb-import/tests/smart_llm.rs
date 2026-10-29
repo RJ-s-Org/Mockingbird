@@ -1,5 +1,5 @@
 //! LLM chunk extraction, summaries, the token budget and merging.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::time::Duration;

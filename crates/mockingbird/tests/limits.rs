@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
 //! Per-mock rate limits, request size caps, daily token budgets and the
 //! engine guards, through an in-process app.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

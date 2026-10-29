@@ -4,6 +4,10 @@
 //! that answers codes registered with [`MockOidcProvider::issue_code`] and a
 //! userinfo endpoint for the access tokens it handed out. This is test
 //! support: it panics on internal failures instead of returning errors.
+#![expect(
+    clippy::expect_used,
+    reason = "test-support fixture (feature `testing`, dev-dependencies only) whose public API is documented to panic on internal failures; returning errors would break the published 0.1 signatures"
+)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

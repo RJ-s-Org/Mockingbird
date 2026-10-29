@@ -1,6 +1,7 @@
 //! Cross-node bus. The Postgres and Redis tests are gated by
 //! `MB_TEST_POSTGRES_URL` / `MB_TEST_REDIS_URL` (see `scripts/test-postgres.sh`
 //! and `scripts/test-redis.sh`).
+#![cfg(test)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

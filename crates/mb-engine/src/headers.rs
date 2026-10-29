@@ -102,7 +102,6 @@ fn token(rng: &mut impl Rng, len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
 
     use super::*;
 

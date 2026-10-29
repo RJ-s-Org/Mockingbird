@@ -1,6 +1,6 @@
 //! Per-stage trace spans (spec §14): every call's `mock.request` span has
 //! one child span per pipeline stage.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

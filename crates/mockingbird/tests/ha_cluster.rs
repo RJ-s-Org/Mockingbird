@@ -1,11 +1,10 @@
-#![allow(clippy::unwrap_used)]
-
 //! A whole HA cluster in process: `control` and `data` nodes built from
 //! their configuration files (Postgres control store, Redis state store and
 //! Redis bus, so leader election uses the Redis lease) and served with
 //! `server::serve_app` on ephemeral ports. Gated on both
 //! `MB_TEST_POSTGRES_URL` and `MB_TEST_REDIS_URL`; run with
 //! `MB_TEST_RUNNER=scripts/test-postgres.sh scripts/test-redis.sh -p mockingbird-cli --test ha_cluster`.
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

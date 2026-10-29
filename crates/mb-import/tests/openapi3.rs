@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use mb_import::{ImportError, compile};
 use mb_mcm::{Bundle, Effect, Identity, OperationKind, StatusSelector};
 use serde_json::json;

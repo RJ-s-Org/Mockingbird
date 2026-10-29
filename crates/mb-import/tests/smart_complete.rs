@@ -1,5 +1,4 @@
 //! The `required` and nullable post-pass over draft schemas.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use mb_import::smart::complete::complete_schema;
 use serde_json::json;

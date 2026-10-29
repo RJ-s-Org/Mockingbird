@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use std::sync::Arc;
 
 use mb_engine::{Engine, EngineConfig, MessageContext, SchemaValidator, Source};

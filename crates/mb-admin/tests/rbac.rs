@@ -1,6 +1,6 @@
 //! Role-based access control on the admin API, with a test authenticator
 //! that maps `Authorization: Bearer <name>` to fixed principals.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

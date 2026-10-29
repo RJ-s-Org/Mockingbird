@@ -1,6 +1,7 @@
 //! Import jobs: the `…/mocks/{mock}/imports` API and the worker that turns
 //! jobs into draft contract versions.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg(test)]
+#![allow(clippy::panic)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

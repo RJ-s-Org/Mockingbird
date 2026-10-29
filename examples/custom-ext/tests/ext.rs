@@ -1,5 +1,5 @@
 //! The example's extensions, wired into an in-process offline app.
-#![allow(clippy::unwrap_used)]
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 

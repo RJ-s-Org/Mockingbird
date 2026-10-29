@@ -378,7 +378,6 @@ fn text(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
     use serde_json::json;
 
     use super::super::envelope::{Version, envelope};

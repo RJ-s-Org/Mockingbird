@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+#![cfg(test)]
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

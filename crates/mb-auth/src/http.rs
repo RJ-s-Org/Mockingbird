@@ -78,7 +78,6 @@ impl<'c> AsyncHttpClient<'c> for OidcHttp<'_> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

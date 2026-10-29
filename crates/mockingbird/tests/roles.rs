@@ -1,11 +1,10 @@
-#![allow(clippy::unwrap_used)]
-
 //! Node roles (`all`, `control`, `data`) and leader-gated work, in process:
 //! nodes are built with `config::build_app_with_bus`/`build_app_with_leader`
 //! and served with `server::serve_app` on ephemeral listeners. The leader
 //! tests use role `all` on one SQLite file and a [`MemoryBusHub`] with a
 //! [`LeaderBackend::Manual`] override; the split-role tests need Postgres
 //! (`MB_TEST_POSTGRES_URL`, see `scripts/test-postgres.sh`).
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
