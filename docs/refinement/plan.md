@@ -6,6 +6,25 @@ Finding IDs below (`MB-ENGINE-PERF-2`, `CI-2` …) point at entries there, each 
 file:line, evidence, fix and risk. Numbers are measured against
 [`baseline.md`](baseline.md).
 
+## Status (2026-10-30)
+
+Waves 0–7 are done: 55 PRs, all merged with every required check green. The
+before and after numbers are in [baseline.md](baseline.md#after).
+
+| Wave | PRs | Result |
+|---|---|---|
+| 0 | #80 #81 | nextest in CI; 143 `unwrap`/`expect` allows removed, `expect_used` denied |
+| 1 | #82–#87 | one integration-test binary per crate, same tests before and after |
+| 2 | #88–#93 | slow tests fixed (MCP 10.6 s → 0.6 s on Linux, protocols 10.3 s → 2.4 s, auth 3.8 s → 0.33 s); a daemon zombie bug fixed |
+| 3 | #95–#103 | B1–B9 merged |
+| 4 | #105–#107 #114–#117 #119 #120 | P1–P9 merged; leftovers listed below |
+| 5 | #108–#113 #118 #121 #122 | F1–F8 merged |
+| 6 | #123–#128 | A1–A5 per crate group, additive, with deprecations |
+| 7 | #129–#136 | D1–D7 merged (D2 as #131 and #133) |
+
+Left open: the [0.2.0 scope](#020-scope), the issue [#78](https://github.com/RJ-s-Org/Mockingbird/issues/78) deferrals,
+and the follow-ups in [baseline.md](baseline.md#left-open).
+
 ## Rules for every PR
 
 - One concern per PR, a disjoint file set from every PR in the same wave, branched
@@ -112,14 +131,32 @@ Classified *finish* by the audit; one PR per crate area.
 | F1 `mb-protocols` GraphQL | MB-PROTOCOLS-STUB-1 (SDL directives) |
 | F2 `mb-protocols` other | STUB-2 (`?wsdl` XSDs), 4 (gRPC compression), 6 (MQTT shared group), 7, 11 (binary WS frames) |
 | F3 `mb-import` | MB-IMPORT-STUB-3, 4, 6, 7, 9, 10, 12 |
-| F4 `mb-engine`, `mb-mcm` | MB-ENGINE-STUB-1, 2, 3, 4, 7, 8, 12 |
+| F4 `mb-engine`, `mb-mcm` | MB-ENGINE-STUB-1, 2, 3, 4, 7, 8, 12 (STUB-1: follow the [LLM-validity constraints](#constraints-from-the-llm-validity-work)) |
 | F5 `mockingbird` | MOCKINGBIRD-STUB-2, 3, 6, 7, 8, 9, 13 |
 | F6 `mb-admin` | MB-ADMIN-STUB-4, 5, 6 (Admin API: `npm run gen:api`), 9, 13 |
 | F7 OIDC pending logins in the store | MB-ADMIN-STUB-1, MB-ADMIN-STUB-2 |
-| F8 others | MB-STORE-STUB-5, 10, 11, 12, 13; MB-ENGINE-STUB-6 (cross-node cache reset) |
+| F8 others | MB-STORE-STUB-5, 10, 11, 12, 13 (STUB-11: see the [LLM-validity constraints](#constraints-from-the-llm-validity-work)); MB-ENGINE-STUB-6 (cross-node cache reset) |
 
 The multi-file external `$ref` import (MB-IMPORT-STUB-2, effort L) needs a design
 pass first; it is planned last in this wave.
+
+### Constraints from the LLM-validity work
+
+The LLM-validity work in the llm-benchmark session (draft [#104](https://github.com/RJ-s-Org/Mockingbird/pull/104)) builds on this program. These PRs must leave it room:
+
+- **F4, MB-ENGINE-STUB-1** (format assertion in `validate.rs`):
+  1. Assert only the formats the faker produces: `uuid`, `date-time`, `date`, `time`, `email`, `uri`, `ipv4`, `ipv6`, `hostname`. Other formats stay annotations, so contracts with custom formats do not start failing.
+  2. Format errors stay in `patch()`'s local-fix set. The faker refills them; they never go to an LLM repair round and are never rejected.
+  3. Request-id echo survives. A response value equal to a request path or query value (`GET /orders/{id}` echoing a format-less id into a `format: uuid` field) is not overwritten. If the validator cannot see the request, give `patch()` a keep-predicate hook (`keep: impl Fn(&str /*pointer*/, &Value) -> bool`) that keeps nothing by default.
+  4. Add a test that an invalid uuid in an LLM answer comes back patched (`Source::Repaired`).
+- **P1 and D3:** keep the changes to `extract.rs`, the validator construction, the repair loop in `lib.rs` and `faker.rs` self-contained.
+- **D3** (seeded faker):
+  1. Thread the RNG/seed through as a parameter, so that a property test can fake every contract under `crates/mb-evals/contracts` N times reproducibly.
+  2. Keep the depth-limit path in one identifiable place.
+  3. Add no path that emits a body without validating it.
+  4. If its tests show the faker returning schema-invalid bodies on deep recursion, add a failing test, `#[ignore]` with a reason. Today the faker drops required members at its depth limit (Shopify `Query.products`, `inventoryItem.variant` missing `__typename` and `pageInfo`).
+- **D6** (non-JSON responses): if it touches `extract.rs` or `guards.rs` `check_output`, either take the first complete JSON value in `extract_json` (instead of first `{` to last `}`, which breaks on doubled `{..}{..}` answers) or keep the `bracketed()` fallback easy to swap.
+- **F8, MB-STORE-STUB-11** (eval skipped counts): #104 also edits `crates/mb-evals/src/{report,main,manifest,lib}.rs` and rebases onto this PR. Keep the change small.
 
 ## Wave 6: API guidelines and style (additive only)
 
