@@ -16,13 +16,17 @@ use crate::{
 /// is sent to that hop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HopSettings {
+    /// How long one request to this hop may take.
     pub timeout: Duration,
+    /// Sampling temperature.
     pub temperature: f32,
+    /// Most completion tokens an answer may use.
     pub max_tokens: u32,
 }
 
 impl HopSettings {
     /// `req` with this hop's timeout, temperature and token limit.
+    #[must_use]
     pub fn apply(&self, mut req: ChatRequest) -> ChatRequest {
         req.timeout = self.timeout;
         req.temperature = self.temperature;
@@ -41,7 +45,18 @@ pub struct FallbackProvider {
     secondary_settings: Option<HopSettings>,
 }
 
+impl std::fmt::Debug for FallbackProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FallbackProvider")
+            .field("primary_settings", &self.primary_settings)
+            .field("secondary_settings", &self.secondary_settings)
+            .finish_non_exhaustive()
+    }
+}
+
 impl FallbackProvider {
+    /// Sends to `primary` first and to `secondary` when it fails, each with
+    /// the request as given.
     pub fn new(primary: Arc<dyn Provider>, secondary: Arc<dyn Provider>) -> Self {
         Self {
             primary,
@@ -52,12 +67,14 @@ impl FallbackProvider {
     }
 
     /// Requests to the primary use `settings`.
+    #[must_use]
     pub fn with_primary_settings(mut self, settings: HopSettings) -> Self {
         self.primary_settings = Some(settings);
         self
     }
 
     /// Requests to the secondary use `settings`.
+    #[must_use]
     pub fn with_secondary_settings(mut self, settings: HopSettings) -> Self {
         self.secondary_settings = Some(settings);
         self

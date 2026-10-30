@@ -7,4 +7,5 @@ mod perf;
 mod postgres;
 mod sqlite;
 mod support;
+mod traits;
 mod upgrade;

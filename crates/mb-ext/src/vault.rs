@@ -177,12 +177,31 @@ impl VaultSecrets {
     /// Builds the client from the process environment. `Ok(None)` when
     /// `VAULT_ADDR` is unset; an error when it is set but the rest of the
     /// configuration is unusable (no token, bad URL, unreadable CA bundle).
+    ///
+    /// # Errors
+    ///
+    /// [`ExtError::Other`], naming the variable at fault, when `VAULT_ADDR` is
+    /// not an `http(s)` URL, neither `VAULT_TOKEN` nor `VAULT_TOKEN_FILE` is
+    /// set, `VAULT_CACERT` cannot be read or parsed, or the HTTP client
+    /// cannot be built.
     pub fn from_env() -> Result<Option<Self>, ExtError> {
         Self::from_vars(|name| std::env::var(name).ok())
     }
 
     /// Like [`VaultSecrets::from_env`], reading the variables through `var`
     /// instead of the process environment. Empty values count as unset.
+    ///
+    /// # Errors
+    ///
+    /// As [`VaultSecrets::from_env`].
+    ///
+    /// ```
+    /// use mb_ext::VaultSecrets;
+    ///
+    /// // Without VAULT_ADDR, Vault support is off.
+    /// assert!(VaultSecrets::from_vars(|_| None)?.is_none());
+    /// # Ok::<(), mb_ext::ExtError>(())
+    /// ```
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ExtError> {
         Self::from_vars_with_http(var, &VaultHttp::default())
     }
@@ -190,6 +209,11 @@ impl VaultSecrets {
     /// Like [`VaultSecrets::from_vars`], with the client's proxy and extra
     /// CA roots from `http`. A CA bundle without a certificate or a proxy
     /// that is not a URL is an error.
+    ///
+    /// # Errors
+    ///
+    /// As [`VaultSecrets::from_env`], and [`ExtError::Other`] when `http`
+    /// holds a CA bundle without a certificate or a proxy that is not a URL.
     pub fn from_vars_with_http(
         var: impl Fn(&str) -> Option<String>,
         http: &VaultHttp,
@@ -411,6 +435,18 @@ impl DefaultSecrets {
 
     /// Like [`DefaultSecrets::from_env`], reading the variables through `var`
     /// instead of the process environment.
+    ///
+    /// ```
+    /// use mb_ext::{DefaultSecrets, Extensions};
+    ///
+    /// // A fixed Vault configuration, whatever the process environment holds.
+    /// let vars = [("VAULT_ADDR", "https://vault.example:8200"), ("VAULT_TOKEN_FILE", "/run/vault/token")];
+    /// let secrets = DefaultSecrets::from_vars(|name| {
+    ///     vars.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string())
+    /// });
+    /// let extensions = Extensions::default().with_secrets(std::sync::Arc::new(secrets));
+    /// # let _ = extensions;
+    /// ```
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
         let vars = VAULT_VARS
             .iter()

@@ -50,6 +50,60 @@ fn config_debug_redacts_the_api_key_and_header_values() {
     );
 }
 
+fn config_with_secrets() -> OpenAiConfig {
+    OpenAiConfig {
+        base_url: "https://bob:s3ntinel-base-pass@llm.example/v1".into(),
+        api_key: Some("sk-s3ntinel-api-key".into()),
+        model: "m".into(),
+        json_schema: true,
+        headers: vec![("api-key".into(), "s3ntinel-header".into())],
+        extra_body: serde_json::Map::new(),
+        http: HttpOptions {
+            extra_roots_pem: Vec::new(),
+            proxy: Some("http://alice:s3ntinel-proxy-pass@proxy.example:3128".into()),
+            no_proxy: vec!["internal.example".into()],
+        },
+    }
+}
+
+#[test]
+fn http_options_debug_redacts_proxy_credentials() {
+    let shown = format!("{:?}", config_with_secrets().http);
+    assert!(
+        !shown.contains("s3ntinel"),
+        "proxy password leaked: {shown}"
+    );
+    assert!(!shown.contains("alice"), "proxy user leaked: {shown}");
+    assert!(
+        shown.contains("http://<redacted>@proxy.example:3128"),
+        "proxy host kept: {shown}"
+    );
+    assert!(shown.contains("internal.example"), "no_proxy kept: {shown}");
+}
+
+#[test]
+fn provider_debug_shows_no_secret() {
+    let config = config_with_secrets();
+    let shown = format!("{config:?}");
+    assert!(!shown.contains("s3ntinel"), "secret leaked: {shown}");
+    assert!(shown.contains("llm.example"), "base_url host kept: {shown}");
+    let provider = OpenAiCompatible::new(config).unwrap();
+    let shown = format!("{provider:?}");
+    assert!(!shown.contains("s3ntinel"), "secret leaked: {shown}");
+    assert!(shown.starts_with("OpenAiCompatible"), "{shown}");
+}
+
+#[test]
+fn invalid_proxy_error_hides_its_credentials() {
+    let opts = HttpOptions {
+        proxy: Some("http://alice:s3ntinel-pass@[bad".into()),
+        ..HttpOptions::default()
+    };
+    let err = http_client(&opts, None).unwrap_err().to_string();
+    assert!(err.contains("invalid proxy"), "{err}");
+    assert!(!err.contains("s3ntinel"), "proxy password leaked: {err}");
+}
+
 fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
     OpenAiCompatible::new(OpenAiConfig {
         base_url: format!("{}/", server.uri()),
@@ -590,7 +644,7 @@ async fn reasoning_off_is_sent_unless_extra_body_sets_it() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    let c = client(&server, false).reasoning_off(true);
+    let c = client(&server, false).with_reasoning_disabled(true);
     c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -617,7 +671,7 @@ async fn reasoning_off_is_sent_unless_extra_body_sets_it() {
         http: HttpOptions::default(),
     })
     .unwrap()
-    .reasoning_off(true);
+    .with_reasoning_disabled(true);
     c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -646,7 +700,7 @@ async fn a_rejected_reasoning_switch_is_dropped() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    let c = client(&server, false).reasoning_off(true);
+    let c = client(&server, false).with_reasoning_disabled(true);
     for _ in 0..2 {
         let resp = c
             .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))

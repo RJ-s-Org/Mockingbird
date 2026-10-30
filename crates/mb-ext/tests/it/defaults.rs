@@ -296,6 +296,37 @@ fn rejection_new_and_retry_after() {
 }
 
 #[test]
+fn rejection_is_an_error_with_status_title_and_detail() {
+    let r = Rejection::from_status(http::StatusCode::TOO_MANY_REQUESTS, "Quota exceeded", "");
+    assert_eq!(r, Rejection::new(429, "Quota exceeded", ""));
+    assert_eq!(r.to_string(), "429 Quota exceeded");
+    let r = Rejection::new(403, "Forbidden", "no access");
+    assert_eq!(r.to_string(), "403 Forbidden: no access");
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(r);
+    assert!(boxed.source().is_none());
+}
+
+#[test]
+fn extensions_debug_names_the_type() {
+    let shown = format!("{:?}", Extensions::default());
+    assert_eq!(shown, "Extensions { .. }");
+}
+
+#[test]
+fn usage_event_source_constants_match_the_documented_values() {
+    assert_eq!(
+        [
+            UsageEvent::SOURCE_LLM,
+            UsageEvent::SOURCE_REPAIRED,
+            UsageEvent::SOURCE_FALLBACK,
+            UsageEvent::SOURCE_NOT_GENERATED,
+            UsageEvent::SOURCE_IMPORT,
+        ],
+        ["llm", "repaired", "fallback", "not_generated", "import"]
+    );
+}
+
+#[test]
 fn usage_event_new_defaults() {
     let e = UsageEvent::new(Tenancy::new("t", "w"), "petstore", "listPets");
     assert_eq!(e.tenancy, Tenancy::new("t", "w"));

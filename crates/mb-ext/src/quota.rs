@@ -9,7 +9,12 @@ use crate::{CallInfo, Rejection, Tenancy};
 #[async_trait]
 pub trait QuotaGuard: Send + Sync {
     /// `Ok(())` admits the call; a rejection is answered to the caller.
-    async fn admit(&self, t: &Tenancy, call: &CallInfo<'_>) -> Result<(), Rejection>;
+    ///
+    /// # Errors
+    ///
+    /// A [`Rejection`] (typically `429` with a `Retry-After`) when the call
+    /// is refused; the caller answers it as an RFC 9457 problem.
+    async fn admit(&self, tenancy: &Tenancy, call: &CallInfo<'_>) -> Result<(), Rejection>;
 }
 
 /// Self-hosted default: admits every call (per-mock rate limits still apply).
@@ -18,7 +23,7 @@ pub struct AllowAll;
 
 #[async_trait]
 impl QuotaGuard for AllowAll {
-    async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
+    async fn admit(&self, _tenancy: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
         Ok(())
     }
 }

@@ -68,13 +68,13 @@ impl FixedQuota {
 
 #[async_trait]
 impl QuotaGuard for FixedQuota {
-    async fn admit(&self, t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
+    async fn admit(&self, tenancy: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
         // Either guard holds the shard lock, so check-and-increment is
         // atomic across concurrent calls from one tenant. A known tenant
         // is looked up by reference; only a new one copies its name.
-        let mut used = match self.counts.get_mut(t.tenant.as_str()) {
+        let mut used = match self.counts.get_mut(tenancy.tenant.as_str()) {
             Some(used) => used,
-            None => self.counts.entry(t.tenant.clone()).or_insert(0),
+            None => self.counts.entry(tenancy.tenant.clone()).or_insert(0),
         };
         if *used >= self.per_tenant {
             return Err(Rejection::new(
@@ -82,7 +82,7 @@ impl QuotaGuard for FixedQuota {
                 "Quota exceeded",
                 format!(
                     "tenant {:?} has used all {} calls of its quota",
-                    t.tenant, self.per_tenant
+                    tenancy.tenant, self.per_tenant
                 ),
             )
             .with_retry_after(QUOTA_RETRY_AFTER));

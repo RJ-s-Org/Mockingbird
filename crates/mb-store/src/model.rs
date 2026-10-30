@@ -19,12 +19,16 @@ pub struct Workspace {
 }
 
 /// How a mock's data plane authenticates callers.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DataPlaneAuthMode {
+    /// Callers are not authenticated.
     #[default]
     None,
+    /// Callers send a data-plane API key in [`DataPlaneAuthConfig::header`].
     ApiKey,
+    /// Credentials must be present in the form the contract's security
+    /// requirements declare; they are not verified.
     PassthroughValidate,
 }
 
@@ -55,10 +59,12 @@ impl Default for DataPlaneAuthConfig {
 }
 
 /// Where a resource is managed. `File` resources are read-only through the API.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceSource {
+    /// Declared in the config file.
     File,
+    /// Created through the Admin API.
     Api,
 }
 
@@ -172,6 +178,10 @@ impl WebhookTarget {
 
     /// The first problem with this target, naming the field without the
     /// `webhooks[i].` prefix the caller adds. Never echoes the secret.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a message naming the field.
     pub fn validate(&self) -> Result<(), String> {
         let Some(url) = url::Url::parse(&self.url)
             .ok()
@@ -243,6 +253,10 @@ pub fn is_vault_reference(s: &str) -> bool {
 
 /// At most [`WebhookTarget::MAX_TARGETS`] targets, each valid; messages
 /// name the offending `webhooks[i].<field>`.
+///
+/// # Errors
+///
+/// The first problem found, as a message naming `webhooks[i].<field>`.
 pub fn validate_webhooks(targets: &[WebhookTarget]) -> Result<(), String> {
     if targets.len() > WebhookTarget::MAX_TARGETS {
         return Err(format!(
@@ -362,6 +376,10 @@ impl PathRewrite {
     }
 
     /// Both prefixes are route-prefix shaped (`/seg(/seg)*`) and not `/`.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a message naming the prefix.
     pub fn validate(&self) -> Result<(), String> {
         for (field, value) in [
             ("strip_prefix", &self.strip_prefix),
@@ -403,6 +421,10 @@ impl MockBehavior {
 
     /// The path rewrite is valid and `graphql_path`, when set, is an
     /// absolute path.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a message naming the field.
     pub fn validate(&self) -> Result<(), String> {
         self.path_rewrite.validate()?;
         if let Some(path) = &self.graphql_path
@@ -443,6 +465,10 @@ impl ChaosSettings {
     pub const MAX_JITTER_MS: u64 = 30_000;
 
     /// Checks the ranges; the message names the offending field.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a message naming the field.
     pub fn validate(&self) -> Result<(), String> {
         unit_rate("chaos.error_rate", self.error_rate)?;
         unit_rate("chaos.drop_stream_rate", self.drop_stream_rate)?;
@@ -511,6 +537,10 @@ impl MockLimits {
     pub const MAX_RESPONSE_BYTES: u64 = 16_777_216;
 
     /// Checks the ranges; the message names the offending field.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a message naming the field.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(r) = &self.rate_limit {
             // Written so that NaN fails too.
@@ -555,12 +585,16 @@ fn byte_cap(field: &str, value: Option<u64>, max: u64) -> Result<(), String> {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractStatus {
+    /// Imported or edited, not yet approved.
     Draft,
+    /// Approved, not serving.
     Approved,
+    /// The version the mock serves.
     Active,
+    /// No longer served.
     Archived,
 }
 
@@ -617,7 +651,7 @@ impl From<&ContractVersion> for ContractVersionInfo {
             mock_id: v.mock_id,
             version: v.version,
             source_digest: v.source_digest.clone(),
-            status: v.status.clone(),
+            status: v.status,
             created_by: v.created_by.clone(),
             created_at: v.created_at,
             imported: v.draft_meta.is_some(),
@@ -683,6 +717,10 @@ impl ScenarioRules {
     /// `Err` names the first unusable header: an empty or non-token name, a
     /// framing header, an `X-Mockingbird-*` header or a value with
     /// characters a header cannot carry.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a message naming the header.
     pub fn check_headers(&self) -> Result<(), String> {
         for (name, value) in &self.headers {
             let token = !name.is_empty()
@@ -764,6 +802,7 @@ pub enum RequestKind {
 }
 
 impl RequestKind {
+    /// The wire name (`http`, `graphql`, `grpc`, `soap`, `event`).
     pub fn as_str(&self) -> &'static str {
         match self {
             RequestKind::Http => "http",
@@ -774,6 +813,7 @@ impl RequestKind {
         }
     }
 
+    /// The kind named `s` ([`RequestKind::as_str`]), if any.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "http" => Some(RequestKind::Http),
@@ -783,6 +823,23 @@ impl RequestKind {
             "event" => Some(RequestKind::Event),
             _ => None,
         }
+    }
+}
+
+impl std::fmt::Display for RequestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The inverse of [`RequestKind::as_str`]; an unknown name is
+/// [`crate::StoreError::Invalid`].
+impl std::str::FromStr for RequestKind {
+    type Err = crate::StoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+            .ok_or_else(|| crate::StoreError::Invalid(format!("unknown request kind {s:?}")))
     }
 }
 
@@ -1075,13 +1132,18 @@ impl Default for AuditFilter {
 
 /// Lifecycle of an [`ImportJob`]: `queued` → `running` → `done` | `failed`,
 /// or `canceled` from `queued` or `running`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportJobStatus {
+    /// Waiting for a worker.
     Queued,
+    /// A worker is on it.
     Running,
+    /// Finished with a draft.
     Done,
+    /// Finished with an error.
     Failed,
+    /// Canceled before it finished.
     Canceled,
 }
 
@@ -1154,6 +1216,7 @@ pub enum ControlChange {
 }
 
 impl ResourceSource {
+    /// The wire name (`file`, `api`).
     pub fn as_str(&self) -> &'static str {
         match self {
             ResourceSource::File => "file",
@@ -1173,6 +1236,7 @@ impl ResourceSource {
 }
 
 impl ContractStatus {
+    /// The wire name (`draft`, `approved`, `active`, `archived`).
     pub fn as_str(&self) -> &'static str {
         match self {
             ContractStatus::Draft => "draft",
@@ -1196,6 +1260,7 @@ impl ContractStatus {
 }
 
 impl ImportJobStatus {
+    /// The wire name (`queued`, `running`, `done`, `failed`, `canceled`).
     pub fn as_str(&self) -> &'static str {
         match self {
             ImportJobStatus::Queued => "queued",
@@ -1227,6 +1292,32 @@ impl ImportJobStatus {
         }
     }
 }
+
+/// `Display` as the type's `as_str`, and `FromStr` its inverse: an unknown
+/// name is [`crate::StoreError::Invalid`].
+macro_rules! wire_names {
+    ($ty:ty, $what:literal) => {
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for $ty {
+            type Err = crate::StoreError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::parse(s).map_err(|_| {
+                    crate::StoreError::Invalid(format!(concat!("unknown ", $what, " {:?}"), s))
+                })
+            }
+        }
+    };
+}
+
+wire_names!(ResourceSource, "resource source");
+wire_names!(ContractStatus, "contract status");
+wire_names!(ImportJobStatus, "import job status");
 
 #[cfg(test)]
 mod tests {

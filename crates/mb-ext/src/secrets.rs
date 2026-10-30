@@ -14,6 +14,17 @@ use crate::ExtError;
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     /// The secret value `reference` points to.
+    ///
+    /// # Errors
+    ///
+    /// Implementations map failures to these variants, naming the reference
+    /// and never a resolved value:
+    ///
+    /// - [`ExtError::SecretNotFound`]: the variable, file or secret does not
+    ///   exist;
+    /// - [`ExtError::BadSecretRef`]: the reference is malformed, or no
+    ///   configured store handles its scheme;
+    /// - [`ExtError::Other`]: anything else (I/O, network, permissions).
     async fn resolve(&self, reference: &str) -> Result<String, ExtError>;
 }
 
@@ -33,6 +44,11 @@ pub fn in_key_store(path: &Path) -> bool {
 /// Refuses a key-store file ([`in_key_store`]) that group or others may
 /// read (Unix modes); every other path, and every path on other platforms,
 /// passes. The error never contains the file's contents.
+///
+/// # Errors
+///
+/// [`ExtError::Other`] naming the file and its mode when a key-store file
+/// is readable by group or others.
 pub fn check_secret_file(path: &Path) -> Result<(), ExtError> {
     #[cfg(unix)]
     if in_key_store(path) {

@@ -65,6 +65,9 @@ const VERSION_INFO_COLUMNS: &str = "id, mock_id, version, source_digest, status,
 const CHANNEL_COLUMNS: &str = "mock_id, channel_id, enabled, triggers, source, updated_at";
 const EVENT_SETTINGS_COLUMNS: &str = "mock_id, broker, source, updated_at";
 
+/// The SQLite [`ControlStore`].
+///
+/// `Debug` shows the pool's size, never the connection URL.
 pub struct SqliteControlStore {
     pool: SqlitePool,
     /// For an in-memory database: a connection outside the pool, never used
@@ -78,9 +81,24 @@ pub struct SqliteControlStore {
     prune: PruneCounter,
 }
 
+impl std::fmt::Debug for SqliteControlStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteControlStore")
+            .field("connections", &self.pool.size())
+            .field("idle", &self.pool.num_idle())
+            .field("in_memory", &self._keeper.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteControlStore {
     /// Opens `sqlite::memory:` or `sqlite://<path>` (created if missing) and
     /// runs migrations.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Invalid`] for a malformed URL, and [`StoreError::Db`]
+    /// when the database cannot be opened or migrated.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::from_str(url)
             .map_err(|e| StoreError::Invalid(format!("sqlite url: {e}")))?
