@@ -463,8 +463,8 @@ fn request_stop(dir: &Path, pid: u32) {
 }
 
 /// Stops `child`, a server [`start_child`] started in this process: a
-/// graceful stop request (see [`request_stop`]), then a kill after 10
-/// seconds, and reaps it.
+/// graceful stop request (its stop file, see [`STOP_FILE_ENV`], and a
+/// SIGTERM on Unix), then a kill after 10 seconds, and reaps it.
 pub async fn stop_child(args: &StateArgs, mut child: std::process::Child) -> anyhow::Result<()> {
     request_stop(&args.state_dir, child.id());
     let deadline = Instant::now() + Duration::from_secs(10);
