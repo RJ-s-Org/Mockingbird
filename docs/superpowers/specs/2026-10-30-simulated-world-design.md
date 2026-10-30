@@ -1,23 +1,23 @@
 # Simulated worlds at runtime: design
 
-Status: draft for review. Date: 2026-10-30. Evidence: round 2 benchmark data in `docs/benchmarks/2026-10-30/`.
+Status: approved 2026-10-30; the pilot decides what gets built. Date: 2026-10-30. Evidence: round 2 benchmark data in `docs/benchmarks/2026-10-30/`.
 
 ## Goal
 
-A mock should behave like a small simulated copy of the API: it answers requests nobody anticipated, remembers what it said, and shows the consequences of writes. Teams get this from a contract and, at most, a one-line persona.
+A mock should behave like a small simulated copy of the API: it answers requests nobody anticipated, remembers what it said, and shows the consequences of writes. A contract alone is enough to get this. Teams may add context when they want more control.
 
 The LLM should spend its effort on judgement (what is plausible, what a request means, what a write causes). The engine should own what a machine does exactly (structure, opaque IDs, constraints, bookkeeping).
 
 ## Constraints
 
-1. **No new required configuration.** Setup stays a contract plus an optional persona. Nothing in this design needs authoring, approval or maintenance. Scenarios, fixtures and `--offline` keep working as they do.
+1. **Context is optional, never required.** A contract is all a mock needs, and nothing in this design needs authoring, approval or maintenance to work. Teams may add a reasonable amount of context: a persona, domain notes, seed entities or rules they want held. It is plain and small, it guides the LLM and takes precedence over what the mock learned, and leaving it out never breaks a mock. Scenarios, fixtures and `--offline` keep working as they do.
 2. **The LLM stays on the request path** for anything new. There is no pre-built dataset and no canned answer store.
 3. **Every answer still matches the contract**, on every protocol.
 4. **Secrets stay references.** No API key enters a prompt, a stored entity, a log or a report.
 
 ## Rejected
 
-- **A blueprint or pre-built world as a reviewed artifact.** Even when the LLM writes it, a team has to review and maintain it, and a frozen dataset cannot answer the unanticipated.
+- **A blueprint or pre-built world as a required, reviewed artifact.** Even when the LLM writes it, a team has to review and maintain it, and a frozen dataset cannot answer the unanticipated. Optional context (constraint 1) is different: a mock works without it.
 - **Constrained decoding as the core approach.** Provider support varies, and it fixes neither placeholder values nor wrong sums.
 
 ## Evidence
@@ -84,7 +84,7 @@ The engine applies an effect only when the entity exists and the merged entity s
 
 ### 4. Learned invariants (last, optional)
 
-From the contract and early answers, a background call proposes invariants such as `durationMinutes = arrival − departure`, in a small expression language with no code execution. The engine then computes those fields. Rules are a disposable cache, can be inspected, and can be corrected by a sentence in the persona. Nobody has to approve them.
+From the contract and early answers, a background call proposes invariants such as `durationMinutes = arrival − departure`, in a small expression language with no code execution. The engine then computes those fields. Rules are a disposable cache and can be inspected. Nobody has to approve them. A team can correct or add one in its optional context, and those take precedence.
 
 This slice ships only if the pilot shows that arithmetic errors still hurt coherence after slices 1–3.
 
@@ -104,7 +104,7 @@ Blind-judged realism and coherence, cost and latency stay as they are.
 
 ## Pilot, before any engine work on slices 1–4
 
-A prototype in `scripts/llm-bench`, using the round 2 contracts and no added configuration: about 6 contracts and 3 models, including the default.
+A prototype in `scripts/llm-bench`, using the round 2 contracts with no context added, because the contract-only case has to work first: about 6 contracts and 3 models, including the default.
 
 | Test | Pass |
 |---|---|
