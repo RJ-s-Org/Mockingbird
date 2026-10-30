@@ -1,8 +1,10 @@
 //! Postgres [`ControlStore`]. Uuids are `UUID`, timestamps `TIMESTAMPTZ` and
 //! JSON is `json` (bound as text and cast, read back as text).
 //!
-//! Change notifications are in-process only, like SQLite; cross-node
-//! `LISTEN/NOTIFY` arrives with HA.
+//! [`ControlStore::subscribe`] is in-process, like SQLite's: it carries the
+//! changes made through this store. Between nodes, the cross-node bus of
+//! `mockingbird-state` (`bus.url`: Postgres `LISTEN/NOTIFY` or Redis) relays
+//! them, and receivers reload from the store.
 
 use std::collections::HashMap;
 use std::str::FromStr;

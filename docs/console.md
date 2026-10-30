@@ -111,4 +111,4 @@ npm run e2e        # Playwright against the binary with auth.mode: none
 npm run build      # into crates/mb-console/dist, which the next cargo build embeds
 ```
 
-Without a console build, `cargo build` embeds a placeholder page, so Rust work never needs Node. After changing the Admin API, run `npm run check:api` to regenerate the TypeScript types from the OpenAPI document.
+Without a console build, `cargo build` embeds a placeholder page, so Rust work never needs Node; a server built that way logs a warning at startup naming the build command. After changing the Admin API, run `npm run check:api` to regenerate the TypeScript types from the OpenAPI document.

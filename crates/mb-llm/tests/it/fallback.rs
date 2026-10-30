@@ -181,6 +181,29 @@ async fn fallback_stream_uses_secondary_when_primary_fails_first() {
     assert_eq!(secondary.stream_requests().len(), 1);
 }
 
+/// The usage a metered stream reports is that of the hop that served it.
+#[tokio::test]
+async fn fallback_metered_stream_reports_the_serving_hops_usage() {
+    use futures::StreamExt;
+
+    let usage = mb_llm::Usage {
+        prompt_tokens: 40,
+        completion_tokens: 4,
+    };
+    let primary =
+        Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Err(LlmError::Timeout)]));
+    let secondary = Arc::new(
+        ScriptedProvider::new(vec![])
+            .with_streams(vec![Ok(vec![Ok("z".into())])])
+            .with_stream_usage(usage),
+    );
+    let fallback = FallbackProvider::new(primary, secondary);
+    let metered = fallback.stream_metered(request()).await.unwrap();
+    let items: Vec<_> = metered.text.collect().await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(metered.usage.get(), Some(usage));
+}
+
 #[tokio::test]
 async fn fallback_stream_does_not_switch_after_first_delta() {
     let primary = Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![

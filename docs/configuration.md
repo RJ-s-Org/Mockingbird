@@ -61,8 +61,8 @@ Settings for the HTTP requests Mockingbird makes to LLM providers, the audit web
 | Key | Type | Default | Range / rule | Env / flag | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `outbound` | section | | | | |
-| `outbound.ca_file` | path | unset | PEM bundle | | CA certificates trusted in addition to the default roots. |
-| `outbound.proxy` | URL | unset | `http://` or `https://` URL with a host | | Proxy for outbound requests. |
+| `outbound.ca_file` | path | unset | PEM bundle | | CA certificates trusted in addition to the default roots (the Vault client also adds `VAULT_CACERT`). |
+| `outbound.proxy` | URL | unset | `http://` or `https://` URL with a host | | Proxy for outbound requests, the Vault client's included. |
 | `outbound.no_proxy` | list of strings | `[]` | Host names, or `.domain` suffixes | | Hosts reached without the proxy. |
 
 ## `proxy`
@@ -248,7 +248,7 @@ Mocks declared as code, by name. They are reconciled into the store at startup a
 | `mocks.<name>.data_plane_auth` | section | | | | How callers of the mock authenticate. |
 | `mocks.<name>.data_plane_auth.mode` | `none`, `api_key`, `passthrough_validate` | `none` | | | `api_key`: a `data-plane` API key of the mock's workspace is required. `passthrough_validate`: credentials must be present in the form the contract's security requirements declare, without being verified. |
 | `mocks.<name>.data_plane_auth.header` | string | `x-api-key` | Lowercase | | Header carrying the key in `api_key` mode (or `?api_key=`). |
-| `mocks.<name>.consistency` | `on`, `off` | `on` | | | `on`: a session repeating a read gets the same answer (`X-Mockingbird-Source: cache`, 500 answers per session, cleared by any write of the resource type and by a session reset), and the items of a list answer are stored so a later read by id returns them. `off` generates every answer anew. Reads of a stored resource are answered from session state (`state`) either way. |
+| `mocks.<name>.consistency` | `on`, `off` | `on` | | | `on`: a session repeating a read gets the same answer (`X-Mockingbird-Source: cache`, 500 answers per session, cleared by any write of the resource type and by a session reset, seed or mock reset, on every node), and the items of a list answer are stored so a later read by id returns them. `off` generates every answer anew. Reads of a stored resource are answered from session state (`state`) either way. |
 | `mocks.<name>.unknown_ids` | `generate`, `404` | `generate` | | | How a read by path id of a resource the session does not hold (created or listed) is answered: generated, or the operation's declared 404 (problem+json when it declares none). Only a path parameter that is the identity field or id-like (`id`, `orderId`, `movie_id`) counts as a path id; reads by another key (`/users/{username}`) and reads without one are never 404'd, and a forced status wins. |
 | `mocks.<name>.default_scenario` | string | unset | A key of `mocks.<name>.scenarios` | | Scenario applied when a call sends no `X-Mockingbird-Scenario` header. |
 

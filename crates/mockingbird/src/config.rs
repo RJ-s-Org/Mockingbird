@@ -503,8 +503,17 @@ pub async fn bind_grpc(
 }
 
 /// [`build_app_with`] with the self-hosted [`Extensions`].
+/// Its Vault client follows `outbound:` (see [`self_hosted_app`]).
 pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<App> {
-    build_app_with(args, llm, Extensions::default()).await
+    self_hosted_app(args, llm).await
+}
+
+/// [`build_app_with`] with the self-hosted [`Extensions`], whose
+/// [`mb_ext::DefaultSecrets`] reaches Vault with `outbound.proxy`,
+/// `outbound.no_proxy` and `outbound.ca_file`. (Embedders that pass their
+/// own extensions set that up with [`mb_ext::DefaultSecrets::with_http`].)
+pub(crate) async fn self_hosted_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<App> {
+    build_app_inner(args, llm, Extensions::default(), None, None, true).await
 }
 
 /// Opens the stores, sets up Admin API authentication (`auth.mode`; in
@@ -529,7 +538,7 @@ pub async fn build_app_with(
     llm: Option<LlmEnv>,
     ext: Extensions,
 ) -> anyhow::Result<App> {
-    build_app_on(args, llm, ext, None, None).await
+    build_app_inner(args, llm, ext, None, None, false).await
 }
 
 /// [`build_app_with`] on the given cross-node bus instead of the one the
@@ -542,7 +551,7 @@ pub async fn build_app_with_bus(
     ext: Extensions,
     bus: Arc<dyn Bus>,
 ) -> anyhow::Result<App> {
-    build_app_on(args, llm, ext, Some(bus), None).await
+    build_app_inner(args, llm, ext, Some(bus), None, false).await
 }
 
 /// [`build_app_with_bus`] with leadership from `leader` instead of
@@ -555,15 +564,18 @@ pub async fn build_app_with_leader(
     bus: Arc<dyn Bus>,
     leader: LeaderBackend,
 ) -> anyhow::Result<App> {
-    build_app_on(args, llm, ext, Some(bus), Some(leader)).await
+    build_app_inner(args, llm, ext, Some(bus), Some(leader), false).await
 }
 
-async fn build_app_on(
+/// `self_hosted_secrets`: `ext.secrets` is the default
+/// [`mb_ext::DefaultSecrets`], rebuilt here with the outbound settings.
+async fn build_app_inner(
     args: &ServeArgs,
     llm: Option<LlmEnv>,
     mut ext: Extensions,
     bus: Option<Arc<dyn Bus>>,
     leader: Option<LeaderBackend>,
+    self_hosted_secrets: bool,
 ) -> anyhow::Result<App> {
     let cfg = resolve_config(args, llm.as_ref())?;
     let role = cfg.server.role;
@@ -577,6 +589,9 @@ async fn build_app_on(
         None => None,
     };
     let http = crate::tls::outbound_options(&cfg.outbound)?;
+    if self_hosted_secrets {
+        ext.secrets = Arc::new(mb_ext::DefaultSecrets::from_env().with_http(vault_http(&http)));
+    }
     if let Some(key) = llm.as_ref().and_then(|l| l.api_key.clone()) {
         ext.secrets = Arc::new(EnvKeyOverlay {
             key,
@@ -599,10 +614,10 @@ async fn build_app_on(
             .await
             .context("connecting the cross-node bus")?,
     };
-    // The response cache wraps the shared store, so a session reset through
-    // the Admin API and every write clear it.
-    let state = mb_state::CachingStateStore::wrap(
-        ha.shared_state(state),
+    // The response cache wraps the shared store, so every write and a
+    // session reset, seed or mock reset clear it, on every node.
+    let state = ha.cached_shared_state(
+        state,
         cfg.storage.session_ttl,
         mb_state::DEFAULT_CACHE_ENTRIES,
     );
@@ -821,6 +836,9 @@ async fn build_app_on(
         // A data node's admin port serves the ops endpoints only.
         Role::Data => ops,
         Role::All | Role::Control => {
+            if let Some(warning) = console_placeholder_warning(mb_console::is_placeholder()) {
+                tracing::warn!("{warning}");
+            }
             let console = mb_console::router().layer(axum::middleware::from_fn_with_state(
                 admin_state.clone(),
                 mb_admin::console_gate,
@@ -1187,6 +1205,28 @@ pub fn ensure_brokers_unchanged(
     )
 }
 
+/// The Vault client's share of the outbound settings.
+fn vault_http(http: &mb_llm::HttpOptions) -> mb_ext::VaultHttp {
+    let mut vault = mb_ext::VaultHttp::new()
+        .with_no_proxy(http.no_proxy.clone())
+        .with_extra_roots_pem(http.extra_roots_pem.clone());
+    if let Some(proxy) = &http.proxy {
+        vault = vault.with_proxy(proxy.clone());
+    }
+    vault
+}
+
+/// The startup warning of a binary built without the console (`placeholder`:
+/// [`mb_console::is_placeholder`]), which then serves a "Console not built"
+/// page on the admin port.
+fn console_placeholder_warning(placeholder: bool) -> Option<&'static str> {
+    placeholder.then_some(
+        "this binary was built without the console: the admin port serves a \
+         \"Console not built\" page. Build it with `npm --prefix crates/mb-console/web ci && \
+         npm --prefix crates/mb-console/web run build`, then rebuild mockingbird",
+    )
+}
+
 /// Resolves `env:MB_LLM_API_KEY` to the key handed to [`build_app`], and
 /// everything else through the wrapped store.
 struct EnvKeyOverlay {
@@ -1202,5 +1242,40 @@ impl SecretStore for EnvKeyOverlay {
         } else {
             self.inner.resolve(reference).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{console_placeholder_warning, vault_http};
+
+    #[test]
+    fn the_vault_client_gets_the_outbound_proxy_and_roots() {
+        let http = mb_llm::HttpOptions {
+            extra_roots_pem: b"pem".to_vec(),
+            proxy: Some("http://proxy.internal:3128".into()),
+            no_proxy: vec![".corp".into()],
+        };
+        assert_eq!(
+            vault_http(&http),
+            mb_ext::VaultHttp::new()
+                .with_proxy("http://proxy.internal:3128")
+                .with_no_proxy(vec![".corp".into()])
+                .with_extra_roots_pem(b"pem".to_vec())
+        );
+        assert_eq!(
+            vault_http(&mb_llm::HttpOptions::default()),
+            mb_ext::VaultHttp::new()
+        );
+    }
+
+    #[test]
+    fn a_placeholder_console_is_warned_about_with_the_build_command() {
+        let warning = console_placeholder_warning(true).expect("a warning");
+        assert!(
+            warning.contains("npm --prefix crates/mb-console/web run build"),
+            "{warning}"
+        );
+        assert_eq!(console_placeholder_warning(false), None);
     }
 }

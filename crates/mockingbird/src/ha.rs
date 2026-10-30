@@ -8,14 +8,17 @@
 //!   becomes [`HubEvent::Resync`] (reload everything).
 //! - [`Ha::shared_state`] wraps the state store so its change feed carries
 //!   both this node's changes (also announced on the bus) and other nodes'
-//!   (marked [`ChangeOrigin::Remote`]).
+//!   (marked [`ChangeOrigin::Remote`]). [`Ha::cached_shared_state`] also
+//!   puts the response cache in front and clears it when another node
+//!   resets or seeds a session or resets a mock.
 //! - Request-log announcements are handled by
 //!   [`StoreRecorder::with_bus`](crate::recorder::StoreRecorder::with_bus).
 //!
 //! With the in-process [`LocalBus`] of a single node nothing is announced
 //! and nothing arrives, so behaviour is that of a node without HA.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -99,6 +102,16 @@ impl Ha {
         BusStateStore::new(inner, Arc::clone(&self.bus))
     }
 
+    /// [`cached_shared_state`] over this node's bus.
+    pub fn cached_shared_state(
+        &self,
+        inner: Arc<dyn StateStore>,
+        idle_ttl: Duration,
+        capacity: usize,
+    ) -> Arc<dyn StateStore> {
+        cached_shared_state(inner, Arc::clone(&self.bus), idle_ttl, capacity)
+    }
+
     /// Where leader election runs: the bus's backend, or always the leader
     /// on a single node.
     pub fn leader_backend(cfg: &FileConfig) -> LeaderBackend {
@@ -114,6 +127,120 @@ impl Drop for Ha {
     fn drop(&mut self) {
         for task in &self.tasks {
             task.abort();
+        }
+    }
+}
+
+/// `inner` with a change feed shared across nodes ([`BusStateStore`]) and a
+/// response cache in front ([`mb_state::CachingStateStore`]) that a session
+/// reset, a seed or a mock reset on any node clears: this node's clear its
+/// cache directly, and other nodes' arrive as reset announcements (see
+/// [`reset_event`]).
+pub fn cached_shared_state(
+    inner: Arc<dyn StateStore>,
+    bus: Arc<dyn Bus>,
+    idle_ttl: Duration,
+    capacity: usize,
+) -> Arc<dyn StateStore> {
+    let shared = BusStateStore::new(inner, Arc::clone(&bus));
+    let cached = mb_state::CachingStateStore::wrap(
+        Arc::clone(&shared) as Arc<dyn StateStore>,
+        idle_ttl,
+        capacity,
+    );
+    if !bus.is_local() {
+        // Subscribed before returning, so no reset after it is missed. The
+        // task holds the cache weakly and `shared` aborts it when dropped.
+        let task = tokio::spawn(clear_on_remote_resets(
+            Arc::downgrade(&cached),
+            bus.subscribe(),
+        ));
+        if let Err(task) = shared.reset_task.set(task) {
+            task.abort();
+        }
+    }
+    cached
+}
+
+/// What a reset announcement covers.
+#[derive(Debug, PartialEq)]
+enum Reset {
+    Session(SessionKey),
+    Mock { workspace: String, mock: String },
+}
+
+/// The announcement of a session reset (or seed), or of a mock reset when
+/// `session` is `None`: a [`BusEvent::State`] deletion with an empty
+/// resource type (which no resource has), and for a mock reset an empty
+/// session too. Nodes that predate it relay it as a change of no resource
+/// type, which matches nothing. (A dedicated bus event needs a new
+/// [`BusEvent`] variant, a 0.2 change.)
+fn reset_event(workspace: &str, mock: &str, session: Option<&str>) -> BusEvent {
+    BusEvent::State {
+        workspace: workspace.to_owned(),
+        mock: mock.to_owned(),
+        session: session.unwrap_or_default().to_owned(),
+        resource_type: String::new(),
+        id: String::new(),
+        deleted: true,
+    }
+}
+
+/// The reset `event` announces, if it is a reset announcement.
+fn as_reset(event: &BusEvent) -> Option<Reset> {
+    match event {
+        BusEvent::State {
+            workspace,
+            mock,
+            session,
+            resource_type,
+            ..
+        } if resource_type.is_empty() => Some(if session.is_empty() {
+            Reset::Mock {
+                workspace: workspace.clone(),
+                mock: mock.clone(),
+            }
+        } else {
+            Reset::Session(SessionKey {
+                workspace: workspace.clone(),
+                mock: mock.clone(),
+                session: session.clone(),
+            })
+        }),
+        _ => None,
+    }
+}
+
+/// Bridge 4: other nodes' reset announcements clear this node's response
+/// cache, until the cache is dropped or the bus closes.
+async fn clear_on_remote_resets(
+    cached: Weak<dyn StateStore>,
+    mut events: broadcast::Receiver<BusEvent>,
+) {
+    loop {
+        let reset = match events.recv().await {
+            Ok(event) => match as_reset(&event) {
+                Some(reset) => reset,
+                None => continue,
+            },
+            Err(RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    skipped = n,
+                    "bus events lagged; a reset on another node may leave cached answers here until they are rewritten or idle"
+                );
+                continue;
+            }
+            Err(RecvError::Closed) => return,
+        };
+        let Some(store) = cached.upgrade() else {
+            return;
+        };
+        let Some(cache) = store.response_cache() else {
+            continue;
+        };
+        match reset {
+            Reset::Session(s) => cache.clear_session(&s),
+            Reset::Mock { workspace, mock } => cache.clear_mock(&workspace, &mock),
         }
     }
 }
@@ -186,8 +313,11 @@ async fn bus_to_hub(mut events: broadcast::Receiver<BusEvent>, hub: broadcast::S
 /// [`BusEvent::State`]) merged with the other nodes' (`Remote`).
 pub struct BusStateStore {
     inner: Arc<dyn StateStore>,
+    bus: Arc<dyn Bus>,
     merged: broadcast::Sender<StateChanged>,
     task: JoinHandle<()>,
+    /// The [`clear_on_remote_resets`] task of the cache in front, if any.
+    reset_task: OnceLock<JoinHandle<()>>,
 }
 
 impl BusStateStore {
@@ -196,20 +326,40 @@ impl BusStateStore {
         let task = tokio::spawn(merge_state_changes(
             inner.subscribe(),
             bus.subscribe(),
-            bus,
+            Arc::clone(&bus),
             merged.clone(),
         ));
         Arc::new(Self {
             inner,
+            bus,
             merged,
             task,
+            reset_task: OnceLock::new(),
         })
+    }
+
+    /// Announces a reset to the other nodes, so they clear their response
+    /// caches (see [`cached_shared_state`]).
+    async fn announce_reset(&self, workspace: &str, mock: &str, session: Option<&str>) {
+        if self.bus.is_local() {
+            return;
+        }
+        if let Err(error) = self
+            .bus
+            .publish(reset_event(workspace, mock, session))
+            .await
+        {
+            tracing::warn!(%error, "cannot announce a session reset on the bus; other nodes keep their cached answers until they are rewritten or idle");
+        }
     }
 }
 
 impl Drop for BusStateStore {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(task) = self.reset_task.get() {
+            task.abort();
+        }
     }
 }
 
@@ -240,6 +390,8 @@ async fn merge_state_changes(
                 Err(RecvError::Closed) => return,
             },
             event = remote.recv(), if remote_open => match event {
+                // Reset announcements are for the response cache only.
+                Ok(event) if as_reset(&event).is_some() => {}
                 Ok(BusEvent::State { workspace, mock, session, resource_type, id, deleted }) => {
                     let _ = merged.send(StateChanged {
                         session: SessionKey { workspace, mock, session },
@@ -304,10 +456,15 @@ impl StateStore for BusStateStore {
         self.inner.delete(s, resource_type, id).await
     }
     async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
-        self.inner.reset(s).await
+        self.inner.reset(s).await?;
+        self.announce_reset(&s.workspace, &s.mock, Some(&s.session))
+            .await;
+        Ok(())
     }
     async fn reset_mock(&self, workspace: &str, mock: &str) -> Result<(), StateError> {
-        self.inner.reset_mock(workspace, mock).await
+        self.inner.reset_mock(workspace, mock).await?;
+        self.announce_reset(workspace, mock, None).await;
+        Ok(())
     }
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch(s).await
@@ -322,7 +479,10 @@ impl StateStore for BusStateStore {
         self.inner.export(s).await
     }
     async fn seed(&self, s: &SessionKey, resources: Vec<StoredResource>) -> Result<(), StateError> {
-        self.inner.seed(s, resources).await
+        self.inner.seed(s, resources).await?;
+        self.announce_reset(&s.workspace, &s.mock, Some(&s.session))
+            .await;
+        Ok(())
     }
     async fn ping(&self) -> Result<(), StateError> {
         self.inner.ping().await
@@ -401,6 +561,82 @@ mod tests {
             seen.push(c.kind);
         }
         assert_eq!(seen, vec![ChangeKind::Upserted, ChangeKind::Deleted]);
+    }
+
+    fn answer() -> mb_state::CachedResponse {
+        mb_state::CachedResponse {
+            status: 200,
+            content_type: None,
+            body: Some(serde_json::json!({"ok": true})),
+            fallback_reason: None,
+        }
+    }
+
+    fn cache_len(store: &Arc<dyn StateStore>, s: &SessionKey) -> usize {
+        store.response_cache().map_or(0, |c| c.len(s))
+    }
+
+    /// Waits up to 2 s for `done`.
+    async fn eventually(what: &str, done: impl Fn() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !done() {
+            assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Two nodes over one shared store: a session reset, a seed and a mock
+    /// reset on one node clear the other node's response cache too (only
+    /// for the sessions they cover), and the announcements never reach the
+    /// change feed.
+    #[tokio::test]
+    async fn resets_and_seeds_clear_the_response_cache_on_every_node() {
+        let hub = MemoryBusHub::new();
+        let shared: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(60)));
+        let node = |id: &str| {
+            cached_shared_state(
+                Arc::clone(&shared),
+                hub.join(id.into()),
+                Duration::from_secs(60),
+                10,
+            )
+        };
+        let (a, b) = (node("a"), node("b"));
+        let mut feed_b = b.subscribe();
+        let other = SessionKey {
+            session: "other".into(),
+            ..key()
+        };
+        let fill = |store: &Arc<dyn StateStore>| {
+            let cache = store.response_cache().expect("a response cache");
+            for s in [key(), other.clone()] {
+                cache.put(&s, "GET /things".into(), None, answer());
+            }
+        };
+
+        fill(&b);
+        a.reset(&key()).await.expect("reset");
+        eventually("session reset reaches b", || cache_len(&b, &key()) == 0).await;
+        assert_eq!(cache_len(&b, &other), 1, "another session is kept");
+
+        fill(&b);
+        a.seed(&key(), vec![resource("1")]).await.expect("seed");
+        eventually("seed reaches b", || cache_len(&b, &key()) == 0).await;
+        assert_eq!(cache_len(&b, &other), 1, "another session is kept");
+
+        fill(&b);
+        a.reset_mock("default", "m").await.expect("reset mock");
+        eventually("mock reset reaches b", || {
+            cache_len(&b, &key()) == 0 && cache_len(&b, &other) == 0
+        })
+        .await;
+
+        while let Ok(change) = feed_b.try_recv() {
+            assert!(
+                !change.resource_type.is_empty(),
+                "a reset announcement leaked into the change feed: {change:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mb_ext::{DefaultSecrets, ExtError, SecretStore, VaultSecrets};
+use mb_ext::{DefaultSecrets, ExtError, SecretStore, VaultHttp, VaultSecrets};
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -320,4 +320,71 @@ async fn failed_vault_reads_are_not_cached() {
     ));
     assert_eq!(store.resolve(reference).await.ok().as_deref(), Some("v"));
     assert_eq!(store.resolve(reference).await.ok().as_deref(), Some("v"));
+}
+
+/// `VaultHttp::with_proxy` sends Vault requests through the proxy: the
+/// Vault host does not resolve, so only the proxy (wiremock) can answer.
+#[tokio::test]
+async fn vault_requests_go_through_the_configured_proxy() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .and(header("X-Vault-Token", "t"))
+        .respond_with(kv2(json!({ "k": "via-proxy" })))
+        .expect(1)
+        .mount(&proxy)
+        .await;
+    let store = DefaultSecrets::from_vars(|name| match name {
+        "VAULT_ADDR" => Some("http://vault.invalid:8200".to_string()),
+        "VAULT_TOKEN" => Some("t".to_string()),
+        _ => None,
+    })
+    .with_http(VaultHttp::new().with_proxy(proxy.uri()));
+    let value = store.resolve("vault:secret/mockingbird#k").await;
+    assert_eq!(value.ok().as_deref(), Some("via-proxy"));
+}
+
+/// A host in `no_proxy` is reached directly, past a proxy that is down.
+#[tokio::test]
+async fn vault_hosts_in_no_proxy_bypass_the_proxy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .respond_with(kv2(json!({ "k": "direct" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let addr = server.uri();
+    let http = VaultHttp::new()
+        .with_proxy("http://127.0.0.1:9")
+        .with_no_proxy(vec!["127.0.0.1".to_string()]);
+    let store = VaultSecrets::from_vars_with_http(
+        |name| match name {
+            "VAULT_ADDR" => Some(addr.clone()),
+            "VAULT_TOKEN" => Some("t".to_string()),
+            _ => None,
+        },
+        &http,
+    )
+    .expect("config")
+    .expect("VAULT_ADDR is set");
+    let value = store.resolve("vault:secret/mockingbird#k").await;
+    assert_eq!(value.ok().as_deref(), Some("direct"));
+}
+
+/// A bad CA bundle is a configuration error naming it, and the `Debug`
+/// output never shows the proxy URL (it may carry credentials).
+#[test]
+fn vault_http_errors_name_the_setting_and_debug_hides_the_proxy() {
+    let vars = |name: &str| match name {
+        "VAULT_ADDR" => Some("http://vault.invalid:8200".to_string()),
+        "VAULT_TOKEN" => Some("t".to_string()),
+        _ => None,
+    };
+    let bad_ca = VaultHttp::new().with_extra_roots_pem(b"not a certificate".to_vec());
+    let err = VaultSecrets::from_vars_with_http(vars, &bad_ca).expect_err("bad CA bundle");
+    assert!(err.to_string().contains("outbound CA bundle"), "{err}");
+
+    let secret_proxy = VaultHttp::new().with_proxy("http://user:hunter2@proxy.invalid:3128");
+    assert!(!format!("{secret_proxy:?}").contains("hunter2"));
 }

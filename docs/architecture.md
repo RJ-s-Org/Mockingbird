@@ -112,7 +112,7 @@ Channel triggers (`every`, `cron`, `on_state_change`) run on data-plane nodes, s
 
 Session state is keyed by workspace, mock, session, resource type and id, and expires `storage.session_ttl` after its last write. `mb_state_sessions{mock}` counts live sessions on every data-serving node.
 
-Each node also keeps a per-session response cache in memory (500 answers per session, least recently used first out), so a session repeating a read gets the same answer (`X-Mockingbird-Source: cache`). A write of a resource type, from this node or relayed over the bus, drops that type's answers; a session reset or seed drops the session's; an idle session's answers expire with `storage.session_ttl`. A reset made on another node does not clear this node's cache: the session's next write of a type, or its idleness, does. Mocks with `consistency: off` bypass the cache.
+Each node also keeps a per-session response cache in memory (500 answers per session, least recently used first out), so a session repeating a read gets the same answer (`X-Mockingbird-Source: cache`). A write of a resource type, from this node or relayed over the bus, drops that type's answers; a session reset or seed drops the session's, and a mock reset every session's of that mock, on every node (the node that made it announces it on the bus); an idle session's answers expire with `storage.session_ttl`. Mocks with `consistency: off` bypass the cache.
 
 The Redis state store needs `maxmemory-policy noeviction`: evicting a key would silently lose a session's resources. It uses multi-key transactions without hash tags, so Redis Cluster is not supported; use a single primary.
 

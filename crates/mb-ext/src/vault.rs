@@ -17,6 +17,91 @@ const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// Timeout for one Vault request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Outbound HTTP settings for the Vault client: a proxy, the hosts reached
+/// without it and extra trusted CA certificates. The server passes its
+/// `outbound.proxy`, `outbound.no_proxy` and `outbound.ca_file` here. The
+/// default changes nothing: reqwest's own proxy handling (the
+/// `HTTP(S)_PROXY`/`NO_PROXY` environment) and the default roots, plus
+/// `VAULT_CACERT`.
+///
+/// `Debug` shows whether a proxy is set, never its URL (it may carry
+/// credentials).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct VaultHttp {
+    proxy: Option<String>,
+    no_proxy: Vec<String>,
+    extra_roots_pem: Vec<u8>,
+}
+
+impl fmt::Debug for VaultHttp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VaultHttp")
+            .field("proxy", &self.proxy.as_ref().map(|_| "<set>"))
+            .field("no_proxy", &self.no_proxy)
+            .field("extra_roots_pem_bytes", &self.extra_roots_pem.len())
+            .finish()
+    }
+}
+
+impl VaultHttp {
+    /// No proxy override and no extra roots.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sends every Vault request through this `http(s)://` proxy, instead
+    /// of following the `HTTP(S)_PROXY` environment.
+    #[must_use]
+    pub fn with_proxy(mut self, url: impl Into<String>) -> Self {
+        self.proxy = Some(url.into());
+        self
+    }
+
+    /// Hosts, addresses or `.domain` suffixes reached without the proxy of
+    /// [`VaultHttp::with_proxy`].
+    #[must_use]
+    pub fn with_no_proxy(mut self, hosts: Vec<String>) -> Self {
+        self.no_proxy = hosts;
+        self
+    }
+
+    /// PEM certificates trusted in addition to the default roots (and to
+    /// `VAULT_CACERT`).
+    #[must_use]
+    pub fn with_extra_roots_pem(mut self, pem: Vec<u8>) -> Self {
+        self.extra_roots_pem = pem;
+        self
+    }
+
+    fn apply(
+        &self,
+        mut builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, ExtError> {
+        if !self.extra_roots_pem.is_empty() {
+            let certs = reqwest::Certificate::from_pem_bundle(&self.extra_roots_pem)
+                .ok()
+                .filter(|certs| !certs.is_empty())
+                .ok_or_else(|| {
+                    ExtError::Other(
+                        "the outbound CA bundle for Vault holds no PEM certificate".to_string(),
+                    )
+                })?;
+            builder = builder.tls_certs_merge(certs);
+        }
+        if let Some(url) = &self.proxy {
+            // The error never names the URL, which may carry credentials.
+            let mut proxy = reqwest::Proxy::all(url).map_err(|_| {
+                ExtError::Other("the outbound proxy for Vault is not a valid URL".to_string())
+            })?;
+            if !self.no_proxy.is_empty() {
+                proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&self.no_proxy.join(",")));
+            }
+            builder = builder.proxy(proxy);
+        }
+        Ok(builder)
+    }
+}
+
 /// Where the Vault token comes from.
 enum TokenSource {
     /// `VAULT_TOKEN`, read once at construction.
@@ -37,6 +122,10 @@ enum TokenSource {
 ///   every cache miss);
 /// - `VAULT_NAMESPACE` (optional, sent as `X-Vault-Namespace`);
 /// - `VAULT_CACERT` (optional PEM bundle added to the default roots).
+///
+/// A proxy and further CA roots come from a [`VaultHttp`]
+/// ([`VaultSecrets::from_vars_with_http`]); without one, reqwest follows the
+/// `HTTP(S)_PROXY`/`NO_PROXY` environment.
 ///
 /// Requests time out after 5 s and values are cached for 5 minutes. A missing
 /// secret or field is [`ExtError::SecretNotFound`]; any other failure is
@@ -95,6 +184,16 @@ impl VaultSecrets {
     /// Like [`VaultSecrets::from_env`], reading the variables through `var`
     /// instead of the process environment. Empty values count as unset.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ExtError> {
+        Self::from_vars_with_http(var, &VaultHttp::default())
+    }
+
+    /// Like [`VaultSecrets::from_vars`], with the client's proxy and extra
+    /// CA roots from `http`. A CA bundle without a certificate or a proxy
+    /// that is not a URL is an error.
+    pub fn from_vars_with_http(
+        var: impl Fn(&str) -> Option<String>,
+        http: &VaultHttp,
+    ) -> Result<Option<Self>, ExtError> {
         let var = |name: &str| var(name).filter(|v| !v.trim().is_empty());
         let Some(addr) = var("VAULT_ADDR") else {
             return Ok(None);
@@ -112,7 +211,7 @@ impl VaultSecrets {
                 ));
             }
         };
-        let mut builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
+        let mut builder = http.apply(reqwest::Client::builder().timeout(REQUEST_TIMEOUT))?;
         if let Some(ca) = var("VAULT_CACERT") {
             let pem = std::fs::read(&ca)
                 .map_err(|e| ExtError::Other(format!("reading VAULT_CACERT {ca}: {e}")))?;
@@ -286,6 +385,7 @@ const VAULT_VARS: [&str; 5] = [
 pub struct DefaultSecrets {
     files: EnvFileSecrets,
     vars: Vec<(&'static str, String)>,
+    http: VaultHttp,
     /// The Vault client, or why there is none.
     vault: tokio::sync::OnceCell<Result<VaultSecrets, String>>,
 }
@@ -295,6 +395,7 @@ impl fmt::Debug for DefaultSecrets {
         let names: Vec<&str> = self.vars.iter().map(|(name, _)| *name).collect();
         f.debug_struct("DefaultSecrets")
             .field("vault_vars", &names)
+            .field("http", &self.http)
             .field("vault", &self.vault.get())
             .finish_non_exhaustive()
     }
@@ -318,8 +419,19 @@ impl DefaultSecrets {
         Self {
             files: EnvFileSecrets,
             vars,
+            http: VaultHttp::default(),
             vault: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Builds the Vault client with the proxy and extra CA roots of `http`
+    /// (see [`VaultSecrets::from_vars_with_http`]). An unusable setting is
+    /// logged on the first `vault:` resolve and Vault is disabled, like any
+    /// other unusable Vault configuration.
+    #[must_use]
+    pub fn with_http(mut self, http: VaultHttp) -> Self {
+        self.http = http;
+        self
     }
 
     /// The Vault client, built (off the async workers) on first use, or
@@ -333,11 +445,14 @@ impl DefaultSecrets {
                         .find(|(n, _)| *n == name)
                         .map(|(_, v)| v.clone())
                 };
-                let built = tokio::task::spawn_blocking(move || VaultSecrets::from_vars(lookup))
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(ExtError::Other(format!("building the Vault client: {e}")))
-                    });
+                let http = self.http.clone();
+                let built = tokio::task::spawn_blocking(move || {
+                    VaultSecrets::from_vars_with_http(lookup, &http)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    Err(ExtError::Other(format!("building the Vault client: {e}")))
+                });
                 match built {
                     Ok(Some(vault)) => Ok(vault),
                     Ok(None) => Err("VAULT_ADDR is not set".to_string()),

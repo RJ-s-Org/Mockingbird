@@ -58,7 +58,7 @@ pub use quota::{AllowAll, QuotaGuard};
 pub use secrets::{EnvFileSecrets, SecretStore, check_secret_file, in_key_store};
 pub use tenancy::{CallInfo, SingleTenant, Tenancy, TenantResolver};
 pub use usage::{PrometheusUsage, UsageEvent, UsageSink};
-pub use vault::{DefaultSecrets, VaultSecrets};
+pub use vault::{DefaultSecrets, VaultHttp, VaultSecrets};
 
 /// A refusal to serve a call, rendered by the caller as an RFC 9457 problem.
 ///

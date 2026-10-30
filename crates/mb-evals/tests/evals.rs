@@ -83,6 +83,9 @@ fn sample_report() -> EvalReport {
         per_contract,
         per_api_type: BTreeMap::new(),
         per_domain: BTreeMap::new(),
+        skipped_calls: 0,
+        skipped_streaming_operations: 0,
+        skipped_contracts: Vec::new(),
     }
 }
 
@@ -120,6 +123,60 @@ fn corpus_skips_files_that_do_not_compile() {
     let entries = corpus::load(dir.path()).unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["api.yaml"]);
+    let (entries, skipped) = corpus::load_with_skipped(dir.path()).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(skipped, ["notes.txt"]);
+}
+
+/// Streaming operations are not called, and the report counts them.
+#[tokio::test]
+async fn run_evals_counts_the_streaming_operations_it_skips() {
+    let bytes = std::fs::read(fixtures().join("proto/route_guide.proto")).unwrap();
+    let entry = CorpusEntry {
+        name: "route_guide.proto".into(),
+        bundle: mb_import::compile(&bytes).unwrap(),
+    };
+    let report = run_evals(&[entry], Arc::new(ScriptedProvider::new(vec![])), "m", 10).await;
+    assert_eq!(report.calls, 1, "only the unary GetFeature is called");
+    assert_eq!(report.skipped_streaming_operations, 3);
+    assert_eq!(report.skipped_calls, 0);
+}
+
+/// Skips show in the Markdown and JSON, and `max_skipped` bounds them.
+#[test]
+fn skipped_contracts_and_calls_are_reported_and_bounded() {
+    let mut report = sample_report();
+    report.skipped_calls = 2;
+    report.skipped_streaming_operations = 3;
+    report.skipped_contracts = vec!["broken.yaml".into()];
+    let md = report.to_markdown();
+    assert!(md.contains("| Skipped calls | 2 |"), "{md}");
+    assert!(
+        md.contains("| Streaming operations not evaluated | 3 |"),
+        "{md}"
+    );
+    assert!(md.contains("## Skipped contracts"), "{md}");
+    assert!(md.contains("- broken.yaml"), "{md}");
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["skipped_contracts"],
+        serde_json::json!(["broken.yaml"])
+    );
+
+    let mut t = Thresholds {
+        min_schema_valid_rate: 0.0,
+        max_repair_rate: 1.0,
+        max_fallback_rate: 1.0,
+        ..Thresholds::default()
+    };
+    assert!(report.violations(&t).is_empty(), "no bound by default");
+    t.max_skipped = Some(2);
+    let v = report.violations(&t);
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert!(v[0].contains("skipped 3"), "{v:?}");
+
+    let clean = sample_report().to_markdown();
+    assert!(!clean.contains("Skipped"), "{clean}");
 }
 
 #[tokio::test]

@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
-    Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, Provider, ResponseFormat,
-    TextStream, Usage,
+    Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, MeteredStream, Provider,
+    ResponseFormat, StreamUsage, TextStream, Usage,
 };
 
 /// An OpenAI-compatible endpoint. Its `Debug` output redacts `api_key` and
@@ -52,6 +52,9 @@ pub struct OpenAiCompatible {
     /// Whether requests ask for no reasoning (see [`Self::reasoning_off`]);
     /// cleared when the endpoint rejects that.
     reasoning_off: AtomicBool,
+    /// Whether streams ask for usage (`stream_options.include_usage`);
+    /// cleared when the endpoint rejects that.
+    stream_usage: AtomicBool,
 }
 
 impl OpenAiCompatible {
@@ -63,6 +66,7 @@ impl OpenAiCompatible {
             client,
             config,
             reasoning_off: AtomicBool::new(reasoning_off),
+            stream_usage: AtomicBool::new(true),
         })
     }
 
@@ -92,6 +96,28 @@ impl OpenAiCompatible {
                 "the endpoint rejects reasoning: {{enabled: false}}; not sending it again"
             );
             self.reasoning_off.store(false, Ordering::Relaxed);
+        }
+        rejected
+    }
+
+    /// Whether streams send `stream_options: {"include_usage": true}`, so
+    /// the endpoint ends them with a usage chunk; not when `extra_body` sets
+    /// `stream_options`, nor after the endpoint rejected it.
+    fn sends_stream_usage(&self) -> bool {
+        self.stream_usage.load(Ordering::Relaxed)
+            && !self.config.extra_body.contains_key("stream_options")
+    }
+
+    /// Whether `e` rejects the `stream_options` this client sent; if so it
+    /// is not sent again (and those streams' usage is estimated).
+    fn rejected_stream_usage(&self, e: &LlmError) -> bool {
+        let rejected = self.sends_stream_usage()
+            && matches!(e, LlmError::Http { status: 400 | 404 | 422, body } if body.to_ascii_lowercase().contains("stream_options"));
+        if rejected {
+            tracing::info!(
+                "the endpoint rejects stream_options: {{include_usage: true}}; not sending it again"
+            );
+            self.stream_usage.store(false, Ordering::Relaxed);
         }
         rejected
     }
@@ -164,16 +190,26 @@ impl OpenAiCompatible {
     /// success status. A non-2xx status is an [`LlmError::Http`] carrying the
     /// response body.
     async fn open_stream(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
-        match self.open_stream_once(req).await {
-            Err(e) if self.rejected_reasoning_off(&e) => self.open_stream_once(req).await,
-            other => other,
+        // Each switch is dropped at most once, so this is three tries at most.
+        let mut result = self.open_stream_once(req).await;
+        for _ in 0..2 {
+            match result {
+                Err(e) if self.rejected_reasoning_off(&e) || self.rejected_stream_usage(&e) => {
+                    result = self.open_stream_once(req).await;
+                }
+                other => return other,
+            }
         }
+        result
     }
 
     async fn open_stream_once(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
         let mut body = self.body(req);
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), Value::Bool(true));
+            if self.sends_stream_usage() {
+                obj.insert("stream_options".to_string(), json!({"include_usage": true}));
+            }
         }
         let resp = self.post(&body).await?;
         let status = resp.status();
@@ -251,6 +287,22 @@ fn provider_prefix(v: &Value) -> String {
         .and_then(Value::as_str)
         .map(|p| format!("provider {p}, "))
         .unwrap_or_default()
+}
+
+/// The `usage` a stream chunk carries (the final one, when the request set
+/// `stream_options.include_usage`).
+fn chunk_usage(v: &Value) -> Option<Usage> {
+    let usage = v.get("usage").filter(|u| u.is_object())?;
+    let tok = |name: &str| {
+        usage
+            .get(name)
+            .and_then(Value::as_u64)
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+    };
+    Some(Usage {
+        prompt_tokens: tok("prompt_tokens")?,
+        completion_tokens: tok("completion_tokens").unwrap_or(0),
+    })
 }
 
 /// The `finish_reason` of the first choice, `"none"` without one.
@@ -474,6 +526,13 @@ impl Provider for OpenAiCompatible {
     /// `req.timeout` bounds only the arrival of the response head (and of an
     /// error body); the deltas then arrive as fast as the server sends them.
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        self.stream_metered(req).await.map(|m| m.text)
+    }
+
+    /// [`Provider::stream`], asking for usage (`stream_options`, dropped for
+    /// good when the endpoint rejects it): the usage of the final chunk is
+    /// reported once the stream has ended.
+    async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
         tracing::Span::current().record("llm.model", self.config.model.as_str());
         let resp = match tokio::time::timeout(req.timeout, self.open_stream(&req)).await {
             Ok(r) => r?,
@@ -481,54 +540,65 @@ impl Provider for OpenAiCompatible {
         };
         let events = resp.bytes_stream().eventsource();
         let max_tokens = req.max_tokens;
+        let usage = StreamUsage::new();
+        let reported = usage.clone();
         // The state is the event source plus an error to yield after the
         // delta just returned (a truncation marked on a chunk with content);
         // `None` once the stream has ended.
-        let deltas = futures::stream::unfold(Some((events, None)), move |state| async move {
-            let (mut events, pending) = state?;
-            if let Some(error) = pending {
-                return Some((Err(error), None));
-            }
-            loop {
-                let event = match events.next().await {
-                    None => return None,
-                    Some(Err(e)) => {
-                        return Some((Err(LlmError::Transport(e.to_string())), None));
-                    }
-                    Some(Ok(event)) => event,
-                };
-                let data = event.data.trim();
-                if data == "[DONE]" {
-                    return None;
-                }
-                let v: Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(e) => return Some((Err(LlmError::Decode(e.to_string())), None)),
-                };
-                if let Some(error) = in_band_error(&v) {
+        let deltas = futures::stream::unfold(Some((events, None)), move |state| {
+            let reported = reported.clone();
+            async move {
+                let (mut events, pending) = state?;
+                if let Some(error) = pending {
                     return Some((Err(error), None));
                 }
-                let truncated = (finish_reason(&v) == "length").then(|| {
+                loop {
+                    let event = match events.next().await {
+                        None => return None,
+                        Some(Err(e)) => {
+                            return Some((Err(LlmError::Transport(e.to_string())), None));
+                        }
+                        Some(Ok(event)) => event,
+                    };
+                    let data = event.data.trim();
+                    if data == "[DONE]" {
+                        return None;
+                    }
+                    let v: Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(e) => return Some((Err(LlmError::Decode(e.to_string())), None)),
+                    };
+                    if let Some(error) = in_band_error(&v) {
+                        return Some((Err(error), None));
+                    }
+                    if let Some(u) = chunk_usage(&v) {
+                        reported.set(u);
+                    }
+                    let truncated = (finish_reason(&v) == "length").then(|| {
                     LlmError::Truncated(format!(
                         "{}stopped at max_tokens ({max_tokens}); raise the profile's max_tokens",
                         provider_prefix(&v)
                     ))
                 });
-                let text = v
-                    .pointer("/choices/0/delta/content")
-                    .and_then(Value::as_str)
-                    .filter(|t| !t.is_empty());
-                match (text, truncated) {
-                    (Some(text), truncated) => {
-                        return Some((Ok(text.to_string()), Some((events, truncated))));
+                    let text = v
+                        .pointer("/choices/0/delta/content")
+                        .and_then(Value::as_str)
+                        .filter(|t| !t.is_empty());
+                    match (text, truncated) {
+                        (Some(text), truncated) => {
+                            return Some((Ok(text.to_string()), Some((events, truncated))));
+                        }
+                        (None, Some(error)) => return Some((Err(error), None)),
+                        // Keep-alive, role-only, stop and usage chunks carry nothing.
+                        (None, None) => continue,
                     }
-                    (None, Some(error)) => return Some((Err(error), None)),
-                    // Keep-alive, role-only and stop chunks carry nothing.
-                    (None, None) => continue,
                 }
             }
         });
-        Ok(Box::pin(deltas))
+        Ok(MeteredStream {
+            text: Box::pin(deltas),
+            usage,
+        })
     }
 }
 

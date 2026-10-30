@@ -7,7 +7,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider, TextStream, Usage};
+use crate::{
+    Capabilities, ChatRequest, ChatResponse, LlmError, MeteredStream, Provider, StreamUsage,
+    TextStream, Usage,
+};
 
 /// One scripted stream: either `stream()` fails, or it yields these items.
 type StreamScript = Result<Vec<Result<String, LlmError>>, LlmError>;
@@ -20,6 +23,7 @@ pub struct ScriptedProvider {
     stream_requests: Mutex<Vec<ChatRequest>>,
     chunk_delay: Duration,
     chunks_yielded: Arc<AtomicUsize>,
+    stream_usage: Option<Usage>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -50,6 +54,7 @@ impl ScriptedProvider {
             stream_requests: Mutex::new(Vec::new()),
             chunk_delay: Duration::ZERO,
             chunks_yielded: Arc::new(AtomicUsize::new(0)),
+            stream_usage: None,
         }
     }
 
@@ -58,6 +63,13 @@ impl ScriptedProvider {
     /// back to the trait default (one delta from the `complete` script).
     pub fn with_streams(mut self, streams: Vec<StreamScript>) -> Self {
         self.streams = Some(Mutex::new(streams.into()));
+        self
+    }
+
+    /// Every [`Provider::stream_metered`] stream reports `usage` once its
+    /// items are exhausted (without this, streams report none).
+    pub fn with_stream_usage(mut self, usage: Usage) -> Self {
+        self.stream_usage = Some(usage);
         self
     }
 
@@ -104,6 +116,10 @@ impl Provider for ScriptedProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        self.stream_metered(req).await.map(|m| m.text)
+    }
+
+    async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
         locked(&self.stream_requests).push(req);
         let chunks = match &self.streams {
             Some(streams) => locked(streams)
@@ -115,15 +131,32 @@ impl Provider for ScriptedProvider {
         };
         let delay = self.chunk_delay;
         let yielded = Arc::clone(&self.chunks_yielded);
-        Ok(Box::pin(futures::stream::iter(chunks).then(move |chunk| {
-            let yielded = Arc::clone(&yielded);
-            async move {
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
+        let usage = StreamUsage::new();
+        let (reported, at_end) = (usage.clone(), self.stream_usage);
+        let text = futures::stream::iter(chunks)
+            .then(move |chunk| {
+                let yielded = Arc::clone(&yielded);
+                async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    yielded.fetch_add(1, Ordering::SeqCst);
+                    chunk
                 }
-                yielded.fetch_add(1, Ordering::SeqCst);
-                chunk
-            }
-        })))
+            })
+            // Reports the usage when the items run out, and yields nothing.
+            .chain(
+                futures::stream::once(async move {
+                    if let Some(u) = at_end {
+                        reported.set(u);
+                    }
+                    None
+                })
+                .filter_map(std::future::ready),
+            );
+        Ok(MeteredStream {
+            text: Box::pin(text),
+            usage,
+        })
     }
 }

@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use clap::{Args, Subcommand};
 use futures::StreamExt;
 use mb_llm::{
-    Capabilities, ChatRequest, ChatResponse, LlmError, Provider, ResponseFormat, Role, TextStream,
-    Usage,
+    Capabilities, ChatRequest, ChatResponse, LlmError, MeteredStream, Provider, ResponseFormat,
+    Role, StreamUsage, TextStream, Usage,
 };
 use mb_state::{SessionKey, StateStore, StoredResource};
 use reqwest::Method;
@@ -395,18 +395,29 @@ impl Provider for SnapshotProvider {
     }
 
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        self.stream_metered(req).await.map(|m| m.text)
+    }
+
+    /// A replay reports no tokens; otherwise the inner provider's usage.
+    async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
         if let Some(content) = self.replayed(&req) {
-            return Ok(Box::pin(futures::stream::once(std::future::ready(Ok(
-                content,
-            )))));
+            let usage = StreamUsage::new();
+            usage.set(Usage::default());
+            return Ok(MeteredStream {
+                text: Box::pin(futures::stream::once(std::future::ready(Ok(content)))),
+                usage,
+            });
         }
         let Some(inner) = &self.inner else {
             return Err(Self::miss());
         };
         if !self.snapshot.records() {
-            return inner.stream(req).await;
+            return inner.stream_metered(req).await;
         }
-        let stream = inner.stream(req.clone()).await?;
+        let MeteredStream {
+            text: stream,
+            usage,
+        } = inner.stream_metered(req.clone()).await?;
         // The whole text is recorded once the stream ends without an error.
         let text = Arc::new(Mutex::new(Some(String::new())));
         let seen = Arc::clone(&text);
@@ -431,7 +442,10 @@ impl Provider for SnapshotProvider {
             }
         })
         .filter_map(|()| std::future::ready(None));
-        Ok(Box::pin(tee.chain(done)))
+        Ok(MeteredStream {
+            text: Box::pin(tee.chain(done)),
+            usage,
+        })
     }
 }
 

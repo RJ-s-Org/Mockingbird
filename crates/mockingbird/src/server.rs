@@ -67,7 +67,7 @@ pub fn binds_for(role: Role) -> (bool, bool, bool) {
 /// [`run_with`] with `MB_LLM_*` from the environment and the self-hosted
 /// [`Extensions`].
 pub async fn run(args: ServeArgs) -> Result<(), ServeError> {
-    run_with(args, Some(LlmEnv::from_env()), Extensions::default()).await
+    run_inner(args, Some(LlmEnv::from_env()), None).await
 }
 
 /// Validates the configuration, binds the role's listeners (see
@@ -77,6 +77,16 @@ pub async fn run_with(
     args: ServeArgs,
     llm: Option<LlmEnv>,
     ext: Extensions,
+) -> Result<(), ServeError> {
+    run_inner(args, llm, Some(ext)).await
+}
+
+/// [`run_with`]; `None` stands for the self-hosted [`Extensions`] (see
+/// [`crate::config::build_app`]).
+async fn run_inner(
+    args: ServeArgs,
+    llm: Option<LlmEnv>,
+    ext: Option<Extensions>,
 ) -> Result<(), ServeError> {
     let cfg = resolve_config(&args, llm.as_ref())?;
     let role = cfg.server.role;
@@ -112,7 +122,10 @@ pub async fn run_with(
         false => None,
     };
 
-    let app = build_app_with(&args, llm, ext).await?;
+    let app = match ext {
+        Some(ext) => build_app_with(&args, llm, ext).await?,
+        None => crate::config::self_hosted_app(&args, llm).await?,
+    };
     let proxy_addr = SocketAddr::new(cfg.proxy.host, cfg.proxy.port);
     let proxy = match &app.proxy {
         Some(_) if bind_data => Some(
