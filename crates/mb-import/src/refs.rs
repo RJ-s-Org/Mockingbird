@@ -1,11 +1,14 @@
 //! Bundling of multi-file OpenAPI, Swagger and AsyncAPI documents: `$ref`s
 //! naming other uploaded files are resolved and the root document is turned
 //! into one self-contained document (see
-//! `docs/refinement/design-external-refs.md`). Nothing is fetched: refs to
-//! URLs are left as they are.
+//! `docs/refinement/design-external-refs.md`). Nothing is fetched here:
+//! in an upload, refs to URLs are left as they are; for a contract fetched
+//! from a URL (the smart importer), refs resolve against the URL of the
+//! document holding them, and the caller (`smart::remote_refs`) fetches the
+//! documents they name between bundling passes.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -178,6 +181,15 @@ impl Pos {
     }
 }
 
+/// Whether `doc` holds a ref that names another document (any ref not
+/// starting with `#`).
+#[cfg(feature = "smart")]
+pub(crate) fn has_external_refs(doc: &Value) -> bool {
+    let mut found = false;
+    visit_refs(doc, Pos::Doc, &mut |r| found |= !r.starts_with('#'));
+    found
+}
+
 /// Whether `doc` holds a ref that names another file (not a URL).
 pub(crate) fn has_file_refs(doc: &Value) -> bool {
     let mut found = false;
@@ -229,13 +241,64 @@ pub(crate) fn bundle(
     format: SourceFormat,
     files: &[SourceFile],
 ) -> Result<Option<Value>, ImportError> {
+    let files = files.iter().map(|f| (f.path.as_str(), f)).collect();
+    match run(root, doc, format, files, HashMap::new(), Locator::Upload)? {
+        Pass::Bundled(out) => Ok(out),
+        #[cfg(feature = "smart")]
+        Pass::Missing(_) => Ok(None),
+    }
+}
+
+/// The outcome of a bundling pass.
+pub(crate) enum Pass {
+    /// The bundled document (`None` when the format has no definitions
+    /// section).
+    Bundled(Option<Value>),
+    /// The documents the refs of a fetched contract name that are not
+    /// fetched yet, by URL, each with the first ref naming it and the
+    /// (redacted) URL of the document holding that ref.
+    #[cfg(feature = "smart")]
+    Missing(std::collections::BTreeMap<String, (String, String)>),
+}
+
+/// One bundling pass over `doc`, a contract fetched from the URL `root`,
+/// against the documents fetched so far (`fetched`, by URL; `aliases` maps a
+/// requested URL to the URL it was served from). Refs resolve against the
+/// URL of the document holding them; a ref of another scheme than that
+/// document's is an error. While a referenced document is missing, the pass
+/// walks on with an empty placeholder in its place and returns every
+/// missing document instead of a bundle.
+#[cfg(feature = "smart")]
+pub(crate) fn bundle_fetched(
+    root: &str,
+    doc: &Value,
+    format: SourceFormat,
+    fetched: HashMap<String, Arc<Value>>,
+    aliases: &HashMap<String, String>,
+) -> Result<Pass, ImportError> {
+    let locator = Locator::Urls {
+        aliases: aliases.clone(),
+        missing: std::collections::BTreeMap::new(),
+    };
+    run(root, doc, format, HashMap::new(), fetched, locator)
+}
+
+fn run<'a>(
+    root: &str,
+    doc: &Value,
+    format: SourceFormat,
+    files: HashMap<&'a str, &'a SourceFile>,
+    parsed: HashMap<String, Arc<Value>>,
+    locator: Locator,
+) -> Result<Pass, ImportError> {
     let Some((defs_pointer, defs_prefix)) = defs_location(format) else {
-        return Ok(None);
+        return Ok(Pass::Bundled(None));
     };
     let root_defs = doc.pointer(defs_pointer).and_then(Value::as_object);
     let mut b = Bundler {
-        files: files.iter().map(|f| (f.path.as_str(), f)).collect(),
-        parsed: HashMap::new(),
+        files,
+        parsed,
+        locator,
         root: root.to_owned(),
         defs_pointer,
         defs_prefix,
@@ -264,6 +327,12 @@ pub(crate) fn bundle(
         }
     }
     let mut out = b.walk(doc, root, Pos::Doc, Some(""))?;
+    #[cfg(feature = "smart")]
+    if let Locator::Urls { missing, .. } = &mut b.locator
+        && !missing.is_empty()
+    {
+        return Ok(Pass::Missing(std::mem::take(missing)));
+    }
     if !b.new_defs.is_empty() {
         let section = defs_pointer
             .split('/')
@@ -281,12 +350,43 @@ pub(crate) fn bundle(
             section.insert(name, def);
         }
     }
-    Ok(Some(out))
+    Ok(Pass::Bundled(Some(out)))
+}
+
+/// How refs name other documents.
+enum Locator {
+    /// Uploaded files: a path relative to the file holding the ref. Refs to
+    /// URLs are left as they are.
+    Upload,
+    /// Fetched documents, keyed by URL.
+    #[cfg(feature = "smart")]
+    Urls {
+        /// Requested URL -> the URL it was served from.
+        aliases: HashMap<String, String>,
+        /// Documents named but not fetched yet, as in [`Pass::Missing`].
+        missing: std::collections::BTreeMap<String, (String, String)>,
+    },
+}
+
+impl Locator {
+    /// `key` as error messages show it: a URL with its query values
+    /// redacted.
+    fn shown(&self, key: &str) -> String {
+        match self {
+            Locator::Upload => key.to_owned(),
+            #[cfg(feature = "smart")]
+            Locator::Urls { .. } => url::Url::parse(key).map_or_else(
+                |_| key.to_owned(),
+                |u| crate::smart::redact::redacted_url(&u),
+            ),
+        }
+    }
 }
 
 struct Bundler<'a> {
     files: HashMap<&'a str, &'a SourceFile>,
-    parsed: HashMap<String, Rc<Value>>,
+    parsed: HashMap<String, Arc<Value>>,
+    locator: Locator,
     root: String,
     defs_pointer: &'static str,
     defs_prefix: &'static str,
@@ -307,22 +407,73 @@ impl Bundler<'_> {
     /// The target of `r` held by `from`; `None` for a URL, or for a local ref
     /// of the root.
     fn key_of(&self, r: &str, from: &str) -> Result<Option<Key>, ImportError> {
-        if is_url(r) || (from == self.root && r.starts_with('#')) {
+        if from == self.root && r.starts_with('#') {
             return Ok(None);
         }
         let (rel, pointer) = r.split_once('#').unwrap_or((r, ""));
-        let path = if rel.is_empty() {
-            from.to_owned()
-        } else {
-            resolve_path(r, &percent_decode(rel), from)?
+        let path = match &self.locator {
+            Locator::Upload if is_url(r) => return Ok(None),
+            _ if rel.is_empty() => from.to_owned(),
+            Locator::Upload => resolve_path(r, &percent_decode(rel), from)?,
+            #[cfg(feature = "smart")]
+            Locator::Urls { aliases, .. } => {
+                let url = self.join(r, rel, from)?;
+                aliases.get(&url).cloned().unwrap_or(url)
+            }
         };
         Ok(Some((path, percent_decode(pointer))))
     }
 
-    /// The parsed document of an uploaded file.
-    fn document(&mut self, path: &str, r: &str, from: &str) -> Result<Rc<Value>, ImportError> {
+    /// The URL (without fragment) that `rel`, the file part of the ref `r`,
+    /// names, resolved against `from`, the URL of the document holding it.
+    /// Only a ref of the same scheme as `from` is accepted.
+    #[cfg(feature = "smart")]
+    fn join(&self, r: &str, rel: &str, from: &str) -> Result<String, ImportError> {
+        let shown = self.locator.shown(from);
+        let base = url::Url::parse(from)
+            .map_err(|e| invalid(r, format!("external $ref {r} (in {shown}): {e}")))?;
+        let mut url = base.join(rel).map_err(|e| {
+            invalid(
+                r,
+                format!("external $ref {r} (in {shown}) is not a valid URL reference: {e}"),
+            )
+        })?;
+        if url.scheme() != base.scheme() {
+            return Err(invalid(
+                r,
+                format!(
+                    "external $ref {r} (in {shown}) uses the {} scheme; a contract fetched over {} \
+                     follows only {} refs",
+                    url.scheme(),
+                    base.scheme(),
+                    base.scheme()
+                ),
+            ));
+        }
+        url.set_fragment(None);
+        Ok(url.to_string())
+    }
+
+    /// The parsed document of an uploaded file or a fetched URL; `None`
+    /// (and recorded) while a fetched contract's document is missing.
+    fn document(
+        &mut self,
+        path: &str,
+        r: &str,
+        from: &str,
+    ) -> Result<Option<Arc<Value>>, ImportError> {
         if let Some(doc) = self.parsed.get(path) {
-            return Ok(Rc::clone(doc));
+            return Ok(Some(Arc::clone(doc)));
+        }
+        #[cfg(feature = "smart")]
+        if matches!(self.locator, Locator::Urls { .. }) {
+            let shown = self.locator.shown(from);
+            if let Locator::Urls { missing, .. } = &mut self.locator {
+                missing
+                    .entry(path.to_owned())
+                    .or_insert_with(|| (r.to_owned(), shown));
+            }
+            return Ok(None);
         }
         let file = self.files.get(path).ok_or_else(|| {
             invalid(
@@ -336,9 +487,9 @@ impl Bundler<'_> {
                 format!("{path}, referenced by $ref {r} in {from}, is not JSON or YAML: {e}"),
             )
         })?;
-        let doc = Rc::new(doc);
-        self.parsed.insert(path.to_owned(), Rc::clone(&doc));
-        Ok(doc)
+        let doc = Arc::new(doc);
+        self.parsed.insert(path.to_owned(), Arc::clone(&doc));
+        Ok(Some(doc))
     }
 
     /// The value a ref names.
@@ -346,15 +497,24 @@ impl Bundler<'_> {
         if self.stack.len() >= MAX_DEPTH {
             return Err(invalid(
                 r,
-                format!("external $ref {r} (in {from}): refs nest deeper than {MAX_DEPTH}"),
+                format!(
+                    "external $ref {r} (in {}): refs nest deeper than {MAX_DEPTH}",
+                    self.locator.shown(from)
+                ),
             ));
         }
         let (path, pointer) = key;
-        let doc = self.document(path, r, from)?;
+        let Some(doc) = self.document(path, r, from)? else {
+            return Ok(Value::Object(Map::new()));
+        };
         let value = doc.pointer(pointer).cloned().ok_or_else(|| {
             invalid(
                 r,
-                format!("external $ref {r} (in {from}): {path} has no {pointer}"),
+                format!(
+                    "external $ref {r} (in {}): {} has no {pointer}",
+                    self.locator.shown(from),
+                    self.locator.shown(path)
+                ),
             )
         })?;
         let len = json_len(&value);
@@ -362,7 +522,8 @@ impl Bundler<'_> {
             invalid(
                 r,
                 format!(
-                    "external $ref {r} (in {from}): the bundled contract exceeds {} MiB",
+                    "external $ref {r} (in {}): the bundled contract exceeds {} MiB",
+                    self.locator.shown(from),
                     MAX_BUNDLED_BYTES / (1024 * 1024)
                 ),
             )
@@ -503,7 +664,8 @@ impl Bundler<'_> {
             return Err(invalid(
                 r,
                 format!(
-                    "external $ref {r} (in {file}) is cyclic outside a schema, which cannot be bundled into one document"
+                    "external $ref {r} (in {}) is cyclic outside a schema, which cannot be bundled into one document",
+                    self.locator.shown(file)
                 ),
             ));
         }

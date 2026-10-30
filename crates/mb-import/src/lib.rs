@@ -240,7 +240,7 @@ pub fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
 
 /// [`sniff`], with the JSON or YAML document it parsed on the way (the
 /// value [`parse_document`] returns), so [`compile`] parses only once.
-fn sniff_parsed(bytes: &[u8]) -> Result<(SourceFormat, Option<Value>), ImportError> {
+pub(crate) fn sniff_parsed(bytes: &[u8]) -> Result<(SourceFormat, Option<Value>), ImportError> {
     if archive::is_archive(bytes) {
         return Ok((SourceFormat::Archive, None));
     }

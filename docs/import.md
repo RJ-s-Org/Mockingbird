@@ -8,11 +8,12 @@ Not every API comes with a contract. Smart import turns what you do have into a 
 | A HAR 1.2 recording (browser dev tools, proxies) | `har` | Deterministic: the JSON traffic of the most common origin; static assets and other origins are dropped; ids in paths become parameters (`/pets/42` → `/pets/{petId}`). | Operations with schemas inferred from the recorded bodies and up to two examples each. |
 | A Postman v2.0 or v2.1 collection | `postman` | Deterministic: every request, folders as tags, saved responses as examples, `:var` and `{{var}}` path segments as parameters. | As for HAR. |
 | An http(s) URL to any of the above | (`url`) | Fetched once (see [URL fetching](#url-fetching)), then read according to its content type. | As above. |
+| An http(s) URL to an OpenAPI 3.x or Swagger 2.0 contract (JSON or YAML) | (`url`) | Deterministic: taken as written, like an [embedded definition](#embedded-openapi); its relative `$ref`s are resolved against the URL and fetched with the same guards ([`$ref`s of a fetched contract](#refs-of-a-fetched-contract)). | Operations with confidence 1.0; the source kind is `text`. |
 | Up to 20 URLs, or up to 100 Markdown, HTML or text documents | (`urls`, `documents`) | Each source as above, under one token budget; operations of all sources are merged into one draft. A source that cannot be fetched or read is skipped with a `source_skipped` warning. | One draft. |
 
 HAR and Postman imports do not need an LLM. When one is available it only writes missing summaries. Passwords, tokens, API keys, cookies, `Authorization` headers and similar values in recordings are replaced by `<redacted>` before anything is stored. Every input is at most 20 MiB.
 
-Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploaded contract, so a draft is always a valid contract. OpenAPI, GraphQL, protobuf and WSDL files are contracts already: upload them to `…/contracts` as before (a WSDL split across files with `wsdl:import` or `xs:import` goes up as one archive; see [WSDL known limits](protocols.md#known-limits)).
+Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploaded contract, so a draft is always a valid contract. OpenAPI, GraphQL, protobuf and WSDL files are contracts already: upload them to `…/contracts` as before (an OpenAPI or Swagger contract can also be imported from its URL as a draft, see above; a WSDL split across files with `wsdl:import` or `xs:import` goes up as one archive; see [WSDL known limits](protocols.md#known-limits)).
 
 ## Embedded OpenAPI
 
@@ -89,7 +90,16 @@ URL imports are fetched by the server, so they are guarded against server-side r
 - Query values and the fragment are redacted (`?sig=REDACTED`) in everything stored or audited: the job's `source_name`, the draft's `source_name` and `source_url`, and the `import.create` audit event. The real URL is used only for the fetch.
 - At most 5 redirects, and each hop is validated and resolved again, exactly like the first request.
 - No proxy is used (proxy environment variables are ignored), the whole fetch takes at most 20 s and the body is at most 10 MiB.
-- The content type picks the reader: `text/html`, `text/markdown`, `text/plain`, `application/pdf`, or JSON that is a HAR file or a Postman collection.
+- The content type picks the reader: `text/html`, `text/markdown`, `text/plain`, `application/pdf`, or JSON that is a HAR file or a Postman collection. A body served as anything but HTML, Markdown or PDF that is an OpenAPI 3.x or Swagger 2.0 contract (JSON or YAML) is read as a contract instead; other contracts (AsyncAPI, GraphQL, protobuf, WSDL) are refused and go to `…/contracts` as uploads.
+
+### `$ref`s of a fetched contract
+
+A contract fetched from a URL may be split into several documents (`$ref: ./schemas/pet.yaml`, `$ref: ../common.yaml#/Error`). Its `$ref`s are resolved against the URL of the document holding them (after redirects), the documents they name are fetched, and the contract is bundled into one document exactly as a [multi-file upload](cli.md#archive-uploads) is: schemas become named definitions (recursive ones included), other objects are copied in place.
+
+- Every referenced document is fetched through the same guards as the contract: the address checks and `import.url_allowlist`, the redirect checks, at most 10 MiB and 20 s per document. A ref to a blocked host fails the import with the same "destination not allowed" message.
+- Only refs of the contract's own scheme are followed (`http` or `https`, including absolute and `//host/…` refs to other hosts, which are checked like any other URL); `file:`, `ftp:` and every other scheme, and a switch between `http` and `https`, fail the import, naming the ref.
+- Each document is fetched once, so cyclic refs end. At most 64 documents (`mb_import::smart::MAX_REF_DOCUMENTS`), at most 16 documents deep (`MAX_REF_DEPTH`), at most 20 MiB with the contract, and at most 20 s for all of them together; the bundled contract is capped at 32 MiB, as for uploads. Passing a limit fails the import, before the documents past it are fetched.
+- Errors name the ref and the document holding it, with query values redacted.
 
 ## Admin API
 

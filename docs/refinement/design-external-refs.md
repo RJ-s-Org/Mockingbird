@@ -20,7 +20,7 @@ that the referenced files were missing.
 | A local directory through the CLI (`mockingbird import dir/`, `mockingbird validate dir/`, a `contract:` path in config) | `read_source` packs the directory into an archive (`pack_dir`) | yes, through the archive path |
 | Loose files through the library (`compile_files`) | the caller's `SourceFile`s | yes |
 | A single file whose refs name files that were not uploaded | | refused, with an error that says what to do |
-| A URL import whose spec has relative refs | the smart importer fetches one URL | no (see below) |
+| A URL import whose spec has relative refs | the smart importer fetches the URL, then each referenced document | no; added later by URL-REFS (see below) |
 | `$ref` to an absolute URL (`https://…`) | | never fetched; left as is, and refused with a clear error if the compiler needs it |
 
 ## Choosing the root document
@@ -120,7 +120,14 @@ suggesting to upload the referenced files or bundle the spec. The audit's
   redirect checks). Following relative refs would mean fetching more URLs on
   the same origin, with a per-import count and byte cap and the same guards;
   until then such a spec has to be bundled (`redocly bundle`) or uploaded as
-  an archive.
+  an archive. **Done in URL-REFS:** a smart URL import of an OpenAPI 3.x or
+  Swagger 2.0 contract reads it as written and resolves its refs against the
+  URL in passes (`refs::bundle_fetched` names the missing documents,
+  `smart::remote_refs` fetches them through `fetch_with` with the import's
+  `FetchPolicy`), each document once, at most 64 documents, 16 deep, 20 MiB
+  and one fetch timeout in all; only refs of the contract's scheme. See
+  [`$ref`s of a fetched contract](../import.md#refs-of-a-fetched-contract).
+  Embedded definitions in fetched documentation pages are not resolved.
 - **The CLI pointed at one file of a split spec.** `mockingbird import
   openapi.yaml` reads only that file; the error tells the user to point it at
   the directory. Packing the parent directory automatically is possible but

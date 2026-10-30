@@ -28,6 +28,7 @@ mod pdfscan;
 pub mod postman;
 mod probe;
 pub mod redact;
+mod remote_refs;
 mod swagger2;
 #[doc(hidden)]
 pub mod text;
@@ -318,8 +319,8 @@ fn fetched_kind(fetched: &Fetched) -> Result<ImportKind, SmartError> {
             return match detect_kind(None, &fetched.bytes) {
                 Some(kind @ (ImportKind::Har | ImportKind::Postman)) => Ok(kind),
                 _ => Err(SmartError::Unsupported(
-                    "the URL returned JSON that is neither a HAR file nor a Postman collection; \
-                     upload OpenAPI and other contracts to the contracts endpoint"
+                    "the URL returned JSON that is neither an OpenAPI or Swagger contract, a HAR \
+                     file nor a Postman collection; upload other contracts to the contracts endpoint"
                         .to_string(),
                 )),
             };
@@ -488,6 +489,12 @@ pub async fn run_import_with(
 
 /// Most sources of one import.
 pub const MAX_IMPORT_SOURCES: usize = 100;
+/// Most documents the external `$ref`s of a contract fetched from a URL
+/// may name (the contract itself not counted).
+pub const MAX_REF_DOCUMENTS: usize = 64;
+/// Most levels of documents the external `$ref`s of a contract fetched from
+/// a URL may nest (a document the contract names is one level deep).
+pub const MAX_REF_DEPTH: usize = 16;
 
 /// Where a source's operations came from.
 struct SourceInfo {
@@ -509,6 +516,63 @@ fn input_name(input: &ImportInput) -> String {
     }
 }
 
+/// Whether `bytes` may hold an OpenAPI or Swagger document (a cheap test
+/// before parsing).
+fn names_openapi(bytes: &[u8]) -> bool {
+    [b"openapi".as_slice(), b"swagger".as_slice()]
+        .iter()
+        .any(|word| bytes.windows(word.len()).any(|w| w == *word))
+}
+
+/// The extraction of an OpenAPI 3.x or Swagger 2.0 contract fetched from
+/// `url` (served as anything but HTML, PDF or Markdown): its operations are
+/// taken as written, as an embedded document's are, after its external
+/// `$ref`s are resolved against the URL and fetched with the same policy
+/// ([`remote_refs::bundle_refs`]). `None` for any other document.
+async fn read_contract(
+    url: &str,
+    fetched: &Fetched,
+    source_name: &str,
+    opts: &ImportOptions,
+    resolver: &dyn Resolver,
+) -> Result<Option<Extracted>, SmartError> {
+    let documentation = matches!(
+        fetched.content_type.as_deref(),
+        Some("text/html" | "application/pdf" | "text/markdown" | "text/x-markdown")
+    );
+    if documentation || fetched.bytes.len() > MAX_IMPORT_BYTES || !names_openapi(&fetched.bytes) {
+        return Ok(None);
+    }
+    let bytes = fetched.bytes.clone();
+    let parsed = blocking(move || {
+        Ok(match crate::sniff_parsed(&bytes) {
+            Ok((format @ (crate::SourceFormat::OpenApi3 | crate::SourceFormat::Swagger2), doc)) => {
+                doc.map(|doc| (format, doc))
+            }
+            _ => None,
+        })
+    })
+    .await?;
+    let Some((format, doc)) = parsed else {
+        return Ok(None);
+    };
+    let doc = remote_refs::bundle_refs(url, fetched, doc, format, &opts.fetch, resolver).await?;
+    let title = doc
+        .pointer("/info/title")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let embedded = blocking(move || Ok(embedded::from_document(&doc))).await?;
+    Ok(Some(Extracted {
+        title: document_title(title, Some(source_name)),
+        servers: embedded.servers.clone(),
+        operations: Vec::new(),
+        warnings: embedded.warnings.clone(),
+        chunk_count: 0,
+        chunks_processed: 0,
+        embedded,
+    }))
+}
+
 /// Fetches (for a URL) and extracts one source within `budget`.
 async fn extract_source(
     input: ImportInput,
@@ -523,13 +587,21 @@ async fn extract_source(
         ImportInput::Url(url) => {
             report(observer, Phase::Fetching, 0, 1).await?;
             let fetched = fetch_with(&url, &opts.fetch, resolver).await?;
-            let kind = fetched_kind(&fetched)?;
             // The real URL is only fetched; what is stored and prompted
             // with has its query values redacted.
             let name = fetch::validate_url(&url)
                 .map(|u| redact::redacted_url(&u))
                 .unwrap_or_default();
             let final_url = redact::redacted_url(&fetched.url);
+            if let Some(extracted) = read_contract(&url, &fetched, &name, opts, resolver).await? {
+                let info = SourceInfo {
+                    kind: ImportKind::Text,
+                    name: Some(name),
+                    url: Some(final_url),
+                };
+                return Ok((info, extracted));
+            }
+            let kind = fetched_kind(&fetched)?;
             (kind, fetched.bytes, Some(name), Some(final_url))
         }
     };

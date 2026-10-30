@@ -187,22 +187,37 @@ pub fn extract_embedded(kind: ImportKind, bytes: &[u8], doc: &mut TextDoc) -> Em
         // A block that held a document is read from the document.
         found.documents.len() == before
     });
+    found.into_embedded()
+}
 
-    let mut embedded = Embedded::default();
-    let mut seen_documents: HashSet<BTreeSet<String>> = HashSet::new();
-    let mut seen_operations = HashSet::new();
-    for document in &found.documents {
-        let paths: BTreeSet<String> = document
-            .get("paths")
-            .and_then(Value::as_object)
-            .map(|p| p.keys().cloned().collect())
-            .unwrap_or_default();
-        if !seen_documents.insert(paths) {
-            continue;
+/// What an OpenAPI 3.x or Swagger 2.0 document holds, read as an embedded
+/// document is (a Swagger 2.0 document is converted first).
+pub(crate) fn from_document(document: &Value) -> Embedded {
+    let mut found = Found::default();
+    found.walk(document, 0);
+    found.into_embedded()
+}
+
+impl Found {
+    /// The documents found, each set of paths counted once.
+    fn into_embedded(self) -> Embedded {
+        let found = self;
+        let mut embedded = Embedded::default();
+        let mut seen_documents: HashSet<BTreeSet<String>> = HashSet::new();
+        let mut seen_operations = HashSet::new();
+        for document in &found.documents {
+            let paths: BTreeSet<String> = document
+                .get("paths")
+                .and_then(Value::as_object)
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default();
+            if !seen_documents.insert(paths) {
+                continue;
+            }
+            add_document(&mut embedded, document, &mut seen_operations);
         }
-        add_document(&mut embedded, document, &mut seen_operations);
+        embedded
     }
-    embedded
 }
 
 /// Adds `document`'s servers, components and operations to `embedded`,
