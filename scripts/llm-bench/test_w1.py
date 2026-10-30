@@ -51,6 +51,16 @@ class CauseTest(unittest.TestCase):
         self.assertTrue(set(cases.values()) <= set(aggregate.FALLBACK_CAUSES))
 
 
+class PatchedSourceTest(unittest.TestCase):
+    def test_patched_counts_as_schema_valid_and_is_reported_apart(self):
+        items = [({"source": src}, None) for src in ("llm", "patched", "repaired", "fallback")]
+        t = aggregate.tally(items, has_grades=False)
+        self.assertEqual(t["schema_valid"], 0.75)
+        self.assertEqual(t["patch"], 0.25)
+        self.assertEqual(t["repair"], 0.25)
+        self.assertIn("patched", aggregate.ENGINE_SOURCES)
+
+
 class SessionSlugTest(unittest.TestCase):
     def test_variant_suffix_is_header_safe(self):
         self.assertEqual(server_suites.session_slug("thinkingmachines/inkling@nojson"),

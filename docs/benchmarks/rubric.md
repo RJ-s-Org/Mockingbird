@@ -110,9 +110,11 @@ Engine samples (from `samples.jsonl`; `state`/`cache`/`rejected` rows are exclud
 from `N_m`, they do not occur in evals):
 
 - `first_try_rate = count(source == "llm") / N_m`
-- `schema_valid_rate = count(source in {"llm","repaired"}) / N_m` (after repair; note
-  `repaired` includes the engine's deterministic patch with no second LLM call)
-- `repair_rate = count(source == "repaired") / N_m`
+- `schema_valid_rate = count(source in {"llm","patched","repaired"}) / N_m` (after
+  repair). `patched` is the engine's local fix with no second LLM call; runs before
+  #142 (2026-10-29) report it as `repaired`, so compare their sum across rounds
+- `patch_rate = count(source == "patched") / N_m`
+- `repair_rate = count(source == "repaired") / N_m` (an LLM repair round trip)
 - `fallback_rate = count(source == "fallback") / N_m`
 - `fallback_causes`: each fallback counted once, by the engine's reason:
   `truncated` (cut at `max_tokens`), `non_json` (still not JSON after the
@@ -237,8 +239,8 @@ is within 10 % of the best Q.
 ## Formulas
 
 ```
-N      = engine samples of the model (source in llm|repaired|fallback)
-FT     = n(llm)/N                 SV = n(llm|repaired)/N         FB = n(fallback)/N
+N      = engine samples of the model (source in llm|patched|repaired|fallback)
+FT     = n(llm)/N                 SV = n(llm|patched|repaired)/N         FB = n(fallback)/N
 K      = n(non-fallback with 0 violations) / (N - n(fallback))
 J      = mean((realism + coherence)/2) over judged items, auto items = 1
 Jn     = (J - 1)/4

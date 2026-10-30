@@ -386,7 +386,7 @@ Before the next run:
 
 ## Known gap: JSON mode cannot be turned off
 
-`thinkingmachines/inkling` only works without JSON mode, and Mockingbird has no switch for that. `llm.profiles.<name>.json_schema` chooses between `json_schema` structured output and JSON mode (`json_object`); one of the two is always sent. `extra_body` cannot override it either, because it rejects the `response_format` key. Supporting such models needs a profile setting that sends no `response_format` and relies on the engine's parsing and repair, which the `@nojson` rows approximate. This is not implemented.
+In this run, `thinkingmachines/inkling` only worked without JSON mode, and Mockingbird had no switch for that: `llm.profiles.<name>.json_schema` chose between `json_schema` structured output and JSON mode (`json_object`), and `extra_body` rejects the `response_format` key. The `@nojson` rows approximate a profile that sends no `response_format`. Since #142, `output_mode: none` is that setting.
 
 ## Raw data
 
