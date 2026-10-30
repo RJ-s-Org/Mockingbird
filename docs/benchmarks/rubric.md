@@ -241,6 +241,7 @@ is within 10 % of the best Q.
 ```
 N      = engine samples of the model (source in llm|patched|repaired|fallback)
 FT     = n(llm)/N                 SV = n(llm|patched|repaired)/N         FB = n(fallback)/N
+FT per call and no second call (n(llm|patched)/N) are reported over all N, not averaged over api_types
 K      = n(non-fallback with 0 violations) / (N - n(fallback))
 J      = mean((realism + coherence)/2) over judged items, auto items = 1
 Jn     = (J - 1)/4

@@ -62,6 +62,16 @@ class PatchedSourceTest(unittest.TestCase):
         self.assertIn("patched", aggregate.ENGINE_SOURCES)
 
 
+class PerCallRatesTest(unittest.TestCase):
+    def test_per_call_rates_are_not_averaged_over_api_types(self):
+        items = [({"source": "llm", "api_type": "grpc"}, None)]
+        items += [({"source": s, "api_type": "rest"}, None) for s in ("patched", "patched", "repaired")]
+        block = aggregate.engine_block(items, False, {})
+        self.assertEqual(block["macro"]["first_try"], 0.5)
+        self.assertEqual(block["first_try"], 0.25)
+        self.assertEqual(block["no_second_call"], 0.75)
+
+
 class OutputModeTest(unittest.TestCase):
     def test_nojson_variant_runs_the_engine_with_no_response_format(self):
         self.assertEqual(run.output_mode("thinkingmachines/inkling@nojson", "json_object"), "none")

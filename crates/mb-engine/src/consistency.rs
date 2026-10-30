@@ -158,7 +158,7 @@ pub(crate) fn deref<'a>(bundle: &'a Bundle, mut schema: &'a Value) -> &'a Value 
 
 /// The schema of `field` in object `schema`, looking through `$ref`s and
 /// `allOf`/`oneOf`/`anyOf` members.
-pub(crate) fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<Value> {
+pub fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<Value> {
     fn find(bundle: &Bundle, schema: &Value, field: &str, depth: usize) -> Option<Value> {
         if depth > 8 {
             return None;

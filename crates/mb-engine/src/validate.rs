@@ -57,6 +57,23 @@ const ANNOTATION_FORMATS: &[&str] = &[
     "uri-template",
 ];
 
+/// The keywords [`mend`] checks a replacement string against.
+const LEAF_KEYWORDS: &[&str] = &[
+    "pattern",
+    "minLength",
+    "maxLength",
+    "enum",
+    "const",
+    "format",
+];
+
+/// A bad identifier at least this long is replaced wherever the answer
+/// repeats it as a whole token; shorter ones could match by chance.
+const MIN_SHARED_CHARS: usize = 6;
+
+/// Longer draws are used as they are: [`overlay`] checks once per character.
+const MAX_OVERLAID_CHARS: usize = 256;
+
 /// JSON Schema (draft 2020-12) validator over a schema that carries its own
 /// `$defs`.
 pub struct SchemaValidator {
@@ -123,13 +140,7 @@ impl SchemaValidator {
             return None;
         }
         self.formats
-            .get_or_init(|| {
-                let mut options = jsonschema::draft202012::options().should_validate_formats(true);
-                for name in ANNOTATION_FORMATS {
-                    options = options.with_format(*name, |_: &str| true);
-                }
-                options.build(&self.schema).ok()
-            })
+            .get_or_init(|| asserting_formats(&self.schema))
             .as_ref()
     }
 
@@ -182,7 +193,8 @@ impl SchemaValidator {
     /// `pattern`, `maxLength`, `minLength`, `enum`, `format`, `const` or a
     /// numeric range (`minimum`, `maximum`, their exclusive forms,
     /// `multipleOf`) is
-    /// replaced by `fill` of the schema holding that keyword. `fill` gets the
+    /// replaced from `fill` of the schema holding that keyword, keeping what
+    /// fits of the old value. `fill` gets the
     /// schema with the root's `$defs`. `None` unless such errors are all that
     /// is wrong and the patched value is valid. `format` counts only for a
     /// validator built by [`SchemaValidator::for_output`], and only for
@@ -232,31 +244,24 @@ impl SchemaValidator {
             }
         }
         for e in self.inner.iter_errors(instance) {
-            let pointer = e.instance_path().as_str().to_string();
-            let expected = || self.subschema(e.evaluation_path().as_str());
-            match e.kind() {
-                ValidationErrorKind::Type { .. } if e.instance().is_null() => {
-                    nulls.push((pointer, expected()?));
-                }
-                ValidationErrorKind::Pattern { .. }
-                | ValidationErrorKind::MaxLength { .. }
-                | ValidationErrorKind::MinLength { .. }
-                | ValidationErrorKind::Enum { .. }
-                | ValidationErrorKind::Constant { .. }
-                | ValidationErrorKind::Minimum { .. }
-                | ValidationErrorKind::Maximum { .. }
-                | ValidationErrorKind::ExclusiveMinimum { .. }
-                | ValidationErrorKind::ExclusiveMaximum { .. }
-                | ValidationErrorKind::MultipleOf { .. } => refills.push((pointer, expected()?)),
-                _ => return None,
-            }
+            self.collect(&e, &mut nulls, &mut refills)?;
         }
         if nulls.is_empty() && refills.is_empty() {
             return None;
         }
         let mut out = instance.clone();
+        // Shortest first: a value that embeds another (a secret holding its
+        // id) then finds that one's replacement.
+        refills.sort_by_key(|(pointer, _)| {
+            instance
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map_or(usize::MAX, |text| text.chars().count())
+        });
+        let mut replaced = Vec::new();
         for (pointer, expected) in &refills {
-            *out.pointer_mut(pointer)? = fill(expected);
+            let bad = out.pointer(pointer)?.clone();
+            *out.pointer_mut(pointer)? = mend(&bad, expected, &mut replaced, &mut fill);
         }
         for (pointer, _) in &nulls {
             let (parent, key) = pointer.rsplit_once('/')?;
@@ -264,18 +269,10 @@ impl SchemaValidator {
                 map.remove(&unescape(key));
             }
         }
-        let missing: HashSet<String> = self
-            .inner
-            .iter_errors(&out)
-            .filter_map(|e| match e.kind() {
-                ValidationErrorKind::Required { property } => Some(format!(
-                    "{}/{}",
-                    e.instance_path().as_str(),
-                    escape(property.as_str()?)
-                )),
-                _ => None,
-            })
-            .collect();
+        let mut missing = HashSet::new();
+        for e in self.inner.iter_errors(&out) {
+            required_members(&e, &mut missing);
+        }
         for (pointer, expected) in &nulls {
             let dropped = out.pointer(pointer).is_none();
             if dropped && !missing.contains(pointer) {
@@ -291,7 +288,78 @@ impl SchemaValidator {
                 _ => return None,
             }
         }
+        // A value left as it was may hold a replaced one (a URL holding an id).
+        let refilled: HashSet<&str> = refills.iter().map(|(p, _)| p.as_str()).collect();
+        let mut linked = out.clone();
+        carry(&mut linked, String::new(), &replaced, &|pointer, value| {
+            refilled.contains(pointer) || keep(pointer, value)
+        });
+        let out = if self.is_valid(&linked) && self.formats_hold(&linked, &keep) {
+            linked
+        } else {
+            out
+        };
         (self.is_valid(&out) && self.formats_hold(&out, &keep)).then_some(out)
+    }
+
+    /// Adds what `e` needs patched to `nulls` and `refills`; `None` when a
+    /// local fix cannot solve it. A failed `anyOf` or `oneOf` is patched in
+    /// the branch needing the fewest fixes, among those whose `const` and
+    /// `enum` members already hold: changing one would change what the
+    /// answer is.
+    fn collect<'s>(
+        &'s self,
+        e: &jsonschema::ValidationError<'_>,
+        nulls: &mut Vec<(String, &'s Value)>,
+        refills: &mut Vec<(String, &'s Value)>,
+    ) -> Option<()> {
+        let pointer = e.instance_path().as_str().to_string();
+        let expected = || self.subschema(e.evaluation_path().as_str());
+        match e.kind() {
+            ValidationErrorKind::Type { .. } if e.instance().is_null() => {
+                nulls.push((pointer, expected()?));
+            }
+            ValidationErrorKind::Pattern { .. }
+            | ValidationErrorKind::MaxLength { .. }
+            | ValidationErrorKind::MinLength { .. }
+            | ValidationErrorKind::Enum { .. }
+            | ValidationErrorKind::Constant { .. }
+            | ValidationErrorKind::Minimum { .. }
+            | ValidationErrorKind::Maximum { .. }
+            | ValidationErrorKind::ExclusiveMinimum { .. }
+            | ValidationErrorKind::ExclusiveMaximum { .. }
+            | ValidationErrorKind::MultipleOf { .. } => refills.push((pointer, expected()?)),
+            ValidationErrorKind::AnyOf { context }
+            | ValidationErrorKind::OneOfNotValid { context } => {
+                let mut best: Option<(Vec<_>, Vec<_>)> = None;
+                for branch in context {
+                    let discriminated = branch.iter().any(|e| {
+                        matches!(
+                            e.kind(),
+                            ValidationErrorKind::Constant { .. } | ValidationErrorKind::Enum { .. }
+                        )
+                    });
+                    let (mut branch_nulls, mut branch_refills) = (Vec::new(), Vec::new());
+                    if discriminated
+                        || !branch.iter().all(|e| {
+                            self.collect(e, &mut branch_nulls, &mut branch_refills)
+                                .is_some()
+                        })
+                    {
+                        continue;
+                    }
+                    let fixes = branch_nulls.len() + branch_refills.len();
+                    if best.as_ref().is_none_or(|(n, r)| fixes < n.len() + r.len()) {
+                        best = Some((branch_nulls, branch_refills));
+                    }
+                }
+                let (branch_nulls, branch_refills) = best?;
+                nulls.extend(branch_nulls);
+                refills.extend(branch_refills);
+            }
+            _ => return None,
+        }
+        Some(())
     }
 
     /// `instance` with every missing required property that `wanted`
@@ -571,6 +639,167 @@ const MAX_BRANCH_ERRORS: usize = 3;
 /// Nesting of `anyOf`/`oneOf` followed into a branch.
 const MAX_BRANCH_DEPTH: usize = 4;
 
+/// The validator of `schema` asserting [`ASSERTED_FORMATS`]; `None` when it
+/// does not compile.
+fn asserting_formats(schema: &Value) -> Option<jsonschema::Validator> {
+    let mut options = jsonschema::draft202012::options().should_validate_formats(true);
+    for name in ANNOTATION_FORMATS {
+        options = options.with_format(*name, |_: &str| true);
+    }
+    options.build(schema).ok()
+}
+
+/// The replacement for `bad`, which breaks a keyword of `node`, keeping as
+/// much of what the LLM wrote as still fits: replacements made earlier in
+/// this answer (`replaced`) carry over, a value too long is cut, and a drawn
+/// value takes the characters of `bad` that its pattern or length allows.
+fn mend(
+    bad: &Value,
+    node: &Value,
+    replaced: &mut Vec<(String, String)>,
+    fill: &mut impl FnMut(&Value) -> Value,
+) -> Value {
+    let (Value::String(old), Value::Object(keywords)) = (bad, node) else {
+        return fill(node);
+    };
+    let leaf: serde_json::Map<String, Value> = keywords
+        .iter()
+        .filter(|(k, _)| LEAF_KEYWORDS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let Some(leaf) = asserting_formats(&Value::Object(leaf)) else {
+        return fill(node);
+    };
+    let fits = |text: &str| leaf.is_valid(&Value::String(text.to_string()));
+
+    let mut text = old.clone();
+    for (from, to) in replaced.iter() {
+        text = swap(&text, from, to);
+    }
+    let mended = if text != *old && fits(&text) {
+        text
+    } else if let Some(cut) = keywords
+        .get("maxLength")
+        .and_then(Value::as_u64)
+        .map(|max| text.chars().take(max as usize).collect::<String>())
+        .filter(|cut| *cut != text && fits(cut))
+    {
+        cut
+    } else {
+        match fill(node) {
+            Value::String(drawn)
+                if keywords.contains_key("pattern") || keywords.contains_key("minLength") =>
+            {
+                overlay(&text, &drawn, &fits)
+            }
+            Value::String(drawn) => drawn,
+            other => return other,
+        }
+    };
+    // Identifiers only: a word or a number under a pattern also appears
+    // with another meaning elsewhere.
+    let identifier = keywords.contains_key("pattern")
+        || keywords.get("format").and_then(Value::as_str) == Some("uuid");
+    if identifier
+        && old.chars().count() >= MIN_SHARED_CHARS
+        && old.chars().any(char::is_alphabetic)
+        && old.chars().any(|c| c.is_ascii_digit())
+    {
+        replaced.push((old.clone(), mended.clone()));
+    }
+    Value::String(mended)
+}
+
+/// Adds the JSON pointer of every member `e` reports missing, also inside
+/// the branches of a failed `anyOf` or `oneOf`.
+fn required_members(e: &jsonschema::ValidationError<'_>, out: &mut HashSet<String>) {
+    match e.kind() {
+        ValidationErrorKind::Required { property } => {
+            if let Some(name) = property.as_str() {
+                out.insert(format!("{}/{}", e.instance_path().as_str(), escape(name)));
+            }
+        }
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            for e in context.iter().flatten() {
+                required_members(e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `value` with every replaced identifier swapped in its strings, except
+/// where `skip` says so (given the JSON pointer and the value).
+fn carry(
+    value: &mut Value,
+    pointer: String,
+    replaced: &[(String, String)],
+    skip: &impl Fn(&str, &Value) -> bool,
+) {
+    if skip(&pointer, value) {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            for (from, to) in replaced {
+                *text = swap(text, from, to);
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter_mut().enumerate() {
+                carry(item, format!("{pointer}/{i}"), replaced, skip);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                carry(item, format!("{pointer}/{}", escape(key)), replaced, skip);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `text` with each occurrence of `from` that is a whole token (no letter or
+/// digit touches it) replaced by `to`.
+fn swap(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (at, _) in text.match_indices(from) {
+        let end = at + from.len();
+        let touches = text[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+            || text[end..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric);
+        if !touches {
+            out.push_str(&text[copied..at]);
+            out.push_str(to);
+            copied = end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// `drawn` with each character replaced by the one at the same place in
+/// `text`, wherever the result still `fits`.
+fn overlay(text: &str, drawn: &str, fits: &impl Fn(&str) -> bool) -> String {
+    let mut chars: Vec<char> = drawn.chars().collect();
+    if chars.len() > MAX_OVERLAID_CHARS {
+        return drawn.to_string();
+    }
+    for (i, c) in text.chars().take(chars.len()).enumerate() {
+        let drawn_char = std::mem::replace(&mut chars[i], c);
+        if drawn_char != c && !fits(&chars.iter().collect::<String>()) {
+            chars[i] = drawn_char;
+        }
+    }
+    chars.into_iter().collect()
+}
+
 /// `"<pointer>: <keyword>: <message>"`; for a failed `anyOf`/`oneOf`, the
 /// errors of the branch that got furthest into the value (the deepest
 /// pointer, then the fewest errors).
@@ -788,8 +1017,381 @@ mod tests {
             .unwrap();
         assert_eq!(
             out,
-            json!({"path": "/x", "code": "ok", "kind": "a", "v": 1})
+            json!({"path": "/x", "code": "lo", "kind": "a", "v": 1})
         );
+    }
+
+    /// Draws a different value on every call, as the faker does.
+    fn drawing(values: &[&str]) -> impl FnMut(&Value) -> Value {
+        let mut draws: Vec<Value> = values.iter().rev().map(|v| json!(v)).collect();
+        move |_| draws.pop().unwrap_or(json!("spent"))
+    }
+
+    #[test]
+    fn a_broken_value_inside_one_of_is_patched_in_its_nearest_branch() {
+        let v = SchemaValidator::new(&json!({
+            "oneOf": [
+                {"type": "object", "required": ["kind", "n"], "properties": {
+                    "kind": {"const": "count"}, "n": {"type": "integer"}}},
+                {"type": "object", "required": ["kind", "code"], "properties": {
+                    "kind": {"const": "text"}, "code": {"type": "string", "pattern": "^[a-z]{2}$"}}}
+            ]
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"kind": "text", "code": "TOOLONG"}),
+                drawing(&["xy"]),
+            )
+            .unwrap();
+        assert_eq!(out["kind"], "text");
+        assert!(v.is_valid(&out), "{out}");
+    }
+
+    #[test]
+    fn a_broken_value_inside_any_of_is_patched_at_depth() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"pay": {"anyOf": [
+                {"type": "null"},
+                {"$ref": "#/$defs/Card"}
+            ]}},
+            "$defs": {"Card": {"type": "object", "properties": {
+                "last4": {"type": "string", "pattern": "^[0-9]{4}$"}}}}
+        }))
+        .unwrap();
+        let out = v
+            .patch(&json!({"pay": {"last4": "x"}}), drawing(&["1234"]))
+            .unwrap();
+        assert_eq!(out, json!({"pay": {"last4": "1234"}}));
+    }
+
+    #[test]
+    fn a_branch_with_an_unpatchable_error_is_not_chosen() {
+        let v = SchemaValidator::new(&json!({
+            "oneOf": [{"type": "integer"}, {"type": "boolean"}]
+        }))
+        .unwrap();
+        assert_eq!(v.patch(&json!("nope"), drawing(&["x"])), None);
+    }
+
+    #[test]
+    fn the_same_bad_value_gets_the_same_replacement() {
+        let id = json!({"type": "string", "pattern": "^id_[0-9]{4}$"});
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"id": id, "copy": id}
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"id": "bad_value1", "copy": "bad_value1"}),
+                drawing(&["id_1111", "id_2222"]),
+            )
+            .unwrap();
+        assert_eq!(out["id"], out["copy"], "{out}");
+    }
+
+    #[test]
+    fn a_replaced_value_is_carried_into_values_that_embed_it() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "pattern": "^pi_[a-z0-9]{6}$"},
+                "secret": {"type": "string", "pattern": "^pi_[a-z0-9]{6}_secret_[a-z0-9]{4}$"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"id": "pi_harbor1", "secret": "pi_harbor1_secret_abcd"}),
+                drawing(&["pi_aaaaaa", "pi_bbbbbb_secret_cccc"]),
+            )
+            .unwrap();
+        assert_eq!(
+            out["secret"].as_str().unwrap(),
+            format!("{}_secret_abcd", out["id"].as_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_value_breaking_a_pattern_keeps_the_characters_that_fit() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"id": {"type": "string", "pattern": "^U_kgDO[A-Za-z0-9]{8}$"}}
+        }))
+        .unwrap();
+        let out = v
+            .patch(&json!({"id": "U_kgDOabc"}), drawing(&["U_kgDOZZZZZZZZ"]))
+            .unwrap();
+        assert_eq!(out["id"], "U_kgDOabcZZZZZ");
+    }
+
+    #[test]
+    fn a_value_over_max_length_is_trimmed() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"code": {"type": "string", "maxLength": 3}}
+        }))
+        .unwrap();
+        let out = v
+            .patch(&json!({"code": "abcdef"}), drawing(&["zz"]))
+            .unwrap();
+        assert_eq!(out["code"], "abc");
+    }
+
+    #[test]
+    fn branch_choice_does_not_flip_a_discriminator() {
+        let v = SchemaValidator::new(&json!({
+            "oneOf": [
+                {"type": "object", "properties": {"kind": {"const": "count"}}},
+                {"type": "object", "properties": {
+                    "kind": {"const": "text"},
+                    "code": {"type": "string", "pattern": "^[a-z]{2}$"},
+                    "sub": {"type": "string", "pattern": "^[0-9]$"}}}
+            ]
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"kind": "text", "code": "TOOLONG", "sub": "x"}),
+                drawing(&["1", "ab"]),
+            )
+            .unwrap();
+        assert_eq!(out["kind"], "text");
+        assert_eq!(out["sub"], "1");
+    }
+
+    #[test]
+    fn a_null_for_a_member_a_branch_requires_is_refilled() {
+        let v = SchemaValidator::new(&json!({
+            "oneOf": [
+                {"type": "object", "required": ["last4"], "properties": {
+                    "kind": {"const": "card"}, "last4": {"type": "string"}}},
+                {"type": "object", "required": ["iban"], "properties": {
+                    "kind": {"const": "bank"}, "iban": {"type": "string"}}}
+            ]
+        }))
+        .unwrap();
+        let out = v
+            .patch(&json!({"kind": "card", "last4": null}), drawing(&["1234"]))
+            .unwrap();
+        assert_eq!(out, json!({"kind": "card", "last4": "1234"}));
+    }
+
+    #[test]
+    fn an_unconstrained_string_follows_a_replaced_identifier() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "pattern": "^pi_[0-9]{4}$"},
+                "url": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"id": "pi_harbor1", "url": "/intents/pi_harbor1"}),
+                drawing(&["pi_1111"]),
+            )
+            .unwrap();
+        assert_eq!(
+            out["url"].as_str().unwrap(),
+            format!("/intents/{}", out["id"].as_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn short_or_enum_values_are_not_carried_between_fields() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string", "pattern": "^[0-9]{3}$"},
+                "b": {"type": "string", "pattern": "^[0-9]{3}$"},
+                "state": {"enum": ["open", "shut"]},
+                "note": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"a": "n/a", "b": "n/a", "state": "closed", "note": "closed early"}),
+                drawing(&["111", "222", "shut"]),
+            )
+            .unwrap();
+        assert_ne!(out["a"], out["b"]);
+        assert_eq!(out["note"], "closed early");
+    }
+
+    #[test]
+    fn a_branch_with_another_discriminator_is_never_patched_into() {
+        let required = SchemaValidator::new(&json!({"oneOf": [
+            {"type": "object", "properties": {"kind": {"const": "count"}}},
+            {"type": "object", "required": ["code"], "properties": {"kind": {"const": "text"}}}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            required.patch(&json!({"kind": "text", "msg": "hello"}), drawing(&["x"])),
+            None
+        );
+        let nested = SchemaValidator::new(&json!({"oneOf": [
+            {"oneOf": [
+                {"type": "object", "properties": {"kind": {"const": "cat"}}},
+                {"type": "object", "properties": {"kind": {"const": "dog"}}}
+            ]},
+            {"type": "object", "properties": {
+                "kind": {"const": "bird"},
+                "code": {"type": "string", "pattern": "^[a-z]{2}$"}}}
+        ]}))
+        .unwrap();
+        let out = nested
+            .patch(
+                &json!({"kind": "bird", "code": "TOOLONG"}),
+                drawing(&["ab"]),
+            )
+            .unwrap();
+        assert_eq!(out["kind"], "bird");
+    }
+
+    #[test]
+    fn replacing_a_word_leaves_ordinary_text_alone() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "pattern": "^[A-Z]+$"},
+                "note": {"type": "string"},
+                "prev": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"status": "active", "note": "was active", "prev": "inactive"}),
+                drawing(&["QXZ"]),
+            )
+            .unwrap();
+        assert_eq!(out["note"], "was active");
+        assert_eq!(out["prev"], "inactive");
+    }
+
+    #[test]
+    fn an_identifier_inside_a_longer_token_is_left_alone() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "pattern": "^x_[0-9]{4}$"},
+                "other": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"id": "pi_abc1", "other": "pi_abc12 and pi_abc1"}),
+                drawing(&["x_1111"]),
+            )
+            .unwrap();
+        assert_eq!(out["other"], "pi_abc12 and x_1111");
+    }
+
+    #[test]
+    fn a_value_extended_from_the_old_one_is_carried_once() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "pattern": "^pi_[a-z0-9]{8,30}$"},
+                "url": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"id": "pi_abc1", "url": "/x/pi_abc1"}),
+                drawing(&["pi_zzzzzzzz"]),
+            )
+            .unwrap();
+        assert_eq!(
+            out["url"].as_str().unwrap(),
+            format!("/x/{}", out["id"].as_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_value_keep_accepts_is_not_rewritten_by_a_replacement() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "pattern": "^pi_[a-z]{3}$"},
+                "query": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch_keeping(
+                &json!({"id": "harbor-1", "query": "harbor-1"}),
+                |_, value| value == "harbor-1",
+                drawing(&["pi_abc"]),
+            )
+            .unwrap();
+        assert_eq!(out["query"], "harbor-1");
+    }
+
+    #[test]
+    fn an_optional_null_holding_a_union_is_dropped() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "pay": {"anyOf": [{"type": "object"}, {"type": "string"}]},
+                "note": {"$ref": "#/$defs/Note"}
+            },
+            "$defs": {"Note": {"type": "string"}}
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"pay": null, "note": null}),
+                drawing(&["FAKE", "FAKE"]),
+            )
+            .unwrap();
+        assert_eq!(out, json!({}));
+    }
+
+    #[test]
+    fn words_and_numbers_under_a_pattern_are_not_carried() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "pattern": "^[A-Z_]+$"},
+                "zip": {"type": "string", "pattern": "^[0-9]{5}$"},
+                "note": {"type": "string"},
+                "qty": {"type": "string"}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch(
+                &json!({"status": "in_progress", "zip": "100001",
+                        "note": "still in_progress", "qty": "100001"}),
+                drawing(&["10000", "QX_"]),
+            )
+            .unwrap();
+        assert_eq!(out["note"], "still in_progress");
+        assert_eq!(out["qty"], "100001");
+    }
+
+    #[test]
+    fn an_optional_null_inside_a_union_is_dropped() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"pay": {"anyOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}},
+                {"type": "string"}
+            ]}}
+        }))
+        .unwrap();
+        let out = v
+            .patch(&json!({"pay": {"a": null, "b": "x"}}), drawing(&["FAKE"]))
+            .unwrap();
+        assert_eq!(out, json!({"pay": {"b": "x"}}));
     }
 
     #[test]
