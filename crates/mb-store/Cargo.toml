@@ -23,6 +23,7 @@ serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
 uuid.workspace = true

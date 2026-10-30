@@ -115,7 +115,8 @@ pub fn binds_for(role: Role) -> (bool, bool, bool) {
 ///
 /// As [`run_with`].
 pub async fn run(args: ServeArgs) -> Result<(), ServeError> {
-    run_inner(args, Some(LlmEnv::from_env()), None).await
+    let llm = LlmEnv::try_from_env().map_err(ServeError::Usage)?;
+    run_inner(args, Some(llm), None).await
 }
 
 /// Validates the configuration, binds the role's listeners (see

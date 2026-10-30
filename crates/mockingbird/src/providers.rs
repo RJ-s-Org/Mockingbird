@@ -395,6 +395,9 @@ impl ProviderArgs {
             .clone()
             .or_else(|| preset.default_model.map(String::from))
             .ok_or_else(|| anyhow!("the {id} preset needs --model"))?;
+        if self.output_mode.is_some() && self.json_schema.is_some() {
+            bail!("set output_mode only; json_schema is its deprecated alias");
+        }
         let mut profile = FileProfile::new(base_url, model);
         profile.output_mode = Some(
             self.output_mode
@@ -664,6 +667,27 @@ mod tests {
                 assert!(env.ends_with("_API_KEY"), "{}: {env}", p.id);
             }
         }
+    }
+
+    #[test]
+    fn output_mode_and_its_alias_are_not_both_accepted() {
+        let both = ProviderArgs {
+            output_mode: Some(OutputMode::None),
+            json_schema: Some(true),
+            ..args("openrouter")
+        };
+        let err = both.profile().unwrap_err().to_string();
+        assert!(err.contains("output_mode only"), "{err}");
+        let alias = ProviderArgs {
+            json_schema: Some(true),
+            ..args("openrouter")
+        };
+        assert_eq!(alias.profile().unwrap().mode(), OutputMode::JsonSchema);
+        let mode = ProviderArgs {
+            output_mode: Some(OutputMode::None),
+            ..args("openrouter")
+        };
+        assert_eq!(mode.profile().unwrap().mode(), OutputMode::None);
     }
 
     #[test]

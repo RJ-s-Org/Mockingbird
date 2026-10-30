@@ -392,16 +392,18 @@ fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
     let temperature: f64 = row.try_get("temperature")?;
     let headers: String = row.try_get("headers")?;
     let extra_body: String = row.try_get("extra_body")?;
+    let name: String = row.try_get("name")?;
     Ok(LlmProfile {
         workspace: row.try_get("workspace")?,
-        name: row.try_get("name")?,
+        output_mode: OutputMode::from_columns(
+            &name,
+            row.try_get::<Option<String>, _>("output_mode")?.as_deref(),
+            row.try_get("json_schema")?,
+        ),
+        name,
         base_url: row.try_get("base_url")?,
         model: row.try_get("model")?,
         secret_ref: row.try_get("secret_ref")?,
-        output_mode: OutputMode::from_columns(
-            row.try_get::<Option<String>, _>("output_mode")?.as_deref(),
-            row.try_get("json_schema")?,
-        )?,
         // Stored from an f32, so the narrowing is exact.
         temperature: temperature as f32,
         timeout_ms: from_i64(row.try_get("timeout_ms")?, "timeout_ms")?,

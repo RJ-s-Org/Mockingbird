@@ -1756,3 +1756,55 @@ async fn no_items_envelope_without_json_mode() {
             .contains(r#"{"items": [...]}"#)
     );
 }
+
+/// A list of orders whose `Order` has its own `items` (line items): one
+/// order answered alone is wrapped into a one-item list, never replaced by
+/// its line items.
+#[tokio::test]
+async fn single_item_with_its_own_items_member_is_not_unwrapped() {
+    let bundle = inline(
+        r##"
+openapi: 3.0.3
+info: {title: shop, version: "1"}
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Order"}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, items]
+      properties:
+        id: {type: integer}
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/LineItem"}
+    LineItem:
+      type: object
+      required: [sku, qty]
+      properties:
+        sku: {type: string}
+        qty: {type: integer}
+"##,
+    );
+    let op = bundle.operation("listOrders").unwrap();
+    let order = json!({"id": 1, "items": [{"sku": "a", "qty": 2}, {"sku": "b", "qty": 1}]});
+    let (provider, engine) = json_mode(vec![Ok(order.to_string())]);
+    let call = OperationCall {
+        operation_id: "listOrders".into(),
+        ..OperationCall::default()
+    };
+    let out = engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    assert_ne!(out.source, Source::Fallback, "{:?}", out.fallback_reason);
+    assert_eq!(out.body, Some(json!([order])));
+    assert_eq!(provider.requests().len(), 1);
+}

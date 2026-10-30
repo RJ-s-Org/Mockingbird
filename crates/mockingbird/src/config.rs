@@ -298,26 +298,51 @@ pub struct LlmEnv {
     pub model: String,
     pub api_key: Option<String>,
     /// `MB_LLM_OUTPUT_MODE`, else the deprecated `MB_LLM_JSON_SCHEMA`;
-    /// `None` when neither is set or the value is not a mode.
+    /// `None` when neither is set.
     pub output_mode: Option<mb_store::OutputMode>,
 }
 
 impl LlmEnv {
     /// Reads `MB_LLM_*`, applying the documented defaults.
+    ///
+    /// # Errors
+    ///
+    /// `MB_LLM_OUTPUT_MODE` is set to something other than `none`,
+    /// `json_object` or `json_schema`.
+    pub fn try_from_env() -> Result<Self, String> {
+        Self::read(true)
+    }
+
+    /// [`Self::try_from_env`], ignoring an invalid `MB_LLM_OUTPUT_MODE`.
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `try_from_env`, which rejects an invalid MB_LLM_OUTPUT_MODE"
+    )]
     pub fn from_env() -> Self {
+        // Lenient reads never fail.
+        Self::read(false).unwrap_or_else(|_| Self {
+            base_url: DEFAULT_LLM_BASE_URL.into(),
+            model: DEFAULT_LLM_MODEL.into(),
+            api_key: None,
+            output_mode: None,
+        })
+    }
+
+    fn read(strict: bool) -> Result<Self, String> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        Self {
+        let output_mode = match get("MB_LLM_OUTPUT_MODE").map(|v| v.parse::<mb_store::OutputMode>())
+        {
+            Some(Ok(mode)) => Some(mode),
+            Some(Err(e)) if strict => return Err(format!("MB_LLM_OUTPUT_MODE: {e}")),
+            Some(Err(_)) | None => get("MB_LLM_JSON_SCHEMA")
+                .map(|v| mb_store::OutputMode::from_json_schema(v.eq_ignore_ascii_case("true"))),
+        };
+        Ok(Self {
             base_url: get("MB_LLM_BASE_URL").unwrap_or_else(|| DEFAULT_LLM_BASE_URL.into()),
             model: get("MB_LLM_MODEL").unwrap_or_else(|| DEFAULT_LLM_MODEL.into()),
             api_key: get("MB_LLM_API_KEY"),
-            output_mode: get("MB_LLM_OUTPUT_MODE")
-                .and_then(|v| v.parse().ok())
-                .or_else(|| {
-                    get("MB_LLM_JSON_SCHEMA").map(|v| {
-                        mb_store::OutputMode::from_json_schema(v.eq_ignore_ascii_case("true"))
-                    })
-                }),
-        }
+            output_mode,
+        })
     }
 }
 

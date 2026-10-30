@@ -227,7 +227,7 @@ impl Engine {
             return Checked::Invalid(vec!["output is not valid JSON".to_string()]);
         };
         if checks.items_envelope {
-            value = unwrap_items(value);
+            value = unwrap_items(validator, value);
         }
         if let Some(cap) = self.guards.max_response_bytes {
             let size = serde_json::to_vec(&value).map_or(text.len(), |b| b.len());
@@ -344,6 +344,13 @@ member, \"items\", is the array the schema describes. Add no other members.";
 /// without structured outputs), which forces an object at the top level,
 /// and the schema's root is an array. Models otherwise invent an envelope
 /// of their own (`{"messages": [...]}`), or answer one item.
+///
+/// A fallback chain reports JSON mode only when every hop uses it (see
+/// `FallbackProvider::capabilities`), so a chain mixing `none` and
+/// `json_object` hops asks for the bare array. That is deliberate: the
+/// prompt cannot depend on which hop answers, and a JSON-mode hop's own
+/// envelope (`{"orders": [...]}`) is still unwrapped by the envelope checks
+/// in `check_value`.
 pub(crate) fn items_envelope(caps: mb_llm::Capabilities, schema: &Value) -> bool {
     caps.json_mode && !caps.json_schema && is_array_root(schema)
 }
@@ -379,14 +386,25 @@ fn is_array_root(doc: &Value) -> bool {
     false
 }
 
-/// The array under [`ITEMS_KEY`] when `value` is an object holding one
-/// there, else `value` as it is (a model may answer the bare array).
-fn unwrap_items(value: Value) -> Value {
-    match value {
-        Value::Object(mut map) if map.get(ITEMS_KEY).is_some_and(Value::is_array) => {
-            map.remove(ITEMS_KEY).unwrap_or_default()
-        }
-        other => other,
+/// The array under [`ITEMS_KEY`] when `value` is the envelope asked for,
+/// else `value` as it is (a model may answer the bare array, or one item).
+/// It is the envelope when `items` is an array and its only member that is
+/// not `null`, or, with other members beside it, when the array validates
+/// and the object does not. A single item whose own `items` member is a
+/// list (an order with line items) is therefore kept, for
+/// `wrap_single_item` to turn into a one-item list.
+fn unwrap_items(validator: &SchemaValidator, value: Value) -> Value {
+    let Value::Object(map) = &value else {
+        return value;
+    };
+    let Some(items @ Value::Array(_)) = map.get(ITEMS_KEY) else {
+        return value;
+    };
+    let sole = map.iter().all(|(k, v)| k == ITEMS_KEY || v.is_null());
+    if sole || (validator.is_valid(items) && !validator.is_valid(&value)) {
+        items.clone()
+    } else {
+        value
     }
 }
 

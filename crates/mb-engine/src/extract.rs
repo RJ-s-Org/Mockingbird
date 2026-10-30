@@ -9,8 +9,9 @@ const MAX_STARTS: usize = 32;
 
 /// Tries, in order: the whole trimmed text; the contents of the first
 /// Markdown code fence; the first complete JSON object or array in the
-/// text. Text after that value is ignored: a second object (`{..}{..}`,
-/// which some models write) or prose that contains braces.
+/// text (see [`first_value`]). Text after that value is ignored: a second
+/// object (`{..}{..}`, which some models write) or prose that contains
+/// braces.
 pub fn extract_json(text: &str) -> Option<Value> {
     let trimmed = text.trim();
     parse(trimmed)
@@ -35,15 +36,58 @@ fn fenced(text: &str) -> Option<&str> {
 
 /// The first complete JSON object or array, starting at a `{` or `[`: the
 /// first such position whose text parses as a value, whatever follows it.
+///
+/// A position inside a candidate that failed is never tried: a value
+/// nested in a broken answer (cut short, or with a trailing comma or a
+/// comment) is a fragment, not the answer. A candidate cut off by the end
+/// of the text ends the search, so a truncated answer is `None` and goes to
+/// repair. An empty `{}` or `[]` (prose such as "left empty ([])") is
+/// returned only when no non-empty value follows it.
 fn first_value(text: &str) -> Option<Value> {
-    text.match_indices(['{', '['])
-        .take(MAX_STARTS)
-        .find_map(|(start, _)| {
-            serde_json::Deserializer::from_str(&text[start..])
-                .into_iter::<Value>()
-                .next()
-                .and_then(Result::ok)
-        })
+    let mut empty = None;
+    let mut next = 0;
+    let mut tries = 0;
+    for (start, _) in text.match_indices(['{', '[']) {
+        if start < next {
+            continue;
+        }
+        tries += 1;
+        if tries > MAX_STARTS {
+            break;
+        }
+        let rest = &text[start..];
+        let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        match values.next() {
+            Some(Ok(value)) if is_empty(&value) => {
+                next = start + values.byte_offset();
+                empty.get_or_insert(value);
+            }
+            Some(Ok(value)) => return Some(value),
+            Some(Err(e)) if e.is_eof() => return None,
+            Some(Err(e)) => next = start + error_offset(rest, &e).max(1),
+            None => return None,
+        }
+    }
+    empty
+}
+
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+/// The byte offset in `text` of the position `e` reports (1-based line and
+/// column).
+fn error_offset(text: &str, e: &serde_json::Error) -> usize {
+    let line_start: usize = text
+        .split_inclusive('\n')
+        .take(e.line().saturating_sub(1))
+        .map(str::len)
+        .sum();
+    (line_start + e.column().saturating_sub(1)).min(text.len())
 }
 
 #[cfg(test)]
@@ -94,6 +138,48 @@ mod tests {
             Some(json!([{"id": 1}, {"id": 2}]))
         );
         assert_eq!(extract_json("[1, 2][3]"), Some(json!([1, 2])));
+    }
+
+    /// A truncated answer is not replaced by a value nested in it.
+    #[test]
+    fn truncated_answers_are_none_not_their_inner_values() {
+        let nested = r#"{"user": {"id":1,"name":"a"}, "orders": [{"id":9}, {"id":"#;
+        assert_eq!(extract_json(nested), None);
+        assert_eq!(extract_json(r#"[{"id": 1}, {"id": 2}, {"id""#), None);
+        assert_eq!(extract_json(r#"{"items": [{"id": 1}, {"id": 2"#), None);
+        assert_eq!(extract_json(r#"Here: {"a": {"b": 1}, "c": [1, 2"#), None);
+    }
+
+    /// Nor is a broken one: a trailing comma, a comment or `NaN`.
+    #[test]
+    fn broken_answers_are_none_not_their_inner_values() {
+        assert_eq!(extract_json(r#"{"a": {"b": 1}, "c": [{"d": 2}],}"#), None);
+        assert_eq!(
+            extract_json(
+                r#"{"a": {"b": 1}, // note
+"c": 2}"#
+            ),
+            None
+        );
+        assert_eq!(extract_json(r#"{"a": {"b": 1}, "c": NaN}"#), None);
+        // A value after the broken one still counts.
+        assert_eq!(
+            extract_json(r#"{"a": 1,} oops, again: {"a": 1}"#),
+            Some(json!({"a": 1}))
+        );
+    }
+
+    #[test]
+    fn empty_values_in_prose_lose_to_a_later_answer() {
+        assert_eq!(
+            extract_json(r#"Fields left empty ([]) as requested: [{"id":1}]"#),
+            Some(json!([{"id": 1}]))
+        );
+        assert_eq!(
+            extract_json(r#"No filter {} applied. {"id": 1}"#),
+            Some(json!({"id": 1}))
+        );
+        assert_eq!(extract_json("The answer: [] (none)."), Some(json!([])));
     }
 
     #[test]
