@@ -1372,3 +1372,230 @@ async fn serves_under_the_contract_base_path_too() {
     assert_eq!(status_of(&base, "/orders/orders").await, 200);
     assert_eq!(status_of(&base, "/orders/v2/orders").await, 404);
 }
+
+/// Resolves every secret reference to `k`, counting how often each one is
+/// asked for: each mock build resolves the secret of every profile in its
+/// chain once, so the counts say which mocks were rebuilt.
+#[derive(Default)]
+struct CountingSecrets(std::sync::Mutex<HashMap<String, usize>>);
+
+impl CountingSecrets {
+    /// The counts since the last call, by reference, then reset.
+    fn take(&self) -> HashMap<String, usize> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretStore for CountingSecrets {
+    async fn resolve(&self, reference: &str) -> Result<String, ExtError> {
+        *self
+            .0
+            .lock()
+            .unwrap()
+            .entry(reference.to_string())
+            .or_default() += 1;
+        Ok("k".into())
+    }
+}
+
+/// Profile `name` with secret `env:<NAME>`, so its builds can be counted.
+fn counted_profile(name: &str, fallback: Option<&str>) -> LlmProfile {
+    let mut p = profile(name, "http://127.0.0.1:9".into(), fallback);
+    p.secret_ref = Some(format!("env:{}", name.to_uppercase()));
+    p
+}
+
+/// `(reference, count)` pairs as a map, for comparing with
+/// [`CountingSecrets::take`].
+fn counts(pairs: &[(&str, usize)]) -> HashMap<String, usize> {
+    pairs.iter().map(|(r, n)| (r.to_string(), *n)).collect()
+}
+
+/// Online deps whose secrets are counted.
+fn counted_deps(store: Arc<dyn ControlStore>) -> (RuntimeDeps, Arc<CountingSecrets>) {
+    let secrets = Arc::new(CountingSecrets::default());
+    let mut deps = deps(store);
+    deps.offline = false;
+    deps.ext.secrets = secrets.clone();
+    (deps, secrets)
+}
+
+/// A profile change rebuilds exactly the mocks using it (MOCKINGBIRD-PERF-8a):
+/// those naming it, those naming none while it is the default, and those
+/// whose chain falls back to it.
+#[tokio::test]
+async fn profile_change_rebuilds_only_its_mocks() {
+    let store = store().await;
+    store
+        .put_profile(&counted_profile("f", None))
+        .await
+        .unwrap();
+    store
+        .put_profile(&counted_profile("p", Some("f")))
+        .await
+        .unwrap();
+    store
+        .put_profile(&counted_profile("q", None))
+        .await
+        .unwrap();
+    for (name, profile) in [
+        ("a", Some("p")),
+        ("b", Some("p")),
+        ("c", Some("q")),
+        ("d", None),
+    ] {
+        let m = create_mock(&store, name, &format!("/{name}"), profile).await;
+        activate(&store, &m, &fixture_source()).await;
+    }
+    let (deps, secrets) = counted_deps(store.clone());
+    deps.default_profile.set(Some("q".into()));
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(
+        secrets.take(),
+        counts(&[("env:P", 2), ("env:F", 2), ("env:Q", 2)])
+    );
+
+    registry.reload_profile(&deps, DEFAULT_WORKSPACE, "p").await;
+    assert_eq!(secrets.take(), counts(&[("env:P", 2), ("env:F", 2)]));
+    // A fallback profile's change rebuilds the mocks whose chain reaches it.
+    registry.reload_profile(&deps, DEFAULT_WORKSPACE, "f").await;
+    assert_eq!(secrets.take(), counts(&[("env:P", 2), ("env:F", 2)]));
+    // The default profile's change rebuilds the mocks naming it and those
+    // naming none.
+    registry.reload_profile(&deps, DEFAULT_WORKSPACE, "q").await;
+    assert_eq!(secrets.take(), counts(&[("env:Q", 2)]));
+    // A profile no mock uses, or one of another workspace, rebuilds nothing.
+    registry
+        .reload_profile(&deps, DEFAULT_WORKSPACE, "unused")
+        .await;
+    registry.reload_profile(&deps, "other", "p").await;
+    assert_eq!(secrets.take(), counts(&[]));
+
+    let mut mounted: Vec<String> = registry.mounted_mocks().into_iter().map(|m| m.1).collect();
+    mounted.sort();
+    assert_eq!(mounted, ["a", "b", "c", "d"]);
+}
+
+/// Profile changes reach the registry through the watcher without
+/// reloading every mock.
+#[tokio::test(flavor = "multi_thread")]
+async fn watcher_rebuilds_only_the_changed_profiles_mocks() {
+    let store = store().await;
+    for name in ["p", "q"] {
+        store
+            .put_profile(&counted_profile(name, None))
+            .await
+            .unwrap();
+    }
+    for (name, profile) in [("a", "p"), ("b", "q")] {
+        let m = create_mock(&store, name, &format!("/{name}"), Some(profile)).await;
+        activate(&store, &m, &fixture_source()).await;
+    }
+    let (deps, secrets) = counted_deps(store.clone());
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    secrets.take();
+    let (tx, rx) = tokio::sync::broadcast::channel(16);
+    let _watcher = registry.spawn_watcher(deps.clone(), rx);
+    tx.send(mockingbird::ha::HubEvent::Change(
+        mb_store::ControlChange::Profile {
+            workspace: DEFAULT_WORKSPACE.into(),
+            name: "p".into(),
+        },
+    ))
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    while !seen.contains_key("env:P") {
+        assert!(Instant::now() < deadline, "mock a rebuilt within 10s");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        seen.extend(secrets.take());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    seen.extend(secrets.take());
+    assert_eq!(seen, counts(&[("env:P", 1)]));
+}
+
+/// Switching the default profile rebuilds the mocks naming no profile, and
+/// only those.
+#[tokio::test]
+async fn default_switch_rebuilds_the_mocks_naming_no_profile() {
+    let store = store().await;
+    for name in ["p", "q"] {
+        store
+            .put_profile(&counted_profile(name, None))
+            .await
+            .unwrap();
+    }
+    for (name, profile) in [("a", Some("p")), ("d", None), ("e", None)] {
+        let m = create_mock(&store, name, &format!("/{name}"), profile).await;
+        activate(&store, &m, &fixture_source()).await;
+    }
+    let (deps, secrets) = counted_deps(store.clone());
+    deps.default_profile.set(Some("q".into()));
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(secrets.take(), counts(&[("env:P", 1), ("env:Q", 2)]));
+
+    deps.default_profile.set(Some("p".into()));
+    registry.reload_default_profile_mocks(&deps).await;
+    assert_eq!(secrets.take(), counts(&[("env:P", 2)]));
+    // The old default is no longer used.
+    registry.reload_profile(&deps, DEFAULT_WORKSPACE, "q").await;
+    assert_eq!(secrets.take(), counts(&[]));
+}
+
+/// Picks profile `r` for every call on mock `a`.
+struct RForA;
+
+impl mb_ext::ProviderPolicy for RForA {
+    fn choose(
+        &self,
+        _: &mb_ext::Tenancy,
+        mock: &str,
+        configured: Option<&str>,
+    ) -> Result<Option<String>, mb_ext::Rejection> {
+        Ok(match mock {
+            "a" => Some("r".into()),
+            _ => configured.map(str::to_string),
+        })
+    }
+}
+
+/// A profile used only through the per-call provider policy rebuilds the
+/// mocks whose calls built an engine for it, dropping that cached engine.
+#[tokio::test]
+async fn profile_used_through_the_policy_rebuilds_its_mocks() {
+    let store = store().await;
+    for name in ["p", "r"] {
+        store
+            .put_profile(&counted_profile(name, None))
+            .await
+            .unwrap();
+    }
+    for name in ["a", "b"] {
+        let m = create_mock(&store, name, &format!("/{name}"), Some("p")).await;
+        activate(&store, &m, &fixture_source()).await;
+    }
+    let (mut deps, secrets) = counted_deps(store.clone());
+    deps.ext.providers = Arc::new(RForA);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    assert_eq!(secrets.take(), counts(&[("env:P", 2)]));
+    // Before any call built it, `r` is not used.
+    registry.reload_profile(&deps, DEFAULT_WORKSPACE, "r").await;
+    assert_eq!(secrets.take(), counts(&[]));
+
+    let router = registry.router();
+    call(&router, "GET", "localhost", "/a/orders", None).await;
+    call(&router, "GET", "localhost", "/b/orders", None).await;
+    assert_eq!(secrets.take(), counts(&[("env:R", 1)]));
+
+    registry.reload_profile(&deps, DEFAULT_WORKSPACE, "r").await;
+    assert_eq!(secrets.take(), counts(&[("env:P", 1)]));
+    // The rebuilt runtime builds `r` afresh on its next call.
+    call(&router, "GET", "localhost", "/a/orders", None).await;
+    assert_eq!(secrets.take(), counts(&[("env:R", 1)]));
+}
