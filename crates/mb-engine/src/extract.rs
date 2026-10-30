@@ -9,7 +9,7 @@ const MAX_STARTS: usize = 32;
 
 /// Tries, in order: the whole trimmed text; the contents of the first
 /// Markdown code fence; the first complete JSON object or array in the
-/// text (see [`first_value`]). Text after that value is ignored: a second
+/// text. Text after that value is ignored: a second
 /// object (`{..}{..}`, which some models write) or prose that contains
 /// braces.
 pub fn extract_json(text: &str) -> Option<Value> {
