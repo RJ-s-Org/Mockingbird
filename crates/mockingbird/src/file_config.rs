@@ -370,7 +370,7 @@ impl ImportConfig {
         if self.max_active_jobs_per_mock == 0 {
             return Err("import.max_active_jobs_per_mock: 0 must be at least 1".to_string());
         }
-        let fetch = mb_import::smart::fetch::FetchPolicy::from_allowlist(&self.url_allowlist)
+        let fetch = mb_import::smart::fetch::FetchPolicy::parse_allowlist(&self.url_allowlist)
             .map_err(|e| format!("import.url_allowlist: {e}"))?;
         Ok(mb_admin::ImportSettings {
             workers: self.workers,

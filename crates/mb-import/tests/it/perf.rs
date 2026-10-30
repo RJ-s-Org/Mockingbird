@@ -177,7 +177,7 @@ async fn perf_6_fetch_redirects() {
         .mount(&server)
         .await;
     let url = format!("{}/h0", server.uri());
-    let mut policy = FetchPolicy::from_allowlist(&["127.0.0.0/8".to_string()]).unwrap();
+    let mut policy = FetchPolicy::parse_allowlist(&["127.0.0.0/8".to_string()]).unwrap();
     policy.max_redirects = hops;
     for (label, roots) in [("no extra roots", Vec::new()), ("extra roots", pem)] {
         policy.extra_roots_pem = roots;

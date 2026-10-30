@@ -584,6 +584,11 @@ fn compiles_together<'a>(
 
 /// Validates and compiles an (edited) draft document; Ok((pretty JSON
 /// source bytes, bundle)).
+///
+/// # Errors
+///
+/// Every [`DraftIssue`] found: a document that is not OpenAPI 3.x, schema
+/// or reference problems, or a compile error.
 pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> {
     if !doc.is_object() {
         return Err(vec![DraftIssue::new(

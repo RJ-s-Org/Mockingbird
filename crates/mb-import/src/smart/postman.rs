@@ -74,6 +74,11 @@ struct Item {
 }
 
 /// Imports a Postman collection (v2.0 or v2.1).
+///
+/// # Errors
+///
+/// [`SmartError::Unreadable`] when the bytes are not JSON, and
+/// [`SmartError::Unsupported`] when they are not a v2.0 or v2.1 collection.
 pub fn import_postman(bytes: &[u8]) -> Result<RecordedImport, SmartError> {
     let doc: Value =
         serde_json::from_slice(bytes).map_err(|e| SmartError::Unreadable(e.to_string()))?;

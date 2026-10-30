@@ -49,6 +49,11 @@ enum ResponseBody {
 }
 
 /// Imports a HAR document.
+///
+/// # Errors
+///
+/// [`SmartError::Unreadable`] when the bytes are not JSON, and
+/// [`SmartError::Unsupported`] when they have no `log.entries` array.
 pub fn import_har(bytes: &[u8]) -> Result<RecordedImport, SmartError> {
     let doc: Value =
         serde_json::from_slice(bytes).map_err(|e| SmartError::Unreadable(e.to_string()))?;

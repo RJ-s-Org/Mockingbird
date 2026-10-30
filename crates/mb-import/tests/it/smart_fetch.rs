@@ -8,7 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mb_import::smart::SmartError;
 use mb_import::smart::fetch::{
-    AllowEntry, FetchError, FetchPolicy, Resolver, fetch, fetch_with, is_blocked_ip, validate_url,
+    AllowEntry, AllowlistError, FetchError, FetchPolicy, Resolver, SystemResolver, fetch,
+    fetch_with, is_blocked_ip, validate_url,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -19,7 +20,7 @@ fn ip(s: &str) -> IpAddr {
 
 fn allow(entries: &[&str]) -> FetchPolicy {
     let entries: Vec<String> = entries.iter().map(|s| s.to_string()).collect();
-    FetchPolicy::from_allowlist(&entries).unwrap()
+    FetchPolicy::parse_allowlist(&entries).unwrap()
 }
 
 struct MapResolver {
@@ -348,7 +349,68 @@ fn allow_entry_parsing() {
     );
     assert!("".parse::<AllowEntry>().is_err());
     assert!("10.0.0.0/33".parse::<AllowEntry>().is_err());
-    assert!(FetchPolicy::from_allowlist(&["10.0.0.0/33".to_string()]).is_err());
+    assert!(FetchPolicy::parse_allowlist(&["10.0.0.0/33".to_string()]).is_err());
+}
+
+#[test]
+fn allowlist_errors_are_typed_and_keep_their_messages() {
+    let cases = [
+        ("  ", AllowlistError::Empty, "an empty allowlist entry"),
+        (
+            "10.0.0.0/33",
+            AllowlistError::InvalidCidr("10.0.0.0/33".into()),
+            "\"10.0.0.0/33\" is not a valid CIDR range",
+        ),
+        (
+            "*.bad host",
+            AllowlistError::InvalidSuffix("*.bad host".into()),
+            "\"*.bad host\" is not a valid host suffix",
+        ),
+        (
+            "bad..host",
+            AllowlistError::InvalidHost("bad..host".into()),
+            "\"bad..host\" is not a valid host name",
+        ),
+    ];
+    for (entry, typed, message) in cases {
+        assert_eq!(
+            AllowEntry::parse_entry(entry),
+            Err(typed.clone()),
+            "{entry}"
+        );
+        assert_eq!(
+            entry.parse::<AllowEntry>(),
+            Err(message.to_string()),
+            "{entry}"
+        );
+        assert_eq!(typed.to_string(), message);
+        assert_eq!(
+            FetchPolicy::parse_allowlist(&[entry.to_string()]).err(),
+            Some(typed)
+        );
+    }
+}
+
+#[test]
+fn system_resolver_and_import_input_debug() {
+    assert_eq!(format!("{SystemResolver:?}"), "SystemResolver");
+    let url = mb_import::smart::ImportInput::Url(
+        "https://alice:hunter2-secret@docs.example/api?api_key=hunter2-secret&page=2".into(),
+    );
+    let debug = format!("{url:?}");
+    assert!(!debug.contains("hunter2-secret"), "{debug}");
+    assert!(debug.contains("docs.example"), "{debug}");
+    assert!(debug.contains("page=REDACTED"), "{debug}");
+    let unparsed = mb_import::smart::ImportInput::Url("not a url hunter2-secret".into());
+    assert!(!format!("{unparsed:?}").contains("hunter2-secret"));
+    let bytes = mb_import::smart::ImportInput::Bytes {
+        kind: mb_import::smart::ImportKind::Text,
+        name: Some("notes.txt".into()),
+        bytes: vec![b'x'; 4096],
+    };
+    let debug = format!("{bytes:?}");
+    assert!(debug.contains("4096"), "{debug}");
+    assert!(debug.len() < 200, "{debug}");
 }
 
 #[test]

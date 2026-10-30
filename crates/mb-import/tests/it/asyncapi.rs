@@ -1,7 +1,9 @@
 #![cfg(test)]
 use std::time::Duration;
 
-use mb_import::{ImportError, SourceFormat, compile, detect_format, sniff, validate_triggers};
+use mb_import::{
+    ImportError, SourceFormat, TriggerError, check_triggers, compile, detect_format, sniff,
+};
 use mb_mcm::{Bundle, ChannelBinding, Direction, Reply, StateChangeKind, Trigger};
 use serde_json::json;
 
@@ -244,45 +246,76 @@ fn runaway_schedule_extension_invalid() {
 #[test]
 fn trigger_validation_rules() {
     assert_eq!(
-        validate_triggers(&[Trigger::Manual], Direction::Subscribe).unwrap_err(),
+        check_triggers(&[Trigger::Manual], Direction::Subscribe)
+            .unwrap_err()
+            .to_string(),
         "triggers apply only to channels this mock publishes"
     );
     assert_eq!(
-        validate_triggers(
+        check_triggers(
             &[Trigger::Schedule {
                 every: Duration::from_millis(99)
             }],
             Direction::Publish
         )
-        .unwrap_err(),
+        .unwrap_err()
+        .to_string(),
         "schedule interval must be at least 100ms"
     );
-    let err = validate_triggers(
+    let err = check_triggers(
         &[Trigger::Cron {
             expr: "not a cron".into(),
         }],
         Direction::Publish,
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
     assert!(
         err.starts_with("invalid cron expression \"not a cron\": "),
         "{err}"
     );
     assert_eq!(
-        validate_triggers(
+        check_triggers(
             &[Trigger::OnStateChange {
                 resource_type: String::new(),
                 kind: StateChangeKind::Any
             }],
             Direction::Publish
         )
-        .unwrap_err(),
+        .unwrap_err()
+        .to_string(),
         "on_state_change needs a resource_type"
     );
     let ok: Vec<Trigger> =
         serde_json::from_value(json!([{"cron": {"expr": "*/5 * * * *"}}, "manual"])).unwrap();
-    assert_eq!(validate_triggers(&ok, Direction::Publish), Ok(()));
-    assert_eq!(validate_triggers(&[], Direction::Subscribe), Ok(()));
+    assert_eq!(check_triggers(&ok, Direction::Publish), Ok(()));
+    assert_eq!(check_triggers(&[], Direction::Subscribe), Ok(()));
+}
+
+#[test]
+fn trigger_errors_are_typed() {
+    assert_eq!(
+        check_triggers(&[Trigger::Manual], Direction::Subscribe),
+        Err(TriggerError::NotPublish)
+    );
+    assert_eq!(
+        check_triggers(
+            &[Trigger::Schedule {
+                every: Duration::from_millis(1)
+            }],
+            Direction::Publish
+        ),
+        Err(TriggerError::ScheduleTooFrequent {
+            min: mb_mcm::MIN_SCHEDULE_INTERVAL
+        })
+    );
+    assert!(matches!(
+        check_triggers(
+            &[Trigger::Cron { expr: "nope".into() }],
+            Direction::Publish
+        ),
+        Err(TriggerError::InvalidCron { expr, .. }) if expr == "nope"
+    ));
 }
 
 #[test]

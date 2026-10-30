@@ -251,6 +251,12 @@ fn operation_ids(doc: &Value) -> HashSet<String> {
 /// and `x-original-operation-id`. The result is compiled.
 ///
 /// CPU-bound: callers run it on the blocking pool.
+///
+/// # Errors
+///
+/// [`SmartError::Unsupported`] when the base version is not an OpenAPI 3
+/// document, and [`SmartError::Compile`] when the merged draft does not
+/// compile.
 pub fn merge_drafts(base: &MergeBase, incoming: DraftResult) -> Result<DraftResult, SmartError> {
     let refuse = || {
         SmartError::Unsupported(format!(

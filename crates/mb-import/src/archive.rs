@@ -38,6 +38,14 @@ pub(crate) fn is_archive(bytes: &[u8]) -> bool {
 /// `__MACOSX/` entries and hidden (dot-prefixed) files and directories, and
 /// a leading `./` is stripped; when every file shares one top-level
 /// directory, that directory is stripped too.
+///
+/// # Errors
+///
+/// [`ImportError::Unsupported`] when the bytes are neither a zip nor a
+/// gzip archive, [`ImportError::Parse`] when it is corrupt, and
+/// [`ImportError::Invalid`] when an entry has an unsafe or duplicate path,
+/// is a link or device, or the archive exceeds [`MAX_ARCHIVE_FILES`] or
+/// [`MAX_ARCHIVE_UNPACKED_BYTES`].
 pub fn unpack_archive(bytes: &[u8]) -> Result<Vec<SourceFile>, ImportError> {
     let mut members = Members::default();
     if bytes.starts_with(ZIP_MAGIC) {
@@ -228,6 +236,11 @@ fn unpack_tar_gz(bytes: &[u8], members: &mut Members) -> Result<(), ImportError>
 /// Pack a directory as a deterministic `tar.gz`: sorted relative paths,
 /// hidden entries skipped, mtime 0, mode 0644, uid/gid 0, and a gzip header
 /// with mtime 0. Packing the same tree twice gives identical bytes.
+///
+/// # Errors
+///
+/// [`ImportError::Invalid`], naming the path, when a file or directory
+/// cannot be read or the archive cannot be written.
 pub fn pack_dir(dir: &Path) -> Result<Vec<u8>, ImportError> {
     let mut files = BTreeMap::new();
     collect(dir, "", &mut files)?;
@@ -293,6 +306,11 @@ fn io_error(path: &Path, e: &std::io::Error) -> ImportError {
 }
 
 /// The contract at `path`: a file's bytes, or [`pack_dir`] for a directory.
+///
+/// # Errors
+///
+/// [`ImportError::Invalid`], naming the path, when it cannot be read; the
+/// [`pack_dir`] errors for a directory.
 pub fn read_source(path: &Path) -> Result<Vec<u8>, ImportError> {
     let meta = std::fs::metadata(path).map_err(|e| io_error(path, &e))?;
     if meta.is_dir() {

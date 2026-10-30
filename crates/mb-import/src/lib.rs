@@ -1,6 +1,49 @@
 //! Compiles API descriptions (OpenAPI 3.x, Swagger 2.0, GraphQL SDL and
 //! introspection, protobuf sources and descriptor sets, WSDL 1.1 with XSD,
 //! AsyncAPI 2.x and 3.0) into the Mockingbird Contract Model.
+//!
+//! [`compile`] sniffs the format of one document and compiles it into an
+//! [`mb_mcm::Bundle`]; [`compile_files`] does the same for a multi-file
+//! upload, and [`unpack_archive`] and [`read_source`] turn a zip, a `tar.gz`
+//! or a directory into those files.
+//!
+//! ```
+//! # fn main() -> Result<(), mb_import::ImportError> {
+//! let spec = br#"{
+//!   "openapi": "3.0.3",
+//!   "info": { "title": "Pets", "version": "1" },
+//!   "paths": { "/pets": { "get": {
+//!     "operationId": "listPets",
+//!     "responses": { "200": { "description": "ok" } }
+//!   } } }
+//! }"#;
+//! assert_eq!(mb_import::sniff(spec)?, mb_import::SourceFormat::OpenApi3);
+//! let bundle = mb_import::compile(spec)?;
+//! assert_eq!(bundle.operations.len(), 1);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Features
+//!
+//! - `smart`: the `smart` module, which drafts a contract from
+//!   documentation (Markdown, HTML, PDF, text) with an LLM, or from a HAR
+//!   capture or a Postman collection, and fetches URLs behind an SSRF
+//!   guard.
+//!
+//! # Stability
+//!
+//! This is an internal crate of Mockingbird, published for
+//! `mockingbird-cli`, with no API stability guarantee beyond semver of its
+//! version. Use `mockingbird-cli` for the binary and `mb-ext` for
+//! extensions.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(
+    missing_debug_implementations,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::return_self_not_must_use
+)]
 
 mod archive;
 mod asyncapi;
@@ -12,6 +55,7 @@ mod refs;
 mod schema;
 mod security;
 #[cfg(feature = "smart")]
+#[cfg_attr(docsrs, doc(cfg(feature = "smart")))]
 pub mod smart;
 mod swagger2;
 mod triggers;
@@ -26,17 +70,42 @@ use std::collections::{HashMap, HashSet};
 use mb_mcm::Bundle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use triggers::validate_triggers;
+pub use triggers::{TriggerError, check_triggers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`check_triggers`], with the error as its message.
+///
+/// # Errors
+///
+/// The [`TriggerError`] message of the first rule broken.
+#[deprecated(
+    since = "0.1.1",
+    note = "use check_triggers, which returns a typed TriggerError"
+)]
+pub fn validate_triggers(
+    triggers: &[mb_mcm::Trigger],
+    direction: mb_mcm::Direction,
+) -> Result<(), String> {
+    check_triggers(triggers, direction).map_err(|e| e.to_string())
+}
+
+/// The format of a contract source, as [`sniff`] detects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SourceFormat {
+    /// OpenAPI 3.x (JSON or YAML).
     OpenApi3,
+    /// Swagger 2.0 (JSON or YAML).
     Swagger2,
+    /// GraphQL schema definition language.
     GraphqlSdl,
+    /// A GraphQL introspection result (`__schema` or `data.__schema`).
     GraphqlIntrospection,
+    /// Protocol buffers source (`.proto`).
     Proto,
+    /// A binary protobuf `FileDescriptorSet`.
     FileDescriptorSet,
+    /// WSDL 1.1 with its XSD types.
     Wsdl11,
+    /// A zip or `tar.gz` archive of contract files.
     Archive,
     /// AsyncAPI 2.0 through 2.6.
     AsyncApi2,
@@ -49,17 +118,28 @@ pub enum SourceFormat {
 pub struct SourceFile {
     /// `/`-separated path relative to the upload root.
     pub path: String,
+    /// The file's contents.
     pub bytes: Vec<u8>,
 }
 
+/// Why a contract could not be compiled.
 #[derive(thiserror::Error, Debug)]
 pub enum ImportError {
+    /// The bytes are not valid JSON, YAML, XML, SDL or protobuf.
     #[error("parse error: {0}")]
     Parse(String),
+    /// The format, or its version, is not one Mockingbird compiles.
     #[error("unsupported format: {0}")]
     Unsupported(String),
+    /// The document parses but breaks a rule; `pointer` locates the
+    /// problem (a JSON pointer, a file path or a definition name).
     #[error("{pointer}: {message}")]
-    Invalid { pointer: String, message: String },
+    Invalid {
+        /// Where the problem is.
+        pointer: String,
+        /// What is wrong there.
+        message: String,
+    },
 }
 
 /// A version field as text. Unquoted YAML versions (`swagger: 2.0`) parse as numbers.
@@ -84,6 +164,11 @@ fn is_asyncapi2(v: &str) -> bool {
 
 /// Detect the contract format from `"asyncapi": "2.x|3.0.x"`,
 /// `"openapi": "3.x"` or `"swagger": "2.0"`.
+///
+/// # Errors
+///
+/// [`ImportError::Unsupported`] when the document has none of these
+/// fields, or names a version Mockingbird does not compile.
 pub fn detect_format(doc: &Value) -> Result<SourceFormat, ImportError> {
     if let Some(v) = version_string(doc.get("asyncapi")) {
         if is_asyncapi2(&v) {
@@ -112,6 +197,10 @@ pub fn detect_format(doc: &Value) -> Result<SourceFormat, ImportError> {
 }
 
 /// Parse JSON, falling back to YAML.
+///
+/// # Errors
+///
+/// [`ImportError::Parse`] when the bytes are neither JSON nor YAML.
 pub fn parse_document(bytes: &[u8]) -> Result<Value, ImportError> {
     if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
         return Ok(v);
@@ -137,6 +226,12 @@ fn is_introspection(doc: &Value) -> bool {
 }
 
 /// Detect the source format of uploaded bytes.
+///
+/// # Errors
+///
+/// [`ImportError::Parse`] when the bytes are none of the supported
+/// formats, and [`ImportError::Unsupported`] when they are a JSON or YAML
+/// document of an unsupported kind or version.
 pub fn sniff(bytes: &[u8]) -> Result<SourceFormat, ImportError> {
     sniff_parsed(bytes).map(|(format, _)| format)
 }
@@ -223,6 +318,12 @@ impl Ctx {
 }
 
 /// Detect the format and dispatch to the matching compiler.
+///
+/// # Errors
+///
+/// The [`sniff`] errors, and any [`ImportError`] of the format's compiler:
+/// [`ImportError::Invalid`] names the pointer of the first rule the
+/// document breaks.
 pub fn compile(bytes: &[u8]) -> Result<Bundle, ImportError> {
     compile_in(bytes, &mut Ctx::new())
 }
@@ -285,6 +386,10 @@ pub struct Warning {
 
 /// [`compile`], with the warnings of the compiler (what it skipped or
 /// relaxed) followed by the bundle's [`bundle_warnings`].
+///
+/// # Errors
+///
+/// As [`compile`].
 pub fn compile_with_warnings(bytes: &[u8]) -> Result<(Bundle, Vec<Warning>), ImportError> {
     let mut ctx = Ctx::new();
     let bundle = compile_in(bytes, &mut ctx)?;
@@ -292,6 +397,10 @@ pub fn compile_with_warnings(bytes: &[u8]) -> Result<(Bundle, Vec<Warning>), Imp
 }
 
 /// [`compile_files`], with the warnings [`compile_with_warnings`] gives.
+///
+/// # Errors
+///
+/// As [`compile_files`].
 pub fn compile_files_with_warnings(
     files: &[SourceFile],
 ) -> Result<(Bundle, Vec<Warning>), ImportError> {
@@ -528,6 +637,12 @@ fn is_incidental(path: &str) -> bool {
 ///    resolved and bundled into the one compiled contract: schemas become
 ///    definitions, other objects are copied in place. Refs to URLs are
 ///    never fetched.
+///
+/// # Errors
+///
+/// [`ImportError::Invalid`] when no file, or more than one, is a contract
+/// (the error names them), or when an external `$ref` cannot be resolved;
+/// otherwise the errors of the chosen file's compiler, as [`compile`].
 pub fn compile_files(files: &[SourceFile]) -> Result<Bundle, ImportError> {
     compile_files_in(files, &mut Ctx::new())
 }

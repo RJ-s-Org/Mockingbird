@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use crate::openapi3::{EXTERNAL_REF_HINT, check_refs, deref, invalid};
 use crate::schema::{collect_refs, normalize_schema};
-use crate::{ImportError, triggers::validate_triggers, version_string};
+use crate::{ImportError, triggers::check_triggers, version_string};
 
 pub(crate) use v2::compile_v2;
 pub(crate) use v3::compile_v3;
@@ -480,7 +480,7 @@ impl Extensions {
     /// Checks the triggers and the state effect against `direction`.
     pub(crate) fn check(&self, direction: Direction) -> Result<(), ImportError> {
         if let Some((triggers, at)) = &self.triggers {
-            validate_triggers(triggers, direction).map_err(|m| invalid(at, m))?;
+            check_triggers(triggers, direction).map_err(|e| invalid(at, e.to_string()))?;
         }
         if let Some((_, at)) = &self.state
             && direction != Direction::Subscribe

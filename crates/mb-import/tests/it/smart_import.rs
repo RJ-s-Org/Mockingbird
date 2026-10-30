@@ -473,7 +473,7 @@ async fn canceled_observer_stops() {
 
 fn loopback_options() -> ImportOptions {
     ImportOptions {
-        fetch: FetchPolicy::from_allowlist(&["127.0.0.1/32".to_string()]).unwrap(),
+        fetch: FetchPolicy::parse_allowlist(&["127.0.0.1/32".to_string()]).unwrap(),
         ..ImportOptions::default()
     }
 }
@@ -1457,4 +1457,34 @@ fn valid_docs_operation_ids_are_kept_as_written() {
             .get("x-original-operation-id")
             .is_none()
     );
+}
+
+#[test]
+fn extract_llm_debug_omits_the_provider() {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok("sk-sentinel-answer".into())]));
+    let debug = format!("{:?}", llm(provider, 512));
+    assert!(debug.starts_with("ExtractLlm {"), "{debug}");
+    assert!(debug.contains("max_tokens: 512"), "{debug}");
+    assert!(!debug.contains("sk-sentinel"), "{debug}");
+}
+
+#[test]
+fn import_kind_and_phase_display_their_wire_names() {
+    for kind in [
+        ImportKind::Markdown,
+        ImportKind::Html,
+        ImportKind::Pdf,
+        ImportKind::Text,
+        ImportKind::Har,
+        ImportKind::Postman,
+    ] {
+        assert_eq!(kind.to_string(), kind.as_str());
+        assert_eq!(kind.as_str().parse::<ImportKind>(), Ok(kind));
+        assert_eq!(ImportKind::parse(kind.as_str()), Some(kind));
+    }
+    let err = "docx".parse::<ImportKind>().unwrap_err();
+    assert_eq!(err.0, "docx");
+    assert!(err.to_string().contains("\"docx\""), "{err}");
+    assert_eq!(Phase::Summarizing.to_string(), "summarizing");
+    assert_eq!(format!("{NoopObserver:?}"), "NoopObserver");
 }

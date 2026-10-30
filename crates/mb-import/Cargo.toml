@@ -6,10 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Internal crate of Mockingbird (contract importers and smart import), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+keywords = ["mock", "openapi", "graphql", "protobuf", "wsdl"]
+categories = ["development-tools::testing", "parser-implementations"]
 
 # The library keeps its name (`use mb_import::…`).
 [lib]
 name = "mb_import"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

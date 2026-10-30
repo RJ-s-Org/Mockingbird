@@ -36,18 +36,35 @@ const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OP
 /// The provider and settings of an import's LLM calls.
 #[derive(Clone)]
 pub struct ExtractLlm {
+    /// The provider the calls go to.
     pub provider: Arc<dyn Provider>,
+    /// The timeout, temperature and token limit of each call.
     pub settings: HopSettings,
+}
+
+/// Shows the settings and the provider's capabilities; the provider itself
+/// (which may hold a key) is not shown.
+impl std::fmt::Debug for ExtractLlm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractLlm")
+            .field("capabilities", &self.provider.capabilities())
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Tokens an import may spend, and what it spent.
 #[derive(Clone, Debug, Default)]
 pub struct TokenBudget {
+    /// Most tokens the import may spend.
     pub limit: u64,
+    /// Tokens spent so far.
     pub used: TokenUsage,
 }
 
 impl TokenBudget {
+    /// A budget of `limit` tokens, none spent.
+    #[must_use]
     pub fn new(limit: u64) -> Self {
         Self {
             limit,
@@ -56,10 +73,12 @@ impl TokenBudget {
     }
 
     /// Whether `estimate` more tokens stay within the limit.
+    #[must_use]
     pub fn can_afford(&self, estimate: u64) -> bool {
         self.total().saturating_add(estimate) <= self.limit
     }
 
+    /// Records the tokens of one call.
     pub fn add(&mut self, u: Usage) {
         self.used.prompt_tokens = self
             .used
@@ -209,9 +228,13 @@ pub fn extraction_messages(chunk: &Chunk, total: usize, source_name: &str) -> Ve
 }
 
 /// What one chunk produced.
+#[derive(Clone, Debug)]
 pub struct ChunkResult {
+    /// The operations extracted from the chunk.
     pub operations: Vec<DraftOperation>,
+    /// What was skipped or relaxed.
     pub warnings: Vec<DraftWarning>,
+    /// The tokens the call used.
     pub usage: Usage,
 }
 
@@ -329,6 +352,11 @@ fn drop_nulls(value: Value) -> Value {
 
 /// Parses and validates an extraction answer for `chunk`. Errs (the chunk is
 /// skipped) when the answer is not a JSON object with an `operations` array.
+///
+/// # Errors
+///
+/// The reason, as text, when the answer is not JSON, not an object or has
+/// no `operations` array.
 pub fn parse_extraction(
     content: &str,
     chunk: &Chunk,
@@ -744,6 +772,11 @@ fn summary_line(op: &DraftOperation) -> String {
 ///
 /// Reports `Summarizing` progress before each batch (batch index, batch
 /// count); `Err(Canceled)` when the observer cancels.
+///
+/// # Errors
+///
+/// [`SmartError::Canceled`] when the observer cancels; a failed batch is a
+/// warning, not an error.
 pub async fn summarize_operations(
     llm: &ExtractLlm,
     ops: &mut [DraftOperation],
