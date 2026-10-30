@@ -23,24 +23,29 @@ COPY . .
 RUN mkdir /manifests \
  && find . \( -name Cargo.toml -o -name Cargo.lock \) -exec cp --parents {} /manifests/ \;
 
-FROM rust:1.97-bookworm AS builder
-# Cargo features of the binary. The default builds the full image (Kafka,
-# AMQP and MQTT brokers; librdkafka is compiled with cmake). For the slim
-# image (WebSocket channels and the memory broker only, no system libraries):
-#   docker build --build-arg FEATURES=--no-default-features -t mockingbird:slim .
-ARG FEATURES="--features full"
+# The toolchain both cargo builds run in.
+FROM rust:1.97-bookworm AS toolchain
 # libcurl headers: librdkafka 2.12 includes <curl/curl.h> even without curl.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+
+# Builds the dependencies against stub sources (an empty lib per crate, a stub
+# `main` for the binary, a no-op build script where one is declared, and an
+# empty file per declared test target), then sorts the result into /deps so
+# the builder can copy it as several layers. On a cache hit BuildKit downloads
+# those in parallel; as one layer (about 720 MB) it took about 40 s from the
+# gha cache. The cargo registry stays in these layers rather than in a cache
+# mount: CI runners are ephemeral and the gha cache does not keep mount
+# contents, so a mount would make every workspace build re-fetch every crate.
+FROM toolchain AS deps
+# Cargo features of the binary. The default builds the full image (Kafka,
+# AMQP and MQTT brokers; librdkafka is compiled with cmake). For the slim
+# image (WebSocket channels and the memory broker only, no system libraries):
+#   docker build --build-arg FEATURES=--no-default-features -t mockingbird:slim .
+ARG FEATURES="--features full"
 COPY --from=manifests /manifests ./
-# Build the dependencies against stub sources (an empty lib per crate, a
-# stub `main` for the binary, a no-op build script where one is declared, and
-# an empty file per declared test target). The cargo registry stays in this
-# layer rather than in a cache mount: CI runners are ephemeral and the gha cache
-# does not keep mount contents, so a mount would make every workspace build
-# re-fetch and unpack every crate.
 RUN for manifest in crates/*/Cargo.toml; do \
         dir="$(dirname "$manifest")"; \
         mkdir -p "$dir/src" "$dir/tests"; \
@@ -51,7 +56,23 @@ RUN for manifest in crates/*/Cargo.toml; do \
     done \
  && echo 'fn main() {}' > crates/mockingbird/src/main.rs \
  && cargo build --release --locked -p mockingbird-cli $FEATURES \
- && rm -rf crates
+ && mkdir -p /deps/rlib-a /deps/rlib-b /deps/rmeta \
+ && mv target/release/deps/lib[a-l]*.rlib /deps/rlib-a/ \
+ && mv target/release/deps/*.rlib /deps/rlib-b/ \
+ && mv target/release/deps/*.rmeta /deps/rmeta/ \
+ && mv target /deps/target \
+ && mv /usr/local/cargo/registry /deps/registry
+
+FROM toolchain AS builder
+# See the deps stage.
+ARG FEATURES="--features full"
+COPY --from=manifests /manifests ./
+# mv and COPY keep the build's timestamps, so Cargo finds these fresh.
+COPY --from=deps /deps/registry /usr/local/cargo/registry
+COPY --from=deps /deps/target target
+COPY --from=deps /deps/rlib-a target/release/deps/
+COPY --from=deps /deps/rlib-b target/release/deps/
+COPY --from=deps /deps/rmeta target/release/deps/
 COPY crates crates
 # The agent skills the binary embeds (`mockingbird agent`, the MCP server).
 COPY plugins plugins
