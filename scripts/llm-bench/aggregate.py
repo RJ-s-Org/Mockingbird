@@ -370,6 +370,7 @@ def tally(items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]], has_grad
     return {
         "n": n,
         "first_try": rate(llm, n),
+        "no_second_call": rate(llm + patched, n),
         "schema_valid": rate(llm + patched + repaired, n),
         "patch": rate(patched, n),
         "repair": rate(repaired, n),
@@ -1343,14 +1344,15 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
     rows = []
     for m, b in models.items():
         e, j = b["engine"], b["judge"]
-        rows.append([m, fmt(e["n"], "int"), fmt(e["macro"]["first_try"]), fmt(e["macro"]["schema_valid"]),
+        rows.append([m, fmt(e["n"], "int"), fmt(e["macro"]["first_try"]), fmt(e["first_try"]),
+                     fmt(e["no_second_call"]), fmt(e["macro"]["schema_valid"]),
                      fmt(e["fallback"], "pct"), fmt(e["S"]), fmt(e["macro"]["conformance"]),
                      fmt(j["J"], nd=2), fmt(j["Jn"]), fmt(j["realism"], nd=2), fmt(j["coherence"], nd=2),
                      fmt(j["judge_n"], "int"), fmt(j["judge_auto"], "int"), fmt(j["judge_missing"], "int"),
                      fmt(j.get("judge_excluded_valid_empty"), "int"),
                      fmt(e.get("fallback_truncated_max_tokens"), "int"), fmt(e.get("engine_timeouts"), "int"),
                      fmt(b["quality"]["Q"])])
-    lines += md_table(["Model", "N", "First try (FT)", "Schema valid (SV)", "Fallback", "S", "K (conformance)",
+    lines += md_table(["Model", "N", "First try (FT)", "FT per call", "No second call", "Schema valid (SV)", "Fallback", "S", "K (conformance)",
                        "J", "Jn", "Realism", "Coherence", "judge_n", "auto", "missing", "excl. valid {}",
                        "fallback: max_tokens", "fallback: engine timeout", "Q"], rows)
     lines.append("")

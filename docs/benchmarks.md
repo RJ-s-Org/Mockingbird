@@ -56,7 +56,7 @@ Round 2 had to fit in about $4 so that the two rounds together stay under $10. T
 
 ### Leaderboard
 
-Sorted by Value, the default-exponent formula against the baseline `deepseek/deepseek-v4.1-flash` = 100. All 12 pass every gate. Q is quality, SV the macro schema-valid rate, J the judge score, C the cost per 1,000 responses, L the p50 end-to-end latency. "Round 1 Value" is the ungated figure in parentheses where round 1 gated the model.
+Sorted by Value, the default-exponent formula against the baseline `deepseek/deepseek-v4.1-flash` = 100. All 12 pass every gate. Q is quality, SV the macro schema-valid rate, First try the share answered validly with no fix, averaged over API types, J the judge score, C the cost per 1,000 responses, L the p50 end-to-end latency. "Round 1 Value" is the ungated figure in parentheses where round 1 gated the model.
 
 | # | Model | Value | Q | SV | First try | J (1-5) | C $/1k | L p50 ms | Round 1 Value |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -81,6 +81,23 @@ Round 1 only, not re-run (2,048 tokens, 30 s):
 | `reflection/beam-1.0-501b-a23b` | (21.7) | 0.722 | 3.43 |
 | `thinkingmachines/inkling-small` | (41.4) | 0.803 | 3.93 |
 | `thinkingmachines/inkling` | — | 0.000 | 1.00 |
+
+First try weighs each API type equally, and gRPC is 100% for every model. Per call, across all 1,944 answers in `samples.jsonl.gz`, it's lower:
+
+| Model | First try per call | REST only | No second call |
+| --- | ---: | ---: | ---: |
+| `openai/gpt-6-luna` | 0.852 | 0.765 | 0.994 |
+| `deepseek/deepseek-v4.1-flash-1017` | 0.660 | 0.500 | 0.975 |
+| `nvidia/nemotron-3.5-lightning` | 0.370 | 0.147 | 0.679 |
+| `inception/mercury-3` | 0.469 | 0.275 | 0.926 |
+| `anthropic/claude-haiku-5.5` | 0.735 | 0.627 | 0.932 |
+| `nvidia/nemotron-3.5-super-vl` | 0.549 | 0.324 | 0.926 |
+| `deepseek/deepseek-v4.1-flash` | 0.679 | 0.520 | 0.988 |
+| `minimax/minimax-m3.1-flash` | 0.586 | 0.461 | 0.815 |
+| `z-ai/glm-5.3-flash` | 0.636 | 0.490 | 0.883 |
+| `qwen/qwen3.8-flash` | 0.630 | 0.490 | 0.994 |
+| `thinkingmachines/inkling-small@nojson` | 0.494 | 0.294 | 0.852 |
+| `thinkingmachines/inkling@nojson` | 0.500 | 0.284 | 0.907 |
 
 The baseline's own p50 latency rose from 2,204 to 3,491 ms between rounds. Value is relative to the baseline, so that rise lifts every other model's Value; compare Q, C and L directly as well.
 

@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mb_engine::consistency::property_schema;
 use mb_engine::{Engine, EngineConfig, GenerationContext, MessageContext, OperationCall, Source};
 use mb_llm::Usage;
 use mb_mcm::{Bundle, Direction, Operation};
@@ -415,11 +416,47 @@ fn fake_object(engine: &Engine, bundle: &Bundle, schema: Option<&Value>) -> Map<
     }
 }
 
+/// A real client asks for an id the API gave it. When the only path
+/// parameter declares no shape of its own and the response's `id` has a
+/// `pattern`, the call's id fits that pattern, so repeating it is valid.
+fn fit_path_id(
+    engine: &Engine,
+    bundle: &Bundle,
+    op: &Operation,
+    path_params: &mut Map<String, Value>,
+) {
+    let (Some(input), Some(output), 1) = (
+        op.input.path.as_ref(),
+        op.success_output().and_then(|o| o.schema.as_ref()),
+        path_params.len(),
+    ) else {
+        return;
+    };
+    let Some(id) = property_schema(bundle, output, "id").filter(|s| s.get("pattern").is_some())
+    else {
+        return;
+    };
+    for (name, value) in path_params.iter_mut() {
+        let declared = property_schema(bundle, input, name);
+        let shaped = declared.is_some_and(|s| {
+            s.get("type").is_some_and(|t| t != "string")
+                || ["pattern", "format", "enum", "const"]
+                    .iter()
+                    .any(|k| s.get(*k).is_some())
+        });
+        if !shaped && let drawn @ Value::String(_) = engine.fake(bundle, &id) {
+            *value = drawn;
+        }
+    }
+}
+
 /// A faker-built call of `op`.
 fn fake_call(engine: &Engine, bundle: &Bundle, op: &Operation) -> OperationCall {
+    let mut path_params = fake_object(engine, bundle, op.input.path.as_ref());
+    fit_path_id(engine, bundle, op, &mut path_params);
     OperationCall {
         operation_id: op.id.clone(),
-        path_params: fake_object(engine, bundle, op.input.path.as_ref()),
+        path_params,
         query: fake_object(engine, bundle, op.input.query.as_ref()),
         headers: Map::new(),
         body: op.input.body.as_ref().map(|s| engine.fake(bundle, s)),
@@ -805,7 +842,47 @@ pub async fn run_contracts(
 
 #[cfg(test)]
 mod tests {
-    use super::percentile;
+    use super::{fake_call, percentile};
+    use mb_engine::{Engine, EngineConfig};
+
+    fn path_id(param_schema: &str) -> serde_json::Value {
+        let source = format!(
+            r#"
+openapi: 3.1.0
+info: {{title: Payments, version: "1"}}
+paths:
+  /intents/{{id}}:
+    get:
+      operationId: getIntent
+      parameters: [{{name: id, in: path, required: true, schema: {param_schema}}}]
+      responses:
+        "200": {{description: OK, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string, pattern: "^pi_[0-9]{{6}}$"}}}}}}}}}}}}
+"#
+        );
+        let bundle = mb_import::compile(source.as_bytes()).unwrap();
+        let engine = Engine::new(None, EngineConfig::default());
+        let op = bundle.operation("getIntent").unwrap();
+        let call = fake_call(&engine, &bundle, op);
+        call.path_params["id"].clone()
+    }
+
+    #[test]
+    fn a_shapeless_path_id_fits_the_response_id_pattern() {
+        let id = path_id("{type: string}");
+        let id = id.as_str().unwrap();
+        assert!(id.starts_with("pi_") && id.len() == 9, "{id}");
+    }
+
+    #[test]
+    fn a_path_id_with_its_own_shape_is_left_alone() {
+        let id = path_id("{type: string, pattern: \"^ord-[0-9]$\"}");
+        assert!(id.as_str().unwrap().starts_with("ord-"), "{id}");
+    }
+
+    #[test]
+    fn a_numeric_path_id_stays_numeric() {
+        assert!(path_id("{type: integer}").is_i64());
+    }
 
     #[test]
     fn nearest_rank_percentiles() {
