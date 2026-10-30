@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-02",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "599c34e92e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Clean payload, but id gid://shopify/Product/12345 is short and low. Handle iris, title tundra, tags echoed; null status defaults to DRAFT; blank productType and vendor match nulls; createdAt equals updatedAt; userErrors empty."
+  },
+  {
+   "opaque_id": "9be5c67bbc",
+   "realism": 4,
+   "coherence": 2,
+   "rationale": "Long gid and plausible error shapes; productType \"Home & Garden\" is invented. Product created yet three userErrors; \"Handle could not be generated\" while handle is sable; archived rejected but returned ARCHIVED."
+  },
+  {
+   "opaque_id": "660dce7960",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Real-shaped 13-digit gid, realistic timestamp, empty strings for unset fields as Shopify returns. Handle ember, title kestrel, tags, DRAFT all echoed; createdAt equals updatedAt; userErrors empty fits returned product."
+  },
+  {
+   "opaque_id": "030733b58d",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "id \"S5SepxospzJ0yW\" is not a gid; blank-field errors are generic. Echoes handle, title, tags and DRAFT, but product is returned alongside errors saying productType, vendor and description cannot be blank, which conflict for a draft."
+  },
+  {
+   "opaque_id": "29063bb389",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Proper gid, realistic timestamp, believable error messages. Request echoed correctly, but userErrors say productType, vendor, description cannot be blank while the product is still returned as created, a material conflict."
+  },
+  {
+   "opaque_id": "1a8cd74124",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "id \"YLqilhHqTMuYVA\" is not a gid; productType \"General\" invented from null. Handle error stated while handle sable is returned; productType error though General is set; description \"nectar\" flagged unsupported formatting."
+  },
+  {
+   "opaque_id": "058463c3b9",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "Non-gid id, gibberish error fields \"yjmqlafx\" and \"rkmvukrd\", invented \"outerwear\"/\"handmade\". Null vendor returned as handmade yet \"Vendor is required\"; one tag flagged not unique; product ACTIVE with errors."
+  },
+  {
+   "opaque_id": "d7ea46bb24",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Plausible gid, timestamp and sparse optional fields. Title sable, generated handle sable, vendor raven, ARCHIVED, tags all match the request; blank productType fits null; userErrors empty; createdAt equals updatedAt."
+  },
+  {
+   "opaque_id": "aab44d0518",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "gid Product/1 and stock \"Acme Outdoors\" look seeded. \"Title is required\" though title tundra was sent; vendor and productType invented yet reported required; product returned ACTIVE despite three errors."
+  }
+ ]
+}

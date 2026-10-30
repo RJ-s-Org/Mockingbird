@@ -1,0 +1,54 @@
+{
+ "batch_id": "batch-01",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "ee02f42af2",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Product names are decent but ids like AdKknFxuzMBelZ are not gids and endCursor Y3Vyc2l6ZT1xYWV is odd. priceRange 129.99 conflicts with variants 99.50 and 149.99; handle classic-wool-blanket vs Organic Cotton; query onyx ignored."
+  },
+  {
+   "opaque_id": "4b78588106",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "gid ids, SKUs like CED-CB-SM and cedar goods are realistic, though ids are sequential and currencies mix USD, CAD, EUR, GBP in one store. Query honored, but INVENTORY_TOTAL order broken (142, 0, 57, 9, 23) and one updatedAt precedes createdAt."
+  },
+  {
+   "opaque_id": "b0aae449f3",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Trailhead Merino socks, Summit flask and Ridgeline shell with sensible prices look real; ids are not gids. Query \"cedar\" is ignored entirely and INVENTORY_TOTAL with reverse false returns 142, 87, 0. Price ranges match variants."
+  },
+  {
+   "opaque_id": "2316e5df9d",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "gid ids, SKUs like LUM-DESK-BLK, per-variant inventory and specific lighting titles read as production. Query lumen honored, totalInventory equals variant sum, price ranges match variants, cursor decodes to last id and value."
+  },
+  {
+   "opaque_id": "d30e4061a0",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Good Lumen lamp, lantern and bulb catalog with coherent vendor; non-gid ids and rounded timestamps are minor tells. Query lumen and PRODUCT_TYPE honored, price ranges match variants; endCursor null despite nodes returned."
+  },
+  {
+   "opaque_id": "252eb3902e",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Believable products, vendors and price ranges; ids are not gids. Query cedar matches only one product, others are named harbor and quartz after the cursors, and INVENTORY_TOTAL with reverse false comes back 184, 67, 12."
+  },
+  {
+   "opaque_id": "3cee535055",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Specific lamp, sconce and lantern entries with varied variants look real; non-gid ids and endCursor \"cursor_lumen_outdoor_lighting_2026\" are small tells. Query lumen honored, sorted by product type, price ranges match variants."
+  },
+  {
+   "opaque_id": "8467ccdcf8",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Generic vendor CozyThreads, tags \"soft\", \"smooth\", round timestamps, non-gid ids. Every priceRange disagrees with its variants (65-85 vs 45 and 38); handle leather-goods-collection on a wallet; query onyx ignored."
+  }
+ ]
+}

@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-12",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "7748da652b",
+   "realism": 2,
+   "coherence": 1,
+   "rationale": "Second segments are gibberish (city \"vtqaluhs\", timezone \"tplqfeeh\"). Destination LIS instead of ERD, origin WDH instead of ZMW, return legs have departureAt = arrivalAt with 3433 minutes, total 549 with 3 offers."
+  },
+  {
+   "opaque_id": "3a38dc2cf1",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Invented \"Gagarin City\" with countryCode XY and Etc/UTC everywhere reads synthetic. Requested LJO and GCG honored and durations match, but second leg flies HPT to GCG after already arriving, not a return."
+  },
+  {
+   "opaque_id": "bb6b0f194a",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Fictional Fulmar Bay/Mylestown airports are plausible, IE fits IRL, varied carriers and aircraft. Durations equal times, outbound and return dates match the request, stops within maxStops, total 3 equals offers."
+  },
+  {
+   "opaque_id": "0c160df29d",
+   "realism": 2,
+   "coherence": 1,
+   "rationale": "Segments fly LIS to LIS and BCN to BCN, one has timezone \"LH123\" and name \"stibihhz\". Arrival before departure, 2026-10-31 instead of requested dates, ERD and ZMW ignored, total 670 with 3 offers."
+  },
+  {
+   "opaque_id": "44813bbd3d",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Real-looking Vilo Acuna and Owen Roberts airports with correct time zones and sensible flight numbers; LJO is a misapplied code. Destination GCM replaces requested GCG; otherwise durations, return pairing and total hold."
+  },
+  {
+   "opaque_id": "147cd9dd82",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "offers is empty with total 0, so a search that implies results returns no usable data. Consistent in itself: total matches the empty list, currency echoed, unknown airports could explain no results."
+  },
+  {
+   "opaque_id": "45e35b765f",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Well-known sample UUID f47ac10b-58cc, \"Zambezi Airport\" and AT123 feel generic. Origin and destination echoed, but total is 2 with one offer and the requested return leg is missing."
+  },
+  {
+   "opaque_id": "acb5a05cef",
+   "realism": 4,
+   "coherence": 2,
+   "rationale": "Real airports, carriers and time zones with fitting durations look good. But requested MYL never appears (ends at AGP via RAK), returnDate 2026-10-27 is ignored with both legs on 10-13, and FVB maps to Spain with IRL prices."
+  },
+  {
+   "opaque_id": "213a5fc7d7",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Fenwick Bay and Mylestown are fictional but plausible, prices varied. Route, dates and total are right; KC outbound 07:15 to 10:25 is 190 minutes but durationMinutes says 130 with 0 stops."
+  }
+ ]
+}

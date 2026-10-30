@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-10",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "21e7033445",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Mostly credible, but third cast entry has original_name \"laggvmdw\" and character equal to actor name. Order jumps 0,1,805; name and original_name disagree; genders mismatch names (Liam 1, Chloe 2). id echoed."
+  },
+  {
+   "opaque_id": "5358196f6f",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Believable invented names, varied popularity, but every profile_path null and person ids run 842601-3. movie id echoed, order clean, departments match jobs; gender flipped against names (Mara 2, Eli 1, Tessa 2)."
+  },
+  {
+   "opaque_id": "d3217a6bcf",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Nordic names, TMDB-style 7-digit ids, image hashes, mix of null profile_path, 3-decimal popularity. id 838776 echoed, order 0-2, gender matches names, departments match jobs, popularity falls with billing."
+  },
+  {
+   "opaque_id": "f177624c38",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Real Dune cast and crew with fitting ids and rich crew list, though Fraser's path \"/aBcD1EfGhIj...\" is filler. Characters match actors, id echoed; Mary Parent gender 2 and Joe Walker gender 1 are wrong."
+  },
+  {
+   "opaque_id": "8ee35fefda",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Invented names like \"Elara Voss\", person ids tiny (290, 119), cast_id 733 odd, but paths and popularity decimals are credible. id echoed, order 0-2, gender fits names, each crew department matches job."
+  },
+  {
+   "opaque_id": "df0827f104",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "profile_path \"/abc123def456ghi789jkl012mno.jpg\" is filler; person ids tiny; character \"Director\" in cast. order starts at 1; genders contradict names (Alice 2, Ethan 1, Sofia 1). movie id echoed."
+  },
+  {
+   "opaque_id": "5739d9a708",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "credit_id \"111111111111111111111111\", \"1234567890abcdef12345678\", sequential person ids. Tom Hanks as \"Himself\", Tim Allen as Woody, Timothy Dalton as Buzz clash; language \"en-US\" contradicts ib-YH; id echoed."
+  },
+  {
+   "opaque_id": "f4d7bd7019",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Scandinavian names with diacritics, credible hashes, popularity decimals, some null paths; person ids unusually small (88, 184). id echoed, order clean, gender fits names, departments align with jobs."
+  },
+  {
+   "opaque_id": "76b7a5f9de",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "7-digit ids, varied hashes and popularity feel like real records, invented names like \"Iven Cor\" a bit fantasy. id echoed, order clean, jobs match departments; Elara Voss gender 2 and Mira Sen ordering of popularity slightly off."
+  }
+ ]
+}

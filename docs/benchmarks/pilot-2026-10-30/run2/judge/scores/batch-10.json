@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-10",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "52c5901922",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Plausible cast Mara Voss, Eli Mercer, but ids run 842601-842603, credit_ids step predictably and every profile_path is null. movie id echoed, order fine; gender codes are reversed against names (Mara is 2, Eli is 1)."
+  },
+  {
+   "opaque_id": "1eb5f1dd96",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Real Dune cast and crew with believable data, but credit_ids count up 5f8a...9f01 to 9f0b and path /aBcD1EfGhIjKlMnOpQrStUvWxYz is fake. id echoed; Mary Parent gender 2 and Joe Walker gender 1 are swapped."
+  },
+  {
+   "opaque_id": "6ac60be535",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Crew entry name \"cdnvjtye\" with original_name \"/Q6r7s8t9u0vW1x2y3z4A5b6C7.jpg\" and popularity 910.0 is junk. Actor name equals character name in all cast; Original Music Composer sits in department Production."
+  },
+  {
+   "opaque_id": "6d5f6da137",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Nordic names Elin Halvorsen, Ingrid Saether, Lars Braten, varied popularity and mixed null profiles look organic. Characters differ from actors, gender codes match names, order starts at 0, id echoed, departments match jobs."
+  },
+  {
+   "opaque_id": "b84b461315",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "profile_path \"/abc123def456ghi789jkl012mno.jpg\" is a placeholder and names are generic. id echoed, departments match jobs; order starts at 1 rather than 0 and actor Victor Hale plays character \"Director\"."
+  },
+  {
+   "opaque_id": "acc6022d21",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Mara Venn, Theo Rainer, Dr. Ilyan Sorell, varied random credit_ids and paths, descending popularity read as real. id echoed, jobs match departments; director Nadia Kessler carries gender 2, a minor slip."
+  },
+  {
+   "opaque_id": "2b0afbff3f",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "credit_ids 111111111111111111111111 and 1234567890abcdef12345678, ids 123456 and 789012 are placeholders. Tom Hanks as \"Himself\", Tim Allen as Woody, Timothy Dalton as Buzz; adds language en-US against the request and total_results 5."
+  },
+  {
+   "opaque_id": "adb826a807",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Fictional names Elara Voss, Tarin Holt fit, modest popularity is varied, but all profile paths share the suffix \"sA5t\" or similar pattern. id echoed, order from 0, gender and departments consistent, characters distinct."
+  },
+  {
+   "opaque_id": "adc9a0f61d",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Scandinavian names, \"Kaptajn Mira Voss\" and \"Lighthouse Keeper Ove\" give character texture and suit the DK language hint; profile paths look organic. id echoed, gender codes match names, jobs fit departments."
+  }
+ ]
+}

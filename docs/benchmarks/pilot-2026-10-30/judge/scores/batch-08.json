@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-08",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "7586a9765a",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Tundra Labs enterprise account, -1250 credit balance, TNDRLAB1 prefix, region and tier metadata read as real. Name reflects \"tundra\", credit balance fits non-delinquent, but id cus_EpWU... does not echo the requested customer."
+  },
+  {
+   "opaque_id": "35df332dbc",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Tundra Outfitters LLC with billing address, 907 phone, TUNDRA42 prefix and wholesale description looks like production. Fields agree and name reflects request, but id is not the requested \"tundra\"."
+  },
+  {
+   "opaque_id": "484850179a",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Credible Northstar Studio, random prefix, sensible created; sparse with null phone and description. Fields agree with each other (zero balance, not delinquent), but id does not echo \"delta\" and nothing relates to it."
+  },
+  {
+   "opaque_id": "82c0d5d479",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Northstar Atelier with matching billing email looks plausible; \"Subscription customer\" is bland. Balance, delinquent and created agree, but id does not echo \"delta\" and the name has no link to it."
+  },
+  {
+   "opaque_id": "81e75f477a",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "sable@example.com, \"Account for sable\" and null name read as filler; id and prefix fine. Email and description reflect the request, zero balance fits not delinquent, though id does not echo \"sable\"."
+  },
+  {
+   "opaque_id": "b1393e252f",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Generic customer@example.com with null name, description and phone is default-like; id and prefix well formed. No field contradicts another, but nothing echoes \"sable\", including id."
+  },
+  {
+   "opaque_id": "27a49a1f87",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "\"Delta Customer\" and customer.delta@example.com are generic; D3LTA8Q2 prefix is a nice touch. Name, email and prefix reflect the request and agree, id itself does not echo \"delta\"."
+  },
+  {
+   "opaque_id": "75a96699a5",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "\"Sable User\", sable@example.com, +15551234567 and \"Customer account for sable\" are clearly synthetic. Positive 1250 balance with delinquent false is acceptable; fields reflect sable but id is not the requested one."
+  },
+  {
+   "opaque_id": "dc9bc1cce4",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Wholesale Tundra Outfitters LLC, -4500 credit, 907 phone, TUNDRA42 prefix read as genuine. Description, email and name all agree and credit fits not delinquent, but id does not echo \"tundra\"."
+  }
+ ]
+}

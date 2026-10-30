@@ -1,0 +1,54 @@
+{
+ "batch_id": "batch-11",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "8719c2c044",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Tax amounts in LSB and BVP with \"056.28\" and FF123456789 look fake. Taxes exceed USD total 325.00, FRA-BER 08:15 to 14:30 says 135 minutes, a 2020-born infant, three unrelated surnames on one booking."
+  },
+  {
+   "opaque_id": "fe3f3fa86d",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Natural BA274 LHR-JFK, GBP total with GB and US taxes, ticket number and reference look real. Arrival 13:15Z with 470 minutes only works as local time labelled Z, a minor offset slip. bookingId echoed."
+  },
+  {
+   "opaque_id": "ffbe8a88c2",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "TP flight plus SNCF TGV connection is a nice touch, but ids a1d2e3f4-5b6c, last4 4242 and +351912345678 feel patterned. bookingId echoed, connection times and durations line up, ticketed with tickets."
+  },
+  {
+   "opaque_id": "45825a0144",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Portuguese family with TAP Miles&Go numbers, holder \"NUNO M FERREIRA\", sequential e-tickets, mailbox.org email and real OPO-LIS-MAD routing read as production data. Durations match times, EUR throughout, id echoed."
+  },
+  {
+   "opaque_id": "2fc5f9868f",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Credible TAP itinerary to Ponta Delgada with EUR taxes; ticket 0471234567890 is a bit patterned. TP1863 12:15 to 15:40 is 205 minutes but says 145, TP1864 11:10 to 12:55 is 105 but says 165."
+  },
+  {
+   "opaque_id": "e4f6ee0fdb",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Navarro family, varied FF programs, BA117 and AA flights with correct offsets feel real. First leg 10:15Z to 17:05-05:00 is 710 minutes but durationMinutes says 410. JFK connection and return otherwise fit; id echoed."
+  },
+  {
+   "opaque_id": "b47c5bed82",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Stock values: Alice Smith, reference BK1234, ticket 1234567890123, BA123, last4 4242, round 850.00 and 120.00. Times and duration match, id echoed, but status confirmed while a ticketNumber exists."
+  },
+  {
+   "opaque_id": "68324a12e7",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Rich IB itinerary with real airports, but fictional \"Harbor Miles\" and \"Northstar Rewards\" stand out. All three durations ignore the offsets: 08:00+00:00 to 12:15+01:00 is 195 minutes, not 255; same on later legs."
+  }
+ ]
+}

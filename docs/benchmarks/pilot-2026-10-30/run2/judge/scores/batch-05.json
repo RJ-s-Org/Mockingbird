@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-05",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "5e89b579da",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "\"123 Main St\", \"456 Oak Ave\", billing@example.com and \"Uptown Branch\" are stock values, Apt 4B on a cafe. States, area codes, ZIPs and time zones agree; two different merchant_ids in one merchant's list; mcc 7513 is odd for a branch."
+  },
+  {
+   "opaque_id": "f390885484",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "merchant_id ML00000000001, \"123 Main Street\", (415) 555-0000, example.com and one generic \"Main Square\" location read as filler. San Francisco, CA, 94105, 415 and Los Angeles time zone all agree; mcc fits a store."
+  },
+  {
+   "opaque_id": "a9851a17f8",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Juniper & Stone Hollywood and Northline Loop with fitting ZIPs and MCCs look real; .example domains are the tell. Geography, area codes and time zones agree, but two unrelated businesses and merchant_ids appear in one account list."
+  },
+  {
+   "opaque_id": "041e1add96",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Cedar Grove Cafe Fremont and Pearl District with real streets, matching ZIPs, 206 and 503 numbers, mcc 5812 and per-location URLs look production. Same LLC but different merchant_ids across its two locations."
+  },
+  {
+   "opaque_id": "9b8974f997",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Harborview and Lakeshore names, addresses and phones are convincing. capabilities repeats CREDIT_CARD_PROCESSING twice, different business and merchant_id per location, mobile cart has a Unit 5 street address."
+  },
+  {
+   "opaque_id": "d6fd301008",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "address_line_2 \"eywlbhfv\" is junk; Acme Hardware, \"123 Main Street\", billing@example.com, example.com and Beta Solutions are stock. Geography and time zones agree; two merchants in one list, INACTIVE MOBILE location with mcc 7372."
+  },
+  {
+   "opaque_id": "9074512150",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Harborview Coffee and Cedar & Stone Market with fitting Seattle and Madison addresses, 206 and 608 phones and MCCs look natural; .example domains are the tell. Time zones fit, but merchant_id differs across locations."
+  },
+  {
+   "opaque_id": "bbd1c9db6c",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Maple Street Cafe with a Riverside Kiosk is natural; .example domains and very recent created_at are small tells. Same merchant_id and LLC on both locations, ZIPs, area codes and time zones fit, MOBILE fits the kiosk."
+  },
+  {
+   "opaque_id": "083af2ffb0",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Alder & Ash on NE Alberta St and Cypress & Clay on S Broadway with correct ZIPs, area codes, MCCs and .com sites read as real merchants. Geography agrees, but two unrelated businesses with separate merchant_ids share one list."
+  }
+ ]
+}

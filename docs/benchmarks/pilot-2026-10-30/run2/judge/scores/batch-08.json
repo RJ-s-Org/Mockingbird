@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-08",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "262530da40",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Tundra Outfitters LLC with billing@tundraoutfitters.com, Alaska 907 phone, TUNDRA42 prefix and a wholesale description; all fit the tundra path cue. Only the round created timestamp is slightly bland."
+  },
+  {
+   "opaque_id": "ba15195b1f",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Northstar Analytics, .example email and plausible created read well, but invoice_prefix KSYCOAQO just copies the id. Name and email carry no link to the requested \"delta\" key."
+  },
+  {
+   "opaque_id": "8c9f365f4b",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Tundra Labs with balance -1250 and metadata tier/region is believable; phone +1-555-0100 and .example.com domain are mildly synthetic. Name follows path cue, description matches tier."
+  },
+  {
+   "opaque_id": "557cee2c48",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Northstar Studio, random N7Q4M2X9 prefix and plausible created look fine, null phone/description bland. Nothing ties it to requested \"delta\"."
+  },
+  {
+   "opaque_id": "b95fd5a39a",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "\"Delta Customer\" and customer.delta@example.com are generic placeholder-style values; D3LTA8Q2 prefix cute. Fully consistent with the path key delta and no field conflicts."
+  },
+  {
+   "opaque_id": "690ae238a3",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Tundra Outfitters LLC, -1250 credit balance consistent with net-30 wholesale description, realistic phone, TUNDRA01 prefix. .example domain is the only tell."
+  },
+  {
+   "opaque_id": "50ac82b039",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "\"Acme Corp\", prefix ABCDEFGH and +15551234567 are stock placeholder values. Internally consistent, positive balance with delinquent false fine, but requested \"sable\" is not reflected."
+  },
+  {
+   "opaque_id": "a13a7cb5ba",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "\"Account for sable\" and sable@example.com are generic, name null. Echoes the path key and has no contradictions; random prefix is fine."
+  },
+  {
+   "opaque_id": "7771ea539d",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "customer@example.com with null name, phone and description reads as a default stub. Prefix random and timestamp fine; nothing reflects requested \"sable\"."
+  }
+ ]
+}

@@ -1,0 +1,54 @@
+{
+ "batch_id": "batch-09",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "f2c5bf4388",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Real film data reads well: budget, revenue, poster, vote_count 28940. But Spider-Man sits in \"Avengers Collection\", imdb_id tt1375666 is another film, runtime 185 is wrong, overview says MCU and tagline does not fit. Id echoed."
+  },
+  {
+   "opaque_id": "1ecb8d6c1e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "The Clockwork Garden has rich overview, plausible budget and revenue; homepage example.com gives it away and vote_count 32871 is high. Id echoed, animation genres fit plot, title equals original_title, release before status Released."
+  },
+  {
+   "opaque_id": "8ac1ca043a",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Credible indie sci-fi with $28M budget and null collection, but paths like \"/A8bK4mN2pQ6rT9vX1yZ3cD5eF7G.jpg\" are patterned and homepage is example.com. Id echoed; genres, overview, popularity and revenue all align."
+  },
+  {
+   "opaque_id": "194d84d73b",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "Text is good, but every image path steps a pattern (\"/aB3cD4eF5gH6...\", \"/bC4dE5fG6hJ7...\") and homepage is .example; small ids 355, 571. Id echoed; GB/IE origins match companies and Irish language, Gaeilge correct."
+  },
+  {
+   "opaque_id": "3202dde848",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Nightfall Chronicles has varied image hashes, $68M budget, $142.85M revenue, specific overview and tagline, believable homepage and studios. Id echoed; thriller genres fit plot and collection name, title equals original_title."
+  },
+  {
+   "opaque_id": "bc820abee8",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Lantern Keepers reads like a production record: realistic hashes, 5-digit company ids, null logo on one, believable homepage. Id echoed; family fantasy genres match overview, release 2023 fits Released status and votes."
+  },
+  {
+   "opaque_id": "cf726f4d36",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Kestrel: The Far Shore has realistic hashes, ids and revenue; homepage uses .example, a small tell. Id echoed, title matches collection and original_title, genres fit the signal plot, release 2025-11 before now with Released status."
+  },
+  {
+   "opaque_id": "9f2e82abd3",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Collection name \"TheChroniclesCollection\" has no spaces and homepage moviewebsite.com is generic; Legendary tagged GB. Id echoed and Quantum Rift genres, revenue, overview hang together, but the collection is unrelated to the title."
+  }
+ ]
+}

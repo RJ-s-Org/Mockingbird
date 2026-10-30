@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-04",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "266ff38fa9",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Event-stream toolkit in Rust, 1264 stars, real Apache license node_id MDc6TGljZW5zZTI=, varied timestamps, plausible homepage. Path echoed in full_name and URLs, owner id matches avatar, watchers equal stars, Rust fits topics."
+  },
+  {
+   "opaque_id": "7eda58952b",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Avatar u/1234567, node \"U_kgDOabcdefgh\", \"R_kgDOabc123\", topic \"v784b\" read as filler. Path echoed, but owner id 12345678 differs from avatar id, license url null for MIT, and MIT carries the Apache license node_id."
+  },
+  {
+   "opaque_id": "90b9fa51aa",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "Topic \"inqg19sq69-w\" is gibberish, clone and ssh urls absent, pushed_at stale at 2024-05, round times. Path echoed everywhere, owner id matches avatar, watchers equal stars, pushed before updated, Python matches description."
+  },
+  {
+   "opaque_id": "31e3788938",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Service mesh sidecar in Go, realistic counts, sizes, timestamps, license node and homepage harbor.alpha.dev. Path echoed, owner id matches avatar, watchers equal stars, pushed before updated, topics fit description."
+  },
+  {
+   "opaque_id": "87961b966e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Solid Go service mesh repo with varied counts and dates; license node_id \"U7MQBrooeujGHp\" does not look like GitHub's. Path echoed in all URLs, owner id matches avatar, watchers equal stars, pushed before updated."
+  },
+  {
+   "opaque_id": "af0105316e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Plausible Go toolkit, real license node_id, but owner node \"U_kgDOa1b2C3d4\" is patterned and description is generic. Path echoed, owner id matches avatar, watchers equal stars, dates ordered, Go matches topics."
+  },
+  {
+   "opaque_id": "f08aa2ac6d",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Modest personal Rust project with believable small counts; license node_id \"LHONIEbi4QfZk6\" is off. Path and owner id hold, watchers equal stars, but owner url points at users/z8s- instead of users/sable."
+  },
+  {
+   "opaque_id": "c10aa6ce1f",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Rich Go sidecar repo, real license node, believable stats, marred by one gibberish topic \"p80tl07x9ymmeh-qcu1pd\". Path echoed, owner id matches avatar, watchers equal stars; pushed_at 10-29 is later than updated_at 10-28."
+  },
+  {
+   "opaque_id": "87657689c3",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Compact Rust toolkit with realistic counts and dates; license node_id \"h3fAGbk2nwvw4o\" is not GitHub-like. Path echoed everywhere, owner id matches avatar, watchers equal stars, pushed before updated, topics match language."
+  }
+ ]
+}

@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-06",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "8569acd3c1",
+   "realism": 2,
+   "coherence": 4,
+   "rationale": "Placeholder-heavy: customer_id CUST0123..., location L123456789012, version_token ABC123XYZ..., note \"Test payment for order\", fingerprint abc123def, \"SQ *Square Example\". id alpha echoed, money adds up; created_at is 3 days before authorized_at."
+  },
+  {
+   "opaque_id": "ee3ab69511",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Cafe POS sale with SQ *KITE CAFE and contactless reads well; fingerprint abcDEF1234567890 and bin 411111 are patterned. Tip 500 plus 4250 equals total 4750. created_at is one second after authorized_at, id does not echo kestrel."
+  },
+  {
+   "opaque_id": "34344ebb8e",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Harbor Books, mira.chen and varied ids look real, but refund id \"ilmfzweo\" is junk and fee amount_money is {}. Note says online order with ECOMMERCE_API yet entry_method CONTACTLESS; refund_ids present with refunded_money 0."
+  },
+  {
+   "opaque_id": "bf93f92574",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Dana Whitfield, SQ *HARBOR GOODS, online pickup note and KEYED entry look production-like; only the empty fee amount_money {} is off. 12900+800=13700, 2500 refund matches refund_ids, updated_at follows the refund-era fee."
+  },
+  {
+   "opaque_id": "40e0306ce2",
+   "realism": 4,
+   "coherence": 2,
+   "rationale": "Harborlight coffee details are convincing, though $42.50 for \"Cappuccino and pastry\" is high. total_money 4250 ignores tip 500, refund_ids present with refunded_money 0, risk_evaluation created after capture."
+  },
+  {
+   "opaque_id": "d825b8bc42",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "SQ *HARBOR COFFEE with EMV is plausible, but card 411111/1111 and A1B2C3 are test-card tells. id echoes harbor, amounts agree across amount, approved and total, timestamps ordered and COMPLETED matches CAPTURED."
+  },
+  {
+   "opaque_id": "e5b56ac140",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "\"Payment for order #123\", buyer@example.com, refund \"ref_001\", receipt A1B2, \"SQ *  LM\" feel generic. created_at 20:41:27 is after authorized and captured, card status AUTHORIZED with captured_at, refund id with refunded 0."
+  },
+  {
+   "opaque_id": "8911cf496a",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Northgate Outfitters, m.reyes, camp stoves note and 18450+1250=19700 are very believable; fee amount_money {} is the tell. Note says online order but entry_method EMV; refund 4200 and timeline otherwise consistent."
+  },
+  {
+   "opaque_id": "176462332e",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "note \"Order notes here\", customer@example.com, card 411111/1111, refund \"azfodxnx\" and \"SQ *  LM\" read as filler. 2850+150=3000 holds, but card status AUTHORIZED has captured_at and refund_ids sits with refunded_money 0."
+  }
+ ]
+}

@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-07",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "6f87657043",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Credible pi_/cus_/pm_ ids, $48.00 renewal, northwind billing email, realistic card_declined object. requires_payment_method fits amount_received 0 and secret matches id; id does not echo \"onyx\", manual capture is slightly odd."
+  },
+  {
+   "opaque_id": "0dfcd12250",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Varied ids, 7250 amount, decline object with test-log URL all read as real. Status, null latest_charge, null payment_method and secret prefix agree; description echoes Lumen but id does not carry requested \"lumen\"."
+  },
+  {
+   "opaque_id": "48ab196648",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Round 1000, null description, bare defaults. Status succeeded with latest_charge and payment_method null; client_secret prefix pi_nq629... differs from id pi_nkI0...; requested intent not echoed."
+  },
+  {
+   "opaque_id": "6eda1294a8",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Studio lighting kit description, 4280 amount, generic_decline error and logs URL look production-like. Status and null fields consistent with a declined attempt, secret matches id; only id does not echo \"lumen\"."
+  },
+  {
+   "opaque_id": "cef48f0ef8",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Believable but id \"pi_Onyx7...\" is staged and ch_/pm_ ids are short. Echoes onyx in id and description; succeeded has amount_received 4200, latest_charge and payment_method set, no error; secret matches id."
+  },
+  {
+   "opaque_id": "0387fcf1b2",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Workshop description, 4899 amount, clean ids; sparse but credible with many nulls. requires_payment_method with amount_received 0 and no charge is valid; secret matches id; id lacks \"lumen\"."
+  },
+  {
+   "opaque_id": "a970bccd76",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Stock \"Acme Labs\" customer, otherwise solid 24900 renewal, decline object, cus_/pm_ ids. Status and amount_received 0 agree, secret matches id; requested id not echoed and pm kept after decline."
+  },
+  {
+   "opaque_id": "dd28f41eff",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "payment_method_types has gibberish \"jweqnare\",\"ohemjwpd\"; id \"pi_XyZ123AbCd...\" is placeholder-like. Status succeeded yet last_payment_error insufficient_funds is set; client_secret prefix differs from id; id not echoed."
+  },
+  {
+   "opaque_id": "9bddd0fad4",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "last_payment_error fields are gibberish (\"piujuorf\", doc_url \"rpmknfuo\"), null description, created in 2024. Status succeeded with an api_error present and no latest_charge or payment_method; intent not echoed."
+  }
+ ]
+}

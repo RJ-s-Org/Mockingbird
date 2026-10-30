@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-03",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "a9409fffe2",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Realistic merged PR, title, SHAs, branch; label ids tiny (908, 246), body null. merged/closed_at/merged_at/merge sha agree and path echoed, but mira-chen has different id and node_id in head.user vs user, with avatar ids that differ."
+  },
+  {
+   "opaque_id": "5e4474163f",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "Base label \"i7bnq:pz5s0\", head \"t0w9b:lsf\", sha a1b2c3d4..., avatars u/12345678, node \"U_kgDOabcdefgh\", label url example.org, description \"hvborppw\". base and head share ref feature-xyz; labels don't match owner; user ids vary."
+  },
+  {
+   "opaque_id": "509da385fd",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Sensible title and body, but head label \"rydrj:a98/-eps-if2un5ztf0px/qmmrwxo3c\", base \"kfhufv6ja:m3ki\", id 1000000059, node \"U_kgDOABCDEFGH\". additions/deletions absent; head html_url gcul with login iris; labels contradict ref."
+  },
+  {
+   "opaque_id": "e5774e6399",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Rich, believable: upload-retry title and body \"Closes #29\", plausible SHAs, standard GitHub label colors and descriptions. Path echoed and open state fits nulls; marcusdev id differs between head.user and user, avatar also."
+  },
+  {
+   "opaque_id": "28e47da16a",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Stock logins alice/bob, unusual ref \"refs/heads/main\", body null. Labels \"main:refs/heads/main\" are not owner:ref; head user alice differs from author bob; label URLs drop the repo path; created Sep with 12 additions for a dark mode UI."
+  },
+  {
+   "opaque_id": "00ff7b637e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Fitting retry title and body, solid timestamps; SHAs \"a2b4c6d8e0f1234567890abcdef...\" and node \"PR_kwDOaBcD1234EfGh\" look patterned. Path echoed, open state with null merge fields, head.user equals author, label url correct."
+  },
+  {
+   "opaque_id": "b9c3f17ab6",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Multi-line PR body, believable streaming-parser title and diff sizes, canonical label colors. Path echoed, open state consistent, ids stable; miravale node_id differs between head.user and user, one minor slip."
+  },
+  {
+   "opaque_id": "aacb2a0405",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Believable cache-key PR with 3018726041-style label ids; node ids like \"U_kgDOA1b2C3d4\" are patterned and body null. Path echoed, state open with null merge fields, head.user equals author with stable id and node_id."
+  },
+  {
+   "opaque_id": "5dfc5d0afa",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Good webhook retry body and labels, node ids \"LA_kwDOAbCd12EfGh34\" patterned. Path and open state hold, but author is Organization iris, with avatar ids and node_ids differing across the same id 482915 in base, head and user."
+  }
+ ]
+}
