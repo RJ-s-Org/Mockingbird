@@ -2,9 +2,10 @@
 //! contract's payload when it describes one, else the Stripe-shaped
 //! envelope) and hands it to the mock's dispatcher, off the response path.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mb_engine::{GeneratedResponse, MessageContext, OperationCall};
+use mb_engine::{Engine, GeneratedResponse, MessageContext, OperationCall};
 use mb_mcm::{Channel, ChannelBinding, Direction, Operation, OperationKind, WebhookDef};
 use mb_state::SessionKey;
 use serde_json::{Map, json};
@@ -15,9 +16,11 @@ use crate::MockRuntime;
 
 /// Sends `op`'s webhook event when the mock has targets for it and the
 /// call succeeded; returns at once, the event is built and sent by a
-/// spawned task.
+/// spawned task. A contract payload is generated with `engine`, the one
+/// the provider policy chose for the call.
 pub(crate) fn emit(
     rt: &MockRuntime,
+    engine: &Arc<Engine>,
     op: &Operation,
     call: &OperationCall,
     generated: &GeneratedResponse,
@@ -44,7 +47,7 @@ pub(crate) fn emit(
     }
     let dispatcher = dispatcher.clone();
     let bundle = rt.bundle().clone();
-    let engine = rt.engine.clone();
+    let engine = Arc::clone(engine);
     let def = bundle.webhook_for(&op.id, &event_type).cloned();
     let event_id = new_event_id();
     let object = envelope_object(op, generated.body.as_ref(), target_id);

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::http::HeaderMap;
-use mb_engine::{GeneratedMessage, MessageContext, Source};
-use mb_ext::{CallInfo, Tenancy, UsageEvent};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use mb_engine::{Engine, GeneratedMessage, MessageContext, Source};
+use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_mcm::{Channel, ChannelBinding};
 use mb_state::StoredResource;
 use serde_json::{Value, json};
@@ -96,68 +96,239 @@ struct PublishReport<'a> {
     started: Instant,
     request: Value,
     error: Option<String>,
-    /// The caller's admitted tenancy; `None` resolves one for the mock.
+    /// The tenancy the message is attributed to; `None` when the tenant
+    /// resolver refused it, and then nothing is metered.
     tenancy: Option<Tenancy>,
 }
 
+/// How one message is produced: the engine generating it, the tenancy it
+/// is attributed to (`None` when the tenant resolver refused it), the
+/// broker carrying it (`None` for a WebSocket channel) and when producing
+/// it began.
+struct Plan {
+    engine: Arc<Engine>,
+    tenancy: Option<Tenancy>,
+    broker: Option<String>,
+    started: Instant,
+}
+
+/// Why an event message (a trigger's, or a reply) was not published.
+#[derive(Debug)]
+pub(crate) enum EventError {
+    /// The provider policy refused its generation; the skip is already
+    /// recorded and metered.
+    Rejected(Rejection),
+    /// Producing or publishing it failed.
+    Publish(PublishError),
+}
+
+impl std::fmt::Display for EventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventError::Rejected(r) => write!(f, "rejected: {} {}", r.status, r.detail),
+            EventError::Publish(e) => e.fmt(f),
+        }
+    }
+}
+
+impl From<PublishError> for EventError {
+    fn from(error: PublishError) -> Self {
+        EventError::Publish(error)
+    }
+}
+
+/// `headers` as a header map, leaving out names or values that are not
+/// valid HTTP header text.
+fn header_map(headers: &[(String, String)]) -> HeaderMap {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                HeaderName::from_bytes(name.as_bytes()).ok()?,
+                HeaderValue::from_str(value).ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// The trigger JSON a message from `origin` records.
+fn trigger_of(origin: &Origin) -> Value {
+    match origin {
+        Origin::Trigger { trigger, .. } => trigger.clone(),
+        Origin::Manual(_) => json!({"kind": "manual"}),
+        Origin::Reply { hop, .. } => json!({"kind": "reply", "hop": hop}),
+    }
+}
+
 impl ChannelInner {
-    /// Generate one message for the publish channel `channel` and deliver
-    /// it, recording the outcome.
+    /// Generate one message for the publish channel `channel` with the
+    /// mock's configured engine (a manual publish) and deliver it,
+    /// recording the outcome.
     pub(crate) async fn produce(
         self: &Arc<Self>,
         channel: &Channel,
         origin: Origin,
         related: Vec<StoredResource>,
     ) -> Result<Published, PublishError> {
-        self.produce_to(channel, origin, related, None).await
+        let started = Instant::now();
+        let plan = Plan {
+            broker: self.broker_for(channel)?,
+            engine: Arc::clone(&self.rt.engine),
+            tenancy: self.tenancy_of(channel, &origin).await,
+            started,
+        };
+        self.publish(channel, origin, related, None, plan).await
     }
 
-    /// [`Self::produce`], sending a WebSocket channel's message to
-    /// `socket` alone when given, else to every subscriber of its path.
-    pub(crate) async fn produce_to(
+    /// Generate one event message (a trigger's, or a reply to a consumed
+    /// message) for the publish channel `channel` and deliver it, sending a
+    /// WebSocket channel's message to `socket` alone when given, else to
+    /// every subscriber of its path. It is generated with the profile the
+    /// mock's provider policy picks for its tenancy; a rejection skips the
+    /// message, warned, recorded and metered.
+    pub(crate) async fn produce_event(
         self: &Arc<Self>,
         channel: &Channel,
         origin: Origin,
         related: Vec<StoredResource>,
         socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
-    ) -> Result<Published, PublishError> {
+    ) -> Result<Published, EventError> {
         let started = Instant::now();
-        let broker = match &channel.binding {
-            ChannelBinding::WebSocket { .. } => None,
+        let broker = self.broker_for(channel)?;
+        let tenancy = self.tenancy_of(channel, &origin).await;
+        // Without a resolved tenancy the policy is asked with the one the
+        // self-hosted `SingleTenant` gives.
+        let asked = tenancy
+            .clone()
+            .unwrap_or_else(|| Tenancy::new("default", "default"));
+        let engine = match self.rt.engine_for(&asked).await {
+            Ok(engine) => engine,
+            Err(rejection) => {
+                self.report_skipped(channel, &origin, tenancy, &rejection, started);
+                return Err(EventError::Rejected(rejection));
+            }
+        };
+        let plan = Plan {
+            engine,
+            tenancy,
+            broker,
+            started,
+        };
+        Ok(self.publish(channel, origin, related, socket, plan).await?)
+    }
+
+    /// The broker carrying `channel`; `None` for a WebSocket channel.
+    fn broker_for(&self, channel: &Channel) -> Result<Option<String>, PublishError> {
+        match &channel.binding {
+            ChannelBinding::WebSocket { .. } => Ok(None),
             _ => {
                 if let Some(reason) = self.inactive_reason(&channel.id) {
                     return Err(PublishError::NoBroker(reason.to_string()));
                 }
                 match &self.broker {
-                    Some(b) => Some(b.clone()),
-                    None => return Err(PublishError::NoBroker("no broker configured".into())),
+                    Some(b) => Ok(Some(b.clone())),
+                    None => Err(PublishError::NoBroker("no broker configured".into())),
                 }
             }
+        }
+    }
+
+    /// The tenancy a message on `channel` from `origin` is attributed to:
+    /// a WebSocket client's (resolved at its upgrade), else what the tenant
+    /// resolver gives for the channel and the consumed message's headers
+    /// (none for a trigger or a manual publish); `None` when it refuses.
+    async fn tenancy_of(&self, channel: &Channel, origin: &Origin) -> Option<Tenancy> {
+        let headers = match origin {
+            Origin::Reply {
+                tenancy: Some(tenancy),
+                ..
+            } => return Some(tenancy.clone()),
+            Origin::Reply { headers, .. } => header_map(headers),
+            Origin::Trigger { .. } | Origin::Manual(_) => HeaderMap::new(),
         };
+        let call_info = CallInfo::new(&self.rt.name, &channel.id, &headers);
+        self.rt.ext.tenants.resolve(&call_info).await.ok()
+    }
+
+    /// Record an event message whose generation the provider policy
+    /// refused: a warning, usage (not generated), the request record, and
+    /// the channel's activity and metrics (as a publish error).
+    fn report_skipped(
+        &self,
+        channel: &Channel,
+        origin: &Origin,
+        tenancy: Option<Tenancy>,
+        rejection: &Rejection,
+        started: Instant,
+    ) {
+        let rt = &self.rt;
+        let latency = started.elapsed();
+        tracing::warn!(
+            mock = %rt.name,
+            channel = %channel.id,
+            status = rejection.status,
+            detail = %rejection.detail,
+            "the provider policy refused the message's generation; skipped"
+        );
+        if let Some(tenancy) = tenancy {
+            let mut event = UsageEvent::new(tenancy, rt.name.clone(), channel.id.clone());
+            event.status = rejection.status;
+            event.source = UsageEvent::SOURCE_NOT_GENERATED.to_string();
+            event.latency = latency;
+            rt.ext.usage.record(&event);
+        }
+        let error = format!("rejected: {} {}", rejection.status, rejection.detail);
+        if let Some(recorder) = &rt.recorder {
+            recorder.record(RequestRecord {
+                workspace: rt.workspace.clone(),
+                mock: rt.name.clone(),
+                operation_id: Some(channel.id.clone()),
+                session: origin.session(),
+                method: "PUBLISH".into(),
+                path: channel.address.clone(),
+                status: rejection.status,
+                source: None,
+                fallback_reason: None,
+                latency,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                request: json!({"trigger": trigger_of(origin), "error": error}),
+                request_body_bytes: None,
+                response: None,
+                kind: RequestKind::Event,
+            });
+        }
+        self.note(&channel.id, Flow::Publish, Err(&error));
+    }
+
+    /// Generate one message for `channel` as `plan` says and deliver it
+    /// (a WebSocket channel's to `socket` alone when given, else to every
+    /// subscriber of its path), recording the outcome.
+    async fn publish(
+        self: &Arc<Self>,
+        channel: &Channel,
+        origin: Origin,
+        related: Vec<StoredResource>,
+        socket: Option<&tokio::sync::mpsc::Sender<Outbound>>,
+        plan: Plan,
+    ) -> Result<Published, PublishError> {
+        let Plan {
+            engine,
+            tenancy,
+            broker,
+            started,
+        } = plan;
         let session = origin.session();
-        let (trigger, context, received, incoming, hop, tenancy) = match origin {
-            Origin::Trigger { trigger, hop } => (trigger, None, None, Vec::new(), hop, None),
-            Origin::Manual(context) => (
-                json!({"kind": "manual"}),
-                context,
-                None,
-                Vec::new(),
-                0,
-                None,
-            ),
+        let trigger = trigger_of(&origin);
+        let (context, received, incoming, hop) = match origin {
+            Origin::Trigger { hop, .. } => (None, None, Vec::new(), hop),
+            Origin::Manual(context) => (context, None, Vec::new(), 0),
             Origin::Reply {
                 received,
                 headers,
                 hop,
-                tenancy,
-            } => (
-                json!({"kind": "reply", "hop": hop}),
-                None,
-                Some(received),
-                headers,
-                hop.saturating_add(1),
-                tenancy,
-            ),
+                ..
+            } => (None, Some(received), headers, hop.saturating_add(1)),
         };
         let ctx = MessageContext {
             trigger,
@@ -166,7 +337,7 @@ impl ChannelInner {
             related,
         };
 
-        let engine = &self.rt.engine;
+        let engine = &*engine;
         let bundle = self.rt.bundle();
         let generated = match engine.generate_message(bundle, channel, &ctx).await {
             Ok(generated) => generated,
@@ -340,15 +511,7 @@ impl ChannelInner {
     async fn report_publish(&self, r: PublishReport<'_>) {
         let rt = &self.rt;
         let latency = r.started.elapsed();
-        let tenancy = match r.tenancy {
-            Some(tenancy) => Some(tenancy),
-            None => {
-                let empty = HeaderMap::new();
-                let call_info = CallInfo::new(&rt.name, &r.channel.id, &empty);
-                rt.ext.tenants.resolve(&call_info).await.ok()
-            }
-        };
-        if let Some(tenancy) = tenancy {
+        if let Some(tenancy) = r.tenancy {
             let mut event = UsageEvent::new(tenancy, rt.name.clone(), r.channel.id.clone());
             event.status = r.status;
             event.source = r.generated.source.as_str().to_string();

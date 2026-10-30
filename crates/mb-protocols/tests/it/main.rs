@@ -26,6 +26,7 @@ mod events_broker;
 mod events_kafka;
 #[cfg(feature = "mqtt")]
 mod events_mqtt;
+mod events_policy;
 mod events_runtime;
 mod events_triggers;
 mod events_ws;

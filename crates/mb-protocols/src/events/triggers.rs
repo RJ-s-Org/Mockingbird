@@ -200,7 +200,7 @@ async fn run_cron(inner: Arc<ChannelInner>, channel: Channel, expr: String) {
 }
 
 /// Produce once, unless shutdown begins first. Errors are recorded by
-/// `produce` and never stop the trigger.
+/// `produce_event` and never stop the trigger.
 async fn fire(
     inner: &Arc<ChannelInner>,
     channel: &Channel,
@@ -210,7 +210,7 @@ async fn fire(
 ) {
     tokio::select! {
         () = stopped.as_mut() => {}
-        result = inner.produce(channel, origin, related) => {
+        result = inner.produce_event(channel, origin, related, None) => {
             if let Err(e) = result {
                 tracing::debug!(mock = %inner.rt.name, channel = %channel.id, error = %e, "trigger publish failed");
             }

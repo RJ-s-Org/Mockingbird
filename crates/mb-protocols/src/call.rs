@@ -873,7 +873,15 @@ pub(crate) async fn complete(
         feature = "grpc",
         feature = "soap"
     ))]
-    crate::webhooks::emit::emit(rt, op, call, &generated, target_id.as_deref(), session);
+    crate::webhooks::emit::emit(
+        rt,
+        &plan.engine,
+        op,
+        call,
+        &generated,
+        target_id.as_deref(),
+        session,
+    );
 
     // Seeded first, then cached: a later list never clears a cached one.
     // A fallback is cached too: a schema the LLM cannot answer in time
