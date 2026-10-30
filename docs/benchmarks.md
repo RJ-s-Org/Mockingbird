@@ -1,6 +1,6 @@
 # Model benchmarks
 
-Mockingbird can use any OpenAI-compatible model. This page records two benchmark rounds on Mockingbird's own generation code. Each round measures schema validity, conformance, blinded realism and coherence scores, latency, reliability and cost per 1,000 mock responses, and combines them into one Value score against the shipped default, `deepseek/deepseek-v4.1-flash`.
+Mockingbird can use any OpenAI-compatible model. This page records two benchmark rounds on Mockingbird's own generation code. Each round measures schema validity, conformance, blinded realism and coherence scores, latency, reliability and cost per 1,000 mock responses, and combines them into one Value score against a baseline, `deepseek/deepseek-v4.1-flash`, the shipped default when both rounds ran. The default is now `deepseek/deepseek-v4.1-flash-1017`; the numbers below stay as measured, still relative to that baseline.
 
 - **Round 2 (2026-10-30):** 12 configurations, at production settings (16,384 output tokens, 60 s timeout), after the engine's output-validity fixes.
 - **Round 1 (2026-10-29):** 16 configurations, at the bench's earlier 2,048-token cap and 30 s timeout.
@@ -10,7 +10,7 @@ The short version:
 - Every round-2 configuration clears the 0.90 schema-valid gate; in round 1, 5 of 16 did. On the same 12 models and the same 1,944 calls, fallbacks to the faker fell from 239 to 59. See [round 2](#round-2-2026-10-30).
 - `openai/gpt-6-luna` has the best Value in both rounds (160.5 in round 2). `deepseek/deepseek-v4.1-flash-1017` is second (144.0). `anthropic/claude-haiku-5.5` has the best quality score (Q 0.934). The top quality scores are close to each other given the sample size.
 - `thinkingmachines/inkling` now runs, with `output_mode: none`: SV 0.992, J 4.00. Its Value (32.6) is the lowest, because it costs $2.21 per 1,000 responses.
-- The shipped default does not change on this page; whether to switch is a separate decision.
+- After these results, the shipped default moved from `deepseek/deepseek-v4.1-flash` to `deepseek/deepseek-v4.1-flash-1017`. No figure here was re-based: `deepseek/deepseek-v4.1-flash` is still Value 100. C is what OpenRouter charged under default routing, which spreads calls across many providers at different prices: `deepseek/deepseek-v4.1-flash-1017`'s $0.324 per 1,000 responses is below what its listed price implies. That listed price was $0.15/$0.60 per million tokens in round 1, $0.30/$1.20 when round 2 started, and $0.15/$0.60 again later that day, so expect its cost to move.
 
 ![The live bench view during part 2 of the full run: a table of 16 models with schema-valid, fallback, latency and cost columns filling in as Gemini, Beam and the Inkling variants run, followed by the server suites](benchmarks/media/05-full-run-part2-short.gif)
 
@@ -56,17 +56,17 @@ Round 2 had to fit in about $4 so that the two rounds together stay under $10. T
 
 ### Leaderboard
 
-Sorted by Value, the default-exponent formula against `deepseek/deepseek-v4.1-flash` = 100. All 12 pass every gate. Q is quality, SV the macro schema-valid rate, J the judge score, C the cost per 1,000 responses, L the p50 end-to-end latency. "Round 1 Value" is the ungated figure in parentheses where round 1 gated the model.
+Sorted by Value, the default-exponent formula against the baseline `deepseek/deepseek-v4.1-flash` = 100. All 12 pass every gate. Q is quality, SV the macro schema-valid rate, J the judge score, C the cost per 1,000 responses, L the p50 end-to-end latency. "Round 1 Value" is the ungated figure in parentheses where round 1 gated the model.
 
 | # | Model | Value | Q | SV | First try | J (1-5) | C $/1k | L p50 ms | Round 1 Value |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | `openai/gpt-6-luna` | 160.5 | 0.925 | 1.000 | 0.953 | 4.33 | 0.198 | 2,660 | 125.1 |
-| 2 | `deepseek/deepseek-v4.1-flash-1017` | 144.0 | 0.909 | 0.998 | 0.852 | 4.36 | 0.324 | 1,882 | 87.4 |
+| 2 | `deepseek/deepseek-v4.1-flash-1017` (default now) | 144.0 | 0.909 | 0.998 | 0.852 | 4.36 | 0.324 | 1,882 | 87.4 |
 | 3 | `nvidia/nemotron-3.5-lightning` | 134.6 | 0.797 | 0.931 | 0.664 | 3.71 | 0.160 | 2,579 | (94.5) |
 | 4 | `inception/mercury-3` | 128.6 | 0.788 | 0.975 | 0.710 | 3.43 | 0.435 | 989 | (137.1) |
 | 5 | `anthropic/claude-haiku-5.5` | 120.4 | 0.934 | 0.998 | 0.869 | 4.57 | 0.433 | 2,240 | 84.1 |
 | 6 | `nvidia/nemotron-3.5-super-vl` | 102.1 | 0.887 | 0.992 | 0.811 | 4.21 | 0.439 | 2,498 | (64.9) |
-| 7 | `deepseek/deepseek-v4.1-flash` (default) | 100.0 | 0.911 | 0.996 | 0.864 | 4.36 | 0.365 | 3,491 | 100.0 |
+| 7 | `deepseek/deepseek-v4.1-flash` (baseline, default then) | 100.0 | 0.911 | 0.996 | 0.864 | 4.36 | 0.365 | 3,491 | 100.0 |
 | 8 | `minimax/minimax-m3.1-flash` | 88.1 | 0.908 | 0.959 | 0.762 | 4.57 | 0.607 | 2,671 | (101.3) |
 | 9 | `z-ai/glm-5.3-flash` | 79.2 | 0.884 | 0.998 | 0.815 | 4.17 | 0.409 | 4,411 | (61.1) |
 | 10 | `qwen/qwen3.8-flash` | 64.8 | 0.864 | 1.000 | 0.796 | 4.00 | 0.311 | 7,887 | (52.7) |
@@ -82,7 +82,7 @@ Round 1 only, not re-run (2,048 tokens, 30 s):
 | `thinkingmachines/inkling-small` | (41.4) | 0.803 | 3.93 |
 | `thinkingmachines/inkling` | — | 0.000 | 1.00 |
 
-The default's own p50 latency rose from 2,204 to 3,491 ms between rounds. Value is relative to the default, so that rise lifts every other model's Value; compare Q, C and L directly as well.
+The baseline's own p50 latency rose from 2,204 to 3,491 ms between rounds. Value is relative to the baseline, so that rise lifts every other model's Value; compare Q, C and L directly as well.
 
 Value sensitivity, rank in parentheses:
 
@@ -125,7 +125,7 @@ Fallbacks by cause, same 12 configurations:
 | Other | 6 | 0 |
 | **Total** | **239** | **59** |
 
-A patched answer is the model's own answer fixed locally, with no second call. That is usually a member the output budget left out, or a format value refilled. Patch rates of 14% to 46% mean the engine's local fixes do much of the work. First-try rate is the stricter view of what each model gets right unaided.
+A patched answer is the model's own answer fixed locally, with no second call. Of the 549 patched answers that could be matched to their raw output, 504 had a value replaced for failing a contract `pattern`, mostly exact-length identifiers such as `^pi_[A-Za-z0-9]{24}$`, and 445 had nothing else changed. The replacement is independent fake data, so related fields can stop matching: `client_secret` starts with the `id` in all 11 first-try Stripe payment intents and in none of the 54 patched ones. Patch rates of 14% to 46% mean the engine's local fixes do much of the work. First-try rate is the stricter view of what each model gets right unaided.
 
 Schema-invalid answers are the largest remaining cause. `nvidia/nemotron-3.5-lightning` accounts for 18 of the 51 (14 of its 19 fallbacks are REST targets).
 
@@ -170,11 +170,11 @@ The proxy enforced a hard stop at $9.50 across both rounds and refused no calls.
 
 To run any `@nojson` configuration, set `llm.profiles.<name>.output_mode: none` ([configuration](configuration.md)).
 
-The shipped default stays `deepseek/deepseek-v4.1-flash` until a decision to change it. Several models now beat it on Value. The round-2 leaders (Luna, DeepSeek 1017, Haiku) match or beat it on quality.
+When this round ran, the shipped default was `deepseek/deepseek-v4.1-flash`, the baseline above. Several models beat it on Value, and Luna and Haiku beat it on Q, and DeepSeek 1017 is level (0.909 against 0.911). The default is now `deepseek/deepseek-v4.1-flash-1017`.
 
 # Round 1 (2026-10-29)
 
-Everything from here to [Re-running](#re-running) is round 1. It ran at a 2,048-token cap and a 30 s engine timeout, with no GraphQL selections and no echo-aware grading. The method sections still describe how both rounds score.
+Everything from here to [Re-running](#re-running) is round 1. It ran at a 2,048-token cap and a 30 s engine timeout, with no GraphQL selections and no echo-aware grading. The method sections still describe how both rounds score. In this round, "the default" means `deepseek/deepseek-v4.1-flash`, the default at the time, and the recommendations are the ones made then.
 
 ## Method
 

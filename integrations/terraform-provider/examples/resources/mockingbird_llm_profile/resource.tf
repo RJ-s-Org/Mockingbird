@@ -3,7 +3,7 @@
 resource "mockingbird_llm_profile" "default" {
   name        = "openrouter"
   base_url    = "https://openrouter.ai/api/v1"
-  model       = "deepseek/deepseek-v4.1-flash"
+  model       = "deepseek/deepseek-v4.1-flash-1017"
   secret_ref  = "env:OPENROUTER_API_KEY"
   json_schema = true
   temperature = 0.4

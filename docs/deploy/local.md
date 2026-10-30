@@ -34,7 +34,7 @@ MB_LLM_API_KEY=sk-or-... mockingbird serve spec.yaml
 | `127.0.0.1:50051` | gRPC mocks (h2c) |
 | `127.0.0.1:9090` | Admin API, console, `/healthz`, `/readyz`, `/metrics` |
 
-The LLM is any OpenAI-compatible endpoint: `MB_LLM_BASE_URL` (default `https://openrouter.ai/api/v1`) and `MB_LLM_MODEL` (default `deepseek/deepseek-v4.1-flash`, DeepSeek V4.1 Flash on OpenRouter). A local Ollama works with `MB_LLM_BASE_URL=http://127.0.0.1:11434/v1` and any dummy key.
+The LLM is any OpenAI-compatible endpoint: `MB_LLM_BASE_URL` (default `https://openrouter.ai/api/v1`) and `MB_LLM_MODEL` (default `deepseek/deepseek-v4.1-flash-1017`, a dated DeepSeek V4.1 Flash snapshot on OpenRouter). A local Ollama works with `MB_LLM_BASE_URL=http://127.0.0.1:11434/v1` and any dummy key.
 
 ## Offline mode
 

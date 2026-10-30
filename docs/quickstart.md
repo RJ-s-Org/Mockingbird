@@ -99,7 +99,7 @@ llm:
   profiles:
     openrouter:
       base_url: https://openrouter.ai/api/v1
-      model: deepseek/deepseek-v4.1-flash
+      model: deepseek/deepseek-v4.1-flash-1017
       api_key: env:OPENROUTER_API_KEY # a secret reference: env:NAME, file:/path or vault:…
 mocks:
   orders:

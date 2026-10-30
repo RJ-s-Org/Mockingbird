@@ -51,7 +51,7 @@ To give the mocks an LLM (richer, persona-driven answers), create the Secret in 
 llm:
   existingSecret: mockingbird-llm   # key api-key
   baseUrl: https://openrouter.ai/api/v1
-  model: deepseek/deepseek-v4.1-flash
+  model: deepseek/deepseek-v4.1-flash-1017
 ```
 
 Each mock can cap its spend with `limits.daily_token_budget`; once it is spent, the mock falls back to the faker.

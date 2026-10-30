@@ -35,7 +35,7 @@ body:
     id: model
     attributes:
       label: LLM provider and model
-      description: For example `openrouter`, `deepseek/deepseek-v4.1-flash`; or `--offline`.
+      description: For example `openrouter`, `deepseek/deepseek-v4.1-flash-1017`; or `--offline`.
   - type: textarea
     id: expected
     attributes:

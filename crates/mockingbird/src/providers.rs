@@ -74,7 +74,7 @@ pub const PRESETS: &[Preset] = &[
         id: "openrouter",
         name: "OpenRouter",
         base_url: "https://openrouter.ai/api/v1",
-        default_model: Some("deepseek/deepseek-v4.1-flash"),
+        default_model: Some("deepseek/deepseek-v4.1-flash-1017"),
         key_env: Some("OPENROUTER_API_KEY"),
         key_required: true,
         // JSON-object mode: some routes (DeepSeek on DigitalOcean) drop the
@@ -700,7 +700,7 @@ mod tests {
         // wrap top-level arrays) and a timeout a remote model can meet.
         // JSON Schema mode loses the answer on some OpenRouter routes.
         assert_eq!(p.mode(), OutputMode::JsonObject);
-        assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
+        assert_eq!(p.model, "deepseek/deepseek-v4.1-flash-1017");
         assert_eq!(p.timeout, std::time::Duration::from_secs(60));
         assert_eq!(p.max_tokens, 16_384);
     }

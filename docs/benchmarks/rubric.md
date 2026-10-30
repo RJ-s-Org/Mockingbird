@@ -195,7 +195,7 @@ stakes that most models clear; what separates them is whether the data looks rea
 `S` and `K` together still weigh 0.60, so a model cannot buy a good Value with
 pretty but invalid output.
 
-Value relative to the baseline `b = deepseek/deepseek-v4.1-flash`:
+Value relative to the baseline `b = deepseek/deepseek-v4.1-flash`, the shipped default when rounds 1 and 2 ran. It stays the baseline so their figures remain comparable:
 
 `Value = 100 * (Q / Q_b)^2 / ( (C / C_b)^0.5 * (L / L_b)^0.5 )`
 
