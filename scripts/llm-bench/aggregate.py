@@ -38,7 +38,10 @@ BASELINE = "deepseek/deepseek-v4.1-flash"
 SEED = "mb-bench-2026-10-29"
 API_ORDER = ["rest", "graphql", "grpc", "soap", "asyncapi"]
 DOMAIN_STRATA = ["travel", "payments"]
-ENGINE_SOURCES = ("llm", "repaired", "fallback")
+# "patched" (a local fix, no second call) is split from "repaired" (an LLM
+# repair round trip) since #142; earlier runs report both as "repaired".
+ENGINE_SOURCES = ("llm", "patched", "repaired", "fallback")
+VALID_SOURCES = ("llm", "patched", "repaired")
 ERROR_KINDS = ("http_4xx", "http_5xx", "stream_error", "empty")
 DEFAULT_KEYWORDS = {
     "format": ["format"],
@@ -353,6 +356,7 @@ def tally(items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]], has_grad
     n = len(items)
     sources = Counter(s.get("source") for s, _ in items)
     llm, repaired, fallback = sources.get("llm", 0), sources.get("repaired", 0), sources.get("fallback", 0)
+    patched = sources.get("patched", 0)
     non_fallback = [(s, g) for s, g in items if s.get("source") != "fallback"]
     # K denominator is N' = N - fallback (rubric 2). A non-fallback sample with no
     # grade row counts as non-conforming; only samples grade.py could not check
@@ -364,7 +368,8 @@ def tally(items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]], has_grad
     return {
         "n": n,
         "first_try": rate(llm, n),
-        "schema_valid": rate(llm + repaired, n),
+        "schema_valid": rate(llm + patched + repaired, n),
+        "patch": rate(patched, n),
         "repair": rate(repaired, n),
         "fallback": rate(fallback, n),
         "conformance": rate(conforming, len(graded)) if has_grades else None,
@@ -525,7 +530,7 @@ def valid_empty_object(sample: Optional[Dict[str, Any]], grade: Optional[Dict[st
     score: they are excluded from J (neither penalised nor rewarded) and counted
     in `judge_excluded_valid_empty`.
     """
-    return (sample is not None and sample.get("source") in ("llm", "repaired")
+    return (sample is not None and sample.get("source") in VALID_SOURCES
             and not sample.get("error") and sample.get("body") == {}
             and grade is not None and grade.get("valid") is True)
 

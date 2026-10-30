@@ -114,7 +114,7 @@ def frame(out: str, pilot: bool, budget: float, stop: float) -> (str, bool):
         sdir = os.path.join(base, slug) if pilot else os.path.join(out, "engine", slug)
         samples = read_jsonl(os.path.join(sdir, "samples.jsonl"))
         n = len(samples)
-        valid = sum(1 for s in samples if s.get("source") in ("llm", "repaired"))
+        valid = sum(1 for s in samples if s.get("source") in ("llm", "patched", "repaired"))
         fallback = sum(1 for s in samples if s.get("source") == "fallback")
         engine = [r for r in recs if not r.get("error_kind")]
         ttft = p50([float(r["ttft_ms"]) for r in engine if r.get("ttft_ms") is not None])
@@ -133,7 +133,7 @@ def frame(out: str, pilot: bool, budget: float, stop: float) -> (str, bool):
             f"{(RED if errs else '') + str(errs) + RESET:>{4 + len(RESET) + (len(RED) if errs else 0)}} ${cost:>7.4f}"
         )
     lines.append("")
-    lines.append(f"{DIM}valid = schema-valid (first try or repaired) · TTFT/p50 from the proxy ledger · "
+    lines.append(f"{DIM}valid = schema-valid (first try, patched or repaired) · TTFT/p50 from the proxy ledger · "
                  f"{len(ledger)} calls{RESET}")
     # The pilot writes no run state: a recorder passes --until-file instead.
     finished = bool(state and state.get("finished"))
