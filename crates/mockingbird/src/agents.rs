@@ -462,13 +462,20 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<Value> {
                 ));
             }
         } else if !names.is_empty() && syntax == EnvSyntax::Unsupported {
-            out.insert(
-                "passthrough_unsupported".into(),
-                json!(format!(
+            let message = if args.client == Client::ClaudeCode {
+                // Claude Code reads `${NAME:-}` in a project `.mcp.json`;
+                // only the printed `claude mcp add` line cannot carry it.
+                "a `claude mcp add --scope user` line cannot pass variables through (the shell would write their values into ~/.claude.json); use --scope project, which writes `${NAME:-}` references to .mcp.json, or run `mockingbird keys setup` to store the key in a file instead".to_string()
+            } else {
+                format!(
                     "{} cannot read variables in its MCP config; run `mockingbird keys setup` to store the key in a file instead",
-                    args.client.to_possible_value().map(|v| v.get_name().to_string()).unwrap_or_default()
-                )),
-            );
+                    args.client
+                        .to_possible_value()
+                        .map(|v| v.get_name().to_string())
+                        .unwrap_or_default()
+                )
+            };
+            out.insert("passthrough_unsupported".into(), json!(message));
         }
     }
     if !args.no_skills {

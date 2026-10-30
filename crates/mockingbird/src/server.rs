@@ -171,7 +171,10 @@ async fn run_inner(
 
     let (stop_tx, stop_rx) = watch::channel(false);
     tokio::spawn(async move {
-        shutdown_signal().await;
+        tokio::select! {
+            () = shutdown_signal() => {}
+            () = stop_file_appears() => {}
+        }
         tracing::info!("shutting down");
         crate::runtime::stop_open_streams();
         let _ = stop_tx.send(true);
@@ -290,6 +293,25 @@ async fn serve_listener(
             watcher.abort();
             served
         }
+    }
+}
+
+/// Resolves once the file named by [`crate::daemon::STOP_FILE_ENV`] exists,
+/// after removing it; never when the variable is unset. `server stop`
+/// creates it to stop a background server gracefully on every platform.
+async fn stop_file_appears() {
+    let Some(path) = std::env::var_os(crate::daemon::STOP_FILE_ENV).filter(|p| !p.is_empty())
+    else {
+        return std::future::pending().await;
+    };
+    let path = std::path::PathBuf::from(path);
+    loop {
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_file(&path).await;
+            tracing::info!("stop file {} found", path.display());
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 

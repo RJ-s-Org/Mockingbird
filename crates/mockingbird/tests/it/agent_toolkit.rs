@@ -322,6 +322,25 @@ fn agent_install_passes_key_names_not_values() {
             .contains("keys setup"),
         "{out}"
     );
+    // MOCKINGBIRD-STUB-11: Claude Code reads variables, but not through a
+    // printed `claude mcp add` line; the message says so.
+    let out = run(
+        dir.path(),
+        &[
+            "agent",
+            "install",
+            "claude-code",
+            "--scope",
+            "user",
+            "--no-skills",
+        ],
+    );
+    let msg = out["passthrough_unsupported"].as_str().unwrap();
+    assert!(
+        msg.contains("--scope project") && msg.contains("keys setup"),
+        "{out}"
+    );
+    assert!(!msg.contains("cannot read variables"), "{msg}");
     let bad = bin()
         .args([
             "agent",

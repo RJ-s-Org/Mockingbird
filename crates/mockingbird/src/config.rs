@@ -876,16 +876,21 @@ async fn build_app_inner(
         Role::All | Role::Control => {
             let flags = args.clone();
             let initial_brokers = broker_configs.clone();
-            let initial_proxy = cfg.proxy.clone();
+            let initial = cfg.clone();
             let prepare: watch::Prepare = Arc::new(move |cfg: &mut FileConfig| {
                 file_config::apply_env(cfg)?;
                 apply_flags(cfg, &flags);
                 cfg.validate_ranges().map_err(|e| anyhow!(e))?;
-                // The proxy is started once: say so instead of ignoring an
-                // edit silently.
-                if cfg.proxy != initial_proxy {
+                // The proxy and the other read-at-startup sections are
+                // used once: say so instead of ignoring an edit silently.
+                if cfg.proxy != initial.proxy {
                     tracing::warn!(
                         "config reload: the proxy: section changed; restart the server to apply it (mocks and their hosts are reloaded)"
+                    );
+                }
+                for section in restart_only_changes(&initial, cfg) {
+                    tracing::warn!(
+                        "config reload: the {section}: section changed; restart the server to apply it"
                     );
                 }
                 // Brokers are connected at startup only: a reload that
@@ -1246,9 +1251,32 @@ impl SecretStore for EnvKeyOverlay {
     }
 }
 
+/// The read-at-startup sections (besides `proxy:` and `brokers:`, which a
+/// reload handles itself) that differ between `initial`, the configuration
+/// the process started with, and `next`, a reloaded one: a `--watch`
+/// reload cannot apply them, so it warns about each.
+fn restart_only_changes(initial: &FileConfig, next: &FileConfig) -> Vec<&'static str> {
+    let sections = [
+        ("server", initial.server != next.server),
+        ("storage", initial.storage != next.storage),
+        ("protocols", initial.protocols != next.protocols),
+        ("auth", initial.auth != next.auth),
+        ("audit", initial.audit != next.audit),
+        ("outbound", initial.outbound != next.outbound),
+        ("bus", initial.bus != next.bus),
+        ("limits", initial.limits != next.limits),
+        ("pii", initial.pii != next.pii),
+        ("import", initial.import != next.import),
+    ];
+    sections
+        .into_iter()
+        .filter_map(|(name, changed)| changed.then_some(name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{console_placeholder_warning, vault_http};
+    use super::{FileConfig, console_placeholder_warning, restart_only_changes, vault_http};
 
     #[test]
     fn the_vault_client_gets_the_outbound_proxy_and_roots() {
@@ -1278,5 +1306,25 @@ mod tests {
             "{warning}"
         );
         assert_eq!(console_placeholder_warning(false), None);
+    }
+
+    /// MOCKINGBIRD-STUB-9: every read-at-startup section a reload changes
+    /// is named; live sections (mocks, LLM profiles, the request log) are
+    /// not.
+    #[test]
+    fn reload_names_the_sections_that_need_a_restart() {
+        let initial = FileConfig::default();
+        let mut next = initial.clone();
+        assert!(restart_only_changes(&initial, &next).is_empty());
+        next.observability.request_log_retention += 1;
+        next.llm.default_profile = Some("other".into());
+        assert!(restart_only_changes(&initial, &next).is_empty());
+        next.server.port = next.server.port.wrapping_add(1);
+        next.limits.max_request_bytes += 1;
+        next.auth.public_metrics = !next.auth.public_metrics;
+        assert_eq!(
+            restart_only_changes(&initial, &next),
+            ["server", "auth", "limits"]
+        );
     }
 }
