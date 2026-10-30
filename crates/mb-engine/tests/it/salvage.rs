@@ -100,14 +100,28 @@ async fn a_member_the_cut_dropped_is_filled() {
     order_validator().validate(&body).unwrap();
 }
 
+/// A cut string is dropped, not served shortened: a required one is
+/// refilled whole. Half a surrogate pair goes with it.
 #[tokio::test]
-async fn a_cut_string_is_closed_where_it_stops() {
+async fn a_cut_string_is_dropped_and_refilled() {
     let partial =
-        format!(r#"{{"id": "{ID}", "status": "pending", "total": 42.5, "customerId": "cust-0"#);
-    let (_, engine) = scripted(vec![Err(cut(&partial))]);
+        r#"{"customerId": "c1", "status": "pending", "total": 42.5, "id": "7f9c2ba4-e88f"#;
+    let (_, engine) = scripted(vec![Err(cut(partial))]);
     let out = generate(&engine, "getOrder").await;
     assert_eq!(out.source, Source::Patched);
-    assert_eq!(out.body.unwrap()["customerId"], "cust-0");
+    let body = out.body.unwrap();
+    assert_ne!(body["id"], "7f9c2ba4-e88f");
+    assert_eq!(body["customerId"], "c1");
+    order_validator().validate(&body).unwrap();
+
+    let partial = format!(
+        r#"{{"id": "{ID}", "customerId": "c1", "status": "pending", "total": 4.5, "note": "hi \uD83D\uDE"#
+    );
+    let (provider, engine) = scripted(vec![Err(cut(&partial))]);
+    let out = generate(&engine, "getOrder").await;
+    assert_eq!(out.source, Source::Patched);
+    assert_eq!(out.body.unwrap()["total"], 4.5);
+    assert_eq!(provider.requests().len(), 1);
 }
 
 /// The complete items are kept; the cut one keeps its complete members
@@ -148,34 +162,83 @@ async fn a_cut_items_envelope_is_salvaged_and_unwrapped() {
     assert_eq!(items[1]["customerId"], "c2");
 }
 
-/// An answer that ends inside its value without the provider reporting a
-/// cut is salvaged too.
+/// An answer the provider did not cut is never salvaged: a missing `}`
+/// is repaired, and its real values are not replaced by the faker's.
 #[tokio::test]
-async fn an_answer_ending_inside_its_value_is_salvaged() {
-    let partial = format!(
-        r#"Here: {{"id": "{ID}", "customerId": "c1", "status": "pending", "total": 1, "note": "a"#
-    );
-    let (provider, engine) = scripted(vec![Ok(partial)]);
+async fn an_uncut_answer_ending_inside_its_value_is_repaired() {
+    let partial =
+        format!(r#"{{"id": "{ID}", "customerId": "c1", "status": "pending", "total": 42.5"#);
+    let (provider, engine) = scripted(vec![Ok(partial.clone()), Ok(valid_order().to_string())]);
     let out = generate(&engine, "getOrder").await;
-    assert_eq!(out.source, Source::Patched);
-    assert_eq!(out.body.unwrap()["customerId"], "c1");
+    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(out.body.unwrap()["total"], 42.5);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let repair = &requests[1].messages.last().unwrap().content;
+    assert!(!repair.contains("cut off"), "{repair}");
+
+    let (_, engine) = scripted(vec![Ok(partial)]);
+    let reason = generate(&engine, "getOrder").await.fallback_reason.unwrap();
+    assert!(!reason.contains("truncated"), "{reason}");
+}
+
+/// A complete answer before cut prose is accepted as it is.
+#[tokio::test]
+async fn a_complete_answer_before_cut_prose_is_llm() {
+    let partial = format!(
+        "```json\n{}\n```\nThis order is pending and the total",
+        valid_order()
+    );
+    let (provider, engine) = scripted(vec![Err(cut(&partial))]);
+    let out = generate(&engine, "getOrder").await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body.unwrap()["total"], 42.5);
     assert_eq!(provider.requests().len(), 1);
 }
 
+/// A cut wrapped answer is completed inside the wrapper: its own values are
+/// the answer, with nothing faked around the wrapper.
+#[tokio::test]
+async fn a_cut_wrapped_answer_is_completed_inside_the_wrapper() {
+    let partial = format!(
+        r#"{{"payment_intent": {{"id": "{ID}", "customerId": "c1", "status": "pending", "total": 4"#
+    );
+    let (_, engine) = scripted(vec![Err(cut(&partial))]);
+    let out = generate(&engine, "getOrder").await;
+    assert_eq!(out.source, Source::Patched);
+    let body = out.body.unwrap();
+    assert!(body.get("payment_intent").is_none(), "{body}");
+    assert_eq!(body["id"], ID);
+    assert_eq!(body["customerId"], "c1");
+    assert_eq!(body["status"], "pending");
+    order_validator().validate(&body).unwrap();
+}
+
 /// The salvage closes the outermost value; it never answers with a value
-/// nested in the cut one.
+/// nested in the cut one, nor fills an answer that is no order.
 #[tokio::test]
 async fn the_salvage_never_returns_an_inner_fragment() {
     let inner = valid_order();
     let partial = format!(r#"{{"order": {inner}, "others": [{inner}, {{"id": "#);
-    let (_, engine) = scripted(vec![Err(cut(&partial)), Err(cut("{"))]);
+    let (provider, engine) = scripted(vec![Err(cut(&partial)), Ok("no json".into())]);
     let out = generate(&engine, "getOrder").await;
-    let body = out.body.unwrap();
-    assert_ne!(out.source, Source::Llm);
-    if out.source == Source::Patched {
-        // The closed root, completed: the wrapper's members stay.
-        assert!(body.get("order").is_some(), "{body}");
-    }
+    assert_eq!(out.source, Source::Fallback);
+    assert_eq!(provider.requests().len(), 2);
+    assert_ne!(out.body.unwrap()["customerId"], "c1");
+
+    // Broken before the cut (a comment): the category inside is no root.
+    let partial = format!(
+        "{{\"id\": \"{ID}\", \"customerId\": \"REAL\", // c\n \"status\": \"pending\", \"total\": 1, \"category\": {{\"name\": \"books\", \"parent\": {{\"na"
+    );
+    let (provider, engine) = scripted(vec![Err(cut(&partial)), Ok("no json".into())]);
+    let out = generate(&engine, "getOrder").await;
+    assert_eq!(out.source, Source::Fallback);
+    assert_eq!(provider.requests().len(), 2);
+    assert!(
+        out.fallback_reason
+            .unwrap()
+            .starts_with("LLM output truncated")
+    );
 }
 
 /// When nothing complete can be closed, the repair request says the answer
@@ -261,6 +324,29 @@ async fn the_schema_itself_is_named() {
     .await;
     assert!(
         request.starts_with("You returned the JSON Schema itself"),
+        "{request}"
+    );
+}
+
+/// Data with its own `type` and `properties` members is not the schema; an
+/// array root answered with one such object is "array expected".
+#[tokio::test]
+async fn data_with_type_and_properties_is_not_the_schema() {
+    let request = repair_request(
+        "getOrder",
+        json!({"id": ID, "type": "x", "properties": {"a": 1}}),
+        false,
+    )
+    .await;
+    assert!(!request.contains("JSON Schema itself"), "{request}");
+    let request = repair_request(
+        "listOrders",
+        json!({"type": "Feature", "properties": {"name": "a"}}),
+        false,
+    )
+    .await;
+    assert!(
+        request.starts_with("An array was expected at the root"),
         "{request}"
     );
 }

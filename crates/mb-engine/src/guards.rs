@@ -286,12 +286,19 @@ impl Engine {
         }
         let checked = if fill_missing {
             // Filled only when the value is not valid as it is (or
-            // unwrapped): members are never filled around a wrapper.
+            // unwrapped), and never around a wrapper: a wrapped answer has
+            // its inner value filled, so its own data stays the answer.
             match self.check_value(validator, value.clone(), echoes) {
-                Checked::Invalid(errors) => match self.fill_missing(validator, &value) {
-                    Some(filled) => self.check_value(validator, filled, echoes),
-                    None => Checked::Invalid(errors),
-                },
+                Checked::Invalid(errors) => {
+                    let target = wrapped(validator, &value).cloned().unwrap_or(value);
+                    if !answers_root(validator, &target) {
+                        return Checked::Invalid(errors);
+                    }
+                    match self.fill_missing(validator, &target) {
+                        Some(filled) => self.check_value(validator, filled, echoes),
+                        None => Checked::Invalid(errors),
+                    }
+                }
                 checked => checked,
             }
         } else {
@@ -456,19 +463,6 @@ pub(crate) fn shape_hints(
 with its required members."
                 .to_string(),
         ),
-        Value::Object(map)
-            if (map.contains_key("$schema")
-                || (map.get("properties").is_some_and(Value::is_object)
-                    && (map.contains_key("type") || map.contains_key("required"))))
-                && !declares("$schema")
-                && !declares("properties") =>
-        {
-            hints.push(
-                "You returned the JSON Schema itself (`$schema`/`properties` at the root). Return \
-data that matches the schema, not the schema."
-                    .to_string(),
-            );
-        }
         Value::Object(map) => {
             let mut present = map.iter().filter(|(_, v)| !v.is_null());
             let sole = match (present.next(), present.next()) {
@@ -477,6 +471,11 @@ data that matches the schema, not the schema."
                 }
                 _ => None,
             };
+            let schema_itself = (map.contains_key("$schema")
+                || (map.get("properties").is_some_and(Value::is_object)
+                    && map.get("type").is_some_and(|t| t == "object")))
+                && !declares("$schema")
+                && !declares("properties");
             if wants_array && items_envelope {
                 if !matches!(sole, Some((key, inner)) if key == ITEMS_KEY && inner.is_array()) {
                     hints.push(format!(
@@ -495,6 +494,12 @@ return the array itself."
                             .to_string(),
                     ),
                 }
+            } else if schema_itself {
+                hints.push(
+                    "You returned the JSON Schema itself (`$schema`/`properties` at the root). \
+Return data that matches the schema, not the schema."
+                        .to_string(),
+                );
             } else if let Some((key, _)) = sole
                 && wants_object
                 && !declares(key)
@@ -636,6 +641,43 @@ impl Engine {
             |node| faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng),
         )
     }
+}
+
+/// Whether `value` is an attempt at the root schema worth completing: an
+/// object for a root that declares properties holds at least one of them
+/// (`{"order": {...}, "others": [...]}` is no order to fill in).
+fn answers_root(validator: &SchemaValidator, value: &Value) -> bool {
+    match (value, validator.declared_property_names()) {
+        (Value::Object(map), Some(declared)) => map.keys().any(|k| declared.contains(k)),
+        _ => true,
+    }
+}
+
+/// The value inside one or two nested one-member objects (`{"payment_intent":
+/// {...}}`) whose keys the root schema does not declare, when it has the
+/// root's kind (an object for an object root, an array for an array root).
+fn wrapped<'v>(validator: &SchemaValidator, value: &'v Value) -> Option<&'v Value> {
+    let wants_array = is_array_root(validator.schema());
+    let declared = validator.declared_property_names();
+    let mut value = value;
+    let mut inner = None;
+    for _ in 0..2 {
+        let Value::Object(map) = value else {
+            break;
+        };
+        let mut present = map.iter().filter(|(_, v)| !v.is_null());
+        let (Some((key, next)), None) = (present.next(), present.next()) else {
+            break;
+        };
+        if declared.is_some_and(|d| d.contains(key)) || !(next.is_object() || next.is_array()) {
+            break;
+        }
+        value = next;
+        if next.is_array() == wants_array {
+            inner = Some(next);
+        }
+    }
+    inner
 }
 
 /// The list a one-member object wraps (`{"orders": [...]}`), which a

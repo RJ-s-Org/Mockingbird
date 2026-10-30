@@ -1,5 +1,4 @@
-//! Close a JSON answer cut short: the output stopped at `max_tokens`, or
-//! ended inside the value.
+//! Close a JSON answer the provider cut short at `max_tokens`.
 
 use serde_json::Value;
 
@@ -9,12 +8,14 @@ const MAX_STARTS: usize = 8;
 /// The JSON object or array that `text` starts (after any prose or Markdown
 /// fence) and that its end cuts short, closed: the trailing member or
 /// element that is incomplete is dropped (a key without its value, a cut
-/// number or literal), a cut string value is closed where it stops, and the
+/// string, number or literal: `"cust-0"` may be `"cust-0042"`), and the
 /// open arrays and objects are closed. `None` when the text holds no value
 /// cut short, or when nothing of it is complete (an empty root).
 ///
 /// Only the outermost value is closed: a value nested in it is never
-/// returned on its own (see `extract::first_value`).
+/// returned on its own. A candidate that breaks before the end of the text
+/// (a comment, an unquoted key, a mismatched bracket) ends the search, as
+/// in `extract::first_value`: the `{` after the break is inside it.
 pub(crate) fn close_truncated(text: &str) -> Option<Value> {
     let mut next = 0;
     for (tries, (start, _)) in text.match_indices(['{', '[']).enumerate() {
@@ -26,7 +27,9 @@ pub(crate) fn close_truncated(text: &str) -> Option<Value> {
         }
         match close(&text[start..]) {
             Scan::Cut(value) => return Some(value),
-            Scan::Ended(end) => next = start + end.max(1),
+            // Brackets in prose (`[draft]`): look after them.
+            Scan::Closed(end) => next = start + end,
+            Scan::Broken => return None,
         }
     }
     None
@@ -41,11 +44,12 @@ enum Frame {
 }
 
 enum Scan {
-    /// The value, cut short and closed (`None` from [`close`] when it
-    /// could not be).
+    /// The value, cut short and closed.
     Cut(Value),
-    /// The value ended (closed, or broken) at this byte offset.
-    Ended(usize),
+    /// The value's brackets closed at this byte offset: it is not cut.
+    Closed(usize),
+    /// Not JSON before the end of the text, or nothing to salvage.
+    Broken,
 }
 
 /// Scans the value `text` starts with (`{` or `[`), keeping the last point
@@ -64,7 +68,7 @@ fn close(text: &str) -> Scan {
             b' ' | b'\t' | b'\n' | b'\r' => i += 1,
             b @ (b'{' | b'[') => {
                 if in_key {
-                    return Scan::Ended(i);
+                    return Scan::Broken;
                 }
                 stack.push(if b == b'{' {
                     Frame::Object { value: false }
@@ -76,11 +80,11 @@ fn close(text: &str) -> Scan {
             b @ (b'}' | b']') => {
                 match (stack.pop(), b) {
                     (Some(Frame::Object { .. }), b'}') | (Some(Frame::Array), b']') => {}
-                    _ => return Scan::Ended(i),
+                    _ => return Scan::Broken,
                 }
                 i += 1;
                 if stack.is_empty() {
-                    return Scan::Ended(i);
+                    return Scan::Closed(i);
                 }
                 cut = (i, stack.len());
             }
@@ -89,7 +93,7 @@ fn close(text: &str) -> Scan {
                     *value = true;
                     i += 1;
                 }
-                _ => return Scan::Ended(i),
+                _ => return Scan::Broken,
             },
             b',' => {
                 if let Some(Frame::Object { value }) = stack.last_mut() {
@@ -104,12 +108,8 @@ fn close(text: &str) -> Scan {
                         cut = (i, stack.len());
                     }
                 }
-                None if in_key => break,
-                // Cut inside a string value: it ends where it stops.
-                None => {
-                    let closed = format!("{}\"", without_partial_escape(text));
-                    return finish(&closed, &stack);
-                }
+                // Cut inside a key or a string value: dropped.
+                None => break,
             },
             _ => {
                 let end = bytes[i..]
@@ -117,7 +117,7 @@ fn close(text: &str) -> Scan {
                     .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')))
                     .map_or(bytes.len(), |n| i + n);
                 if end == i || in_key {
-                    return Scan::Ended(i);
+                    return Scan::Broken;
                 }
                 if end == bytes.len() {
                     // Cut inside a number or literal: `12` may be `1234`.
@@ -130,7 +130,7 @@ fn close(text: &str) -> Scan {
     }
     let (end, depth) = cut;
     if depth == 0 {
-        return Scan::Ended(bytes.len());
+        return Scan::Broken;
     }
     finish(&text[..end], &stack[..depth])
 }
@@ -147,7 +147,7 @@ fn finish(text: &str, open: &[Frame]) -> Scan {
     }
     match serde_json::from_str::<Value>(&closed) {
         Ok(value) if !is_empty(&value) => Scan::Cut(value),
-        _ => Scan::Ended(text.len()),
+        _ => Scan::Broken,
     }
 }
 
@@ -171,35 +171,6 @@ fn string_end(bytes: &[u8], from: usize) -> Option<usize> {
         }
     }
     None
-}
-
-/// `text`, which ends inside a string, without an escape sequence the cut
-/// left incomplete (`\` or `\u12`).
-fn without_partial_escape(text: &str) -> &str {
-    let bytes = text.as_bytes();
-    let backslashes = bytes.iter().rev().take_while(|&&b| b == b'\\').count();
-    if backslashes % 2 == 1 {
-        return &text[..text.len() - 1];
-    }
-    // `\u` and up to three hex digits.
-    let hex = bytes
-        .iter()
-        .rev()
-        .take(3)
-        .take_while(|b| b.is_ascii_hexdigit())
-        .count();
-    let before = bytes.len() - hex;
-    if before >= 2 && &bytes[before - 2..before] == b"\\u" {
-        let escaped = bytes[..before - 2]
-            .iter()
-            .rev()
-            .take_while(|&&b| b == b'\\')
-            .count();
-        if escaped % 2 == 0 {
-            return &text[..before - 2];
-        }
-    }
-    text
 }
 
 #[cfg(test)]
@@ -233,19 +204,22 @@ mod tests {
         assert_eq!(close_truncated("[1, 2, "), Some(json!([1, 2])));
     }
 
+    /// A cut string is dropped like a cut number: a shortened id or URL
+    /// is worse than none (a required one is refilled).
     #[test]
-    fn a_cut_string_value_is_closed_where_it_stops() {
+    fn a_cut_string_value_is_dropped() {
         assert_eq!(
-            close_truncated(r#"{"id": 1, "bio": "Writes about bir"#),
-            Some(json!({"id": 1, "bio": "Writes about bir"}))
+            close_truncated(r#"{"id": 1, "ref": "7f9c2ba4-e88f"#),
+            Some(json!({"id": 1}))
         );
         assert_eq!(
             close_truncated(r#"{"id": 1, "bio": "a \"quote\" and \"#),
-            Some(json!({"id": 1, "bio": "a \"quote\" and "}))
+            Some(json!({"id": 1}))
         );
+        // Half a surrogate pair goes with it.
         assert_eq!(
-            close_truncated(r#"{"id": 1, "bio": "caf\u00"#),
-            Some(json!({"id": 1, "bio": "caf"}))
+            close_truncated(r#"{"id": 1, "note": "hi \uD83D\uDE"#),
+            Some(json!({"id": 1}))
         );
     }
 
@@ -253,7 +227,7 @@ mod tests {
     fn a_cut_items_envelope_is_closed_as_the_envelope() {
         assert_eq!(
             close_truncated(r#"{"items": [{"id": 1}, {"id": 2, "name": "b"#),
-            Some(json!({"items": [{"id": 1}, {"id": 2, "name": "b"}]}))
+            Some(json!({"items": [{"id": 1}, {"id": 2}]}))
         );
     }
 
@@ -272,5 +246,12 @@ mod tests {
         assert_eq!(close_truncated(r#"{"a": {"b": 1}, // note"#), None);
         assert_eq!(close_truncated(r#"{"a"#), None);
         assert_eq!(close_truncated("no json"), None);
+        // A value nested in one that broke is never a root.
+        assert_eq!(
+            close_truncated("{\"a\": 1, // c\n \"b\": {\"c\": 2, \"d\": {\"e"),
+            None
+        );
+        assert_eq!(close_truncated(r#"{a: 1, "b": {"c": 2, "d": [1, 2"#), None);
+        assert_eq!(close_truncated(r#"{"a": [1}, "b": {"c": 2, "d": [1"#), None);
     }
 }

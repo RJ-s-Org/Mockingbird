@@ -198,43 +198,37 @@ impl OpenAiCompatible {
         Reasoning::from_u8(self.reasoning.load(Ordering::Relaxed))
     }
 
-    /// The `reasoning` member requests send; `None` when `extra_body` sets
-    /// its own.
-    fn sent_reasoning(&self) -> Option<Value> {
+    /// The `reasoning` member a request with `setting` sends; `None` when
+    /// `extra_body` sets its own.
+    fn sent_reasoning(&self, setting: Reasoning) -> Option<Value> {
         if self.config.extra_body.contains_key("reasoning") {
             return None;
         }
-        self.reasoning_setting().body()
+        setting.body()
     }
 
-    /// Whether `e` rejects the `reasoning` setting this client sent; if so
-    /// the setting steps down for good (off, then minimal effort, then
-    /// none), with a warning naming the model.
-    fn rejected_reasoning(&self, e: &LlmError) -> bool {
-        let Some(sent) = self.sent_reasoning() else {
+    /// Whether `e` rejects the `reasoning` setting `sent` with the request;
+    /// if so the setting steps down from `sent` for good (off, then minimal
+    /// effort, then none), with a warning naming the model. Concurrent
+    /// calls that sent the same setting step it down once.
+    fn rejected_reasoning(&self, e: &LlmError, sent: Reasoning) -> bool {
+        let Some(sent_body) = self.sent_reasoning(sent) else {
             return false;
         };
         let rejected = matches!(e, LlmError::Http { status: 400 | 404 | 422, body }
-            if { let body = body.to_ascii_lowercase(); body.contains("reasoning") || body.contains("effort") });
+            if rejects_reasoning(body, sent));
         if !rejected {
             return false;
         }
-        let current = self.reasoning_setting();
-        let next = current.step_down();
-        // Another call may have stepped down already; only one warns.
+        let next = sent.step_down();
         if self
             .reasoning
-            .compare_exchange(
-                current as u8,
-                next as u8,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
+            .compare_exchange(sent as u8, next as u8, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
             tracing::warn!(
                 model = %self.config.model,
-                rejected = %sent,
+                rejected = %sent_body,
                 sending = %next.body().map_or_else(|| "no reasoning setting".to_string(), |b| b.to_string()),
                 "the model rejects the reasoning setting; it reasons, and its reasoning tokens count against max_tokens"
             );
@@ -271,7 +265,7 @@ impl OpenAiCompatible {
         )
     }
 
-    fn body(&self, req: &ChatRequest) -> Value {
+    fn body(&self, req: &ChatRequest, reasoning: Reasoning) -> Value {
         let messages: Vec<Value> = req
             .messages
             .iter()
@@ -302,7 +296,7 @@ impl OpenAiCompatible {
                     obj.insert(key.clone(), value.clone());
                 }
             }
-            if let Some(reasoning) = self.sent_reasoning() {
+            if let Some(reasoning) = self.sent_reasoning(reasoning) {
                 obj.insert("reasoning".to_string(), reasoning);
             }
         }
@@ -330,11 +324,13 @@ impl OpenAiCompatible {
     async fn open_stream(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
         // The reasoning setting steps down at most twice and stream_options
         // is dropped at most once, so this is four tries at most.
-        let mut result = self.open_stream_once(req).await;
+        let mut sent = self.reasoning_setting();
+        let mut result = self.open_stream_once(req, sent).await;
         for _ in 0..3 {
             match result {
-                Err(e) if self.rejected_reasoning(&e) || self.rejected_stream_usage(&e) => {
-                    result = self.open_stream_once(req).await;
+                Err(e) if self.rejected_reasoning(&e, sent) || self.rejected_stream_usage(&e) => {
+                    sent = self.reasoning_setting();
+                    result = self.open_stream_once(req, sent).await;
                 }
                 other => return other,
             }
@@ -342,8 +338,12 @@ impl OpenAiCompatible {
         result
     }
 
-    async fn open_stream_once(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
-        let mut body = self.body(req);
+    async fn open_stream_once(
+        &self,
+        req: &ChatRequest,
+        reasoning: Reasoning,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut body = self.body(req, reasoning);
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), Value::Bool(true));
             if self.sends_stream_usage() {
@@ -367,18 +367,26 @@ impl OpenAiCompatible {
 
     async fn send(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         // The reasoning setting steps down at most twice.
-        let mut result = self.send_once(req).await;
+        let mut sent = self.reasoning_setting();
+        let mut result = self.send_once(req, sent).await;
         for _ in 0..2 {
             match result {
-                Err(e) if self.rejected_reasoning(&e) => result = self.send_once(req).await,
+                Err(e) if self.rejected_reasoning(&e, sent) => {
+                    sent = self.reasoning_setting();
+                    result = self.send_once(req, sent).await;
+                }
                 other => return other,
             }
         }
         result
     }
 
-    async fn send_once(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let resp = self.post(&self.body(req)).await?;
+    async fn send_once(
+        &self,
+        req: &ChatRequest,
+        reasoning: Reasoning,
+    ) -> Result<ChatResponse, LlmError> {
+        let resp = self.post(&self.body(req, reasoning)).await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -448,6 +456,35 @@ impl Reasoning {
             Reasoning::Minimal | Reasoning::Unset => Reasoning::Unset,
         }
     }
+}
+
+/// Whether an error `body` rejects the request's `reasoning` parameter
+/// itself (`sent`): it names `reasoning` (or `effort`, when that was sent)
+/// and says the parameter or value is unsupported, invalid or mandatory. An
+/// error that only mentions reasoning (a context-length error counting
+/// reasoning tokens) is not one.
+fn rejects_reasoning(body: &str, sent: Reasoning) -> bool {
+    let body = body.to_ascii_lowercase();
+    let names =
+        body.contains("reasoning") || (sent == Reasoning::Minimal && body.contains("effort"));
+    if !names || body.contains("context length") || body.contains("context_length") {
+        return false;
+    }
+    [
+        "not supported",
+        "unsupported",
+        "does not support",
+        "invalid",
+        "cannot be disabled",
+        "mandatory",
+        "is required",
+        "unrecognized",
+        "unknown parameter",
+        "not allowed",
+        "not permitted",
+    ]
+    .iter()
+    .any(|phrase| body.contains(phrase))
 }
 
 /// Whether `base_url` is OpenRouter's API.

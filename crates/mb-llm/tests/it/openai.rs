@@ -886,3 +886,80 @@ async fn other_endpoints_get_no_reasoning_switch() {
         .unwrap();
     assert!(wire_body(&server).await.get("reasoning").is_none());
 }
+
+/// Two calls rejected for the same setting step it down once: the client
+/// goes to minimal effort, not past it.
+#[tokio::test]
+async fn concurrent_rejections_step_down_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v["reasoning"] == json!({"enabled": false})
+        })
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_delay(Duration::from_millis(200))
+                .set_body_string(
+                    r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}"#,
+                ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
+    let (a, b) = tokio::join!(
+        c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2))),
+        c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+    );
+    a.unwrap();
+    b.unwrap();
+    c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let reqs = server.received_requests().await.unwrap();
+    let last: Value = serde_json::from_slice(&reqs[reqs.len() - 1].body).unwrap();
+    assert_eq!(last["reasoning"], json!({"effort": "minimal"}));
+    assert!(
+        reqs.iter().all(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["reasoning"] != Value::Null
+        }),
+        "never stepped past minimal effort"
+    );
+}
+
+/// An error that only mentions reasoning is not a rejection of the
+/// reasoning parameter: nothing steps down.
+#[tokio::test]
+async fn an_unrelated_400_mentioning_reasoning_keeps_the_setting() {
+    for message in [
+        "This model's maximum context length is 8192 tokens (including reasoning). Please reduce the length of the messages.",
+        "Invalid schema for response_format: property 'effort' has no type",
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(json!({"error": {"message": message}}).to_string()),
+            )
+            .mount(&server)
+            .await;
+        let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
+        for _ in 0..2 {
+            let _ = c
+                .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+                .await;
+        }
+        let sent: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()["reasoning"].clone())
+            .collect();
+        assert_eq!(sent, vec![json!({"enabled": false}); 2], "{message}");
+    }
+}

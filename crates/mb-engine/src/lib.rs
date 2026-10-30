@@ -1382,9 +1382,9 @@ impl Engine {
     /// Every completed call's tokens are added to `usage` and charged to the
     /// budget, including calls whose output is ultimately discarded.
     ///
-    /// An answer cut short (stopped at `max_tokens`, or ending inside the
-    /// value) is salvaged first (see [`Engine::check_truncated`]): closed
-    /// and completed locally, it is `Patched`. Otherwise the repair request
+    /// An answer the provider cut at `max_tokens` is salvaged when it does
+    /// not check as it is (see [`Engine::check_truncated`]): closed and
+    /// completed locally, it is `Patched`. Otherwise the repair request
     /// says it was cut, and a fallback reason then starts with the
     /// truncation ("LLM output truncated: …").
     ///
@@ -1409,7 +1409,7 @@ impl Engine {
             .await?;
         let (checked, cut) = tracing::info_span!("mb.validate")
             .in_scope(|| self.check_reply(validator, &first, checks));
-        let truncated = cut.then(|| first.truncation());
+        let truncated = first.truncated.clone().filter(|_| cut);
         let errors = match checked {
             Checked::Valid(value) => return Ok((value, Source::Llm)),
             Checked::Patched(value) => return Ok((value, Source::Patched)),
@@ -1442,7 +1442,7 @@ impl Engine {
             let (checked, second_cut) = tracing::info_span!("mb.validate")
                 .in_scope(|| self.check_reply(validator, &second, checks));
             let cause = if second_cut {
-                Some(second.truncation())
+                second.truncated
             } else {
                 truncated
             };
@@ -1459,28 +1459,29 @@ impl Engine {
         .await
     }
 
-    /// [`Engine::check_output`] of `reply`, or [`Engine::check_truncated`]
-    /// when it was cut short: stopped at `max_tokens`, or ending inside its
-    /// JSON value. The flag says whether it was cut.
+    /// [`Engine::check_output`] of `reply`; when the provider cut it at
+    /// `max_tokens` and that fails, [`Engine::check_truncated`] (a complete
+    /// value before cut prose is accepted as it is). An answer the provider
+    /// did not cut is never salvaged: a missing `}` there is an error to
+    /// repair, not a cut. The flag says whether the reply was cut.
     fn check_reply(
         &self,
         validator: &SchemaValidator,
         reply: &Reply,
         checks: &Checks<'_>,
     ) -> (Checked, bool) {
-        if reply.truncated.is_some() {
-            return (self.check_truncated(validator, &reply.text, checks), true);
+        let checked = self.check_output(validator, &reply.text, checks);
+        if reply.truncated.is_none() {
+            return (checked, false);
         }
-        match self.check_output(validator, &reply.text, checks) {
-            Checked::Invalid(errors) if errors.len() == 1 && errors[0] == guards::NOT_JSON => {
+        match checked {
+            Checked::Invalid(errors) => {
                 match self.check_truncated(validator, &reply.text, checks) {
-                    Checked::Invalid(e) if e.len() == 1 && e[0] == guards::CUT_SHORT => {
-                        (Checked::Invalid(errors), false)
-                    }
-                    salvaged => (salvaged, true),
+                    salvaged @ Checked::Patched(_) => (salvaged, true),
+                    _ => (Checked::Invalid(errors), true),
                 }
             }
-            other => (other, false),
+            other => (other, true),
         }
     }
 
@@ -1537,20 +1538,6 @@ struct Reply {
     text: String,
     truncated: Option<String>,
 }
-
-impl Reply {
-    /// Why the reply counts as truncated: the provider's message, or, for
-    /// a reply that ended inside its JSON value, a message saying that.
-    fn truncation(&self) -> String {
-        self.truncated
-            .clone()
-            .unwrap_or_else(|| TRUNCATED_JSON_REASON.to_string())
-    }
-}
-
-/// The fallback cause of an answer that ended inside its JSON value
-/// without the provider reporting a cut.
-const TRUNCATED_JSON_REASON: &str = "LLM output truncated: the JSON ends inside a value";
 
 /// `reason` to fall back, after the truncation `cause` when there is one.
 fn with_cause(cause: Option<&str>, reason: String) -> String {
