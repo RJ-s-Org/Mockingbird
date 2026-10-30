@@ -1119,3 +1119,287 @@ async fn webhooks_deliveries_lists_json() {
     let out = run(&admin, &["webhooks", "deliveries", "nope"]).await;
     assert_ne!(out.code, 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mocks_update_patches_the_given_fields() {
+    let admin = admin_url().await;
+    let out = run(&admin, &["mocks", "create", "shop", "--persona", "Terse"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let dir = tempfile::tempdir().unwrap();
+    let patch = dir.path().join("patch.json");
+    std::fs::write(
+        &patch,
+        br#"{"persona": "from the file", "chaos": {"error_rate": 0.5}}"#,
+    )
+    .unwrap();
+    // The flags win over the same keys in --patch.
+    let out = run(
+        &admin,
+        &[
+            "mocks",
+            "update",
+            "shop",
+            "--patch",
+            patch.to_str().unwrap(),
+            "--persona",
+            "Formal",
+            "--prefix",
+            "/store",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let mock = out.json();
+    assert_eq!(mock["persona"], "Formal", "{mock}");
+    assert_eq!(mock["route_prefix"], "/store", "{mock}");
+    assert_eq!(mock["chaos"]["error_rate"], 0.5, "{mock}");
+
+    // A patch from stdin.
+    let out = run_with(
+        &admin,
+        &["mocks", "update", "shop", "--patch", "-"],
+        &[],
+        Some(r#"{"chaos": null}"#),
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["chaos"], Value::Null);
+
+    // Nothing to change is a usage error, before any request.
+    let out = run(&admin, &["mocks", "update", "shop"]).await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    let out = run(&admin, &["mocks", "update", "nope", "--persona", "x"]).await;
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(out.stderr.contains("Not Found"), "{}", out.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contracts_list_and_activate() {
+    let admin = admin_url().await;
+    create_workspace(&admin, "team-c").await;
+    let contract = fixture();
+    let contract = contract.to_str().unwrap();
+    for _ in 0..2 {
+        let out = run(
+            &admin,
+            &[
+                "--workspace",
+                "team-c",
+                "import",
+                contract,
+                "--as",
+                "orders",
+            ],
+        )
+        .await;
+        assert_eq!(out.code, 0, "{}", out.stderr);
+    }
+    // Global flags work after the new subcommands too.
+    let out = run(
+        &admin,
+        &["contracts", "list", "orders", "--workspace", "team-c"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let versions: Vec<(i64, String)> = out
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["version"].as_i64().unwrap(),
+                v["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(versions.contains(&(1, "active".into())), "{versions:?}");
+    assert!(
+        versions.iter().any(|(v, s)| *v == 2 && s != "active"),
+        "{versions:?}"
+    );
+
+    let out = run(
+        &admin,
+        &[
+            "--workspace",
+            "team-c",
+            "contracts",
+            "activate",
+            "orders",
+            "2",
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let out = run(&admin, &["--workspace", "team-c", "mocks", "get", "orders"]).await;
+    assert_eq!(out.json()["active_version"], 2);
+
+    let out = run(&admin, &["contracts", "activate", "orders", "1"]).await;
+    assert_eq!(out.code, 1, "the default workspace has no such mock");
+    let out = run(&admin, &["contracts", "activate", "orders", "one"]).await;
+    assert_eq!(out.code, 2, "{}", out.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drafts_approve_finishes_an_import_with_warnings() {
+    let admin = admin_url().await;
+    let har = smart_fixture("petstore.har");
+    let out = run(
+        &admin,
+        &["import", har.to_str().unwrap(), "--as", "pets", "--approve"],
+    )
+    .await;
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    let version = out.json()["version"].as_i64().unwrap();
+    // The refusal names the command that finishes the job.
+    assert!(
+        out.stderr
+            .contains(&format!("mockingbird drafts approve pets {version}")),
+        "{}",
+        out.stderr
+    );
+
+    // Without a version: the newest draft; --no-activate leaves it approved.
+    let out = run(&admin, &["drafts", "approve", "pets", "--no-activate"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["status"], "approved", "{}", out.stdout);
+    let out = run(&admin, &["mocks", "get", "pets"]).await;
+    assert_eq!(out.json()["active_version"], Value::Null);
+
+    // An approved version is no longer a draft.
+    let out = run(&admin, &["drafts", "approve", "pets"]).await;
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.stderr.contains("no draft"), "{}", out.stderr);
+
+    // A second import, approved by version, is activated.
+    let out = run(&admin, &["import", har.to_str().unwrap(), "--as", "pets"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let version = out.json()["version"].as_i64().unwrap().to_string();
+    let out = run(&admin, &["drafts", "approve", "pets", &version]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["status"], "active", "{}", out.stdout);
+    let out = run(&admin, &["mocks", "get", "pets"]).await;
+    assert_eq!(out.json()["active_version"].to_string(), version);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_passes_requests_through() {
+    let admin = admin_url().await;
+    let out = run(&admin, &["api", "GET", "/workspaces/default/mocks"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json(), json!([]));
+
+    // An inline JSON body, with a lowercase method.
+    let out = run(
+        &admin,
+        &[
+            "api",
+            "post",
+            "/workspaces/default/mocks",
+            "--data",
+            r#"{"name": "inline"}"#,
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["name"], "inline");
+
+    // A body from a file, and the /api/v1 prefix accepted.
+    let dir = tempfile::tempdir().unwrap();
+    let body = dir.path().join("mock.json");
+    std::fs::write(&body, br#"{"name": "from-file"}"#).unwrap();
+    let data = format!("@{}", body.display());
+    let out = run(
+        &admin,
+        &[
+            "api",
+            "POST",
+            "/api/v1/workspaces/default/mocks",
+            "-d",
+            &data,
+        ],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["name"], "from-file");
+
+    // A body from stdin.
+    let out = run_with(
+        &admin,
+        &[
+            "api",
+            "PATCH",
+            "/workspaces/default/mocks/inline",
+            "--data",
+            "@-",
+        ],
+        &[],
+        Some(r#"{"persona": "piped"}"#),
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["persona"], "piped");
+
+    // A query string, and an empty answer prints nothing.
+    let out = run(&admin, &["api", "GET", "/workspaces/default/mocks?limit=1"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let out = run(
+        &admin,
+        &["api", "DELETE", "/workspaces/default/mocks/inline"],
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.trim().is_empty(), "{}", out.stdout);
+
+    // A non-2xx answer: its problem details on stderr, exit 1.
+    let out = run(&admin, &["api", "GET", "/workspaces/default/mocks/nope"]).await;
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.stdout.is_empty(), "{}", out.stdout);
+    let problem: Value = serde_json::from_str(&out.stderr).unwrap();
+    assert_eq!(problem["status"], 404, "{problem}");
+
+    // Usage errors, before any request.
+    for args in [
+        &["api", "GET", "workspaces"][..],
+        &["api", "GET", "/../healthz"],
+        &["api", "G E T", "/workspaces"],
+        &["api", "POST", "/workspaces", "--data", "{not json"],
+        &[
+            "api",
+            "POST",
+            "/workspaces",
+            "--data",
+            "@/no/such/file.json",
+        ],
+    ] {
+        let out = run(&admin, args).await;
+        assert_ne!(out.code, 0, "{args:?}: {}", out.stdout);
+        assert!(out.stdout.is_empty(), "{args:?}: {}", out.stdout);
+    }
+}
+
+#[test]
+fn help_lists_the_workflow_commands() {
+    let help = |args: &[&str]| {
+        let out = Command::cargo_bin("mockingbird")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let top = help(&["--help"]);
+    assert!(top.starts_with("LLM-backed mock endpoints"), "{top}");
+    for name in ["drafts", "contracts", "api", "mocks"] {
+        assert!(
+            top.lines().any(|l| l.trim_start().starts_with(name)),
+            "{name}: {top}"
+        );
+    }
+    assert!(help(&["mocks", "--help"]).contains("update"));
+    assert!(help(&["drafts", "--help"]).contains("approve"));
+    assert!(help(&["contracts", "--help"]).contains("activate"));
+    assert!(help(&["api", "--help"]).contains("--data"));
+}

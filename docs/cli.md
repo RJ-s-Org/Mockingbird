@@ -6,10 +6,20 @@ The same binary drives the Admin API. It prints JSON on stdout and problem detai
 mockingbird mocks list
 mockingbird mocks get orders
 mockingbird mocks create billing --prefix /bill --persona "Formal" --profile openrouter
+mockingbird mocks update billing --persona "Terse" --patch chaos.json   # flags win over --patch keys
 mockingbird mocks delete billing
 
 # Upload a contract as a new version (creating the mock if missing).
 mockingbird import orders.yaml --as orders --activate
+
+# Contract versions: list them, serve another one (roll forward or back).
+mockingbird contracts list orders
+mockingbird contracts activate orders 2
+
+# A documentation, HAR or Postman import is a draft; approve it after review
+# (the newest draft without a version; --no-activate approves without serving).
+mockingbird import petstore.har --as pets
+mockingbird drafts approve pets
 
 mockingbird sessions list orders
 mockingbird sessions reset orders alice
@@ -17,7 +27,15 @@ mockingbird sessions reset orders alice
 # Save a session's state as fixtures, and load it back (into any session).
 mockingbird export-fixtures --mock orders --session alice > fixtures.json
 mockingbird seed-fixtures --mock orders --session ci fixtures.json
+
+# Anything else in the Admin API: any method and path under /api/v1.
+mockingbird api GET /workspaces/default/api-keys
+mockingbird api POST /workspaces --data '{"name": "team-a"}'
+mockingbird api PUT /workspaces/default/mocks/orders/scenarios/slow --data @slow.json
+echo '{"persona": "Formal"}' | mockingbird api PATCH /workspaces/default/mocks/orders --data @-
 ```
+
+`api` takes the path under `/api/v1` (a leading `/api/v1` is accepted) with any query string, and a JSON body from `--data` (`-d`): inline, `@FILE` or `@-` for stdin. `POST`, `PUT` and `PATCH` without one send `{}`. It prints a JSON answer as is, any other answer of up to 1 MiB as `{content_type, text}` (or `{content_type, bytes, base64}` when it is not UTF-8), and nothing for an empty one; a non-2xx answer prints its problem details on stderr and exits 1, like every other client command. The MCP `admin_api` tool does the same.
 
 ## Archive uploads
 
