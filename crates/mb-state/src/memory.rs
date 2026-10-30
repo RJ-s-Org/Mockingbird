@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use dashmap::mapref::one::RefMut;
+use dashmap::mapref::one::{Ref, RefMut};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
@@ -14,14 +14,23 @@ use crate::{
     StateError, StateStore, StoredResource,
 };
 
+/// One resource type of a session.
+#[derive(Default)]
+struct TypeData {
+    /// id -> (recency sequence, resource)
+    by_id: HashMap<String, (u64, StoredResource)>,
+    /// recency sequence -> id, so a list reads only the newest `limit`.
+    order: BTreeMap<u64, String>,
+}
+
 struct SessionData {
     /// Monotonic clock, for expiry (pausable in tests).
     last_touched: Instant,
     /// Wall clock, for reporting.
     last_touched_at: DateTime<Utc>,
     seq: u64,
-    /// (resource_type, id) -> (recency sequence, resource)
-    resources: HashMap<(String, String), (u64, StoredResource)>,
+    /// resource_type -> its resources
+    resources: HashMap<String, TypeData>,
 }
 
 impl SessionData {
@@ -42,27 +51,72 @@ impl SessionData {
     fn insert(&mut self, r: StoredResource) {
         self.seq += 1;
         let seq = self.seq;
-        self.resources
-            .insert((r.resource_type.clone(), r.id.clone()), (seq, r));
+        let data = self.resources.entry(r.resource_type.clone()).or_default();
+        let id = r.id.clone();
+        data.order.insert(seq, id.clone());
+        if let Some((old, _)) = data.by_id.insert(id, (seq, r)) {
+            data.order.remove(&old);
+        }
     }
 
-    /// Resources matching `filter`, most recent first.
-    fn sorted<'a>(
-        &'a self,
-        filter: impl Fn(&str) -> bool,
-    ) -> impl Iterator<Item = &'a StoredResource> + 'a {
-        let mut items: Vec<&(u64, StoredResource)> = self
+    fn get(&self, resource_type: &str, id: &str) -> Option<&StoredResource> {
+        self.resources
+            .get(resource_type)?
+            .by_id
+            .get(id)
+            .map(|(_, r)| r)
+    }
+
+    fn contains(&self, resource_type: &str, id: &str) -> bool {
+        self.get(resource_type, id).is_some()
+    }
+
+    fn remove(&mut self, resource_type: &str, id: &str) -> bool {
+        let Some(data) = self.resources.get_mut(resource_type) else {
+            return false;
+        };
+        let Some((seq, _)) = data.by_id.remove(id) else {
+            return false;
+        };
+        data.order.remove(&seq);
+        if data.by_id.is_empty() {
+            self.resources.remove(resource_type);
+        }
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.resources.values().map(|d| d.by_id.len()).sum()
+    }
+
+    /// Up to `limit` resources of `resource_type`, most recent first.
+    fn list(&self, resource_type: &str, limit: usize) -> Vec<StoredResource> {
+        let Some(data) = self.resources.get(resource_type) else {
+            return Vec::new();
+        };
+        data.order
+            .values()
+            .rev()
+            .filter_map(|id| data.by_id.get(id))
+            .take(limit)
+            .map(|(_, r)| r.clone())
+            .collect()
+    }
+
+    /// Every resource, oldest first.
+    fn export(&self) -> Vec<StoredResource> {
+        let mut all: Vec<&(u64, StoredResource)> = self
             .resources
-            .iter()
-            .filter(|((t, _), _)| filter(t))
-            .map(|(_, v)| v)
+            .values()
+            .flat_map(|d| d.by_id.values())
             .collect();
-        items.sort_by_key(|i| std::cmp::Reverse(i.0));
-        items.into_iter().map(|(_, r)| r)
+        all.sort_unstable_by_key(|(seq, _)| *seq);
+        all.into_iter().map(|(_, r)| r.clone()).collect()
     }
 }
 
 type Entry<'a> = RefMut<'a, SessionKey, SessionData>;
+type ReadEntry<'a> = Ref<'a, SessionKey, SessionData>;
 
 struct Inner {
     sessions: DashMap<SessionKey, SessionData>,
@@ -75,25 +129,37 @@ impl Inner {
         now.saturating_duration_since(d.last_touched) >= self.ttl
     }
 
-    /// Fetches a live session without refreshing it. Never creates one; an
-    /// expired session is purged and reported as absent.
-    fn live(&self, s: &SessionKey) -> Option<Entry<'_>> {
+    /// Fetches a live session for reading, under a shared shard lock, without
+    /// refreshing it. Never creates one; an expired session is purged and
+    /// reported as absent.
+    fn live(&self, s: &SessionKey) -> Option<ReadEntry<'_>> {
         let now = Instant::now();
-        let entry = self.sessions.get_mut(s)?;
+        let entry = self.sessions.get(s)?;
         if self.expired(&entry, now) {
             drop(entry);
-            self.sessions
-                .remove_if(s, |_, d| self.expired(d, Instant::now()));
+            self.purge_expired(s);
             return None;
         }
         Some(entry)
     }
 
-    /// [`Inner::live`], refreshing the session.
+    /// Fetches a live session for writing and refreshes it. Never creates
+    /// one; an expired session is purged and reported as absent.
     fn touch_existing(&self, s: &SessionKey) -> Option<Entry<'_>> {
-        let mut entry = self.live(s)?;
+        let now = Instant::now();
+        let mut entry = self.sessions.get_mut(s)?;
+        if self.expired(&entry, now) {
+            drop(entry);
+            self.purge_expired(s);
+            return None;
+        }
         entry.touch();
         Some(entry)
+    }
+
+    fn purge_expired(&self, s: &SessionKey) {
+        self.sessions
+            .remove_if(s, |_, d| self.expired(d, Instant::now()));
     }
 
     /// Fetches a live session, creating it (or restarting an expired one),
@@ -166,12 +232,10 @@ impl StateStore for MemoryStore {
         resource_type: &str,
         id: &str,
     ) -> Result<Option<StoredResource>, StateError> {
-        Ok(self.inner.live(s).and_then(|entry| {
-            entry
-                .resources
-                .get(&(resource_type.to_string(), id.to_string()))
-                .map(|(_, r)| r.clone())
-        }))
+        Ok(self
+            .inner
+            .live(s)
+            .and_then(|entry| entry.get(resource_type, id).cloned()))
     }
 
     async fn list(
@@ -183,13 +247,7 @@ impl StateStore for MemoryStore {
         Ok(self
             .inner
             .live(s)
-            .map(|entry| {
-                entry
-                    .sorted(|t| t == resource_type)
-                    .take(limit)
-                    .cloned()
-                    .collect()
-            })
+            .map(|entry| entry.list(resource_type, limit))
             .unwrap_or_default())
     }
 
@@ -202,10 +260,7 @@ impl StateStore for MemoryStore {
 
     async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {
         let mut entry = self.inner.touch_or_create(s);
-        if entry
-            .resources
-            .contains_key(&(r.resource_type.clone(), r.id.clone()))
-        {
+        if entry.contains(&r.resource_type, &r.id) {
             return Ok(false);
         }
         entry.insert(r);
@@ -218,12 +273,10 @@ impl StateStore for MemoryStore {
         resource_type: &str,
         id: &str,
     ) -> Result<bool, StateError> {
-        let removed = self.inner.touch_existing(s).is_some_and(|mut entry| {
-            entry
-                .resources
-                .remove(&(resource_type.to_string(), id.to_string()))
-                .is_some()
-        });
+        let removed = self
+            .inner
+            .touch_existing(s)
+            .is_some_and(|mut entry| entry.remove(resource_type, id));
         if removed {
             self.inner
                 .publish(s, resource_type, id, ChangeKind::Deleted);
@@ -277,7 +330,7 @@ impl StateStore for MemoryStore {
                     d.last_touched,
                     SessionInfo {
                         session: e.key().session.clone(),
-                        resources: d.resources.len(),
+                        resources: d.len(),
                         last_touched: d.last_touched_at,
                     },
                 )
@@ -291,11 +344,7 @@ impl StateStore for MemoryStore {
         Ok(self
             .inner
             .live(s)
-            .map(|entry| {
-                let mut all: Vec<StoredResource> = entry.sorted(|_| true).cloned().collect();
-                all.reverse();
-                all
-            })
+            .map(|entry| entry.export())
             .unwrap_or_default())
     }
 

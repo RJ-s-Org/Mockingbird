@@ -6,7 +6,7 @@
 //! drops that type's answers, a reset drops the session's. Seeded inserts
 //! clear nothing, so paginated lists do not evict each other.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -45,6 +45,9 @@ struct Entry {
 
 struct SessionCache {
     entries: HashMap<String, Entry>,
+    /// `Entry::used` -> key, so eviction finds the least recently used
+    /// entry without a scan.
+    recency: BTreeMap<u64, String>,
     clock: u64,
     /// Bumped by every invalidation of the session.
     epoch: u64,
@@ -56,6 +59,7 @@ impl SessionCache {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            recency: BTreeMap::new(),
             clock: 0,
             epoch: 0,
             last_used: Instant::now(),
@@ -113,7 +117,11 @@ impl ResponseCache {
         }
         let mut cache = self.sessions.get_mut(s)?;
         let used = cache.tick();
+        let cache = &mut *cache;
         let entry = cache.entries.get_mut(key)?;
+        if let Some(k) = cache.recency.remove(&entry.used) {
+            cache.recency.insert(used, k);
+        }
         entry.used = used;
         Some(entry.value.clone())
     }
@@ -139,21 +147,21 @@ impl ResponseCache {
             cache.epoch = epoch;
         }
         let used = cache.tick();
-        cache.entries.insert(
-            key,
+        let cache = &mut *cache;
+        let replaced = cache.entries.insert(
+            key.clone(),
             Entry {
                 resource_type: resource_type.map(str::to_string),
                 value,
                 used,
             },
         );
+        if let Some(old) = replaced {
+            cache.recency.remove(&old.used);
+        }
+        cache.recency.insert(used, key);
         while cache.entries.len() > self.capacity {
-            let Some(oldest) = cache
-                .entries
-                .iter()
-                .min_by_key(|(_, e)| e.used)
-                .map(|(k, _)| k.clone())
-            else {
+            let Some((_, oldest)) = cache.recency.pop_first() else {
                 break;
             };
             cache.entries.remove(&oldest);
@@ -192,9 +200,15 @@ impl ResponseCache {
             .entry(s.clone())
             .or_insert_with(SessionCache::new);
         cache.epoch += 1;
-        cache
-            .entries
-            .retain(|_, e| e.resource_type.as_deref() != Some(resource_type));
+        let cache = &mut *cache;
+        let recency = &mut cache.recency;
+        cache.entries.retain(|_, e| {
+            let keep = e.resource_type.as_deref() != Some(resource_type);
+            if !keep {
+                recency.remove(&e.used);
+            }
+            keep
+        });
     }
 
     /// Drops every answer of the session.
@@ -205,6 +219,7 @@ impl ResponseCache {
             .or_insert_with(SessionCache::new);
         cache.epoch += 1;
         cache.entries.clear();
+        cache.recency.clear();
     }
 
     /// Drops every answer of every session of a mock.

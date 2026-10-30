@@ -55,6 +55,36 @@ async fn least_recently_used_entry_is_evicted() {
 }
 
 #[tokio::test]
+async fn replacing_or_invalidating_an_entry_keeps_the_eviction_order() {
+    let st = store();
+    let c = st.response_cache().unwrap();
+    let s = key("a");
+    c.put(&s, "k1".into(), Some("orders"), answer(1));
+    c.put(&s, "k2".into(), Some("pets"), answer(2));
+    // Re-putting k1 makes it the most recent: k2 goes first.
+    c.put(&s, "k1".into(), Some("orders"), answer(11));
+    c.put(&s, "k3".into(), Some("pets"), answer(3));
+    assert_eq!(c.get(&s, "k2"), None);
+    assert_eq!(c.get(&s, "k1"), Some(answer(11)));
+    // k3 is now the oldest; invalidating orders drops k1.
+    c.invalidate_type(&s, "orders");
+    assert_eq!(c.len(&s), 1);
+    c.put(&s, "k4".into(), Some("pets"), answer(4));
+    c.put(&s, "k5".into(), Some("pets"), answer(5));
+    assert_eq!(c.get(&s, "k3"), None, "least recently used goes first");
+    assert_eq!(c.get(&s, "k4"), Some(answer(4)));
+    assert_eq!(c.get(&s, "k5"), Some(answer(5)));
+    assert_eq!(c.len(&s), 2);
+    // After a session clear the cache fills and evicts afresh.
+    c.clear_session(&s);
+    c.put(&s, "k6".into(), None, answer(6));
+    c.put(&s, "k7".into(), None, answer(7));
+    c.put(&s, "k8".into(), None, answer(8));
+    assert_eq!(c.get(&s, "k6"), None);
+    assert_eq!(c.len(&s), 2);
+}
+
+#[tokio::test]
 async fn writes_of_the_type_and_resets_invalidate() {
     let st = store();
     let c = st.response_cache().unwrap();
