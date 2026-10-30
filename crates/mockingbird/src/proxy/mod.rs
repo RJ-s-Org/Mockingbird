@@ -12,6 +12,7 @@ mod server;
 mod standalone;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::file_config::Unmapped;
@@ -41,7 +42,17 @@ impl HostClaims for MockRegistry {
 
 /// Prometheus counter of proxied requests to hosts no mock claims, by
 /// `host` and `mode` (`pass` or `block`); `mockingbird report` reads it.
+/// Past [`MAX_UNMAPPED_HOSTS`] distinct hosts, new ones are counted under
+/// [`OTHER_HOSTS_LABEL`].
 pub const UNMAPPED_METRIC: &str = "mb_proxy_unmapped_requests_total";
+
+/// Distinct unmapped hosts the proxy remembers (each logged once and
+/// counted under its own `host` label in [`UNMAPPED_METRIC`]).
+pub const MAX_UNMAPPED_HOSTS: usize = 500;
+
+/// The `host` label of [`UNMAPPED_METRIC`] for unmapped hosts past
+/// [`MAX_UNMAPPED_HOSTS`].
+pub const OTHER_HOSTS_LABEL: &str = "other";
 
 /// What the proxy serves with.
 pub struct ProxyState {
@@ -54,7 +65,10 @@ pub struct ProxyState {
     pub(crate) images: Vec<images::ImageRule>,
     /// Forwards plain requests to unmapped hosts.
     pub(crate) client: reqwest::Client,
+    /// Unmapped hosts seen so far, at most [`MAX_UNMAPPED_HOSTS`].
     seen: Mutex<HashSet<String>>,
+    /// Whether reaching [`MAX_UNMAPPED_HOSTS`] was logged.
+    seen_full: AtomicBool,
 }
 
 impl ProxyState {
@@ -80,16 +94,47 @@ impl ProxyState {
             images,
             client,
             seen: Mutex::new(HashSet::new()),
+            seen_full: AtomicBool::new(false),
         }))
     }
 
     /// `true` the first time `host` is seen, so each unmapped host is
-    /// logged once.
+    /// logged once. Only the first [`MAX_UNMAPPED_HOSTS`] distinct hosts
+    /// are remembered; a new host past them is `false`.
     pub fn first_sighting(&self, host: &str) -> bool {
-        self.seen
+        self.sight(host).1
+    }
+
+    /// The `host` label a request to unmapped `host` is counted under in
+    /// [`UNMAPPED_METRIC`]: the host itself while it is (or would be) one
+    /// of the first [`MAX_UNMAPPED_HOSTS`] seen, else [`OTHER_HOSTS_LABEL`].
+    pub fn unmapped_label(&self, host: &str) -> String {
+        let tracked = self
+            .seen
             .lock()
-            .map(|mut seen| seen.insert(host.to_owned()))
-            .unwrap_or(false)
+            .map(|seen| seen.contains(host) || seen.len() < MAX_UNMAPPED_HOSTS)
+            .unwrap_or(false);
+        if tracked {
+            host.to_owned()
+        } else {
+            OTHER_HOSTS_LABEL.to_owned()
+        }
+    }
+
+    /// `(tracked, first)`: whether `host` is one of the remembered hosts,
+    /// and whether this call added it.
+    fn sight(&self, host: &str) -> (bool, bool) {
+        let Ok(mut seen) = self.seen.lock() else {
+            return (false, false);
+        };
+        if seen.contains(host) {
+            (true, false)
+        } else if seen.len() < MAX_UNMAPPED_HOSTS {
+            seen.insert(host.to_owned());
+            (true, true)
+        } else {
+            (false, false)
+        }
     }
 
     /// The local CA's certificate path.
@@ -111,9 +156,21 @@ impl ProxyState {
     /// Logs `host` once as unmapped and counts the request in
     /// [`UNMAPPED_METRIC`].
     pub(crate) fn note_unmapped(&self, host: &str) {
-        metrics::counter!(UNMAPPED_METRIC, "host" => host.to_owned(), "mode" => self.unmapped.as_str())
+        let (tracked, first) = self.sight(host);
+        let label = if tracked {
+            host.to_owned()
+        } else {
+            OTHER_HOSTS_LABEL.to_owned()
+        };
+        metrics::counter!(UNMAPPED_METRIC, "host" => label, "mode" => self.unmapped.as_str())
             .increment(1);
-        if self.first_sighting(host) {
+        if !tracked && !self.seen_full.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                limit = MAX_UNMAPPED_HOSTS,
+                "proxy: more than {MAX_UNMAPPED_HOSTS} unmapped hosts; new ones are not logged and are counted as host \"{OTHER_HOSTS_LABEL}\""
+            );
+        }
+        if first {
             tracing::info!(
                 host,
                 mode = self.unmapped.as_str(),

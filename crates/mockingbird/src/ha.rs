@@ -222,16 +222,32 @@ async fn merge_state_changes(
     merged: broadcast::Sender<StateChanged>,
 ) {
     let mut remote_open = true;
+    // Announcements go through a queue to their own task, so a slow bus
+    // holds back neither this node's feed nor the reading of `local`. The
+    // publisher stops once this bridge stops and the queue is drained.
+    let (announce, queued) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+    let announcing = !bus.is_local();
+    // Whether the last announcement was dropped: warn once per overflow.
+    let mut overflowing = false;
+    if announcing {
+        tokio::spawn(announce_state(queued, bus));
+    }
     loop {
         tokio::select! {
             change = local.recv() => match change {
                 Ok(mut change) => {
                     change.origin = ChangeOrigin::Local;
-                    let _ = merged.send(change.clone());
-                    if !bus.is_local()
-                        && let Err(error) = bus.publish(state_event(&change)).await
-                    {
-                        tracing::warn!(%error, "cannot announce a state change on the bus");
+                    let event = state_event(&change);
+                    let _ = merged.send(change);
+                    if announcing {
+                        let full = matches!(
+                            announce.try_send(event),
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+                        );
+                        if full && !overflowing {
+                            tracing::warn!("the bus is too slow for this node's state changes; some are not announced");
+                        }
+                        overflowing = full;
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
@@ -255,6 +271,15 @@ async fn merge_state_changes(
                 }
                 Err(RecvError::Closed) => remote_open = false,
             },
+        }
+    }
+}
+
+/// Publishes queued state announcements on `bus`, in order.
+async fn announce_state(mut queued: tokio::sync::mpsc::Receiver<BusEvent>, bus: Arc<dyn Bus>) {
+    while let Some(event) = queued.recv().await {
+        if let Err(error) = bus.publish(event).await {
+            tracing::warn!(%error, "cannot announce a state change on the bus");
         }
     }
 }

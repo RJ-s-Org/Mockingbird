@@ -237,6 +237,33 @@ fn unmapped_hosts_are_logged_once() {
     assert!(!st.first_sighting("x.test"));
 }
 
+#[test]
+fn unmapped_hosts_past_the_cap_are_counted_as_other() {
+    use mockingbird::proxy::{MAX_UNMAPPED_HOSTS, OTHER_HOSTS_LABEL};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(hosted_registry("a.test"));
+    let dir = tempfile::tempdir().unwrap();
+    let ca = Arc::new(LocalCa::load_or_create(dir.path()).unwrap());
+    let st = ProxyState::new(
+        registry.clone(),
+        registry.router(),
+        ca,
+        Unmapped::Pass,
+        vec![],
+    )
+    .unwrap();
+    let firsts = (0..MAX_UNMAPPED_HOSTS + 10)
+        .filter(|i| st.first_sighting(&format!("h{i}.test")))
+        .count();
+    assert_eq!(firsts, MAX_UNMAPPED_HOSTS);
+    assert_eq!(st.unmapped_label("h0.test"), "h0.test");
+    assert_eq!(
+        st.unmapped_label(&format!("h{}.test", MAX_UNMAPPED_HOSTS)),
+        OTHER_HOSTS_LABEL
+    );
+    assert_eq!(st.unmapped_label("new.test"), OTHER_HOSTS_LABEL);
+}
+
 #[tokio::test]
 async fn forwarding_ignores_proxy_environment() {
     let upstream = wiremock::MockServer::start().await;

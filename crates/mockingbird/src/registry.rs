@@ -5,7 +5,7 @@
 //! and SOAP mocks are dispatched by route prefix on the data plane; gRPC
 //! mocks hold no prefix and are published to the shared [`GrpcServer`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -13,6 +13,7 @@ use axum::Router;
 use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
+use futures::StreamExt as _;
 use mb_mcm::{Channel, ChannelBinding, Direction, Protocol};
 use mb_protocols::events::{ChannelMode, ChannelRuntime, ChannelSetup, EventSetup};
 use mb_protocols::grpc::{GrpcError, GrpcMock, GrpcServer};
@@ -38,6 +39,9 @@ pub fn mock_label(workspace: &str, name: &str) -> String {
 
 /// `(workspace, name)`: identifies a mock across workspaces.
 type MockKey = (String, String);
+
+/// Mocks [`MockRegistry::reload_all`] builds at once.
+const RELOAD_CONCURRENCY: usize = 8;
 
 /// One mounted mock.
 #[derive(Clone)]
@@ -168,6 +172,10 @@ pub struct MockRegistry {
     /// some, mounted or not: a host stays claimed while its mock fails to
     /// build, so the proxy fails closed instead of passing it through.
     configured_hosts: std::sync::Mutex<BTreeMap<MockKey, Vec<String>>>,
+    /// Every host of the mounted mocks and of `configured_hosts`, rebuilt
+    /// whenever either changes, so the proxy's per-request
+    /// [`Self::claims_host`] is one lookup.
+    claimed: ArcSwap<HashSet<String>>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
     reload: Mutex<()>,
 }
@@ -181,6 +189,7 @@ impl MockRegistry {
             grpc_published: std::sync::Mutex::new(BTreeSet::new()),
             grpc: GrpcServer::new(),
             configured_hosts: std::sync::Mutex::new(BTreeMap::new()),
+            claimed: ArcSwap::from_pointee(HashSet::new()),
             reload: Mutex::new(()),
         })
     }
@@ -208,16 +217,33 @@ impl MockRegistry {
                 .map(|m| ((m.workspace.clone(), m.name.clone()), m.hosts.clone()))
                 .collect();
         }
+        self.refresh_claimed();
         let current = self.mounted.load_full();
         let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
-        for mock in mocks {
-            let mounted = match build_mounted(deps, &mock).await {
+        // Built concurrently but taken in (workspace, name) order, so which
+        // mock keeps a contested prefix does not depend on build times.
+        let mut builds = futures::stream::iter(mocks)
+            .map(|mock| {
+                let key: MockKey = (mock.workspace.clone(), mock.name.clone());
+                let deps = deps.clone();
+                let task = tokio::spawn(async move { build_mounted(&deps, &mock).await });
+                async move { (key, task.await) }
+            })
+            .buffered(RELOAD_CONCURRENCY);
+        while let Some((key, joined)) = builds.next().await {
+            let built = joined.unwrap_or_else(|error| {
+                let error = format!("building the mock failed: {error}");
+                tracing::error!(mock = %mock_label(&key.0, &key.1), %error, "cannot build mock; keeping any previous version mounted");
+                Err(error)
+            });
+            let mounted = match built {
                 Ok(Some(mounted)) => mounted,
                 Ok(None) => continue,
                 Err(error) => {
-                    failed.insert((mock.workspace.clone(), mock.name.clone()), error);
-                    match current.iter().find(|m| m.is(&mock.workspace, &mock.name)) {
+                    let previous = current.iter().find(|m| m.is(&key.0, &key.1));
+                    failed.insert(key, error);
+                    match previous {
                         Some(previous) => previous.clone(),
                         None => continue,
                     }
@@ -346,6 +372,12 @@ impl MockRegistry {
     /// [`Ha::changes`](crate::ha::Ha::changes)): a mock change (in any
     /// workspace, from any node) reloads that mock; a workspace or profile
     /// change, a resync request, or missed changes, reload all.
+    ///
+    /// Changes queued while a reload runs are applied together: each mock
+    /// is rebuilt once however many changes name it (one store write
+    /// publishes one change, so a reconcile publishes several per mock),
+    /// and a reload of all covers every mock change with it. A rebuild
+    /// reads the latest stored state, so nothing is lost.
     pub fn spawn_watcher(
         self: &Arc<Self>,
         deps: RuntimeDeps,
@@ -354,19 +386,24 @@ impl MockRegistry {
         let registry = Arc::clone(self);
         tokio::spawn(async move {
             loop {
+                let mut batch = ChangeBatch::default();
                 match changes.recv().await {
-                    Ok(HubEvent::Change(ControlChange::Mock { workspace, name })) => {
-                        registry.reload_mock(&deps, &workspace, &name).await;
-                    }
-                    Ok(HubEvent::Change(ControlChange::Workspace { .. }))
-                    | Ok(HubEvent::Change(ControlChange::Profile { .. }))
-                    | Ok(HubEvent::Resync)
-                    | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if let Err(error) = registry.reload_all(&deps).await {
-                            tracing::error!(%error, "cannot reload mocks");
-                        }
-                    }
+                    Ok(event) => batch.add(event),
+                    Err(broadcast::error::RecvError::Lagged(_)) => batch.all = true,
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+                batch.drain(&mut changes);
+                if batch.all {
+                    if let Err(error) = registry.reload_all(&deps).await {
+                        tracing::error!(%error, "cannot reload mocks");
+                    }
+                } else {
+                    for (workspace, name) in &batch.mocks {
+                        registry.reload_mock(&deps, workspace, name).await;
+                    }
+                }
+                if batch.closed {
+                    break;
                 }
             }
         })
@@ -401,14 +438,22 @@ impl MockRegistry {
     /// Whether a mock lists `host` (already normalized) in its hosts,
     /// whether or not it is mounted (see [`Self::claimed_hosts`]).
     pub fn claims_host(&self, host: &str) -> bool {
-        self.claimed_hosts().iter().any(|h| h == host)
+        self.claimed.load().contains(host)
     }
 
     /// Every host a mock lists, sorted and deduplicated: the mounted mocks'
     /// and those of stored mocks that failed to build, have no active
     /// contract or lost a route collision, so their hosts fail closed.
     pub fn claimed_hosts(&self) -> Vec<String> {
-        let mut hosts: BTreeSet<String> = self
+        let mut hosts: Vec<String> = self.claimed.load().iter().cloned().collect();
+        hosts.sort();
+        hosts
+    }
+
+    /// Recomputes [`Self::claimed`] from the mounted mocks and the
+    /// configured hosts; called after either changes.
+    fn refresh_claimed(&self) {
+        let mut hosts: HashSet<String> = self
             .mounted
             .load()
             .iter()
@@ -417,7 +462,7 @@ impl MockRegistry {
         if let Ok(configured) = self.configured_hosts.lock() {
             hosts.extend(configured.values().flatten().cloned());
         }
-        hosts.into_iter().collect()
+        self.claimed.store(Arc::new(hosts));
     }
 
     fn set_configured_hosts(&self, workspace: &str, name: &str, hosts: &[String]) {
@@ -429,6 +474,7 @@ impl MockRegistry {
                 configured.insert(key, hosts.to_vec());
             }
         }
+        self.refresh_claimed();
     }
 
     /// The 503 for a request to `host` that a stored mock lists but that no
@@ -623,6 +669,7 @@ impl MockRegistry {
             })
             .collect();
         self.mounted.store(Arc::new(next));
+        self.refresh_claimed();
         self.publish_grpc(grpc).await;
     }
 
@@ -720,6 +767,47 @@ impl MockRegistry {
         match router.oneshot(req).await {
             Ok(response) => response.into_response(),
             Err(never) => match never {},
+        }
+    }
+}
+
+/// The hub events the watcher applies in one turn, deduplicated.
+#[derive(Debug, Default, PartialEq)]
+struct ChangeBatch {
+    /// Reload every mock: a workspace or profile change, a resync
+    /// request, or missed changes.
+    all: bool,
+    /// The mocks to reload when not `all`.
+    mocks: BTreeSet<MockKey>,
+    /// The hub closed: stop once the batch is applied.
+    closed: bool,
+}
+
+impl ChangeBatch {
+    fn add(&mut self, event: HubEvent) {
+        match event {
+            HubEvent::Change(ControlChange::Mock { workspace, name }) => {
+                self.mocks.insert((workspace, name));
+            }
+            HubEvent::Change(ControlChange::Workspace { .. })
+            | HubEvent::Change(ControlChange::Profile { .. })
+            | HubEvent::Resync => self.all = true,
+        }
+    }
+
+    /// Adds every event already queued on `changes`, without waiting.
+    fn drain(&mut self, changes: &mut broadcast::Receiver<HubEvent>) {
+        use broadcast::error::TryRecvError;
+        loop {
+            match changes.try_recv() {
+                Ok(event) => self.add(event),
+                Err(TryRecvError::Lagged(_)) => self.all = true,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Closed) => {
+                    self.closed = true;
+                    return;
+                }
+            }
         }
     }
 }
@@ -887,7 +975,10 @@ async fn event_setup(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_host, strip_prefix};
+    use mb_store::ControlChange;
+    use tokio::sync::broadcast;
+
+    use super::{ChangeBatch, HubEvent, MockRegistry, normalize_host, strip_prefix};
 
     #[test]
     fn hosts_are_normalized() {
@@ -912,5 +1003,101 @@ mod tests {
         assert_eq!(strip_prefix("/a/b", "/a"), Some("/b"));
         assert_eq!(strip_prefix("/ab", "/a"), None);
         assert_eq!(strip_prefix("/b", "/a"), None);
+    }
+
+    fn mock(name: &str) -> HubEvent {
+        HubEvent::Change(ControlChange::Mock {
+            workspace: "default".into(),
+            name: name.into(),
+        })
+    }
+
+    #[test]
+    fn queued_changes_are_batched_per_mock() {
+        let (tx, mut rx) = broadcast::channel(64);
+        for _ in 0..20 {
+            tx.send(mock("a")).unwrap();
+        }
+        tx.send(mock("b")).unwrap();
+        let mut batch = ChangeBatch::default();
+        batch.drain(&mut rx);
+        let keys: Vec<(String, String)> = batch.mocks.iter().cloned().collect();
+        assert_eq!(
+            keys,
+            [
+                ("default".to_owned(), "a".to_owned()),
+                ("default".to_owned(), "b".to_owned())
+            ]
+        );
+        assert!(!batch.all && !batch.closed);
+
+        tx.send(mock("c")).unwrap();
+        tx.send(HubEvent::Change(ControlChange::Profile {
+            workspace: "default".into(),
+            name: "p".into(),
+        }))
+        .unwrap();
+        let mut batch = ChangeBatch::default();
+        batch.drain(&mut rx);
+        assert!(batch.all);
+
+        drop(tx);
+        let mut batch = ChangeBatch::default();
+        batch.drain(&mut rx);
+        assert_eq!(
+            batch,
+            ChangeBatch {
+                closed: true,
+                ..ChangeBatch::default()
+            }
+        );
+    }
+
+    #[test]
+    fn missed_changes_reload_all() {
+        let (tx, mut rx) = broadcast::channel(2);
+        for _ in 0..5 {
+            tx.send(mock("a")).unwrap();
+        }
+        let mut batch = ChangeBatch::default();
+        batch.drain(&mut rx);
+        assert!(batch.all);
+    }
+
+    #[test]
+    fn configured_hosts_are_claimed_as_soon_as_they_are_set() {
+        let registry = MockRegistry::new();
+        assert!(!registry.claims_host("api.test"));
+        registry.set_configured_hosts("default", "m", &["api.test".into(), "b.test".into()]);
+        assert!(registry.claims_host("api.test"));
+        assert_eq!(registry.claimed_hosts(), ["api.test", "b.test"]);
+        registry.set_configured_hosts("default", "m", &[]);
+        assert!(!registry.claims_host("api.test"));
+        assert!(registry.claimed_hosts().is_empty());
+    }
+
+    /// MOCKINGBIRD-PERF-2 benchmark: `claims_host` with `h` configured
+    /// hosts (10 per mock).
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_claims_host() {
+        for h in [1_000usize, 10_000] {
+            let registry = super::MockRegistry::new();
+            for m in 0..h / 10 {
+                let hosts: Vec<String> = (0..10).map(|i| format!("h{m}-{i}.test")).collect();
+                registry.set_configured_hosts("default", &format!("m{m}"), &hosts);
+            }
+            let lookups = 1_000;
+            let start = std::time::Instant::now();
+            let mut hits = 0;
+            for i in 0..lookups {
+                hits += usize::from(registry.claims_host(&format!("h{}-0.test", i % (h / 10))));
+            }
+            assert_eq!(hits, lookups);
+            println!(
+                "PERF-2 claims_host with {h} hosts: {:?} per lookup",
+                start.elapsed() / u32::try_from(lookups).unwrap()
+            );
+        }
     }
 }
