@@ -1961,3 +1961,208 @@ fn duplicate_definitions_in_a_stored_sdl_are_an_error() {
         assert!(err.contains("more than once"), "{sdl}: {err}");
     }
 }
+
+// ------------------------------------------------------- batched requests
+
+/// MB-PROTOCOLS-STUB-9: a JSON array of operations is answered with an
+/// array of responses, in order, each operation recorded as its own
+/// request.
+#[tokio::test]
+async fn batched_operations_are_answered_with_an_array() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let r = post(
+        &base,
+        json!([
+            {"query": "{ viewer { login } }"},
+            {
+                "query": "query($o: String!) { repository(owner: $o, name: \"n\") { name } }",
+                "variables": {"o": "octocat"},
+            },
+        ]),
+        &[("x-mockingbird-session", "s9")],
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.headers["content-type"], "application/json");
+    let answers = r.body.as_array().expect("an array");
+    assert_eq!(answers.len(), 2, "{}", r.body);
+    assert!(
+        answers[0]["data"]["viewer"]["login"].is_string(),
+        "{}",
+        r.body
+    );
+    assert!(answers[1]["data"].get("repository").is_some(), "{}", r.body);
+    assert_eq!(
+        answers[0]["extensions"]["mockingbird"]["sources"]["viewer"],
+        "fallback"
+    );
+    assert_eq!(r.headers["x-mockingbird-source"], "fallback");
+
+    let recs = records.wait(2).await;
+    assert_eq!(recs.len(), 2, "{recs:?}");
+    assert_eq!(recs[0].operation_id.as_deref(), Some("Query.viewer"));
+    assert_eq!(recs[1].operation_id.as_deref(), Some("Query.repository"));
+    for rec in &recs {
+        assert_eq!(rec.status, 200);
+        assert_eq!(rec.method, "POST");
+        assert_eq!(rec.path, "/graphql");
+        assert_eq!(rec.session, "s9");
+    }
+    assert_eq!(recs[1].request["variables"], json!({"o": "octocat"}));
+    // A one-field operation records that field's value, as when sent alone.
+    assert!(
+        recs[0].response.as_ref().unwrap()["login"].is_string(),
+        "{:?}",
+        recs[0].response
+    );
+}
+
+/// Batched operations run in order: a query after a mutation in the same
+/// batch sees its write.
+#[tokio::test]
+async fn batched_operations_run_in_order() {
+    let provider = scripted(vec![
+        issue("i-1", "Crash on start"),
+        issue("i-1", "Something else"),
+    ]);
+    let base = serve(runtime(Some(provider))).await;
+    let r = post(
+        &base,
+        json!([
+            {
+                "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { id title } }",
+                "variables": {"in": {"repositoryId": "r-1", "title": "Crash on start"}},
+            },
+            {"query": "{ issue(id: \"i-1\") { id title } }"},
+        ]),
+        &[("x-mockingbird-session", "s1")],
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let made = &r.body[0]["data"]["createIssue"];
+    assert_eq!(made["id"], "i-1", "{}", r.body);
+    assert_eq!(r.body[1]["data"]["issue"], *made, "{}", r.body);
+}
+
+/// A batch larger than the cap, or an empty one, is a 400 problem,
+/// reported once, before anything runs.
+#[tokio::test]
+async fn batch_size_is_capped() {
+    let provider = scripted(vec![]);
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(Some(provider.clone()));
+    rt.recorder = Some(records.clone());
+    let base = serve(rt).await;
+    let max = graphql::MAX_BATCH_OPERATIONS;
+
+    let over: Vec<Value> = (0..=max)
+        .map(|_| json!({"query": "{ viewer { login } }"}))
+        .collect();
+    let r = post(&base, Value::Array(over), &[]).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(r.headers["content-type"], "application/problem+json");
+    assert_eq!(
+        r.body["detail"],
+        format!("a batch holds at most {max} operations (got {})", max + 1)
+    );
+    assert!(provider.requests().is_empty());
+
+    let r = post(&base, json!([]), &[]).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(r.headers["content-type"], "application/problem+json");
+    assert_eq!(r.body["detail"], "a batch holds at least one operation");
+
+    let recs = records.wait(2).await;
+    assert_eq!(recs.len(), 2, "{recs:?}");
+    assert!(recs.iter().all(|r| r.status == 400), "{recs:?}");
+
+    // At the cap, every operation runs.
+    let at: Vec<Value> = (0..max)
+        .map(|_| json!({"query": "{ viewer { login } }"}))
+        .collect();
+    let r = post(&base, Value::Array(at), &[]).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.as_array().map(Vec::len), Some(max));
+}
+
+/// Each batched operation is checked on its own: one over the root-field
+/// cap, or invalid, answers its own errors while the others run.
+#[tokio::test]
+async fn each_batched_operation_is_checked_on_its_own() {
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    rt.protocols.graphql_max_root_fields = 1;
+    let base = serve(rt).await;
+    let r = post(
+        &base,
+        json!([
+            {"query": "{ viewer { login } }"},
+            {"query": "{ a: viewer { login } b: viewer { login } }"},
+            {"query": "{ nope }"},
+        ]),
+        &[],
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body[0]["data"]["viewer"]["login"].is_string(),
+        "{}",
+        r.body
+    );
+    assert_eq!(
+        r.body[1],
+        json!({"errors": [{
+            "message": "too many root fields: 2 (maximum 1)",
+            "extensions": {"code": "TOO_MANY_ROOT_FIELDS"},
+        }]})
+    );
+    assert!(r.body[2]["errors"][0]["message"].is_string(), "{}", r.body);
+    assert!(r.body[2]["data"].is_null(), "{}", r.body);
+    let statuses: Vec<u16> = records.wait(2).await.iter().map(|r| r.status).collect();
+    assert_eq!(statuses, [200, 400], "the invalid query runs no field");
+}
+
+/// Chaos decides each batched operation on its own: every one gets its
+/// injected error, and the injected latency is waited once (the largest),
+/// not summed over the batch.
+#[tokio::test]
+async fn chaos_applies_to_each_batched_operation() {
+    use mb_protocols::{ChaosRuntime, ChaosSpec};
+    let records = Arc::new(Records::default());
+    let mut rt = runtime(None);
+    rt.recorder = Some(records.clone());
+    rt.chaos = Some(Arc::new(ChaosRuntime::new(
+        ChaosSpec {
+            error_rate: 1.0,
+            latency_jitter: Some((Duration::from_millis(300), Duration::from_millis(300))),
+            drop_stream_rate: 0.0,
+        },
+        Some(7),
+    )));
+    let base = serve(rt).await;
+    let ops: Vec<Value> = (0..3)
+        .map(|_| json!({"query": "{ viewer { login } }"}))
+        .collect();
+    let started = std::time::Instant::now();
+    let r = post(&base, Value::Array(ops), &[]).await;
+    let elapsed = started.elapsed();
+    assert_eq!(r.status, 200, "{}", r.body);
+    let answers = r.body.as_array().expect("an array");
+    assert_eq!(answers.len(), 3, "{}", r.body);
+    for answer in answers {
+        assert_eq!(
+            answer["errors"][0]["extensions"]["code"], "UNAVAILABLE",
+            "{}",
+            r.body
+        );
+    }
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(850), "{elapsed:?}");
+    let recs = records.wait(3).await;
+    assert_eq!(recs.len(), 3, "{recs:?}");
+    assert!(recs.iter().all(|r| r.status == 503), "{recs:?}");
+}
