@@ -20,6 +20,13 @@ Suites (contracts are in-repo, so the bench is reproducible):
 - consistency: per rep a fresh `x-mockingbird-session`; Stripe create/read of a
   PaymentIntent, TMDB popular list then detail of its first id, Square create/read
   of a payment. Field-level agreement in `detail`.
+- journeys: multi-step journeys over three contracts, one fresh session each per
+  rep: Stripe (customer, payment intent, confirm, refund), travel (search, offer,
+  booking, cancel) and GitHub (search, repo, issue). One row per check, `case` =
+  `<journey>.<check>`; `source` is the `x-mockingbird-source` of the call the check
+  judged. A journey that breaks fails its remaining checks. Not in the default
+  suites (it is asked for with `--suite journeys`). Measures remembering entities
+  and the effects of writes.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -38,6 +45,7 @@ import glob
 import http.client
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -52,7 +60,10 @@ import uuid
 from datetime import datetime
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SUITES = ("consistency", "sse", "import")
+SUITES = ("consistency", "sse", "import", "journeys")
+# What a run without --suite does (and what run.py gets). The journeys suite
+# costs real calls on top of these, so it is asked for by name.
+DEFAULT_SUITES = ("consistency", "sse", "import")
 PLACEHOLDER_KEY = "bench-proxy-injects-the-real-key"
 IMPORT_DIR = "docs/benchmarks/import-inputs"
 FIXTURES_SMART_EXPECTED = os.path.join(IMPORT_DIR, "fixtures-smart.expected.json")
@@ -86,6 +97,12 @@ CONSISTENCY_MOCKS = {
     "stripe": ("examples/apis/stripe/stripe.openapi.yaml", "/stripe", STRIPE_PERSONA),
     "tmdb": ("examples/apis/tmdb/tmdb.openapi.yaml", "/tmdb", TMDB_PERSONA),
     "square": ("examples/apis/square/square.openapi.yaml", "/square", SQUARE_PERSONA),
+}
+# Journeys use the contracts alone: no persona.
+JOURNEY_MOCKS = {
+    "stripe": ("examples/apis/stripe/stripe.openapi.yaml", "/stripe", None),
+    "travel": ("docs/benchmarks/contracts/travel.openapi.yaml", "/travel", None),
+    "github": ("examples/apis/github-rest/github-rest.openapi.yaml", "/github", None),
 }
 SSE_MOCKS = {
     "events": ("fixtures/openapi/events-3.1.yaml", "/events",
@@ -174,7 +191,8 @@ def write_config(directory, model, base_url, ports, mocks, suite):
             lines.append(f"  {name}:\n")
             lines.append(f"    contract: {json.dumps(os.path.join(REPO, contract))}\n")
             lines.append(f"    route_prefix: {prefix}\n")
-            lines.append(f"    persona: {json.dumps(persona)}\n")
+            if persona:
+                lines.append(f"    persona: {json.dumps(persona)}\n")
     path = os.path.join(directory, "mockingbird.yaml")
     with open(path, "w") as f:
         f.write("".join(lines))
@@ -709,12 +727,236 @@ def import_one(srv, args, mock, name, path, expected):
     return compiles, elapsed, source, detail
 
 
+# ---------------------------------------------------------------- journeys
+
+# The checks of each journey in step order, the same names as the pilot
+# (docs/benchmarks/pilot-2026-10-30/). A check that only applies in some runs
+# (a succeeded intent, a numeric open_issues_count) is not listed here.
+JOURNEY_CHECKS = {
+    "stripe": [
+        "intent keeps the customer", "intent keeps the amount", "read matches the created intent",
+        "confirm keeps identity and amount", "confirm moves the status on",
+        "read shows the confirmed status", "refund names its intent", "refund keeps the amount",
+        "refund uses the intent's currency", "customer reads back as created",
+    ],
+    "travel": [
+        "offers fly the searched route", "offers use the searched currency",
+        "offer detail keeps the listed price", "offer detail keeps the listed segments",
+        "booking names its offer", "booking keeps the passenger", "booking costs what the offer did",
+        "booking flies the offer's segments", "read matches the created booking",
+        "cancellation names its booking", "refund is in the booking's currency",
+        "cancel shows on the booking",
+    ],
+    "github": [
+        "repo detail keeps the listed repo", "issue keeps its title", "issue reads back as created",
+        "issue list holds the new issue", "repo keeps its identity",
+    ],
+}
+# The check recorded when a journey cannot go on past its first call.
+JOURNEY_GATE = {"travel": "search returned offers", "github": "search returned repositories"}
+
+
+def journey_check(sink, journey, rep, name, ok, detail, source="?", latency_ms=None):
+    """One row `<journey>.<name>`; `source` and `latency_ms` are those of the
+    call the check judged."""
+    sink.add(f"{journey}.{name}", rep, ok, latency_ms, source, detail)
+
+
+class JourneyStop(Exception):
+    """The journey cannot go on; its remaining checks fail."""
+
+
+def eq(a, b):
+    return a is not None and a == b
+
+
+class Journey:
+    """One journey run: a fresh session, calls through `request()`, and checks
+    recorded as rows against the latest call."""
+
+    def __init__(self, name, srv, sink, args, rep):
+        self.name, self.srv, self.sink, self.args, self.rep = name, srv, sink, args, rep
+        session = f"bench-{session_slug(args.model)}-{int(time.time())}-{name}-{rep}"
+        self.headers = {"x-mockingbird-session": session}
+        self.rng = random.Random(f"{args.model}|{name}|{rep}")
+        self.done = set()
+        self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
+
+    def call(self, method, path, query=None, body=None, form=None):
+        """The JSON body of the response, or {} when it is not a JSON object."""
+        url = f"{self.srv.data}/{self.name}{path}"
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+        ms, status, hdrs, parsed, raw = request(url, method, self.headers, json_body=body, form=form,
+                                                timeout=self.args.timeout)
+        self.last = {"status": status, "source": source_of(hdrs), "ms": ms,
+                     "fallback_reason": fallback_reason(hdrs)}
+        if status >= 400 or status == 0:
+            self.last["error"] = excerpt(raw)
+        return parsed if isinstance(parsed, (dict, list)) else {}
+
+    def check(self, name, ok, **detail):
+        self.done.add(name)
+        detail = dict(detail, **{k: v for k, v in self.last.items() if k not in ("source", "ms") and v is not None})
+        journey_check(self.sink, self.name, self.rep, name, bool(ok), detail,
+                      self.last["source"], self.last["ms"])
+
+    def stop(self, gate):
+        self.check(gate, False)
+        raise JourneyStop(gate)
+
+
+def run_one_journey(name, steps, srv, sink, args, rep):
+    j = Journey(name, srv, sink, args, rep)
+    try:
+        steps(j)
+        reason = None
+    except JourneyStop as e:
+        reason = f"stopped at {e}"
+    except Exception as e:  # noqa: BLE001 - a journey that breaks is recorded, not raised
+        reason = f"{type(e).__name__}: {e}"[:300]
+    for check in JOURNEY_CHECKS[name]:
+        if check not in j.done:
+            j.last = {"status": None, "source": "skipped", "ms": None, "fallback_reason": None}
+            j.check(check, False, reason=reason or "journey ended early")
+
+
+def stripe_steps(j):
+    name, email = "Ana Silva", f"ana{j.rng.randint(100, 999)}@example.org"
+    cust = j.call("POST", "/v1/customers", form={"name": name, "email": email})
+    amount = 1000 + j.rng.randint(1, 900) * 10
+    pi = j.call("POST", "/v1/payment_intents",
+                form={"amount": amount, "currency": "eur", "customer": cust.get("id")})
+    pid = pi.get("id")
+    j.check("intent keeps the customer", eq(pi.get("customer"), cust.get("id")))
+    j.check("intent keeps the amount", eq(pi.get("amount"), amount))
+    read = j.call("GET", f"/v1/payment_intents/{pid}")
+    j.check("read matches the created intent",
+            all(eq(read.get(k), pi.get(k)) for k in ("id", "amount", "customer", "status")))
+    conf = j.call("POST", f"/v1/payment_intents/{pid}/confirm", form={})
+    j.check("confirm keeps identity and amount", eq(conf.get("id"), pid) and eq(conf.get("amount"), amount))
+    j.check("confirm moves the status on",
+            conf.get("status") in ("succeeded", "processing", "requires_action", "requires_capture"),
+            status_value=conf.get("status"))
+    if conf.get("status") == "succeeded":
+        j.check("a succeeded intent received its amount", eq(conf.get("amount_received"), amount))
+    read2 = j.call("GET", f"/v1/payment_intents/{pid}")
+    j.check("read shows the confirmed status", eq(read2.get("status"), conf.get("status")),
+            confirmed=conf.get("status"), read=read2.get("status"))
+    part = amount // 2
+    refund = j.call("POST", "/v1/refunds", form={"payment_intent": pid, "amount": part})
+    j.check("refund names its intent", eq(refund.get("payment_intent"), pid))
+    j.check("refund keeps the amount", eq(refund.get("amount"), part))
+    j.check("refund uses the intent's currency", eq(str(refund.get("currency")).lower(), "eur"))
+    cust2 = j.call("GET", f"/v1/customers/{cust.get('id')}")
+    j.check("customer reads back as created", eq(cust2.get("name"), name) and eq(cust2.get("email"), email))
+
+
+def travel_steps(j):
+    search = {"origin": "LIS", "destination": "OSL", "departureDate": "2026-12-14",
+              "passengers": [{"type": "adult"}], "currency": "EUR"}
+    found = j.call("POST", "/flights/search", body=search)
+    offers = found.get("offers") if isinstance(found, dict) else None
+    if not offers or not isinstance(offers[0], dict):
+        j.stop(JOURNEY_GATE["travel"])
+    first = offers[0]
+    segs = first.get("segments") or [{}]
+    seg0 = segs[0] if isinstance(segs[0], dict) else {}
+    origin = seg0.get("origin")
+    j.check("offers fly the searched route",
+            eq(origin.get("iata") if isinstance(origin, dict) else origin, "LIS") or "LIS" in json.dumps(seg0))
+    price = first.get("price")
+    j.check("offers use the searched currency", eq(price.get("currency") if isinstance(price, dict) else None, "EUR"))
+    offer = j.call("GET", f"/offers/{first.get('id')}")
+    j.check("offer detail keeps the listed price", eq(offer.get("price"), first.get("price")))
+    j.check("offer detail keeps the listed segments", eq(offer.get("segments"), first.get("segments")))
+    passenger = {"givenName": "Ana", "familyName": "Silva", "dateOfBirth": "1990-04-02", "type": "adult"}
+    body = {"offerId": first.get("id"), "passengers": [passenger],
+            "contact": {"email": "ana@example.org", "phone": "+351912345678"},
+            "payment": {"type": "card", "brand": "visa", "last4": "4242", "expMonth": 8, "expYear": 2030,
+                        "holderName": "Ana Silva"}}
+    booking = j.call("POST", "/bookings", body=body)
+    bid = booking.get("id")
+    j.check("booking names its offer", eq(booking.get("offerId"), first.get("id")))
+    passengers = booking.get("passengers")
+    p0 = passengers[0] if isinstance(passengers, list) and passengers and isinstance(passengers[0], dict) else {}
+    j.check("booking keeps the passenger", eq(p0.get("familyName"), "Silva"))
+    bprice = booking.get("price")
+    j.check("booking costs what the offer did",
+            eq(bprice.get("total") if isinstance(bprice, dict) else None, first.get("price")))
+    j.check("booking flies the offer's segments", eq(booking.get("segments"), first.get("segments")))
+    read = j.call("GET", f"/bookings/{bid}")
+    j.check("read matches the created booking",
+            all(eq(read.get(k), booking.get(k)) for k in ("id", "reference", "status", "price")))
+    cancel = j.call("POST", f"/bookings/{bid}/cancel", body={"reason": "customer_request"})
+    j.check("cancellation names its booking", eq(cancel.get("bookingId"), bid))
+    refund = cancel.get("refund")
+    amount = refund.get("amount") if isinstance(refund, dict) else None
+    total = bprice.get("total") if isinstance(bprice, dict) else None
+    j.check("refund is in the booking's currency",
+            eq(amount.get("currency") if isinstance(amount, dict) else None,
+               total.get("currency") if isinstance(total, dict) else None))
+    read2 = j.call("GET", f"/bookings/{bid}")
+    j.check("cancel shows on the booking", read2.get("status") == "cancelled", status_value=read2.get("status"))
+
+
+def github_steps(j):
+    found = j.call("GET", "/search/repositories", query={"q": "language:rust", "per_page": 3})
+    items = found.get("items") if isinstance(found, dict) else None
+    first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
+    full = str(first.get("full_name") or "") if first else ""
+    if "/" not in full:
+        j.stop(JOURNEY_GATE["github"])
+    owner, repo = full.split("/", 1)
+    got = j.call("GET", f"/repos/{owner}/{repo}")
+    j.check("repo detail keeps the listed repo",
+            all(eq(got.get(k), first.get(k)) for k in ("id", "full_name", "stargazers_count", "description")))
+    before = got.get("open_issues_count")
+    title = "Crash when the cache is empty"
+    issue = j.call("POST", f"/repos/{owner}/{repo}/issues",
+                   body={"title": title, "body": "Steps to reproduce follow."})
+    j.check("issue keeps its title", eq(issue.get("title"), title))
+    number = issue.get("number")
+    read = j.call("GET", f"/repos/{owner}/{repo}/issues/{number}")
+    j.check("issue reads back as created", eq(read.get("title"), title) and eq(read.get("id"), issue.get("id")))
+    again = j.call("GET", f"/repos/{owner}/{repo}/issues")
+    listed = again if isinstance(again, list) else []
+    j.check("issue list holds the new issue", any(isinstance(i, dict) and i.get("number") == number for i in listed))
+    after = j.call("GET", f"/repos/{owner}/{repo}")
+    j.check("repo keeps its identity", eq(after.get("id"), got.get("id")))
+    if isinstance(before, int) and isinstance(after.get("open_issues_count"), int):
+        j.check("repo counts the new issue", after["open_issues_count"] == before + 1,
+                before=before, after=after["open_issues_count"])
+
+
+def journey_stripe(srv, sink, args, rep):
+    run_one_journey("stripe", stripe_steps, srv, sink, args, rep)
+
+
+def journey_travel(srv, sink, args, rep):
+    run_one_journey("travel", travel_steps, srv, sink, args, rep)
+
+
+def journey_github(srv, sink, args, rep):
+    run_one_journey("github", github_steps, srv, sink, args, rep)
+
+
+JOURNEYS = {"stripe": journey_stripe, "travel": journey_travel, "github": journey_github}
+
+
+def run_journeys(srv, sink, args):
+    for rep in range(args.repeat):
+        for fn in JOURNEYS.values():
+            fn(srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
     "consistency": (CONSISTENCY_MOCKS, run_consistency),
     "sse": (SSE_MOCKS, run_sse),
     "import": ({}, run_import),
+    "journeys": (JOURNEY_MOCKS, run_journeys),
 }
 
 
@@ -724,7 +966,7 @@ def main():
     p.add_argument("--proxy-base", required=True, help="bench proxy, e.g. http://127.0.0.1:18080")
     p.add_argument("--out", required=True, help="results directory (server.jsonl is appended)")
     p.add_argument("--repeat", type=int, default=3, help="reps (fresh session each) per suite")
-    p.add_argument("--suite", action="append", choices=SUITES, help="default: all")
+    p.add_argument("--suite", action="append", choices=SUITES, help="default: consistency, sse, import")
     p.add_argument("--binary", default="target/release/mockingbird")
     p.add_argument("--timeout", type=float, default=180, help="client timeout per call, seconds")
     p.add_argument("--stream-items", type=int, default=5, help="SSE events to read per rep")
@@ -742,7 +984,7 @@ def main():
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
     failed = False
-    for suite in args.suite or SUITES:
+    for suite in args.suite or DEFAULT_SUITES:
         mocks, runner = RUNNERS[suite]
         sink = Sink(args.out, args.model, suite)
         print(f"{args.model} / {suite}", file=sys.stderr)
