@@ -7,8 +7,9 @@ use crate::{Rejection, Tenancy};
 /// `Ok(None)` means "no LLM profile" (the engine falls back accordingly).
 ///
 /// Asked for every call once the [`TenantResolver`] has resolved its
-/// tenancy, with that tenancy: data-plane calls, and the imports and
-/// draft previews of the Admin API. A call whose answer is the configured
+/// tenancy, with that tenancy: data-plane calls (and the webhook payloads
+/// they send), event-channel replies and trigger messages, and the imports
+/// and draft previews of the Admin API. A call whose answer is the configured
 /// profile generates with the mock's own provider; another profile's
 /// provider is built on first use and kept for the mock. A rejection is
 /// answered as the call's problem, like a quota's. Being asked per call,

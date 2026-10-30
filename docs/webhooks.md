@@ -33,6 +33,8 @@ A target receives an event when its `events` list contains `*`, the operation id
 
 Callback URL expressions (`{$request.body#/callbackUrl}`) are ignored; events go to the configured targets only.
 
+The payload is generated with the LLM profile the provider policy chose for the call that sent the event, so it uses the same profile (and is billed to the same tenant) as that call's response.
+
 Otherwise the body is a Stripe-shaped event:
 
 ```json

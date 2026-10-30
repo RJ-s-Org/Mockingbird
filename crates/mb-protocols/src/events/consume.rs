@@ -9,7 +9,7 @@ use mb_mcm::Channel;
 use mb_state::{SessionKey, StoredResource};
 use serde_json::{Map, Value, json};
 
-use super::produce::find_header;
+use super::produce::{EventError, find_header};
 use super::runtime::{ChannelInner, DEFAULT_SESSION, Flow, Origin, PublishError, WsClient};
 use super::{BrokerError, HEADER_HOP, InMessage, MAX_HOPS, MAX_MESSAGE_BYTES};
 use crate::{RequestKind, RequestRecord};
@@ -350,9 +350,10 @@ impl ChannelInner {
             tenancy: client.map(|c| c.tenancy.clone()),
         };
         let socket = client.map(|c| &c.socket);
-        match self.produce_to(target, origin, Vec::new(), socket).await {
+        match self.produce_event(target, origin, Vec::new(), socket).await {
             Ok(_) => None,
-            Err(e) => Some(format!("error: {e}")),
+            Err(e @ EventError::Rejected(_)) => Some(e.to_string()),
+            Err(EventError::Publish(e)) => Some(format!("error: {e}")),
         }
     }
 }

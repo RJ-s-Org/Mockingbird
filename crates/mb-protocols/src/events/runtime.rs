@@ -215,7 +215,8 @@ pub(crate) enum Origin {
         headers: Vec<(String, String)>,
         hop: u32,
         /// The tenancy admitted for the caller (a WebSocket client's,
-        /// resolved at its upgrade); `None` resolves one for the mock.
+        /// resolved at its upgrade); `None` resolves one for the channel
+        /// from the consumed message's headers.
         tenancy: Option<mb_ext::Tenancy>,
     },
 }
