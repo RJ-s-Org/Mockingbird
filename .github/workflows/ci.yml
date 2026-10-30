@@ -82,7 +82,12 @@ jobs:
         with:
           toolchain: "1.97"
           components: rustfmt, clippy
+      # Every rust-cache step saves only from main and PRs restore main's
+      # caches: PR saves (scoped to refs/pull/N/merge, unusable elsewhere)
+      # evicted main's at the 10 GB repository limit (audit CI-8).
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - run: cargo fmt --all --check
@@ -113,6 +118,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: protocols
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - name: cargo check -p mockingbird-protocols, each feature on its own
@@ -147,6 +153,8 @@ jobs:
         with:
           toolchain: "1.97"
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
@@ -204,6 +212,8 @@ jobs:
           toolchain: "1.97"
       - if: steps.changed.outputs.run == 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Cache cargo-semver-checks
         if: steps.changed.outputs.run == 'true'
         id: semver-checks
@@ -241,6 +251,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # librdkafka 2.12 includes <curl/curl.h> even when built without curl.
       - if: steps.msrv.outputs.run == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
@@ -264,7 +275,10 @@ jobs:
           load: true
           tags: mockingbird:local
           cache-from: type=gha,scope=full
-          cache-to: type=gha,mode=max,scope=full
+          # Only main writes the cache: a PR's export cost about 30 s, and its
+          # entries (scoped to refs/pull/N/merge) only crowded out main's.
+          # PRs read main's cache. zstd unpacks faster than gzip.
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=full,compression=zstd' || '' }}
       - name: Smoke test
         run: docker run --rm mockingbird:local --version
       - name: Scan the image
