@@ -135,7 +135,7 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `auth.oidc.issuer` | URL | | Exactly the discovery document's `issuer`, trailing slash included | | OIDC issuer. |
 | `auth.oidc.client_id` | string | | | | Client id. |
 | `auth.oidc.client_secret` | secret reference | unset | | | Client secret; omit it for a public client. |
-| `auth.oidc.scopes` | list | `[openid, profile, email, groups]` | | | Scopes requested at login. |
+| `auth.oidc.scopes` | list | `[openid, profile, email, groups]` | | | Scopes requested at login. Add `offline_access` when your provider issues refresh tokens only for it: console roles are then refreshed from the provider after login ([roles after login](console.md#auth-modes)). |
 | `auth.oidc.roles_claim` | string | `groups` | | | Claim holding `<group_prefix>:<workspace>:<role>` and `<group_prefix>:sysadmin` strings. |
 | `auth.oidc.group_prefix` | string | `mb` | | | Prefix of the role strings. |
 | `auth.oidc.audience` | string | `client_id` | | | The `aud` bearer JWTs must carry. |

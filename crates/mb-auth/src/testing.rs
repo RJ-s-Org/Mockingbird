@@ -116,6 +116,12 @@ struct State {
     codes: HashMap<String, String>,
     /// Access token → userinfo claims.
     userinfo: HashMap<String, Value>,
+    /// Authorization code → the refresh token its exchange returns.
+    code_refresh: HashMap<String, String>,
+    /// Refresh token → the claims of the ID token a refresh returns.
+    refresh: HashMap<String, Value>,
+    /// How many refresh-token grants were requested.
+    refreshes: usize,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -288,6 +294,45 @@ impl MockOidcProvider {
         state.userinfo.insert(access_token(code), info);
     }
 
+    /// [`Self::issue_code`], with `refresh_token` in the token response. A
+    /// refresh with it answers an ID token for `claims` (fresh `iat` and
+    /// `exp`, no `nonce`) until [`Self::set_refresh_claims`] changes them or
+    /// [`Self::revoke_refresh`] revokes it.
+    ///
+    /// # Panics
+    ///
+    /// When signing fails.
+    pub async fn issue_code_with_refresh(&self, code: &str, claims: Value, refresh_token: &str) {
+        let mut refreshed = claims.clone();
+        if let Some(m) = refreshed.as_object_mut() {
+            m.remove("nonce");
+        }
+        self.issue_code(code, claims).await;
+        let mut state = lock(&self.state);
+        state
+            .code_refresh
+            .insert(code.to_string(), refresh_token.to_string());
+        state.refresh.insert(refresh_token.to_string(), refreshed);
+    }
+
+    /// Makes refreshes with `refresh_token` answer an ID token for `claims`
+    /// from now on (for example with other groups).
+    pub fn set_refresh_claims(&self, refresh_token: &str, claims: Value) {
+        lock(&self.state)
+            .refresh
+            .insert(refresh_token.to_string(), claims);
+    }
+
+    /// Revokes `refresh_token`: refreshes with it fail with `invalid_grant`.
+    pub fn revoke_refresh(&self, refresh_token: &str) {
+        lock(&self.state).refresh.remove(refresh_token);
+    }
+
+    /// How many refresh-token grants the token endpoint has received.
+    pub fn refresh_requests(&self) -> usize {
+        lock(&self.state).refreshes
+    }
+
     /// Standard claims for `sub`: `iss`, `aud = CLIENT_ID`, `iat` now,
     /// `exp` now + 300 s, `groups`, and `nonce` when given.
     pub fn claims(&self, sub: &str, groups: &[&str], nonce: Option<&str>) -> Value {
@@ -367,6 +412,9 @@ impl Respond for Token {
         if !auth_ok {
             return error(401, "invalid_client");
         }
+        if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
+            return self.refresh(form.get("refresh_token").map(String::as_str));
+        }
         if form.get("grant_type").map(String::as_str) != Some("authorization_code")
             || form.get("code_verifier").is_none_or(String::is_empty)
         {
@@ -375,11 +423,58 @@ impl Respond for Token {
         let Some(code) = form.get("code") else {
             return error(400, "invalid_request");
         };
-        let Some(id_token) = lock(&self.0).codes.remove(code) else {
-            return error(400, "invalid_grant");
+        let (id_token, refresh_token) = {
+            let mut state = lock(&self.0);
+            let Some(id_token) = state.codes.remove(code) else {
+                return error(400, "invalid_grant");
+            };
+            (id_token, state.code_refresh.remove(code))
+        };
+        let mut body = json!({
+            "access_token": access_token(code),
+            "token_type": "Bearer",
+            "expires_in": 300,
+            "id_token": id_token,
+        });
+        if let (Some(rt), Some(m)) = (refresh_token, body.as_object_mut()) {
+            m.insert("refresh_token".to_string(), json!(rt));
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+impl Token {
+    /// Answers a refresh-token grant: a fresh ID token for the token's
+    /// claims, and an access token that unlocks them at userinfo.
+    fn refresh(&self, refresh_token: Option<&str>) -> ResponseTemplate {
+        let claims = {
+            let mut state = lock(&self.0);
+            state.refreshes += 1;
+            refresh_token.and_then(|t| state.refresh.get(t).cloned())
+        };
+        let Some(mut claims) = claims else {
+            return ResponseTemplate::new(400).set_body_json(json!({ "error": "invalid_grant" }));
+        };
+        let now = chrono::Utc::now().timestamp();
+        if let Some(m) = claims.as_object_mut() {
+            m.insert("iat".to_string(), json!(now));
+            m.insert("exp".to_string(), json!(now + 300));
+        }
+        let id_token = sign_current(&self.0, &claims);
+        let access = {
+            let mut state = lock(&self.0);
+            let access = format!("access-refresh-{}", state.refreshes);
+            let mut info = claims;
+            if let Some(m) = info.as_object_mut() {
+                for c in ["iss", "aud", "exp", "iat", "nbf", "nonce", "auth_time"] {
+                    m.remove(c);
+                }
+            }
+            state.userinfo.insert(access.clone(), info);
+            access
         };
         ResponseTemplate::new(200).set_body_json(json!({
-            "access_token": access_token(code),
+            "access_token": access,
             "token_type": "Bearer",
             "expires_in": 300,
             "id_token": id_token,

@@ -7,8 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use mb_auth::testing::MockOidcProvider;
 use mb_auth::{
-    AuthError, BearerVerifier, JwtVerifier, OidcClient, OidcSettings, PrincipalKind, Role,
-    RoleMapping, http_client, validate_return_to,
+    AuthError, BearerVerifier, FinishedLogin, JwtVerifier, OidcClient, OidcSettings, Principal,
+    PrincipalKind, Role, RoleMapping, SessionManager, http_client, validate_return_to,
 };
 use mb_store::ControlStore;
 use serde_json::{Value, json};
@@ -691,4 +691,173 @@ async fn oidc_client_and_verifier_debug_show_no_secret() {
         "pending login leaked: {shown}"
     );
     assert!(shown.contains(MockOidcProvider::CLIENT_ID), "{shown}");
+}
+
+/// A finished login of `alice` with `groups`, the provider handing out
+/// `refresh` as its refresh token when given.
+async fn finished(
+    p: &MockOidcProvider,
+    c: &OidcClient,
+    code: &str,
+    groups: &[&str],
+    refresh: Option<&str>,
+) -> FinishedLogin {
+    let login = c.start_login("/").await.unwrap();
+    let nonce = MockOidcProvider::query_param(&login.url, "nonce").unwrap();
+    let claims = p.claims("alice", groups, Some(&nonce));
+    match refresh {
+        Some(rt) => p.issue_code_with_refresh(code, claims, rt).await,
+        None => p.issue_code(code, claims).await,
+    }
+    c.finish_login(&login.state, code).await.unwrap()
+}
+
+fn role(p: &Principal, ws: &str) -> Option<Role> {
+    p.roles.get(ws).copied()
+}
+
+#[tokio::test]
+async fn finish_login_returns_the_grant() {
+    let p = MockOidcProvider::start().await;
+    let c = client(&p).await;
+    let done = finished(&p, &c, "fin-1", &["mb:default:viewer"], Some("rt-fin")).await;
+    assert_eq!(role(&done.principal, "default"), Some(Role::Viewer));
+    assert_eq!(done.return_to, "/");
+    assert!(done.grant.has_refresh_token());
+    assert_eq!(done.grant.claims()["sub"], "alice");
+    let shown = format!("{done:?}");
+    assert!(!shown.contains("rt-fin"), "refresh token leaked: {shown}");
+    let done = finished(&p, &c, "fin-2", &[], None).await;
+    assert!(!done.grant.has_refresh_token());
+}
+
+#[tokio::test]
+async fn session_roles_follow_a_mapping_change() {
+    let p = MockOidcProvider::start().await;
+    let store = store().await;
+    let before = Arc::new(store_client(&p, &store).await);
+    let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(before.clone());
+    let groups = ["mb:default:viewer", "team:default:admin"];
+    let done = finished(&p, &before, "map-1", &groups, None).await;
+    let cookie = sessions.create_from_login(&done).await.unwrap();
+    let plain = sessions.create(&done.principal).await.unwrap();
+    let got = sessions.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Viewer));
+
+    // The operator switches the group prefix (a config change and restart).
+    let mut s = settings(&p);
+    s.mapping.group_prefix = "team".to_string();
+    let after = Arc::new(OidcClient::discover(s, http_client()).await.unwrap());
+    let restarted = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(after);
+    let got = restarted.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Admin));
+    // Stored for every node, and the provider was not asked.
+    let row = store
+        .get_admin_session(&SessionManager::session_id(&cookie))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.principal["roles"]["default"], "admin");
+    assert_eq!(p.refresh_requests(), 0);
+    // A session without stored claims keeps the roles of its login.
+    let got = restarted.lookup(&plain).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Viewer));
+}
+
+#[tokio::test]
+async fn session_roles_refresh_with_the_refresh_token() {
+    let p = MockOidcProvider::start().await;
+    let store = store().await;
+    let c = Arc::new(store_client(&p, &store).await);
+    let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(c.clone())
+        .with_role_refresh_interval(Duration::ZERO);
+    let done = finished(&p, &c, "ref-1", &["mb:default:viewer"], Some("rt-alice")).await;
+    let cookie = sessions.create_from_login(&done).await.unwrap();
+
+    // The refresh token is stored sealed.
+    let id = SessionManager::session_id(&cookie);
+    let (_, grant) = store
+        .get_admin_session_with_grant(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    let sealed = grant.unwrap().refresh_token.unwrap();
+    assert!(!sealed.contains("rt-alice"), "{sealed}");
+
+    // The user's groups change at the provider.
+    p.set_refresh_claims("rt-alice", p.claims("alice", &["mb:default:editor"], None));
+    let got = sessions.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Editor));
+    assert_eq!(p.refresh_requests(), 1);
+    let got = sessions.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Editor));
+    assert_eq!(p.refresh_requests(), 2);
+
+    // The provider revokes the grant: the session ends.
+    p.revoke_refresh("rt-alice");
+    assert_eq!(sessions.lookup(&cookie).await.unwrap(), None);
+    assert!(store.get_admin_session(&id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn role_refresh_waits_for_its_interval_and_needs_a_refresh_token() {
+    let p = MockOidcProvider::start().await;
+    let store = store().await;
+    let c = Arc::new(store_client(&p, &store).await);
+    let hourly = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(c.clone())
+        .with_role_refresh_interval(Duration::from_secs(3600));
+    let done = finished(&p, &c, "wait-1", &["mb:default:viewer"], Some("rt-wait")).await;
+    let cookie = hourly.create_from_login(&done).await.unwrap();
+    p.set_refresh_claims("rt-wait", p.claims("alice", &["mb:default:owner"], None));
+    let got = hourly.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Viewer));
+    assert_eq!(p.refresh_requests(), 0);
+
+    // Without a refresh token there is nothing to refresh with.
+    let always = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(c.clone())
+        .with_role_refresh_interval(Duration::ZERO);
+    let done = finished(&p, &c, "wait-2", &["mb:default:viewer"], None).await;
+    let cookie = always.create_from_login(&done).await.unwrap();
+    let got = always.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Viewer));
+    assert_eq!(p.refresh_requests(), 0);
+}
+
+#[tokio::test]
+async fn refreshed_id_token_for_another_subject_ends_the_session() {
+    let p = MockOidcProvider::start().await;
+    let store = store().await;
+    let c = Arc::new(store_client(&p, &store).await);
+    let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(c.clone())
+        .with_role_refresh_interval(Duration::ZERO);
+    let done = finished(&p, &c, "sub-1", &["mb:default:viewer"], Some("rt-sub")).await;
+    let cookie = sessions.create_from_login(&done).await.unwrap();
+    p.set_refresh_claims("rt-sub", p.claims("mallory", &["mb:sysadmin"], None));
+    assert_eq!(sessions.lookup(&cookie).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn unreachable_provider_keeps_the_roles() {
+    let p = MockOidcProvider::start().await;
+    let store = store().await;
+    let c = Arc::new(store_client(&p, &store).await);
+    let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), false)
+        .with_role_refresh(c.clone())
+        .with_role_refresh_interval(Duration::ZERO);
+    let done = finished(&p, &c, "down-1", &["mb:default:viewer"], Some("rt-down")).await;
+    let cookie = sessions.create_from_login(&done).await.unwrap();
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&p.server)
+        .await;
+    let got = sessions.lookup(&cookie).await.unwrap().unwrap();
+    assert_eq!(role(&got, "default"), Some(Role::Viewer));
 }

@@ -21,16 +21,16 @@ use mb_mcm::Bundle;
 use serde_json::Value;
 
 use crate::{
-    ACQUIRE_TIMEOUT, ActiveBundle, AdminSession, ApiKey, AuditEvent, AuditFilter,
-    CHANGE_CHANNEL_CAPACITY, ChannelSettings, ContractStatus, ContractVersion, ContractVersionInfo,
-    ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob, ImportJobStatus, ImportOutcome,
-    ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST, Mock, MockEventSettings, NewAuditEvent,
-    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, OidcPendingLogin, PruneCounter,
-    RequestKind, RequestLogEntry, RequestLogFilter, RequestLogSummary, ResourceSource,
-    STALE_IMPORT_ERROR, Scenario, ScenarioRules, StoreError, Workspace, lease_times,
-    missing_workspace, not_a_draft, now, queued_progress, require_draft_status, sha256_hex,
-    validate_header_name, validate_hosts, validate_mock_name, validate_mock_settings,
-    validate_route_prefix, validate_workspace_name,
+    ACQUIRE_TIMEOUT, ActiveBundle, AdminSession, AdminSessionGrant, ApiKey, AuditEvent,
+    AuditFilter, CHANGE_CHANNEL_CAPACITY, ChannelSettings, ContractStatus, ContractVersion,
+    ContractVersionInfo, ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob,
+    ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST, Mock,
+    MockEventSettings, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
+    NewRequestLogEntry, OidcPendingLogin, PruneCounter, RequestKind, RequestLogEntry,
+    RequestLogFilter, RequestLogSummary, ResourceSource, STALE_IMPORT_ERROR, Scenario,
+    ScenarioRules, StoreError, Workspace, lease_times, missing_workspace, not_a_draft, now,
+    queued_progress, require_draft_status, sha256_hex, validate_header_name, validate_hosts,
+    validate_mock_name, validate_mock_settings, validate_route_prefix, validate_workspace_name,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -1678,6 +1678,78 @@ impl ControlStore for PgStore {
                 .await?
                 .rows_affected(),
         )
+    }
+
+    async fn get_admin_session_with_grant(
+        &self,
+        id_hash: &str,
+    ) -> Result<Option<(AdminSession, Option<AdminSessionGrant>)>, StoreError> {
+        let sql = format!(
+            "SELECT {SESSION_SELECT}, claims::text AS claims, mapping_hash, refresh_token, \
+             refreshed_at FROM admin_sessions WHERE id_hash = $1"
+        );
+        let Some(row) = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id_hash)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let session = session_from_row(&row)?;
+        let claims: Option<String> = row.try_get("claims")?;
+        let mapping_hash: Option<String> = row.try_get("mapping_hash")?;
+        let refreshed_at: Option<DateTime<Utc>> = row.try_get("refreshed_at")?;
+        let grant = match (claims, mapping_hash, refreshed_at) {
+            (Some(claims), Some(mapping_hash), Some(refreshed_at)) => Some(AdminSessionGrant {
+                claims: serde_json::from_str(&claims)?,
+                mapping_hash,
+                refresh_token: row.try_get("refresh_token")?,
+                refreshed_at,
+            }),
+            _ => None,
+        };
+        Ok(Some((session, grant)))
+    }
+
+    async fn put_admin_session_grant(
+        &self,
+        id_hash: &str,
+        principal: &Value,
+        grant: &AdminSessionGrant,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE admin_sessions SET principal = $1::json, claims = $2::json, \
+             mapping_hash = $3, refresh_token = $4, refreshed_at = $5 WHERE id_hash = $6",
+        )
+        .bind(serde_json::to_string(principal)?)
+        .bind(serde_json::to_string(&grant.claims)?)
+        .bind(&grant.mapping_hash)
+        .bind(&grant.refresh_token)
+        .bind(grant.refreshed_at)
+        .bind(id_hash)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    async fn claim_admin_session_refresh(
+        &self,
+        id_hash: &str,
+        seen: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        Ok(sqlx::query(
+            "UPDATE admin_sessions SET refreshed_at = $1 \
+             WHERE id_hash = $2 AND refreshed_at = $3",
+        )
+        .bind(now)
+        .bind(id_hash)
+        .bind(seen)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
     }
 
     async fn delete_idle_admin_sessions(&self, before: DateTime<Utc>) -> Result<u64, StoreError> {

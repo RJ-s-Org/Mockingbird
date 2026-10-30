@@ -60,11 +60,14 @@ pub use http::{HttpError, http_client, http_client_with, send, try_http_client};
 pub use jwt::{ALLOWED_ALGS, JwtVerifier};
 pub use mapping::RoleMapping;
 pub use oidc::{
-    CompletedLogin, LoginRedirect, MAX_RETURN_TO, OidcClient, OidcSettings, validate_return_to,
+    CompletedLogin, FinishedLogin, LoginGrant, LoginRedirect, MAX_RETURN_TO, OidcClient,
+    OidcSettings, validate_return_to,
 };
 pub use principal::{Principal, PrincipalKind};
 pub use role::{ParseRoleError, Permission, Role};
-pub use session::{CookieSecurity, SESSION_COOKIE, SessionInfo, SessionManager};
+pub use session::{
+    CookieSecurity, DEFAULT_ROLE_REFRESH_INTERVAL, SESSION_COOKIE, SessionInfo, SessionManager,
+};
 
 /// Lowercase hex encoding of `bytes`.
 pub(crate) fn hex(bytes: &[u8]) -> String {

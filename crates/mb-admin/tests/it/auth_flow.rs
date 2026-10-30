@@ -155,7 +155,11 @@ async fn node(
         .with_post_logout_redirect("http://127.0.0.1:9090/")
         .unwrap();
     let oidc = Arc::new(oidc);
-    let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), secure);
+    // Roles refresh on every request, for sessions whose login issued a
+    // refresh token.
+    let sessions = SessionManager::new(store.clone(), Duration::from_secs(3600), secure)
+        .with_role_refresh(oidc.clone())
+        .with_role_refresh_interval(Duration::ZERO);
     let auth = Authenticator {
         api_keys: ApiKeys::new(store.clone()),
         sessions: Some(sessions.clone()),
@@ -1119,4 +1123,46 @@ async fn console_sessions_without_login_are_empty() {
     )
     .await;
     r.problem(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn console_roles_follow_the_provider_after_login() {
+    let h = harness().await;
+    let started = h.start_login("/mocks").await;
+    let nonce = MockOidcProvider::query_param(&started.url, "nonce").unwrap();
+    let state = MockOidcProvider::query_param(&started.url, "state").unwrap();
+    let claims = h
+        .provider
+        .claims("alice", &["mb:default:viewer"], Some(&nonce));
+    h.provider
+        .issue_code_with_refresh("refresh-code", claims, "rt-console")
+        .await;
+    let r = get_with(
+        &h.app,
+        &format!("/auth/callback?code=refresh-code&state={state}"),
+        &[(
+            "cookie",
+            &format!(
+                "{LOGIN_STATE_COOKIE}={}",
+                cookie_value(&started.state_cookie)
+            ),
+        )],
+    )
+    .await;
+    assert_eq!(r.location(), "/mocks");
+    let session = cookie_value(&r.set_cookie(SESSION_COOKIE).unwrap());
+    let me = h.me(&session).await.json();
+    assert_eq!(me["workspaces"][0]["role"], "viewer", "{me}");
+
+    // Promoted at the provider: the next request has the new role.
+    h.provider.set_refresh_claims(
+        "rt-console",
+        h.provider.claims("alice", &["mb:default:admin"], None),
+    );
+    let me = h.me(&session).await.json();
+    assert_eq!(me["workspaces"][0]["role"], "admin", "{me}");
+
+    // Signed out at the provider: the console session ends too.
+    h.provider.revoke_refresh("rt-console");
+    h.me(&session).await.problem(StatusCode::UNAUTHORIZED);
 }

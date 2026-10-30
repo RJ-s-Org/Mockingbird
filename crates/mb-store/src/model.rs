@@ -1037,6 +1037,33 @@ pub struct AdminSession {
     pub last_seen: DateTime<Utc>,
 }
 
+/// What a console session keeps to re-derive its roles after login: the
+/// identity provider's `claims`, the hash of the role mapping that turned
+/// them into the session's principal, the provider's refresh token (sealed
+/// by `mb-auth`; opaque to the store) and when the roles were last
+/// refreshed. Its `Debug` output redacts `refresh_token`.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct AdminSessionGrant {
+    pub claims: Value,
+    pub mapping_hash: String,
+    pub refresh_token: Option<String>,
+    pub refreshed_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for AdminSessionGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminSessionGrant")
+            .field("claims", &self.claims)
+            .field("mapping_hash", &self.mapping_hash)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("refreshed_at", &self.refreshed_at)
+            .finish()
+    }
+}
+
 /// An OIDC console login that was started and has not come back to the
 /// callback yet, keyed by the hex sha256 of its `state`. `data` (the PKCE
 /// verifier, nonce and return path) is opaque to the store. Its `Debug`
