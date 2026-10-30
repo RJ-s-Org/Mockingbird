@@ -702,7 +702,10 @@ fn effective_trigger_slice_matches_effective_triggers() {
     channel.triggers = vec![Trigger::Cron {
         expr: "* * * * *".into(),
     }];
-    assert_eq!(channel.effective_trigger_slice(), channel.triggers.as_slice());
+    assert_eq!(
+        channel.effective_trigger_slice(),
+        channel.triggers.as_slice()
+    );
     channel.direction = Direction::Subscribe;
     assert!(channel.effective_trigger_slice().is_empty());
     assert!(channel.effective_triggers().is_empty());
