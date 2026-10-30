@@ -9,6 +9,12 @@ RUN npm ci
 COPY crates/mb-console/web ./
 RUN npm run build
 
+# Only the built console. The builder copies from this stage, so when the
+# console build is a cache hit BuildKit fetches this one small layer instead of
+# the whole Node image and node_modules under it (about 470 MB on CI).
+FROM scratch AS console-dist
+COPY --from=console /src/crates/mb-console/dist /dist
+
 # Collects only the Cargo manifests, so the dependency layer below is rebuilt
 # only when a manifest or the lockfile changes.
 FROM rust:1.97-bookworm AS manifests
@@ -31,7 +37,10 @@ WORKDIR /src
 COPY --from=manifests /manifests ./
 # Build the dependencies against stub sources (an empty lib per crate, a
 # stub `main` for the binary, a no-op build script where one is declared, and
-# an empty file per declared test target).
+# an empty file per declared test target). The cargo registry stays in this
+# layer rather than in a cache mount: CI runners are ephemeral and the gha cache
+# does not keep mount contents, so a mount would make every workspace build
+# re-fetch and unpack every crate.
 RUN for manifest in crates/*/Cargo.toml; do \
         dir="$(dirname "$manifest")"; \
         mkdir -p "$dir/src" "$dir/tests"; \
@@ -48,7 +57,7 @@ COPY crates crates
 COPY plugins plugins
 # The API examples catalog the binary embeds (`mockingbird examples`).
 COPY examples/apis examples/apis
-COPY --from=console /src/crates/mb-console/dist crates/mb-console/dist
+COPY --from=console-dist /dist crates/mb-console/dist
 # COPY keeps the context's timestamps, which can be older than the stub
 # build; touch the sources so Cargo rebuilds the workspace crates.
 RUN find crates -name '*.rs' -exec touch {} + \
