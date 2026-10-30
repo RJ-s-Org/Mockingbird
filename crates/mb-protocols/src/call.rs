@@ -1045,6 +1045,68 @@ impl BundleIndex {
     }
 }
 
+/// Aliases [`PathAliases`] holds at most; it is emptied when full.
+const MAX_PATH_ALIASES: usize = 4096;
+
+/// Which stored resource a path field value names (GitHub's issue `number`
+/// 412 → the issue stored under its `id`), remembered from this runtime's
+/// writes so that a read by number gets the resource instead of scanning
+/// the session's resources of the type. Only a hint: a hit is used only
+/// when the resource it names still holds that value, and a read that
+/// misses (written elsewhere: the Admin API, another node, before a
+/// restart) still scans, then remembers what it found.
+#[derive(Debug, Default)]
+pub(crate) struct PathAliases(std::sync::Mutex<HashMap<PathAlias, String>>);
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct PathAlias {
+    session: SessionKey,
+    resource_type: String,
+    field: String,
+    value: String,
+}
+
+impl PathAliases {
+    /// Remembers that resource `id` of type `t` holds each of `values`
+    /// (field, value).
+    fn remember(&self, session: &SessionKey, t: &str, id: &str, values: Vec<(&str, String)>) {
+        if values.is_empty() {
+            return;
+        }
+        let Ok(mut aliases) = self.0.lock() else {
+            return;
+        };
+        if aliases.len() + values.len() > MAX_PATH_ALIASES {
+            aliases.clear();
+        }
+        for (field, value) in values {
+            let key = PathAlias {
+                session: session.clone(),
+                resource_type: t.to_string(),
+                field: field.to_string(),
+                value,
+            };
+            aliases.insert(key, id.to_string());
+        }
+    }
+
+    /// The id last remembered for `field` = `value`.
+    fn id_of(&self, session: &SessionKey, t: &str, field: &str, value: &str) -> Option<String> {
+        let key = PathAlias {
+            session: session.clone(),
+            resource_type: t.to_string(),
+            field: field.to_string(),
+            value: value.to_string(),
+        };
+        self.0.lock().ok()?.get(&key).cloned()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().map(|a| a.len()).unwrap_or_default()
+    }
+}
+
 impl MockRuntime {
     /// The operation `id` of [`MockRuntime::bundle`] (the first of a
     /// repeated id), without scanning the operations. (SOAP keeps its own
@@ -1166,14 +1228,14 @@ async fn store_wrapped(
 /// query (sorted), a query operation's body, the narrowed selection and the
 /// call's faker seed (`X-Mockingbird-Seed`).
 fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Value>) -> String {
-    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::hash::{DefaultHasher, Hasher};
     let body = match op.kind {
         OperationKind::Query => call.body.as_ref().map(canonical),
         _ => None,
     };
     let selection = response_schema.map(|schema| {
         let mut hasher = DefaultHasher::new();
-        canonical(schema).to_string().hash(&mut hasher);
+        hash_canonical(schema, &mut hasher);
         format!("{:016x}", hasher.finish())
     });
     serde_json::json!([
@@ -1189,7 +1251,7 @@ fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Valu
 
 /// `value` with every object's keys sorted, whatever map order serde_json
 /// keeps.
-fn canonical(value: &Value) -> Value {
+pub(crate) fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(obj) => {
             let mut keys: Vec<&String> = obj.keys().collect();
@@ -1203,6 +1265,42 @@ fn canonical(value: &Value) -> Value {
         }
         Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
         other => other.clone(),
+    }
+}
+
+/// Feeds `value` to `hasher` with every object's keys sorted, like hashing
+/// [`canonical`]'s output without building it: equal values (whatever their
+/// map order) hash equally.
+pub(crate) fn hash_canonical<H: std::hash::Hasher>(value: &Value, hasher: &mut H) {
+    use std::hash::Hash;
+    std::mem::discriminant(value).hash(hasher);
+    match value {
+        Value::Null => {}
+        Value::Bool(b) => b.hash(hasher),
+        Value::Number(n) => n.hash(hasher),
+        Value::String(s) => s.hash(hasher),
+        Value::Array(items) => {
+            items.len().hash(hasher);
+            for item in items {
+                hash_canonical(item, hasher);
+            }
+        }
+        Value::Object(obj) => hash_canonical_members(obj, hasher),
+    }
+}
+
+/// [`hash_canonical`] of an object's members.
+pub(crate) fn hash_canonical_members<H: std::hash::Hasher>(
+    obj: &Map<String, Value>,
+    hasher: &mut H,
+) {
+    use std::hash::Hash;
+    let mut members: Vec<(&String, &Value)> = obj.iter().collect();
+    members.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    members.len().hash(hasher);
+    for (key, member) in members {
+        key.hash(hasher);
+        hash_canonical(member, hasher);
     }
 }
 
@@ -1558,11 +1656,7 @@ async fn read_context(
         (Some(t), Some(id)) => match state.get(session, t, id).await {
             Some(hit) => Some(hit),
             None => match op.identity.as_ref().and_then(|i| i.path_field.as_deref()) {
-                Some(field) => state
-                    .list(session, t, MAX_SCAN)
-                    .await
-                    .into_iter()
-                    .find(|r| r.data.get(field).and_then(id_string).as_deref() == Some(id)),
+                Some(field) => by_path_field(state, session, t, field, id).await,
                 None => None,
             },
         },
@@ -1578,6 +1672,45 @@ async fn read_context(
     )
     .await;
     (target, related)
+}
+
+/// The value `data` holds for each of `fields`, as (field, value).
+fn path_values<'f>(fields: &'f [String], data: &Value) -> Vec<(&'f str, String)> {
+    fields
+        .iter()
+        .filter_map(|f| Some((f.as_str(), data.get(f).and_then(id_string)?)))
+        .collect()
+}
+
+/// The resource of type `t` whose `field` is `value` (a read by GitHub's
+/// issue number): the one [`PathAliases`] names when it still holds the
+/// value, else the first of a scan.
+async fn by_path_field(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    field: &str,
+    value: &str,
+) -> Option<StoredResource> {
+    let holds =
+        |r: &StoredResource| r.data.get(field).and_then(id_string).as_deref() == Some(value);
+    if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
+        && let Some(hit) = state.get(session, t, &id).await
+        && holds(&hit)
+    {
+        return Some(hit);
+    }
+    let found = state
+        .list(session, t, MAX_SCAN)
+        .await
+        .into_iter()
+        .find(|r| holds(r))?;
+    let values = vec![(field, value.to_string())];
+    state
+        .rt
+        .path_aliases()
+        .remember(session, t, &found.id, values);
+    Some(found)
 }
 
 /// State-store access for one call. The first failing call marks the mock
@@ -1686,9 +1819,15 @@ impl<'a> StateAccess<'a> {
         if !self.open() {
             return false;
         }
-        let r = self.rt.state.upsert(s, r).await;
+        let rt = self.rt;
+        let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
+        let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
+        if ok && let Some((t, id)) = named {
+            rt.path_aliases().remember(s, &t, &id, values);
+        }
         ok
     }
 
@@ -1709,9 +1848,15 @@ impl<'a> StateAccess<'a> {
         if !self.open() {
             return false;
         }
-        let r = self.rt.state.insert_seeded(s, r).await;
+        let rt = self.rt;
+        let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
+        let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
         self.wrote |= stored;
+        if stored && let Some((t, id)) = named {
+            rt.path_aliases().remember(s, &t, &id, values);
+        }
         stored
     }
 }
@@ -2556,6 +2701,243 @@ paths:
                 "consumed message of {size} bytes: {:?} of copies",
                 started.elapsed() / n
             );
+        }
+    }
+
+    #[test]
+    fn canonical_hash_ignores_member_order_and_tells_values_apart() {
+        use std::hash::{DefaultHasher, Hasher};
+        let hash = |v: &Value| {
+            let mut hasher = DefaultHasher::new();
+            hash_canonical(v, &mut hasher);
+            hasher.finish()
+        };
+        let mut forward = Map::new();
+        forward.insert("a".into(), json!(1));
+        forward.insert("b".into(), json!({"y": [1, 2], "x": null}));
+        let mut backward = Map::new();
+        backward.insert("b".into(), json!({"x": null, "y": [1, 2]}));
+        backward.insert("a".into(), json!(1));
+        assert_eq!(
+            hash(&Value::Object(forward)),
+            hash(&Value::Object(backward))
+        );
+        let distinct = [
+            json!({"a": [1, 2]}),
+            json!({"a": [2, 1]}),
+            json!({"a": "1"}),
+            json!({"a": 1}),
+            json!({"a": null}),
+            json!({}),
+            json!([["a", 1]]),
+            json!({"a": {"b": 1}}),
+            json!({"a": [{"b": 1}]}),
+        ];
+        let hashes: HashSet<u64> = distinct.iter().map(hash).collect();
+        assert_eq!(hashes.len(), distinct.len());
+    }
+
+    /// Counts `list` calls on a memory store.
+    struct ListSpy {
+        inner: MemoryStore,
+        lists: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ListSpy {
+        fn lists(&self) -> usize {
+            self.lists.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateStore for ListSpy {
+        async fn get(
+            &self,
+            s: &SessionKey,
+            t: &str,
+            id: &str,
+        ) -> Result<Option<StoredResource>, StateError> {
+            self.inner.get(s, t, id).await
+        }
+        async fn list(
+            &self,
+            s: &SessionKey,
+            t: &str,
+            limit: usize,
+        ) -> Result<Vec<StoredResource>, StateError> {
+            self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.list(s, t, limit).await
+        }
+        async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+            self.inner.upsert(s, r).await
+        }
+        async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
+            self.inner.delete(s, t, id).await
+        }
+        async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+            self.inner.reset(s).await
+        }
+        async fn reset_mock(&self, w: &str, m: &str) -> Result<(), StateError> {
+            self.inner.reset_mock(w, m).await
+        }
+        async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+            self.inner.touch(s).await
+        }
+        async fn sessions(
+            &self,
+            w: &str,
+            m: &str,
+        ) -> Result<Vec<mb_state::SessionInfo>, StateError> {
+            self.inner.sessions(w, m).await
+        }
+        async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+            self.inner.export(s).await
+        }
+        async fn seed(&self, s: &SessionKey, r: Vec<StoredResource>) -> Result<(), StateError> {
+            self.inner.seed(s, r).await
+        }
+        async fn ping(&self) -> Result<(), StateError> {
+            Ok(())
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<mb_state::StateChanged> {
+            self.inner.subscribe()
+        }
+    }
+
+    /// GitHub's runtime over a [`ListSpy`], with its read of an issue by
+    /// number.
+    fn issue_reads() -> (Arc<ListSpy>, MockRuntime, Operation) {
+        let spy = Arc::new(ListSpy {
+            inner: MemoryStore::new(Duration::from_secs(3600)),
+            lists: Default::default(),
+        });
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(example("github-rest/github-rest.openapi.yaml")),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            spy.clone(),
+        );
+        let op = rt
+            .bundle()
+            .operations
+            .iter()
+            .find(|o| o.identity.as_ref().is_some_and(|i| i.path_field.is_some()))
+            .cloned()
+            .unwrap();
+        (spy, rt, op)
+    }
+
+    fn issue(op: &Operation, id: &str, number: u64) -> StoredResource {
+        StoredResource {
+            resource_type: op.resource_type.clone().unwrap(),
+            id: id.into(),
+            data: json!({"id": id, "number": number, "title": format!("issue {number}")}),
+        }
+    }
+
+    async fn read_by(rt: &MockRuntime, op: &Operation, number: &str) -> Option<String> {
+        let mut state = StateAccess::new(rt);
+        let (target, _) = read_context(
+            &mut state,
+            &session("s"),
+            op,
+            Some(number),
+            &OperationCall::default(),
+        )
+        .await;
+        target.map(|t| t.id)
+    }
+
+    #[tokio::test]
+    async fn a_read_by_path_field_finds_this_runtimes_writes_without_a_scan() {
+        let (spy, rt, op) = issue_reads();
+        let field = op.identity.as_ref().unwrap().path_field.as_deref();
+        assert_eq!(field, Some("number"));
+        let t = op.resource_type.clone().unwrap();
+        let s = session("s");
+        let mut state = StateAccess::new(&rt);
+        assert!(state.upsert(&s, issue(&op, "I_1", 7)).await);
+        assert!(state.insert_seeded(&s, issue(&op, "I_2", 8)).await);
+        assert_eq!(read_by(&rt, &op, "7").await.as_deref(), Some("I_1"));
+        assert_eq!(read_by(&rt, &op, "8").await.as_deref(), Some("I_2"));
+        assert_eq!(spy.lists(), 0);
+
+        // Renumbered behind the runtime's back: the alias no longer holds,
+        // so the read scans like before, and remembers what it found.
+        rt.state.upsert(&s, issue(&op, "I_1", 9)).await.unwrap();
+        assert_eq!(read_by(&rt, &op, "7").await, None);
+        assert_eq!(spy.lists(), 1);
+        assert_eq!(read_by(&rt, &op, "9").await.as_deref(), Some("I_1"));
+        assert_eq!(spy.lists(), 2);
+        assert_eq!(read_by(&rt, &op, "9").await.as_deref(), Some("I_1"));
+        assert_eq!(spy.lists(), 2);
+
+        // Deleted or reset: the alias names nothing.
+        rt.state.delete(&s, &t, "I_1").await.unwrap();
+        assert_eq!(read_by(&rt, &op, "9").await, None);
+        rt.state.reset(&s).await.unwrap();
+        assert_eq!(read_by(&rt, &op, "8").await, None);
+        // Another session does not see this one's aliases.
+        let mut state = StateAccess::new(&rt);
+        assert!(state.upsert(&session("other"), issue(&op, "I_3", 3)).await);
+        assert_eq!(read_by(&rt, &op, "3").await, None);
+    }
+
+    #[test]
+    fn path_aliases_are_bounded() {
+        let aliases = PathAliases::default();
+        let s = session("s");
+        for i in 0..(MAX_PATH_ALIASES + 10) {
+            let values = vec![("number", i.to_string())];
+            aliases.remember(&s, "issues", &format!("I_{i}"), values);
+            assert!(aliases.len() <= MAX_PATH_ALIASES);
+        }
+        let last = MAX_PATH_ALIASES + 9;
+        assert_eq!(
+            aliases.id_of(&s, "issues", "number", &last.to_string()),
+            Some(format!("I_{last}"))
+        );
+    }
+
+    /// Timing harness for a read by path field, scanning (as before) and
+    /// through [`PathAliases`]: `cargo test -p mockingbird-protocols --lib
+    /// --release -- --ignored --nocapture path_read_timing`.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "timing harness"]
+    async fn path_read_timing() {
+        let (_, rt, op) = issue_reads();
+        let s = session("s");
+        let t = op.resource_type.clone().unwrap();
+        let mut stored = 0;
+        for n in [50usize, 500] {
+            let mut state = StateAccess::new(&rt);
+            for i in stored..n {
+                let mut r = issue(&op, &format!("I_{i}"), i as u64);
+                r.data["body"] = json!("y".repeat(1500));
+                r.data["user"] = json!({"login": "octocat", "id": 1});
+                state.upsert(&s, r).await;
+            }
+            stored = n;
+            let iters = 500u32;
+            let started = std::time::Instant::now();
+            for _ in 0..iters {
+                let _ = rt.state.get(&s, &t, "3").await;
+                let found = rt
+                    .state
+                    .list(&s, &t, MAX_SCAN)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.data.get("number").and_then(id_string).as_deref() == Some("3"));
+                std::hint::black_box(found);
+            }
+            let scan = started.elapsed() / iters;
+            let started = std::time::Instant::now();
+            for _ in 0..iters {
+                std::hint::black_box(read_by(&rt, &op, "3").await);
+            }
+            let aliased = started.elapsed() / iters;
+            println!("{n} issues stored: read by number, scan {scan:?}, alias {aliased:?}");
         }
     }
 }

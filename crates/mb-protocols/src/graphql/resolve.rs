@@ -386,10 +386,13 @@ async fn generate_in(
                     // included: a whole return type (GitHub's `Issue`) is
                     // tens of thousands of prompt tokens and an answer no
                     // model finishes. What the answer holds is stored below.
-                    let narrowed = op
-                        .success_output()
-                        .and_then(|o| o.schema.as_ref())
-                        .map(|schema| super::select::narrow(schema, &rt.bundle.defs, selection));
+                    let narrowed =
+                        op.success_output()
+                            .and_then(|o| o.schema.as_ref())
+                            .map(|schema| {
+                                rt.narrowed()
+                                    .narrow(&op.id, schema, &rt.bundle.defs, selection)
+                            });
                     let was_narrowed = narrowed.is_some();
                     // The engine overlays a read's stored target by field
                     // name, which an aliased selection must re-key (unless
@@ -411,7 +414,8 @@ async fn generate_in(
                     // generate joins the shared LLM call, and its answer
                     // is seeded and cached per field.
                     let route = match batch.take() {
-                        Some(b) => match call::prepare(rt, &plan, &call, narrowed.as_ref()).await {
+                        Some(b) => match call::prepare(rt, &plan, &call, narrowed.as_deref()).await
+                        {
                             call::Prepared::Answered(answer) => {
                                 // Not generating: give up the batch place.
                                 *batch = Some(b);
@@ -451,7 +455,7 @@ async fn generate_in(
                                     &plan,
                                     &call,
                                     pending,
-                                    narrowed.as_ref(),
+                                    narrowed.as_deref(),
                                 )
                                 .await
                                 .map_err(engine_failure),
@@ -459,7 +463,7 @@ async fn generate_in(
                         }
                         Route::Answered(answer) => Ok(answer),
                         Route::Alone => {
-                            call::generate_narrowed(rt, &plan, &call, narrowed.as_ref())
+                            call::generate_narrowed(rt, &plan, &call, narrowed.as_deref())
                                 .await
                                 .map_err(engine_failure)
                         }

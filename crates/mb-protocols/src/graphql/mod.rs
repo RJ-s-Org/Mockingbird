@@ -48,6 +48,7 @@ mod state;
 mod subscription;
 
 pub(crate) use schema::build_schema;
+pub(crate) use select::NarrowCache;
 
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const PROBLEM_JSON: &str = "application/problem+json";
