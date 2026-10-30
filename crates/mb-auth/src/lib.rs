@@ -4,6 +4,7 @@
 //! depends on axum; extractors and middleware live in `mb-admin`.
 
 mod apikey;
+mod apikey_cache;
 mod authenticator;
 mod error;
 mod http;
@@ -17,8 +18,8 @@ mod session;
 pub mod testing;
 
 pub use apikey::{
-    API_KEY_PREFIX, ApiKeys, GeneratedKey, KeyScope, NewKeyRequest, generate_key, hash_secret,
-    parse_token,
+    API_KEY_CACHE_CAPACITY, API_KEY_PREFIX, ApiKeys, DEFAULT_API_KEY_CACHE_TTL, GeneratedKey,
+    KeyScope, NewKeyRequest, generate_key, hash_secret, parse_token,
 };
 pub use authenticator::{Authenticate, Authenticator, BearerVerifier, LocalAuth};
 pub use error::AuthError;

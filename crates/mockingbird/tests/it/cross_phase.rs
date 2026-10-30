@@ -314,3 +314,49 @@ async fn grpc_mock_in_workspace_records_there() {
     assert_eq!(r.status(), 200);
     assert_eq!(r.json::<Value>().await.unwrap(), json!([]));
 }
+
+/// (3) The data plane caches verified keys briefly, but a key revoked
+/// through the Admin API stops working at once on the node that revoked it,
+/// on every adapter.
+#[tokio::test]
+async fn revoked_data_plane_key_is_refused_immediately() {
+    let app = start().await;
+    let http = reqwest::Client::new();
+    let r = http
+        .post(format!("{}/api/v1/workspaces/{WS}/api-keys", app.admin))
+        .json(&json!({"name": "dp", "role": "viewer", "scopes": ["data-plane"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let body: Value = r.json().await.unwrap();
+    let key = body["token"].as_str().unwrap().to_string();
+    let key_id = body["key"]["key_id"].as_str().unwrap().to_string();
+
+    // Served twice: the second call is answered from the key cache.
+    for _ in 0..2 {
+        let r = graphql(&app.data, Some(("x-api-key", &key)), None).await;
+        assert_eq!(r.status(), 200);
+    }
+    get_feature(app.grpc, &[("x-mb-key", &key)]).await.unwrap();
+
+    let r = http
+        .delete(format!(
+            "{}/api/v1/workspaces/{WS}/api-keys/{key_id}",
+            app.admin
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    assert_eq!(
+        graphql(&app.data, Some(("x-api-key", &key)), None)
+            .await
+            .status(),
+        401
+    );
+    let err = get_feature(app.grpc, &[("x-mb-key", &key)])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err:?}");
+}
