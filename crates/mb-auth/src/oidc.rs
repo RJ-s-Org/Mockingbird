@@ -14,12 +14,12 @@ use openidconnect::core::{
     CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
 };
 use openidconnect::{
-    AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndSessionUrl, EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenFields, IssuerUrl,
-    JsonWebKeySetUrl, LogoutRequest, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
-    PkceCodeVerifier, PostLogoutRedirectUrl, ProviderMetadataWithLogout, RedirectUrl,
-    RequestTokenError, Scope, StandardErrorResponse, StandardTokenResponse, TokenResponse,
-    UserInfoClaims,
+    AccessToken, AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
+    EmptyExtraTokenFields, EndSessionUrl, EndpointMaybeSet, EndpointNotSet, EndpointSet, IdToken,
+    IdTokenFields, IssuerUrl, JsonWebKeySetUrl, LogoutRequest, Nonce, NonceVerifier,
+    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, PostLogoutRedirectUrl,
+    ProviderMetadataWithLogout, RedirectUrl, RefreshToken, RequestTokenError, Scope,
+    StandardErrorResponse, StandardTokenResponse, SubjectIdentifier, TokenResponse, UserInfoClaims,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -56,6 +56,12 @@ type IdFields = IdTokenFields<
     CoreJwsSigningAlgorithm,
 >;
 type TokenResp = StandardTokenResponse<IdFields, CoreTokenType>;
+type IdTok = IdToken<
+    ExtraClaims,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;
 type Client = openidconnect::Client<
     ExtraClaims,
     CoreAuthDisplay,
@@ -131,6 +137,59 @@ pub struct CompletedLogin {
     pub principal: Principal,
     /// The same-origin path the login was started with.
     pub return_to: String,
+}
+
+/// What the provider granted at login (or at a later refresh): its claims
+/// about the user, from which the roles are derived, and its refresh token
+/// when it issued one. A [`SessionManager`](crate::SessionManager) keeps it
+/// to re-derive the roles after login. Its `Debug` output shows neither the
+/// claims nor the refresh token.
+#[derive(Clone)]
+pub struct LoginGrant {
+    claims: Map<String, Value>,
+    refresh_token: Option<String>,
+}
+
+impl LoginGrant {
+    /// The provider's claims: the ID token's, completed from userinfo.
+    pub fn claims(&self) -> &Map<String, Value> {
+        &self.claims
+    }
+
+    /// Whether the provider issued a refresh token.
+    pub fn has_refresh_token(&self) -> bool {
+        self.refresh_token.is_some()
+    }
+
+    pub(crate) fn into_parts(self) -> (Map<String, Value>, Option<String>) {
+        (self.claims, self.refresh_token)
+    }
+}
+
+impl std::fmt::Debug for LoginGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginGrant")
+            .field("claims", &self.claims.len())
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+/// The outcome of a successful callback, with the provider's grant
+/// ([`OidcClient::finish_login`]).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct FinishedLogin {
+    /// The user who signed in.
+    pub principal: Principal,
+    /// The same-origin path the login was started with.
+    pub return_to: String,
+    /// What the provider granted, for
+    /// [`SessionManager::create_from_login`](crate::SessionManager::create_from_login).
+    pub grant: LoginGrant,
 }
 
 struct Pending {
@@ -508,7 +567,8 @@ impl OidcClient {
 
     /// Finishes the login identified by `state`: exchanges `code`, verifies
     /// the ID token and maps its claims to a principal. A state can be
-    /// completed at most once.
+    /// completed at most once. [`Self::finish_login`] also returns what the
+    /// provider granted, so the session can re-derive the roles later.
     ///
     /// # Errors
     ///
@@ -521,6 +581,139 @@ impl OidcClient {
         state: &str,
         code: &str,
     ) -> Result<CompletedLogin, AuthError> {
+        let done = self.finish_login(state, code).await?;
+        Ok(CompletedLogin {
+            principal: done.principal,
+            return_to: done.return_to,
+        })
+    }
+
+    /// The role mapping this client applies to the provider's claims.
+    pub fn mapping(&self) -> &RoleMapping {
+        &self.mapping
+    }
+
+    /// The verified claims of `id_token` and its subject, refetching the
+    /// provider's keys once when verification fails (they may have rotated
+    /// since discovery).
+    async fn verified_claims<N>(
+        &self,
+        id_token: &IdTok,
+        nonce: N,
+    ) -> Result<(Map<String, Value>, SubjectIdentifier), AuthError>
+    where
+        N: NonceVerifier + Copy,
+    {
+        let invalid = |e: openidconnect::ClaimsVerificationError| {
+            AuthError::Unauthenticated(format!("invalid ID token: {e}"))
+        };
+        let jwks = self.id_keys.cache.read().await.0.clone();
+        let id_claims = match id_token.claims(&self.id_keys.verifier(jwks.clone()), nonce) {
+            Ok(claims) => claims,
+            Err(e) => {
+                if !self.id_keys.refetch(&self.http, &jwks).await {
+                    return Err(invalid(e));
+                }
+                let jwks = self.id_keys.cache.read().await.0.clone();
+                id_token
+                    .claims(&self.id_keys.verifier(jwks), nonce)
+                    .map_err(invalid)?
+            }
+        };
+        Ok((to_map(id_claims)?, id_claims.subject().clone()))
+    }
+
+    /// The userinfo claims for `access_token`, which must be `subject`'s.
+    async fn user_info_claims(
+        &self,
+        access_token: &AccessToken,
+        subject: &SubjectIdentifier,
+    ) -> Result<Map<String, Value>, AuthError> {
+        let info: UserInfoClaims<ExtraClaims, CoreGenderClaim> = self
+            .client
+            .user_info(access_token.clone(), Some(subject.clone()))
+            .map_err(|e| upstream("OIDC userinfo", e))?
+            .request_async(&OidcHttp(&self.http))
+            .await
+            .map_err(|e| upstream("OIDC userinfo failed", error_chain(&e)))?;
+        to_map(&info)
+    }
+
+    /// The provider's current claims for `subject`, from a refresh-token
+    /// grant: the new ID token's claims when the provider sends one (its
+    /// `sub` must be `subject`; it carries no nonce), otherwise `previous`
+    /// updated from userinfo, and in both cases completed from userinfo as
+    /// at login. The returned grant's refresh token is the provider's new
+    /// one when it rotated it, else `None` (keep using `refresh_token`).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Unauthenticated`] when the provider refuses the refresh
+    /// token (for example the user was disabled or signed out there) or
+    /// sends an invalid ID token or one for another subject;
+    /// [`AuthError::Upstream`] when the provider cannot be reached or
+    /// answers unexpectedly.
+    pub async fn refresh_grant(
+        &self,
+        refresh_token: &str,
+        subject: &str,
+        previous: &Map<String, Value>,
+    ) -> Result<LoginGrant, AuthError> {
+        let token = self
+            .client
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+            .map_err(|e| upstream("OIDC provider has no token endpoint", e))?
+            .request_async(&OidcHttp(&self.http))
+            .await
+            .map_err(|e| match e {
+                RequestTokenError::ServerResponse(r) => {
+                    AuthError::Unauthenticated(format!("refresh token rejected: {r}"))
+                }
+                other => upstream("token refresh failed", error_chain(&other)),
+            })?;
+        let subject_id = SubjectIdentifier::new(subject.to_string());
+        let fresh_id_token = token.id_token().is_some();
+        let mut claims = match token.id_token() {
+            Some(id_token) => {
+                let (claims, sub) = self
+                    .verified_claims(id_token, |_: Option<&Nonce>| Ok(()))
+                    .await?;
+                if sub != subject_id {
+                    return Err(AuthError::Unauthenticated(
+                        "the refreshed ID token is for another subject".to_string(),
+                    ));
+                }
+                claims
+            }
+            None => previous.clone(),
+        };
+        let wants_info = !fresh_id_token || !claims.contains_key(&self.mapping.roles_claim);
+        if wants_info && self.client.user_info_url().is_some() {
+            let info = self
+                .user_info_claims(token.access_token(), &subject_id)
+                .await?;
+            for (k, v) in info {
+                if fresh_id_token {
+                    claims.entry(k).or_insert(v);
+                } else {
+                    claims.insert(k, v);
+                }
+            }
+        }
+        Ok(LoginGrant {
+            claims,
+            refresh_token: token.refresh_token().map(|t| t.secret().clone()),
+        })
+    }
+
+    /// [`Self::complete_login`], also returning what the provider granted
+    /// (its claims and refresh token) for
+    /// [`SessionManager::create_from_login`](crate::SessionManager::create_from_login).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::complete_login`].
+    pub async fn finish_login(&self, state: &str, code: &str) -> Result<FinishedLogin, AuthError> {
         let pending = self
             .take(state)
             .await?
@@ -544,39 +737,14 @@ impl OidcClient {
         let id_token = token
             .id_token()
             .ok_or_else(|| AuthError::Upstream("token response has no id_token".to_string()))?;
-        let invalid = |e: openidconnect::ClaimsVerificationError| {
-            AuthError::Unauthenticated(format!("invalid ID token: {e}"))
-        };
-        let jwks = self.id_keys.cache.read().await.0.clone();
-        let id_claims = match id_token.claims(&self.id_keys.verifier(jwks.clone()), &pending.nonce)
-        {
-            Ok(claims) => claims,
-            // The provider may have rotated its keys since discovery.
-            Err(e) => {
-                if !self.id_keys.refetch(&self.http, &jwks).await {
-                    return Err(invalid(e));
-                }
-                let jwks = self.id_keys.cache.read().await.0.clone();
-                id_token
-                    .claims(&self.id_keys.verifier(jwks), &pending.nonce)
-                    .map_err(invalid)?
-            }
-        };
-        let mut claims = to_map(id_claims)?;
+        let (mut claims, subject) = self.verified_claims(id_token, &pending.nonce).await?;
 
         if !claims.contains_key(&self.mapping.roles_claim) && self.client.user_info_url().is_some()
         {
-            let info: UserInfoClaims<ExtraClaims, CoreGenderClaim> = self
-                .client
-                .user_info(
-                    token.access_token().clone(),
-                    Some(id_claims.subject().clone()),
-                )
-                .map_err(|e| upstream("OIDC userinfo", e))?
-                .request_async(&call)
-                .await
-                .map_err(|e| upstream("OIDC userinfo failed", error_chain(&e)))?;
-            for (k, v) in to_map(&info)? {
+            let info = self
+                .user_info_claims(token.access_token(), &subject)
+                .await?;
+            for (k, v) in info {
                 claims.entry(k).or_insert(v);
             }
         }
@@ -590,9 +758,13 @@ impl OidcClient {
                  segment or invalid workspace name)"
             );
         }
-        Ok(CompletedLogin {
+        Ok(FinishedLogin {
             principal: self.mapping.principal(&claims)?,
             return_to: pending.return_to,
+            grant: LoginGrant {
+                claims,
+                refresh_token: token.refresh_token().map(|t| t.secret().clone()),
+            },
         })
     }
 

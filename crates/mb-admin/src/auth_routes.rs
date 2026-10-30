@@ -234,8 +234,8 @@ async fn callback(
     if let Some(old) = cookie(&headers, SESSION_COOKIE) {
         web.sessions.destroy(old).await?;
     }
+    let session = web.sessions.create_from_login(&completed).await?;
     let principal = completed.principal;
-    let session = web.sessions.create(&principal).await?;
     st.audit
         .record_by(
             &principal,
@@ -309,7 +309,7 @@ async fn complete(
     web: &WebAuth,
     headers: &HeaderMap,
     q: &CallbackQuery,
-) -> Result<mb_auth::CompletedLogin, (Failure, bool)> {
+) -> Result<mb_auth::FinishedLogin, (Failure, bool)> {
     let own_state = q
         .state
         .as_deref()
@@ -338,7 +338,7 @@ async fn complete(
         false
     });
     web.oidc
-        .complete_login(state, code)
+        .finish_login(state, code)
         .await
         .map_err(|e| (Failure::Rejected(e), attributable))
 }

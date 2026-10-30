@@ -10,13 +10,13 @@ use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
 use mb_mcm::Bundle;
 use mb_mcm::Trigger;
 use mb_store::{
-    AdminSession, ApiKey, AuditFilter, ChannelSettings, ChaosSettings, Consistency, ContractStatus,
-    ControlChange, ControlStore, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
-    ImportJobStatus, ImportOutcome, ImportProgress, LatencyJitter, LlmProfile, Mock, MockBehavior,
-    MockEventSettings, MockLimits, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
-    NewRequestLogEntry, OidcPendingLogin, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind,
-    RequestLogFilter, ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds,
-    WebhookSigning, WebhookTarget,
+    AdminSession, AdminSessionGrant, ApiKey, AuditFilter, ChannelSettings, ChaosSettings,
+    Consistency, ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE,
+    DataPlaneAuthConfig, DataPlaneAuthMode, ImportJobStatus, ImportOutcome, ImportProgress,
+    LatencyJitter, LlmProfile, Mock, MockBehavior, MockEventSettings, MockLimits, NewAuditEvent,
+    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, OidcPendingLogin,
+    RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter, ResourceSource, Scenario,
+    ScenarioRules, StoreError, UnknownIds, WebhookSigning, WebhookTarget,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -60,6 +60,8 @@ macro_rules! conformance_checks {
             expired_admin_sessions_are_swept,
             admin_sessions_listed_and_revoked_by_subject,
             idle_admin_sessions_are_swept,
+            admin_session_grant_round_trips,
+            admin_session_refresh_is_claimed_once,
             oidc_pending_login_is_taken_once,
             expired_oidc_pending_logins_are_not_returned,
             oidc_pending_logins_are_bounded,
@@ -1821,6 +1823,135 @@ pub(crate) async fn admin_sessions_listed_and_revoked_by_subject(store: &Arc<dyn
     );
     let all = store.list_admin_sessions(None).await.expect("list");
     assert_eq!(listed_of_mine(all), vec![b1, tricky]);
+}
+
+pub(crate) async fn admin_session_grant_round_trips(store: &Arc<dyn ControlStore>) {
+    let now = now_us();
+    let s = admin_session_of(&"5".repeat(64), "grant-alice", now, now);
+    store.create_admin_session(&s).await.expect("create");
+    // A session starts without a grant.
+    assert_eq!(
+        store
+            .get_admin_session_with_grant(&s.id_hash)
+            .await
+            .expect("get"),
+        Some((s.clone(), None))
+    );
+    assert_eq!(
+        store
+            .get_admin_session_with_grant(&"6".repeat(64))
+            .await
+            .expect("get missing"),
+        None
+    );
+
+    let principal = json!({"subject": "grant-alice", "kind": "user", "roles": {"team": "editor"}});
+    let grant = AdminSessionGrant {
+        claims: json!({"sub": "grant-alice", "groups": ["mb:team:editor"]}),
+        mapping_hash: "abc".into(),
+        refresh_token: Some("sealed".into()),
+        refreshed_at: now,
+    };
+    assert!(
+        store
+            .put_admin_session_grant(&s.id_hash, &principal, &grant)
+            .await
+            .expect("put")
+    );
+    let (got, got_grant) = store
+        .get_admin_session_with_grant(&s.id_hash)
+        .await
+        .expect("get")
+        .expect("session");
+    assert_eq!(got.principal, principal);
+    assert_eq!(got_grant, Some(grant.clone()));
+    // The plain read sees the new principal too.
+    assert_eq!(
+        store
+            .get_admin_session(&s.id_hash)
+            .await
+            .expect("get")
+            .expect("session")
+            .principal,
+        principal
+    );
+
+    // Without a refresh token.
+    let without = AdminSessionGrant {
+        refresh_token: None,
+        ..grant
+    };
+    store
+        .put_admin_session_grant(&s.id_hash, &principal, &without)
+        .await
+        .expect("put");
+    assert_eq!(
+        store
+            .get_admin_session_with_grant(&s.id_hash)
+            .await
+            .expect("get")
+            .and_then(|(_, g)| g),
+        Some(without.clone())
+    );
+    assert!(
+        !store
+            .put_admin_session_grant(&"6".repeat(64), &principal, &without)
+            .await
+            .expect("put missing")
+    );
+}
+
+pub(crate) async fn admin_session_refresh_is_claimed_once(store: &Arc<dyn ControlStore>) {
+    let now = now_us();
+    let s = admin_session_of(&"7".repeat(64), "grant-bob", now, now);
+    store.create_admin_session(&s).await.expect("create");
+    // Without a grant there is nothing to refresh.
+    assert!(
+        !store
+            .claim_admin_session_refresh(&s.id_hash, now, now)
+            .await
+            .expect("claim")
+    );
+    let seen = now - Duration::minutes(10);
+    let grant = AdminSessionGrant {
+        claims: json!({"sub": "grant-bob"}),
+        mapping_hash: "abc".into(),
+        refresh_token: Some("sealed".into()),
+        refreshed_at: seen,
+    };
+    store
+        .put_admin_session_grant(&s.id_hash, &s.principal, &grant)
+        .await
+        .expect("put");
+    // Read back, as the session manager does, before claiming.
+    let seen = store
+        .get_admin_session_with_grant(&s.id_hash)
+        .await
+        .expect("get")
+        .and_then(|(_, g)| g)
+        .expect("grant")
+        .refreshed_at;
+    let later = now_us();
+    assert!(
+        store
+            .claim_admin_session_refresh(&s.id_hash, seen, later)
+            .await
+            .expect("claim")
+    );
+    assert!(
+        !store
+            .claim_admin_session_refresh(&s.id_hash, seen, later)
+            .await
+            .expect("claim again")
+    );
+    let after = store
+        .get_admin_session_with_grant(&s.id_hash)
+        .await
+        .expect("get")
+        .and_then(|(_, g)| g)
+        .expect("grant");
+    assert_eq!(after.refreshed_at, later);
+    assert_eq!(after.refresh_token.as_deref(), Some("sealed"));
 }
 
 pub(crate) async fn idle_admin_sessions_are_swept(store: &Arc<dyn ControlStore>) {

@@ -360,6 +360,45 @@ pub trait ControlStore: Send + Sync {
         }
         Ok(n)
     }
+    /// The console session with this id hash and its grant (`None` when
+    /// [`Self::put_admin_session_grant`] never stored one), in one read.
+    ///
+    /// The default implementation reads the session with
+    /// [`Self::get_admin_session`] and keeps no grants.
+    async fn get_admin_session_with_grant(
+        &self,
+        id_hash: &str,
+    ) -> Result<Option<(AdminSession, Option<AdminSessionGrant>)>, StoreError> {
+        Ok(self.get_admin_session(id_hash).await?.map(|s| (s, None)))
+    }
+    /// Replaces the session's principal and grant; `false` if the session
+    /// does not exist.
+    ///
+    /// The default implementation stores nothing and returns `false`: the
+    /// session's roles then stay those of its login.
+    async fn put_admin_session_grant(
+        &self,
+        id_hash: &str,
+        principal: &Value,
+        grant: &AdminSessionGrant,
+    ) -> Result<bool, StoreError> {
+        let _ = (id_hash, principal, grant);
+        Ok(false)
+    }
+    /// Sets the grant's `refreshed_at` to `now` if it is still `seen`, so of
+    /// concurrent refreshes on any node at most one goes ahead; `false`
+    /// otherwise (or without a grant).
+    ///
+    /// The default implementation returns `false` (never refresh).
+    async fn claim_admin_session_refresh(
+        &self,
+        id_hash: &str,
+        seen: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StoreError> {
+        let _ = (id_hash, seen, now);
+        Ok(false)
+    }
     /// Stores a started OIDC login. Expired logins are deleted first, then,
     /// while `max` or more remain, the oldest (`created_at`), so at most
     /// `max` are kept. `Conflict` if `state_hash` is taken.
