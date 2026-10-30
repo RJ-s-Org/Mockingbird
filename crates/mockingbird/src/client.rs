@@ -55,6 +55,125 @@ pub enum ClientCommand {
     Webhooks(WebhooksCommand),
 }
 
+/// The client subcommands that finish the import workflow from the command
+/// line: `mocks update`, `drafts approve`, `contracts list|activate` and the
+/// raw `api <METHOD> <PATH>` passthrough. They are parsed beside
+/// [`ClientCommand`] (see [`crate::config::parse`]) and run by
+/// [`run_workflow`]; the MCP tools `update_mock`, `approve_draft`,
+/// `list_contract_versions`, `activate_contract_version` and `admin_api`
+/// do the same.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum WorkflowCommand {
+    /// `mocks update`.
+    MocksUpdate(MocksUpdateArgs),
+    /// `drafts …`.
+    Drafts(DraftsCommand),
+    /// `contracts …`.
+    Contracts(ContractsCommand),
+    /// `api <METHOD> <PATH>`.
+    Api(ApiArgs),
+}
+
+// The top-level subcommands among `WorkflowCommand`, for clap. No doc
+// comment: clap would make it the about text of the whole command.
+#[derive(Subcommand, Debug)]
+pub(crate) enum WorkflowTop {
+    /// Approve a draft contract version (from a documentation, HAR or
+    /// Postman import) after reviewing it.
+    #[command(subcommand)]
+    Drafts(DraftsCommand),
+    /// List a mock's contract versions and activate one.
+    #[command(subcommand)]
+    Contracts(ContractsCommand),
+    /// Send any Admin API request and print the JSON answer: `api GET
+    /// /workspaces/default/api-keys`. Non-2xx answers print their problem
+    /// details on stderr and exit 1.
+    Api(ApiArgs),
+}
+
+impl From<WorkflowTop> for WorkflowCommand {
+    fn from(top: WorkflowTop) -> Self {
+        match top {
+            WorkflowTop::Drafts(cmd) => Self::Drafts(cmd),
+            WorkflowTop::Contracts(cmd) => Self::Contracts(cmd),
+            WorkflowTop::Api(args) => Self::Api(args),
+        }
+    }
+}
+
+/// `mocks update`: change some fields of a mock (`PATCH`).
+#[derive(Args, Debug)]
+#[non_exhaustive]
+pub struct MocksUpdateArgs {
+    /// The mock to change.
+    pub name: String,
+    /// A JSON object of fields to change (a file, or `-` for stdin):
+    /// `route_prefix`, `persona`, `llm_profile`, `header_overrides`,
+    /// `data_plane_auth`, `chaos`, `limits`, …; `null` clears a field. The
+    /// flags below win over the same keys.
+    #[arg(long, value_name = "FILE")]
+    pub patch: Option<PathBuf>,
+    /// New route prefix.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// New persona (style instructions) for generated responses.
+    #[arg(long)]
+    pub persona: Option<String>,
+    /// New LLM profile.
+    #[arg(long)]
+    pub profile: Option<String>,
+}
+
+/// `drafts …`.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum DraftsCommand {
+    /// Approve a draft; it is activated (served) unless --no-activate.
+    Approve {
+        /// The mock.
+        mock: String,
+        /// The draft version [default: the newest draft].
+        version: Option<u64>,
+        /// Approve without activating.
+        #[arg(long)]
+        no_activate: bool,
+    },
+}
+
+/// `contracts …`.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum ContractsCommand {
+    /// List a mock's contract versions with their status and warnings.
+    List {
+        /// The mock.
+        mock: String,
+    },
+    /// Serve this version of the mock's contract (roll forward or back).
+    Activate {
+        /// The mock.
+        mock: String,
+        /// The version to serve.
+        version: u64,
+    },
+}
+
+/// `api <METHOD> <PATH>`.
+#[derive(Args, Debug)]
+#[non_exhaustive]
+pub struct ApiArgs {
+    /// HTTP method: GET, POST, PUT, PATCH, DELETE, …
+    pub method: String,
+    /// Path under /api/v1 (a leading /api/v1 is accepted), with any query:
+    /// /workspaces/default/mocks?limit=10.
+    pub path: String,
+    /// JSON body: inline, @FILE, or @- for stdin. POST, PUT and PATCH
+    /// without one send {}.
+    #[arg(short = 'd', long, value_name = "JSON|@FILE|@-")]
+    pub data: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum WebhooksCommand {
     /// Print the signature header a mock would send for a body (for tests).
@@ -425,6 +544,142 @@ pub async fn run(
             .await
         }
     }
+}
+
+/// Runs a [`WorkflowCommand`] like [`run`] runs a [`ClientCommand`]:
+/// against workspace `workspace` of the Admin API at `admin_url` (`api`
+/// takes its path as given), returning the JSON to print, or `None` when
+/// the API answered without a body.
+///
+/// # Errors
+///
+/// [`ClientError::Usage`] for an inconsistent command line (nothing to
+/// change, an invalid method, path or JSON body), [`ClientError::Api`] for
+/// a non-2xx answer, and [`ClientError::Other`] when the request cannot be
+/// made, a local input cannot be read or the mock has no draft.
+pub async fn run_workflow(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    cmd: WorkflowCommand,
+) -> Result<Option<Value>, ClientError> {
+    if let WorkflowCommand::Api(args) = cmd {
+        return raw_api(admin_url, token, args).await;
+    }
+    let api = AdminClient::new(admin_url, token, workspace)?;
+    match cmd {
+        WorkflowCommand::MocksUpdate(args) => {
+            let mut patch = match &args.patch {
+                Some(file) => read_json(file)?,
+                None => json!({}),
+            };
+            let Value::Object(fields) = &mut patch else {
+                return Err(ClientError::Usage(
+                    "--patch must hold a JSON object".to_string(),
+                ));
+            };
+            for (key, value) in [
+                ("route_prefix", args.prefix),
+                ("persona", args.persona),
+                ("llm_profile", args.profile),
+            ] {
+                if let Some(v) = value {
+                    fields.insert(key.to_string(), Value::String(v));
+                }
+            }
+            if fields.is_empty() {
+                return Err(ClientError::Usage(
+                    "nothing to change: give --patch, --prefix, --persona or --profile".to_string(),
+                ));
+            }
+            api.send(
+                Method::PATCH,
+                &["mocks", &args.name],
+                Some(Body::Json(patch)),
+            )
+            .await
+        }
+        WorkflowCommand::Drafts(DraftsCommand::Approve {
+            mock,
+            version,
+            no_activate,
+        }) => {
+            let version = match version {
+                Some(v) => v,
+                None => newest_draft(&api, &mock).await?,
+            }
+            .to_string();
+            api.send(
+                Method::POST,
+                &["mocks", &mock, "contracts", &version, "approve"],
+                Some(Body::Json(json!({ "activate": !no_activate }))),
+            )
+            .await
+        }
+        WorkflowCommand::Contracts(ContractsCommand::List { mock }) => {
+            api.send(Method::GET, &["mocks", &mock, "contracts"], None)
+                .await
+        }
+        WorkflowCommand::Contracts(ContractsCommand::Activate { mock, version }) => {
+            let version = version.to_string();
+            api.send(
+                Method::POST,
+                &["mocks", &mock, "contracts", &version, "activate"],
+                // Mutating requests carry a JSON content type (the admin
+                // port's CSRF defence).
+                Some(Body::Json(json!({}))),
+            )
+            .await
+        }
+        WorkflowCommand::Api(_) => Err(ClientError::Other(anyhow!("api is sent by path"))),
+    }
+}
+
+/// The newest draft version of `mock`.
+async fn newest_draft(api: &AdminClient, mock: &str) -> Result<u64, ClientError> {
+    let versions = api
+        .send(Method::GET, &["mocks", mock, "contracts"], None)
+        .await?
+        .unwrap_or_default();
+    versions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["status"] == "draft")
+        .filter_map(|v| v["version"].as_u64())
+        .max()
+        .ok_or_else(|| {
+            ClientError::Other(anyhow!(
+                "mock {mock:?} has no draft; import documentation, a HAR recording or a Postman collection first"
+            ))
+        })
+}
+
+/// `api <METHOD> <PATH>`: the body from `--data` (inline JSON, `@FILE` or
+/// `@-`), else `{}` for methods that carry one, sent by [`api_path`].
+async fn raw_api(
+    admin_url: &str,
+    token: Option<&str>,
+    args: ApiArgs,
+) -> Result<Option<Value>, ClientError> {
+    let method = Method::from_bytes(args.method.to_ascii_uppercase().as_bytes())
+        .map_err(|_| ClientError::Usage(format!("invalid HTTP method {:?}", args.method)))?;
+    let body = match args.data.as_deref() {
+        Some(data) => Some(match data.strip_prefix('@') {
+            Some(file) => read_json(Path::new(file))?,
+            None => serde_json::from_str(data)
+                .map_err(|e| ClientError::Usage(format!("--data is not JSON: {e}")))?,
+        }),
+        // Mutating requests carry a JSON content type (the admin port's
+        // CSRF defence), as the MCP `admin_api` tool sends them.
+        None if [Method::POST, Method::PUT, Method::PATCH].contains(&method) => Some(json!({})),
+        None => None,
+    };
+    let path = match args.path.strip_prefix("/api/v1") {
+        Some(rest) if rest.starts_with('/') => rest,
+        _ => args.path.as_str(),
+    };
+    api_path(admin_url, token, method, path, body).await
 }
 
 /// Message of several sources that are not all URLs.
@@ -864,7 +1119,10 @@ async fn smart_import(
         let noun = if n == 1 { "warning" } else { "warnings" };
         return Err(ClientError::Incomplete {
             output,
-            message: format!("not approved: the draft has {n} {noun}; review it in the console"),
+            message: format!(
+                "not approved: the draft has {n} {noun}; review it in the console, then approve it with `mockingbird drafts approve {} {version}`",
+                args.mock
+            ),
         });
     }
     let summary = api

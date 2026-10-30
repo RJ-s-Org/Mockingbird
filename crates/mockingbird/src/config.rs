@@ -17,7 +17,7 @@ use mb_protocols::events::{Brokers, EventDeps};
 use mb_state::{Bus, LeaderBackend, Leadership, StateStore};
 use mb_store::ControlStore;
 
-use crate::client::ClientCommand;
+use crate::client::{ClientCommand, MocksUpdateArgs, WorkflowCommand, WorkflowTop};
 use crate::dp_keys::StoreDataPlaneKeys;
 use crate::events::{RegistryChannels, StoreLease};
 use crate::file_config::{
@@ -67,6 +67,94 @@ pub struct Cli {
     pub workspace: String,
     #[command(subcommand)]
     pub cmd: Command,
+}
+
+/// A parsed command line: a [`Cli`] command, or one of the
+/// [`WorkflowCommand`]s that [`command`] adds to it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Invocation {
+    /// A [`Command`] with the global flags.
+    Cli(Box<Cli>),
+    /// A workflow command with the global flags it runs with.
+    Workflow {
+        /// `--admin-url` (`MB_ADMIN_URL`).
+        admin_url: String,
+        /// `--token` (`MB_ADMIN_TOKEN`).
+        token: Option<String>,
+        /// `--workspace` (`MB_WORKSPACE`).
+        workspace: String,
+        /// The command.
+        cmd: WorkflowCommand,
+    },
+}
+
+/// The whole `mockingbird` command line: [`Cli`] with `mocks update`,
+/// `drafts`, `contracts` and `api` added (the [`WorkflowCommand`]s).
+#[must_use]
+pub fn command() -> clap::Command {
+    use clap::{Args as _, CommandFactory as _, Subcommand as _};
+    let cmd = Cli::command().mut_subcommand("mocks", |mocks| {
+        mocks.subcommand(
+            MocksUpdateArgs::augment_args(clap::Command::new("update"))
+                .about("Change some fields of a mock; the others keep their values"),
+        )
+    });
+    WorkflowTop::augment_subcommands(cmd)
+}
+
+/// Parses `args` (the program name first) against [`command`].
+///
+/// # Errors
+///
+/// The [`clap::Error`] to print and exit with (help and `--version`
+/// included).
+pub fn parse_from<I, T>(args: I) -> Result<Invocation, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    use clap::{FromArgMatches as _, Subcommand as _};
+    let mut matches = command().try_get_matches_from(args)?;
+    let workflow = match matches.subcommand() {
+        Some(("mocks", mocks)) => match mocks.subcommand() {
+            Some(("update", update)) => Some(WorkflowCommand::MocksUpdate(
+                MocksUpdateArgs::from_arg_matches(update).map_err(formatted)?,
+            )),
+            _ => None,
+        },
+        Some((name, _)) if WorkflowTop::has_subcommand(name) => Some(
+            WorkflowTop::from_arg_matches(&matches)
+                .map_err(formatted)?
+                .into(),
+        ),
+        _ => None,
+    };
+    let Some(cmd) = workflow else {
+        return Cli::from_arg_matches_mut(&mut matches)
+            .map(|cli| Invocation::Cli(Box::new(cli)))
+            .map_err(formatted);
+    };
+    let global = |id: &str| matches.get_one::<String>(id).cloned();
+    Ok(Invocation::Workflow {
+        admin_url: global("admin_url")
+            .unwrap_or_else(|| crate::client::DEFAULT_ADMIN_URL.to_string()),
+        token: global("token"),
+        workspace: global("workspace").unwrap_or_else(|| mb_store::DEFAULT_WORKSPACE.to_string()),
+        cmd,
+    })
+}
+
+/// [`parse_from`] the process arguments; prints the error (or help) and
+/// exits on failure.
+#[must_use]
+pub fn parse() -> Invocation {
+    parse_from(std::env::args_os()).unwrap_or_else(|e| e.exit())
+}
+
+/// An error from turning matches into types, formatted like a parse error.
+fn formatted(e: clap::Error) -> clap::Error {
+    e.format(&mut command())
 }
 
 /// A `--workspace` (`MB_WORKSPACE`) value: a valid workspace name, so an

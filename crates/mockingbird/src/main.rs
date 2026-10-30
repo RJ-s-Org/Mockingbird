@@ -1,9 +1,8 @@
 use std::process::ExitCode;
 
-use clap::Parser;
 use mockingbird::agents::{self, AgentCommand};
-use mockingbird::client::{self, ClientCommand, ClientError};
-use mockingbird::config::{Cli, Command};
+use mockingbird::client::{self, ClientCommand, ClientError, WorkflowCommand};
+use mockingbird::config::{Command, Invocation};
 use mockingbird::daemon::{self, ServerCommand};
 use mockingbird::onboard::{self, LlmCommand};
 use mockingbird::server::{self, ServeError};
@@ -11,8 +10,8 @@ use mockingbird::telemetry;
 use mockingbird::{mcp, providers};
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    if matches!(cli.cmd, Command::Mcp(_)) {
+    let cli = mockingbird::config::parse();
+    if matches!(&cli, Invocation::Cli(c) if matches!(c.cmd, Command::Mcp(_))) {
         // SAFETY: nothing else runs yet; the runtime starts below.
         unsafe { mockingbird::shell_env::import() };
     }
@@ -28,13 +27,26 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> ExitCode {
+async fn run(invocation: Invocation) -> ExitCode {
     // Kept alive until exit so buffered spans are flushed.
     let _telemetry = match telemetry::init("mockingbird") {
         Ok(guard) => Some(guard),
         Err(e) => {
             eprintln!("warning: telemetry disabled: {e:#}");
             None
+        }
+    };
+    let cli = match invocation {
+        Invocation::Workflow {
+            admin_url,
+            token,
+            workspace,
+            cmd,
+        } => return exit_code(workflow(&admin_url, token.as_deref(), &workspace, cmd).await),
+        Invocation::Cli(cli) => *cli,
+        _ => {
+            eprintln!("error: unsupported command");
+            return ExitCode::from(1);
         }
     };
     let result = match cli.cmd {
@@ -87,6 +99,11 @@ async fn run(cli: Cli) -> ExitCode {
             client(&cli.admin_url, cli.token.as_deref(), &cli.workspace, cmd).await
         }
     };
+    exit_code(result)
+}
+
+/// The exit code for `result`, reporting a failure on stderr.
+fn exit_code(result: Result<(), Failure>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Usage(msg)) => {
@@ -121,7 +138,24 @@ async fn client(
     workspace: &str,
     cmd: ClientCommand,
 ) -> Result<(), Failure> {
-    match client::run(admin_url, token, workspace, cmd).await {
+    print_client(client::run(admin_url, token, workspace, cmd).await)
+}
+
+/// Runs a workflow subcommand (`mocks update`, `drafts`, `contracts`,
+/// `api`) like [`client`].
+async fn workflow(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    cmd: WorkflowCommand,
+) -> Result<(), Failure> {
+    print_client(client::run_workflow(admin_url, token, workspace, cmd).await)
+}
+
+/// Prints a client command's result: JSON on stdout, problem details on
+/// stderr.
+fn print_client(result: Result<Option<serde_json::Value>, ClientError>) -> Result<(), Failure> {
+    match result {
         Ok(Some(value)) => {
             let text = serde_json::to_string_pretty(&value).map_err(anyhow::Error::from)?;
             println!("{text}");

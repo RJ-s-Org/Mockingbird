@@ -133,7 +133,7 @@ mockingbird import ./docs --as pets --mode replace
 mockingbird import petstore.har --as pets --approve
 ```
 
-With `--approve`, a draft with warnings is left unapproved: the command prints the summary, says how many warnings there are and exits 1, so you can review it in the console. An approved draft is activated unless `--no-activate`; `--activate` is still accepted with `--approve`. `--mode merge|replace` picks the [merge mode](#merge-or-replace).
+With `--approve`, a draft with warnings is left unapproved: the command prints the summary, says how many warnings there are and exits 1, so you can review it in the console and then approve it with `mockingbird drafts approve <mock> [<version>]` (`--no-activate` to approve without serving). An approved draft is activated unless `--no-activate`; `--activate` is still accepted with `--approve`. `--mode merge|replace` picks the [merge mode](#merge-or-replace).
 
 ## Console
 
