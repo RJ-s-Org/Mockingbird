@@ -944,6 +944,7 @@ pub(crate) struct BundleIndex {
     by_id: HashMap<String, usize>,
     /// Each channel's position in `bundle.channels`, by id (the first one
     /// of a repeated id, as [`mb_mcm::Bundle::channel`] finds).
+    #[cfg(any(test, feature = "events"))]
     channel_by_id: HashMap<String, usize>,
     /// Per resource type: the fields its operations take from the path
     /// (GitHub's issue `number`), sorted and deduplicated.
@@ -985,12 +986,15 @@ impl BundleIndex {
             fields.sort_unstable();
             fields.dedup();
         }
+        #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
+        #[cfg(any(test, feature = "events"))]
         for (i, channel) in bundle.channels.iter().enumerate() {
             channel_by_id.entry(channel.id.clone()).or_insert(i);
         }
         Self {
             by_id,
+            #[cfg(any(test, feature = "events"))]
             channel_by_id,
             path_fields,
             listed,
@@ -1004,6 +1008,7 @@ impl BundleIndex {
     }
 
     /// The position of channel `id`.
+    #[cfg(any(test, feature = "events"))]
     pub(crate) fn channel(&self, id: &str) -> Option<usize> {
         self.channel_by_id.get(id).copied()
     }
