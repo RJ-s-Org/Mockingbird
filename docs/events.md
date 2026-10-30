@@ -91,7 +91,7 @@ Every produced message carries these headers (written lowercase):
 
 | Header | Value |
 | --- | --- |
-| `x-mockingbird-source` | `llm`, `repaired` or `fallback` (faker) |
+| `x-mockingbird-source` | `llm`, `patched`, `repaired` or `fallback` (faker) |
 | `x-mockingbird-mock` | the mock's name |
 | `x-mockingbird-hop` | the reply depth, `0` for a message that is not a reply |
 

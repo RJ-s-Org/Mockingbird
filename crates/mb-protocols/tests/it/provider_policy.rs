@@ -142,7 +142,7 @@ async fn customer(router: &Router, uri: &str, tenant: Option<&str>) -> Value {
     // The LLM's answer (its `id` patched to the path's).
     assert_eq!(
         resp.headers()["x-mockingbird-source"],
-        Source::Repaired.as_str(),
+        Source::Patched.as_str(),
         "{uri}"
     );
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)

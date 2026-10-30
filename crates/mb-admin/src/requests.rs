@@ -21,7 +21,7 @@ pub struct RequestsQuery {
     pub operation: Option<String>,
     /// Session id.
     pub session: Option<String>,
-    /// Response source, e.g. `llm`, `repaired`, `fallback`.
+    /// Response source, e.g. `llm`, `patched`, `repaired`, `fallback`.
     pub source: Option<String>,
     /// 1–500; default 100.
     pub limit: Option<u32>,

@@ -68,6 +68,20 @@ pub enum ResourceSource {
     Api,
 }
 
+/// How an LLM profile's endpoint is asked for JSON (its
+/// `response_format`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    /// No `response_format`; the prompt alone asks for JSON.
+    None,
+    /// JSON mode (`json_object`), which forces an object at the top level.
+    #[default]
+    JsonObject,
+    /// Structured outputs (`json_schema`) with the answer's schema.
+    JsonSchema,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Mock {
     pub id: Uuid,
@@ -774,7 +788,8 @@ pub struct LlmProfile {
     /// `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`; never a
     /// raw secret.
     pub secret_ref: Option<String>,
-    pub json_schema: bool,
+    #[serde(default)]
+    pub output_mode: OutputMode,
     pub temperature: f32,
     pub timeout_ms: u64,
     pub max_tokens: u32,
@@ -1267,6 +1282,79 @@ impl ResourceSource {
     }
 }
 
+impl OutputMode {
+    /// The deprecated `json_schema` flag's mode: `true` is `JsonSchema`,
+    /// `false` `JsonObject`.
+    pub fn from_json_schema(json_schema: bool) -> Self {
+        if json_schema {
+            OutputMode::JsonSchema
+        } else {
+            OutputMode::JsonObject
+        }
+    }
+
+    /// The wire name (`none`, `json_object`, `json_schema`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputMode::None => "none",
+            OutputMode::JsonObject => "json_object",
+            OutputMode::JsonSchema => "json_schema",
+        }
+    }
+
+    /// The mode named `s`, if it is one.
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(OutputMode::None),
+            "json_object" => Some(OutputMode::JsonObject),
+            "json_schema" => Some(OutputMode::JsonSchema),
+            _ => None,
+        }
+    }
+
+    /// The mode stored for profile `name`: its `output_mode` column unless
+    /// the `json_schema` flag contradicts it, else the flag's mode.
+    ///
+    /// The flag wins a contradiction because a node that predates the
+    /// column (during a rolling upgrade) updates only the flag: after a new
+    /// node stores `json_schema` and an old one turns the flag off, the
+    /// column is stale. A `NULL` column (a row written before it existed)
+    /// and a value this build does not know (logged) read the flag too, so
+    /// one bad row never fails a listing.
+    pub(crate) fn from_columns(name: &str, output_mode: Option<&str>, json_schema: bool) -> Self {
+        let flag = Self::from_json_schema(json_schema);
+        match output_mode.map(|s| (s, Self::parse(s))) {
+            None => flag,
+            Some((_, Some(mode))) if (mode == OutputMode::JsonSchema) == json_schema => mode,
+            Some((_, Some(_))) => flag,
+            Some((other, None)) => {
+                tracing::warn!(
+                    profile = name,
+                    output_mode = other,
+                    "unknown stored output mode; using the json_schema flag"
+                );
+                flag
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OutputMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::parse(s).ok_or_else(|| {
+            format!("unknown output mode {s:?}; expected none, json_object or json_schema")
+        })
+    }
+}
+
 impl ContractStatus {
     /// The wire name (`draft`, `approved`, `active`, `archived`).
     pub fn as_str(&self) -> &'static str {
@@ -1353,7 +1441,38 @@ wire_names!(ImportJobStatus, "import job status");
 
 #[cfg(test)]
 mod tests {
-    use super::{PathRewrite, WebhookTarget, validate_webhooks};
+    use super::{OutputMode, PathRewrite, WebhookTarget, validate_webhooks};
+
+    #[test]
+    fn output_mode_columns_prefer_the_flag_when_they_disagree() {
+        let read = |col, flag| OutputMode::from_columns("p", col, flag);
+        // Rows from before the column: the flag.
+        assert_eq!(read(None, false), OutputMode::JsonObject);
+        assert_eq!(read(None, true), OutputMode::JsonSchema);
+        // Agreeing columns: the column (`none` is only expressible there).
+        assert_eq!(read(Some("none"), false), OutputMode::None);
+        assert_eq!(read(Some("json_object"), false), OutputMode::JsonObject);
+        assert_eq!(read(Some("json_schema"), true), OutputMode::JsonSchema);
+        // An older node changed only the flag: it wins.
+        assert_eq!(read(Some("json_schema"), false), OutputMode::JsonObject);
+        assert_eq!(read(Some("none"), true), OutputMode::JsonSchema);
+        assert_eq!(read(Some("json_object"), true), OutputMode::JsonSchema);
+        // A value this build does not know degrades to the flag.
+        assert_eq!(read(Some("strict"), true), OutputMode::JsonSchema);
+        assert_eq!(read(Some(""), false), OutputMode::JsonObject);
+    }
+
+    #[test]
+    fn output_mode_parses_its_wire_names() {
+        for mode in [
+            OutputMode::None,
+            OutputMode::JsonObject,
+            OutputMode::JsonSchema,
+        ] {
+            assert_eq!(mode.as_str().parse::<OutputMode>(), Ok(mode));
+        }
+        assert!("strict".parse::<OutputMode>().is_err());
+    }
 
     fn hook(secret: &str) -> WebhookTarget {
         WebhookTarget {

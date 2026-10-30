@@ -803,7 +803,7 @@ pub(crate) async fn profile_crud(store: &Arc<dyn ControlStore>) {
         base_url: "http://localhost:11434/v1".into(),
         model: "llama3".into(),
         secret_ref: Some("env:OPENAI_API_KEY".into()),
-        json_schema: true,
+        output_mode: mb_store::OutputMode::JsonSchema,
         temperature: 0.5,
         timeout_ms: 30_000,
         max_tokens: 2048,
@@ -855,6 +855,18 @@ pub(crate) async fn profile_crud(store: &Arc<dyn ControlStore>) {
             .extra_body,
         p.extra_body,
         "extra_body round-trip"
+    );
+    p.output_mode = mb_store::OutputMode::None;
+    store.put_profile(&p).await.expect("upsert output mode");
+    assert_eq!(
+        store
+            .get_profile(DEFAULT_WORKSPACE, "fast")
+            .await
+            .expect("get")
+            .expect("present")
+            .output_mode,
+        mb_store::OutputMode::None,
+        "output_mode round-trip"
     );
     let slow = LlmProfile {
         name: "slow".into(),
@@ -1131,7 +1143,7 @@ fn profile(ws: &str, name: &str) -> LlmProfile {
         base_url: "http://localhost:11434/v1".into(),
         model: "llama3".into(),
         secret_ref: None,
-        json_schema: false,
+        output_mode: mb_store::OutputMode::JsonObject,
         temperature: 0.0,
         timeout_ms: 1000,
         max_tokens: 100,

@@ -1,8 +1,14 @@
 import { useState, type FormEvent, type InputHTMLAttributes } from "react";
-import { usePutProfile, type Profile, type ProfileWriteResult, type PutProfile } from "../api/queries";
+import {
+  usePutProfile,
+  type OutputMode,
+  type Profile,
+  type ProfileWriteResult,
+  type PutProfile,
+} from "../api/queries";
 import { Drawer } from "../components/Drawer";
 import { ProblemAlert } from "../components/ProblemAlert";
-import { Checkbox, Field as FieldShell, inputClass, primaryButton, secondaryButton } from "../components/ui";
+import { Field as FieldShell, inputClass, primaryButton, secondaryButton } from "../components/ui";
 
 /**
  * What the server's default `server.api_secret_refs` policy accepts from the
@@ -24,16 +30,25 @@ function Field({
   );
 }
 
+/** The output modes, as the form offers them. */
+const OUTPUT_MODES: { value: OutputMode; label: string }[] = [
+  { value: "json_object", label: "JSON mode (json_object)" },
+  { value: "json_schema", label: "Structured output (json_schema)" },
+  { value: "none", label: "None: prompt only" },
+];
+
 /**
  * The writable fields of a stored profile: the view minus what only the
- * server reports (`name` is in the path, `source` is not settable). The
- * server refuses unknown PUT fields, so these two must not be sent.
+ * server reports (`name` is in the path, `source` is not settable) and the
+ * deprecated `json_schema`, which the server refuses beside `output_mode`.
+ * The server refuses unknown PUT fields, so these must not be sent.
  */
 function storedFields(profile: Profile | undefined): Partial<PutProfile> {
   if (!profile) return { headers: {} };
   const rest: Partial<Profile> = { ...profile };
   delete rest.name;
   delete rest.source;
+  delete rest.json_schema;
   return rest;
 }
 
@@ -60,7 +75,7 @@ export function ProfileEditor({
   const [baseUrl, setBaseUrl] = useState(profile?.base_url ?? "");
   const [model, setModel] = useState(profile?.model ?? "");
   const [secretRef, setSecretRef] = useState(profile?.secret_ref ?? "");
-  const [jsonSchema, setJsonSchema] = useState(profile?.json_schema ?? false);
+  const [outputMode, setOutputMode] = useState<OutputMode>(profile?.output_mode ?? "json_object");
   const [temperature, setTemperature] = useState(String(profile?.temperature ?? 0.7));
   const [timeoutMs, setTimeoutMs] = useState(String(profile?.timeout_ms ?? 3000));
   const [maxTokens, setMaxTokens] = useState(String(profile?.max_tokens ?? 2048));
@@ -81,7 +96,7 @@ export function ProfileEditor({
           base_url: baseUrl.trim(),
           model: model.trim(),
           secret_ref: secretRef.trim() || null,
-          json_schema: jsonSchema,
+          output_mode: outputMode,
           temperature: Number(temperature),
           timeout_ms: Number(timeoutMs),
           max_tokens: Number(maxTokens),
@@ -125,12 +140,25 @@ export function ProfileEditor({
           autoComplete="off"
           hint={SECRET_REF_HINT}
         />
-        <Checkbox
-          id="profile-json-schema"
-          label="JSON schema responses"
-          checked={jsonSchema}
-          onChange={setJsonSchema}
-        />
+        <FieldShell
+          id="profile-output-mode"
+          label="Output mode"
+          hint="How the provider is asked for JSON. Use none for models that answer badly in JSON mode."
+        >
+          <select
+            id="profile-output-mode"
+            className={inputClass}
+            aria-describedby="profile-output-mode-hint"
+            value={outputMode}
+            onChange={(e) => setOutputMode(e.target.value as OutputMode)}
+          >
+            {OUTPUT_MODES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </FieldShell>
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
           <Field
             id="profile-temperature"

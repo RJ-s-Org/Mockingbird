@@ -555,7 +555,8 @@ impl Tally {
         self.stats.calls += 1;
         match source {
             Source::Llm => self.stats.llm += 1,
-            Source::Repaired => self.stats.repaired += 1,
+            // A local patch counts with repairs until W1 reports it apart.
+            Source::Patched | Source::Repaired => self.stats.repaired += 1,
             Source::Fallback => self.stats.fallback += 1,
             // `Engine::generate` never answers from state or the cache.
             Source::State | Source::Cache | Source::Rejected => {}

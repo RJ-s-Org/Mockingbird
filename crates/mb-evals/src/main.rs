@@ -228,9 +228,9 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         base_url: env.base_url.clone(),
         api_key: Some(env.api_key),
         model: env.model.clone(),
-        // The server default (`MB_LLM_JSON_SCHEMA` unset): JSON mode, which
-        // every OpenAI-compatible provider supports.
-        json_schema: false,
+        // The server default (`output_mode` unset): JSON mode, which every
+        // OpenAI-compatible provider supports.
+        output_mode: mb_llm::OutputMode::JsonObject,
         http: mb_llm::HttpOptions::default(),
     })
     .context("building the LLM client")?;

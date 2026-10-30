@@ -50,7 +50,7 @@ pub struct StreamQuery {
     pub operation: Option<String>,
     /// Only this session id.
     pub session: Option<String>,
-    /// Only this response source, e.g. `llm`, `repaired`, `fallback`.
+    /// Only this response source, e.g. `llm`, `patched`, `repaired`, `fallback`.
     pub source: Option<String>,
     /// Only this request kind: `http`, `graphql`, `grpc`, `soap` or `event`.
     pub kind: Option<String>,

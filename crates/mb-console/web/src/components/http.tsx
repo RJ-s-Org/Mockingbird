@@ -27,7 +27,14 @@ export function StatusCode({ status }: { status: number }) {
   return <Badge tone={statusTone(status)}>{status}</Badge>;
 }
 
-const SOURCE_TONE: Record<string, Tone> = { llm: "accent", repaired: "info", fallback: "neutral", state: "info", cache: "neutral" };
+const SOURCE_TONE: Record<string, Tone> = {
+  llm: "accent",
+  patched: "info",
+  repaired: "info",
+  fallback: "neutral",
+  state: "info",
+  cache: "neutral",
+};
 
 /** Where a response came from (`X-Mockingbird-Source`), or a dash. */
 export function ResponseSource({ source }: { source?: string | null }) {

@@ -53,7 +53,7 @@ curl -i localhost:8080/orders/<id> -H 'X-Mockingbird-Status: 404'
 curl -i localhost:8080/orders -H 'X-Mockingbird-Latency: 250ms'
 ```
 
-Every response carries `X-Mockingbird-Source: llm | repaired | fallback`. A `fallback` response also carries `X-Mockingbird-Fallback-Reason`, which says why the LLM answer was not used (no LLM configured, a timeout, a provider error, output cut at `max_tokens`, or an answer that did not match the schema); GraphQL reports it under `extensions.mockingbird.fallbackReasons`, and the request log records it.
+Every response carries `X-Mockingbird-Source: llm | patched | repaired | fallback`. A `fallback` response also carries `X-Mockingbird-Fallback-Reason`, which says why the LLM answer was not used (no LLM configured, a timeout, a provider error, output cut at `max_tokens`, or an answer that did not match the schema); GraphQL reports it under `extensions.mockingbird.fallbackReasons`, and the request log records it.
 
 Check a contract without serving it:
 

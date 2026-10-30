@@ -393,7 +393,7 @@ fn profile(name: &str, base_url: String, fallback: Option<&str>) -> LlmProfile {
         base_url,
         model: "m".into(),
         secret_ref: Some("env:MB_TEST_REGISTRY_LLM_KEY".into()),
-        json_schema: false,
+        output_mode: mb_store::OutputMode::JsonObject,
         temperature: 0.2,
         timeout_ms: 3000,
         max_tokens: 512,

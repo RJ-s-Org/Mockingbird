@@ -13,6 +13,7 @@ const fast = {
   temperature: 0.2,
   max_tokens: 512,
   timeout_ms: 1000,
+  output_mode: "json_schema",
   json_schema: true,
   fallback_profile: null,
   headers: { "x-title": "Mockingbird" },
@@ -61,7 +62,7 @@ describe("llm profiles", () => {
     await user.type(within(dialog).getByLabelText("Base URL"), "http://llm.local/v1");
     await user.type(within(dialog).getByLabelText("Model"), "gpt-mini");
     await user.type(secretRef, "env:MB_LLM_API_KEY");
-    await user.click(within(dialog).getByLabelText("JSON schema responses"));
+    await user.selectOptions(within(dialog).getByLabelText("Output mode"), "json_schema");
     await user.clear(within(dialog).getByLabelText("Temperature"));
     await user.type(within(dialog).getByLabelText("Temperature"), "0.2");
     await user.clear(within(dialog).getByLabelText("Timeout (ms)"));
@@ -82,7 +83,7 @@ describe("llm profiles", () => {
       base_url: "http://llm.local/v1",
       model: "gpt-mini",
       secret_ref: "env:MB_LLM_API_KEY",
-      json_schema: true,
+      output_mode: "json_schema",
       temperature: 0.2,
       timeout_ms: 1000,
       max_tokens: 512,
@@ -133,6 +134,9 @@ describe("llm profiles", () => {
     // View-only fields are not sent: the server refuses unknown PUT fields.
     expect("name" in body).toBe(false);
     expect("source" in body).toBe(false);
+    // The deprecated alias is refused beside `output_mode`.
+    expect(body.output_mode).toBe("json_schema");
+    expect("json_schema" in body).toBe(false);
   });
 
   it("a refused save shows the server's problem detail", async () => {

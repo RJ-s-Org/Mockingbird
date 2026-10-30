@@ -48,7 +48,7 @@ fn profile(workspace: &str, name: &str, timeout_ms: u64, max_tokens: u32) -> Llm
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "m".into(),
         secret_ref: None,
-        json_schema: false,
+        output_mode: mb_store::OutputMode::JsonObject,
         temperature: 0.7,
         timeout_ms,
         max_tokens,

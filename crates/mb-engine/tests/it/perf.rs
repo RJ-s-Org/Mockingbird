@@ -279,7 +279,7 @@ async fn time_local_patch() {
             .generate(&bundle, op, &get_item(), GenerationContext::default())
             .await
             .unwrap();
-        assert_eq!(response.source, mb_engine::Source::Repaired);
+        assert_eq!(response.source, mb_engine::Source::Patched);
     }
     println!(
         "PERF-15 patched LLM answer (12 errors, 8 defs) x{n}: {:?}",

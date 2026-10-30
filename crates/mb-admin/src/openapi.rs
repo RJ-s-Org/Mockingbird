@@ -115,6 +115,7 @@ use crate::{
         scenarios::PutScenario,
         profiles::LlmProfileView,
         profiles::PutProfile,
+        profiles::OutputMode,
         profiles::ProfileWriteResult,
         profiles::ProfileDeleteResult,
         sessions::SessionInfoView,

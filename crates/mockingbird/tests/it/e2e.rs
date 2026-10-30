@@ -29,7 +29,7 @@ fn llm(base: String) -> LlmEnv {
         base_url: base,
         model: "m".into(),
         api_key: Some("k".into()),
-        json_schema: false,
+        output_mode: None,
     }
 }
 

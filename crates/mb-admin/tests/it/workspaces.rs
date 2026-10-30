@@ -283,7 +283,7 @@ async fn force_delete_refuses_file_managed_resources() {
             base_url: "https://x".into(),
             model: "m".into(),
             secret_ref: None,
-            json_schema: false,
+            output_mode: mb_store::OutputMode::JsonObject,
             temperature: 0.7,
             timeout_ms: 3000,
             max_tokens: 2048,

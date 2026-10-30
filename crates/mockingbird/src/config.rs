@@ -320,21 +320,52 @@ pub struct LlmEnv {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
-    pub json_schema: bool,
+    /// `MB_LLM_OUTPUT_MODE`, else the deprecated `MB_LLM_JSON_SCHEMA`;
+    /// `None` when neither is set.
+    pub output_mode: Option<mb_store::OutputMode>,
 }
 
 impl LlmEnv {
     /// Reads `MB_LLM_*`, applying the documented defaults.
+    ///
+    /// # Errors
+    ///
+    /// `MB_LLM_OUTPUT_MODE` is set to something other than `none`,
+    /// `json_object` or `json_schema`.
+    pub fn try_from_env() -> Result<Self, String> {
+        Self::read(true)
+    }
+
+    /// [`Self::try_from_env`], ignoring an invalid `MB_LLM_OUTPUT_MODE`.
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `try_from_env`, which rejects an invalid MB_LLM_OUTPUT_MODE"
+    )]
     pub fn from_env() -> Self {
+        // Lenient reads never fail.
+        Self::read(false).unwrap_or_else(|_| Self {
+            base_url: DEFAULT_LLM_BASE_URL.into(),
+            model: DEFAULT_LLM_MODEL.into(),
+            api_key: None,
+            output_mode: None,
+        })
+    }
+
+    fn read(strict: bool) -> Result<Self, String> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        Self {
+        let output_mode = match get("MB_LLM_OUTPUT_MODE").map(|v| v.parse::<mb_store::OutputMode>())
+        {
+            Some(Ok(mode)) => Some(mode),
+            Some(Err(e)) if strict => return Err(format!("MB_LLM_OUTPUT_MODE: {e}")),
+            Some(Err(_)) | None => get("MB_LLM_JSON_SCHEMA")
+                .map(|v| mb_store::OutputMode::from_json_schema(v.eq_ignore_ascii_case("true"))),
+        };
+        Ok(Self {
             base_url: get("MB_LLM_BASE_URL").unwrap_or_else(|| DEFAULT_LLM_BASE_URL.into()),
             model: get("MB_LLM_MODEL").unwrap_or_else(|| DEFAULT_LLM_MODEL.into()),
             api_key: get("MB_LLM_API_KEY"),
-            json_schema: get("MB_LLM_JSON_SCHEMA")
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-        }
+            output_mode,
+        })
     }
 }
 
@@ -487,7 +518,7 @@ pub fn zero_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<Fil
     if let (false, Some(env)) = (args.offline, llm) {
         let mut profile = FileProfile::new(env.base_url.clone(), env.model.clone());
         profile.api_key = Some(ENV_API_KEY_REF.to_string());
-        profile.json_schema = env.json_schema;
+        profile.output_mode = env.output_mode;
         cfg.llm.profiles.insert(ENV_PROFILE.to_string(), profile);
         cfg.llm.default_profile = Some(ENV_PROFILE.to_string());
     }

@@ -13,6 +13,7 @@ const profiles = [
     temperature: 0.2,
     max_tokens: 512,
     timeout_ms: 1000,
+    output_mode: "json_schema",
     json_schema: true,
     source: "api",
   },

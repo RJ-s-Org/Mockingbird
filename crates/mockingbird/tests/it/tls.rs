@@ -288,7 +288,7 @@ fn provider(base_url: String, http: HttpOptions) -> OpenAiCompatible {
         base_url,
         api_key: None,
         model: "m".into(),
-        json_schema: false,
+        output_mode: mb_llm::OutputMode::JsonObject,
         http,
     })
     .unwrap()

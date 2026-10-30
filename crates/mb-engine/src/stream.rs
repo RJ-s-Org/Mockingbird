@@ -18,7 +18,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tracing::Instrument;
 
-use crate::guards::{Checked, Echoes, GenerationPermit};
+use crate::guards::{Checked, Checks, GenerationPermit};
 use crate::ndjson::LineSplitter;
 use crate::prompt::{self, build_stream_messages};
 use crate::validate::SchemaValidator;
@@ -382,15 +382,15 @@ impl StreamState {
         );
     }
 
-    /// A candidate line as an item: valid → `Llm`; otherwise one repair
-    /// call → `Repaired`, else a faker item.
+    /// A candidate line as an item: valid → `Llm`, fixed locally →
+    /// `Patched`; otherwise one repair call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
         let errors = match self
             .engine
-            .check_output(&self.validator, line, None, &Echoes::default())
+            .check_output(&self.validator, line, &Checks::default())
         {
             Checked::Valid(value) => return (value, Source::Llm),
-            Checked::Patched(value) => return (value, Source::Repaired),
+            Checked::Patched(value) => return (value, Source::Patched),
             Checked::Rejected(reason) => {
                 tracing::warn!(operation = %self.op_id, %reason, "stream item fell back to faker");
                 return (self.fake(), Source::Fallback);
@@ -460,7 +460,7 @@ impl StreamState {
             Ok(Err(e)) => return Err(e.to_string()),
             Err(_) => return Err("LLM repair timed out".into()),
         };
-        match engine.check_output(&self.validator, &text, None, &Echoes::default()) {
+        match engine.check_output(&self.validator, &text, &Checks::default()) {
             Checked::Valid(value) | Checked::Patched(value) => Ok(value),
             Checked::Rejected(reason) => Err(reason),
             Checked::Invalid(errors) => Err(errors.join("; ")),

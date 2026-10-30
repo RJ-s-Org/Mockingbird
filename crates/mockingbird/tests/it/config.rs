@@ -126,13 +126,13 @@ fn loads_full_example_config() {
     assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
     assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
     assert_eq!(p.api_key.as_deref(), Some("env:OPENROUTER_API_KEY"));
-    assert!(!p.json_schema);
+    assert_eq!(p.mode(), mb_store::OutputMode::JsonObject);
     assert_eq!(p.timeout, Duration::from_secs(3));
     assert!((p.temperature - 0.7).abs() < f32::EPSILON);
     assert_eq!(p.max_tokens, 2048);
     assert_eq!(p.fallback.as_deref(), Some("local"));
     let local = &cfg.llm.profiles["local"];
-    assert!(local.json_schema);
+    assert_eq!(local.mode(), mb_store::OutputMode::JsonSchema);
     assert_eq!(local.api_key, None);
     assert_eq!(local.fallback, None);
     assert_eq!(local.timeout, Duration::from_secs(10));
@@ -565,6 +565,60 @@ fn env_llm_vars_create_default_profile() {
     assert_eq!(cfg.llm.default_profile.as_deref(), Some("default"));
 }
 
+#[test]
+fn env_output_mode_sets_and_validates_the_default_profile() {
+    let apply = |vars: &[(&str, &str)]| {
+        let env: HashMap<&str, &str> = vars.iter().copied().collect();
+        let mut cfg = FileConfig::default();
+        file_config::apply_env_from(&mut cfg, |k| env.get(k).map(|v| v.to_string()))
+            .map(|()| cfg.llm.profiles["default"].mode())
+    };
+    assert_eq!(
+        apply(&[("MB_LLM_OUTPUT_MODE", "none")]).unwrap(),
+        mb_store::OutputMode::None
+    );
+    // The deprecated alias, and the new variable winning over it.
+    assert_eq!(
+        apply(&[("MB_LLM_JSON_SCHEMA", "true")]).unwrap(),
+        mb_store::OutputMode::JsonSchema
+    );
+    assert_eq!(
+        apply(&[
+            ("MB_LLM_JSON_SCHEMA", "true"),
+            ("MB_LLM_OUTPUT_MODE", "json_object")
+        ])
+        .unwrap(),
+        mb_store::OutputMode::JsonObject
+    );
+    let err = apply(&[("MB_LLM_OUTPUT_MODE", "jsonschema")]).unwrap_err();
+    assert!(format!("{err:#}").contains("MB_LLM_OUTPUT_MODE"), "{err:#}");
+}
+
+#[test]
+fn output_mode_and_its_deprecated_alias_are_not_both_accepted() {
+    let ws = Workspace::new();
+    ws.write(
+        r#"
+llm:
+  profiles:
+    p: {base_url: "http://x", model: m, output_mode: none, json_schema: false}
+"#,
+    );
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("set output_mode only"),
+        "{err:#}"
+    );
+    let cfg = ws.load(
+        r#"
+llm:
+  profiles:
+    p: {base_url: "http://x", model: m, output_mode: none}
+"#,
+    );
+    assert_eq!(cfg.llm.profiles["p"].mode(), mb_store::OutputMode::None);
+}
+
 #[tokio::test]
 async fn reconcile_creates_and_activates() {
     let ws = Workspace::new();
@@ -697,7 +751,7 @@ fn api_profile(name: &str) -> LlmProfile {
         base_url: "http://api".into(),
         model: "m".into(),
         secret_ref: None,
-        json_schema: false,
+        output_mode: mb_store::OutputMode::JsonObject,
         temperature: 0.7,
         timeout_ms: 3000,
         max_tokens: 2048,

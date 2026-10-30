@@ -515,8 +515,12 @@ fn conform_item_checks_item_schema() {
 }
 
 #[test]
-fn source_worst_orders_fallback_repaired_llm() {
+fn source_worst_orders_fallback_repaired_patched_llm() {
     assert_eq!(Source::Llm.worst(Source::Llm), Source::Llm);
+    assert_eq!(Source::Llm.worst(Source::Patched), Source::Patched);
+    assert_eq!(Source::Patched.worst(Source::Repaired), Source::Repaired);
+    assert_eq!(Source::Repaired.worst(Source::Patched), Source::Repaired);
+    assert_eq!(Source::Patched.to_string(), "patched");
     assert_eq!(Source::Llm.worst(Source::Repaired), Source::Repaired);
     assert_eq!(Source::Repaired.worst(Source::Llm), Source::Repaired);
     assert_eq!(Source::Fallback.worst(Source::Repaired), Source::Fallback);

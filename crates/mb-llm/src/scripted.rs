@@ -26,6 +26,7 @@ pub struct ScriptedProvider {
     chunk_delay: Duration,
     chunks_yielded: Arc<AtomicUsize>,
     stream_usage: Option<Usage>,
+    capabilities: Capabilities,
 }
 
 impl std::fmt::Debug for ScriptedProvider {
@@ -68,7 +69,19 @@ impl ScriptedProvider {
             chunk_delay: Duration::ZERO,
             chunks_yielded: Arc::new(AtomicUsize::new(0)),
             stream_usage: None,
+            capabilities: Capabilities {
+                json_schema: true,
+                json_mode: true,
+            },
         }
+    }
+
+    /// Reports `capabilities` (by default both structured outputs and JSON
+    /// mode).
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: Capabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     /// Each [`Provider::stream`] call pops one entry: an `Err` fails the
@@ -120,10 +133,7 @@ impl ScriptedProvider {
 #[async_trait]
 impl Provider for ScriptedProvider {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            json_schema: true,
-            json_mode: true,
-        }
+        self.capabilities
     }
 
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {

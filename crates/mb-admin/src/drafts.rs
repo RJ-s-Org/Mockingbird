@@ -161,7 +161,7 @@ pub struct PreviewResponse {
     pub content_type: Option<String>,
     #[schema(value_type = Object)]
     pub body: Option<Value>,
-    /// `llm`, `repaired` or `fallback`.
+    /// `llm`, `patched`, `repaired` or `fallback`.
     pub source: String,
 }
 

@@ -64,7 +64,7 @@ pub struct PublishedMessage {
     pub headers: BTreeMap<String, String>,
     #[schema(value_type = Object)]
     pub payload: Value,
-    /// `llm`, `repaired` or `fallback`.
+    /// `llm`, `patched`, `repaired` or `fallback`.
     pub source: String,
 }
 

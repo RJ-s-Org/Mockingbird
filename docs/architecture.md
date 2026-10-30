@@ -54,13 +54,13 @@ A typical HA layout is two `control` replicas (one leader at a time) and an auto
    - the mock's daily token budget (`mb_token_budget_used`, `mb_token_budget_exhausted_total`), shared across replicas through the `token_usage` table and flushed every 5 s (the leader deletes rows older than 90 days, daily);
    - the response size cap (`limits.max_response_bytes`).
    A refused guard never errors: the faker answers.
-6. **Validate → repair → fallback** (`mb.validate`, `mb.repair`). Values breaking a format the faker produces are refilled locally (never sent for repair). One repair call with the validation errors; then the faker, whose answer is flagged in its fallback reason (and `mb_faker_invalid_total`) when no draw validates. The response carries `X-Mockingbird-Source: llm | repaired | fallback`.
+6. **Validate → repair → fallback** (`mb.validate`, `mb.repair`). Values breaking a format the faker produces are refilled locally (never sent for repair). One repair call with the validation errors; then the faker, whose answer is flagged in its fallback reason (and `mb_faker_invalid_total`) when no draw validates. The response carries `X-Mockingbird-Source: llm | patched | repaired | fallback`.
 7. **Scrub.** With `pii.enabled`, personal-data look-alikes are replaced with synthetic values of the same shape (`mb_pii_replacements_total{pattern}`). Scrubbed output still validates.
 8. **State write and encode** (`mb.encode`). Commands upsert or delete the resource and publish a state change; the adapter encodes the response. Streams (`drop_stream_rate`) may be cut short by chaos.
 
 A request failing validation never reaches the LLM: it is answered with the contract's 400, 422 or `default` error shape (else problem+json), with source `rejected`, whose message-like field, the `X-Mockingbird-Validation` header and the request record's `request.validation` carry the reasons. Form and multipart bodies and query strings are decoded with bracket notation (`a[b][c]=1`, `a[0]=x`, `a[]=y`) and coerced through the schema before validation.
 
-Every call is recorded in the request log (redacted) and counted in `mb_requests_total{mock,operation,status,source}`. Its `source` is `llm`, `repaired`, `fallback`, `state`, `cache` or `rejected` (a request that failed validation; as in `X-Mockingbird-Source`), or `not_generated` for a call answered without generating a body: refused before generation (auth, quota, rate limit, an invalid override, an unknown scenario) or answered with a native error (a forced or injected error status the contract declares no response for).
+Every call is recorded in the request log (redacted) and counted in `mb_requests_total{mock,operation,status,source}`. Its `source` is `llm`, `patched`, `repaired`, `fallback`, `state`, `cache` or `rejected` (a request that failed validation; as in `X-Mockingbird-Source`), or `not_generated` for a call answered without generating a body: refused before generation (auth, quota, rate limit, an invalid override, an unknown scenario) or answered with a native error (a forced or injected error status the contract declares no response for).
 
 ## High availability
 

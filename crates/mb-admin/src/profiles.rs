@@ -35,6 +35,38 @@ pub struct ProfilePath {
 /// Body keys that would carry a raw secret.
 const RAW_KEY_FIELDS: [&str; 2] = ["api_key", "apiKey"];
 
+/// How a profile's endpoint is asked for JSON: `none` (no
+/// `response_format`; the prompt alone asks for JSON), `json_object` (JSON
+/// mode, the default) or `json_schema` (structured output).
+#[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    None,
+    #[default]
+    JsonObject,
+    JsonSchema,
+}
+
+impl From<mb_store::OutputMode> for OutputMode {
+    fn from(m: mb_store::OutputMode) -> Self {
+        match m {
+            mb_store::OutputMode::None => OutputMode::None,
+            mb_store::OutputMode::JsonObject => OutputMode::JsonObject,
+            mb_store::OutputMode::JsonSchema => OutputMode::JsonSchema,
+        }
+    }
+}
+
+impl From<OutputMode> for mb_store::OutputMode {
+    fn from(m: OutputMode) -> Self {
+        match m {
+            OutputMode::None => mb_store::OutputMode::None,
+            OutputMode::JsonObject => mb_store::OutputMode::JsonObject,
+            OutputMode::JsonSchema => mb_store::OutputMode::JsonSchema,
+        }
+    }
+}
+
 /// An LLM profile. `secret_ref` is returned as stored, never resolved.
 #[derive(Serialize, ToSchema, Debug)]
 pub struct LlmProfileView {
@@ -43,6 +75,9 @@ pub struct LlmProfileView {
     pub model: String,
     /// `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`.
     pub secret_ref: Option<String>,
+    pub output_mode: OutputMode,
+    /// Deprecated: `output_mode == "json_schema"`.
+    #[schema(deprecated)]
     pub json_schema: bool,
     pub temperature: f32,
     pub timeout_ms: u64,
@@ -65,7 +100,8 @@ impl From<LlmProfile> for LlmProfileView {
             base_url: p.base_url,
             model: p.model,
             secret_ref: p.secret_ref,
-            json_schema: p.json_schema,
+            output_mode: p.output_mode.into(),
+            json_schema: p.output_mode == mb_store::OutputMode::JsonSchema,
             temperature: p.temperature,
             timeout_ms: p.timeout_ms,
             max_tokens: p.max_tokens,
@@ -89,9 +125,14 @@ pub struct PutProfile {
     /// `env:` names, `file:` paths and `vault:<mount>/<path>#<field>`
     /// references are rejected unless the server allows them.
     pub secret_ref: Option<String>,
-    /// Use the provider's `json_schema` response format.
+    /// How the provider is asked for JSON; default `json_object`.
     #[serde(default)]
-    pub json_schema: bool,
+    pub output_mode: Option<OutputMode>,
+    /// Deprecated alias of `output_mode`: `true` is `json_schema`, `false`
+    /// `json_object`. Not with `output_mode`.
+    #[serde(default)]
+    #[schema(deprecated)]
+    pub json_schema: Option<bool>,
     #[serde(default = "default_temperature")]
     #[schema(default = 0.7)]
     pub temperature: f32,
@@ -179,6 +220,12 @@ fn check_secret_ref(r: &str, allowed: &[String]) -> ApiResult<()> {
 const INVALID_PROFILE: &str = "Invalid LLM profile";
 
 fn validate(name: &str, p: &PutProfile) -> ApiResult<()> {
+    if p.output_mode.is_some() && p.json_schema.is_some() {
+        return Err(Problem::invalid(
+            INVALID_PROFILE,
+            "set output_mode only; json_schema is its deprecated alias",
+        ));
+    }
     if p.base_url.trim().is_empty() || p.model.trim().is_empty() {
         return Err(Problem::invalid(
             INVALID_PROFILE,
@@ -396,7 +443,11 @@ pub async fn put(
         base_url: body.base_url,
         model: body.model,
         secret_ref: body.secret_ref,
-        json_schema: body.json_schema,
+        output_mode: body
+            .output_mode
+            .map(Into::into)
+            .or(body.json_schema.map(mb_store::OutputMode::from_json_schema))
+            .unwrap_or_default(),
         temperature: body.temperature,
         timeout_ms: body.timeout_ms,
         max_tokens: body.max_tokens,

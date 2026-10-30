@@ -1549,11 +1549,16 @@ export interface components {
             headers: {
                 [key: string]: string;
             };
+            /**
+             * @deprecated
+             * @description Deprecated: `output_mode == "json_schema"`.
+             */
             json_schema: boolean;
             /** Format: int32 */
             max_tokens: number;
             model: string;
             name: string;
+            output_mode: components["schemas"]["OutputMode"];
             /** @description `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`. */
             secret_ref?: string | null;
             source: components["schemas"]["Source"];
@@ -1665,6 +1670,13 @@ export interface components {
              */
             target: string;
         };
+        /**
+         * @description How a profile's endpoint is asked for JSON: `none` (no
+         *     `response_format`; the prompt alone asks for JSON), `json_object` (JSON
+         *     mode, the default) or `json_schema` (structured output).
+         * @enum {string}
+         */
+        OutputMode: "none" | "json_object" | "json_schema";
         /** @description JSON merge patch of a mock: absent fields are kept, `null` clears. */
         PatchMock: {
             chaos?: components["schemas"]["ChaosSettings"] | null;
@@ -1715,7 +1727,7 @@ export interface components {
         PreviewResponse: {
             body: Record<string, never>;
             content_type?: string | null;
-            /** @description `llm`, `repaired` or `fallback`. */
+            /** @description `llm`, `patched`, `repaired` or `fallback`. */
             source: string;
             /** Format: int32 */
             status: number;
@@ -1787,7 +1799,7 @@ export interface components {
             };
             key?: string | null;
             payload: Record<string, never>;
-            /** @description `llm`, `repaired` or `fallback`. */
+            /** @description `llm`, `patched`, `repaired` or `fallback`. */
             source: string;
         };
         /** @description A channel's settings. Absent `triggers` use the contract's. */
@@ -1830,14 +1842,19 @@ export interface components {
             headers?: {
                 [key: string]: string;
             };
-            /** @description Use the provider's `json_schema` response format. */
-            json_schema?: boolean;
+            /**
+             * @deprecated
+             * @description Deprecated alias of `output_mode`: `true` is `json_schema`, `false`
+             *     `json_object`. Not with `output_mode`.
+             */
+            json_schema?: boolean | null;
             /**
              * Format: int32
              * @default 16384
              */
             max_tokens: number;
             model: string;
+            output_mode?: components["schemas"]["OutputMode"] | null;
             /**
              * @description A secret reference, never a raw key. Through the API it must match
              *     the server's `server.api_secret_refs` globs; by default
@@ -3766,7 +3783,7 @@ export interface operations {
                 operation?: string;
                 /** @description Session id. */
                 session?: string;
-                /** @description Response source, e.g. `llm`, `repaired`, `fallback`. */
+                /** @description Response source, e.g. `llm`, `patched`, `repaired`, `fallback`. */
                 source?: string;
                 /** @description 1–500; default 100. */
                 limit?: number;
@@ -3823,7 +3840,7 @@ export interface operations {
                 operation?: string;
                 /** @description Only this session id. */
                 session?: string;
-                /** @description Only this response source, e.g. `llm`, `repaired`, `fallback`. */
+                /** @description Only this response source, e.g. `llm`, `patched`, `repaired`, `fallback`. */
                 source?: string;
                 /** @description Only this request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
                 kind?: string;
@@ -6123,7 +6140,7 @@ export interface operations {
                 operation?: string;
                 /** @description Session id. */
                 session?: string;
-                /** @description Response source, e.g. `llm`, `repaired`, `fallback`. */
+                /** @description Response source, e.g. `llm`, `patched`, `repaired`, `fallback`. */
                 source?: string;
                 /** @description 1–500; default 100. */
                 limit?: number;
@@ -6182,7 +6199,7 @@ export interface operations {
                 operation?: string;
                 /** @description Only this session id. */
                 session?: string;
-                /** @description Only this response source, e.g. `llm`, `repaired`, `fallback`. */
+                /** @description Only this response source, e.g. `llm`, `patched`, `repaired`, `fallback`. */
                 source?: string;
                 /** @description Only this request kind: `http`, `graphql`, `grpc`, `soap` or `event`. */
                 kind?: string;

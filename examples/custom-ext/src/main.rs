@@ -22,13 +22,14 @@ struct Cli {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match server::run_with(
-        cli.serve,
-        Some(LlmEnv::from_env()),
-        extensions(CALLS_PER_TENANT),
-    )
-    .await
-    {
+    let llm = match LlmEnv::try_from_env() {
+        Ok(llm) => llm,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::from(2);
+        }
+    };
+    match server::run_with(cli.serve, Some(llm), extensions(CALLS_PER_TENANT)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(ServeError::Usage(msg)) => {
             eprintln!("{msg}");

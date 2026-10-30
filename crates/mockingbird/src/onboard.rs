@@ -137,8 +137,8 @@ fn profile_yaml_value(p: &FileProfile, fallback: Option<&str>) -> Value {
     if let Some(key) = &p.api_key {
         obj.insert("api_key".into(), json!(key));
     }
-    if p.json_schema {
-        obj.insert("json_schema".into(), json!(true));
+    if p.mode() != defaults.mode() {
+        obj.insert("output_mode".into(), json!(p.mode()));
     }
     if p.timeout != defaults.timeout {
         obj.insert(
