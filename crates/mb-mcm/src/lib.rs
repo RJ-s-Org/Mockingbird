@@ -92,8 +92,9 @@ pub enum ProtocolPayload {
         /// The schema document.
         sdl: String,
     },
-    /// The WSDL document. The schemas uploaded with it that its
-    /// `schemaLocation`s reach are embedded at the end of its root element,
+    /// The WSDL document. The documents uploaded with it that its
+    /// `wsdl:import`s and `schemaLocation`s reach (imported WSDLs, then
+    /// schemas) are embedded at the end of its root element,
     /// in one `<schemas wsdl="<the WSDL's upload path>">` element of
     /// namespace [`EMBEDDED_SCHEMAS_NS`] holding a `<schema path="…">`
     /// element per schema, its text in CDATA sections.

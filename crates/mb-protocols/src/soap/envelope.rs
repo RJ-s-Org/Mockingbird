@@ -436,14 +436,14 @@ fn tag_with(e: &BytesStart<'_>, name: &str, value: &str, empty: bool) -> Result<
     Ok(tag)
 }
 
-/// The uploaded schemas embedded in a stored WSDL (see
-/// [`mb_mcm::ProtocolPayload::Soap`]).
+/// The uploaded documents (schemas and imported WSDLs) embedded in a
+/// stored WSDL (see [`mb_mcm::ProtocolPayload::Soap`]).
 #[derive(Debug, Default)]
 pub(crate) struct Schemas {
-    /// The WSDL's path in the upload, which its `schemaLocation`s are
-    /// relative to.
+    /// The WSDL's path in the upload, which its `schemaLocation`s and
+    /// `wsdl:import` locations are relative to.
     pub wsdl_path: String,
-    /// Upload path → schema text.
+    /// Upload path → document text.
     pub files: HashMap<String, String>,
 }
 
@@ -520,8 +520,9 @@ pub(crate) fn join_location(importer: &str, location: &str) -> String {
 }
 
 /// `doc` (the document at upload path `doc_path`) with every XSD
-/// `import`/`include`/`redefine` `schemaLocation` that names one of
-/// `schemas` set to `url(<its upload path>)`. Everything else is copied
+/// `import`/`include`/`redefine` `schemaLocation`, and every `wsdl:import`
+/// `location`, that names one of `schemas` set to `url(<its upload
+/// path>)`. Everything else is copied
 /// byte for byte.
 pub(crate) fn rewrite_schema_locations(
     doc: &str,
@@ -539,12 +540,19 @@ pub(crate) fn rewrite_schema_locations(
         let before = usize::try_from(reader.buffer_position()).map_err(syntax)?;
         let (resolved, event) = reader.read_resolved_event().map_err(syntax)?;
         let in_xsd = matches!(resolved, ResolveResult::Bound(ns) if ns.0 == XSD_NS);
+        let in_wsdl = matches!(resolved, ResolveResult::Bound(ns) if ns.0 == WSDL_NS);
         match event {
             Event::Start(ref e) | Event::Empty(ref e)
-                if in_xsd
-                    && matches!(e.local_name().as_ref(), "import" | "include" | "redefine") =>
+                if (in_xsd
+                    && matches!(e.local_name().as_ref(), "import" | "include" | "redefine"))
+                    || (in_wsdl && e.local_name().as_ref() == "import") =>
             {
-                let Some(location) = attr_value(e, "schemaLocation")? else {
+                let attr = if in_wsdl {
+                    "location"
+                } else {
+                    "schemaLocation"
+                };
+                let Some(location) = attr_value(e, attr)? else {
                     continue;
                 };
                 let target = join_location(doc_path, location.trim());
@@ -559,7 +567,7 @@ pub(crate) fn rewrite_schema_locations(
                 out.push_str(&doc[copied..start]);
                 out.push_str(&tag_with(
                     e,
-                    "schemaLocation",
+                    attr,
                     &url(&target),
                     matches!(event, Event::Empty(_)),
                 )?);

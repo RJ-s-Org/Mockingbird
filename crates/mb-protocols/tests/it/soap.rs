@@ -725,3 +725,74 @@ async fn wsdl_serves_uploaded_schemas() {
     assert_eq!(status, 404);
     assert_eq!(content_type, "application/problem+json");
 }
+
+/// `?wsdl` points `wsdl:import` locations at `?xsd=<path>` too, which
+/// serves the imported WSDL with its own references rewritten
+/// (MB-IMPORT-STUB-10).
+#[tokio::test]
+async fn wsdl_serves_imported_wsdls() {
+    let abstract_wsdl = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:abstract" targetNamespace="urn:abstract">
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:abstract" elementFormDefault="qualified">
+      <xs:include schemaLocation="../schemas/note.xsd"/>
+      <xs:element name="Put"><xs:complexType><xs:sequence><xs:element name="id" type="xs:string"/></xs:sequence></xs:complexType></xs:element>
+      <xs:element name="PutResponse"><xs:complexType><xs:sequence><xs:element name="ok" type="xs:boolean"/></xs:sequence></xs:complexType></xs:element>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="PutIn"><wsdl:part name="body" element="tns:Put"/></wsdl:message>
+  <wsdl:message name="PutOut"><wsdl:part name="body" element="tns:PutResponse"/></wsdl:message>
+  <wsdl:portType name="P"><wsdl:operation name="Put"><wsdl:input message="tns:PutIn"/><wsdl:output message="tns:PutOut"/></wsdl:operation></wsdl:portType>
+</wsdl:definitions>"#;
+    let note = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:abstract">
+  <xs:simpleType name="Note"><xs:restriction base="xs:string"/></xs:simpleType>
+</xs:schema>"#;
+    let main = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:abs="urn:abstract" xmlns:tns="urn:main" targetNamespace="urn:main">
+  <wsdl:import namespace="urn:abstract" location="abstract/port.wsdl"/>
+  <wsdl:binding name="B" type="abs:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Put"><soap:operation soapAction="urn:Put"/></wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S"><wsdl:port name="Port" binding="tns:B"><soap:address location="http://x/put"/></wsdl:port></wsdl:service>
+</wsdl:definitions>"#;
+    let files = [
+        ("main.wsdl", main),
+        ("abstract/port.wsdl", abstract_wsdl),
+        ("schemas/note.xsd", note),
+    ]
+    .into_iter()
+    .map(|(path, text)| mb_import::SourceFile {
+        path: path.into(),
+        bytes: text.as_bytes().to_vec(),
+    })
+    .collect::<Vec<_>>();
+    let bundle = Arc::new(mb_import::compile_files(&files).unwrap());
+    let rt = runtime(bundle, &scripted(vec![]));
+    let base = serve(rt, "/m").await;
+
+    let (status, _, wsdl) = get_text(&format!("{base}/put?wsdl")).await;
+    assert_eq!(status, 200);
+    assert!(
+        wsdl.contains(
+            r#"<wsdl:import namespace="urn:abstract" location="http://127.0.0.1:1234/m/put?xsd=abstract/port.wsdl"/>"#
+        ),
+        "{wsdl}"
+    );
+    assert!(!wsdl.contains("mockingbird"), "{wsdl}");
+
+    let (status, content_type, port) =
+        get_text(&format!("{base}/put?xsd=abstract%2Fport.wsdl")).await;
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "text/xml; charset=utf-8");
+    assert!(port.contains(r#"<wsdl:portType name="P">"#), "{port}");
+    assert!(
+        port.contains(
+            r#"<xs:include schemaLocation="http://127.0.0.1:1234/m/put?xsd=schemas/note.xsd"/>"#
+        ),
+        "{port}"
+    );
+    let (status, _, note) = get_text(&format!("{base}/put?xsd=schemas%2Fnote.xsd")).await;
+    assert_eq!(status, 200);
+    assert!(note.contains(r#"name="Note""#), "{note}");
+}

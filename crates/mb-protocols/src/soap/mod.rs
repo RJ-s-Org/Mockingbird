@@ -7,8 +7,8 @@
 //! run through the shared `call` pipeline. Responses use
 //! the request's SOAP version; every failure is a SOAP Fault. `GET ?wsdl`
 //! serves the stored WSDL with its addresses pointing at this mock, and
-//! its uploaded schemas' `schemaLocation`s at `GET ?xsd=<path>`, which
-//! serves them.
+//! its uploaded schemas' `schemaLocation`s and its `wsdl:import`s at
+//! `GET ?xsd=<path>`, which serves them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -74,7 +74,8 @@ struct SoapState {
     rt: Arc<MockRuntime>,
     /// The stored WSDL without its embedded schemas.
     wsdl: String,
-    /// The schemas uploaded with the WSDL, served at `?xsd=<path>`.
+    /// The schemas and imported WSDLs uploaded with the WSDL, served at
+    /// `?xsd=<path>`.
     schemas: Schemas,
     /// `address_path` → the operations served there.
     endpoints: HashMap<String, Vec<Endpoint>>,

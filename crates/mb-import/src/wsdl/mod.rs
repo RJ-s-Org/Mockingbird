@@ -2,9 +2,9 @@
 //!
 //! Each `wsdl:service` is served through its first SOAP 1.1 or SOAP 1.2
 //! port; every operation of that port's portType becomes one operation.
-//! External schemas are never fetched: `schemaLocation`s must resolve
-//! within the upload. `wsdl:import` is not followed: a document that needs
-//! the definitions it imports fails with an error naming the import.
+//! `wsdl:import`s and `schemaLocation`s are followed within the upload,
+//! relative to the importing file; external documents are never fetched.
+//! A multi-WSDL upload is rooted at the file that holds `wsdl:service`.
 
 mod xml;
 mod xsd;
@@ -81,11 +81,89 @@ pub(crate) fn compile_text(bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, Import
     compile_upload(&file, &[], hex_digest(bytes), ctx)
 }
 
-/// Compile `wsdl`, resolving `schemaLocation`s among `files`. Its
-/// `wsdl:import`s are not followed: an error is extended to name them, and
-/// a document that compiles without them gets a `wsdl_import_ignored`
-/// warning. Schemas using `xs:any` or `xs:anyAttribute` get an
-/// `xsd_wildcard_ignored` warning per file.
+/// The `location`s of a WSDL document's `wsdl:import`s, `""` for one
+/// without.
+fn import_locations(root: &Element) -> impl Iterator<Item = &str> {
+    root.children_named(WSDL_NS, "import")
+        .map(|i| i.attr("location").unwrap_or_default().trim())
+}
+
+/// The root of a multi-WSDL upload: the one `.wsdl` file that holds a
+/// `wsdl:service`; among several, the one no other `.wsdl` file imports.
+pub(crate) fn upload_root<'f>(wsdls: &[&'f SourceFile]) -> Result<&'f SourceFile, ImportError> {
+    let mut parsed = Vec::new();
+    let mut first_error = None;
+    for f in wsdls {
+        match parse(&f.bytes, &f.path) {
+            Ok(root) => parsed.push((*f, root)),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    let with_service: Vec<&SourceFile> = parsed
+        .iter()
+        .filter(|(_, root)| {
+            root.is(WSDL_NS, "definitions") && root.child(WSDL_NS, "service").is_some()
+        })
+        .map(|(f, _)| *f)
+        .collect();
+    let roots = if with_service.len() > 1 {
+        let imported: BTreeSet<String> = parsed
+            .iter()
+            .flat_map(|(f, root)| import_locations(root).map(|l| join(&f.path, l)))
+            .collect();
+        let roots: Vec<&SourceFile> = with_service
+            .iter()
+            .copied()
+            .filter(|f| !imported.contains(&f.path))
+            .collect();
+        if roots.is_empty() {
+            with_service
+        } else {
+            roots
+        }
+    } else {
+        with_service
+    };
+    let names = |files: &[&SourceFile]| {
+        files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match roots.as_slice() {
+        [root] => Ok(root),
+        [] => match first_error {
+            Some(e) => Err(e),
+            None => Err(invalid(
+                "/",
+                format!(
+                    "none of the {} .wsdl files ({}) holds a wsdl:service; upload the file that does, with the documents it reaches through wsdl:import",
+                    wsdls.len(),
+                    names(wsdls)
+                ),
+            )),
+        },
+        many => Err(invalid(
+            "/",
+            format!(
+                "the upload contains {} .wsdl files with a wsdl:service ({}); expected one root document, the others reached through its wsdl:imports",
+                many.len(),
+                names(many)
+            ),
+        )),
+    }
+}
+
+/// Compile `wsdl`, following its `wsdl:import`s and resolving
+/// `schemaLocation`s among `files` (locations are relative to the importing
+/// file). An import whose location is not in the upload (a URL, say) is
+/// not followed: an error is extended to name it, and a document that
+/// compiles without it gets a `wsdl_import_ignored` warning. Schemas using
+/// `xs:any` or `xs:anyAttribute` get an `xsd_wildcard_ignored` warning per
+/// file.
 pub(crate) fn compile_upload(
     wsdl: &SourceFile,
     files: &[SourceFile],
@@ -94,38 +172,46 @@ pub(crate) fn compile_upload(
 ) -> Result<Bundle, ImportError> {
     let root = parse(&wsdl.bytes, &wsdl.path)?;
     check_root(&root)?;
-    let imports: Vec<&str> = root
-        .children_named(WSDL_NS, "import")
-        .map(|i| i.attr("location").unwrap_or("(no location)"))
+    let uploads: BTreeMap<&str, &[u8]> = files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes.as_slice()))
         .collect();
-    let imported = || {
+    let imports = load_imports(&wsdl.path, &root, &uploads)?;
+    let missing = || {
         imports
+            .missing
             .iter()
-            .map(|l| format!("\"{l}\""))
+            .map(|(importer, l)| {
+                if *importer == wsdl.path {
+                    format!("\"{l}\"")
+                } else {
+                    format!("\"{l}\" (in {importer})")
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
-    match compile_root(wsdl, &root, files, source_digest, ctx) {
+    match compile_root(wsdl, &root, &imports, &uploads, source_digest, ctx) {
         Ok(bundle) => {
-            if !imports.is_empty() {
+            if !imports.missing.is_empty() {
                 ctx.warn(
                     "wsdl_import_ignored",
                     None,
                     format!(
-                        "{}: wsdl:import of {} is not followed; only the definitions in this file are served",
+                        "{}: wsdl:import of {} is not in the upload and is not fetched; only the uploaded definitions are served",
                         wsdl.path,
-                        imported()
+                        missing()
                     ),
                 );
             }
             Ok(bundle)
         }
-        Err(ImportError::Invalid { pointer, message }) if !imports.is_empty() => {
+        Err(ImportError::Invalid { pointer, message }) if !imports.missing.is_empty() => {
             Err(ImportError::Invalid {
                 pointer,
                 message: format!(
-                    "{message} (the document uses wsdl:import of {}, which is not supported; merge the imported definitions into this file)",
-                    imported()
+                    "{message} (wsdl:import of {} is not in the upload; external documents are not fetched, so upload them with the WSDL in one archive)",
+                    missing()
                 ),
             })
         }
@@ -136,27 +222,29 @@ pub(crate) fn compile_upload(
 fn compile_root(
     wsdl: &SourceFile,
     root: &Element,
-    files: &[SourceFile],
+    imports: &Imports,
+    uploads: &BTreeMap<&str, &[u8]>,
     source_digest: String,
     ctx: &mut Ctx,
 ) -> Result<Bundle, ImportError> {
     let text = std::str::from_utf8(&wsdl.bytes)
         .map_err(|e| ImportError::Parse(format!("{}: not valid UTF-8: {e}", wsdl.path)))?;
-    let uploads: BTreeMap<&str, &[u8]> = files
-        .iter()
-        .map(|f| (f.path.as_str(), f.bytes.as_slice()))
+    let wsdl_docs: Vec<(&str, &Element)> = std::iter::once((wsdl.path.as_str(), root))
+        .chain(imports.wsdls.iter().map(|d| (d.path.as_str(), &d.root)))
         .collect();
-    let loaded = load_schemas(&wsdl.path, root, &uploads)?;
+    let loaded = load_schemas(&wsdl_docs, &imports.schemas, uploads)?;
     let mut docs = Vec::new();
-    for schema in inline_schemas(root) {
-        docs.push(SchemaDoc {
-            el: schema,
-            file: wsdl.path.clone(),
-            tns: schema
-                .attr("targetNamespace")
-                .unwrap_or_default()
-                .to_owned(),
-        });
+    for (path, doc) in &wsdl_docs {
+        for schema in inline_schemas(doc) {
+            docs.push(SchemaDoc {
+                el: schema,
+                file: (*path).to_owned(),
+                tns: schema
+                    .attr("targetNamespace")
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
+        }
     }
     for l in &loaded {
         docs.push(SchemaDoc {
@@ -167,7 +255,8 @@ fn compile_root(
     }
     let xsd = Xsd::new(&docs);
     let defs = xsd.defs()?;
-    let wsdl_doc = Wsdl::new(root, &wsdl.path);
+    let roots: Vec<&Element> = wsdl_docs.iter().map(|(_, doc)| *doc).collect();
+    let wsdl_doc = Wsdl::new(&roots, &wsdl.path);
     let operations = wsdl_doc.operations(&xsd, &defs)?;
     for file in xsd.wildcard_files() {
         ctx.warn(
@@ -184,6 +273,12 @@ fn compile_root(
         .map(str::to_owned)
         .or_else(|| wsdl_doc.services.first().map(|s| s.name.clone()))
         .unwrap_or_else(|| DEFAULT_TITLE.to_owned());
+    let embedded: Vec<&str> = imports
+        .wsdls
+        .iter()
+        .map(|d| d.path.as_str())
+        .chain(loaded.iter().map(|l| l.path.as_str()))
+        .collect();
     Ok(Bundle {
         id: slug(&title),
         title,
@@ -192,11 +287,11 @@ fn compile_root(
         operations,
         defs,
         protocol_payload: Some(ProtocolPayload::Soap {
-            wsdl: embed_schemas(
+            wsdl: embed_documents(
                 text.strip_prefix('\u{feff}').unwrap_or(text),
                 &wsdl.path,
-                &loaded,
-                &uploads,
+                &embedded,
+                uploads,
             )?,
         }),
         channels: Vec::new(),
@@ -205,19 +300,107 @@ fn compile_root(
 }
 
 // ---------------------------------------------------------------------------
-// Schemas
+// Imported documents and schemas
 // ---------------------------------------------------------------------------
 
-/// `wsdl` with the uploaded schemas in `loaded` embedded before the end
-/// tag of its root element (see [`ProtocolPayload::Soap`]), so `?wsdl`
-/// can serve them; `wsdl` itself when nothing was loaded.
-fn embed_schemas(
+/// How deep `wsdl:import`s may nest below the root document.
+const MAX_IMPORT_DEPTH: usize = 16;
+
+/// A WSDL document reached through `wsdl:import`.
+struct Doc {
+    path: String,
+    root: Element,
+}
+
+/// What the root document's `wsdl:import`s reach within the upload.
+struct Imports {
+    /// The imported WSDL documents, breadth first, each once.
+    wsdls: Vec<Doc>,
+    /// `(importer, location)` of the XML Schemas imported with
+    /// `wsdl:import`.
+    schemas: Vec<(String, String)>,
+    /// `(importer, location)` of the imports not in the upload.
+    missing: Vec<(String, String)>,
+}
+
+/// Follow the `wsdl:import`s of `root` (at upload path `root_path`)
+/// through `uploads`, breadth first: each document is loaded once (an
+/// import cycle ends where it closes), at most [`MAX_IMPORT_DEPTH`] imports
+/// deep. URLs and locations not in the upload are recorded as missing.
+fn load_imports(
+    root_path: &str,
+    root: &Element,
+    uploads: &BTreeMap<&str, &[u8]>,
+) -> Result<Imports, ImportError> {
+    let mut imports = Imports {
+        wsdls: Vec::new(),
+        schemas: Vec::new(),
+        missing: Vec::new(),
+    };
+    // (importing file, location, depth of the imported document)
+    let mut queue: VecDeque<(String, String, usize)> = import_locations(root)
+        .map(|l| (root_path.to_owned(), l.to_owned(), 1))
+        .collect();
+    let mut seen = BTreeSet::from([root_path.to_owned()]);
+    while let Some((importer, location, depth)) = queue.pop_front() {
+        if location.is_empty() {
+            imports.missing.push((importer, "(no location)".into()));
+            continue;
+        }
+        let path = join(&importer, &location);
+        let bytes = match uploads.get(path.as_str()) {
+            Some(bytes) if !location.contains("://") => *bytes,
+            _ => {
+                imports.missing.push((importer, location));
+                continue;
+            }
+        };
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if depth > MAX_IMPORT_DEPTH {
+            return Err(invalid(
+                importer.as_str(),
+                format!(
+                    "wsdl:import of \"{location}\" nests documents more than {MAX_IMPORT_DEPTH} deep"
+                ),
+            ));
+        }
+        let doc = parse(bytes, &path)?;
+        if doc.is(XSD_NS, "schema") {
+            imports.schemas.push((importer, location));
+            continue;
+        }
+        if !doc.is(WSDL_NS, "definitions") {
+            return match check_root(&doc) {
+                Err(ImportError::Unsupported(m)) if doc.is(WSDL20_NS, "description") => {
+                    Err(ImportError::Unsupported(format!("{path}: {m}")))
+                }
+                _ => Err(invalid(
+                    path.as_str(),
+                    "the wsdl:import target is not a WSDL 1.1 or XML Schema document",
+                )),
+            };
+        }
+        for l in import_locations(&doc) {
+            queue.push_back((path.clone(), l.to_owned(), depth + 1));
+        }
+        imports.wsdls.push(Doc { path, root: doc });
+    }
+    Ok(imports)
+}
+
+/// `wsdl` with the uploaded documents at `paths` (imported WSDLs and
+/// schemas) embedded before the end tag of its root element (see
+/// [`ProtocolPayload::Soap`]), so `?wsdl` can serve them; `wsdl` itself
+/// when there are none.
+fn embed_documents(
     wsdl: &str,
     wsdl_path: &str,
-    loaded: &[Loaded],
+    paths: &[&str],
     uploads: &BTreeMap<&str, &[u8]>,
 ) -> Result<String, ImportError> {
-    if loaded.is_empty() {
+    if paths.is_empty() {
         return Ok(wsdl.to_owned());
     }
     let end = root_end_tag(wsdl)
@@ -226,14 +409,14 @@ fn embed_schemas(
         r#"<mb:schemas xmlns:mb="{EMBEDDED_SCHEMAS_NS}" wsdl="{}">"#,
         xml_attr(wsdl_path)
     );
-    for l in loaded {
-        let bytes = uploads.get(l.path.as_str()).copied().unwrap_or_default();
+    for path in paths {
+        let bytes = uploads.get(path).copied().unwrap_or_default();
         let text = std::str::from_utf8(bytes)
-            .map_err(|e| ImportError::Parse(format!("{}: not valid UTF-8: {e}", l.path)))?;
+            .map_err(|e| ImportError::Parse(format!("{path}: not valid UTF-8: {e}")))?;
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         block.push_str(&format!(
             r#"<mb:schema path="{}"><![CDATA[{}]]></mb:schema>"#,
-            xml_attr(&l.path),
+            xml_attr(path),
             text.replace("]]>", "]]]]><![CDATA[>")
         ));
     }
@@ -280,7 +463,8 @@ fn inline_schemas(root: &Element) -> impl Iterator<Item = &Element> {
         .flat_map(|t| t.children_named(XSD_NS, "schema"))
 }
 
-/// An uploaded schema reached through `xs:import`/`xs:include`.
+/// An uploaded schema reached through `xs:import`/`xs:include` or
+/// `wsdl:import`.
 struct Loaded {
     path: String,
     root: Element,
@@ -318,18 +502,26 @@ fn locations(schema: &Element) -> Vec<String> {
         .collect()
 }
 
+/// The uploaded schemas the inline schemas of `wsdls` (`(path, root)`)
+/// reach, plus the `(importer, location)`s of `imported` and what they
+/// reach.
 fn load_schemas(
-    wsdl_path: &str,
-    root: &Element,
+    wsdls: &[(&str, &Element)],
+    imported: &[(String, String)],
     uploads: &BTreeMap<&str, &[u8]>,
 ) -> Result<Vec<Loaded>, ImportError> {
     // (importing file, location, the importer's target namespace)
     let mut queue: VecDeque<(String, String, String)> = VecDeque::new();
-    for schema in inline_schemas(root) {
-        let tns = schema.attr("targetNamespace").unwrap_or_default();
-        for loc in locations(schema) {
-            queue.push_back((wsdl_path.to_owned(), loc, tns.to_owned()));
+    for (path, root) in wsdls {
+        for schema in inline_schemas(root) {
+            let tns = schema.attr("targetNamespace").unwrap_or_default();
+            for loc in locations(schema) {
+                queue.push_back(((*path).to_owned(), loc, tns.to_owned()));
+            }
         }
+    }
+    for (importer, location) in imported {
+        queue.push_back((importer.clone(), location.clone(), String::new()));
     }
     let mut seen = BTreeSet::new();
     let mut loaded = Vec::new();
@@ -379,6 +571,8 @@ struct Service<'a> {
     name: String,
     port: String,
     binding: &'a Element,
+    /// The target namespace of the document defining the binding.
+    tns: &'a str,
     /// The namespace of the binding's SOAP extension elements.
     soap_ns: &'static str,
     version: SoapVersion,
@@ -387,20 +581,48 @@ struct Service<'a> {
 
 struct Wsdl<'a> {
     file: &'a str,
-    tns: &'a str,
-    messages: BTreeMap<&'a str, &'a Element>,
-    port_types: BTreeMap<&'a str, &'a Element>,
+    messages: Named<'a>,
+    port_types: Named<'a>,
     services: Vec<Service<'a>>,
 }
 
-fn named<'a>(root: &'a Element, local: &'static str) -> BTreeMap<&'a str, &'a Element> {
-    let mut map = BTreeMap::new();
-    for el in root.children_named(WSDL_NS, local) {
-        if let Some(name) = el.attr("name") {
-            map.entry(name).or_insert(el);
+/// The top-level definitions of one kind (`message`, `portType`,
+/// `binding`) across the root and its imported documents, with the target
+/// namespace of the document defining each; the first of a name wins.
+struct Named<'a> {
+    by_qname: BTreeMap<(String, String), (&'a Element, &'a str)>,
+    by_local: BTreeMap<&'a str, (&'a Element, &'a str)>,
+}
+
+impl<'a> Named<'a> {
+    fn new(docs: &[&'a Element], local: &'static str) -> Self {
+        let mut named = Named {
+            by_qname: BTreeMap::new(),
+            by_local: BTreeMap::new(),
+        };
+        for doc in docs {
+            let tns = doc.attr("targetNamespace").unwrap_or_default();
+            for el in doc.children_named(WSDL_NS, local) {
+                if let Some(name) = el.attr("name") {
+                    named
+                        .by_qname
+                        .entry((tns.to_owned(), name.to_owned()))
+                        .or_insert((el, tns));
+                    named.by_local.entry(name).or_insert((el, tns));
+                }
+            }
         }
+        named
     }
-    map
+
+    /// The definition the QName `value` of an attribute of `el` names:
+    /// by namespace and local name, else (a prefix bound to another
+    /// namespace) by local name alone.
+    fn get(&self, el: &Element, value: &str) -> Option<(&'a Element, &'a str)> {
+        el.resolve(value)
+            .and_then(|q| self.by_qname.get(&(q.ns, q.local)).copied())
+            .or_else(|| self.by_local.get(local_of(value)).copied())
+    }
 }
 
 /// The SOAP version and extension namespace of a binding, if it is SOAP.
@@ -429,23 +651,23 @@ fn address_path(location: Option<&str>, service: &str) -> String {
         .unwrap_or_else(|| format!("/{service}"))
 }
 
-fn services<'a>(root: &'a Element) -> Vec<Service<'a>> {
-    let bindings = named(root, "binding");
+/// The services of `root`, their bindings looked up among `bindings`.
+fn services<'a>(root: &'a Element, bindings: &Named<'a>) -> Vec<Service<'a>> {
     let mut out = Vec::new();
     for service in root.children_named(WSDL_NS, "service") {
         let name = service.attr("name").unwrap_or_default().to_owned();
-        let ports: Vec<(&Element, &Element, SoapVersion, &'static str)> = service
+        let ports: Vec<(&Element, &Element, &str, SoapVersion, &'static str)> = service
             .children_named(WSDL_NS, "port")
             .filter_map(|port| {
-                let binding = *bindings.get(local_of(port.attr("binding")?))?;
+                let (binding, tns) = bindings.get(port, port.attr("binding")?)?;
                 let (version, ns) = soap_binding(binding)?;
-                Some((port, binding, version, ns))
+                Some((port, binding, tns, version, ns))
             })
             .collect();
-        let Some(&(port, binding, _, soap_ns)) = ports.first() else {
+        let Some(&(port, binding, tns, _, soap_ns)) = ports.first() else {
             continue;
         };
-        let version = if ports.iter().any(|p| p.2 == SoapVersion::Soap11) {
+        let version = if ports.iter().any(|p| p.3 == SoapVersion::Soap11) {
             SoapVersion::Soap11
         } else {
             SoapVersion::Soap12
@@ -458,6 +680,7 @@ fn services<'a>(root: &'a Element) -> Vec<Service<'a>> {
             port: port.attr("name").unwrap_or_default().to_owned(),
             name,
             binding,
+            tns,
             soap_ns,
             version,
         });
@@ -517,24 +740,28 @@ struct OpContext<'c, 'x, 's> {
 }
 
 impl<'a> Wsdl<'a> {
-    fn new(root: &'a Element, file: &'a str) -> Self {
+    /// The definitions of `docs`: the root document first, then the ones it
+    /// imports; services come from the root only.
+    fn new(docs: &[&'a Element], file: &'a str) -> Self {
+        let bindings = Named::new(docs, "binding");
         Wsdl {
             file,
-            tns: root.attr("targetNamespace").unwrap_or_default(),
-            messages: named(root, "message"),
-            port_types: named(root, "portType"),
-            services: services(root),
+            messages: Named::new(docs, "message"),
+            port_types: Named::new(docs, "portType"),
+            services: docs
+                .first()
+                .map(|root| services(root, &bindings))
+                .unwrap_or_default(),
         }
     }
 
     fn message(&self, ref_el: Option<&Element>) -> Result<Option<&'a Element>, ImportError> {
-        let Some(name) = ref_el.and_then(|e| e.attr("message")) else {
+        let Some((el, name)) = ref_el.and_then(|e| Some((e, e.attr("message")?))) else {
             return Ok(None);
         };
         self.messages
-            .get(local_of(name))
-            .copied()
-            .map(Some)
+            .get(el, name)
+            .map(|(msg, _)| Some(msg))
             .ok_or_else(|| invalid(self.file, format!("unknown message \"{name}\"")))
     }
 
@@ -670,7 +897,7 @@ impl<'a> Wsdl<'a> {
         }
         let namespace = soap_body
             .and_then(|b| b.attr("namespace"))
-            .unwrap_or(self.tns);
+            .unwrap_or(op.service.tns);
         let wrapper = match side {
             Side::Input => op.name.to_owned(),
             Side::Output => format!("{}Response", op.name),
@@ -805,9 +1032,9 @@ impl<'a> Wsdl<'a> {
         let mut ops = Vec::new();
         for service in &self.services {
             let type_name = service.binding.attr("type").unwrap_or_default();
-            let port_type = self
+            let (port_type, _) = self
                 .port_types
-                .get(local_of(type_name))
+                .get(service.binding, type_name)
                 .ok_or_else(|| invalid(self.file, format!("unknown portType \"{type_name}\"")))?;
             for op in port_type.children_named(WSDL_NS, "operation") {
                 ops.push(self.operation(xsd, defs, service, op)?);

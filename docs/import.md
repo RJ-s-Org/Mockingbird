@@ -12,7 +12,7 @@ Not every API comes with a contract. Smart import turns what you do have into a 
 
 HAR and Postman imports do not need an LLM. When one is available it only writes missing summaries. Passwords, tokens, API keys, cookies, `Authorization` headers and similar values in recordings are replaced by `<redacted>` before anything is stored. Every input is at most 20 MiB.
 
-Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploaded contract, so a draft is always a valid contract. OpenAPI, GraphQL, protobuf and WSDL files are contracts already: upload them to `…/contracts` as before.
+Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploaded contract, so a draft is always a valid contract. OpenAPI, GraphQL, protobuf and WSDL files are contracts already: upload them to `…/contracts` as before (a WSDL split across files with `wsdl:import` or `xs:import` goes up as one archive; see [WSDL known limits](protocols.md#known-limits)).
 
 ## Embedded OpenAPI
 
