@@ -16,6 +16,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[error("{0}")]
 pub struct HttpError(pub String);
 
+impl HttpError {
+    /// What failed, as `Display` prints it.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The builder every identity-provider client starts from: no redirects
 /// (an OAuth endpoint that redirects is misconfigured or hostile) and a
 /// 10 s timeout.
@@ -37,6 +44,10 @@ pub fn http_client() -> reqwest::Client {
 }
 
 /// [`http_client`], with a build failure returned as an error.
+///
+/// # Errors
+///
+/// An [`HttpError`] when the TLS backend cannot initialise.
 pub fn try_http_client() -> Result<reqwest::Client, HttpError> {
     http_client_with(&mb_llm::HttpOptions::default())
 }
@@ -67,6 +78,11 @@ fn fail_closed() -> reqwest::Client {
 /// [`http_client`] with the outbound CA roots and proxy of `opts`; an
 /// error when they (or the client) cannot be built, so a bad CA bundle or
 /// proxy fails startup instead of being silently dropped.
+///
+/// # Errors
+///
+/// An [`HttpError`] for an invalid CA bundle or proxy in `opts`, or when
+/// the client cannot be built.
 pub fn http_client_with(opts: &mb_llm::HttpOptions) -> Result<reqwest::Client, HttpError> {
     opts.apply(builder())
         .map_err(|e| HttpError(e.to_string()))?
@@ -75,6 +91,11 @@ pub fn http_client_with(opts: &mb_llm::HttpOptions) -> Result<reqwest::Client, H
 }
 
 /// Sends an openidconnect request through `client`.
+///
+/// # Errors
+///
+/// An [`HttpError`] when the request cannot be sent or its body cannot be
+/// read; an HTTP error status is returned as a response, not an error.
 pub async fn send(client: &reqwest::Client, req: HttpRequest) -> Result<HttpResponse, HttpError> {
     let (parts, body) = req.into_parts();
     let resp = client
@@ -126,7 +147,7 @@ mod tests {
             ..Default::default()
         };
         let err = http_client_with(&bad_ca).unwrap_err();
-        assert!(err.0.contains("invalid CA bundle"), "{err}");
+        assert!(err.message().contains("invalid CA bundle"), "{err}");
         let bad_proxy = mb_llm::HttpOptions {
             proxy: Some("not a url".into()),
             ..Default::default()

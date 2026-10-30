@@ -20,6 +20,7 @@ pub trait LlmResolver: Send + Sync {
 
 /// No LLM at all: imports of documentation are refused and previews use an
 /// engine without a provider.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct OfflineLlm;
 
 #[async_trait]

@@ -73,6 +73,7 @@ impl From<DeliveryRecord> for WebhookDeliveryView {
 
 #[derive(OpenApi)]
 #[openapi(paths(list_deliveries), components(schemas(WebhookDeliveryView)), tags((name = "webhooks")))]
+#[derive(Debug)]
 pub struct WebhookDeliveriesDoc;
 
 /// The delivery routes of a workspace (relative to `/api/v1/workspaces/{ws}`,

@@ -734,3 +734,91 @@ async fn api_key_verify_cost() {
         }
     }
 }
+
+#[test]
+fn role_display_and_from_str_use_the_wire_names() {
+    for role in [Role::Viewer, Role::Editor, Role::Admin, Role::Owner] {
+        let wire = serde_json::to_value(role).unwrap();
+        assert_eq!(wire, json!(role.to_string()));
+        assert_eq!(role.to_string().parse::<Role>(), Ok(role));
+    }
+    let err = "Admin".parse::<Role>().unwrap_err();
+    assert_eq!(err.input(), "Admin");
+    assert!(err.to_string().contains("\"Admin\""), "{err}");
+    let _: &dyn std::error::Error = &err;
+}
+
+#[test]
+fn principal_kind_and_key_scope_display_match_serde() {
+    for kind in [
+        PrincipalKind::User,
+        PrincipalKind::ApiKey,
+        PrincipalKind::Local,
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(kind.as_str()));
+        assert_eq!(kind.to_string(), kind.as_str());
+    }
+    for scope in [KeyScope::Admin, KeyScope::DataPlane] {
+        assert_eq!(serde_json::to_value(scope).unwrap(), json!(scope.as_str()));
+        assert_eq!(scope.to_string(), scope.as_str());
+    }
+}
+
+fn viewer_key(name: &str) -> NewKeyRequest {
+    NewKeyRequest {
+        name: name.into(),
+        role: Role::Viewer,
+        scopes: vec![],
+        expires_at: None,
+        sysadmin: false,
+    }
+}
+
+#[tokio::test]
+async fn api_key_converts_into_its_principal() {
+    let store = connect("sqlite::memory:").await.unwrap();
+    let keys = ApiKeys::new(store);
+    let (key, _token) = keys
+        .create(&Principal::local(), "default", viewer_key("ci"))
+        .await
+        .unwrap();
+    let p = Principal::from(&key);
+    assert_eq!(p, ApiKeys::principal(&key));
+    assert_eq!(p.kind, PrincipalKind::ApiKey);
+    assert_eq!(p.subject, format!("api_key:{}", key.key_id));
+    assert_eq!(p.role_in("default"), Some(Role::Viewer));
+}
+
+#[tokio::test]
+async fn authenticator_builder_and_debug_show_no_credential() {
+    let store = connect("sqlite::memory:").await.unwrap();
+    let auth = Authenticator::new(ApiKeys::with_cache(store.clone(), Duration::from_secs(5)))
+        .with_sessions(SessionManager::with_cookie_security(
+            store.clone(),
+            Duration::from_secs(60),
+            mb_auth::CookieSecurity::Secure,
+        ));
+    assert!(auth.bearer.is_none());
+    let sessions = auth.sessions.as_ref().unwrap();
+    assert!(sessions.set_cookie("v").ends_with("; Secure"));
+    let insecure = SessionManager::with_cookie_security(
+        store.clone(),
+        Duration::from_secs(60),
+        mb_auth::CookieSecurity::Insecure,
+    );
+    assert!(!insecure.set_cookie("v").contains("Secure"));
+
+    // A session cookie value and an API key token are credentials: neither
+    // the authenticator nor its parts print them.
+    let cookie = sessions.create(&Principal::local()).await.unwrap();
+    let (_, token) = auth
+        .api_keys
+        .create(&Principal::local(), "default", viewer_key("k"))
+        .await
+        .unwrap();
+    auth.api_keys.verify(&token, KeyScope::Admin).await.unwrap();
+    let shown = format!("{auth:?} {sessions:?} {:?}", auth.api_keys);
+    assert!(!shown.contains(&cookie), "session cookie leaked: {shown}");
+    assert!(!shown.contains(&token), "API key leaked: {shown}");
+    assert!(shown.contains("Authenticator"), "{shown}");
+}

@@ -41,7 +41,22 @@ pub struct JwtVerifier {
     refetch_interval: Duration,
 }
 
+impl std::fmt::Debug for JwtVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtVerifier")
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("jwks_uri", &self.jwks_uri)
+            .field("mapping", &self.mapping)
+            .field("refetch_interval", &self.refetch_interval)
+            .finish_non_exhaustive()
+    }
+}
+
 impl JwtVerifier {
+    /// Accepts JWTs whose `iss` is `issuer` and whose `aud` contains
+    /// `audience`, signed by a key of the JWKS at `jwks_uri` (fetched
+    /// through `http` on first use and when an unknown `kid` shows up).
     pub fn new(
         issuer: String,
         audience: String,
@@ -62,6 +77,7 @@ impl JwtVerifier {
     }
 
     /// Sets the minimum time between JWKS fetches (default 30 s).
+    #[must_use]
     pub fn with_refetch_interval(mut self, d: Duration) -> Self {
         self.refetch_interval = d;
         self

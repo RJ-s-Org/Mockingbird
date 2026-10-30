@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Internal crate of Mockingbird (auth, roles and API keys), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
 
+# Document the `testing` module too.
+[package.metadata.docs.rs]
+all-features = true
+
 # The library keeps its name (`use mb_auth::…`).
 [lib]
 name = "mb_auth"

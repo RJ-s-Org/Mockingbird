@@ -675,3 +675,20 @@ async fn end_session_url_from_discovery() {
         Err(AuthError::Invalid(_))
     ));
 }
+
+#[tokio::test]
+async fn oidc_client_and_verifier_debug_show_no_secret() {
+    let p = MockOidcProvider::start().await;
+    let sentinel = "s3ntinel-oidc-client-secret";
+    let mut s = settings(&p);
+    s.client_secret = Some(sentinel.to_string());
+    let c = OidcClient::discover(s, http_client()).await.unwrap();
+    let login = c.start_login("/").await.unwrap();
+    let shown = format!("{c:?} {:?} {p:?}", c.bearer());
+    assert!(!shown.contains(sentinel), "client secret leaked: {shown}");
+    assert!(
+        !shown.contains(&login.state),
+        "pending login leaked: {shown}"
+    );
+    assert!(shown.contains(MockOidcProvider::CLIENT_ID), "{shown}");
+}

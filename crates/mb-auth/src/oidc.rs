@@ -80,14 +80,20 @@ type Client = openidconnect::Client<
 /// `client_secret`.
 #[derive(Clone)]
 pub struct OidcSettings {
+    /// The provider's issuer URL; discovery reads
+    /// `<issuer>/.well-known/openid-configuration`.
     pub issuer: String,
+    /// This relying party's client id at the provider.
     pub client_id: String,
     /// The resolved secret value (not an `env:`/`file:` reference).
     pub client_secret: Option<String>,
+    /// The scopes requested at login (`openid` is always requested).
     pub scopes: Vec<String>,
     /// Required `aud` of bearer JWTs; defaults to `client_id`.
     pub audience: Option<String>,
+    /// The callback URL registered with the provider.
     pub redirect_url: String,
+    /// How the provider's claims become roles.
     pub mapping: RoleMapping,
 }
 
@@ -112,14 +118,18 @@ impl std::fmt::Debug for OidcSettings {
 /// this login (stored in the `mb_login` cookie).
 #[derive(Clone, Debug)]
 pub struct LoginRedirect {
+    /// The provider's authorization URL for this login.
     pub url: String,
+    /// The OAuth `state` that identifies this login at the callback.
     pub state: String,
 }
 
 /// The outcome of a successful callback.
 #[derive(Clone, Debug)]
 pub struct CompletedLogin {
+    /// The user who signed in.
     pub principal: Principal,
+    /// The same-origin path the login was started with.
     pub return_to: String,
 }
 
@@ -226,6 +236,12 @@ fn same_keys(a: &CoreJsonWebKeySet, b: &CoreJsonWebKeySet) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
 }
 
+/// The OIDC relying party for one provider: started with
+/// [`OidcClient::discover`], it runs Authorization Code + PKCE logins
+/// ([`start_login`](Self::start_login), then
+/// [`complete_login`](Self::complete_login) at the callback) and hands out
+/// the provider's bearer-JWT verifier. Its `Debug` output shows neither the
+/// client secret nor pending logins.
 pub struct OidcClient {
     client: Client,
     id_keys: IdTokenKeys,
@@ -238,6 +254,25 @@ pub struct OidcClient {
     post_logout_redirect: Option<PostLogoutRedirectUrl>,
 }
 
+impl std::fmt::Debug for OidcClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcClient")
+            .field("client_id", &self.client.client_id().as_str())
+            .field("issuer", &self.id_keys.issuer.as_str())
+            .field("scopes", &self.scopes)
+            .field("mapping", &self.mapping)
+            .field(
+                "pending",
+                &match self.pending {
+                    PendingLogins::Memory(_) => "memory",
+                    PendingLogins::Store(_) => "store",
+                },
+            )
+            .field("end_session", &self.end_session.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 fn upstream(context: &str, e: impl std::fmt::Display) -> AuthError {
     AuthError::Upstream(format!("{context}: {e}"))
 }
@@ -247,6 +282,11 @@ impl OidcClient {
     /// `<issuer>/.well-known/openid-configuration`. Started logins are kept
     /// in this process until [`Self::with_store`] moves them to the control
     /// store.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Invalid`] for an invalid issuer or redirect URL;
+    /// [`AuthError::Upstream`] when discovery fails.
     pub async fn discover(
         settings: OidcSettings,
         http: reqwest::Client,
@@ -316,6 +356,10 @@ impl OidcClient {
     /// Where the provider sends the browser after an RP-initiated logout
     /// (see [`Self::end_session_url`]); it must be registered with the
     /// provider as a post-logout redirect URI.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Invalid`] when `url` is not a valid URL.
     pub fn with_post_logout_redirect(mut self, url: &str) -> Result<Self, AuthError> {
         let url = PostLogoutRedirectUrl::new(url.to_string()).map_err(|e| {
             AuthError::Invalid(format!("invalid OIDC post-logout redirect URL: {e}"))
@@ -340,7 +384,11 @@ impl OidcClient {
     /// Starts an Authorization Code + PKCE (S256) login that returns the
     /// browser to `return_to` once it completes, keeping it in memory.
     ///
-    /// Refused with `Invalid` on a client built [`Self::with_store`].
+    /// # Errors
+    ///
+    /// [`AuthError::Invalid`] for a `return_to` that
+    /// [`validate_return_to`] refuses, and on a client built
+    /// [`Self::with_store`].
     #[deprecated(
         since = "0.1.1",
         note = "use `start_login`, which also works with `with_store`"
@@ -357,6 +405,12 @@ impl OidcClient {
     /// Starts an Authorization Code + PKCE (S256) login that returns the
     /// browser to `return_to` once it completes. The login is kept (in the
     /// store with [`Self::with_store`], otherwise in memory) for 600 s.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Invalid`] for a `return_to` that
+    /// [`validate_return_to`] refuses; [`AuthError::Store`] when the store
+    /// cannot keep the login.
     pub async fn start_login(&self, return_to: &str) -> Result<LoginRedirect, AuthError> {
         let (redirect, pending) = self.authorize(return_to)?;
         match &self.pending {
@@ -455,6 +509,13 @@ impl OidcClient {
     /// Finishes the login identified by `state`: exchanges `code`, verifies
     /// the ID token and maps its claims to a principal. A state can be
     /// completed at most once.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Unauthenticated`] for an unknown, expired or already
+    /// completed `state`, a rejected `code` or an invalid ID token or
+    /// claims; [`AuthError::Upstream`] when the token or userinfo request
+    /// fails; [`AuthError::Store`] when the pending login cannot be read.
     pub async fn complete_login(
         &self,
         state: &str,
@@ -553,6 +614,10 @@ impl OidcClient {
 
     /// Whether `state` identifies a login that was started and has neither
     /// completed nor expired.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Store`] when the store cannot be read.
     pub async fn login_pending(&self, state: &str) -> Result<bool, AuthError> {
         match &self.pending {
             PendingLogins::Memory(memory) => Ok(lock(memory)
@@ -583,6 +648,12 @@ impl OidcClient {
 
     /// Ends the login identified by `state` without completing it (the
     /// provider answered with an error); returns whether it was pending.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Store`] when the store cannot be read, and
+    /// [`AuthError::Unauthenticated`] for a stored login that cannot be
+    /// read back.
     pub async fn cancel_login(&self, state: &str) -> Result<bool, AuthError> {
         Ok(self.take(state).await?.is_some())
     }
@@ -648,6 +719,10 @@ pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
 /// must contain no control characters (browsers strip tabs and newlines,
 /// which would turn `/\t/evil` into `//evil`), and must be at most
 /// [`MAX_RETURN_TO`] bytes (it is kept until the login ends).
+///
+/// # Errors
+///
+/// [`AuthError::Invalid`] for anything else.
 pub fn validate_return_to(s: &str) -> Result<String, AuthError> {
     let ok = s.len() <= MAX_RETURN_TO
         && s.starts_with('/')

@@ -141,15 +141,33 @@ fn discovery(issuer: &str) -> Value {
     })
 }
 
+/// A running wiremock OpenID provider; see the [module docs](self). Its
+/// `Debug` output shows the issuer, not the keys or issued codes.
+///
+/// # Panics
+///
+/// Its methods panic when a test RSA key cannot be loaded, generated or
+/// used to sign; with the checked-in key pool that does not happen.
 pub struct MockOidcProvider {
+    /// The wiremock server; mount extra mocks on it.
     pub server: MockServer,
     state: Shared,
     /// This provider's starting slot in the key pool.
     pool_base: usize,
 }
 
+impl std::fmt::Debug for MockOidcProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockOidcProvider")
+            .field("issuer", &self.issuer())
+            .finish_non_exhaustive()
+    }
+}
+
 impl MockOidcProvider {
+    /// The client id the token endpoint accepts.
     pub const CLIENT_ID: &'static str = "mockingbird";
+    /// The client secret the token endpoint accepts (a test value).
     pub const CLIENT_SECRET: &'static str = "test-secret";
 
     /// Starts the provider with one signing key and every endpoint mounted.
@@ -216,17 +234,29 @@ impl MockOidcProvider {
     }
 
     /// Signs `claims` with RS256 and the current key's `kid`.
+    ///
+    /// # Panics
+    ///
+    /// When signing fails.
     pub fn sign(&self, claims: Value) -> String {
         sign_current(&self.state, &claims)
     }
 
     /// Signs `claims` with an arbitrary header and key.
+    ///
+    /// # Panics
+    ///
+    /// When `key` cannot sign with `header`'s algorithm.
     pub fn sign_with(&self, header: Header, key: &EncodingKey, claims: Value) -> String {
         encode(&header, &claims, key).expect("signing a JWT")
     }
 
     /// Replaces the signing key; the JWKS serves only the new key from now
     /// on. Returns the new `kid`.
+    ///
+    /// # Panics
+    ///
+    /// When key generation fails.
     pub async fn rotate_key(&self) -> String {
         let n = lock(&self.state).keys.len() + 1;
         let base = self.pool_base;
@@ -241,6 +271,10 @@ impl MockOidcProvider {
     /// Makes the token endpoint answer `code` (once) with an ID token for
     /// `claims`; the access token it returns unlocks the same claims at
     /// the userinfo endpoint.
+    ///
+    /// # Panics
+    ///
+    /// When signing fails.
     pub async fn issue_code(&self, code: &str, claims: Value) {
         let id_token = self.sign(claims.clone());
         let mut info = claims;

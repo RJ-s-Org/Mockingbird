@@ -38,8 +38,17 @@ const SYSTEM_ACTOR: &str = "system";
 
 /// The running worker tasks; dropping this aborts them and the import
 /// pipelines they are running.
+#[must_use = "dropping ImportWorkers aborts the workers at once"]
 pub struct ImportWorkers {
     handles: Vec<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for ImportWorkers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportWorkers")
+            .field("workers", &self.handles.len())
+            .finish()
+    }
 }
 
 impl Drop for ImportWorkers {
@@ -61,6 +70,10 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 /// Starts `st.imports.settings.workers` worker tasks.
+///
+/// # Panics
+///
+/// When called outside a Tokio runtime.
 pub fn spawn_import_workers(st: &AdminState) -> ImportWorkers {
     let handles = (0..st.imports.settings.workers)
         .map(|n| tokio::spawn(work(st.clone(), n)))
@@ -291,6 +304,12 @@ async fn merge_into_base(
 }
 
 /// Claims and runs one queued job to completion; Ok(false) when none was queued.
+///
+/// # Errors
+///
+/// A [`StoreError`] when the queue cannot be read or the job's outcome
+/// cannot be stored; a failed import itself is recorded on the job, not
+/// returned.
 pub async fn run_next_import(st: &AdminState) -> Result<bool, StoreError> {
     let Some(job) = st.store.claim_import_job(Utc::now()).await? else {
         return Ok(false);

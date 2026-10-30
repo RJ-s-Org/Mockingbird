@@ -119,6 +119,15 @@ impl IntoResponse for Problem {
     }
 }
 
+/// `<status> <title>: <detail>`, e.g. `404 Not Found: no mock "orders"`.
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}: {}", self.status, self.title, self.detail)
+    }
+}
+
+impl std::error::Error for Problem {}
+
 /// An extension's refusal (quota, provider policy) with its status, title,
 /// detail and `Retry-After`.
 impl From<mb_ext::Rejection> for Problem {
@@ -227,7 +236,7 @@ impl From<PathRejection> for Problem {
 pub type ApiResult<T> = Result<T, Problem>;
 
 /// `axum::Json` whose rejection is a [`Problem`].
-#[derive(FromRequest)]
+#[derive(FromRequest, Debug)]
 #[from_request(via(axum::Json), rejection(Problem))]
 pub struct Json<T>(pub T);
 
@@ -238,12 +247,12 @@ impl<T: Serialize> IntoResponse for Json<T> {
 }
 
 /// `axum::extract::Query` whose rejection is a [`Problem`].
-#[derive(FromRequestParts)]
+#[derive(FromRequestParts, Debug)]
 #[from_request(via(axum::extract::Query), rejection(Problem))]
 pub struct Query<T>(pub T);
 
 /// `axum::extract::Path` whose rejection is a [`Problem`].
-#[derive(FromRequestParts)]
+#[derive(FromRequestParts, Debug)]
 #[from_request(via(axum::extract::Path), rejection(Problem))]
 pub struct Path<T>(pub T);
 
@@ -265,6 +274,7 @@ pub fn unsupported_media_type(what: &str, accepted: &str) -> Problem {
 /// Requires `Content-Type: application/json` on a request whose body is
 /// ignored (e.g. activation), so a cross-site form or no-cors `fetch` (which
 /// can only send CORS-safelisted content types) cannot trigger it.
+#[derive(Clone, Copy, Debug)]
 pub struct RequireJson;
 
 impl<S: Send + Sync> FromRequestParts<S> for RequireJson {

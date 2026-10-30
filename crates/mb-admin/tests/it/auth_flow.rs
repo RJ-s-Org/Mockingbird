@@ -904,3 +904,20 @@ async fn login_failed_audit_is_rate_limited_per_source() {
     fail(b).await;
     assert_eq!(h.audit("auth.login_failed").await.len(), 2);
 }
+
+#[tokio::test]
+async fn admin_state_debug_shows_no_secret() {
+    let h = harness().await;
+    let started = h.start_login("/").await;
+    let shown = format!("{:?} {:?}", h.st, h.st.web_auth);
+    assert!(
+        !shown.contains(MockOidcProvider::CLIENT_SECRET),
+        "OIDC client secret leaked: {shown}"
+    );
+    assert!(
+        !shown.contains(&started.state_cookie),
+        "pending login leaked: {shown}"
+    );
+    assert!(shown.contains("AdminState"), "{shown}");
+    assert!(shown.contains(MockOidcProvider::CLIENT_ID), "{shown}");
+}

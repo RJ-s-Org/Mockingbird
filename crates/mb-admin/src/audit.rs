@@ -36,7 +36,17 @@ pub struct Auditor {
     webhook: Option<WebhookSink>,
 }
 
+impl std::fmt::Debug for Auditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Auditor")
+            .field("webhook", &self.webhook.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Auditor {
+    /// Writes to `store` and, when given, hands each stored event to
+    /// `webhook`.
     pub fn new(store: Arc<dyn ControlStore>, webhook: Option<WebhookSink>) -> Self {
         Self { store, webhook }
     }
@@ -58,39 +68,34 @@ impl Auditor {
         }
     }
 
-    /// Records `action` on `target` by `principal`.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn record_by(
-        &self,
-        principal: &Principal,
-        workspace: Option<String>,
-        request_id: String,
-        action: &str,
-        target: String,
-        before: Option<Value>,
-        after: Option<Value>,
-    ) {
+    /// Records `entry` as done by `principal`.
+    pub(crate) async fn record_by(&self, principal: &Principal, entry: AuditEntry<'_>) {
         self.record(NewAuditEvent {
-            workspace,
+            workspace: entry.workspace,
             actor_subject: principal.subject.clone(),
-            actor_kind: actor_kind(principal),
-            action: action.to_string(),
-            target,
-            before,
-            after,
-            request_id: Some(request_id),
+            // The wire string of the principal's kind (`user`, `api_key`,
+            // `local`).
+            actor_kind: principal.kind.as_str().to_string(),
+            action: entry.action.to_string(),
+            target: entry.target,
+            before: entry.before,
+            after: entry.after,
+            request_id: Some(entry.request_id),
             at: Utc::now(),
         })
         .await;
     }
 }
 
-/// The wire string of the principal's kind (`user`, `api_key`, `local`).
-fn actor_kind(p: &Principal) -> String {
-    match serde_json::to_value(p.kind) {
-        Ok(Value::String(s)) => s,
-        _ => "unknown".to_string(),
-    }
+/// What [`Auditor::record_by`] records: `action` on `target`, in
+/// `workspace` (`None`: global), for request `request_id`.
+pub(crate) struct AuditEntry<'a> {
+    pub(crate) workspace: Option<String>,
+    pub(crate) request_id: String,
+    pub(crate) action: &'a str,
+    pub(crate) target: String,
+    pub(crate) before: Option<Value>,
+    pub(crate) after: Option<Value>,
 }
 
 /// `v` serialised for an event's `before`/`after`.
@@ -112,12 +117,14 @@ impl WsAccess {
         auditor
             .record_by(
                 &self.principal,
-                Some(self.ws.clone()),
-                self.request_id.clone(),
-                action,
-                target,
-                before,
-                after,
+                AuditEntry {
+                    workspace: Some(self.ws.clone()),
+                    request_id: self.request_id.clone(),
+                    action,
+                    target,
+                    before,
+                    after,
+                },
             )
             .await;
     }
@@ -130,6 +137,10 @@ pub fn retention_cutoff(now: DateTime<Utc>, retention_days: u32) -> Option<DateT
 }
 
 /// Prunes events older than `retention_days` now, then every 24 hours.
+///
+/// # Panics
+///
+/// When called outside a Tokio runtime.
 pub fn spawn_retention(
     store: Arc<dyn ControlStore>,
     retention_days: u32,

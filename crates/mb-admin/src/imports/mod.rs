@@ -96,9 +96,11 @@ impl Default for ImportSettings {
 }
 
 /// Import settings and the signal that wakes idle workers.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Imports {
+    /// How imports run.
     pub settings: ImportSettings,
+    /// Notified when a job is queued, so an idle worker picks it up.
     pub wake: Arc<tokio::sync::Notify>,
 }
 

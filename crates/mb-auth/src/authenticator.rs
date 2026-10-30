@@ -12,6 +12,14 @@ use crate::session::{SESSION_COOKIE, SessionManager};
 /// Resolves the caller of an admin request. `Ok(None)` means "no credential".
 #[async_trait]
 pub trait Authenticate: Send + Sync {
+    /// The principal behind `headers`' credential, or `None` when they
+    /// carry none.
+    ///
+    /// # Errors
+    ///
+    /// An [`AuthError`] when a credential is present but invalid
+    /// (`Unauthenticated`), or when checking it fails (`Store`,
+    /// `Upstream`).
     async fn authenticate(&self, headers: &HeaderMap) -> Result<Option<Principal>, AuthError>;
 }
 
@@ -29,15 +37,61 @@ impl Authenticate for LocalAuth {
 /// Verifies a non-API-key bearer token (a JWT in `oidc` mode).
 #[async_trait]
 pub trait BearerVerifier: Send + Sync {
+    /// The principal `token` identifies.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Unauthenticated`] for a token that does not verify, or
+    /// another [`AuthError`] when verification itself fails.
     async fn verify(&self, token: &str) -> Result<Principal, AuthError>;
 }
 
 /// `auth.mode: oidc`: API keys, bearer JWTs and session cookies.
 #[derive(Clone)]
 pub struct Authenticator {
+    /// Verifies `Authorization: Bearer mbk_…` API keys.
     pub api_keys: ApiKeys,
+    /// Looks up `mb_session` cookies; `None` ignores them.
     pub sessions: Option<SessionManager>,
+    /// Verifies other bearer tokens; `None` refuses them.
     pub bearer: Option<Arc<dyn BearerVerifier>>,
+}
+
+impl Authenticator {
+    /// API keys only: no session cookies, no other bearer tokens. Add them
+    /// with [`Self::with_sessions`] and [`Self::with_bearer`].
+    pub fn new(api_keys: ApiKeys) -> Self {
+        Authenticator {
+            api_keys,
+            sessions: None,
+            bearer: None,
+        }
+    }
+
+    /// Also accepts the console session cookies of `sessions`.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: SessionManager) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// Also accepts bearer tokens that are not API keys, checked by
+    /// `bearer`.
+    #[must_use]
+    pub fn with_bearer(mut self, bearer: Arc<dyn BearerVerifier>) -> Self {
+        self.bearer = Some(bearer);
+        self
+    }
+}
+
+impl std::fmt::Debug for Authenticator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Authenticator")
+            .field("api_keys", &self.api_keys)
+            .field("sessions", &self.sessions)
+            .field("bearer", &self.bearer.is_some())
+            .finish()
+    }
 }
 
 #[async_trait]
