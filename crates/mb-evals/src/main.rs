@@ -75,6 +75,10 @@ struct RunArgs {
     /// `limits.output_budget_tokens`'s default).
     #[arg(long)]
     output_budget: Option<u32>,
+    /// What the LLM client sends as `response_format`: `none`,
+    /// `json_object` (the server default) or `json_schema`.
+    #[arg(long, default_value_t = mb_llm::OutputMode::JsonObject)]
+    output_mode: mb_llm::OutputMode,
     /// Directory `report.json` and `report.md` are written to.
     #[arg(long, default_value = "eval-report")]
     out: PathBuf,
@@ -228,9 +232,7 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         base_url: env.base_url.clone(),
         api_key: Some(env.api_key),
         model: env.model.clone(),
-        // The server default (`output_mode` unset): JSON mode, which every
-        // OpenAI-compatible provider supports.
-        output_mode: mb_llm::OutputMode::JsonObject,
+        output_mode: args.output_mode,
         http: mb_llm::HttpOptions::default(),
     })
     .context("building the LLM client")?;

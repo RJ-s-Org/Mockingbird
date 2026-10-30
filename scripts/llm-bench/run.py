@@ -391,6 +391,12 @@ def child_env(extra: Dict[str, str]) -> Dict[str, str]:
     return env
 
 
+def output_mode(model: str, default: str) -> str:
+    """The engine's `output_mode` for `model`: `none` for an `@nojson`
+    variant (the proxy also strips `response_format`), else `default`."""
+    return "none" if model.endswith("@nojson") else default  # proxy.VARIANT_NOJSON
+
+
 def run_engine(
     args: argparse.Namespace,
     kids: Children,
@@ -416,6 +422,7 @@ def run_engine(
         cmd += ["--max-tokens", str(args.max_tokens)]
     if args.output_budget is not None:
         cmd += ["--output-budget", str(args.output_budget)]
+    cmd += ["--output-mode", output_mode(model, args.output_mode)]
     env = child_env({
         "MB_EVAL_LLM_BASE_URL": proxy.label_url(model, workload),
         "MB_EVAL_LLM_MODEL": model,
@@ -851,6 +858,8 @@ def main() -> int:
         p.add_argument("--llm-timeout-secs", type=int, help="passed to mb-evals (default: the profile default)")
         p.add_argument("--max-tokens", type=int, help="passed to mb-evals (default: the profile default)")
         p.add_argument("--output-budget", type=int, help="passed to mb-evals (default: the limits default)")
+        p.add_argument("--output-mode", default="json_object", choices=["none", "json_object", "json_schema"],
+                       help="the engine's output_mode; an @nojson model always runs with none")
         p.add_argument("--prior-ledger", action="append",
                        help="an earlier run's calls.jsonl(.gz) whose spend counts toward --budget-usd (repeatable)")
         p.add_argument("--repeat", type=int, default=3, help="calls per target in the full run")
