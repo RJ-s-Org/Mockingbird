@@ -570,12 +570,23 @@ pub async fn source(
     // Served as an inert download: stored sources are caller-supplied, and
     // an XML or HTML-looking one rendered inline would run script with the
     // console's session (the API's nosniff and sandbox CSP apply too).
-    let filename = format!(
-        "{}-v{}.{}",
-        download_name(&m.name),
-        v.version,
-        source_extension(&v.source)
-    );
+    // Sniffing parses the whole source (CPU-bound for a large one): once,
+    // off the runtime.
+    let source = v.source;
+    let (source, extension, source_type) = tokio::task::spawn_blocking(move || {
+        let sniffed = mb_import::sniff(&source);
+        let extension = source_extension(&source, &sniffed);
+        let source_type = source_content_type(&source, &sniffed);
+        (source, extension, source_type)
+    })
+    .await
+    .map_err(|e| {
+        Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("sniffing the contract source did not finish: {e}"),
+        )
+    })?;
+    let filename = format!("{}-v{}.{extension}", download_name(&m.name), v.version);
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -584,11 +595,8 @@ pub async fn source(
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
-    headers.insert(
-        SOURCE_TYPE_HEADER,
-        HeaderValue::from_static(source_content_type(&v.source)),
-    );
-    Ok((headers, v.source).into_response())
+    headers.insert(SOURCE_TYPE_HEADER, HeaderValue::from_static(source_type));
+    Ok((headers, source).into_response())
 }
 
 /// Carries the sniffed media type of a downloaded contract source.
@@ -608,8 +616,12 @@ fn download_name(name: &str) -> String {
         .collect()
 }
 
-/// The file extension of stored contract source bytes, by sniffing.
-fn source_extension(source: &[u8]) -> &'static str {
+/// The file extension of stored contract source bytes, by `sniffed`
+/// (their [`mb_import::sniff`]).
+fn source_extension(
+    source: &[u8],
+    sniffed: &Result<SourceFormat, mb_import::ImportError>,
+) -> &'static str {
     if source.starts_with(b"PK\x03\x04") {
         return "zip";
     }
@@ -620,7 +632,7 @@ fn source_extension(source: &[u8]) -> &'static str {
         .map(|t| t.trim_start_matches('\u{feff}').trim_start())
         .ok();
     let json = text.is_some_and(|t| t.starts_with('{'));
-    match mb_import::sniff(source) {
+    match sniffed {
         Ok(SourceFormat::OpenApi3 | SourceFormat::Swagger2) if json => "json",
         Ok(SourceFormat::OpenApi3 | SourceFormat::Swagger2) => "yaml",
         Ok(SourceFormat::GraphqlSdl) => "graphql",
@@ -639,8 +651,12 @@ fn source_extension(source: &[u8]) -> &'static str {
     }
 }
 
-/// The content type of stored contract source bytes, by sniffing.
-fn source_content_type(source: &[u8]) -> &'static str {
+/// The content type of stored contract source bytes, by `sniffed` (their
+/// [`mb_import::sniff`]).
+fn source_content_type(
+    source: &[u8],
+    sniffed: &Result<SourceFormat, mb_import::ImportError>,
+) -> &'static str {
     if source.starts_with(b"PK\x03\x04") {
         return "application/zip";
     }
@@ -657,7 +673,7 @@ fn source_content_type(source: &[u8]) -> &'static str {
     if text.starts_with('{') {
         return "application/json";
     }
-    match mb_import::sniff(source) {
+    match sniffed {
         Ok(SourceFormat::GraphqlSdl | SourceFormat::Proto) => "text/plain; charset=utf-8",
         _ => "application/yaml",
     }
@@ -795,6 +811,10 @@ mod tests {
         }
     }
 
+    fn extension(source: &[u8]) -> &'static str {
+        source_extension(source, &mb_import::sniff(source))
+    }
+
     #[test]
     fn source_extensions_follow_the_sniffed_format() {
         let cases = [
@@ -804,12 +824,12 @@ mod tests {
             ("openapi/orders-3.0.yaml", "yaml"),
         ];
         for (path, ext) in cases {
-            assert_eq!(source_extension(&fixture(path)), ext, "{path}");
+            assert_eq!(extension(&fixture(path)), ext, "{path}");
         }
-        assert_eq!(source_extension(b"PK\x03\x04rest"), "zip");
-        assert_eq!(source_extension(&[0x1f, 0x8b, 0]), "tar.gz");
-        assert_eq!(source_extension(b"{\"openapi\": \"3.0.3\"}"), "json");
-        assert_eq!(source_extension(&[0xff, 0xfe, 0x00]), "bin");
+        assert_eq!(extension(b"PK\x03\x04rest"), "zip");
+        assert_eq!(extension(&[0x1f, 0x8b, 0]), "tar.gz");
+        assert_eq!(extension(b"{\"openapi\": \"3.0.3\"}"), "json");
+        assert_eq!(extension(&[0xff, 0xfe, 0x00]), "bin");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use mb_auth::Permission;
 use mb_engine::{EngineError, GenerationContext, OperationCall};
 use mb_ext::{CallInfo, UsageEvent};
 use mb_import::smart::assemble::{
-    DraftIssue, compile_draft, diff_bundles, refresh_meta, schema_warnings,
+    DraftIssue, compile_draft, diff_bundles, refresh_meta, schema_warnings_from,
 };
 use mb_import::smart::model::DraftMeta;
 use mb_mcm::Binding;
@@ -409,16 +409,23 @@ pub async fn put_draft(
         ))
         .into());
     }
-    // Compiling a large document is CPU-bound: keep it off the runtime.
+    // Compiling a large document and sizing its schemas are CPU-bound: keep
+    // them off the runtime, and size the schemas once.
     let document = body.document;
-    let compiled = tokio::task::spawn_blocking(move || compile_draft(&document))
-        .await
-        .map_err(|e| internal(format!("draft compilation did not finish: {e}")))?;
-    let (source, bundle) = compiled.map_err(DraftError::Invalid)?;
+    let compiled = tokio::task::spawn_blocking(move || {
+        compile_draft(&document).map(|(source, bundle)| {
+            let compile_warnings = mb_import::bundle_warnings(&bundle);
+            let draft_warnings = schema_warnings_from(&bundle, &compile_warnings);
+            (source, bundle, compile_warnings, draft_warnings)
+        })
+    })
+    .await
+    .map_err(|e| internal(format!("draft compilation did not finish: {e}")))?;
+    let (source, bundle, compile_warnings, draft_warnings) =
+        compiled.map_err(DraftError::Invalid)?;
     let mut new_meta = refresh_meta(&meta, &v.bundle, &bundle);
     new_meta.warnings.retain(|w| w.code != "schema_too_large");
-    new_meta.warnings.extend(schema_warnings(&bundle));
-    let compile_warnings = mb_import::bundle_warnings(&bundle);
+    new_meta.warnings.extend(draft_warnings);
     let meta_value = serde_json::to_value(&new_meta)
         .map_err(|e| internal(format!("the draft metadata is invalid: {e}")))?;
     st.store

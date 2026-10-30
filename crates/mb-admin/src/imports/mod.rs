@@ -349,7 +349,7 @@ fn clean_name(name: String) -> Option<String> {
 }
 
 /// A job of document `bytes`: the explicit kind, or the detected one.
-fn document_job(
+async fn document_job(
     mock: &str,
     kind: Option<ImportKind>,
     filename: Option<String>,
@@ -359,10 +359,31 @@ fn document_job(
         return Err(too_large());
     }
     let filename = filename.and_then(clean_name);
-    let kind = match kind.or_else(|| detect_kind(filename.as_deref(), &bytes)) {
-        Some(kind) => kind,
+    let (bytes, detected) = match kind {
+        Some(kind) => (bytes, Ok(kind)),
+        // Detection reads the whole input, and when it finds nothing the
+        // contract sniff parses it: CPU-bound for a large one, so off the
+        // runtime.
         None => {
-            return Err(Problem::unprocessable(match mb_import::sniff(&bytes) {
+            let name = filename.clone();
+            tokio::task::spawn_blocking(move || {
+                let detected =
+                    detect_kind(name.as_deref(), &bytes).ok_or_else(|| mb_import::sniff(&bytes));
+                (bytes, detected)
+            })
+            .await
+            .map_err(|e| {
+                Problem::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("detecting the document kind did not finish: {e}"),
+                )
+            })?
+        }
+    };
+    let kind = match detected {
+        Ok(kind) => kind,
+        Err(sniffed) => {
+            return Err(Problem::unprocessable(match sniffed {
                 Ok(format) => format!(
                     "this is a {format:?} contract; upload it to …/mocks/{mock}/contracts instead"
                 ),
@@ -453,13 +474,15 @@ fn documents_job(documents: Vec<ImportDocument>) -> ApiResult<NewJob> {
 }
 
 /// A job of a JSON [`CreateImport`].
-fn json_job(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
+async fn json_job(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
     let mode = body.mode;
-    json_input(mock, body).map(|job| NewJob { mode, ..job })
+    json_input(mock, body)
+        .await
+        .map(|job| NewJob { mode, ..job })
 }
 
 /// The input of a JSON [`CreateImport`].
-fn json_input(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
+async fn json_input(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
     let given = [
         body.url.is_some(),
         body.urls.is_some(),
@@ -509,7 +532,7 @@ fn json_input(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
                 ));
             }
         };
-        return document_job(mock, Some(kind), body.filename, text.into_bytes());
+        return document_job(mock, Some(kind), body.filename, text.into_bytes()).await;
     }
     let encoded = body.content_base64.unwrap_or_default();
     let kind =
@@ -526,7 +549,7 @@ fn json_input(mock: &str, body: CreateImport) -> ApiResult<NewJob> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded.trim())
         .map_err(|e| Problem::bad_request(format!("\"content_base64\" is not base64: {e}")))?;
-    document_job(mock, kind, body.filename, bytes)
+    document_job(mock, kind, body.filename, bytes).await
 }
 
 /// A job of a multipart upload: part `file`, optional part `kind`.
@@ -576,7 +599,7 @@ async fn multipart_job(mock: &str, mut form: Multipart) -> ApiResult<NewJob> {
     }
     let (name, bytes) =
         file.ok_or_else(|| Problem::bad_request("the upload has no part \"file\""))?;
-    document_job(mock, kind, name, bytes)
+    document_job(mock, kind, name, bytes).await
 }
 
 async fn job_of(st: &AdminState, mock: &Mock, id: Uuid) -> ApiResult<ImportJob> {
@@ -656,7 +679,7 @@ pub async fn create(
             })?;
         let body: CreateImport = serde_json::from_slice(&bytes)
             .map_err(|e| Problem::bad_request(format!("invalid import request: {e}")))?;
-        json_job(&mock, body)?
+        json_job(&mock, body).await?
     };
 
     // Billed to the tenant the resolver gives an `import` call with this

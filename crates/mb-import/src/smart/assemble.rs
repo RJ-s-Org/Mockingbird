@@ -697,7 +697,13 @@ pub fn compile_draft(doc: &Value) -> Result<(Vec<u8>, Bundle), Vec<DraftIssue>> 
 /// [`crate::bundle_warnings`]), each naming its operation's target
 /// (`"GET /big"`).
 pub fn schema_warnings(bundle: &Bundle) -> Vec<DraftWarning> {
-    let warnings = crate::bundle_warnings(bundle);
+    schema_warnings_from(bundle, &crate::bundle_warnings(bundle))
+}
+
+/// [`schema_warnings`] from `warnings`, the [`crate::bundle_warnings`] of
+/// `bundle` already computed, so a caller that needs both computes them
+/// once.
+pub fn schema_warnings_from(bundle: &Bundle, warnings: &[crate::Warning]) -> Vec<DraftWarning> {
     if warnings.is_empty() {
         return Vec::new();
     }
@@ -707,14 +713,14 @@ pub fn schema_warnings(bundle: &Bundle) -> Vec<DraftWarning> {
         by_id.entry(op.id.as_str()).or_insert(op);
     }
     warnings
-        .into_iter()
+        .iter()
         .map(|w| {
             let target = w
                 .operation
                 .as_deref()
                 .and_then(|id| by_id.get(id).copied())
                 .map(Operation::target);
-            let warning = DraftWarning::new(&w.code, w.message);
+            let warning = DraftWarning::new(&w.code, w.message.clone());
             match target {
                 Some(t) => warning.for_operation(t),
                 None => warning,

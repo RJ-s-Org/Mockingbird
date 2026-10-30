@@ -386,9 +386,21 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         Ok(meta) => meta,
         Err(e) => return fail(st, job, format!("the draft metadata is invalid: {e}")).await,
     };
+    // Sizing the schemas of a large bundle is CPU-bound: off the runtime.
+    let sized = tokio::task::spawn_blocking(move || {
+        let compile_warnings = mb_import::bundle_warnings(&draft.bundle);
+        (draft, compile_warnings)
+    })
+    .await;
+    let (draft, compile_warnings) = match sized {
+        Ok(sized) => sized,
+        Err(e) => {
+            tracing::error!(job = %job.id, error = %e, "sizing the draft's schemas panicked");
+            return fail(st, job, UNEXPECTED_ERROR.to_string()).await;
+        }
+    };
     let operations = draft.bundle.operations.len();
     let warnings = draft.meta.warnings.len();
-    let compile_warnings = mb_import::bundle_warnings(&draft.bundle);
     // The draft is stored only if the job is still running, in the same
     // transaction that marks it done: a cancel or stale sweep that won the
     // race leaves no orphaned draft and no audit event.

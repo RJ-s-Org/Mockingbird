@@ -227,11 +227,52 @@ fn shapes_compatible<'a>(shapes: impl Iterator<Item = &'a Shape>) -> bool {
     {
         return false;
     }
-    let distinct: Vec<&Shape> = distinct.into_iter().collect();
-    distinct
+    // A shape without keys is compatible with every shape of its kind.
+    let keyed: Vec<&Shape> = distinct
+        .into_iter()
+        .filter(|s| !s.keys.is_empty())
+        .collect();
+    match bounds_decide(&keyed) {
+        Some(answer) => answer,
+        None => keyed
+            .iter()
+            .enumerate()
+            .all(|(i, a)| keyed[i + 1..].iter().all(|b| a.compatible(b))),
+    }
+}
+
+/// Decides [`shapes_compatible`] for keyed shapes of one kind from key-set
+/// sizes and the keys all of them share, without comparing pairs, when
+/// those bounds settle it; `None` when only the pairwise check can.
+///
+/// Two key sets `A` and `B` are compatible when `3 |A ∩ B| >= |A| + |B|`.
+/// So the smallest and largest sets fail when `largest > 2 * smallest`
+/// (`|A ∩ B| <= smallest`), and every pair passes when `3 |common| >= s1 +
+/// s2`, where `common` is the keys every set has (`|A ∩ B| >= |common|`) and
+/// `s1`, `s2` are the two largest sizes.
+fn bounds_decide(keyed: &[&Shape]) -> Option<bool> {
+    if keyed.len() < 2 {
+        return Some(true);
+    }
+    let smallest = keyed.iter().min_by_key(|s| s.keys.len())?;
+    let (mut s1, mut s2) = (0usize, 0usize);
+    for shape in keyed {
+        let len = shape.keys.len();
+        if len > s1 {
+            (s1, s2) = (len, s1);
+        } else if len > s2 {
+            s2 = len;
+        }
+    }
+    if s1 > 2 * smallest.keys.len() {
+        return Some(false);
+    }
+    let common = smallest
+        .keys
         .iter()
-        .enumerate()
-        .all(|(i, a)| distinct[i + 1..].iter().all(|b| a.compatible(b)))
+        .filter(|k| keyed.iter().all(|s| s.keys.contains(*k)))
+        .count();
+    (3 * common >= s1 + s2).then_some(true)
 }
 
 /// The warning for an operation whose path parameters were inferred from
@@ -360,4 +401,95 @@ pub fn normalize_path(raw: &str) -> String {
         })
         .collect();
     format!("/{}", segments.join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(keys: &[&str]) -> Shape {
+        Shape {
+            kind: "object",
+            keys: keys.iter().map(|k| (*k).to_string()).collect(),
+        }
+    }
+
+    fn pairwise(shapes: &[Shape]) -> bool {
+        shapes
+            .iter()
+            .enumerate()
+            .all(|(i, a)| shapes[i + 1..].iter().all(|b| a.compatible(b)))
+    }
+
+    /// Every subset of a small key universe, as shapes.
+    fn all_shapes(universe: &[&str]) -> Vec<Shape> {
+        (0..1u32 << universe.len())
+            .map(|mask| {
+                let keys: Vec<&str> = universe
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, k)| *k)
+                    .collect();
+                shape(&keys)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bounds_agree_with_the_pairwise_check() {
+        let shapes = all_shapes(&["a", "b", "c", "d", "e"]);
+        let mut checked = 0;
+        // Every pair and every triple of subsets of a 5-key universe.
+        for (i, a) in shapes.iter().enumerate() {
+            for (j, b) in shapes.iter().enumerate().skip(i) {
+                let pair = [a.clone(), b.clone()];
+                assert_eq!(shapes_compatible(pair.iter()), pairwise(&pair), "{pair:?}");
+                for c in shapes.iter().skip(j) {
+                    let triple = [a.clone(), b.clone(), c.clone()];
+                    assert_eq!(
+                        shapes_compatible(triple.iter()),
+                        pairwise(&triple),
+                        "{triple:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 5000);
+    }
+
+    #[test]
+    fn bounds_settle_the_common_cases() {
+        // Shared keys plus one extra each: accepted without pairs.
+        let many: Vec<Shape> = (0..50)
+            .map(|i| {
+                let extra = format!("k{i}");
+                shape(&["a", "b", "c", extra.as_str()])
+            })
+            .collect();
+        let refs: Vec<&Shape> = many.iter().collect();
+        assert_eq!(bounds_decide(&refs), Some(true));
+        // One set over twice the size of another: rejected without pairs.
+        let (small, big) = (shape(&["a"]), shape(&["a", "b", "c"]));
+        assert_eq!(bounds_decide(&[&small, &big]), Some(false));
+        // Pairwise overlap the shared keys cannot prove.
+        let (x, y, z) = (shape(&["a", "b"]), shape(&["b", "c"]), shape(&["a", "c"]));
+        assert_eq!(bounds_decide(&[&x, &y, &z]), None);
+        assert!(!shapes_compatible([x, y, z].iter()));
+    }
+
+    #[test]
+    fn keyless_and_mixed_kinds() {
+        let empty = shape(&[]);
+        let a = shape(&["a"]);
+        let b = shape(&["b"]);
+        assert!(shapes_compatible([empty.clone(), a.clone()].iter()));
+        assert!(!shapes_compatible([empty, a.clone(), b].iter()));
+        let array = Shape {
+            kind: "array",
+            keys: BTreeSet::new(),
+        };
+        assert!(!shapes_compatible([a, array].iter()));
+    }
 }
