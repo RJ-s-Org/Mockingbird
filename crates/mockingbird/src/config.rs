@@ -608,11 +608,15 @@ async fn build_app_on(
     );
 
     let broker_configs = file_config::broker_configs(&cfg).context("applying the configuration")?;
+    // One key cache serves the Admin API and the data plane. A revocation
+    // through this node's Admin API clears it at once; other nodes see it
+    // within the TTL.
+    let api_keys = mb_auth::ApiKeys::with_cache(store.clone(), mb_auth::DEFAULT_API_KEY_CACHE_TTL);
     // Before anything is applied, so a bad auth setup changes nothing.
     let (auth, web_auth) = match role {
         // Data nodes take API keys only: no console login, no OIDC discovery.
-        Role::Data => data_node_auth(&cfg.auth, &store),
-        Role::All | Role::Control => admin_auth(&cfg.auth, &store, &ext, &http).await?,
+        Role::Data => data_node_auth(&cfg.auth, &api_keys),
+        Role::All | Role::Control => admin_auth(&cfg.auth, &store, &api_keys, &ext, &http).await?,
     };
     let audit_sink = match role {
         Role::Data => None,
@@ -671,7 +675,7 @@ async fn build_app_on(
         recorder: Some(recorder.clone()),
         offline: args.offline || replay_only(args),
         default_profile: DefaultProfile::new(cfg.llm.default_profile.clone()),
-        data_plane_keys: Some(StoreDataPlaneKeys::new(store.clone())),
+        data_plane_keys: Some(StoreDataPlaneKeys::with_keys(api_keys)),
         protocols,
         stream,
         events: EventDeps {
@@ -994,13 +998,13 @@ fn reconcile_once(ctx: ReconcileCtx) -> crate::maintenance::ReconcileOnce {
 /// no provider discovery).
 fn data_node_auth(
     auth: &AuthConfig,
-    store: &Arc<dyn ControlStore>,
+    api_keys: &mb_auth::ApiKeys,
 ) -> (Arc<dyn mb_auth::Authenticate>, Option<mb_admin::WebAuth>) {
     match auth.mode {
         AuthMode::None => (Arc::new(mb_auth::LocalAuth), None),
         AuthMode::Oidc => (
             Arc::new(mb_auth::Authenticator {
-                api_keys: mb_auth::ApiKeys::new(store.clone()),
+                api_keys: api_keys.clone(),
                 sessions: None,
                 bearer: None,
             }),
@@ -1019,6 +1023,7 @@ fn data_node_auth(
 async fn admin_auth(
     auth: &AuthConfig,
     store: &Arc<dyn ControlStore>,
+    api_keys: &mb_auth::ApiKeys,
     ext: &Extensions,
     http: &mb_llm::HttpOptions,
 ) -> anyhow::Result<(Arc<dyn mb_auth::Authenticate>, Option<mb_admin::WebAuth>)> {
@@ -1066,7 +1071,7 @@ async fn admin_auth(
     let secure = auth.secure_cookies();
     let sessions = mb_auth::SessionManager::new(store.clone(), auth.session_ttl, secure);
     let authenticator = mb_auth::Authenticator {
-        api_keys: mb_auth::ApiKeys::new(store.clone()),
+        api_keys: api_keys.clone(),
         sessions: Some(sessions.clone()),
         bearer: Some(client.bearer()),
     };

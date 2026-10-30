@@ -9,6 +9,10 @@ use mb_store::ControlStore;
 
 /// Accepts a non-revoked, unexpired key with scope `data-plane` that
 /// belongs to the mock's workspace or is a sysadmin key.
+///
+/// [`StoreDataPlaneKeys::new`] reads the store on every call;
+/// [`StoreDataPlaneKeys::with_keys`] takes an [`ApiKeys`] that may cache
+/// (the server passes one built with [`ApiKeys::with_cache`]).
 pub struct StoreDataPlaneKeys {
     keys: ApiKeys,
 }
@@ -18,6 +22,11 @@ impl StoreDataPlaneKeys {
         Arc::new(Self {
             keys: ApiKeys::new(store),
         })
+    }
+
+    /// Verifies through `keys`, sharing its cache, if any.
+    pub fn with_keys(keys: ApiKeys) -> Arc<Self> {
+        Arc::new(Self { keys })
     }
 }
 

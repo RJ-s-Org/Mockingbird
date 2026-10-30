@@ -49,6 +49,8 @@ Workspace admins create keys in the console (**API keys**) or with `POST /api/v1
 - **`admin`** (the default): the key authenticates Admin API calls, with its role, like a user.
 - **`data-plane`**: the key unlocks mocks whose `data_plane_auth.mode` is `api_key` (see below).
 
+Revoking a key (**Revoke**, or `DELETE /api/v1/workspaces/{ws}/api-keys/{key_id}`) takes effect at once on the node that handled it. A server keeps each verified key's stored record for 5 seconds so that it does not read the control store on every call, so other nodes of a cluster (and data nodes in split mode) can accept a revoked key for up to 5 seconds. Deleting a workspace deletes its keys the same way. Expiry and scopes are checked on every call.
+
 The token, `mbk_<key_id>_<secret>`, is shown once; only a hash is stored. The CLI client sends one with `--token` (or `MB_ADMIN_TOKEN`):
 
 ```sh

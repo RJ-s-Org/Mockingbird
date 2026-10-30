@@ -700,3 +700,37 @@ async fn bearer_without_verifier_rejected() {
         Some(Principal::local())
     );
 }
+
+/// MB-ADMIN-PERF-1 timing harness: `cargo nextest run -p mockingbird-auth
+/// --run-ignored only api_key_verify_cost --no-capture`. Prints the mean
+/// cost of a verification at N and 10N calls, reading the store every time
+/// ([`ApiKeys::new`]) and through the cache ([`ApiKeys::with_cache`]).
+#[tokio::test]
+#[ignore = "timing harness; run by hand"]
+async fn api_key_verify_cost() {
+    use std::time::Instant;
+    for (label, cached) in [("store every call", false), ("cached", true)] {
+        let s = store().await;
+        let keys = if cached {
+            ApiKeys::with_cache(s, mb_auth::DEFAULT_API_KEY_CACHE_TTL)
+        } else {
+            ApiKeys::new(s)
+        };
+        let (_, token) = keys
+            .create(&Principal::local(), "default", req("bench", Role::Viewer))
+            .await
+            .unwrap();
+        keys.verify(&token, KeyScope::Admin).await.unwrap();
+        for n in [1_000u32, 10_000] {
+            let start = Instant::now();
+            for _ in 0..n {
+                keys.verify(&token, KeyScope::Admin).await.unwrap();
+            }
+            let total = start.elapsed();
+            println!(
+                "{label:>16}: N={n:>6} total {total:>10.2?} mean {:>8.2?}",
+                total / n
+            );
+        }
+    }
+}

@@ -198,6 +198,9 @@ pub async fn revoke(
     if !st.store.revoke_api_key(&access.ws, &key_id).await? {
         return Err(missing());
     }
+    // This node refuses the key from now on; other nodes within their
+    // cache TTL (`mb_auth::DEFAULT_API_KEY_CACHE_TTL`).
+    ApiKeys::invalidate_caches();
     let after = st.store.get_api_key(&key_id).await?.map(ApiKeyView::from);
     access
         .audit(

@@ -525,3 +525,56 @@ async fn workspace_force_delete_unmounts() {
     );
     assert_eq!(status_of(&base, "/a/orders").await, 200);
 }
+
+/// The server's data-plane keys share one cache with the Admin API; a key
+/// verified once is served from it, and a revocation announced through
+/// `ApiKeys::invalidate_caches` (as the Admin API does) applies at once.
+#[tokio::test]
+async fn cached_data_plane_keys_follow_invalidation() {
+    use mb_protocols::DataPlaneKeys;
+    let store = store().await;
+    let (key_id, token) = store_key(&store, TEAM_A, &["data-plane"], false, None).await;
+    let keys = StoreDataPlaneKeys::with_keys(mb_auth::ApiKeys::with_cache(
+        store.clone(),
+        Duration::from_secs(60),
+    ));
+    assert!(keys.verify(TEAM_A, &token).await);
+    assert!(!keys.verify(DEFAULT_WORKSPACE, &token).await);
+    assert!(store.revoke_api_key(TEAM_A, &key_id).await.unwrap());
+    mb_auth::ApiKeys::invalidate_caches();
+    assert!(!keys.verify(TEAM_A, &token).await);
+}
+
+/// MOCKINGBIRD-PERF-6 timing harness: `cargo nextest run -p mockingbird-cli
+/// --run-ignored only data_plane_key_verify_cost --no-capture`. Prints the
+/// mean cost of a data-plane key check at N and 10N calls, reading the
+/// store every time and through the server's cache.
+#[tokio::test]
+#[ignore = "timing harness; run by hand"]
+async fn data_plane_key_verify_cost() {
+    use mb_protocols::DataPlaneKeys;
+    for (label, cached) in [("store every call", false), ("cached", true)] {
+        let store = store().await;
+        let (_, token) = store_key(&store, TEAM_A, &["data-plane"], false, None).await;
+        let keys = if cached {
+            StoreDataPlaneKeys::with_keys(mb_auth::ApiKeys::with_cache(
+                store.clone(),
+                mb_auth::DEFAULT_API_KEY_CACHE_TTL,
+            ))
+        } else {
+            StoreDataPlaneKeys::new(store.clone())
+        };
+        assert!(keys.verify(TEAM_A, &token).await);
+        for n in [1_000u32, 10_000] {
+            let start = Instant::now();
+            for _ in 0..n {
+                assert!(keys.verify(TEAM_A, &token).await);
+            }
+            let total = start.elapsed();
+            println!(
+                "{label:>16}: N={n:>6} total {total:>10.2?} mean {:>8.2?}",
+                total / n
+            );
+        }
+    }
+}

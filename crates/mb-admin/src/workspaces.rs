@@ -283,6 +283,8 @@ pub async fn delete(
         }
     }
     if st.store.delete_workspace(ws, force).await? {
+        // Its API keys went with it: stop accepting them on this node now.
+        mb_auth::ApiKeys::invalidate_caches();
         // The webhook deliveries of its mocks (kept on this node) go too.
         if let Some(axum::Extension(log)) = deliveries {
             log.forget_workspace(ws);
