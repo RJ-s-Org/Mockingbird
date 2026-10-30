@@ -76,6 +76,10 @@ fn session(id: &str) -> SessionKey {
     }
 }
 
+/// The id the scripted LLM gives a created order: a uuid, as the
+/// contract's `format: uuid` asks (other values are refilled).
+const O1: &str = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+
 fn order(id: &str, customer: &str) -> Value {
     json!({"id": id, "customerId": customer, "status": "pending", "total": 10})
 }
@@ -114,7 +118,7 @@ fn header_str<'a>(resp: &'a Response, name: &str) -> &'a str {
 async fn create_then_get_returns_stored_resource() {
     let h = harness(
         Some(vec![
-            Ok(order("o1", "c1").to_string()),
+            Ok(order(O1, "c1").to_string()),
             Ok(order("zzz", "other").to_string()),
         ]),
         true,
@@ -126,19 +130,19 @@ async fn create_then_get_returns_stored_resource() {
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert_eq!(header_str(&resp, "x-mockingbird-source"), "llm");
-    assert_eq!(body_json(resp).await["id"], "o1");
+    assert_eq!(body_json(resp).await["id"], O1);
 
-    let resp = send(&h, get("/orders/o1")).await;
+    let resp = send(&h, get(&format!("/orders/{O1}"))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(header_str(&resp, "content-type"), "application/json");
     let body = body_json(resp).await;
-    assert_eq!(body["id"], "o1");
+    assert_eq!(body["id"], O1);
     assert_eq!(body["customerId"], "c1");
 }
 
 #[tokio::test]
 async fn sessions_isolate_state() {
-    let h = harness(Some(vec![Ok(order("o1", "c1").to_string())]), true);
+    let h = harness(Some(vec![Ok(order(O1, "c1").to_string())]), true);
     let req = Request::post("/orders")
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-mockingbird-session", "a")
@@ -147,7 +151,7 @@ async fn sessions_isolate_state() {
     assert_eq!(send(&h, req).await.status(), StatusCode::CREATED);
     assert!(
         h.rt.state
-            .get(&session("a"), "orders", "o1")
+            .get(&session("a"), "orders", O1)
             .await
             .unwrap()
             .is_some()
@@ -155,18 +159,18 @@ async fn sessions_isolate_state() {
 
     // The script is exhausted, so session `b` is served by the faker. The
     // id follows the path, but none of session `a`'s stored fields leak.
-    let req = Request::get("/orders/o1")
+    let req = Request::get(format!("/orders/{O1}"))
         .header("x-mockingbird-session", "b")
         .body(Body::empty())
         .unwrap();
     let resp = send(&h, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
-    assert_eq!(body["id"], "o1");
+    assert_eq!(body["id"], O1);
     assert_ne!(body["customerId"], "c1", "{body}");
     assert!(
         h.rt.state
-            .get(&session("b"), "orders", "o1")
+            .get(&session("b"), "orders", O1)
             .await
             .unwrap()
             .is_none()
@@ -175,7 +179,7 @@ async fn sessions_isolate_state() {
 
 #[tokio::test]
 async fn delete_returns_204_and_removes_state() {
-    let h = harness(Some(vec![Ok(order("o1", "c1").to_string())]), true);
+    let h = harness(Some(vec![Ok(order(O1, "c1").to_string())]), true);
     let resp = send(
         &h,
         post_json("/orders", r#"{"customerId":"c1","total":10}"#),
@@ -184,13 +188,15 @@ async fn delete_returns_204_and_removes_state() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert!(
         h.rt.state
-            .get(&session("default"), "orders", "o1")
+            .get(&session("default"), "orders", O1)
             .await
             .unwrap()
             .is_some()
     );
 
-    let req = Request::delete("/orders/o1").body(Body::empty()).unwrap();
+    let req = Request::delete(format!("/orders/{O1}"))
+        .body(Body::empty())
+        .unwrap();
     let resp = send(&h, req).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert_eq!(header_str(&resp, "x-mockingbird-source"), "llm");
@@ -198,7 +204,7 @@ async fn delete_returns_204_and_removes_state() {
     assert!(body_bytes(resp).await.is_empty());
     assert!(
         h.rt.state
-            .get(&session("default"), "orders", "o1")
+            .get(&session("default"), "orders", O1)
             .await
             .unwrap()
             .is_none()
@@ -1207,16 +1213,16 @@ async fn validation_failures_stay_visible() {
 
 #[tokio::test]
 async fn get_after_create_is_served_from_state() {
-    let h = harness(Some(vec![Ok(order("o1", "c1").to_string())]), true);
+    let h = harness(Some(vec![Ok(order(O1, "c1").to_string())]), true);
     send(
         &h,
         post_json("/orders", r#"{"customerId":"c1","total":10}"#),
     )
     .await;
-    let resp = send(&h, get("/orders/o1")).await;
+    let resp = send(&h, get(&format!("/orders/{O1}"))).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
-    assert_eq!(body_json(resp).await, order("o1", "c1"));
+    assert_eq!(body_json(resp).await, order(O1, "c1"));
     assert_eq!(
         h.provider.as_ref().unwrap().requests().len(),
         1,
@@ -1425,8 +1431,8 @@ async fn listed_items_are_served_by_id_from_state() {
 async fn listing_keeps_a_created_resource() {
     let h = harness(
         Some(vec![
-            Ok(order("o1", "c1").to_string()),
-            Ok(json!([order("o1", "someone-else")]).to_string()),
+            Ok(order(O1, "c1").to_string()),
+            Ok(json!([order(O1, "someone-else")]).to_string()),
         ]),
         true,
     );
@@ -1438,7 +1444,7 @@ async fn listing_keeps_a_created_resource() {
     send(&h, get("/orders")).await;
     let kept =
         h.rt.state
-            .get(&session("default"), "orders", "o1")
+            .get(&session("default"), "orders", O1)
             .await
             .unwrap()
             .unwrap();

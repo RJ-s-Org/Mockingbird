@@ -12,8 +12,8 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use mb_engine::consistency::{ENVELOPE_KEYS, item_identity, list_items, list_members};
 use mb_engine::{
-    EngineError, GeneratedResponse, GenerationContext, OFFLINE_REASON, OperationCall, Source,
-    StreamContext, StreamItem,
+    EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext, OFFLINE_REASON,
+    OperationCall, Source, StreamContext, StreamItem,
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
@@ -880,13 +880,14 @@ pub(crate) async fn complete(
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
-/// answers are its real ones).
+/// answers are its real ones, and a faker answer that only notes it found no
+/// valid draw stands in for nothing).
 pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
     generated.source == Source::Fallback
         && generated
             .fallback_reason
             .as_deref()
-            .is_some_and(|r| r != OFFLINE_REASON)
+            .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
 }
 
 /// Gives a create's answer a fresh identity when the session already holds

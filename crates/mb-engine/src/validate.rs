@@ -19,6 +19,37 @@ pub const TRUNCATED_CHARS: usize = 200;
 /// Schema nodes visited when looking up the schema of one location.
 const MAX_SCHEMA_HOPS: usize = 64;
 
+/// The `format`s a validator built by [`SchemaValidator::for_output`]
+/// asserts: the ones the faker produces, so a generated value breaking one
+/// can always be refilled. Every other format stays an annotation.
+pub const ASSERTED_FORMATS: &[&str] = &[
+    "uuid",
+    "date-time",
+    "date",
+    "time",
+    "email",
+    "uri",
+    "ipv4",
+    "ipv6",
+    "hostname",
+];
+
+/// The formats `jsonschema` knows besides [`ASSERTED_FORMATS`]: an output
+/// validator overrides them with a check that accepts everything, so they
+/// stay annotations and contracts using them do not start failing.
+const ANNOTATION_FORMATS: &[&str] = &[
+    "duration",
+    "idn-email",
+    "idn-hostname",
+    "iri",
+    "iri-reference",
+    "json-pointer",
+    "regex",
+    "relative-json-pointer",
+    "uri-reference",
+    "uri-template",
+];
+
 /// JSON Schema (draft 2020-12) validator over a schema that carries its own
 /// `$defs`.
 pub struct SchemaValidator {
@@ -28,9 +59,18 @@ pub struct SchemaValidator {
     declared: OnceLock<Option<HashSet<String>>>,
     /// The faker's cost table of `schema`, computed on first use.
     costs: OnceLock<Costs>,
+    /// Whether [`ASSERTED_FORMATS`] are checked by the output checks
+    /// ([`SchemaValidator::is_valid_output`], [`SchemaValidator::patch`]).
+    assert_formats: bool,
+    /// The format-asserting validator of `schema`, compiled on first use
+    /// (`None` when it does not compile, so formats stay annotations).
+    formats: OnceLock<Option<jsonschema::Validator>>,
 }
 
 impl SchemaValidator {
+    /// A validator for which `format` is an annotation, as JSON Schema
+    /// 2020-12 has it: the one for requests, whose values a mock must not
+    /// reject over a format the real API may not check.
     pub fn new(schema_with_defs: &Value) -> Result<Self, EngineError> {
         let inner = jsonschema::draft202012::new(schema_with_defs)
             .map_err(|e| EngineError::Schema(e.to_string()))?;
@@ -39,14 +79,71 @@ impl SchemaValidator {
             schema: schema_with_defs.clone(),
             declared: OnceLock::new(),
             costs: OnceLock::new(),
+            assert_formats: false,
+            formats: OnceLock::new(),
         })
+    }
+
+    /// A validator for generated output: like [`SchemaValidator::new`], and
+    /// its output checks ([`SchemaValidator::is_valid_output`],
+    /// [`SchemaValidator::patch`]) also assert [`ASSERTED_FORMATS`]. A
+    /// value breaking one is refilled by `patch`, never reported by
+    /// [`SchemaValidator::validate`] (so it never costs an LLM repair
+    /// round), and [`SchemaValidator::is_valid`] stays the annotation-only
+    /// verdict.
+    pub fn for_output(schema_with_defs: &Value) -> Result<Self, EngineError> {
+        let mut validator = Self::new(schema_with_defs)?;
+        validator.assert_formats = true;
+        Ok(validator)
+    }
+
+    /// The format-asserting validator, when this one asserts formats.
+    fn formats(&self) -> Option<&jsonschema::Validator> {
+        if !self.assert_formats {
+            return None;
+        }
+        self.formats
+            .get_or_init(|| {
+                let mut options = jsonschema::draft202012::options().should_validate_formats(true);
+                for name in ANNOTATION_FORMATS {
+                    options = options.with_format(*name, |_: &str| true);
+                }
+                options.build(&self.schema).ok()
+            })
+            .as_ref()
     }
 
     /// Whether `instance` is valid. Stops at the first error and formats
     /// none: use it instead of [`SchemaValidator::validate`] when only the
-    /// verdict matters.
+    /// verdict matters. `format` is an annotation here, even for a
+    /// validator built by [`SchemaValidator::for_output`].
     pub fn is_valid(&self, instance: &Value) -> bool {
         self.inner.is_valid(instance)
+    }
+
+    /// [`SchemaValidator::is_valid`], also asserting [`ASSERTED_FORMATS`]
+    /// when this validator was built by [`SchemaValidator::for_output`].
+    pub fn is_valid_output(&self, instance: &Value) -> bool {
+        self.formats().unwrap_or(&self.inner).is_valid(instance)
+    }
+
+    /// Whether every asserted format `instance` breaks is at a location
+    /// `keep` accepts (always true when no format is asserted).
+    pub(crate) fn formats_hold(
+        &self,
+        instance: &Value,
+        keep: &impl Fn(&str, &Value) -> bool,
+    ) -> bool {
+        let Some(formats) = self.formats() else {
+            return true;
+        };
+        if formats.is_valid(instance) {
+            return true;
+        }
+        formats.iter_errors(instance).all(|e| {
+            !matches!(e.kind(), ValidationErrorKind::Format { .. })
+                || keep(e.instance_path().as_str(), e.instance())
+        })
     }
 
     /// The schema (with its `$defs`) this validator checks against.
@@ -67,21 +164,53 @@ impl SchemaValidator {
     /// `multipleOf`) is
     /// replaced by `fill` of the schema holding that keyword. `fill` gets the
     /// schema with the root's `$defs`. `None` unless such errors are all that
-    /// is wrong and the patched value is valid.
-    pub fn patch(&self, instance: &Value, mut fill: impl FnMut(&Value) -> Value) -> Option<Value> {
-        self.patch_nodes(instance, |node| fill(&self.with_root_defs(node)))
+    /// is wrong and the patched value is valid. `format` counts only for a
+    /// validator built by [`SchemaValidator::for_output`], and only for
+    /// [`ASSERTED_FORMATS`].
+    pub fn patch(&self, instance: &Value, fill: impl FnMut(&Value) -> Value) -> Option<Value> {
+        self.patch_keeping(instance, |_, _| false, fill)
     }
 
-    /// [`SchemaValidator::patch`], with `fill` given the schema node inside
-    /// [`SchemaValidator::schema`] (its `$ref`s resolve against that root)
-    /// instead of a copy that carries the root's `$defs`.
+    /// [`SchemaValidator::patch`], keeping every value that breaks a format
+    /// where `keep` (given its JSON pointer and the value) says so: a value
+    /// the request sent (a path id echoed into a `format: uuid` field) is
+    /// not overwritten. `keep` applies to format errors only.
+    pub fn patch_keeping(
+        &self,
+        instance: &Value,
+        keep: impl Fn(&str, &Value) -> bool,
+        mut fill: impl FnMut(&Value) -> Value,
+    ) -> Option<Value> {
+        self.patch_nodes(instance, keep, |node| fill(&self.with_root_defs(node)))
+    }
+
+    /// [`SchemaValidator::patch_keeping`], with `fill` given the schema node
+    /// inside [`SchemaValidator::schema`] (its `$ref`s resolve against that
+    /// root) instead of a copy that carries the root's `$defs`.
     pub(crate) fn patch_nodes(
         &self,
         instance: &Value,
+        keep: impl Fn(&str, &Value) -> bool,
         mut fill: impl FnMut(&Value) -> Value,
     ) -> Option<Value> {
         let mut nulls = Vec::new();
         let mut refills = Vec::new();
+        // The annotation-only validator never reports a format; the
+        // asserting one adds the format errors, and only those.
+        if let Some(formats) = self.formats()
+            && !formats.is_valid(instance)
+        {
+            for e in formats.iter_errors(instance) {
+                if !matches!(e.kind(), ValidationErrorKind::Format { .. }) {
+                    continue;
+                }
+                let pointer = e.instance_path().as_str().to_string();
+                if keep(&pointer, e.instance()) {
+                    continue;
+                }
+                refills.push((pointer, self.subschema(e.evaluation_path().as_str())?));
+            }
+        }
         for e in self.inner.iter_errors(instance) {
             let pointer = e.instance_path().as_str().to_string();
             let expected = || self.subschema(e.evaluation_path().as_str());
@@ -93,7 +222,6 @@ impl SchemaValidator {
                 | ValidationErrorKind::MaxLength { .. }
                 | ValidationErrorKind::MinLength { .. }
                 | ValidationErrorKind::Enum { .. }
-                | ValidationErrorKind::Format { .. }
                 | ValidationErrorKind::Constant { .. }
                 | ValidationErrorKind::Minimum { .. }
                 | ValidationErrorKind::Maximum { .. }
@@ -143,7 +271,7 @@ impl SchemaValidator {
                 _ => return None,
             }
         }
-        self.is_valid(&out).then_some(out)
+        (self.is_valid(&out) && self.formats_hold(&out, &keep)).then_some(out)
     }
 
     /// `instance` with every missing required property that `wanted`

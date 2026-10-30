@@ -19,11 +19,11 @@ For each request, the adapter decodes it and validates it against the operation 
 | `state` | The session already holds the resource (a read after a create, or an item seeded from an earlier list), and the stored value matches the response schema. No LLM call. |
 | `cache` | The session asked exactly this before and nothing of that resource type was written since. No LLM call. |
 | `llm` | The LLM generated it, prompted with the operation, its response schema, the request, the session's relevant state, the mock's persona and the scenario's instructions, and the answer validated. |
-| `repaired` | The LLM's answer had small errors (a pattern, a length, a null where none is allowed) that were patched locally, or fixed in one repair call. |
-| `fallback` | The built-in faker generated a schema-valid answer, because there is no LLM (`--offline`), or the LLM timed out, failed or never produced a valid answer. `X-Mockingbird-Fallback-Reason` says which. |
+| `repaired` | The LLM's answer had small errors (a pattern, a length, a null where none is allowed, a value breaking a `uuid`, `date-time`, `date`, `time`, `email`, `uri`, `ipv4`, `ipv6` or `hostname` format) that were patched locally, or fixed in one repair call. A value the request sent (a path id or query value) is never patched over a format; other formats are annotations. |
+| `fallback` | The built-in faker generated the answer, because there is no LLM (`--offline`), or the LLM timed out, failed or never produced a valid answer. `X-Mockingbird-Fallback-Reason` says which. An offline answer without a body (a `204`) is `fallback` too. |
 | `rejected` | The request failed validation and was answered with the contract's error shape (or problem+json), without the LLM. `X-Mockingbird-Validation` says why. A client error, so `verify --no-fallbacks` does not count it. |
 
-Every answer, whatever its source, matches the contract. `--offline` serves faker answers only, which needs no key and no network: the usual choice for CI.
+Every answer, whatever its source, matches the contract, with one known gap: the faker does not generate for `not` or `if`/`then`/`else` and relies on retries for them, and when no retry validates, the fallback reason ends with `faker output does not validate against the schema` (counted by `mb_faker_invalid_total`). `--offline` serves faker answers only, which needs no key and no network: the usual choice for CI.
 
 ## Sessions and state
 

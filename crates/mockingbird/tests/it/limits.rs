@@ -43,6 +43,11 @@ fn completion(content: Value, total_tokens: u32) -> Value {
     })
 }
 
+/// The id of a scripted answer to reads of other paths: a uuid, as the
+/// contract's `format: uuid` asks (another value would be refilled), which
+/// the path id then replaces.
+const SCRIPTED_ID: &str = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+
 fn order(id: &str, customer: &str) -> Value {
     json!({"id": id, "customerId": customer, "status": "pending", "total": 10})
 }
@@ -350,7 +355,9 @@ async fn budget_exhausted_serves_fallback_and_degrades_readyz() {
     let llm = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(completion(order("o1", "c1"), 600)))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(completion(order(SCRIPTED_ID, "c1"), 600)),
+        )
         .mount(&llm)
         .await;
     let dir = tempfile::tempdir().unwrap();
@@ -473,7 +480,7 @@ async fn concurrency_limit_from_config() {
         .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(completion(order("o1", "c1"), 10))
+                .set_body_json(completion(order(SCRIPTED_ID, "c1"), 10))
                 .set_delay(Duration::from_millis(800)),
         )
         .mount(&llm)
