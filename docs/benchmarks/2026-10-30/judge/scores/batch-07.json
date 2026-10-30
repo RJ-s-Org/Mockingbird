@@ -1,0 +1,14 @@
+{"batch_id": "batch-07", "judge": "claude-opus-5-5", "scores": [
+{"opaque_id": "35619c971f", "realism": 4, "coherence": 5, "rationale": "Random-looking re_ id, plausible created timestamp, usd. Echoes amount 58, charge, payment_intent and reason duplicate; pending status is plausible. Realism held back only by the bland default currency."},
+{"opaque_id": "5f6bb4136b", "realism": 4, "coherence": 5, "rationale": "Well-formed random re_ id, recent created, usd. Amount 11, charge/pi 'iris', reason fraudulent all echoed; succeeded fits. Nothing flagged beyond default usd."},
+{"opaque_id": "ffeade7f0f", "realism": 4, "coherence": 5, "rationale": "re_4Kd8mQ2v... id looks real, timestamp plausible. Amount 37, charge/pi 'nectar', reason fraudulent echoed; succeeded consistent."},
+{"opaque_id": "d93c1a180c", "realism": 4, "coherence": 5, "rationale": "Plausible re_ id and created; usd. Amount 60, charge nectar, pi garnet, reason duplicate all echoed exactly; succeeded status coherent."},
+{"opaque_id": "2c0fd08b66", "realism": 4, "coherence": 5, "rationale": "Random mixed-case re_ id, sensible timestamp. Echoes amount 22, charge fjord, pi alpha, duplicate; succeeded fits."},
+{"opaque_id": "79e2a8f9af", "realism": 4, "coherence": 5, "rationale": "re_R8mQ2vL5... id realistic, created plausible. Amount 33, charge sable, pi nectar, duplicate echoed; succeeded consistent."},
+{"opaque_id": "4e405f3af2", "realism": 3, "coherence": 3, "rationale": "Echoes amount 0 and marks status succeeded: a zero-amount refund would be rejected by the real API, not succeed. Otherwise the id, timestamp and echoed charge/pi/reason are fine."},
+{"opaque_id": "757369d293", "realism": 3, "coherence": 5, "rationale": "id re_AbCdEfGhIjKlMnOpQrStUvWx is an obvious alphabet-sequence placeholder. Amount 35, charge raven, pi lumen, requested_by_customer echoed; pending is plausible."},
+{"opaque_id": "c7f097f21f", "realism": 4, "coherence": 5, "rationale": "Random re_ id, plausible created, usd. Amount 87, charge meadow, pi nectar, fraudulent echoed; succeeded consistent."},
+{"opaque_id": "f9a46b44bf", "realism": 4, "coherence": 5, "rationale": "re_Qm7vXt2L... id realistic. Amount 63, charge nectar, pi harbor, fraudulent echoed; pending status plausible for a new refund."},
+{"opaque_id": "399e8a8f87", "realism": 4, "coherence": 5, "rationale": "Random re_ id, sensible timestamp, usd. Amount 11, charge lumen, pi garnet, duplicate echoed; succeeded fits."},
+{"opaque_id": "068785e943", "realism": 4, "coherence": 5, "rationale": "re_GH7jK2mP... id realistic, created plausible. Amount 91, charge sable, pi quartz, fraudulent echoed; succeeded consistent."}
+]}

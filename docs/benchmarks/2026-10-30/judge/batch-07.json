@@ -1,0 +1,81 @@
+{
+  "batch_id": "batch-07",
+  "contract": "rest/payments-stripe",
+  "api_type": "rest",
+  "domain": "payments",
+  "target": "PostRefunds",
+  "items": [
+    {
+      "opaque_id": "35619c971f",
+      "request": "{\n  \"body\": {\n    \"amount\": 58,\n    \"charge\": \"bravo\",\n    \"payment_intent\": \"fjord\",\n    \"reason\": \"duplicate\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 58,\n  \"charge\": \"bravo\",\n  \"created\": 1793346828,\n  \"currency\": \"usd\",\n  \"id\": \"re_Kn3dBbSFHoKdcx4JHlrS6gfe\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"fjord\",\n  \"reason\": \"duplicate\",\n  \"status\": \"pending\"\n}"
+    },
+    {
+      "opaque_id": "5f6bb4136b",
+      "request": "{\n  \"body\": {\n    \"amount\": 11,\n    \"charge\": \"iris\",\n    \"payment_intent\": \"iris\",\n    \"reason\": \"fraudulent\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 11,\n  \"charge\": \"iris\",\n  \"created\": 1793345448,\n  \"currency\": \"usd\",\n  \"id\": \"re_9uPeV7tiieaTmy3BwPauA5ga\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"iris\",\n  \"reason\": \"fraudulent\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "ffeade7f0f",
+      "request": "{\n  \"body\": {\n    \"amount\": 37,\n    \"charge\": \"nectar\",\n    \"payment_intent\": \"nectar\",\n    \"reason\": \"fraudulent\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 37,\n  \"charge\": \"nectar\",\n  \"created\": 1793346239,\n  \"currency\": \"usd\",\n  \"id\": \"re_4Kd8mQ2vXpL9nR3tYwZbHs1C\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"nectar\",\n  \"reason\": \"fraudulent\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "d93c1a180c",
+      "request": "{\n  \"body\": {\n    \"amount\": 60,\n    \"charge\": \"nectar\",\n    \"payment_intent\": \"garnet\",\n    \"reason\": \"duplicate\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 60,\n  \"charge\": \"nectar\",\n  \"created\": 1793345785,\n  \"currency\": \"usd\",\n  \"id\": \"re_5fWk2YtQ9pLmNz8vBx3aRjHd\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"garnet\",\n  \"reason\": \"duplicate\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "2c0fd08b66",
+      "request": "{\n  \"body\": {\n    \"amount\": 22,\n    \"charge\": \"fjord\",\n    \"payment_intent\": \"alpha\",\n    \"reason\": \"duplicate\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 22,\n  \"charge\": \"fjord\",\n  \"created\": 1793345451,\n  \"currency\": \"usd\",\n  \"id\": \"re_wV4ZwUQaTe5hfX4hvJImCIiz\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"alpha\",\n  \"reason\": \"duplicate\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "79e2a8f9af",
+      "request": "{\n  \"body\": {\n    \"amount\": 33,\n    \"charge\": \"sable\",\n    \"payment_intent\": \"nectar\",\n    \"reason\": \"duplicate\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 33,\n  \"charge\": \"sable\",\n  \"created\": 1793345648,\n  \"currency\": \"usd\",\n  \"id\": \"re_R8mQ2vL5xN1cT7kP3aF6zB0d\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"nectar\",\n  \"reason\": \"duplicate\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "4e405f3af2",
+      "request": "{\n  \"body\": {\n    \"amount\": 0,\n    \"charge\": \"lumen\",\n    \"payment_intent\": \"onyx\",\n    \"reason\": \"fraudulent\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 0,\n  \"charge\": \"lumen\",\n  \"created\": 1793345447,\n  \"currency\": \"usd\",\n  \"id\": \"re_LD4JYoPYQmzMbAi1jxgt7hfq\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"onyx\",\n  \"reason\": \"fraudulent\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "757369d293",
+      "request": "{\n  \"body\": {\n    \"amount\": 35,\n    \"charge\": \"raven\",\n    \"payment_intent\": \"lumen\",\n    \"reason\": \"requested_by_customer\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 35,\n  \"charge\": \"raven\",\n  \"created\": 1793346043,\n  \"currency\": \"usd\",\n  \"id\": \"re_AbCdEfGhIjKlMnOpQrStUvWx\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"lumen\",\n  \"reason\": \"requested_by_customer\",\n  \"status\": \"pending\"\n}"
+    },
+    {
+      "opaque_id": "c7f097f21f",
+      "request": "{\n  \"body\": {\n    \"amount\": 87,\n    \"charge\": \"meadow\",\n    \"payment_intent\": \"nectar\",\n    \"reason\": \"fraudulent\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 87,\n  \"charge\": \"meadow\",\n  \"created\": 1793347272,\n  \"currency\": \"usd\",\n  \"id\": \"re_HMCuII2X339vDmhEgUvUEn6I\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"nectar\",\n  \"reason\": \"fraudulent\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "f9a46b44bf",
+      "request": "{\n  \"body\": {\n    \"amount\": 63,\n    \"charge\": \"nectar\",\n    \"payment_intent\": \"harbor\",\n    \"reason\": \"fraudulent\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 63,\n  \"charge\": \"nectar\",\n  \"created\": 1793346199,\n  \"currency\": \"usd\",\n  \"id\": \"re_Qm7vXt2LpD9sKw4BnF8hYzR3\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"harbor\",\n  \"reason\": \"fraudulent\",\n  \"status\": \"pending\"\n}"
+    },
+    {
+      "opaque_id": "399e8a8f87",
+      "request": "{\n  \"body\": {\n    \"amount\": 11,\n    \"charge\": \"lumen\",\n    \"payment_intent\": \"garnet\",\n    \"reason\": \"duplicate\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 11,\n  \"charge\": \"lumen\",\n  \"created\": 1793345926,\n  \"currency\": \"usd\",\n  \"id\": \"re_8p4ZOIieQZXm1LkehO8HHsFp\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"garnet\",\n  \"reason\": \"duplicate\",\n  \"status\": \"succeeded\"\n}"
+    },
+    {
+      "opaque_id": "068785e943",
+      "request": "{\n  \"body\": {\n    \"amount\": 91,\n    \"charge\": \"sable\",\n    \"payment_intent\": \"quartz\",\n    \"reason\": \"fraudulent\"\n  },\n  \"path\": {},\n  \"query\": {}\n}",
+      "schema": "{\"$defs\":{\"refund\":{\"properties\":{\"amount\":{\"type\":\"integer\"},\"charge\":{\"type\":[\"string\",\"null\"]},\"created\":{\"type\":\"integer\"},\"currency\":{\"type\":\"string\"},\"id\":{\"pattern\":\"^re_[A-Za-z0-9]{24}$\",\"type\":\"string\"},\"object\":{\"const\":\"refund\",\"type\":\"string\"},\"payment_intent\":{\"type\":[\"string\",\"null\"]},\"reason\":{\"type\":[\"string\",\"null\"]},\"status\":{\"enum\":[\"pending\",\"requires_action\",\"succeeded\",\"failed\",\"canceled\"],\"type\":\"string\"}},\"required\":[\"id\",\"object\",\"amount\",\"currency\",\"status\",\"created\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/refund\"}",
+      "body": "{\n  \"amount\": 91,\n  \"charge\": \"sable\",\n  \"created\": 1793345676,\n  \"currency\": \"usd\",\n  \"id\": \"re_GH7jK2mP9qWx4vZ8nL3cRt6y\",\n  \"object\": \"refund\",\n  \"payment_intent\": \"quartz\",\n  \"reason\": \"fraudulent\",\n  \"status\": \"succeeded\"\n}"
+    }
+  ]
+}

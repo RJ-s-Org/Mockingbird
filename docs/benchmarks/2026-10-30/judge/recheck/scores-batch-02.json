@@ -1,0 +1,14 @@
+{"batch_id": "batch-02", "judge": "claude-opus-5-5", "scores": [
+{"opaque_id": "ed2eafeebc", "realism": 3, "coherence": 5, "rationale": "Name 'Northwind Demo' and id gid://shopify/Shop/1 read synthetic; contact email on the myshopify.com domain is unusual. Domain, url, plan Basic/shopifyPlus false all consistent."},
+{"opaque_id": "47dd2b0e7a", "realism": 4, "coherence": 5, "rationale": "Plausible 11-digit Shop gid, real plan name 'Shopify', brand-like name; '-demo' domain suffix and .example email are slight tells. Name, domain, url and plan flags agree."},
+{"opaque_id": "7b2d206fb6", "realism": 2, "coherence": 5, "rationale": "Placeholder-like: 'Demo Store', support@example.com, sequential id 123456789. Fields consistent with each other (domain matches url, Shopify plan not Plus)."},
+{"opaque_id": "a36e8c2d69", "realism": 4, "coherence": 5, "rationale": "Plausible id 548380009 and plan 'Basic'; 'Acme Supplies' is a stock name and email on myshopify.com is odd. Domain, url and plan flags consistent."},
+{"opaque_id": "b45cdc086c", "realism": 4, "coherence": 5, "rationale": "Distinctive name 'Maple & Moss', plausible id, url as custom primary domain matching email domain; .example TLD and '-demo' handle are minor tells. Plan Basic, not Plus: consistent."},
+{"opaque_id": "23c919da2e", "realism": 2, "coherence": 5, "rationale": "Placeholder values: 'Example Store', owner@example-store.test, id 1000000001. Internally consistent domain/url and Basic plan with shopifyPlus false."},
+{"opaque_id": "79690edd88", "realism": 2, "coherence": 5, "rationale": "Generic 'Demo Store', owner@example.com, id 1234567890. 'Basic Shopify' is a real legacy plan name; domain, url and plan flags agree."},
+{"opaque_id": "3709da408e", "realism": 4, "coherence": 5, "rationale": "Brand-like 'Northwind Goods', plausible id, 'Shopify Plus' with shopifyPlus true; .example email TLD is the only tell. All fields consistent."},
+{"opaque_id": "7d74b2bcb2", "realism": 4, "coherence": 5, "rationale": "Realistic name 'Blue Bottle Supply Co.', 11-digit id, America/Los_Angeles tz, Plus plan with shopifyPlus true; support email on myshopify.com is slightly off. Coherent throughout."},
+{"opaque_id": "f17e748f1a", "realism": 3, "coherence": 5, "rationale": "Bland name 'Artisan Co' and tiny id Shop/101 look synthetic; email domain artisan.co differs from shop handle but plausible. Plan Basic Shopify, not Plus, consistent."},
+{"opaque_id": "7e9717a1b8", "realism": 2, "coherence": 5, "rationale": "Placeholder 'Example Store', support@example-store.com, id 123456789. 'Professional' is a real legacy plan; domain/url and Plus flag consistent."},
+{"opaque_id": "7af805fe59", "realism": 2, "coherence": 5, "rationale": "Placeholder throughout: 'Example Store', shop@example.com, id 12345. Fields agree with each other (domain matches url, Basic Shopify not Plus)."}
+]}

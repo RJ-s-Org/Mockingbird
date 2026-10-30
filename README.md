@@ -75,21 +75,21 @@ Choose WireMock or Mockoon when you want exact, hand-authored responses; Prism w
 
 ## Model benchmarks
 
-A benchmark on 2026-10-29 ran 16 OpenRouter configurations through Mockingbird's own generation code: 162 engine samples per model over REST, GraphQL, gRPC, SOAP and AsyncAPI contracts, blinded realism and coherence scores from a judge model, and the server's consistency, SSE and smart import suites. Value is quality squared over the square roots of cost and latency, relative to the default (100). A model whose schema-valid rate is under 0.90 gets no Value; its ungated figure is in parentheses.
+The latest benchmark, on 2026-10-30, ran 12 OpenRouter configurations through Mockingbird's own generation code at production settings. It took 162 engine samples per model over REST, GraphQL, gRPC, SOAP and AsyncAPI contracts. It also collected blinded realism and coherence scores from a judge model, and ran the server's consistency, SSE and smart import suites. Value is quality squared over the square roots of cost and latency, relative to the default (100).
 
 | Model | Schema-valid | Judge score (1-5) | p50 latency | Cost per 1k responses | Value |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `openai/gpt-6-luna` | 94.9% | 4.17 | 2.5 s | $0.24 | 125.1 |
-| `deepseek/deepseek-v4.1-flash` (default) | 92.9% | 4.36 | 2.2 s | $0.43 | 100.0 |
-| `deepseek/deepseek-v4.1-flash-1017` | 93.6% | 4.50 | 2.6 s | $0.49 | 87.4 |
-| `anthropic/claude-haiku-5.5` | 93.0% | 4.36 | 2.5 s | $0.56 | 84.1 |
-| `minimax/minimax-m3.1-flash` | 88.9% | 4.67 | 1.7 s | $0.54 | gated (101.3) |
-| `google/gemini-3.8-flash` | 82.6% | 4.14 | 9.6 s | $6.19 | gated (11.6) |
-| `z-ai/glm-5.3-flash` | 85.3% | 4.21 | 7.0 s | $0.29 | gated (61.1) |
-| `qwen/qwen3.8-flash` | 89.8% | 4.21 | 7.3 s | $0.38 | gated (52.7) |
-| `inception/mercury-3` | 83.7% | 4.29 | 1.1 s | $0.33 | gated (137.1) |
+| `openai/gpt-6-luna` | 100.0% | 4.33 | 2.7 s | $0.20 | 160.5 |
+| `deepseek/deepseek-v4.1-flash-1017` | 99.8% | 4.36 | 1.9 s | $0.32 | 144.0 |
+| `nvidia/nemotron-3.5-lightning` | 93.1% | 3.71 | 2.6 s | $0.16 | 134.6 |
+| `inception/mercury-3` | 97.5% | 3.43 | 1.0 s | $0.44 | 128.6 |
+| `anthropic/claude-haiku-5.5` | 99.8% | 4.57 | 2.2 s | $0.43 | 120.4 |
+| `nvidia/nemotron-3.5-super-vl` | 99.2% | 4.21 | 2.5 s | $0.44 | 102.1 |
+| `deepseek/deepseek-v4.1-flash` (default) | 99.6% | 4.36 | 3.5 s | $0.37 | 100.0 |
+| `minimax/minimax-m3.1-flash` | 95.9% | 4.57 | 2.7 s | $0.61 | 88.1 |
+| `thinkingmachines/inkling@nojson` | 99.2% | 4.00 | 4.2 s | $2.21 | 32.6 |
 
-The default stays `deepseek/deepseek-v4.1-flash`: the top four are tied on quality within the run's noise. If cost per response matters most, `openai/gpt-6-luna` is worth trying; it was 45% cheaper per response with the highest schema-valid rate. The [benchmark page](docs/benchmarks.md) has the method, all 16 configurations, the caveats (several models were held back by the bench's own 2,048-token cap) and how to re-run it.
+All 12 configurations cleared the 0.90 schema-valid gate, against 5 of 16 in the first round on 2026-10-29. On the same models and workload, fallbacks to the faker fell from 239 to 59. That followed the engine's output-validity fixes and a switch to production token limits. Inkling runs with `output_mode: none`. The default is unchanged. The [benchmark page](docs/benchmarks.md) has the method, both rounds, the caveats and how to re-run it.
 
 ## Integrations
 
@@ -136,7 +136,7 @@ The documentation is an [mdBook](docs/README.md) built from `docs/` (`scripts/do
 | [Operations runbook](docs/operations/runbook.md) | Signals, what they mean and what to do |
 | [Upgrading](docs/upgrading.md) | Upgrade notes, migrations and the `mb-ext` 1.0 changes |
 | [Performance](docs/performance.md) | The offline bench: method, numbers and how to rerun it |
-| [Model benchmarks](docs/benchmarks.md) | 16 LLM configurations compared on schema validity, judged realism, latency and cost per response, and how to re-run the comparison |
+| [Model benchmarks](docs/benchmarks.md) | LLM configurations compared on schema validity, judged realism, latency and cost per response, in two rounds, and how to re-run the comparison |
 | [Improvements](docs/improvements.md) | Known gaps and planned enhancements, from field trials and use |
 | [Extensions](crates/mb-ext/README.md) | The `mb-ext` extension API and its stability policy |
 | [Examples](examples/gallery/README.md) | Ready-to-serve configurations for every protocol and for chaos |

@@ -245,7 +245,10 @@ def build_batch(seed: str, batch_id: str, t: Target, models: List[str]) -> Tuple
             reason = "fallback"
         elif row.get("error") is not None:
             reason = "error"
-        elif is_empty_body(row.get("body")):
+        elif is_empty_body(row.get("body")) and row.get("body") != {}:
+            # A model's `{}` can be the correct reply (an OTLP full-success
+            # `Export`): it is judged, and aggregate.py leaves a schema-valid
+            # one out of J instead of scoring it 1/1.
             reason = "empty_body"
         else:
             reason = None

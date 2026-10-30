@@ -1,0 +1,154 @@
+{
+  "model": "z-ai/glm-5.3-flash",
+  "base_url": "http://127.0.0.1:58282/r/z-ai__glm-5.3-flash~pilot/api/v1",
+  "started_at": "2026-10-30T07:28:39.667568Z",
+  "calls": 10,
+  "schema_valid_rate": 1.0,
+  "first_pass_rate": 0.9,
+  "repair_rate": 0.1,
+  "fallback_rate": 0.0,
+  "p50_ms": 2922,
+  "p95_ms": 16630,
+  "prompt_tokens_per_call": 752.3,
+  "completion_tokens_per_call": 561.9,
+  "per_contract": {
+    "asyncapi/commerce-events-kafka": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 7539
+    },
+    "asyncapi/orders-amqp-2.6": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 1110
+    },
+    "graphql/devtools-github": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 16630
+    },
+    "graphql/ecommerce-shopify-admin": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 2894
+    },
+    "grpc/otlp-trace-service": {
+      "calls": 1,
+      "llm": 0,
+      "repaired": 1,
+      "fallback": 0,
+      "p95_ms": 2922
+    },
+    "grpc/route-guide": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 2936
+    },
+    "rest/payments-paypal-orders": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 3955
+    },
+    "rest/payments-stripe": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 7021
+    },
+    "soap/accounts-rpc": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 2168
+    },
+    "soap/calculator": {
+      "calls": 1,
+      "llm": 1,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 2313
+    }
+  },
+  "per_api_type": {
+    "asyncapi": {
+      "calls": 2,
+      "llm": 2,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 7539
+    },
+    "graphql": {
+      "calls": 2,
+      "llm": 2,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 16630
+    },
+    "grpc": {
+      "calls": 2,
+      "llm": 1,
+      "repaired": 1,
+      "fallback": 0,
+      "p95_ms": 2936
+    },
+    "rest": {
+      "calls": 2,
+      "llm": 2,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 7021
+    },
+    "soap": {
+      "calls": 2,
+      "llm": 2,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 2313
+    }
+  },
+  "per_domain": {
+    "devtools": {
+      "calls": 2,
+      "llm": 1,
+      "repaired": 1,
+      "fallback": 0,
+      "p95_ms": 16630
+    },
+    "ecommerce": {
+      "calls": 3,
+      "llm": 3,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 7539
+    },
+    "generic": {
+      "calls": 3,
+      "llm": 3,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 2936
+    },
+    "payments": {
+      "calls": 2,
+      "llm": 2,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 7021
+    }
+  },
+  "skipped_streaming_operations": 3
+}

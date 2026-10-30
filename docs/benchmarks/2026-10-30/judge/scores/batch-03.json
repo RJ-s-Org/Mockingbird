@@ -1,0 +1,78 @@
+{
+  "batch_id": "batch-03",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {
+      "opaque_id": "f8b199025d",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "rejectedSpans \"0\" fits the 1-span request, but errorMessage \"Trace data accepted successfully.\" is filler; the spec reserves a non-empty message on full success for warnings."
+    },
+    {
+      "opaque_id": "3405027a6f",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "partialSuccess with rejectedSpans \"0\" and empty errorMessage: the spec's equivalent of full success, exactly what a real collector returns for a 1-span export."
+    },
+    {
+      "opaque_id": "618fa1c037",
+      "realism": 2,
+      "coherence": 4,
+      "rationale": "errorMessage \"...partial_success set with zero rejections per spec\" is meta-commentary about the spec, not a collector message. rejectedSpans \"0\" is consistent."
+    },
+    {
+      "opaque_id": "f1e6411e72",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Empty {} is the normal production OTLP response for full success (partialSuccess unset). Correct for this request, just minimal."
+    },
+    {
+      "opaque_id": "b12e2970bf",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "errorMessage \"All spans were accepted by the collector.\" with rejectedSpans \"0\" is plausible, but a non-empty message on full success should be a warning per spec."
+    },
+    {
+      "opaque_id": "764683313d",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "partialSuccess with rejectedSpans \"0\" and empty errorMessage: the spec's equivalent of full success, exactly what a real collector returns for a 1-span export."
+    },
+    {
+      "opaque_id": "cdd46c2c1b",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "rejectedSpans \"0\" plus a warning about span attribute limits is the spec's sanctioned warning-on-success use and fits the request's high droppedAttributesCount values."
+    },
+    {
+      "opaque_id": "b70d4d5dd5",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Empty {} matches the real full-success OTLP response; consistent with the request, minimal."
+    },
+    {
+      "opaque_id": "496c92c6c8",
+      "realism": 4,
+      "coherence": 2,
+      "rationale": "Realistic rejection message (the span is empty, so missing trace_id/span_id). But rejectedSpans \"2\" exceeds the single span submitted, which contradicts the request."
+    },
+    {
+      "opaque_id": "75e8df9b5e",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "partialSuccess with rejectedSpans \"0\" and empty errorMessage: the spec's equivalent of full success, exactly what a real collector returns for a 1-span export."
+    },
+    {
+      "opaque_id": "48c254613f",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "partialSuccess with rejectedSpans \"0\" and empty errorMessage: the spec's equivalent of full success, exactly what a real collector returns for a 1-span export."
+    },
+    {
+      "opaque_id": "8bf2013e41",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "partialSuccess with rejectedSpans \"0\" and empty errorMessage: the spec's equivalent of full success, exactly what a real collector returns for a 1-span export."
+    }
+  ]
+}

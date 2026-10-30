@@ -1,0 +1,6052 @@
+{
+  "meta": {
+    "generated_at": "2026-10-30T08:11:42+00:00",
+    "out": "/Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/2026-10-30",
+    "inputs": {
+      "run.json": {
+        "present": true
+      },
+      "roster.json": {
+        "present": true
+      },
+      "key-before.json": {
+        "present": true
+      },
+      "key-after.json": {
+        "present": true
+      },
+      "grade-summary.json": {
+        "present": true
+      },
+      "calls.jsonl": {
+        "present": true,
+        "rows": 2404,
+        "bad_lines": 0
+      },
+      "pilot/calls.jsonl": {
+        "present": true,
+        "rows": 124,
+        "bad_lines": 0
+      },
+      "superseded/calls.jsonl": {
+        "present": false,
+        "rows": null,
+        "bad_lines": 0
+      },
+      "grades.jsonl": {
+        "present": true,
+        "rows": 1944,
+        "bad_lines": 0
+      },
+      "samples.jsonl": {
+        "present": true,
+        "rows": 1944,
+        "bad_lines": 0
+      },
+      "server.jsonl": {
+        "present": true,
+        "rows": 300,
+        "bad_lines": 0
+      },
+      "judge.jsonl": {
+        "present": true,
+        "rows": 84,
+        "bad_lines": 0
+      },
+      "judge-recheck.jsonl": {
+        "present": true,
+        "rows": 24,
+        "bad_lines": 0
+      },
+      "judge-key.json": {
+        "present": true
+      }
+    },
+    "models_universe": [
+      "nvidia/nemotron-3.5-lightning",
+      "inception/mercury-3",
+      "deepseek/deepseek-v4.1-flash-1017",
+      "openai/gpt-6-luna",
+      "nvidia/nemotron-3.5-super-vl",
+      "z-ai/glm-5.3-flash",
+      "deepseek/deepseek-v4.1-flash",
+      "qwen/qwen3.8-flash",
+      "anthropic/claude-haiku-5.5",
+      "minimax/minimax-m3.1-flash",
+      "thinkingmachines/inkling-small@nojson",
+      "thinkingmachines/inkling@nojson"
+    ],
+    "samples_unattributed": 0,
+    "run": {
+      "started": "2026-10-30T07:30:45+00:00",
+      "finished": "2026-10-30T08:08:41+00:00",
+      "repeat": 3,
+      "parallel": 3,
+      "concurrency": 4,
+      "budget_usd": 9.5,
+      "manifest": "docs/benchmarks/workloads.json",
+      "aborted": false
+    },
+    "skipped": [],
+    "seed": "mb-bench-2026-10-29",
+    "judge_model": "claude-opus-5-5"
+  },
+  "baseline": {
+    "baseline_requested": "deepseek/deepseek-v4.1-flash",
+    "baseline_used": "deepseek/deepseek-v4.1-flash",
+    "baseline_note": null,
+    "baseline_raw": {
+      "Q": 0.9112142857142855,
+      "C": 0.3653142469135802,
+      "L": 3491.0
+    }
+  },
+  "scoring": {
+    "exponents": {
+      "default": [
+        2.0,
+        0.5,
+        0.5
+      ],
+      "1,1,1": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "2,0.25,1": [
+        2.0,
+        0.25,
+        1.0
+      ]
+    },
+    "weights": {
+      "S": 0.35,
+      "K": 0.25,
+      "Jn": 0.4
+    },
+    "rankings": {
+      "default": [
+        "openai/gpt-6-luna",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "nvidia/nemotron-3.5-lightning",
+        "inception/mercury-3",
+        "anthropic/claude-haiku-5.5",
+        "nvidia/nemotron-3.5-super-vl",
+        "deepseek/deepseek-v4.1-flash",
+        "minimax/minimax-m3.1-flash",
+        "z-ai/glm-5.3-flash",
+        "qwen/qwen3.8-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "thinkingmachines/inkling@nojson"
+      ],
+      "1,1,1": [
+        "nvidia/nemotron-3.5-lightning",
+        "inception/mercury-3",
+        "openai/gpt-6-luna",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "anthropic/claude-haiku-5.5",
+        "nvidia/nemotron-3.5-super-vl",
+        "deepseek/deepseek-v4.1-flash",
+        "minimax/minimax-m3.1-flash",
+        "z-ai/glm-5.3-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "qwen/qwen3.8-flash",
+        "thinkingmachines/inkling@nojson"
+      ],
+      "2,0.25,1": [
+        "inception/mercury-3",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "openai/gpt-6-luna",
+        "anthropic/claude-haiku-5.5",
+        "nvidia/nemotron-3.5-lightning",
+        "nvidia/nemotron-3.5-super-vl",
+        "minimax/minimax-m3.1-flash",
+        "deepseek/deepseek-v4.1-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "z-ai/glm-5.3-flash",
+        "thinkingmachines/inkling@nojson",
+        "qwen/qwen3.8-flash"
+      ]
+    },
+    "gates": {
+      "schema_valid_below": 0.9,
+      "error_plus_timeout_above": 0.1,
+      "judge_n_below": 5
+    }
+  },
+  "value_sensitivity": {
+    "exponents": {
+      "default": [
+        2.0,
+        0.5,
+        0.5
+      ],
+      "1,1,1": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "2,0.25,1": [
+        2.0,
+        0.25,
+        1.0
+      ]
+    },
+    "rankings": {
+      "default": [
+        "openai/gpt-6-luna",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "nvidia/nemotron-3.5-lightning",
+        "inception/mercury-3",
+        "anthropic/claude-haiku-5.5",
+        "nvidia/nemotron-3.5-super-vl",
+        "deepseek/deepseek-v4.1-flash",
+        "minimax/minimax-m3.1-flash",
+        "z-ai/glm-5.3-flash",
+        "qwen/qwen3.8-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "thinkingmachines/inkling@nojson"
+      ],
+      "1,1,1": [
+        "nvidia/nemotron-3.5-lightning",
+        "inception/mercury-3",
+        "openai/gpt-6-luna",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "anthropic/claude-haiku-5.5",
+        "nvidia/nemotron-3.5-super-vl",
+        "deepseek/deepseek-v4.1-flash",
+        "minimax/minimax-m3.1-flash",
+        "z-ai/glm-5.3-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "qwen/qwen3.8-flash",
+        "thinkingmachines/inkling@nojson"
+      ],
+      "2,0.25,1": [
+        "inception/mercury-3",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "openai/gpt-6-luna",
+        "anthropic/claude-haiku-5.5",
+        "nvidia/nemotron-3.5-lightning",
+        "nvidia/nemotron-3.5-super-vl",
+        "minimax/minimax-m3.1-flash",
+        "deepseek/deepseek-v4.1-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "z-ai/glm-5.3-flash",
+        "thinkingmachines/inkling@nojson",
+        "qwen/qwen3.8-flash"
+      ]
+    },
+    "values": {
+      "default": {
+        "nvidia/nemotron-3.5-lightning": 134.59588973235594,
+        "inception/mercury-3": 128.6223721359422,
+        "deepseek/deepseek-v4.1-flash-1017": 143.9880089980905,
+        "openai/gpt-6-luna": 160.47312633388705,
+        "nvidia/nemotron-3.5-super-vl": 102.13445495943004,
+        "z-ai/glm-5.3-flash": 79.15084066029627,
+        "deepseek/deepseek-v4.1-flash": 100.0,
+        "qwen/qwen3.8-flash": 64.83347298836684,
+        "anthropic/claude-haiku-5.5": 120.38011972312425,
+        "minimax/minimax-m3.1-flash": 88.14328240095108,
+        "thinkingmachines/inkling-small@nojson": 63.56343459710028,
+        "thinkingmachines/inkling@nojson": 32.608868680451614
+      },
+      "1,1,1": {
+        "nvidia/nemotron-3.5-lightning": 270.4619001196035,
+        "inception/mercury-3": 256.00319524140264,
+        "deepseek/deepseek-v4.1-flash-1017": 208.55999275525258,
+        "openai/gpt-6-luna": 246.0950653580205,
+        "nvidia/nemotron-3.5-super-vl": 113.07519994169343,
+        "z-ai/glm-5.3-flash": 68.63846410531828,
+        "deepseek/deepseek-v4.1-flash": 100.0,
+        "qwen/qwen3.8-flash": 49.24570029949214,
+        "anthropic/claude-haiku-5.5": 134.63201002277765,
+        "minimax/minimax-m3.1-flash": 78.43887625945965,
+        "thinkingmachines/inkling-small@nojson": 51.1887138832964,
+        "thinkingmachines/inkling@nojson": 12.875649399133193
+      },
+      "2,0.25,1": {
+        "nvidia/nemotron-3.5-lightning": 127.3575189939663,
+        "inception/mercury-3": 252.3706507784527,
+        "deepseek/deepseek-v4.1-flash-1017": 190.3265906916215,
+        "openai/gpt-6-luna": 157.68225538470568,
+        "nvidia/nemotron-3.5-super-vl": 126.41907130564113,
+        "z-ai/glm-5.3-flash": 72.40840688631927,
+        "deepseek/deepseek-v4.1-flash": 100.0,
+        "qwen/qwen3.8-flash": 41.44497326731805,
+        "anthropic/claude-haiku-5.5": 156.79824143593802,
+        "minimax/minimax-m3.1-flash": 114.38484733203695,
+        "thinkingmachines/inkling-small@nojson": 92.00454600242314,
+        "thinkingmachines/inkling@nojson": 46.617634731873125
+      }
+    }
+  },
+  "judge": {
+    "judge_model": "claude-opus-5-5",
+    "seed": "mb-bench-2026-10-29",
+    "order_check_mad": 0.0625,
+    "order_check_pairs": 24,
+    "order_check_noisy": false,
+    "plan": {
+      "seed": "mb-bench-2026-10-29",
+      "models": [
+        "anthropic/claude-haiku-5.5",
+        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash-1017",
+        "inception/mercury-3",
+        "minimax/minimax-m3.1-flash",
+        "nvidia/nemotron-3.5-lightning",
+        "nvidia/nemotron-3.5-super-vl",
+        "openai/gpt-6-luna",
+        "qwen/qwen3.8-flash",
+        "thinkingmachines/inkling-small@nojson",
+        "thinkingmachines/inkling@nojson",
+        "z-ai/glm-5.3-flash"
+      ],
+      "targets": [
+        {
+          "stratum": "api_type:rest",
+          "contract": "rest/travel-booking",
+          "target": "createBooking",
+          "api_type": "rest",
+          "domain": "travel",
+          "rep": 0
+        },
+        {
+          "stratum": "api_type:graphql",
+          "contract": "graphql/ecommerce-shopify-admin",
+          "target": "Query.shop",
+          "api_type": "graphql",
+          "domain": "ecommerce",
+          "rep": 0
+        },
+        {
+          "stratum": "api_type:grpc",
+          "contract": "grpc/otlp-trace-service",
+          "target": "TraceService.Export",
+          "api_type": "grpc",
+          "domain": "devtools",
+          "rep": 0
+        },
+        {
+          "stratum": "api_type:soap",
+          "contract": "soap/accounts-rpc",
+          "target": "GetAccount",
+          "api_type": "soap",
+          "domain": "generic",
+          "rep": 0
+        },
+        {
+          "stratum": "api_type:asyncapi",
+          "contract": "asyncapi/orders-amqp-2.6",
+          "target": "orderCreated",
+          "api_type": "asyncapi",
+          "domain": "ecommerce",
+          "rep": 0
+        },
+        {
+          "stratum": "domain:travel",
+          "contract": "rest/travel-booking",
+          "target": "getBooking",
+          "api_type": "rest",
+          "domain": "travel",
+          "rep": 0
+        },
+        {
+          "stratum": "domain:payments",
+          "contract": "rest/payments-stripe",
+          "target": "PostRefunds",
+          "api_type": "rest",
+          "domain": "payments",
+          "rep": 0
+        }
+      ],
+      "strata_skipped": [],
+      "items": 84,
+      "candidates": 54
+    },
+    "key_check": {
+      "key_items": 84,
+      "planned_items": 84,
+      "missing_from_key": 0,
+      "extra_in_key": 0,
+      "opaque_id_mismatch": 0
+    },
+    "items_judged": 82
+  },
+  "leaderboard": [
+    {
+      "model": "openai/gpt-6-luna",
+      "rank_value": 1,
+      "value": 160.47312633388705,
+      "gated": null,
+      "rank_quality": 2,
+      "Q": 0.9250980392156862,
+      "S": 0.9764705882352941,
+      "K": 1.0,
+      "Jn": 0.8333333333333333,
+      "C_usd_per_1k": 0.19776533950617284,
+      "L_p50_ms": 2660.3,
+      "schema_valid": 1.0,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 160.47312633388705,
+      "judge_n": 6,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "rank_value": 2,
+      "value": 143.9880089980905,
+      "gated": null,
+      "rank_quality": 4,
+      "Q": 0.9094128151260503,
+      "S": 0.9248529411764707,
+      "K": 1.0,
+      "Jn": 0.8392857142857142,
+      "C_usd_per_1k": 0.32421803037037034,
+      "L_p50_ms": 1882.3,
+      "schema_valid": 0.9980392156862745,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 143.9880089980905,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "rank_value": 3,
+      "value": 134.59588973235594,
+      "gated": null,
+      "rank_quality": 11,
+      "Q": 0.7972717086834734,
+      "S": 0.7976470588235294,
+      "K": 0.9866666666666667,
+      "Jn": 0.6785714285714286,
+      "C_usd_per_1k": 0.15992271666666666,
+      "L_p50_ms": 2579.8,
+      "schema_valid": 0.9308823529411765,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 134.59588973235594,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": false,
+      "recommendable": false
+    },
+    {
+      "model": "inception/mercury-3",
+      "rank_value": 4,
+      "value": 128.6223721359422,
+      "gated": null,
+      "rank_quality": 12,
+      "Q": 0.7878007703081232,
+      "S": 0.8426960784313725,
+      "K": 1.0,
+      "Jn": 0.6071428571428571,
+      "C_usd_per_1k": 0.4351744444444445,
+      "L_p50_ms": 989.7,
+      "schema_valid": 0.9754901960784312,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 128.6223721359422,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": false,
+      "recommendable": false
+    },
+    {
+      "model": "anthropic/claude-haiku-5.5",
+      "rank_value": 5,
+      "value": 120.38011972312425,
+      "gated": null,
+      "rank_quality": 1,
+      "Q": 0.933843837535014,
+      "S": 0.9334313725490195,
+      "K": 1.0,
+      "Jn": 0.8928571428571428,
+      "C_usd_per_1k": 0.43323024691358025,
+      "L_p50_ms": 2240.8,
+      "schema_valid": 0.9980392156862745,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 120.38011972312425,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "nvidia/nemotron-3.5-super-vl",
+      "rank_value": 6,
+      "value": 102.13445495943004,
+      "gated": null,
+      "rank_quality": 6,
+      "Q": 0.8870462184873948,
+      "S": 0.9017647058823529,
+      "K": 1.0,
+      "Jn": 0.8035714285714286,
+      "C_usd_per_1k": 0.4393654938271605,
+      "L_p50_ms": 2498.9,
+      "schema_valid": 0.9921568627450981,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 102.13445495943004,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "rank_value": 7,
+      "value": 100.0,
+      "gated": null,
+      "rank_quality": 3,
+      "Q": 0.9112142857142855,
+      "S": 0.9299999999999999,
+      "K": 1.0,
+      "Jn": 0.8392857142857142,
+      "C_usd_per_1k": 0.3653142469135802,
+      "L_p50_ms": 3491.0,
+      "schema_valid": 0.996078431372549,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 100.0,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "minimax/minimax-m3.1-flash",
+      "rank_value": 8,
+      "value": 88.14328240095108,
+      "gated": null,
+      "rank_quality": 5,
+      "Q": 0.9083144257703082,
+      "S": 0.8604901960784312,
+      "K": 1.0,
+      "Jn": 0.8928571428571428,
+      "C_usd_per_1k": 0.6066830555555555,
+      "L_p50_ms": 2671.4,
+      "schema_valid": 0.9588235294117646,
+      "error_plus_timeout": 0.010867675186924013,
+      "value_ungated": 88.14328240095108,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "rank_value": 9,
+      "value": 79.15084066029627,
+      "gated": null,
+      "rank_quality": 7,
+      "Q": 0.8838970588235293,
+      "S": 0.9063725490196078,
+      "K": 1.0,
+      "Jn": 0.7916666666666667,
+      "C_usd_per_1k": 0.40855791790123464,
+      "L_p50_ms": 4411.4,
+      "schema_valid": 0.9980392156862745,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 79.15084066029627,
+      "judge_n": 6,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "qwen/qwen3.8-flash",
+      "rank_value": 10,
+      "value": 64.83347298836684,
+      "gated": null,
+      "rank_quality": 8,
+      "Q": 0.8643651960784313,
+      "S": 0.8981862745098039,
+      "K": 1.0,
+      "Jn": 0.75,
+      "C_usd_per_1k": 0.31143613580246915,
+      "L_p50_ms": 7887.8,
+      "schema_valid": 1.0,
+      "error_plus_timeout": 0.016129032258064516,
+      "value_ungated": 64.83347298836684,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "thinkingmachines/inkling-small@nojson",
+      "rank_value": 11,
+      "value": 63.56343459710028,
+      "gated": null,
+      "rank_quality": 10,
+      "Q": 0.8421071428571429,
+      "S": 0.855,
+      "K": 1.0,
+      "Jn": 0.7321428571428571,
+      "C_usd_per_1k": 0.8868515432098766,
+      "L_p50_ms": 2596.2,
+      "schema_valid": 0.9745098039215687,
+      "error_plus_timeout": 0.0,
+      "value_ungated": 63.56343459710028,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    },
+    {
+      "model": "thinkingmachines/inkling@nojson",
+      "rank_value": 12,
+      "value": 32.608868680451614,
+      "gated": null,
+      "rank_quality": 9,
+      "Q": 0.8549117647058824,
+      "S": 0.8711764705882353,
+      "K": 1.0,
+      "Jn": 0.75,
+      "C_usd_per_1k": 2.2112628395061726,
+      "L_p50_ms": 4202.5,
+      "schema_valid": 0.9921568627450981,
+      "error_plus_timeout": 0.014925373134328358,
+      "value_ungated": 32.608868680451614,
+      "judge_n": 7,
+      "engine_n": 162,
+      "within_10pct_best_q": true,
+      "recommendable": true
+    }
+  ],
+  "models": {
+    "nvidia/nemotron-3.5-lightning": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.37037037037037035,
+        "schema_valid": 0.8827160493827161,
+        "patch": 0.30864197530864196,
+        "repair": 0.2037037037037037,
+        "fallback": 0.11728395061728394,
+        "conformance": 0.993006993006993,
+        "conformance_n": 143,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 2846.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "non_json": 1,
+          "schema": 18
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.6644117647058824,
+          "schema_valid": 0.9308823529411765,
+          "conformance": 0.9866666666666667,
+          "apis": 5
+        },
+        "S": 0.7976470588235294,
+        "conformance_keywords": {
+          "format": {
+            "checked": 233,
+            "passed": 229,
+            "pass_rate": 0.9828326180257511
+          },
+          "enum": {
+            "checked": 781,
+            "passed": 781,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 1775,
+            "passed": 1775,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.14705882352941177,
+            "schema_valid": 0.8627450980392157,
+            "patch": 0.45098039215686275,
+            "repair": 0.2647058823529412,
+            "fallback": 0.13725490196078433,
+            "conformance": 1.0,
+            "conformance_n": 88,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3675.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.7083333333333334,
+            "schema_valid": 0.7916666666666666,
+            "patch": 0.0,
+            "repair": 0.08333333333333333,
+            "fallback": 0.20833333333333334,
+            "conformance": 1.0,
+            "conformance_n": 19,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2846.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 542.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 693.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.4666666666666667,
+            "schema_valid": 1.0,
+            "patch": 0.26666666666666666,
+            "repair": 0.26666666666666666,
+            "fallback": 0.0,
+            "conformance": 0.9333333333333333,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1882.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.4444444444444444,
+            "schema_valid": 0.8518518518518519,
+            "patch": 0.2962962962962963,
+            "repair": 0.1111111111111111,
+            "fallback": 0.14814814814814814,
+            "conformance": 1.0,
+            "conformance_n": 23,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3205.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.5416666666666666,
+            "schema_valid": 0.9583333333333334,
+            "patch": 0.2916666666666667,
+            "repair": 0.125,
+            "fallback": 0.041666666666666664,
+            "conformance": 0.9782608695652174,
+            "conformance_n": 46,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1933.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 671.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.0,
+            "schema_valid": 0.8571428571428571,
+            "patch": 0.42857142857142855,
+            "repair": 0.42857142857142855,
+            "fallback": 0.14285714285714285,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3135.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.03333333333333333,
+            "schema_valid": 0.9,
+            "patch": 0.6,
+            "repair": 0.26666666666666666,
+            "fallback": 0.1,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4189.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.16666666666666666,
+            "schema_valid": 0.6111111111111112,
+            "patch": 0.05555555555555555,
+            "repair": 0.3888888888888889,
+            "fallback": 0.3888888888888889,
+            "conformance": 1.0,
+            "conformance_n": 11,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5600.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 6,
+        "judge_auto": 1,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.142857142857143,
+        "coherence": 4.285714285714286,
+        "J": 3.7142857142857144,
+        "Jn": 0.6785714285714286,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.7222222222222222,
+          "field_agreement": 0.7076923076923077,
+          "fields_checked": 65,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 413.4,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 0.75,
+          "recall_macro": 0.75,
+          "recall_micro": 0.6923076923076923,
+          "precision_macro": 0.75,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 11631.125,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 4153.6,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3.7,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 4,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 16419.9,
+              "warnings": null
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 25947.3,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 238,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 235
+        },
+        "providers": {
+          "Io Net": {
+            "calls": 111,
+            "share": 0.46638655462184875
+          },
+          "CoreWeave": {
+            "calls": 72,
+            "share": 0.3025210084033613
+          },
+          "Darkbloom": {
+            "calls": 48,
+            "share": 0.20168067226890757
+          },
+          "DeepInfra": {
+            "calls": 7,
+            "share": 0.029411764705882353
+          }
+        },
+        "providers_n": 238
+      },
+      "latency": {
+        "engine": {
+          "n": 214,
+          "ttft_p50_ms": 469.1,
+          "ttft_p95_ms": 986.3,
+          "ttft_n": 214,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2579.8,
+          "e2e_p95_ms": 6305.2
+        },
+        "all": {
+          "n": 238,
+          "ttft_p50_ms": 469.1,
+          "ttft_p95_ms": 975.1,
+          "ttft_n": 238,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2583.7,
+          "e2e_p95_ms": 6921.3
+        },
+        "tok_s_engine_median": 163.4123131704078,
+        "tok_s_engine_n": 208,
+        "tok_s_all_median": 165.25931851519198,
+        "tok_s_all_n": 232,
+        "L": 2579.8
+      },
+      "cost": {
+        "n": 238,
+        "actual_usd_usage": 0.0324399665,
+        "total_usd_all_workloads": 0.0324399665,
+        "engine_usd": 0.0259074801,
+        "engine_calls": 214,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.02590748,
+          "consistency": 0.00472052,
+          "sse": 0.00013719,
+          "import": 0.00167477
+        },
+        "prompt_tokens_per_call": 1258.1682242990655,
+        "completion_tokens_per_call": 411.6682242990654,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 214,
+        "C": 0.15992271666666666
+      },
+      "ledger_rows": 238,
+      "quality": {
+        "S": 0.7976470588235294,
+        "K": 0.9866666666666667,
+        "Jn": 0.6785714285714286,
+        "Q": 0.7972717086834734
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 134.59588973235594,
+      "value_sensitivity": {
+        "default": 134.59588973235594,
+        "1,1,1": 270.4619001196035,
+        "2,0.25,1": 127.3575189939663
+      },
+      "value_ungated": 134.59588973235594,
+      "rank_quality": 11,
+      "within_10pct_best_q": false,
+      "recommendable": false,
+      "rank_value": 3,
+      "value_rank_sensitivity": {
+        "default": 3,
+        "1,1,1": 1,
+        "2,0.25,1": 5
+      }
+    },
+    "inception/mercury-3": {
+      "model": "inception/mercury-3",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.4691358024691358,
+        "schema_valid": 0.9629629629629629,
+        "patch": 0.4567901234567901,
+        "repair": 0.037037037037037035,
+        "fallback": 0.037037037037037035,
+        "conformance": 1.0,
+        "conformance_n": 156,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 996.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 2,
+        "fallback_causes": {
+          "schema": 4,
+          "truncated": 2
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.7099019607843138,
+          "schema_valid": 0.9754901960784312,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.8426960784313725,
+        "conformance_keywords": {
+          "format": {
+            "checked": 419,
+            "passed": 416,
+            "pass_rate": 0.9928400954653938
+          },
+          "enum": {
+            "checked": 1397,
+            "passed": 1397,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2874,
+            "passed": 2874,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.27450980392156865,
+            "schema_valid": 0.9607843137254902,
+            "patch": 0.6372549019607843,
+            "repair": 0.049019607843137254,
+            "fallback": 0.0392156862745098,
+            "conformance": 1.0,
+            "conformance_n": 98,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1228.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.875,
+            "schema_valid": 0.9166666666666666,
+            "patch": 0.0,
+            "repair": 0.041666666666666664,
+            "fallback": 0.08333333333333333,
+            "conformance": 1.0,
+            "conformance_n": 22,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 990.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 515.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 440.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.4,
+            "schema_valid": 1.0,
+            "patch": 0.6,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 653.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5185185185185185,
+            "schema_valid": 0.9629629629629629,
+            "patch": 0.37037037037037035,
+            "repair": 0.07407407407407407,
+            "fallback": 0.037037037037037035,
+            "conformance": 1.0,
+            "conformance_n": 26,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1052.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.6041666666666666,
+            "schema_valid": 0.9791666666666666,
+            "patch": 0.375,
+            "repair": 0.0,
+            "fallback": 0.020833333333333332,
+            "conformance": 1.0,
+            "conformance_n": 47,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 780.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 440.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.047619047619047616,
+            "schema_valid": 0.9523809523809523,
+            "patch": 0.9047619047619048,
+            "repair": 0.0,
+            "fallback": 0.047619047619047616,
+            "conformance": 1.0,
+            "conformance_n": 20,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 861.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.0,
+            "schema_valid": 0.9,
+            "patch": 0.8666666666666667,
+            "repair": 0.03333333333333333,
+            "fallback": 0.1,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1326.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.7777777777777778,
+            "schema_valid": 1.0,
+            "patch": 0.05555555555555555,
+            "repair": 0.16666666666666666,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1305.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.2857142857142856,
+        "coherence": 3.5714285714285716,
+        "J": 3.4285714285714284,
+        "Jn": 0.6071428571428571,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.7777777777777778,
+          "field_agreement": 0.7530864197530864,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 0.6666666666666666
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 409.1,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 1.0,
+          "recall_micro": 1.0,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 2052.95,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 1198.7,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3.0,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3461.9,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3548.2,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 199,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 196
+        },
+        "providers": {
+          "Inception": {
+            "calls": 199,
+            "share": 1.0
+          }
+        },
+        "providers_n": 199
+      },
+      "latency": {
+        "engine": {
+          "n": 174,
+          "ttft_p50_ms": 525.9,
+          "ttft_p95_ms": 1173.5,
+          "ttft_n": 174,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 989.7,
+          "e2e_p95_ms": 10552.8
+        },
+        "all": {
+          "n": 199,
+          "ttft_p50_ms": 528.7,
+          "ttft_p95_ms": 1166.3,
+          "ttft_n": 199,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 1025.8,
+          "e2e_p95_ms": 15215.1
+        },
+        "tok_s_engine_median": 863.7609915847881,
+        "tok_s_engine_n": 138,
+        "tok_s_all_median": 853.6441079034548,
+        "tok_s_all_n": 159,
+        "L": 989.7
+      },
+      "cost": {
+        "n": 199,
+        "actual_usd_usage": 0.09762525,
+        "total_usd_all_workloads": 0.09762525,
+        "engine_usd": 0.07049826000000001,
+        "engine_calls": 174,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.07049826,
+          "consistency": 0.02462485,
+          "sse": 0.00018904,
+          "import": 0.0023131
+        },
+        "prompt_tokens_per_call": 1343.287356321839,
+        "completion_tokens_per_call": 882.0114942528736,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 174,
+        "C": 0.4351744444444445
+      },
+      "ledger_rows": 199,
+      "quality": {
+        "S": 0.8426960784313725,
+        "K": 1.0,
+        "Jn": 0.6071428571428571,
+        "Q": 0.7878007703081232
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 128.6223721359422,
+      "value_sensitivity": {
+        "default": 128.6223721359422,
+        "1,1,1": 256.00319524140264,
+        "2,0.25,1": 252.3706507784527
+      },
+      "value_ungated": 128.6223721359422,
+      "rank_quality": 12,
+      "within_10pct_best_q": false,
+      "recommendable": false,
+      "rank_value": 4,
+      "value_rank_sensitivity": {
+        "default": 4,
+        "1,1,1": 2,
+        "2,0.25,1": 1
+      }
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.6604938271604939,
+        "schema_valid": 0.9938271604938271,
+        "patch": 0.3148148148148148,
+        "repair": 0.018518518518518517,
+        "fallback": 0.006172839506172839,
+        "conformance": 1.0,
+        "conformance_n": 161,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 1883.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "schema": 1
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.8516666666666668,
+          "schema_valid": 0.9980392156862745,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.9248529411764707,
+        "conformance_keywords": {
+          "format": {
+            "checked": 463,
+            "passed": 460,
+            "pass_rate": 0.9935205183585313
+          },
+          "enum": {
+            "checked": 1532,
+            "passed": 1532,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 3222,
+            "passed": 3222,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.5,
+            "schema_valid": 0.9901960784313726,
+            "patch": 0.47058823529411764,
+            "repair": 0.0196078431372549,
+            "fallback": 0.00980392156862745,
+            "conformance": 1.0,
+            "conformance_n": 101,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2578.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.9583333333333334,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.041666666666666664,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2418.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 349.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 542.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.8,
+            "schema_valid": 1.0,
+            "patch": 0.2,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1530.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5555555555555556,
+            "schema_valid": 0.9629629629629629,
+            "patch": 0.37037037037037035,
+            "repair": 0.037037037037037035,
+            "fallback": 0.037037037037037035,
+            "conformance": 1.0,
+            "conformance_n": 26,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2987.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.7916666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.1875,
+            "repair": 0.020833333333333332,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1607.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 491.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.2857142857142857,
+            "schema_valid": 1.0,
+            "patch": 0.7142857142857143,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1325.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.4,
+            "schema_valid": 1.0,
+            "patch": 0.5666666666666667,
+            "repair": 0.03333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 30,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3535.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2912.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.7142857142857144,
+        "coherence": 5.0,
+        "J": 4.357142857142857,
+        "Jn": 0.8392857142857142,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 1.0,
+          "field_agreement": 0.9382716049382716,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 858.4,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 1.0,
+          "recall_micro": 1.0,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 5224.4,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 1590.3,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 2.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 4756.0,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 14548.5,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 188,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 185
+        },
+        "providers": {
+          "Wafer": {
+            "calls": 57,
+            "share": 0.30319148936170215
+          },
+          "InferenceNet": {
+            "calls": 37,
+            "share": 0.19680851063829788
+          },
+          "Cohere": {
+            "calls": 16,
+            "share": 0.0851063829787234
+          },
+          "DigitalOcean": {
+            "calls": 15,
+            "share": 0.0797872340425532
+          },
+          "Morph": {
+            "calls": 14,
+            "share": 0.07446808510638298
+          },
+          "Ionstream": {
+            "calls": 13,
+            "share": 0.06914893617021277
+          },
+          "Decart": {
+            "calls": 10,
+            "share": 0.05319148936170213
+          },
+          "ModelRun": {
+            "calls": 7,
+            "share": 0.03723404255319149
+          },
+          "Cloudflare": {
+            "calls": 4,
+            "share": 0.02127659574468085
+          },
+          "StreamLake": {
+            "calls": 4,
+            "share": 0.02127659574468085
+          },
+          "GMICloud": {
+            "calls": 3,
+            "share": 0.015957446808510637
+          },
+          "Sail Research": {
+            "calls": 3,
+            "share": 0.015957446808510637
+          },
+          "Particle AI": {
+            "calls": 2,
+            "share": 0.010638297872340425
+          },
+          "AtlasCloud": {
+            "calls": 1,
+            "share": 0.005319148936170213
+          },
+          "Crusoe": {
+            "calls": 1,
+            "share": 0.005319148936170213
+          },
+          "Fireworks": {
+            "calls": 1,
+            "share": 0.005319148936170213
+          }
+        },
+        "providers_n": 188
+      },
+      "latency": {
+        "engine": {
+          "n": 166,
+          "ttft_p50_ms": 383.1,
+          "ttft_p95_ms": 1591.2,
+          "ttft_n": 166,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 1882.3,
+          "e2e_p95_ms": 7237.3
+        },
+        "all": {
+          "n": 188,
+          "ttft_p50_ms": 384.9,
+          "ttft_p95_ms": 1591.2,
+          "ttft_n": 188,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 1945.1,
+          "e2e_p95_ms": 7470.0
+        },
+        "tok_s_engine_median": 207.3617421588839,
+        "tok_s_engine_n": 157,
+        "tok_s_all_median": 208.97733949876093,
+        "tok_s_all_n": 179,
+        "L": 1882.3
+      },
+      "cost": {
+        "n": 188,
+        "actual_usd_usage": 0.06333898492,
+        "total_usd_all_workloads": 0.06333898492,
+        "engine_usd": 0.05252332092,
+        "engine_calls": 166,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.05252332,
+          "consistency": 0.00671109,
+          "sse": 0.00038427,
+          "import": 0.0037203
+        },
+        "prompt_tokens_per_call": 989.8915662650602,
+        "completion_tokens_per_call": 420.50602409638554,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 166,
+        "C": 0.32421803037037034
+      },
+      "ledger_rows": 188,
+      "quality": {
+        "S": 0.9248529411764707,
+        "K": 1.0,
+        "Jn": 0.8392857142857142,
+        "Q": 0.9094128151260503
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 143.9880089980905,
+      "value_sensitivity": {
+        "default": 143.9880089980905,
+        "1,1,1": 208.55999275525258,
+        "2,0.25,1": 190.3265906916215
+      },
+      "value_ungated": 143.9880089980905,
+      "rank_quality": 4,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 2,
+      "value_rank_sensitivity": {
+        "default": 2,
+        "1,1,1": 4,
+        "2,0.25,1": 2
+      }
+    },
+    "openai/gpt-6-luna": {
+      "model": "openai/gpt-6-luna",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.8518518518518519,
+        "schema_valid": 1.0,
+        "patch": 0.1419753086419753,
+        "repair": 0.006172839506172839,
+        "fallback": 0.0,
+        "conformance": 1.0,
+        "conformance_n": 162,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 2668.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {},
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.9529411764705882,
+          "schema_valid": 1.0,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.9764705882352941,
+        "conformance_keywords": {
+          "format": {
+            "checked": 283,
+            "passed": 280,
+            "pass_rate": 0.9893992932862191
+          },
+          "enum": {
+            "checked": 1025,
+            "passed": 1025,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2013,
+            "passed": 2013,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.7647058823529411,
+            "schema_valid": 1.0,
+            "patch": 0.22549019607843138,
+            "repair": 0.00980392156862745,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 102,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3276.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3898.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1123.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1339.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2443.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.8888888888888888,
+            "schema_valid": 1.0,
+            "patch": 0.1111111111111111,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4200.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.9791666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.020833333333333332,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2402.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1339.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.7142857142857143,
+            "schema_valid": 1.0,
+            "patch": 0.2857142857142857,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3161.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.5333333333333333,
+            "schema_valid": 1.0,
+            "patch": 0.43333333333333335,
+            "repair": 0.03333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 30,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4434.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1904.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 6,
+        "judge_n": 6,
+        "judge_scored_n": 6,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 1,
+        "realism": 4.0,
+        "coherence": 4.666666666666667,
+        "J": 4.333333333333333,
+        "Jn": 0.8333333333333333,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.8888888888888888,
+          "field_agreement": 0.8395061728395061,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 874.5,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 1.0,
+          "recall_micro": 1.0,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 9155.75,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 7852.1,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 4.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 10397.4,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 18368.7,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 185,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 2,
+        "refusal_rate": 0.010810810810810811,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {
+          "refusal": 2
+        },
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 182
+        },
+        "providers": {
+          "OpenAI": {
+            "calls": 185,
+            "share": 1.0
+          }
+        },
+        "providers_n": 185
+      },
+      "latency": {
+        "engine": {
+          "n": 163,
+          "ttft_p50_ms": 944.8,
+          "ttft_p95_ms": 1774.3,
+          "ttft_n": 163,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2660.3,
+          "e2e_p95_ms": 7238.7
+        },
+        "all": {
+          "n": 183,
+          "ttft_p50_ms": 953.8,
+          "ttft_p95_ms": 1774.3,
+          "ttft_n": 183,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2833.2,
+          "e2e_p95_ms": 9586.9
+        },
+        "tok_s_engine_median": 110.52072263549417,
+        "tok_s_engine_n": 147,
+        "tok_s_all_median": 111.80267404333796,
+        "tok_s_all_n": 167,
+        "L": 2660.3
+      },
+      "cost": {
+        "n": 185,
+        "actual_usd_usage": 0.040992574999999996,
+        "total_usd_all_workloads": 0.040992574999999996,
+        "engine_usd": 0.032037985,
+        "engine_calls": 163,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.03203799,
+          "consistency": 0.00572924,
+          "sse": 0.0002218,
+          "import": 0.00300355
+        },
+        "prompt_tokens_per_call": 906.8159509202454,
+        "completion_tokens_per_call": 254.19631901840492,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 163,
+        "C": 0.19776533950617284
+      },
+      "ledger_rows": 185,
+      "quality": {
+        "S": 0.9764705882352941,
+        "K": 1.0,
+        "Jn": 0.8333333333333333,
+        "Q": 0.9250980392156862
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 160.47312633388705,
+      "value_sensitivity": {
+        "default": 160.47312633388705,
+        "1,1,1": 246.0950653580205,
+        "2,0.25,1": 157.68225538470568
+      },
+      "value_ungated": 160.47312633388705,
+      "rank_quality": 2,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 1,
+      "value_rank_sensitivity": {
+        "default": 1,
+        "1,1,1": 3,
+        "2,0.25,1": 3
+      }
+    },
+    "nvidia/nemotron-3.5-super-vl": {
+      "model": "nvidia/nemotron-3.5-super-vl",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.5493827160493827,
+        "schema_valid": 0.9753086419753086,
+        "patch": 0.3765432098765432,
+        "repair": 0.04938271604938271,
+        "fallback": 0.024691358024691357,
+        "conformance": 1.0,
+        "conformance_n": 158,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 2780.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "schema": 4
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.8113725490196078,
+          "schema_valid": 0.9921568627450981,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.9017647058823529,
+        "conformance_keywords": {
+          "format": {
+            "checked": 454,
+            "passed": 451,
+            "pass_rate": 0.9933920704845814
+          },
+          "enum": {
+            "checked": 1471,
+            "passed": 1471,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 3157,
+            "passed": 3157,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.3235294117647059,
+            "schema_valid": 0.9607843137254902,
+            "patch": 0.5588235294117647,
+            "repair": 0.0784313725490196,
+            "fallback": 0.0392156862745098,
+            "conformance": 1.0,
+            "conformance_n": 98,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3374.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2499.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 531.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 952.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.7333333333333333,
+            "schema_valid": 1.0,
+            "patch": 0.26666666666666666,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1243.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5555555555555556,
+            "schema_valid": 1.0,
+            "patch": 0.4444444444444444,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2937.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.7291666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.2708333333333333,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1854.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 952.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.14285714285714285,
+            "schema_valid": 0.9523809523809523,
+            "patch": 0.7619047619047619,
+            "repair": 0.047619047619047616,
+            "fallback": 0.047619047619047616,
+            "conformance": 1.0,
+            "conformance_n": 20,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3250.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.1,
+            "schema_valid": 0.9,
+            "patch": 0.6333333333333333,
+            "repair": 0.16666666666666666,
+            "fallback": 0.1,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 9039.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.8333333333333334,
+            "schema_valid": 1.0,
+            "patch": 0.05555555555555555,
+            "repair": 0.1111111111111111,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3217.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.5714285714285716,
+        "coherence": 4.857142857142857,
+        "J": 4.214285714285714,
+        "Jn": 0.8035714285714286,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.8333333333333334,
+          "field_agreement": 0.7407407407407407,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 1249.9,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 0.9375,
+          "recall_micro": 0.9230769230769231,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 8310.35,
+          "warnings_mean": 0.25,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 8325.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 0.75,
+              "precision": 1.0,
+              "duration_ms": 17335.5,
+              "warnings": 1.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 7576.3,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 199,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 196
+        },
+        "providers": {
+          "Crusoe": {
+            "calls": 65,
+            "share": 0.32663316582914576
+          },
+          "Darkbloom": {
+            "calls": 47,
+            "share": 0.23618090452261306
+          },
+          "DeepInfra": {
+            "calls": 25,
+            "share": 0.12562814070351758
+          },
+          "Together": {
+            "calls": 22,
+            "share": 0.11055276381909548
+          },
+          "CoreWeave": {
+            "calls": 21,
+            "share": 0.10552763819095477
+          },
+          "Venice": {
+            "calls": 19,
+            "share": 0.09547738693467336
+          }
+        },
+        "providers_n": 199
+      },
+      "latency": {
+        "engine": {
+          "n": 174,
+          "ttft_p50_ms": 597.5,
+          "ttft_p95_ms": 11298.6,
+          "ttft_n": 174,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2498.9,
+          "e2e_p95_ms": 14008.9
+        },
+        "all": {
+          "n": 199,
+          "ttft_p50_ms": 662.6,
+          "ttft_p95_ms": 11300.9,
+          "ttft_n": 199,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2540.7,
+          "e2e_p95_ms": 14765.5
+        },
+        "tok_s_engine_median": 432.7040587395472,
+        "tok_s_engine_n": 164,
+        "tok_s_all_median": 433.40811747909436,
+        "tok_s_all_n": 189,
+        "L": 2498.9
+      },
+      "cost": {
+        "n": 199,
+        "actual_usd_usage": 0.0852803,
+        "total_usd_all_workloads": 0.0852803,
+        "engine_usd": 0.07117721,
+        "engine_calls": 174,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.07117721,
+          "consistency": 0.0095568,
+          "sse": 0.00018511,
+          "import": 0.00436118
+        },
+        "prompt_tokens_per_call": 1161.2816091954023,
+        "completion_tokens_per_call": 573.5229885057471,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 174,
+        "C": 0.4393654938271605
+      },
+      "ledger_rows": 199,
+      "quality": {
+        "S": 0.9017647058823529,
+        "K": 1.0,
+        "Jn": 0.8035714285714286,
+        "Q": 0.8870462184873948
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 102.13445495943004,
+      "value_sensitivity": {
+        "default": 102.13445495943004,
+        "1,1,1": 113.07519994169343,
+        "2,0.25,1": 126.41907130564113
+      },
+      "value_ungated": 102.13445495943004,
+      "rank_quality": 6,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 6,
+      "value_rank_sensitivity": {
+        "default": 6,
+        "1,1,1": 6,
+        "2,0.25,1": 6
+      }
+    },
+    "z-ai/glm-5.3-flash": {
+      "model": "z-ai/glm-5.3-flash",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.6358024691358025,
+        "schema_valid": 0.9938271604938271,
+        "patch": 0.24691358024691357,
+        "repair": 0.1111111111111111,
+        "fallback": 0.006172839506172839,
+        "conformance": 1.0,
+        "conformance_n": 161,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 4414.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "schema": 1
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.8147058823529412,
+          "schema_valid": 0.9980392156862745,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.9063725490196078,
+        "conformance_keywords": {
+          "format": {
+            "checked": 445,
+            "passed": 442,
+            "pass_rate": 0.9932584269662922
+          },
+          "enum": {
+            "checked": 1544,
+            "passed": 1544,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 3097,
+            "passed": 3097,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.49019607843137253,
+            "schema_valid": 0.9901960784313726,
+            "patch": 0.3627450980392157,
+            "repair": 0.13725490196078433,
+            "fallback": 0.00980392156862745,
+            "conformance": 1.0,
+            "conformance_n": 101,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 6156.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.9166666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.08333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4004.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1917.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1193.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.6666666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.2,
+            "repair": 0.13333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1900.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.6666666666666666,
+            "schema_valid": 0.9629629629629629,
+            "patch": 0.14814814814814814,
+            "repair": 0.14814814814814814,
+            "fallback": 0.037037037037037035,
+            "conformance": 1.0,
+            "conformance_n": 26,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5704.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.7291666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.1875,
+            "repair": 0.08333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2814.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1193.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.47619047619047616,
+            "schema_valid": 1.0,
+            "patch": 0.42857142857142855,
+            "repair": 0.09523809523809523,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4943.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.43333333333333335,
+            "schema_valid": 1.0,
+            "patch": 0.4666666666666667,
+            "repair": 0.1,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 30,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 7710.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.5,
+            "schema_valid": 1.0,
+            "patch": 0.2222222222222222,
+            "repair": 0.2777777777777778,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 7455.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 6,
+        "judge_n": 6,
+        "judge_scored_n": 6,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 1,
+        "realism": 3.8333333333333335,
+        "coherence": 4.5,
+        "J": 4.166666666666667,
+        "Jn": 0.7916666666666667,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.8333333333333334,
+          "field_agreement": 0.7777777777777778,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 2669.2,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 1.0,
+          "recall_micro": 1.0,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 5091.049999999999,
+          "warnings_mean": 3.75,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3464.2,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3.3,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 8445.3,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 8451.4,
+              "warnings": 15.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 202,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 4,
+        "retry_rate": 0.019801980198019802,
+        "error_kinds": {},
+        "reasoning_rejected": true,
+        "reasoning_rejected_calls": 202,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 199
+        },
+        "providers": {
+          "Wafer": {
+            "calls": 84,
+            "share": 0.4158415841584158
+          },
+          "OpenInference": {
+            "calls": 59,
+            "share": 0.29207920792079206
+          },
+          "InferenceNet": {
+            "calls": 17,
+            "share": 0.08415841584158416
+          },
+          "Particle AI": {
+            "calls": 11,
+            "share": 0.054455445544554455
+          },
+          "Cohere": {
+            "calls": 6,
+            "share": 0.0297029702970297
+          },
+          "Reka": {
+            "calls": 5,
+            "share": 0.024752475247524754
+          },
+          "DigitalOcean": {
+            "calls": 4,
+            "share": 0.019801980198019802
+          },
+          "CoreWeave": {
+            "calls": 3,
+            "share": 0.01485148514851485
+          },
+          "Venice": {
+            "calls": 3,
+            "share": 0.01485148514851485
+          },
+          "Fireworks": {
+            "calls": 2,
+            "share": 0.009900990099009901
+          },
+          "Morph": {
+            "calls": 2,
+            "share": 0.009900990099009901
+          },
+          "Relace": {
+            "calls": 2,
+            "share": 0.009900990099009901
+          },
+          "Crusoe": {
+            "calls": 1,
+            "share": 0.0049504950495049506
+          },
+          "Friendli": {
+            "calls": 1,
+            "share": 0.0049504950495049506
+          },
+          "Makora": {
+            "calls": 1,
+            "share": 0.0049504950495049506
+          },
+          "NextBit": {
+            "calls": 1,
+            "share": 0.0049504950495049506
+          }
+        },
+        "providers_n": 202
+      },
+      "latency": {
+        "engine": {
+          "n": 181,
+          "ttft_p50_ms": 2236.1,
+          "ttft_p95_ms": 17329.9,
+          "ttft_n": 181,
+          "ttfr_p50_ms": 346.3,
+          "ttfr_n": 173,
+          "e2e_p50_ms": 4411.4,
+          "e2e_p95_ms": 21403.6
+        },
+        "all": {
+          "n": 202,
+          "ttft_p50_ms": 2053.8,
+          "ttft_p95_ms": 17329.9,
+          "ttft_n": 202,
+          "ttfr_p50_ms": 344.8,
+          "ttfr_n": 192,
+          "e2e_p50_ms": 4445.1,
+          "e2e_p95_ms": 21403.6
+        },
+        "tok_s_engine_median": 202.0123638809136,
+        "tok_s_engine_n": 181,
+        "tok_s_all_median": 202.48849363825948,
+        "tok_s_all_n": 202,
+        "L": 4411.4
+      },
+      "cost": {
+        "n": 202,
+        "actual_usd_usage": 0.0741733296,
+        "total_usd_all_workloads": 0.0741733296,
+        "engine_usd": 0.0661863827,
+        "engine_calls": 181,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.06618638,
+          "consistency": 0.00608606,
+          "sse": 8.533e-05,
+          "import": 0.00181555
+        },
+        "prompt_tokens_per_call": 986.9337016574585,
+        "completion_tokens_per_call": 1095.4364640883978,
+        "reasoning_tokens_per_call": 542.9171270718232,
+        "tokens_n": 181,
+        "C": 0.40855791790123464
+      },
+      "ledger_rows": 202,
+      "quality": {
+        "S": 0.9063725490196078,
+        "K": 1.0,
+        "Jn": 0.7916666666666667,
+        "Q": 0.8838970588235293
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 79.15084066029627,
+      "value_sensitivity": {
+        "default": 79.15084066029627,
+        "1,1,1": 68.63846410531828,
+        "2,0.25,1": 72.40840688631927
+      },
+      "value_ungated": 79.15084066029627,
+      "rank_quality": 7,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 9,
+      "value_rank_sensitivity": {
+        "default": 9,
+        "1,1,1": 9,
+        "2,0.25,1": 10
+      }
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "model": "deepseek/deepseek-v4.1-flash",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.6790123456790124,
+        "schema_valid": 0.9876543209876543,
+        "patch": 0.30864197530864196,
+        "repair": 0.0,
+        "fallback": 0.012345679012345678,
+        "conformance": 1.0,
+        "conformance_n": 160,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 3524.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "schema": 2
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.863921568627451,
+          "schema_valid": 0.996078431372549,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.9299999999999999,
+        "conformance_keywords": {
+          "format": {
+            "checked": 479,
+            "passed": 476,
+            "pass_rate": 0.9937369519832986
+          },
+          "enum": {
+            "checked": 1590,
+            "passed": 1590,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 3236,
+            "passed": 3236,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.5196078431372549,
+            "schema_valid": 0.9803921568627451,
+            "patch": 0.46078431372549017,
+            "repair": 0.0,
+            "fallback": 0.0196078431372549,
+            "conformance": 1.0,
+            "conformance_n": 100,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3457.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2348.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 709.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3926.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.8,
+            "schema_valid": 1.0,
+            "patch": 0.2,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5065.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5555555555555556,
+            "schema_valid": 0.9629629629629629,
+            "patch": 0.4074074074074074,
+            "repair": 0.0,
+            "fallback": 0.037037037037037035,
+            "conformance": 1.0,
+            "conformance_n": 26,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3837.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.8541666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.14583333333333334,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2294.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3926.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.23809523809523808,
+            "schema_valid": 1.0,
+            "patch": 0.7619047619047619,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2012.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.43333333333333335,
+            "schema_valid": 0.9666666666666667,
+            "patch": 0.5333333333333333,
+            "repair": 0.0,
+            "fallback": 0.03333333333333333,
+            "conformance": 1.0,
+            "conformance_n": 29,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4868.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5811.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 4.0,
+        "coherence": 4.714285714285714,
+        "J": 4.357142857142857,
+        "Jn": 0.8392857142857142,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 1.0,
+          "field_agreement": 0.9259259259259259,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 619.6,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 1.0,
+          "recall_micro": 1.0,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 5164.05,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3522.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 1.5,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 6388.4,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 10743.5,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 186,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 183
+        },
+        "providers": {
+          "Wafer": {
+            "calls": 104,
+            "share": 0.5591397849462365
+          },
+          "InferenceNet": {
+            "calls": 37,
+            "share": 0.1989247311827957
+          },
+          "CoreWeave": {
+            "calls": 16,
+            "share": 0.08602150537634409
+          },
+          "DigitalOcean": {
+            "calls": 12,
+            "share": 0.06451612903225806
+          },
+          "DeepInfra": {
+            "calls": 3,
+            "share": 0.016129032258064516
+          },
+          "Morph": {
+            "calls": 3,
+            "share": 0.016129032258064516
+          },
+          "Together": {
+            "calls": 3,
+            "share": 0.016129032258064516
+          },
+          "Decart": {
+            "calls": 2,
+            "share": 0.010752688172043012
+          },
+          "Venice": {
+            "calls": 2,
+            "share": 0.010752688172043012
+          },
+          "Fireworks": {
+            "calls": 1,
+            "share": 0.005376344086021506
+          },
+          "Makora": {
+            "calls": 1,
+            "share": 0.005376344086021506
+          },
+          "Parasail": {
+            "calls": 1,
+            "share": 0.005376344086021506
+          },
+          "Reka": {
+            "calls": 1,
+            "share": 0.005376344086021506
+          }
+        },
+        "providers_n": 186
+      },
+      "latency": {
+        "engine": {
+          "n": 164,
+          "ttft_p50_ms": 554.1,
+          "ttft_p95_ms": 5607.2,
+          "ttft_n": 164,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 3491.0,
+          "e2e_p95_ms": 9018.8
+        },
+        "all": {
+          "n": 186,
+          "ttft_p50_ms": 576.1,
+          "ttft_p95_ms": 5107.6,
+          "ttft_n": 186,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 3491.0,
+          "e2e_p95_ms": 9418.3
+        },
+        "tok_s_engine_median": 186.09449520208597,
+        "tok_s_engine_n": 154,
+        "tok_s_all_median": 188.1063398547019,
+        "tok_s_all_n": 176,
+        "L": 3491.0
+      },
+      "cost": {
+        "n": 186,
+        "actual_usd_usage": 0.071753551,
+        "total_usd_all_workloads": 0.071753551,
+        "engine_usd": 0.059180908,
+        "engine_calls": 164,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.05918091,
+          "consistency": 0.00928257,
+          "sse": 0.00029394,
+          "import": 0.00299614
+        },
+        "prompt_tokens_per_call": 972.8841463414634,
+        "completion_tokens_per_call": 439.0609756097561,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 164,
+        "C": 0.3653142469135802
+      },
+      "ledger_rows": 186,
+      "quality": {
+        "S": 0.9299999999999999,
+        "K": 1.0,
+        "Jn": 0.8392857142857142,
+        "Q": 0.9112142857142855
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 100.0,
+      "value_sensitivity": {
+        "default": 100.0,
+        "1,1,1": 100.0,
+        "2,0.25,1": 100.0
+      },
+      "value_ungated": 100.0,
+      "rank_quality": 3,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 7,
+      "value_rank_sensitivity": {
+        "default": 7,
+        "1,1,1": 7,
+        "2,0.25,1": 8
+      }
+    },
+    "qwen/qwen3.8-flash": {
+      "model": "qwen/qwen3.8-flash",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.6296296296296297,
+        "schema_valid": 1.0,
+        "patch": 0.36419753086419754,
+        "repair": 0.006172839506172839,
+        "fallback": 0.0,
+        "conformance": 1.0,
+        "conformance_n": 162,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 7893.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {},
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.7963725490196079,
+          "schema_valid": 1.0,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.8981862745098039,
+        "conformance_keywords": {
+          "format": {
+            "checked": 365,
+            "passed": 362,
+            "pass_rate": 0.9917808219178083
+          },
+          "enum": {
+            "checked": 1283,
+            "passed": 1283,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2532,
+            "passed": 2532,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.49019607843137253,
+            "schema_valid": 1.0,
+            "patch": 0.5098039215686274,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 102,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 9431.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.9583333333333334,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.041666666666666664,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 9420.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1744.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2038.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.5333333333333333,
+            "schema_valid": 1.0,
+            "patch": 0.4666666666666667,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4605.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.6296296296296297,
+            "schema_valid": 1.0,
+            "patch": 0.37037037037037035,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 9916.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.7708333333333334,
+            "schema_valid": 1.0,
+            "patch": 0.20833333333333334,
+            "repair": 0.020833333333333332,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 6555.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2007.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.19047619047619047,
+            "schema_valid": 1.0,
+            "patch": 0.8095238095238095,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 7590.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.4,
+            "schema_valid": 1.0,
+            "patch": 0.6,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 30,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 11297.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.7777777777777778,
+            "schema_valid": 1.0,
+            "patch": 0.2222222222222222,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 10210.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.2857142857142856,
+        "coherence": 4.714285714285714,
+        "J": 4.0,
+        "Jn": 0.75,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.9444444444444444,
+          "field_agreement": 0.8765432098765432,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.6666666666666666
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 1702.7,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 0.75,
+          "recall_macro": 0.75,
+          "recall_micro": 0.6153846153846154,
+          "precision_macro": 0.75,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 26222.925,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 15145.7,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 4.4,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 16738.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 5,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 73002.8,
+              "warnings": null
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 186,
+        "errors": 3,
+        "error_rate": 0.016129032258064516,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {
+          "http_4xx": 1,
+          "stream_error": 2
+        },
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 183
+        },
+        "providers": {
+          "Alibaba": {
+            "calls": 185,
+            "share": 1.0
+          }
+        },
+        "providers_n": 185
+      },
+      "latency": {
+        "engine": {
+          "n": 163,
+          "ttft_p50_ms": 1104.9,
+          "ttft_p95_ms": 6583.6,
+          "ttft_n": 163,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 7887.8,
+          "e2e_p95_ms": 19347.0
+        },
+        "all": {
+          "n": 183,
+          "ttft_p50_ms": 1094.7,
+          "ttft_p95_ms": 6374.6,
+          "ttft_n": 183,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 8157.8,
+          "e2e_p95_ms": 20713.8
+        },
+        "tok_s_engine_median": 77.24878966778468,
+        "tok_s_engine_n": 157,
+        "tok_s_all_median": 77.40981940787954,
+        "tok_s_all_n": 177,
+        "L": 7887.8
+      },
+      "cost": {
+        "n": 186,
+        "actual_usd_usage": 0.06351212,
+        "total_usd_all_workloads": 0.06408622,
+        "engine_usd": 0.050452654,
+        "engine_calls": 163,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.008958244065572912,
+        "by_workload_usd": {
+          "engine": 0.05045265,
+          "consistency": 0.00899457,
+          "sse": 0.00032176,
+          "import": 0.00431723
+        },
+        "prompt_tokens_per_call": 921.8343558282209,
+        "completion_tokens_per_call": 507.20245398773005,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 163,
+        "C": 0.31143613580246915
+      },
+      "ledger_rows": 186,
+      "quality": {
+        "S": 0.8981862745098039,
+        "K": 1.0,
+        "Jn": 0.75,
+        "Q": 0.8643651960784313
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 64.83347298836684,
+      "value_sensitivity": {
+        "default": 64.83347298836684,
+        "1,1,1": 49.24570029949214,
+        "2,0.25,1": 41.44497326731805
+      },
+      "value_ungated": 64.83347298836684,
+      "rank_quality": 8,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 10,
+      "value_rank_sensitivity": {
+        "default": 10,
+        "1,1,1": 11,
+        "2,0.25,1": 12
+      }
+    },
+    "anthropic/claude-haiku-5.5": {
+      "model": "anthropic/claude-haiku-5.5",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.7345679012345679,
+        "schema_valid": 0.9938271604938271,
+        "patch": 0.19753086419753085,
+        "repair": 0.06172839506172839,
+        "fallback": 0.006172839506172839,
+        "conformance": 1.0,
+        "conformance_n": 161,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 2267.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "schema": 1
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.8688235294117647,
+          "schema_valid": 0.9980392156862745,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.9334313725490195,
+        "conformance_keywords": {
+          "format": {
+            "checked": 373,
+            "passed": 370,
+            "pass_rate": 0.9919571045576407
+          },
+          "enum": {
+            "checked": 1258,
+            "passed": 1258,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2740,
+            "passed": 2740,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.6274509803921569,
+            "schema_valid": 0.9901960784313726,
+            "patch": 0.29411764705882354,
+            "repair": 0.06862745098039216,
+            "fallback": 0.00980392156862745,
+            "conformance": 1.0,
+            "conformance_n": 101,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2856.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.9166666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.08333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2851.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 775.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 0.9333333333333333,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.06666666666666667,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 812.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.8666666666666667,
+            "schema_valid": 1.0,
+            "patch": 0.13333333333333333,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1773.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5185185185185185,
+            "schema_valid": 0.9629629629629629,
+            "patch": 0.3333333333333333,
+            "repair": 0.1111111111111111,
+            "fallback": 0.037037037037037035,
+            "conformance": 1.0,
+            "conformance_n": 26,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3531.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.9583333333333334,
+            "schema_valid": 1.0,
+            "patch": 0.041666666666666664,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 48,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1886.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 0.9444444444444444,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.05555555555555555,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 770.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.5238095238095238,
+            "schema_valid": 1.0,
+            "patch": 0.47619047619047616,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1542.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.43333333333333335,
+            "schema_valid": 1.0,
+            "patch": 0.36666666666666664,
+            "repair": 0.2,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 30,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3992.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3045.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 4.285714285714286,
+        "coherence": 4.857142857142857,
+        "J": 4.571428571428571,
+        "Jn": 0.8928571428571428,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.8888888888888888,
+          "field_agreement": 0.8271604938271605,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 707.5,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 1.0,
+          "recall_macro": 1.0,
+          "recall_micro": 1.0,
+          "precision_macro": 1.0,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 5046.05,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3081.6,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 3.8,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 6458.9,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 5,
+              "draft_n": 5,
+              "intersection": 5,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 10639.9,
+              "warnings": 0.0
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 195,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 192
+        },
+        "providers": {
+          "Claude Platform on AWS": {
+            "calls": 195,
+            "share": 1.0
+          }
+        },
+        "providers_n": 195
+      },
+      "latency": {
+        "engine": {
+          "n": 173,
+          "ttft_p50_ms": 512.6,
+          "ttft_p95_ms": 636.5,
+          "ttft_n": 173,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2240.8,
+          "e2e_p95_ms": 6143.0
+        },
+        "all": {
+          "n": 195,
+          "ttft_p50_ms": 511.5,
+          "ttft_p95_ms": 622.1,
+          "ttft_n": 195,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2364.6,
+          "e2e_p95_ms": 6531.6
+        },
+        "tok_s_engine_median": 241.56378209366534,
+        "tok_s_engine_n": 166,
+        "tok_s_all_median": 240.62283115223943,
+        "tok_s_all_n": 188,
+        "L": 2240.8
+      },
+      "cost": {
+        "n": 195,
+        "actual_usd_usage": 0.0837407,
+        "total_usd_all_workloads": 0.0837407,
+        "engine_usd": 0.0701833,
+        "engine_calls": 173,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.0701833,
+          "consistency": 0.0095049,
+          "sse": 0.0003225,
+          "import": 0.00373
+        },
+        "prompt_tokens_per_call": 1527.820809248555,
+        "completion_tokens_per_call": 505.8034682080925,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 173,
+        "C": 0.43323024691358025
+      },
+      "ledger_rows": 195,
+      "quality": {
+        "S": 0.9334313725490195,
+        "K": 1.0,
+        "Jn": 0.8928571428571428,
+        "Q": 0.933843837535014
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 120.38011972312425,
+      "value_sensitivity": {
+        "default": 120.38011972312425,
+        "1,1,1": 134.63201002277765,
+        "2,0.25,1": 156.79824143593802
+      },
+      "value_ungated": 120.38011972312425,
+      "rank_quality": 1,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 5,
+      "value_rank_sensitivity": {
+        "default": 5,
+        "1,1,1": 5,
+        "2,0.25,1": 4
+      }
+    },
+    "minimax/minimax-m3.1-flash": {
+      "model": "minimax/minimax-m3.1-flash",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.5864197530864198,
+        "schema_valid": 0.9506172839506173,
+        "patch": 0.22839506172839505,
+        "repair": 0.13580246913580246,
+        "fallback": 0.04938271604938271,
+        "conformance": 1.0,
+        "conformance_n": 154,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 3256.0,
+        "latency_n": 162,
+        "engine_timeouts": 1,
+        "engine_timeout_rate": 0.006172839506172839,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "schema": 7,
+          "timeout": 1
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.762156862745098,
+          "schema_valid": 0.9588235294117646,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.8604901960784312,
+        "conformance_keywords": {
+          "format": {
+            "checked": 442,
+            "passed": 439,
+            "pass_rate": 0.9932126696832579
+          },
+          "enum": {
+            "checked": 1453,
+            "passed": 1453,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2864,
+            "passed": 2864,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.46078431372549017,
+            "schema_valid": 0.9607843137254902,
+            "patch": 0.3137254901960784,
+            "repair": 0.18627450980392157,
+            "fallback": 0.0392156862745098,
+            "conformance": 1.0,
+            "conformance_n": 98,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3992.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.75,
+            "schema_valid": 0.8333333333333334,
+            "patch": 0.0,
+            "repair": 0.08333333333333333,
+            "fallback": 0.16666666666666666,
+            "conformance": 1.0,
+            "conformance_n": 20,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3661.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 431.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 0.9333333333333333,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.06666666666666667,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1091.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.6666666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.3333333333333333,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3049.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5555555555555556,
+            "schema_valid": 0.8148148148148148,
+            "patch": 0.14814814814814814,
+            "repair": 0.1111111111111111,
+            "fallback": 0.18518518518518517,
+            "conformance": 1.0,
+            "conformance_n": 22,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 6591.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.7916666666666666,
+            "schema_valid": 0.9791666666666666,
+            "patch": 0.16666666666666666,
+            "repair": 0.020833333333333332,
+            "fallback": 0.020833333333333332,
+            "conformance": 1.0,
+            "conformance_n": 47,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 3062.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 0.9444444444444444,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.05555555555555555,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 629.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.23809523809523808,
+            "schema_valid": 1.0,
+            "patch": 0.5714285714285714,
+            "repair": 0.19047619047619047,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2221.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.3,
+            "schema_valid": 0.9666666666666667,
+            "patch": 0.3333333333333333,
+            "repair": 0.3333333333333333,
+            "fallback": 0.03333333333333333,
+            "conformance": 1.0,
+            "conformance_n": 29,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 6398.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.6111111111111112,
+            "schema_valid": 0.9444444444444444,
+            "patch": 0.16666666666666666,
+            "repair": 0.16666666666666666,
+            "fallback": 0.05555555555555555,
+            "conformance": 1.0,
+            "conformance_n": 17,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2914.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 4.428571428571429,
+        "coherence": 4.714285714285714,
+        "J": 4.571428571428571,
+        "Jn": 0.8928571428571428,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.6666666666666666,
+          "field_agreement": 0.7846153846153846,
+          "fields_checked": 65,
+          "field_rows_n": 7,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 1036.4,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 0.75,
+          "recall_macro": 0.75,
+          "recall_micro": 0.6153846153846154,
+          "precision_macro": 0.75,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 26530.625,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 2261.6,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 1.6,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 17926.7,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 5,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 85932.6,
+              "warnings": null
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 213,
+        "errors": 1,
+        "error_rate": 0.004694835680751174,
+        "timeouts": 1,
+        "timeout_rate": 0.004694835680751174,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 4,
+        "retry_rate": 0.018779342723004695,
+        "error_kinds": {
+          "http_5xx": 1,
+          "timeout": 1
+        },
+        "reasoning_rejected": true,
+        "reasoning_rejected_calls": 213,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 210
+        },
+        "providers": {
+          "Parasail": {
+            "calls": 98,
+            "share": 0.46226415094339623
+          },
+          "GMICloud": {
+            "calls": 55,
+            "share": 0.25943396226415094
+          },
+          "InferenceNet": {
+            "calls": 23,
+            "share": 0.10849056603773585
+          },
+          "Minimax": {
+            "calls": 21,
+            "share": 0.09905660377358491
+          },
+          "Novita": {
+            "calls": 9,
+            "share": 0.04245283018867924
+          },
+          "SambaNova": {
+            "calls": 5,
+            "share": 0.02358490566037736
+          },
+          "ModelRun": {
+            "calls": 1,
+            "share": 0.0047169811320754715
+          }
+        },
+        "providers_n": 212
+      },
+      "latency": {
+        "engine": {
+          "n": 191,
+          "ttft_p50_ms": 599.8,
+          "ttft_p95_ms": 24345.2,
+          "ttft_n": 191,
+          "ttfr_p50_ms": 1254.1,
+          "ttfr_n": 69,
+          "e2e_p50_ms": 2671.4,
+          "e2e_p95_ms": 28211.7
+        },
+        "all": {
+          "n": 211,
+          "ttft_p50_ms": 599.8,
+          "ttft_p95_ms": 25910.7,
+          "ttft_n": 211,
+          "ttfr_p50_ms": 1226.4,
+          "ttfr_n": 77,
+          "e2e_p50_ms": 2671.4,
+          "e2e_p95_ms": 28631.2
+        },
+        "tok_s_engine_median": 205.8261700095511,
+        "tok_s_engine_n": 163,
+        "tok_s_all_median": 211.30249887533523,
+        "tok_s_all_n": 180,
+        "L": 2671.4
+      },
+      "cost": {
+        "n": 213,
+        "actual_usd_usage": 0.124148955,
+        "total_usd_all_workloads": 0.126894155,
+        "engine_usd": 0.098282655,
+        "engine_calls": 191,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.02163377816732378,
+        "by_workload_usd": {
+          "engine": 0.09828266,
+          "consistency": 0.01408654,
+          "sse": 0.00055551,
+          "import": 0.01396945
+        },
+        "prompt_tokens_per_call": 1139.2408376963351,
+        "completion_tokens_per_call": 784.8743455497382,
+        "reasoning_tokens_per_call": 430.28795811518324,
+        "tokens_n": 191,
+        "C": 0.6066830555555555
+      },
+      "ledger_rows": 213,
+      "quality": {
+        "S": 0.8604901960784312,
+        "K": 1.0,
+        "Jn": 0.8928571428571428,
+        "Q": 0.9083144257703082
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 88.14328240095108,
+      "value_sensitivity": {
+        "default": 88.14328240095108,
+        "1,1,1": 78.43887625945965,
+        "2,0.25,1": 114.38484733203695
+      },
+      "value_ungated": 88.14328240095108,
+      "rank_quality": 5,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 8,
+      "value_rank_sensitivity": {
+        "default": 8,
+        "1,1,1": 8,
+        "2,0.25,1": 7
+      }
+    },
+    "thinkingmachines/inkling-small@nojson": {
+      "model": "thinkingmachines/inkling-small@nojson",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.49382716049382713,
+        "schema_valid": 0.9197530864197531,
+        "patch": 0.35802469135802467,
+        "repair": 0.06790123456790123,
+        "fallback": 0.08024691358024691,
+        "conformance": 1.0,
+        "conformance_n": 149,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 3363.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "non_json": 3,
+          "schema": 10
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.7354901960784314,
+          "schema_valid": 0.9745098039215687,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.855,
+        "conformance_keywords": {
+          "format": {
+            "checked": 354,
+            "passed": 352,
+            "pass_rate": 0.9943502824858758
+          },
+          "enum": {
+            "checked": 1118,
+            "passed": 1118,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2293,
+            "passed": 2293,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.29411764705882354,
+            "schema_valid": 0.8725490196078431,
+            "patch": 0.5294117647058824,
+            "repair": 0.049019607843137254,
+            "fallback": 0.12745098039215685,
+            "conformance": 1.0,
+            "conformance_n": 89,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5984.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 0.9166666666666666,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.08333333333333333,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2381.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 451.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 495.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.4666666666666667,
+            "schema_valid": 1.0,
+            "patch": 0.26666666666666666,
+            "repair": 0.26666666666666666,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 1185.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5925925925925926,
+            "schema_valid": 0.9259259259259259,
+            "patch": 0.25925925925925924,
+            "repair": 0.07407407407407407,
+            "fallback": 0.07407407407407407,
+            "conformance": 1.0,
+            "conformance_n": 25,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2412.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.6875,
+            "schema_valid": 0.9583333333333334,
+            "patch": 0.1875,
+            "repair": 0.08333333333333333,
+            "fallback": 0.041666666666666664,
+            "conformance": 1.0,
+            "conformance_n": 46,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 15750.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 476.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.0,
+            "schema_valid": 1.0,
+            "patch": 1.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 18471.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.0,
+            "schema_valid": 0.7,
+            "patch": 0.5666666666666667,
+            "repair": 0.13333333333333333,
+            "fallback": 0.3,
+            "conformance": 1.0,
+            "conformance_n": 21,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 4105.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.7222222222222222,
+            "schema_valid": 1.0,
+            "patch": 0.2222222222222222,
+            "repair": 0.05555555555555555,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2551.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.4285714285714284,
+        "coherence": 4.428571428571429,
+        "J": 3.9285714285714284,
+        "Jn": 0.7321428571428571,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.8888888888888888,
+          "field_agreement": 0.7901234567901234,
+          "fields_checked": 81,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 0.3333333333333333
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 4401.1,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 0.75,
+          "recall_macro": 0.75,
+          "recall_micro": 0.6153846153846154,
+          "precision_macro": 0.75,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 20280.0,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 3,
+              "draft_n": 3,
+              "intersection": 3,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 10910.6,
+              "warnings": 0.0
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 5.3,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 4,
+              "draft_n": 4,
+              "intersection": 4,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 26543.5,
+              "warnings": 0.0
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 5,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 43660.6,
+              "warnings": null
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 212,
+        "errors": 0,
+        "error_rate": 0.0,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {},
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 23
+        },
+        "providers": {
+          "DeepInfra": {
+            "calls": 212,
+            "share": 1.0
+          }
+        },
+        "providers_n": 212
+      },
+      "latency": {
+        "engine": {
+          "n": 186,
+          "ttft_p50_ms": 382.2,
+          "ttft_p95_ms": 22167.7,
+          "ttft_n": 186,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2596.2,
+          "e2e_p95_ms": 25660.6
+        },
+        "all": {
+          "n": 212,
+          "ttft_p50_ms": 399.2,
+          "ttft_p95_ms": 20927.3,
+          "ttft_n": 212,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 2641.7,
+          "e2e_p95_ms": 26535.6
+        },
+        "tok_s_engine_median": 183.50423040286884,
+        "tok_s_engine_n": 177,
+        "tok_s_all_median": 187.01253932003274,
+        "tok_s_all_n": 203,
+        "L": 2596.2
+      },
+      "cost": {
+        "n": 212,
+        "actual_usd_usage": 0.1722379,
+        "total_usd_all_workloads": 0.1722379,
+        "engine_usd": 0.14366995,
+        "engine_calls": 186,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.14366995,
+          "consistency": 0.0203782,
+          "sse": 0.0006962,
+          "import": 0.00749355
+        },
+        "prompt_tokens_per_call": 1052.3817204301076,
+        "completion_tokens_per_call": 388.5376344086022,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 186,
+        "C": 0.8868515432098766
+      },
+      "ledger_rows": 212,
+      "quality": {
+        "S": 0.855,
+        "K": 1.0,
+        "Jn": 0.7321428571428571,
+        "Q": 0.8421071428571429
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 63.56343459710028,
+      "value_sensitivity": {
+        "default": 63.56343459710028,
+        "1,1,1": 51.1887138832964,
+        "2,0.25,1": 92.00454600242314
+      },
+      "value_ungated": 63.56343459710028,
+      "rank_quality": 10,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 11,
+      "value_rank_sensitivity": {
+        "default": 11,
+        "1,1,1": 10,
+        "2,0.25,1": 9
+      }
+    },
+    "thinkingmachines/inkling@nojson": {
+      "model": "thinkingmachines/inkling@nojson",
+      "run_status": "done",
+      "engine": {
+        "n": 162,
+        "first_try": 0.5,
+        "schema_valid": 0.9753086419753086,
+        "patch": 0.4074074074074074,
+        "repair": 0.06790123456790123,
+        "fallback": 0.024691358024691357,
+        "conformance": 1.0,
+        "conformance_n": 158,
+        "conformance_ungradable": 0,
+        "conformance_ungraded": 0,
+        "p50_latency_ms": 4453.0,
+        "latency_n": 162,
+        "engine_timeouts": 0,
+        "engine_timeout_rate": 0.0,
+        "fallback_truncated_max_tokens": 0,
+        "fallback_causes": {
+          "non_json": 1,
+          "schema": 3
+        },
+        "excluded_sources": 0,
+        "macro": {
+          "first_try": 0.7501960784313726,
+          "schema_valid": 0.9921568627450981,
+          "conformance": 1.0,
+          "apis": 5
+        },
+        "S": 0.8711764705882353,
+        "conformance_keywords": {
+          "format": {
+            "checked": 347,
+            "passed": 344,
+            "pass_rate": 0.9913544668587896
+          },
+          "enum": {
+            "checked": 1089,
+            "passed": 1089,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2458,
+            "passed": 2458,
+            "pass_rate": 1.0
+          }
+        },
+        "by_api_type": {
+          "rest": {
+            "n": 102,
+            "first_try": 0.28431372549019607,
+            "schema_valid": 0.9607843137254902,
+            "patch": 0.5686274509803921,
+            "repair": 0.10784313725490197,
+            "fallback": 0.0392156862745098,
+            "conformance": 1.0,
+            "conformance_n": 98,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5416.0,
+            "latency_n": 102
+          },
+          "graphql": {
+            "n": 24,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 24,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5145.0,
+            "latency_n": 24
+          },
+          "grpc": {
+            "n": 6,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 6,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 514.0,
+            "latency_n": 6
+          },
+          "soap": {
+            "n": 15,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2092.0,
+            "latency_n": 15
+          },
+          "asyncapi": {
+            "n": 15,
+            "first_try": 0.4666666666666667,
+            "schema_valid": 1.0,
+            "patch": 0.5333333333333333,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 15,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2389.0,
+            "latency_n": 15
+          }
+        },
+        "by_domain": {
+          "devtools": {
+            "n": 27,
+            "first_try": 0.5555555555555556,
+            "schema_valid": 1.0,
+            "patch": 0.4444444444444444,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 27,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5885.0,
+            "latency_n": 27
+          },
+          "ecommerce": {
+            "n": 48,
+            "first_try": 0.6666666666666666,
+            "schema_valid": 0.9791666666666666,
+            "patch": 0.3125,
+            "repair": 0.0,
+            "fallback": 0.020833333333333332,
+            "conformance": 1.0,
+            "conformance_n": 47,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2763.0,
+            "latency_n": 48
+          },
+          "generic": {
+            "n": 18,
+            "first_try": 1.0,
+            "schema_valid": 1.0,
+            "patch": 0.0,
+            "repair": 0.0,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 830.0,
+            "latency_n": 18
+          },
+          "payments": {
+            "n": 21,
+            "first_try": 0.09523809523809523,
+            "schema_valid": 0.9523809523809523,
+            "patch": 0.8095238095238095,
+            "repair": 0.047619047619047616,
+            "fallback": 0.047619047619047616,
+            "conformance": 1.0,
+            "conformance_n": 20,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 2407.0,
+            "latency_n": 21
+          },
+          "social-media": {
+            "n": 30,
+            "first_try": 0.03333333333333333,
+            "schema_valid": 0.9333333333333333,
+            "patch": 0.6666666666666666,
+            "repair": 0.23333333333333334,
+            "fallback": 0.06666666666666667,
+            "conformance": 1.0,
+            "conformance_n": 28,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 10613.0,
+            "latency_n": 30
+          },
+          "travel": {
+            "n": 18,
+            "first_try": 0.7222222222222222,
+            "schema_valid": 1.0,
+            "patch": 0.1111111111111111,
+            "repair": 0.16666666666666666,
+            "fallback": 0.0,
+            "conformance": 1.0,
+            "conformance_n": 18,
+            "conformance_ungradable": 0,
+            "conformance_ungraded": 0,
+            "p50_latency_ms": 5647.0,
+            "latency_n": 18
+          }
+        },
+        "grades_present": true
+      },
+      "judge": {
+        "judge_items": 7,
+        "judge_n": 7,
+        "judge_scored_n": 7,
+        "judge_auto": 0,
+        "judge_missing": 0,
+        "judge_invalid": 0,
+        "judge_excluded_valid_empty": 0,
+        "realism": 3.5714285714285716,
+        "coherence": 4.428571428571429,
+        "J": 4.0,
+        "Jn": 0.75,
+        "judge_present": true,
+        "key_present": true
+      },
+      "server": {
+        "consistency": {
+          "n": 18,
+          "case_ok_rate": 0.9444444444444444,
+          "field_agreement": 0.8904109589041096,
+          "fields_checked": 73,
+          "field_rows_n": 9,
+          "by_case": {
+            "square.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "square.read": {
+              "n": 3,
+              "ok_rate": 0.6666666666666666
+            },
+            "stripe.create": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "stripe.read": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.detail": {
+              "n": 3,
+              "ok_rate": 1.0
+            },
+            "tmdb.list": {
+              "n": 3,
+              "ok_rate": 1.0
+            }
+          }
+        },
+        "sse": {
+          "n": 3,
+          "ok_rate": 1.0,
+          "ttfe_p50_ms": 504.2,
+          "ttfe_n": 3
+        },
+        "import": {
+          "n": 4,
+          "draft_valid_rate": 0.25,
+          "recall_macro": 0.25,
+          "recall_micro": 0.07692307692307693,
+          "precision_macro": 0.25,
+          "precision_micro": 1.0,
+          "scored_n": 4,
+          "duration_mean_ms": 15948.824999999999,
+          "warnings_mean": 0.0,
+          "inputs": [
+            {
+              "case": "petstore.md",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 3,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 15089.3,
+              "warnings": null
+            },
+            {
+              "case": "tmdb-readme.html",
+              "rep": 0,
+              "valid": true,
+              "expected_n": 1,
+              "draft_n": 1,
+              "intersection": 1,
+              "recall": 1.0,
+              "precision": 1.0,
+              "duration_ms": 5.6,
+              "warnings": 0.0
+            },
+            {
+              "case": "shipping-api.pdf",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 4,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 17663.6,
+              "warnings": null
+            },
+            {
+              "case": "travel-api-notes.md",
+              "rep": 0,
+              "valid": false,
+              "expected_n": 5,
+              "draft_n": 0,
+              "intersection": 0,
+              "recall": 0.0,
+              "precision": 0.0,
+              "duration_ms": 31036.8,
+              "warnings": null
+            }
+          ]
+        },
+        "n": 25,
+        "n_all": 25,
+        "harness_rejected_n": 0
+      },
+      "reliability": {
+        "n": 201,
+        "errors": 3,
+        "error_rate": 0.014925373134328358,
+        "timeouts": 0,
+        "timeout_rate": 0.0,
+        "refusals": 0,
+        "refusal_rate": 0.0,
+        "retries": 0,
+        "retry_rate": 0.0,
+        "error_kinds": {
+          "http_5xx": 2,
+          "http_4xx": 1
+        },
+        "reasoning_rejected": false,
+        "reasoning_rejected_calls": 0,
+        "response_format_rejected": false,
+        "response_format_rejected_calls": 0,
+        "response_format_types": {
+          "json_object": 18
+        },
+        "providers": {
+          "Together": {
+            "calls": 198,
+            "share": 1.0
+          }
+        },
+        "providers_n": 198
+      },
+      "latency": {
+        "engine": {
+          "n": 177,
+          "ttft_p50_ms": 310.8,
+          "ttft_p95_ms": 3203.4,
+          "ttft_n": 177,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 4202.5,
+          "e2e_p95_ms": 19802.2
+        },
+        "all": {
+          "n": 198,
+          "ttft_p50_ms": 306.6,
+          "ttft_p95_ms": 3047.2,
+          "ttft_n": 198,
+          "ttfr_p50_ms": null,
+          "ttfr_n": 0,
+          "e2e_p50_ms": 4300.2,
+          "e2e_p95_ms": 19802.2
+        },
+        "tok_s_engine_median": 61.876933654176696,
+        "tok_s_engine_n": 165,
+        "tok_s_all_median": 62.736044971350694,
+        "tok_s_all_n": 186,
+        "L": 4202.5
+      },
+      "cost": {
+        "n": 201,
+        "actual_usd_usage": 0.42736668,
+        "total_usd_all_workloads": 0.42736668,
+        "engine_usd": 0.35822458,
+        "engine_calls": 180,
+        "estimate_share_engine": 0.0,
+        "estimate_share_all": 0.0,
+        "by_workload_usd": {
+          "engine": 0.35822458,
+          "consistency": 0.04600265,
+          "sse": 0.0020202,
+          "import": 0.02111925
+        },
+        "prompt_tokens_per_call": 979.6101694915254,
+        "completion_tokens_per_call": 292.3728813559322,
+        "reasoning_tokens_per_call": 0.0,
+        "tokens_n": 177,
+        "C": 2.2112628395061726
+      },
+      "ledger_rows": 201,
+      "quality": {
+        "S": 0.8711764705882353,
+        "K": 1.0,
+        "Jn": 0.75,
+        "Q": 0.8549117647058824
+      },
+      "gate_reasons": [],
+      "gated": null,
+      "value": 32.608868680451614,
+      "value_sensitivity": {
+        "default": 32.608868680451614,
+        "1,1,1": 12.875649399133193,
+        "2,0.25,1": 46.617634731873125
+      },
+      "value_ungated": 32.608868680451614,
+      "rank_quality": 9,
+      "within_10pct_best_q": true,
+      "recommendable": true,
+      "rank_value": 12,
+      "value_rank_sensitivity": {
+        "default": 12,
+        "1,1,1": 12,
+        "2,0.25,1": 11
+      }
+    }
+  },
+  "spend": {
+    "pilot": {
+      "present": true,
+      "calls": 124,
+      "usd": 0.037426567200000004,
+      "by_workload": {
+        "pilot": 0.03742657
+      },
+      "budget_refused_calls": 0
+    },
+    "full": {
+      "present": true,
+      "calls": 2404,
+      "usd": 1.33992961202,
+      "by_workload": {
+        "engine": 1.09832469,
+        "consistency": 0.165678,
+        "sse": 0.00541285,
+        "import": 0.07051407
+      },
+      "budget_refused_calls": 0
+    },
+    "superseded": {
+      "present": false,
+      "calls": null,
+      "usd": null,
+      "by_workload": {}
+    },
+    "all_incl_superseded": {
+      "present": true,
+      "calls": 2528,
+      "usd": 1.37735617922,
+      "by_workload": {
+        "pilot": 0.03742657,
+        "engine": 1.09832469,
+        "consistency": 0.165678,
+        "sse": 0.00541285,
+        "import": 0.07051407
+      }
+    },
+    "combined": {
+      "present": true,
+      "calls": 2528,
+      "usd": 1.37735617922,
+      "by_workload": {
+        "pilot": 0.03742657,
+        "engine": 1.09832469,
+        "consistency": 0.165678,
+        "sse": 0.00541285,
+        "import": 0.07051407
+      }
+    },
+    "key": {
+      "usage_before_usd": 8.566973171,
+      "usage_after_usd": 9.899794231,
+      "usage_delta_usd": 1.3328210599999988,
+      "limit_remaining_before": 41.433026829,
+      "limit_remaining_after": 40.100205769,
+      "ledger_combined_minus_key_delta_usd": 0.044535119220001196,
+      "ledger_all_incl_superseded_minus_key_delta_usd": 0.044535119220001196
+    }
+  },
+  "keyword_categories": {
+    "format": [
+      "format"
+    ],
+    "enum": [
+      "const",
+      "enum"
+    ],
+    "constraint": [
+      "exclusiveMaximum",
+      "exclusiveMinimum",
+      "maxItems",
+      "maxLength",
+      "maximum",
+      "minItems",
+      "minLength",
+      "minimum",
+      "pattern",
+      "uniqueItems"
+    ]
+  }
+}
