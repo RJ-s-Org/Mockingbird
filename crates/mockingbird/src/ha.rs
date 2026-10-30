@@ -134,8 +134,8 @@ impl Drop for Ha {
 /// `inner` with a change feed shared across nodes ([`BusStateStore`]) and a
 /// response cache in front ([`mb_state::CachingStateStore`]) that a session
 /// reset, a seed or a mock reset on any node clears: this node's clear its
-/// cache directly, and other nodes' arrive as reset announcements (see
-/// [`reset_event`]).
+/// cache directly, and other nodes' arrive as reset announcements (state
+/// events with an empty resource type).
 pub fn cached_shared_state(
     inner: Arc<dyn StateStore>,
     bus: Arc<dyn Bus>,

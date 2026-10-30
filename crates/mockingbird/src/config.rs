@@ -503,7 +503,8 @@ pub async fn bind_grpc(
 }
 
 /// [`build_app_with`] with the self-hosted [`Extensions`].
-/// Its Vault client follows `outbound:` (see [`self_hosted_app`]).
+/// Its Vault client follows `outbound.proxy`, `outbound.no_proxy` and
+/// `outbound.ca_file`.
 pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<App> {
     self_hosted_app(args, llm).await
 }
