@@ -1,9 +1,14 @@
 """Tests for the W1 harness fixes: echo-aware grading, fallback causes and
 header-safe session ids. Run: python3 -m unittest scripts/llm-bench/test_w1.py"""
 
+import json
 import os
 import sys
+import tempfile
+import threading
 import unittest
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -92,6 +97,110 @@ class SessionSlugTest(unittest.TestCase):
     def test_variant_suffix_is_header_safe(self):
         self.assertEqual(server_suites.session_slug("thinkingmachines/inkling@nojson"),
                          "thinkingmachines__inkling-nojson")
+
+
+class FakeStripe(BaseHTTPRequestHandler):
+    """A tiny Stripe that remembers what it was told. `stale_read` makes a
+    read of a confirmed intent return the old status."""
+
+    store = {}
+    stale_read = False
+
+    def log_message(self, *a):
+        pass
+
+    def reply(self, obj, code=200):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("x-mockingbird-source", "llm")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def form(self):
+        n = int(self.headers.get("content-length") or 0)
+        if "x-www-form-urlencoded" not in (self.headers.get("content-type") or ""):
+            return {}
+        return {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(n).decode()).items()}
+
+    def do_POST(self):
+        path, body, st = self.path.split("?")[0], self.form(), FakeStripe.store
+        if path == "/stripe/v1/customers":
+            c = {"id": f"cus_{len(st)}", "name": body.get("name"), "email": body.get("email")}
+            st[c["id"]] = c
+            return self.reply(c)
+        if path == "/stripe/v1/payment_intents":
+            pi = {"id": f"pi_{len(st)}", "amount": int(body["amount"]), "currency": body["currency"],
+                  "customer": body.get("customer"), "status": "requires_confirmation"}
+            st[pi["id"]] = pi
+            return self.reply(pi)
+        if path.endswith("/confirm"):
+            pi = st[path.split("/")[-2]]
+            if not FakeStripe.stale_read:
+                pi["status"] = "succeeded"
+            pi["amount_received"] = pi["amount"]
+            return self.reply(dict(pi, status="succeeded"))
+        if path == "/stripe/v1/refunds":
+            pi = st[body["payment_intent"]]
+            return self.reply({"id": "re_1", "payment_intent": pi["id"], "amount": int(body["amount"]),
+                               "currency": pi["currency"]})
+        self.reply({}, 404)
+
+    def do_GET(self):
+        item = FakeStripe.store.get(self.path.split("?")[0].split("/")[-1])
+        self.reply(item or {}, 200 if item else 404)
+
+
+class JourneyTest(unittest.TestCase):
+    def run_stripe(self, stale):
+        FakeStripe.store, FakeStripe.stale_read = {}, stale
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeStripe)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout = "m/x", 10
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys")
+            server_suites.journey_stripe(Srv, sink, Args, 0)
+            with open(os.path.join(out, "server.jsonl")) as f:
+                return {r["case"]: r for r in map(json.loads, f)}
+
+    def test_journeys_is_a_suite(self):
+        self.assertIn("journeys", server_suites.SUITES)
+        self.assertIn("journeys", server_suites.RUNNERS)
+        self.assertNotIn("journeys", server_suites.DEFAULT_SUITES)
+
+    def test_stripe_journey_scores_a_consistent_run(self):
+        rows = self.run_stripe(stale=False)
+        self.assertEqual(sorted(rows), sorted(f"stripe.{n}" for n in server_suites.JOURNEY_CHECKS["stripe"]
+                                              + ["a succeeded intent received its amount"]))
+        self.assertEqual([c for c, r in rows.items() if not r["ok"]], [])
+        self.assertEqual(rows["stripe.refund names its intent"]["source"], "llm")
+
+    def test_stripe_journey_catches_a_lost_status(self):
+        rows = self.run_stripe(stale=True)
+        self.assertFalse(rows["stripe.read shows the confirmed status"]["ok"])
+        self.assertTrue(rows["stripe.refund names its intent"]["ok"])
+
+    def test_a_broken_journey_fails_its_remaining_checks(self):
+        class Args:
+            model, timeout = "m/x", 1
+
+        class Srv:
+            data = "http://127.0.0.1:1"
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys")
+            server_suites.journey_stripe(Srv, sink, Args, 0)
+        self.assertEqual(len(sink.rows), len(server_suites.JOURNEY_CHECKS["stripe"]))
+        self.assertFalse(any(r["ok"] for r in sink.rows))
 
 
 if __name__ == "__main__":
