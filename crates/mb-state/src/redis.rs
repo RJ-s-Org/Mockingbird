@@ -183,6 +183,8 @@ fn stamp() -> Stamp {
     }
 }
 
+/// A [`StateStore`] in Redis, shared by every node using
+/// the same server.
 pub struct RedisStateStore {
     con: ConnectionManager,
     ttl_ms: i64,
@@ -192,9 +194,22 @@ pub struct RedisStateStore {
     list: Script,
 }
 
+impl std::fmt::Debug for RedisStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisStateStore")
+            .field("ttl_ms", &self.ttl_ms)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RedisStateStore {
     /// Connects to `redis://…` or `rediss://…`. The connection is
     /// re-established automatically after a drop.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Backend`] when the URL has another scheme or the
+    /// server cannot be reached.
     pub async fn connect(url: &str, ttl: Duration) -> Result<Self, StateError> {
         if !(url.starts_with("redis://") || url.starts_with("rediss://")) {
             return Err(StateError::Backend(

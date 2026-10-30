@@ -258,7 +258,7 @@ fn operations(bundle: &Bundle) -> Vec<OperationSummary> {
                 id: op.id.clone(),
                 method: method.into(),
                 path,
-                kind: op.kind.label().into(),
+                kind: op.kind.as_str().into(),
                 protocol: protocol_name(op.protocol),
                 target: op.target(),
             }

@@ -11,6 +11,7 @@
 //! A node that loses leadership skips its next attempt, so another contender
 //! gets the first chance to take over.
 
+use std::fmt;
 use std::time::Duration;
 
 use redis::Script;
@@ -23,7 +24,9 @@ use tokio::task::JoinHandle;
 
 use crate::StateError;
 
+/// How long a Redis lease lives without a renewal.
 pub const LEADER_LEASE_TTL: Duration = Duration::from_secs(15);
+/// How often a leader renews its lock and a follower retries.
 pub const LEADER_RENEW_INTERVAL: Duration = Duration::from_secs(5);
 
 const LEADER_METRIC: &str = "mb_leader";
@@ -36,10 +39,46 @@ pub enum LeaderBackend {
     Postgres(String),
     /// A `redis://` or `rediss://` URL.
     Redis(String),
-    /// Leadership set from outside through the paired `watch::Sender`
-    /// (tests flip it by hand).
-    #[doc(hidden)]
+    /// Leadership set from outside through the paired `watch::Sender`: a
+    /// data node passes a receiver that stays `false` (it never leads), and
+    /// tests flip it by hand.
     Manual(watch::Receiver<bool>),
+}
+
+/// Prints the URLs without their credentials: no user info, query or
+/// fragment, and nothing at all of a string that is not a URL.
+impl fmt::Debug for LeaderBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LeaderBackend::Always => f.write_str("Always"),
+            LeaderBackend::Postgres(url) => {
+                f.debug_tuple("Postgres").field(&redacted_url(url)).finish()
+            }
+            LeaderBackend::Redis(url) => f.debug_tuple("Redis").field(&redacted_url(url)).finish(),
+            LeaderBackend::Manual(rx) => f.debug_tuple("Manual").field(&*rx.borrow()).finish(),
+        }
+    }
+}
+
+/// `url` with its user info replaced by `***` and its query and fragment
+/// dropped (`postgres://***@db:5432/mb`); `<redacted>` when it has no
+/// `scheme://`, since a key=value connection string may hold a password
+/// anywhere.
+fn redacted_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted>".into();
+    };
+    // Everything up to the last `@` is user info, even a password holding
+    // an unescaped `/`, `?` or `@` (an `@` in the query only hides more).
+    let (userinfo, rest) = match rest.rsplit_once('@') {
+        Some((_, after)) => ("***@", after),
+        None => ("", rest),
+    };
+    let (rest, elided) = match rest.split_once(['?', '#']) {
+        Some((before, _)) => (before, "?…"),
+        None => (rest, ""),
+    };
+    format!("{scheme}://{userinfo}{rest}{elided}")
 }
 
 /// Renewal and lease timings; [`Default`] gives the production values.
@@ -77,6 +116,7 @@ fn redis_key(name: &str) -> String {
 
 /// This node's claim on a named lock. Dropping it stops contending and
 /// releases the lock.
+#[must_use = "dropping a Leadership stops contending and releases the lock"]
 pub struct Leadership {
     rx: watch::Receiver<bool>,
     /// Keeps the channel open for [`LeaderBackend::Always`].
@@ -86,8 +126,23 @@ pub struct Leadership {
     release: Option<RedisLease>,
 }
 
+impl fmt::Debug for Leadership {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Leadership")
+            .field("is_leader", &self.is_leader())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Leadership {
-    /// Makes the first attempt before returning, so a lone node is leader on return.
+    /// Starts contending for lock `name` as node `node_id`. Makes the first
+    /// attempt before returning, so a lone node is leader on return.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Backend`] when the Postgres or Redis backend cannot be
+    /// reached, or the Redis URL does not start with `redis://` or
+    /// `rediss://`.
     pub async fn start(
         backend: LeaderBackend,
         name: &str,
@@ -148,10 +203,14 @@ impl Leadership {
         })
     }
 
+    /// Whether this node holds the lock right now.
+    #[must_use]
     pub fn is_leader(&self) -> bool {
         *self.rx.borrow()
     }
 
+    /// A receiver of every change of [`Leadership::is_leader`].
+    #[must_use]
     pub fn watch(&self) -> watch::Receiver<bool> {
         self.rx.clone()
     }

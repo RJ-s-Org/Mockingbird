@@ -1,3 +1,6 @@
+//! Schema-driven value generation: [`Faker`] draws values that satisfy a
+//! JSON Schema, used when no LLM answers and to fill what an answer lacks.
+
 use base64::Engine as _;
 use mb_mcm::{Operation, OperationKind};
 use rand::{Rng, RngExt};
@@ -52,10 +55,22 @@ pub struct Faker {
     hints: FakerHints,
 }
 
+/// Prints the hint names, not their values (request values may be
+/// credentials passed in a query string).
+impl std::fmt::Debug for Faker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Faker")
+            .field("max_depth", &self.max_depth)
+            .field("hints", &self.hints.echoes.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// Request values the faker copies into same-named fields of the root
 /// object (`login`, `id`, `page`...).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FakerHints {
+    /// Field name to the value echoed into it.
     pub echoes: Map<String, Value>,
 }
 
@@ -153,6 +168,9 @@ fn cached_pattern(pattern: &str, max_repeat: u32) -> Option<Arc<Pattern>> {
 }
 
 impl Faker {
+    /// A faker nesting at most `max_depth` levels before it generates only
+    /// required members.
+    #[must_use]
     pub fn new(max_depth: usize) -> Self {
         Self {
             max_depth,
@@ -161,11 +179,15 @@ impl Faker {
     }
 
     /// This faker, echoing `hints` into same-named root fields.
+    #[must_use]
     pub fn with_hints(mut self, hints: FakerHints) -> Self {
         self.hints = hints;
         self
     }
 
+    /// A value for `schema_with_defs` (a schema carrying its own `$defs`),
+    /// drawn from `rng`.
+    #[must_use]
     pub fn fake(&self, schema_with_defs: &Value, rng: &mut impl Rng) -> Value {
         self.fake_with_branch(schema_with_defs, None, rng)
     }
@@ -544,6 +566,14 @@ const MAX_INLINE_HOPS: usize = 32;
 /// schema repeatedly compute it once (see [`Faker::fake_with_costs`]).
 pub struct Costs {
     by_ref: HashMap<String, u64>,
+}
+
+impl std::fmt::Debug for Costs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Costs")
+            .field("refs", &self.by_ref.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The object keywords of a schema merged across its `allOf` members (and

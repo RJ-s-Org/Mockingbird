@@ -55,7 +55,7 @@ fn deps(store: Arc<dyn ControlStore>, recorder: Option<Arc<dyn RequestRecorder>>
         offline: true,
         default_profile: None.into(),
         events: mb_protocols::events::EventDeps::default(),
-        limiter: mb_engine::GenerationLimiter::new(64),
+        limiter: mb_engine::GenerationLimiter::new_shared(64),
         scrubber: None,
         limits: Default::default(),
         http: Default::default(),
@@ -502,7 +502,7 @@ async fn workspace_force_delete_unmounts() {
     let deps = deps(store.clone(), None);
     let (registry, base) = served(&deps).await;
     let ha = mockingbird::ha::Ha::start_with_bus(
-        mb_state::LocalBus::new("test".into()),
+        mb_state::LocalBus::new_shared("test".into()),
         deps.store.clone(),
     )
     .await;

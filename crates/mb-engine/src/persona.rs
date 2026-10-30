@@ -145,6 +145,8 @@ fn template(field: &str, text: &str) -> Option<Template> {
 }
 
 impl PersonaFormats {
+    /// The formats `persona` declares; empty when it declares none.
+    #[must_use]
     pub fn parse(persona: &str) -> Self {
         let mut formats = PersonaFormats::default();
         if let Ok(re) =
@@ -201,6 +203,8 @@ impl PersonaFormats {
         formats
     }
 
+    /// Whether the persona declares no format.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.templates.is_empty() && self.ids.is_empty() && self.id_templates.is_empty()
     }

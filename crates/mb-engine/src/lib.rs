@@ -1,5 +1,37 @@
 //! Mock response engine: prompt building, LLM generation with
 //! validate → repair → fallback, schema validation and schema-driven faking.
+//!
+//! This is an internal crate of Mockingbird, published so that
+//! [`mockingbird-cli`](https://crates.io/crates/mockingbird-cli) can depend
+//! on it; it makes no API stability promise. Extensions use
+//! [`mb-ext`](https://crates.io/crates/mb-ext) instead.
+//!
+//! An [`Engine`] answers an [`OperationCall`] of a contract
+//! ([`mb_mcm::Bundle`]) with a [`GeneratedResponse`]: from the LLM when it
+//! has a provider and the answer validates (or is repaired), otherwise
+//! from the [`Faker`]. The faker and the [`SchemaValidator`] also work on
+//! their own:
+//!
+//! ```
+//! # fn demo() -> Result<(), mb_engine::EngineError> {
+//! use mb_engine::{Faker, SchemaValidator};
+//! use serde_json::json;
+//!
+//! let schema = json!({
+//!     "type": "object",
+//!     "required": ["id", "name"],
+//!     "properties": {
+//!         "id": { "type": "integer", "minimum": 1 },
+//!         "name": { "type": "string" }
+//!     }
+//! });
+//! let value = Faker::new(4).fake(&schema, &mut rand::rng());
+//! assert!(SchemaValidator::new(&schema)?.is_valid(&value));
+//! # Ok(())
+//! # }
+//! # demo().unwrap();
+//! ```
+#![warn(missing_debug_implementations, missing_docs)]
 
 use std::collections::HashSet;
 use std::fmt;
@@ -42,12 +74,17 @@ pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
 pub use validate::SchemaValidator;
 
+/// Why the engine could not answer at all (a contract problem, not an LLM
+/// failure: those fall back to the faker).
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    /// A schema does not compile; the text is the compiler's message.
     #[error("invalid schema: {0}")]
     Schema(String),
+    /// The forced status is not one the operation declares.
     #[error("status {0} is not declared by the operation")]
     UndeclaredStatus(u16),
+    /// The operation declares no success output to answer with.
     #[error("operation declares no success output")]
     NoOutput,
 }
@@ -55,30 +92,41 @@ pub enum EngineError {
 /// A decoded, protocol-neutral invocation of an operation.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OperationCall {
+    /// The [`Operation::id`] called.
     pub operation_id: String,
+    /// Path parameters by name, typed by their schemas.
     pub path_params: Map<String, Value>,
+    /// Query parameters by name (an array for a repeated one).
     pub query: Map<String, Value>,
     /// Only non-sensitive headers; the protocol adapter filters them.
     pub headers: Map<String, Value>,
+    /// The decoded request body, if any.
     pub body: Option<Value>,
 }
 
 /// One root field of a GraphQL query answered by
 /// [`Engine::generate_joint`]: its response key, operation, call and context
 /// (a 2xx response; `ctx.response_schema` narrows it).
+#[derive(Clone, Copy, Debug)]
 pub struct JointPart<'a> {
+    /// The root field's response key (its alias, or its name).
     pub key: &'a str,
+    /// The operation the root field maps to.
     pub op: &'a Operation,
+    /// The field's arguments as a call.
     pub call: &'a OperationCall,
+    /// The state the field's answer must stay consistent with.
     pub ctx: GenerationContext<'a>,
 }
 
 /// State the response must stay consistent with.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GenerationContext<'a> {
+    /// Stored resources the answer may refer to.
     pub related: &'a [StoredResource],
     /// Existing resource for query/update/delete.
     pub target: Option<&'a StoredResource>,
+    /// Answer with this declared status instead of the success one.
     pub forced_status: Option<u16>,
     /// The active scenario: its instructions go in the prompt and its `set`
     /// patches 2xx object bodies.
@@ -89,10 +137,14 @@ pub struct GenerationContext<'a> {
     pub response_schema: Option<&'a Value>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a response or item came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Source {
+    /// The LLM's answer, valid as it came.
     Llm,
+    /// The LLM's answer after a local patch or a repair round.
     Repaired,
+    /// The faker's answer (no LLM, or the LLM's answer was unusable).
     Fallback,
     /// Served from the session's stored resource, without the LLM.
     State,
@@ -105,6 +157,7 @@ pub enum Source {
 
 impl Source {
     /// The less trustworthy of two sources: `Fallback` > `Repaired` > `Llm`.
+    #[must_use]
     pub fn worst(self, other: Source) -> Source {
         if other.rank() > self.rank() {
             other
@@ -121,6 +174,9 @@ impl Source {
         }
     }
 
+    /// The lowercase name (`llm`, `repaired`, `fallback`...), also its
+    /// [`Display`](fmt::Display) form.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Llm => "llm",
@@ -139,11 +195,16 @@ impl fmt::Display for Source {
     }
 }
 
+/// A generated answer to one call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedResponse {
+    /// The declared status answered.
     pub status: u16,
+    /// The variant's media type, when it declares one.
     pub content_type: Option<String>,
+    /// The body; `None` for a variant without a schema.
     pub body: Option<Value>,
+    /// Where the body came from.
     pub source: Source,
     /// Tokens spent on this response, summed over the primary and repair
     /// calls; zero when no LLM call was made.
@@ -156,13 +217,21 @@ pub struct GeneratedResponse {
     pub fallback_reason: Option<String>,
 }
 
+/// How an [`Engine`] generates; [`Default`] gives the documented defaults.
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
+    /// Deadline of one generation, LLM calls and repairs included.
     pub timeout: Duration,
+    /// Sampling temperature of the LLM calls.
     pub temperature: f32,
+    /// Completion-token cap of one LLM call.
     pub max_tokens: u32,
+    /// The mock's persona text, added to every prompt; the formats it
+    /// declares are kept on generated bodies.
     pub persona: Option<String>,
+    /// How deep the faker nests before it stops at required members.
     pub faker_depth: usize,
+    /// Limits and pacing of streams.
     pub stream: StreamConfig,
     /// Completion tokens an answer is shaped to (see [`budget`]); 0 turns
     /// shaping off.
@@ -193,7 +262,9 @@ impl Default for StreamConfig {
 /// Owned state a stream's items must stay consistent with.
 #[derive(Clone, Debug, Default)]
 pub struct StreamContext {
+    /// Stored resources the items may refer to.
     pub related: Vec<StoredResource>,
+    /// The existing resource the stream is about, if any.
     pub target: Option<StoredResource>,
     /// The active scenario: its instructions go in the prompt and its `set`
     /// patches object items.
@@ -207,7 +278,9 @@ pub struct StreamContext {
 /// One generated stream item.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamItem {
+    /// The item.
     pub value: Value,
+    /// Where the item came from.
     pub source: Source,
     /// Tokens attributed to this item: its share of the provider stream's
     /// estimate (see [`Engine::generate_stream`]) plus any repair call; zero
@@ -287,6 +360,16 @@ pub struct Engine {
     guards: EngineGuards,
 }
 
+/// The schema a response answers and what it belongs to: the input of
+/// [`Engine::finish`].
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    validator: &'a SchemaValidator,
+    bundle: &'a Bundle,
+    schema: &'a Value,
+    op: &'a Operation,
+}
+
 /// (`<source digest>/<operation id>`, status, narrowed schema digest,
 /// requested member names).
 type ShapeKey = (String, u16, Option<u64>, Vec<String>);
@@ -312,7 +395,25 @@ impl FakeSetup {
     }
 }
 
+/// Prints the configuration and cache sizes; never the provider, which
+/// holds the LLM credentials.
+impl fmt::Debug for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Engine")
+            .field("has_provider", &self.provider.is_some())
+            .field("config", &self.config)
+            .field("guards", &self.guards)
+            .field("validators", &self.validators.len())
+            .field("schema_validators", &self.schema_validators.len())
+            .field("fake_setups", &self.fake_setups.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Engine {
+    /// An engine generating with `provider`, or offline (faker only) when
+    /// it is `None`, with no guards (see [`Engine::with_guards`]).
+    #[must_use]
     pub fn new(provider: Option<Arc<dyn Provider>>, config: EngineConfig) -> Self {
         let persona_formats = config
             .persona
@@ -332,6 +433,8 @@ impl Engine {
         }
     }
 
+    /// The configuration the engine was built with.
+    #[must_use]
     pub fn config(&self) -> &EngineConfig {
         &self.config
     }
@@ -339,12 +442,14 @@ impl Engine {
     /// Whether the engine has an LLM provider; without one every response
     /// comes from the faker, and prompt-only inputs (such as
     /// [`StreamContext::request_stream`]) are never read.
+    #[must_use]
     pub fn has_provider(&self) -> bool {
         self.provider.is_some()
     }
 
     /// Whether `value` is a valid stream item of `op`; `false` when `op`
     /// has no stream item schema.
+    #[must_use]
     pub fn conform_item(&self, bundle: &Bundle, op: &Operation, value: &Value) -> bool {
         let Some(schema) = op.stream_item_schema() else {
             return false;
@@ -361,6 +466,18 @@ impl Engine {
         }
     }
 
+    /// Answers `call` of `op`: with the success output, or the variant of
+    /// `ctx.forced_status`. The LLM answers when there is a provider and its
+    /// answer validates (after a local patch or a repair round); otherwise
+    /// the faker does, and [`GeneratedResponse::fallback_reason`] says why.
+    /// The body is then made consistent with the request, the state and
+    /// the scenario.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::UndeclaredStatus`] when `op` does not declare the
+    /// forced status, and [`EngineError::NoOutput`] when it declares no
+    /// success output. A failed or invalid LLM answer is not an error.
     pub async fn generate(
         &self,
         bundle: &Bundle,
@@ -486,7 +603,13 @@ impl Engine {
             }
         };
         response.usage = usage;
-        Ok(self.finish(&validator, bundle, schema, op, call, &ctx, response))
+        let target = Target {
+            validator: &validator,
+            bundle,
+            schema,
+            op,
+        };
+        Ok(self.finish(target, call, &ctx, response))
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
@@ -597,9 +720,13 @@ impl Engine {
                 .response_schema
                 .or(variant.schema.as_ref())
                 .unwrap_or(&Value::Null);
-            responses.push(self.finish(
-                &validator, bundle, schema, part.op, part.call, &part.ctx, response,
-            ));
+            let target = Target {
+                validator: &validator,
+                bundle,
+                schema,
+                op: part.op,
+            };
+            responses.push(self.finish(target, part.call, &part.ctx, response));
         }
         Some(responses)
     }
@@ -637,7 +764,13 @@ impl Engine {
                     Some(&validator),
                     &FakerHints::from_call(op, call),
                 );
-                self.finish(&validator, bundle, schema, op, call, ctx, response)
+                let target = Target {
+                    validator: &validator,
+                    bundle,
+                    schema,
+                    op,
+                };
+                self.finish(target, call, ctx, response)
             }
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
@@ -730,17 +863,19 @@ impl Engine {
     /// Post-process a generated response: reflect request and state, keep
     /// the persona's formats, give a list read unique item ids, then apply
     /// the scenario's `set` patch.
-    #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
-        validator: &SchemaValidator,
-        bundle: &Bundle,
-        schema: &Value,
-        op: &Operation,
+        target: Target<'_>,
         call: &OperationCall,
         ctx: &GenerationContext<'_>,
         response: GeneratedResponse,
     ) -> GeneratedResponse {
+        let Target {
+            validator,
+            bundle,
+            schema,
+            op,
+        } = target;
         let response = encode_base64(validator, bundle, schema, response);
         let response = reflect(validator, op, call, ctx, response);
         let response = self.keep_persona_formats(validator, call, response);

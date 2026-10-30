@@ -8,6 +8,8 @@ pub struct LineSplitter {
 }
 
 impl LineSplitter {
+    /// An empty splitter.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

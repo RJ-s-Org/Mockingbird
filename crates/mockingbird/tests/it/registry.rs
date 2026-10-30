@@ -67,7 +67,7 @@ fn deps(store: Arc<dyn ControlStore>) -> RuntimeDeps {
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
-        limiter: mb_engine::GenerationLimiter::new(64),
+        limiter: mb_engine::GenerationLimiter::new_shared(64),
         scrubber: None,
         limits: Default::default(),
         http: Default::default(),
@@ -259,7 +259,7 @@ async fn activation_change_reloads() {
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
     let ha = mockingbird::ha::Ha::start_with_bus(
-        mb_state::LocalBus::new("test".into()),
+        mb_state::LocalBus::new_shared("test".into()),
         deps.store.clone(),
     )
     .await;
@@ -280,7 +280,7 @@ async fn delete_unmounts() {
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
     let ha = mockingbird::ha::Ha::start_with_bus(
-        mb_state::LocalBus::new("test".into()),
+        mb_state::LocalBus::new_shared("test".into()),
         deps.store.clone(),
     )
     .await;
@@ -952,7 +952,7 @@ async fn grpc_mock_removed_on_delete() {
     let registry = MockRegistry::new();
     registry.reload_all(&deps).await.unwrap();
     let ha = mockingbird::ha::Ha::start_with_bus(
-        mb_state::LocalBus::new("test".into()),
+        mb_state::LocalBus::new_shared("test".into()),
         deps.store.clone(),
     )
     .await;

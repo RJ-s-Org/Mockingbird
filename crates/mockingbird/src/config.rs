@@ -702,7 +702,7 @@ async fn build_app_inner(
             holder: ha.node_id.clone(),
             shared_subscriptions: !ha.bus.is_local(),
         },
-        limiter: GenerationLimiter::new(cfg.limits.max_concurrent_generations),
+        limiter: GenerationLimiter::new_shared(cfg.limits.max_concurrent_generations),
         scrubber,
         limits: cfg.limits.clone(),
         http: http.clone(),

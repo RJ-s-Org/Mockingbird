@@ -227,7 +227,7 @@ fn verb_prefix(name: &str) -> Option<(&str, &OperationKind)> {
 /// The operation kind implied by a verb-prefixed name (`getUser`,
 /// `create_order`), else `default`.
 pub(crate) fn kind_from_name(name: &str, default: OperationKind) -> OperationKind {
-    verb_prefix(name).map_or(default, |(_, kind)| kind.clone())
+    verb_prefix(name).map_or(default, |(_, kind)| *kind)
 }
 
 /// The resource a name refers to: the name without its verb prefix,

@@ -55,7 +55,7 @@ async fn assert_silent(rx: &mut broadcast::Receiver<BusEvent>) {
 
 #[tokio::test(start_paused = true)]
 async fn memory_hub_delivers_to_others_not_self() {
-    let hub = MemoryBusHub::new();
+    let hub = MemoryBusHub::new_shared();
     let a = hub.join("a".into());
     let b = hub.join("b".into());
     let c = hub.join("c".into());
@@ -74,7 +74,7 @@ async fn memory_hub_delivers_to_others_not_self() {
 
 #[tokio::test(start_paused = true)]
 async fn local_bus_is_silent() {
-    let bus = LocalBus::new("solo".into());
+    let bus = LocalBus::new_shared("solo".into());
     assert!(bus.is_local());
     assert_eq!(bus.node_id(), "solo");
     assert!(bus.health().is_ok());
@@ -125,7 +125,7 @@ fn envelope_round_trip_json() {
 
 #[tokio::test]
 async fn oversized_event_becomes_resync() {
-    let hub = MemoryBusHub::new();
+    let hub = MemoryBusHub::new_shared();
     let a = hub.join("a".into());
     let b = hub.join("b".into());
     let mut rb = b.subscribe();

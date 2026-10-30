@@ -8,6 +8,7 @@
 #![cfg(test)]
 
 mod budget;
+mod debug;
 mod faker;
 mod generate;
 mod guards;

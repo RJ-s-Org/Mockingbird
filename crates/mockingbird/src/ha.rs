@@ -63,7 +63,7 @@ impl Ha {
         node_id: String,
     ) -> anyhow::Result<Arc<Self>> {
         let bus: Arc<dyn Bus> = match cfg.bus_target() {
-            BusTarget::Local => LocalBus::new(node_id),
+            BusTarget::Local => LocalBus::new_shared(node_id),
             BusTarget::Postgres(url) => PgBus::connect(&url, node_id)
                 .await
                 .map_err(|e| anyhow!("connecting the postgres bus: {e}"))?,
@@ -550,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_and_remote_state_changes_are_merged_and_marked() {
-        let hub = MemoryBusHub::new();
+        let hub = MemoryBusHub::new_shared();
         let a = BusStateStore::new(
             Arc::new(MemoryStore::new(Duration::from_secs(60))),
             hub.join("a".into()),
@@ -616,7 +616,7 @@ mod tests {
     /// change feed.
     #[tokio::test]
     async fn resets_and_seeds_clear_the_response_cache_on_every_node() {
-        let hub = MemoryBusHub::new();
+        let hub = MemoryBusHub::new_shared();
         let shared: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(60)));
         let node = |id: &str| {
             cached_shared_state(
@@ -667,7 +667,7 @@ mod tests {
     #[tokio::test]
     async fn local_bus_announces_nothing() {
         let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(60)));
-        let wrapped = BusStateStore::new(store, LocalBus::new("solo".into()));
+        let wrapped = BusStateStore::new(store, LocalBus::new_shared("solo".into()));
         let mut rx = wrapped.subscribe();
         wrapped.upsert(&key(), resource("1")).await.expect("upsert");
         assert_eq!(recv(&mut rx).await.origin, ChangeOrigin::Local);

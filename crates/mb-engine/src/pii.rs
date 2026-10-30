@@ -23,18 +23,32 @@ pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
 /// Builtin passes repeat until nothing changes, at most this often.
 const MAX_PASSES: usize = 8;
 
+/// A builtin PII pattern.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinPattern {
+    /// Email addresses.
     Email,
+    /// North American and E.164 phone numbers.
     Phone,
+    /// Payment card numbers.
     CreditCard,
+    /// US Social Security numbers.
     UsSsn,
+    /// IBANs.
     Iban,
+    /// IPv4 addresses.
     Ipv4,
 }
 
+impl std::fmt::Display for BuiltinPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl BuiltinPattern {
+    /// Every builtin pattern.
     pub const ALL: [BuiltinPattern; 6] = [
         BuiltinPattern::Email,
         BuiltinPattern::Phone,
@@ -44,6 +58,9 @@ impl BuiltinPattern {
         BuiltinPattern::Ipv4,
     ];
 
+    /// The configuration and metric name (`email`, `credit_card`...), also
+    /// the [`Display`](std::fmt::Display) form.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             BuiltinPattern::Email => "email",
@@ -83,18 +100,24 @@ const RUN_ORDER: [BuiltinPattern; 6] = [
     BuiltinPattern::Ipv4,
 ];
 
+/// A pattern the mock owner configures.
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct CustomPattern {
+    /// The metric label: 1 to 32 of `a-z`, `0-9` and `_`.
     pub name: String,
+    /// The regex whose matches are replaced.
     pub regex: String,
     /// Template: `#` → random digit, `?` → random lowercase letter, anything
     /// else literal.
     pub replacement: String,
 }
 
+/// The patterns a [`Scrubber`] replaces; [`Default`] gives every builtin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScrubberConfig {
+    /// The builtins to run.
     pub builtins: Vec<BuiltinPattern>,
+    /// Custom patterns, run after the builtins.
     pub custom: Vec<CustomPattern>,
 }
 
@@ -108,10 +131,17 @@ impl Default for ScrubberConfig {
     }
 }
 
+/// A [`ScrubberConfig`] that cannot be compiled.
 #[derive(thiserror::Error, Debug)]
 pub enum PiiError {
+    /// A custom pattern is invalid.
     #[error("pii.custom[{index}]: {reason}")]
-    Custom { index: usize, reason: String },
+    Custom {
+        /// Its position in [`ScrubberConfig::custom`].
+        index: usize,
+        /// Why it is invalid.
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +173,12 @@ fn valid_custom_name(name: &str) -> bool {
 }
 
 impl Scrubber {
+    /// Compiles the patterns of `cfg`.
+    ///
+    /// # Errors
+    ///
+    /// [`PiiError::Custom`] for a custom pattern with an invalid name or
+    /// regex, or past [`MAX_CUSTOM_PATTERNS`] of them.
     pub fn new(cfg: &ScrubberConfig) -> Result<Self, PiiError> {
         // The builtin regexes are constants that always compile (covered by
         // the per-builtin tests). They are compiled with Unicode mode off, so

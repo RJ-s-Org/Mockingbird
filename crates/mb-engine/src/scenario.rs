@@ -8,6 +8,7 @@ use serde_json::Value;
 /// The scenario active for one generation.
 #[derive(Clone, Debug, Default)]
 pub struct ScenarioSpec {
+    /// The scenario's name.
     pub name: String,
     /// Free-text instructions from the mock owner, added to the prompt.
     pub instructions: Option<String>,

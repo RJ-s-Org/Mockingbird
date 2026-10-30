@@ -27,7 +27,19 @@ pub struct GenerationLimiter {
 }
 
 impl GenerationLimiter {
+    /// A shared limiter of at most `max` generations in flight.
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `GenerationLimiter::new_shared`; in 0.2.0 `new` returns `Self`"
+    )]
     pub fn new(max: usize) -> Arc<Self> {
+        Self::new_shared(max)
+    }
+
+    /// A shared limiter of at most `max` generations in flight (capped at
+    /// the semaphore's maximum).
+    #[must_use]
+    pub fn new_shared(max: usize) -> Arc<Self> {
         let max = max.min(Semaphore::MAX_PERMITS);
         Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(max)),
@@ -36,10 +48,13 @@ impl GenerationLimiter {
     }
 
     /// Permits currently held.
+    #[must_use]
     pub fn in_use(&self) -> usize {
         self.max.saturating_sub(self.semaphore.available_permits())
     }
 
+    /// The most generations in flight.
+    #[must_use]
     pub fn max(&self) -> usize {
         self.max
     }
@@ -73,19 +88,37 @@ impl Drop for GenerationPermit {
     }
 }
 
+/// A budget of LLM tokens the engine checks and charges.
 pub trait TokenBudget: Send + Sync {
     /// Checked before every LLM call; an implementation records its own metric when it returns true.
     fn exhausted(&self) -> bool;
+    /// Charges `tokens` (prompt plus completion) after a call.
     fn spend(&self, tokens: u64);
 }
 
 /// The guards an [`Engine`] applies to every LLM call. Each is optional.
 #[derive(Clone, Default)]
 pub struct EngineGuards {
+    /// Bounds the generations in flight; a call that waits past its
+    /// deadline falls back.
     pub limiter: Option<Arc<GenerationLimiter>>,
+    /// Refuses calls once exhausted, and is charged what each call used.
     pub budget: Option<Arc<dyn TokenBudget>>,
+    /// Replaces PII in LLM output.
     pub scrubber: Option<Arc<crate::pii::Scrubber>>,
+    /// Larger LLM output is rejected (and falls back).
     pub max_response_bytes: Option<usize>,
+}
+
+impl std::fmt::Debug for EngineGuards {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineGuards")
+            .field("limiter", &self.limiter)
+            .field("budget", &self.budget.as_ref().map(|_| "TokenBudget"))
+            .field("scrubber", &self.scrubber)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .finish()
+    }
 }
 
 /// LLM output after the guards and validation.
@@ -129,11 +162,15 @@ impl<'a> Echoes<'a> {
 }
 
 impl Engine {
+    /// This engine with `guards` applied to every LLM call.
+    #[must_use]
     pub fn with_guards(mut self, guards: EngineGuards) -> Self {
         self.guards = guards;
         self
     }
 
+    /// The guards applied to every LLM call.
+    #[must_use]
     pub fn guards(&self) -> &EngineGuards {
         &self.guards
     }

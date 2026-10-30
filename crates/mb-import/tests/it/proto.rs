@@ -143,7 +143,7 @@ fn streaming_flags_map_to_kinds() {
             "RouteGuide.RouteChat",
         ]
     );
-    let kind = |id: &str| b.operation(id).unwrap().kind.clone();
+    let kind = |id: &str| b.operation(id).unwrap().kind;
     assert_eq!(kind("RouteGuide.GetFeature"), OperationKind::Query);
     assert_eq!(kind("RouteGuide.ListFeatures"), OperationKind::StreamServer);
     assert_eq!(kind("RouteGuide.RecordRoute"), OperationKind::StreamClient);

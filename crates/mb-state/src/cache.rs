@@ -28,8 +28,11 @@ pub const DEFAULT_CACHE_ENTRIES: usize = 500;
 /// A final response as the data plane sent it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CachedResponse {
+    /// The HTTP status (or the protocol's equivalent).
     pub status: u16,
+    /// The `Content-Type`, when the response had one.
     pub content_type: Option<String>,
+    /// The body, when the response had one.
     pub body: Option<Value>,
     /// Why the faker answered, for an answer that stood in for a failed LLM
     /// call: a hit is then reported as that fallback again.
@@ -90,7 +93,20 @@ pub struct ResponseCache {
     idle_ttl: Duration,
 }
 
+impl std::fmt::Debug for ResponseCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseCache")
+            .field("sessions", &self.sessions.len())
+            .field("capacity", &self.capacity)
+            .field("idle_ttl", &self.idle_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ResponseCache {
+    /// An empty cache keeping at most `capacity` (at least 1) responses per
+    /// session, and dropping a session idle for `idle_ttl`.
+    #[must_use]
     pub fn new(capacity: usize, idle_ttl: Duration) -> Self {
         Self {
             sessions: DashMap::new(),
@@ -106,6 +122,7 @@ impl ResponseCache {
 
     /// The answer cached under `key`, marking it recently used. A session
     /// idle for the TTL is dropped and misses.
+    #[must_use]
     pub fn get(&self, s: &SessionKey, key: &str) -> Option<CachedResponse> {
         let now = Instant::now();
         if self
@@ -170,6 +187,7 @@ impl ResponseCache {
 
     /// The session's invalidation epoch now: read it before generating an
     /// answer and pass it to [`ResponseCache::put_if_current`].
+    #[must_use]
     pub fn epoch(&self, s: &SessionKey) -> CacheEpoch {
         CacheEpoch {
             clears: self.clears.load(Ordering::SeqCst),
@@ -230,11 +248,13 @@ impl ResponseCache {
     }
 
     /// How many answers the session holds.
+    #[must_use]
     pub fn len(&self, s: &SessionKey) -> usize {
         self.sessions.get(s).map_or(0, |c| c.entries.len())
     }
 
     /// Whether the session holds no answer.
+    #[must_use]
     pub fn is_empty(&self, s: &SessionKey) -> bool {
         self.len(s) == 0
     }
@@ -255,6 +275,14 @@ impl ResponseCache {
 pub struct CachingStateStore {
     inner: Arc<dyn StateStore>,
     cache: Arc<ResponseCache>,
+}
+
+impl std::fmt::Debug for CachingStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachingStateStore")
+            .field("cache", &self.cache)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CachingStateStore {
