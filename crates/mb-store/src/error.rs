@@ -1,11 +1,16 @@
+/// Why a store operation failed.
 #[derive(thiserror::Error, Debug)]
 pub enum StoreError {
+    /// The resource (or one it refers to) does not exist.
     #[error("not found: {0}")]
     NotFound(String),
+    /// The write clashes with an existing resource (a unique key).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// The input breaks a rule; the message names it.
     #[error("invalid: {0}")]
     Invalid(String),
+    /// The database failed, or holds data the store cannot read.
     #[error("database: {0}")]
     Db(String),
 }

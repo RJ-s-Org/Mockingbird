@@ -541,7 +541,7 @@ pub(crate) async fn activation_is_exclusive_and_rolls_back(store: &Arc<dyn Contr
         versions
             .iter()
             .find(|v| v.version == n)
-            .map(|v| v.status.clone())
+            .map(|v| v.status)
             .expect("version present")
     };
     let versions = store.list_contract_versions(mock.id).await.expect("list");

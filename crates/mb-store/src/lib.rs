@@ -1,6 +1,19 @@
 //! Control-plane persistence: workspaces, mocks, contract versions, scenarios,
 //! LLM profiles, the request log, API keys, admin sessions, the audit log and
 //! the import job queue, behind the backend-neutral [`ControlStore`].
+//!
+//! Internal crate of Mockingbird, published for `mockingbird-cli`, with no
+//! API stability guarantee.
+//!
+//! ```
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), mb_store::StoreError> {
+//! let store = mb_store::connect("sqlite::memory:").await?;
+//! assert!(store.get_workspace(mb_store::DEFAULT_WORKSPACE).await?.is_some());
+//! # Ok(())
+//! # }
+//! ```
+#![warn(missing_debug_implementations, clippy::missing_errors_doc)]
 
 mod error;
 mod model;
@@ -53,11 +66,16 @@ fn oidc_pending_unsupported() -> StoreError {
     )
 }
 
+/// The control-plane store, one implementation per backend ([`PgStore`],
+/// [`SqliteControlStore`]). Methods return [`StoreError`]; their docs name
+/// the variants that carry meaning beyond [`StoreError::Db`].
 #[async_trait]
 pub trait ControlStore: Send + Sync {
+    /// Checks that the database answers.
     async fn ping(&self) -> Result<(), StoreError>;
     /// Name ascending.
     async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError>;
+    /// The workspace named `name`, if any.
     async fn get_workspace(&self, name: &str) -> Result<Option<Workspace>, StoreError>;
     /// `Invalid` for a bad name, `Conflict` if it already exists.
     async fn create_workspace(
@@ -78,7 +96,9 @@ pub trait ControlStore: Send + Sync {
     async fn delete_workspace(&self, name: &str, force: bool) -> Result<bool, StoreError>;
     /// Every workspace's mocks, `(workspace, name)` ascending.
     async fn list_all_mocks(&self) -> Result<Vec<Mock>, StoreError>;
+    /// The workspace's mocks, name ascending.
     async fn list_mocks(&self, ws: &str) -> Result<Vec<Mock>, StoreError>;
+    /// The mock `name` of workspace `ws`, if any.
     async fn get_mock(&self, ws: &str, name: &str) -> Result<Option<Mock>, StoreError>;
     /// `Conflict` if the name already exists in the workspace, `NotFound` if
     /// the workspace does not exist, `Invalid` when `chaos` or `limits` is
@@ -100,6 +120,7 @@ pub trait ControlStore: Send + Sync {
         &self,
         mock_id: Uuid,
     ) -> Result<Vec<ContractVersion>, StoreError>;
+    /// Version `version` of the mock, if any.
     async fn get_contract_version(
         &self,
         mock_id: Uuid,
@@ -126,6 +147,7 @@ pub trait ControlStore: Send + Sync {
             "this control store cannot delete contract versions".to_string(),
         ))
     }
+    /// The mock's `Active` version, if any.
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError>;
     /// The active version number of each of `mock_ids` that has one, in
     /// one query (mocks without an active version, or unknown, are left
@@ -189,16 +211,21 @@ pub trait ControlStore: Send + Sync {
             .into_iter()
             .find(|v| statuses.contains(&v.status)))
     }
+    /// The mock's scenarios.
     async fn list_scenarios(&self, mock_id: Uuid) -> Result<Vec<Scenario>, StoreError>;
     /// Upserts by `(mock_id, name)`. `Invalid` when `rules.chaos` is out of
     /// range.
     async fn put_scenario(&self, s: &Scenario) -> Result<(), StoreError>;
+    /// Deletes the scenario; `false` if it does not exist.
     async fn delete_scenario(&self, mock_id: Uuid, name: &str) -> Result<bool, StoreError>;
+    /// The workspace's LLM profiles.
     async fn list_profiles(&self, ws: &str) -> Result<Vec<LlmProfile>, StoreError>;
+    /// The LLM profile `name` of workspace `ws`, if any.
     async fn get_profile(&self, ws: &str, name: &str) -> Result<Option<LlmProfile>, StoreError>;
     /// Upserts by `(workspace, name)`. `NotFound` if the workspace does not
     /// exist.
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError>;
+    /// Deletes the LLM profile; `false` if it does not exist.
     async fn delete_profile(&self, ws: &str, name: &str) -> Result<bool, StoreError>;
     /// Returns the new row id. The mock's rows beyond the newest `retention`
     /// are deleted on its first insert and then every
@@ -255,6 +282,7 @@ pub trait ControlStore: Send + Sync {
         mock_id: Uuid,
         channel_id: &str,
     ) -> Result<bool, StoreError>;
+    /// The mock's event settings, if any were stored.
     async fn get_event_settings(
         &self,
         mock_id: Uuid,
@@ -272,6 +300,7 @@ pub trait ControlStore: Send + Sync {
     /// `NotFound` if the key's workspace does not exist, `Conflict` if the
     /// `key_id` is taken. A workspace's keys go with it when it is deleted.
     async fn create_api_key(&self, k: &ApiKey) -> Result<(), StoreError>;
+    /// The API key with this id, revoked or not, if any.
     async fn get_api_key(&self, key_id: &str) -> Result<Option<ApiKey>, StoreError>;
     /// Newest (`created_at`) first, revoked keys included.
     async fn list_api_keys(&self, ws: &str) -> Result<Vec<ApiKey>, StoreError>;
@@ -281,10 +310,12 @@ pub trait ControlStore: Send + Sync {
     async fn touch_api_key(&self, key_id: &str, at: DateTime<Utc>) -> Result<(), StoreError>;
     /// `Conflict` if `id_hash` is taken.
     async fn create_admin_session(&self, s: &AdminSession) -> Result<(), StoreError>;
+    /// The console session with this id hash, if any.
     async fn get_admin_session(&self, id_hash: &str) -> Result<Option<AdminSession>, StoreError>;
     /// Sets `last_seen`; an unknown session is ignored.
     async fn touch_admin_session(&self, id_hash: &str, at: DateTime<Utc>)
     -> Result<(), StoreError>;
+    /// Deletes the session; `false` if it does not exist.
     async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError>;
     /// Deletes sessions with `expires_at <= now`; returns how many.
     async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError>;
@@ -377,6 +408,7 @@ pub trait ControlStore: Send + Sync {
     /// Queues a job with progress `{"queued", 0, 0}`, copying the mock's
     /// workspace and name. `NotFound` if the mock does not exist.
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError>;
+    /// The import job, if any.
     async fn get_import_job(&self, id: Uuid) -> Result<Option<ImportJob>, StoreError>;
     /// The job's input; `None` for an unknown or finished job (finishing
     /// clears it).
@@ -453,6 +485,8 @@ pub trait ControlStore: Send + Sync {
     /// Deletes finished jobs with `finished_at < finished_before`; returns how
     /// many.
     async fn prune_import_jobs(&self, finished_before: DateTime<Utc>) -> Result<u64, StoreError>;
+    /// Changes written through this store, from now on (see
+    /// [`ControlChange`]).
     fn subscribe(&self) -> broadcast::Receiver<ControlChange>;
 }
 
@@ -460,6 +494,11 @@ pub trait ControlStore: Send + Sync {
 ///
 /// Supported: `sqlite::memory:`, `sqlite://<path>` (created if missing) and
 /// `postgres://…` / `postgresql://…`.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] for another scheme or a malformed URL, and
+/// [`StoreError::Db`] when the database cannot be reached or migrated.
 pub async fn connect(url: &str) -> Result<Arc<dyn ControlStore>, StoreError> {
     if url.starts_with("sqlite:") {
         Ok(Arc::new(SqliteControlStore::connect(url).await?))
@@ -474,6 +513,10 @@ pub async fn connect(url: &str) -> Result<Arc<dyn ControlStore>, StoreError> {
 }
 
 /// `^[a-z0-9][a-z0-9-]{0,62}$`
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`], naming the rule, for any other name.
 pub fn validate_mock_name(name: &str) -> Result<(), StoreError> {
     let bytes = name.as_bytes();
     let valid = !bytes.is_empty()
@@ -492,6 +535,10 @@ pub fn validate_mock_name(name: &str) -> Result<(), StoreError> {
 }
 
 /// Workspace names follow the mock-name rule `^[a-z0-9][a-z0-9-]{0,62}$`.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`], naming the rule, for any other name.
 pub fn validate_workspace_name(name: &str) -> Result<(), StoreError> {
     validate_mock_name(name).map_err(|_| {
         StoreError::Invalid(format!(
@@ -501,6 +548,10 @@ pub fn validate_workspace_name(name: &str) -> Result<(), StoreError> {
 }
 
 /// A lowercase RFC 9110 token of 1–64 characters.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] for any other name.
 pub fn validate_header_name(name: &str) -> Result<(), StoreError> {
     let valid = (1..=64).contains(&name.len())
         && name.bytes().all(|b| {
@@ -527,7 +578,10 @@ const RESERVED_PROFILE_HEADERS: [&str; 5] = [
 
 /// The secret references embedded in a profile header value as
 /// `${<reference>}` (`Bearer ${env:CF_AIG_TOKEN}` → `["env:CF_AIG_TOKEN"]`).
-/// `Invalid` for an unterminated or empty placeholder.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] for an unterminated or empty placeholder.
 pub fn header_secret_refs(value: &str) -> Result<Vec<&str>, StoreError> {
     let mut refs = Vec::new();
     let mut rest = value;
@@ -560,6 +614,10 @@ pub fn is_sensitive_header(name: &str) -> bool {
 /// client does not set itself, values without line breaks, well-formed
 /// `${…}` placeholders, and no literal value for a credential-bearing name
 /// (see [`is_sensitive_header`]).
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] naming the first header that breaks a rule.
 pub fn validate_profile_headers(
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), StoreError> {
@@ -602,6 +660,10 @@ const MAX_EXTRA_BODY_BYTES: usize = 8192;
 
 /// Checks an LLM profile's `extra_body`: no field the client sets itself
 /// (see [`RESERVED_EXTRA_BODY_FIELDS`]) and at most 8 KiB of JSON.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] for a reserved field or a body over 8 KiB.
 pub fn validate_extra_body(body: &serde_json::Map<String, Value>) -> Result<(), StoreError> {
     if let Some(field) = RESERVED_EXTRA_BODY_FIELDS
         .iter()
@@ -639,6 +701,10 @@ pub(crate) fn missing_workspace(name: &str) -> StoreError {
 }
 
 /// `"/"` or `"/seg(/seg)*"` where each segment is `[A-Za-z0-9._-]+`.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] for any other prefix.
 pub fn validate_route_prefix(prefix: &str) -> Result<(), StoreError> {
     let valid = prefix == "/"
         || prefix.strip_prefix('/').is_some_and(|rest| {
@@ -661,6 +727,11 @@ pub fn validate_route_prefix(prefix: &str) -> Result<(), StoreError> {
 /// Each host is a lowercase DNS name or IPv4 address without a port: 1–253
 /// bytes of `.`-separated labels made of `[a-z0-9-]`, not starting or ending
 /// with `-`. No host may be listed twice.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] naming the first host that is malformed or
+/// listed twice.
 pub fn validate_hosts(hosts: &[String]) -> Result<(), StoreError> {
     let mut seen = std::collections::HashSet::new();
     for h in hosts {

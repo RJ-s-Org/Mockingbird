@@ -85,15 +85,34 @@ const CHANNEL_SELECT: &str =
     "mock_id, channel_id, enabled, triggers::text AS triggers, source, updated_at";
 const EVENT_SETTINGS_COLUMNS: &str = "mock_id, broker, source, updated_at";
 
+/// The Postgres [`ControlStore`].
+///
+/// `Debug` shows the pool's size, never the connection URL (it may carry
+/// a password).
 pub struct PgStore {
     pool: PgPool,
     changes: broadcast::Sender<ControlChange>,
     prune: PruneCounter,
 }
 
+impl std::fmt::Debug for PgStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgStore")
+            .field("connections", &self.pool.size())
+            .field("idle", &self.pool.num_idle())
+            .field("closed", &self.pool.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
 impl PgStore {
     /// Opens `postgres://…` (or `postgresql://…`) and runs migrations under
     /// Postgres's advisory lock.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Invalid`] for a malformed URL, and [`StoreError::Db`]
+    /// when the database cannot be reached or migrated.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let options = PgConnectOptions::from_str(url)
             .map_err(|e| StoreError::Invalid(format!("postgres url: {e}")))?;
@@ -115,6 +134,10 @@ impl PgStore {
     /// A store whose pool connects on first use and which runs no
     /// migrations (the schema must already exist). Unlike [`Self::connect`]
     /// it succeeds while the database is unreachable.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Invalid`] for a malformed URL.
     pub fn connect_lazy(url: &str) -> Result<Self, StoreError> {
         let options = PgConnectOptions::from_str(url)
             .map_err(|e| StoreError::Invalid(format!("postgres url: {e}")))?;

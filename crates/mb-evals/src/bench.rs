@@ -97,6 +97,11 @@ fn fill_path(path: &str) -> String {
 /// `127.0.0.1:0` and drives its GET and POST operations round-robin from
 /// `concurrency` workers for `duration`. A transport failure or a 5xx
 /// response counts as an error; latencies cover every request.
+///
+/// # Errors
+///
+/// When `contract` cannot be read or compiled, has no GET or POST
+/// operation, or the offline server cannot start.
 pub async fn bench(
     contract: &Path,
     duration: Duration,

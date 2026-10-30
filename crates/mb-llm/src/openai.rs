@@ -1,3 +1,5 @@
+//! The OpenAI-compatible client ([`OpenAiCompatible`]).
+
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -8,13 +10,18 @@ use crate::{
     ResponseFormat, StreamUsage, TextStream, Usage,
 };
 
-/// An OpenAI-compatible endpoint. Its `Debug` output redacts `api_key` and
-/// the header values (header names are kept).
+/// An OpenAI-compatible endpoint. Its `Debug` output redacts `api_key`, the
+/// header values (header names are kept) and any user and password in
+/// `base_url` or the proxy URL.
 #[derive(Clone)]
 pub struct OpenAiConfig {
+    /// The endpoint, up to (not including) `/chat/completions`.
     pub base_url: String,
+    /// Sent as `Authorization: Bearer <key>` when set.
     pub api_key: Option<String>,
+    /// The model to ask for.
     pub model: String,
+    /// Whether the endpoint supports `response_format: json_schema`.
     pub json_schema: bool,
     /// Extra request headers (name, value), already resolved: Cloudflare AI
     /// Gateway's `cf-aig-authorization`, Azure's `api-key`, attribution.
@@ -35,7 +42,7 @@ impl std::fmt::Debug for OpenAiConfig {
             .map(|(name, _)| (name.as_str(), REDACTED))
             .collect();
         f.debug_struct("OpenAiConfig")
-            .field("base_url", &self.base_url)
+            .field("base_url", &crate::http::redact_userinfo(&self.base_url))
             .field("api_key", &self.api_key.as_ref().map(|_| REDACTED))
             .field("model", &self.model)
             .field("json_schema", &self.json_schema)
@@ -46,10 +53,14 @@ impl std::fmt::Debug for OpenAiConfig {
     }
 }
 
+/// A [`Provider`] for an OpenAI-compatible `/chat/completions` endpoint.
+///
+/// `Debug` shows its [`OpenAiConfig`], redacted the same way.
 pub struct OpenAiCompatible {
     client: reqwest::Client,
     config: OpenAiConfig,
-    /// Whether requests ask for no reasoning (see [`Self::reasoning_off`]);
+    /// Whether requests ask for no reasoning (see
+    /// [`Self::with_reasoning_disabled`]);
     /// cleared when the endpoint rejects that.
     reasoning_off: AtomicBool,
     /// Whether streams ask for usage (`stream_options.include_usage`);
@@ -57,8 +68,23 @@ pub struct OpenAiCompatible {
     stream_usage: AtomicBool,
 }
 
+impl std::fmt::Debug for OpenAiCompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatible")
+            .field("config", &self.config)
+            .field("reasoning_off", &self.reasoning_off.load(Ordering::Relaxed))
+            .field("stream_usage", &self.stream_usage.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl OpenAiCompatible {
     /// OpenRouter endpoints ask for no reasoning by default.
+    ///
+    /// # Errors
+    ///
+    /// [`LlmError::Transport`] when the HTTP client cannot be built from
+    /// [`OpenAiConfig::http`] (see [`HttpOptions::apply`]).
     pub fn new(config: OpenAiConfig) -> Result<Self, LlmError> {
         let client = crate::http_client(&config.http, None)?;
         let reasoning_off = is_openrouter(&config.base_url);
@@ -76,9 +102,17 @@ impl OpenAiCompatible {
     /// the completion of a large answer (DeepSeek: 2–5k tokens, 10–30 s).
     /// An endpoint that rejects the switch (a model that always reasons) is
     /// asked once more without it, and then never again.
-    pub fn reasoning_off(self, on: bool) -> Self {
-        self.reasoning_off.store(on, Ordering::Relaxed);
+    #[must_use]
+    pub fn with_reasoning_disabled(self, disabled: bool) -> Self {
+        self.reasoning_off.store(disabled, Ordering::Relaxed);
         self
+    }
+
+    /// Whether to ask for no reasoning; `true` disables it.
+    #[deprecated(since = "0.1.1", note = "use `with_reasoning_disabled`")]
+    #[must_use]
+    pub fn reasoning_off(self, on: bool) -> Self {
+        self.with_reasoning_disabled(on)
     }
 
     fn sends_reasoning_off(&self) -> bool {

@@ -24,13 +24,19 @@ pub struct CorpusEntry {
 /// not compile is skipped with a warning ([`load_with_skipped`] names the
 /// skipped contracts).
 ///
-/// Fails only when `root` itself cannot be read.
+/// # Errors
+///
+/// Only when `root` itself cannot be read.
 pub fn load(root: &Path) -> anyhow::Result<Vec<CorpusEntry>> {
     load_with_skipped(root).map(|(entries, _)| entries)
 }
 
 /// [`load`], also returning the names of the contracts it skipped (they
 /// could not be read or do not compile), sorted.
+///
+/// # Errors
+///
+/// As [`load`].
 pub fn load_with_skipped(root: &Path) -> anyhow::Result<(Vec<CorpusEntry>, Vec<String>)> {
     std::fs::read_dir(root).with_context(|| format!("cannot read {}", root.display()))?;
     let mut out = Loaded::default();

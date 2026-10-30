@@ -1,4 +1,31 @@
 //! LLM provider abstraction and an OpenAI-compatible client.
+//!
+//! Internal crate of Mockingbird, published for `mockingbird-cli`, with no
+//! API stability guarantee. [`Provider`] is the interface the engine calls;
+//! [`OpenAiCompatible`] talks to any OpenAI-compatible `/chat/completions`
+//! endpoint, and [`FallbackProvider`] retries a failed request on a second
+//! provider.
+//!
+//! ```
+//! use mb_llm::{OpenAiCompatible, OpenAiConfig};
+//!
+//! let provider = OpenAiCompatible::new(OpenAiConfig {
+//!     base_url: "http://127.0.0.1:11434/v1".into(),
+//!     api_key: None,
+//!     model: "llama3.2".into(),
+//!     json_schema: true,
+//!     headers: Vec::new(),
+//!     extra_body: serde_json::Map::new(),
+//!     http: mb_llm::HttpOptions::default(),
+//! })?;
+//! # let _ = provider;
+//! # Ok::<(), mb_llm::LlmError>(())
+//! ```
+#![warn(
+    missing_docs,
+    missing_debug_implementations,
+    clippy::missing_errors_doc
+)]
 
 use std::ops::Add;
 use std::sync::{Arc, Mutex};
@@ -20,14 +47,19 @@ pub use openai::{OpenAiCompatible, OpenAiConfig};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The author of a [`ChatMessage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
+    /// Instructions for the model.
     System,
+    /// The request the model answers.
     User,
+    /// An earlier answer of the model.
     Assistant,
 }
 
 impl Role {
+    /// The role's name on the wire (`system`, `user`, `assistant`).
     pub fn as_str(self) -> &'static str {
         match self {
             Role::System => "system",
@@ -37,31 +69,59 @@ impl Role {
     }
 }
 
+/// The role's name on the wire, as [`Role::as_str`].
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One message of a chat completion request.
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
+    /// Who wrote it.
     pub role: Role,
+    /// Its text.
     pub content: String,
 }
 
+/// The shape a completion must take.
 #[derive(Clone, Debug)]
 pub enum ResponseFormat {
+    /// Free text.
     Text,
+    /// Any JSON object (JSON mode).
     JsonObject,
-    JsonSchema { name: String, schema: Value },
+    /// JSON matching `schema` (structured outputs).
+    JsonSchema {
+        /// Name the schema is sent under.
+        name: String,
+        /// The JSON Schema the answer must match.
+        schema: Value,
+    },
 }
 
+/// A chat completion request.
 #[derive(Clone, Debug)]
 pub struct ChatRequest {
+    /// The conversation, oldest message first.
     pub messages: Vec<ChatMessage>,
+    /// The shape of the answer.
     pub response_format: ResponseFormat,
+    /// Sampling temperature.
     pub temperature: f32,
+    /// Most completion tokens the answer may use.
     pub max_tokens: u32,
+    /// How long one request may take.
     pub timeout: Duration,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Tokens spent on a completion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Usage {
+    /// Tokens of the request.
     pub prompt_tokens: u32,
+    /// Tokens of the answer.
     pub completion_tokens: u32,
 }
 
@@ -77,26 +137,43 @@ impl Add for Usage {
     }
 }
 
+/// A completed chat request.
 #[derive(Clone, Debug)]
 pub struct ChatResponse {
+    /// The answer's text.
     pub content: String,
+    /// Tokens the provider reports for it.
     pub usage: Usage,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The response formats a provider supports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Capabilities {
+    /// [`ResponseFormat::JsonSchema`] (structured outputs).
     pub json_schema: bool,
+    /// [`ResponseFormat::JsonObject`] (JSON mode).
     pub json_mode: bool,
 }
 
+/// Why an LLM call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
+    /// The request took longer than its timeout.
     #[error("LLM request timed out")]
     Timeout,
+    /// The provider answered with an error status (or reported one inside a
+    /// `200` reply).
     #[error("LLM returned HTTP {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        /// The HTTP status.
+        status: u16,
+        /// The response body, as the provider sent it.
+        body: String,
+    },
+    /// The request could not be sent or its answer not read.
     #[error("LLM transport error: {0}")]
     Transport(String),
+    /// The answer is not the JSON the client expects.
     #[error("LLM response decode error: {0}")]
     Decode(String),
     /// The provider stopped at `max_tokens`, so the output is cut short.
@@ -154,7 +231,9 @@ impl StreamUsage {
 /// A streamed completion ([`Provider::stream_metered`]): its text deltas
 /// and the usage its provider reports.
 pub struct MeteredStream {
+    /// The text deltas.
     pub text: TextStream,
+    /// The usage the provider reports, readable once `text` has ended.
     pub usage: StreamUsage,
 }
 
@@ -166,9 +245,19 @@ impl std::fmt::Debug for MeteredStream {
     }
 }
 
+/// An LLM the engine can send chat requests to.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// The response formats it supports.
     fn capabilities(&self) -> Capabilities;
+
+    /// Sends `req` and waits for the whole answer.
+    ///
+    /// # Errors
+    ///
+    /// An [`LlmError`] when the request times out, cannot be sent, or the
+    /// provider answers with an error, a cut-short or an empty reply.
+    /// [`LlmError::is_retryable`] says whether another attempt may succeed.
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// The longest a [`Provider::complete`] call with `request_timeout` may
@@ -180,6 +269,11 @@ pub trait Provider: Send + Sync {
 
     /// Streams the completion of `req` as text deltas. The default calls
     /// [`Provider::complete`] once and yields its content as one delta.
+    ///
+    /// # Errors
+    ///
+    /// As [`Provider::complete`], for a request that fails before the first
+    /// delta; a failure mid-stream arrives as an `Err` item instead.
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
         let response = self.complete(req).await?;
         Ok(Box::pin(futures::stream::once(std::future::ready(Ok(
@@ -189,6 +283,10 @@ pub trait Provider: Send + Sync {
 
     /// [`Provider::stream`], with the usage the provider reports for it.
     /// The default reports none, so callers estimate it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Provider::stream`].
     async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
         Ok(MeteredStream {
             text: self.stream(req).await?,

@@ -19,6 +19,13 @@ pub struct Tenancy {
 
 impl Tenancy {
     /// A tenancy for the given tenant and workspace.
+    ///
+    /// ```
+    /// use mb_ext::Tenancy;
+    ///
+    /// let tenancy = Tenancy::new("acme", "default");
+    /// assert_eq!(tenancy.tenant, "acme");
+    /// ```
     pub fn new(tenant: impl Into<String>, workspace: impl Into<String>) -> Self {
         Self {
             tenant: tenant.into(),
@@ -54,6 +61,11 @@ impl<'a> CallInfo<'a> {
 #[async_trait]
 pub trait TenantResolver: Send + Sync {
     /// The tenancy of `call`, or a rejection (e.g. 401/403) when it has none.
+    ///
+    /// # Errors
+    ///
+    /// A [`Rejection`] when the call cannot be attributed to a tenant; the
+    /// caller answers it as an RFC 9457 problem.
     async fn resolve(&self, call: &CallInfo<'_>) -> Result<Tenancy, Rejection>;
 }
 

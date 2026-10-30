@@ -26,7 +26,7 @@ pub struct UsageEvent {
     /// Where the response came from: `llm`, `repaired` or `fallback`, or
     /// `not_generated` for a call answered without generating a body
     /// (refused before generation, or a native error answer); `import` for
-    /// smart-import jobs.
+    /// smart-import jobs. The `UsageEvent::SOURCE_*` constants name them.
     pub source: String,
     /// Wall-clock time spent serving the call.
     pub latency: Duration,
@@ -37,6 +37,18 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// [`UsageEvent::source`] of an answer the LLM generated.
+    pub const SOURCE_LLM: &str = "llm";
+    /// [`UsageEvent::source`] of an LLM answer repaired to fit the contract.
+    pub const SOURCE_REPAIRED: &str = "repaired";
+    /// [`UsageEvent::source`] of a faker or offline answer.
+    pub const SOURCE_FALLBACK: &str = "fallback";
+    /// [`UsageEvent::source`] of a call answered without generating a body
+    /// (refused before generation, or a native error answer).
+    pub const SOURCE_NOT_GENERATED: &str = "not_generated";
+    /// [`UsageEvent::source`] of a smart-import job.
+    pub const SOURCE_IMPORT: &str = "import";
+
     /// An event for `operation_id` on `mock`, with status 0, an empty source,
     /// zero latency and zero tokens.
     pub fn new(tenancy: Tenancy, mock: impl Into<String>, operation_id: impl Into<String>) -> Self {
@@ -130,11 +142,13 @@ fn status_label(status: u16) -> SharedString {
 /// reports.
 fn source_label(source: &str) -> SharedString {
     match source {
-        "llm" => SharedString::const_str("llm"),
-        "repaired" => SharedString::const_str("repaired"),
-        "fallback" => SharedString::const_str("fallback"),
-        "not_generated" => SharedString::const_str("not_generated"),
-        "import" => SharedString::const_str("import"),
+        UsageEvent::SOURCE_LLM => SharedString::const_str(UsageEvent::SOURCE_LLM),
+        UsageEvent::SOURCE_REPAIRED => SharedString::const_str(UsageEvent::SOURCE_REPAIRED),
+        UsageEvent::SOURCE_FALLBACK => SharedString::const_str(UsageEvent::SOURCE_FALLBACK),
+        UsageEvent::SOURCE_NOT_GENERATED => {
+            SharedString::const_str(UsageEvent::SOURCE_NOT_GENERATED)
+        }
+        UsageEvent::SOURCE_IMPORT => SharedString::const_str(UsageEvent::SOURCE_IMPORT),
         other => SharedString::from(other.to_string()),
     }
 }

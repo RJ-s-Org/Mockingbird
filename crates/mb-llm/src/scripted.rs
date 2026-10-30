@@ -1,3 +1,5 @@
+//! A provider that replays a script, for tests (feature `testing`).
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -24,6 +26,17 @@ pub struct ScriptedProvider {
     chunk_delay: Duration,
     chunks_yielded: Arc<AtomicUsize>,
     stream_usage: Option<Usage>,
+}
+
+impl std::fmt::Debug for ScriptedProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptedProvider")
+            .field("scripted", &locked(&self.script).len())
+            .field("requests", &locked(&self.requests).len())
+            .field("chunk_delay", &self.chunk_delay)
+            .field("stream_usage", &self.stream_usage)
+            .finish_non_exhaustive()
+    }
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -61,6 +74,7 @@ impl ScriptedProvider {
     /// Each [`Provider::stream`] call pops one entry: an `Err` fails the
     /// call, an `Ok` yields its items in order. Without this, `stream` falls
     /// back to the trait default (one delta from the `complete` script).
+    #[must_use]
     pub fn with_streams(mut self, streams: Vec<StreamScript>) -> Self {
         self.streams = Some(Mutex::new(streams.into()));
         self
@@ -68,12 +82,14 @@ impl ScriptedProvider {
 
     /// Every [`Provider::stream_metered`] stream reports `usage` once its
     /// items are exhausted (without this, streams report none).
+    #[must_use]
     pub fn with_stream_usage(mut self, usage: Usage) -> Self {
         self.stream_usage = Some(usage);
         self
     }
 
     /// Sleeps `delay` before each streamed chunk.
+    #[must_use]
     pub fn with_chunk_delay(mut self, delay: Duration) -> Self {
         self.chunk_delay = delay;
         self

@@ -8,9 +8,14 @@ use crate::{Rejection, Tenancy};
 pub trait ProviderPolicy: Send + Sync {
     /// The profile to use for a call on `mock` whose configured profile is
     /// `configured`, or a rejection.
+    ///
+    /// # Errors
+    ///
+    /// A [`Rejection`] when `tenancy` may not use an LLM profile for this
+    /// call; the caller answers it as an RFC 9457 problem.
     fn choose(
         &self,
-        t: &Tenancy,
+        tenancy: &Tenancy,
         mock: &str,
         configured: Option<&str>,
     ) -> Result<Option<String>, Rejection>;
@@ -23,7 +28,7 @@ pub struct ConfiguredProfile;
 impl ProviderPolicy for ConfiguredProfile {
     fn choose(
         &self,
-        _t: &Tenancy,
+        _tenancy: &Tenancy,
         _mock: &str,
         configured: Option<&str>,
     ) -> Result<Option<String>, Rejection> {

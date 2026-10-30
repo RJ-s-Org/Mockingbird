@@ -39,8 +39,40 @@
 //! Kubernetes, use the Secrets Store CSI driver with the provider for your
 //! cloud: it mounts each secret as a file in the pod, which a `file:`
 //! reference then reads.
+//!
+//! # Example
+//!
+//! Replace one default, here the quota guard, and keep the others:
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use async_trait::async_trait;
+//! use mb_ext::{CallInfo, Extensions, QuotaGuard, Rejection, Tenancy};
+//!
+//! /// Refuses every call to the `billing` mock.
+//! struct NoBilling;
+//!
+//! #[async_trait]
+//! impl QuotaGuard for NoBilling {
+//!     async fn admit(&self, _tenancy: &Tenancy, call: &CallInfo<'_>) -> Result<(), Rejection> {
+//!         if call.mock == "billing" {
+//!             return Err(Rejection::new(403, "Forbidden", "billing is closed"));
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//!
+//! let extensions = Extensions::default().with_quota(Arc::new(NoBilling));
+//! # let _ = extensions;
+//! ```
+//!
+//! [`examples/custom-ext`](https://github.com/rj-s-org/mockingbird/tree/main/examples/custom-ext)
+//! is a complete server binary built this way.
 #![deny(missing_docs)]
+#![warn(missing_debug_implementations, clippy::missing_errors_doc)]
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,6 +111,15 @@ pub struct Rejection {
 impl Rejection {
     /// A rejection with the given status, title and detail, and no
     /// `Retry-After`.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use mb_ext::Rejection;
+    ///
+    /// let rejection = Rejection::new(429, "Quota exceeded", "100 calls a day")
+    ///     .with_retry_after(Duration::from_secs(60));
+    /// assert_eq!(rejection.to_string(), "429 Quota exceeded: 100 calls a day");
+    /// ```
     pub fn new(status: u16, title: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             status,
@@ -88,13 +129,43 @@ impl Rejection {
         }
     }
 
+    /// Like [`Rejection::new`], with the status as an [`http::StatusCode`].
+    ///
+    /// ```
+    /// use mb_ext::Rejection;
+    ///
+    /// let rejection = Rejection::from_status(http::StatusCode::FORBIDDEN, "Forbidden", "no plan");
+    /// assert_eq!(rejection.status, 403);
+    /// ```
+    pub fn from_status(
+        status: http::StatusCode,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(status.as_u16(), title, detail)
+    }
+
     /// Sets the delay rendered as a `Retry-After` header.
     #[must_use]
-    pub fn with_retry_after(mut self, d: Duration) -> Self {
-        self.retry_after = Some(d);
+    pub fn with_retry_after(mut self, delay: Duration) -> Self {
+        self.retry_after = Some(delay);
         self
     }
 }
+
+/// `<status> <title>: <detail>`, or `<status> <title>` when the detail is
+/// empty.
+impl fmt::Display for Rejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.status, self.title)?;
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Rejection {}
 
 /// Errors raised by extension implementations.
 ///
@@ -137,44 +208,52 @@ pub struct Extensions {
 impl Extensions {
     /// Replaces the tenant resolver.
     #[must_use]
-    pub fn with_tenants(mut self, t: Arc<dyn TenantResolver>) -> Self {
-        self.tenants = t;
+    pub fn with_tenants(mut self, resolver: Arc<dyn TenantResolver>) -> Self {
+        self.tenants = resolver;
         self
     }
 
     /// Replaces the quota guard.
     #[must_use]
-    pub fn with_quota(mut self, q: Arc<dyn QuotaGuard>) -> Self {
-        self.quota = q;
+    pub fn with_quota(mut self, guard: Arc<dyn QuotaGuard>) -> Self {
+        self.quota = guard;
         self
     }
 
     /// Replaces the usage sink.
     #[must_use]
-    pub fn with_usage(mut self, u: Arc<dyn UsageSink>) -> Self {
-        self.usage = u;
+    pub fn with_usage(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage = sink;
         self
     }
 
     /// Replaces the secret store.
     #[must_use]
-    pub fn with_secrets(mut self, s: Arc<dyn SecretStore>) -> Self {
-        self.secrets = s;
+    pub fn with_secrets(mut self, store: Arc<dyn SecretStore>) -> Self {
+        self.secrets = store;
         self
     }
 
     /// Replaces the provider policy.
     #[must_use]
-    pub fn with_providers(mut self, p: Arc<dyn ProviderPolicy>) -> Self {
-        self.providers = p;
+    pub fn with_providers(mut self, policy: Arc<dyn ProviderPolicy>) -> Self {
+        self.providers = policy;
         self
     }
 
     /// Replaces the admin hooks.
     #[must_use]
-    pub fn with_admin_hooks(mut self, h: Arc<dyn AdminHooks>) -> Self {
-        self.admin_hooks = h;
+    pub fn with_admin_hooks(mut self, hooks: Arc<dyn AdminHooks>) -> Self {
+        self.admin_hooks = hooks;
         self
+    }
+}
+
+/// Names the type only: the extensions are trait objects that need not
+/// implement `Debug`.
+impl fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extensions").finish_non_exhaustive()
     }
 }
 
