@@ -624,9 +624,11 @@ fn is_incidental(path: &str) -> bool {
 /// Compile a multi-file contract (an unpacked archive or loose files):
 /// 1. any `.proto` files are compiled together (imports resolve between
 ///    them);
-/// 2. else exactly one `.wsdl` is compiled with the other files available
-///    to its `schemaLocation`s (several `.wsdl` files are invalid:
-///    `wsdl:import` is not followed);
+/// 2. else the `.wsdl` file is compiled with the other files available to
+///    its `wsdl:import`s and `schemaLocation`s (relative to the importing
+///    file); of several `.wsdl` files, the one that holds `wsdl:service`
+///    (and no other imports) is the root, and none or several such roots
+///    are invalid;
 /// 3. else the `.graphql`/`.graphqls`/`.gql` files are compiled as one SDL,
 ///    joined by `\n` in path order;
 /// 4. else the one file that is a contract ([`sniff`] recognises it, and
@@ -658,26 +660,16 @@ fn compile_files_in(files: &[SourceFile], ctx: &mut Ctx) -> Result<Bundle, Impor
         return proto::compile_sources(&protos, proto::files_digest(&protos));
     }
     let wsdls: Vec<&SourceFile> = files.iter().filter(|f| f.path.ends_with(".wsdl")).collect();
-    match wsdls.as_slice() {
-        [] => {}
-        [wsdl] => {
-            let digest = match files {
-                [one] => proto::hex_digest(&one.bytes),
-                _ => proto::files_digest(&files.iter().collect::<Vec<_>>()),
-            };
-            return wsdl::compile_upload(wsdl, files, digest, ctx);
-        }
-        many => {
-            let names: Vec<&str> = many.iter().map(|f| f.path.as_str()).collect();
-            return Err(ImportError::Invalid {
-                pointer: "/".into(),
-                message: format!(
-                    "the upload contains {} .wsdl files ({}); expected one: wsdl:import is not supported, so merge the imported definitions into the file that holds wsdl:service",
-                    many.len(),
-                    names.join(", ")
-                ),
-            });
-        }
+    if !wsdls.is_empty() {
+        let root = match wsdls.as_slice() {
+            [wsdl] => wsdl,
+            many => wsdl::upload_root(many)?,
+        };
+        let digest = match files {
+            [one] => proto::hex_digest(&one.bytes),
+            _ => proto::files_digest(&files.iter().collect::<Vec<_>>()),
+        };
+        return wsdl::compile_upload(root, files, digest, ctx);
     }
     let mut graphql: Vec<&SourceFile> = files.iter().filter(|f| is_graphql_path(&f.path)).collect();
     if !graphql.is_empty() {

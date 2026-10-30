@@ -719,41 +719,351 @@ fn xsd_wildcards_warn() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
-#[test]
-fn wsdl_import_is_named() {
-    // The binding and service import their portType from another WSDL.
-    let main = r#"<?xml version="1.0"?>
+// ---------------------------------------------------------------------------
+// wsdl:import (MB-IMPORT-STUB-10)
+// ---------------------------------------------------------------------------
+
+fn uploads(entries: &[(&str, &str)]) -> Vec<SourceFile> {
+    entries
+        .iter()
+        .map(|(path, text)| SourceFile {
+            path: (*path).into(),
+            bytes: text.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+fn zip_of(entries: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, text) in entries {
+        w.start_file(*name, opts).unwrap();
+        w.write_all(text.as_bytes()).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// The abstract half of a `Put` service: its types, messages and portType
+/// `P` in namespace `urn:abstract`, with `imports` placed first.
+fn abstract_wsdl(imports: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:abstract" targetNamespace="urn:abstract">
+  {imports}
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:abstract" elementFormDefault="qualified">
+      <xs:element name="Put"><xs:complexType><xs:sequence>
+        <xs:element name="id" type="xs:string"/>
+      </xs:sequence></xs:complexType></xs:element>
+      <xs:element name="PutResponse"><xs:complexType><xs:sequence>
+        <xs:element name="id" type="xs:string"/>
+        <xs:element name="ok" type="xs:boolean"/>
+      </xs:sequence></xs:complexType></xs:element>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="PutIn"><wsdl:part name="body" element="tns:Put"/></wsdl:message>
+  <wsdl:message name="PutOut"><wsdl:part name="body" element="tns:PutResponse"/></wsdl:message>
+  <wsdl:portType name="P">
+    <wsdl:operation name="Put">
+      <wsdl:input message="tns:PutIn"/>
+      <wsdl:output message="tns:PutOut"/>
+    </wsdl:operation>
+  </wsdl:portType>
+</wsdl:definitions>
+"#
+    )
+}
+
+const BINDING: &str = r#"<wsdl:binding name="B" type="abs:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Put">
+      <soap:operation soapAction="urn:Put"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>"#;
+
+/// A WSDL in `urn:main` with `body` (imports, bindings, services).
+fn main_wsdl(body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
 <wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
     xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
-    xmlns:tns="urn:main" targetNamespace="urn:main">
-  <wsdl:import namespace="urn:abstract" location="abstract.wsdl"/>
-  <wsdl:binding name="B" type="tns:P">
-    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
-    <wsdl:operation name="Put"><soap:operation soapAction=""/></wsdl:operation>
-  </wsdl:binding>
-  <wsdl:service name="S">
-    <wsdl:port name="Port" binding="tns:B"><soap:address location="http://x/s"/></wsdl:port>
-  </wsdl:service>
+    xmlns:abs="urn:abstract" xmlns:tns="urn:main" targetNamespace="urn:main">
+  {body}
 </wsdl:definitions>
-"#;
-    let abstract_wsdl = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:abstract"/>"#;
-    let files = [
-        SourceFile {
-            path: "main.wsdl".into(),
-            bytes: main.as_bytes().to_vec(),
-        },
-        SourceFile {
-            path: "abstract.wsdl".into(),
-            bytes: abstract_wsdl.as_bytes().to_vec(),
-        },
-    ];
-    let err = compile_files(&files).unwrap_err().to_string();
-    assert!(err.contains("wsdl:import"), "{err}");
+"#
+    )
+}
 
-    // On its own, the importing file names the import it cannot follow.
-    let err = compile(main.as_bytes()).unwrap_err().to_string();
+const SERVICE: &str = r#"<wsdl:service name="S">
+    <wsdl:port name="Port" binding="tns:B"><soap:address location="http://x/s"/></wsdl:port>
+  </wsdl:service>"#;
+
+fn assert_put(b: &Bundle) {
+    let ids: Vec<&str> = b.operations.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(ids, ["Put"]);
+    let put = b.operation("Put").unwrap();
     assert!(
-        err.contains("wsdl:import") && err.contains("abstract.wsdl"),
-        "{err}"
+        matches!(
+            &put.binding,
+            Binding::Soap { soap_action: Some(a), address_path, .. } if a == "urn:Put" && address_path == "/s"
+        ),
+        "{:?}",
+        put.binding
+    );
+    let output = put.outputs[0].schema.as_ref().unwrap();
+    assert!(validate(b, output, &json!({"id": "1", "ok": true})).is_empty());
+    assert!(!validate(b, output, &json!({"id": "1", "ok": "no"})).is_empty());
+    let input = put.input.body.as_ref().unwrap();
+    assert!(validate(b, input, &json!({"id": "1"})).is_empty());
+}
+
+/// The upload paths of the documents embedded in a compiled WSDL.
+fn embedded_paths(b: &Bundle) -> Vec<String> {
+    let Some(ProtocolPayload::Soap { wsdl }) = &b.protocol_payload else {
+        panic!("no WSDL payload");
+    };
+    wsdl.match_indices("<mb:schema path=\"")
+        .map(|(i, m)| {
+            let rest = &wsdl[i + m.len()..];
+            rest[..rest.find('"').unwrap()].to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn wsdl_import_two_files() {
+    let main = main_wsdl(&format!(
+        r#"<wsdl:import namespace="urn:abstract" location="abstract.wsdl"/>
+  {BINDING}
+  {SERVICE}"#
+    ));
+    // The root is the file that holds wsdl:service, whatever its name.
+    let files = uploads(&[("abstract.wsdl", &abstract_wsdl("")), ("main.wsdl", &main)]);
+    let (b, warnings) = mb_import::compile_files_with_warnings(&files).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_put(&b);
+    assert_eq!(b.title, "S");
+    // `?wsdl` can serve the imported document.
+    assert_eq!(embedded_paths(&b), ["abstract.wsdl"]);
+}
+
+#[test]
+fn wsdl_import_three_files_resolve_relative_to_the_importer() {
+    // api/service.wsdl -> bindings/binding.wsdl -> ../abstract/port.wsdl,
+    // whose types import ../schemas/extra.xsd.
+    let service = main_wsdl(&format!(
+        r#"<wsdl:import namespace="urn:main" location="bindings/binding.wsdl"/>
+  {SERVICE}"#
+    ));
+    let binding = main_wsdl(&format!(
+        r#"<wsdl:import namespace="urn:abstract" location="../abstract/port.wsdl"/>
+  {BINDING}"#
+    ));
+    let port = abstract_wsdl("").replace(
+        r#"<xs:schema targetNamespace="urn:abstract" elementFormDefault="qualified">"#,
+        r#"<xs:schema targetNamespace="urn:abstract" elementFormDefault="qualified" xmlns:x="urn:extra">
+      <xs:import namespace="urn:extra" schemaLocation="../schemas/extra.xsd"/>"#,
+    );
+    let extra = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:extra">
+  <xs:simpleType name="Note"><xs:restriction base="xs:string"/></xs:simpleType>
+</xs:schema>"#;
+    let zip = zip_of(&[
+        ("api/service.wsdl", &service),
+        ("api/bindings/binding.wsdl", &binding),
+        ("api/abstract/port.wsdl", &port),
+        ("api/schemas/extra.xsd", extra),
+        ("README.md", "docs"),
+    ]);
+    let (b, warnings) = mb_import::compile_with_warnings(&zip).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_put(&b);
+    let mut paths = embedded_paths(&b);
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "api/abstract/port.wsdl",
+            "api/bindings/binding.wsdl",
+            "api/schemas/extra.xsd"
+        ]
+    );
+}
+
+#[test]
+fn wsdl_import_cycle_is_followed_once() {
+    // main imports abstract, which imports main back (and itself).
+    let main = main_wsdl(&format!(
+        r#"<wsdl:import namespace="urn:abstract" location="./abstract.wsdl"/>
+  {BINDING}
+  {SERVICE}"#
+    ));
+    let abs = abstract_wsdl(
+        r#"<wsdl:import namespace="urn:main" location="main.wsdl"/>
+  <wsdl:import namespace="urn:abstract" location="abstract.wsdl"/>"#,
+    );
+    let files = uploads(&[("main.wsdl", &main), ("abstract.wsdl", &abs)]);
+    let start = std::time::Instant::now();
+    let (b, warnings) = mb_import::compile_files_with_warnings(&files).unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_put(&b);
+    assert_eq!(embedded_paths(&b), ["abstract.wsdl"]);
+}
+
+#[test]
+fn wsdl_import_missing_is_named() {
+    // The portType lives in a document that is not uploaded.
+    let main = main_wsdl(&format!(
+        r#"<wsdl:import namespace="urn:abstract" location="http://example.com/abstract.wsdl"/>
+  {BINDING}
+  {SERVICE}"#
+    ));
+    for err in [
+        compile(main.as_bytes()).unwrap_err(),
+        compile_files(&uploads(&[("main.wsdl", &main), ("notes.txt", "x")])).unwrap_err(),
+    ] {
+        let message = err.to_string();
+        assert!(matches!(err, ImportError::Invalid { .. }), "{err:?}");
+        assert!(
+            message.contains("wsdl:import")
+                && message.contains("http://example.com/abstract.wsdl")
+                && message.contains("not in the upload"),
+            "{message}"
+        );
+    }
+
+    // An uploaded import that lacks the definitions is an ordinary error.
+    let local = main_wsdl(&format!(
+        r#"<wsdl:import namespace="urn:abstract" location="abstract.wsdl"/>
+  {BINDING}
+  {SERVICE}"#
+    ));
+    let empty = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:abstract"/>"#;
+    let err = compile_files(&uploads(&[("main.wsdl", &local), ("abstract.wsdl", empty)]))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown portType"), "{err}");
+}
+
+#[test]
+fn wsdl_import_not_needed_warns() {
+    // Everything is in the file; the import is documentation only.
+    let full = abstract_wsdl(
+        r#"<wsdl:import namespace="urn:docs" location="http://example.com/docs.wsdl"/>"#,
+    )
+    .replace(
+        "</wsdl:definitions>",
+        &format!(
+            "{}\n{}\n</wsdl:definitions>",
+            BINDING.replace("abs:P", "tns:P"),
+            SERVICE
+        ),
+    )
+    .replace(
+        r#"xmlns:tns="urn:abstract""#,
+        r#"xmlns:tns="urn:abstract" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/""#,
+    );
+    let (b, warnings) = mb_import::compile_with_warnings(full.as_bytes()).unwrap();
+    assert_put(&b);
+    let codes: Vec<&str> = warnings.iter().map(|w| w.code.as_str()).collect();
+    assert_eq!(codes, ["wsdl_import_ignored"], "{warnings:?}");
+    assert!(
+        warnings[0].message.contains("http://example.com/docs.wsdl"),
+        "{}",
+        warnings[0].message
+    );
+}
+
+#[test]
+fn wsdl_import_depth_is_capped() {
+    // main -> d1 -> d2 -> ... -> d40, each an otherwise empty document.
+    let mut files = vec![(
+        "main.wsdl".to_owned(),
+        main_wsdl(&format!(
+            r#"<wsdl:import namespace="urn:d" location="d1.wsdl"/>
+  {SERVICE}"#
+        )),
+    )];
+    for i in 1..=40 {
+        files.push((
+            format!("d{i}.wsdl"),
+            format!(
+                r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:d"><wsdl:import namespace="urn:d" location="d{}.wsdl"/></wsdl:definitions>"#,
+                i + 1
+            ),
+        ));
+    }
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let err = compile_files(&uploads(&files)).unwrap_err();
+    assert!(
+        matches!(&err, ImportError::Invalid { message, .. } if message.contains("wsdl:import") && message.contains("deep")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn wsdl_import_imported_xsd_and_namespaced_lookups() {
+    // Two imported documents define a message named `In` in different
+    // namespaces; the portType's prefix picks the right one. The schema is
+    // pulled in with wsdl:import rather than xs:import.
+    let schema = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t" elementFormDefault="qualified">
+  <xs:element name="Good"><xs:complexType><xs:sequence><xs:element name="n" type="xs:int"/></xs:sequence></xs:complexType></xs:element>
+  <xs:element name="Bad"><xs:complexType><xs:sequence><xs:element name="s" type="xs:string"/></xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#;
+    let decoy = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:t" targetNamespace="urn:decoy">
+  <wsdl:message name="In"><wsdl:part name="body" element="t:Bad"/></wsdl:message>
+</wsdl:definitions>"#;
+    let real = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:t" xmlns:r="urn:real" targetNamespace="urn:real">
+  <wsdl:message name="In"><wsdl:part name="body" element="t:Good"/></wsdl:message>
+  <wsdl:portType name="P"><wsdl:operation name="Get"><wsdl:input message="r:In"/><wsdl:output message="r:In"/></wsdl:operation></wsdl:portType>
+</wsdl:definitions>"#;
+    let main = r#"<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:r="urn:real" xmlns:tns="urn:main" targetNamespace="urn:main">
+  <wsdl:import namespace="urn:t" location="t.xsd"/>
+  <wsdl:import namespace="urn:decoy" location="decoy.wsdl"/>
+  <wsdl:import namespace="urn:real" location="real.wsdl"/>
+  <wsdl:binding name="B" type="r:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Get"><soap:operation soapAction=""/></wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S"><wsdl:port name="Port" binding="tns:B"><soap:address location="http://x/s"/></wsdl:port></wsdl:service>
+</wsdl:definitions>"#;
+    let files = uploads(&[
+        ("main.wsdl", main),
+        ("decoy.wsdl", decoy),
+        ("real.wsdl", real),
+        ("t.xsd", schema),
+    ]);
+    let b = compile_files(&files).unwrap();
+    let get = b.operation("Get").unwrap();
+    let input = get.input.body.as_ref().unwrap();
+    assert!(validate(&b, input, &json!({"n": 1})).is_empty());
+    assert!(!validate(&b, input, &json!({"n": "x"})).is_empty());
+}
+
+#[test]
+fn several_wsdl_roots_are_named() {
+    // Two files with a service, neither importing the other.
+    let a = main_wsdl(SERVICE);
+    let files = uploads(&[("a.wsdl", &a), ("b.wsdl", &a)]);
+    let err = compile_files(&files).unwrap_err();
+    assert!(
+        matches!(&err, ImportError::Invalid { message, .. } if message.contains("a.wsdl") && message.contains("b.wsdl") && message.contains("wsdl:service")),
+        "{err:?}"
+    );
+    // None holds a service.
+    let files = uploads(&[("a.wsdl", &abstract_wsdl("")), ("b.wsdl", "<b/>")]);
+    let err = compile_files(&files).unwrap_err();
+    assert!(
+        matches!(&err, ImportError::Invalid { message, .. } if message.contains("wsdl:service")),
+        "{err:?}"
     );
 }

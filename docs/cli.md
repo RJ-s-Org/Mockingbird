@@ -39,7 +39,7 @@ echo '{"persona": "Formal"}' | mockingbird api PATCH /workspaces/default/mocks/o
 
 ## Archive uploads
 
-A contract that spans several files (`.proto` files importing each other, a WSDL with its XSDs, a GraphQL schema split into files, an OpenAPI, Swagger or AsyncAPI document whose `$ref`s name other files) is uploaded as one zip or tar.gz archive. `mockingbird import` and `mockingbird validate` pack a directory for you:
+A contract that spans several files (`.proto` files importing each other, a WSDL with its XSDs or the WSDLs it pulls in with `wsdl:import`, a GraphQL schema split into files, an OpenAPI, Swagger or AsyncAPI document whose `$ref`s name other files) is uploaded as one zip or tar.gz archive. `mockingbird import` and `mockingbird validate` pack a directory for you:
 
 ```sh
 mockingbird import --as orders protos/          # packs protos/ as tar.gz
