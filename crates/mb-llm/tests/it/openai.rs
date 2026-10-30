@@ -362,7 +362,8 @@ async fn openai_stream_reports_the_final_usage_chunk() {
         metered.usage.get(),
         Some(Usage {
             prompt_tokens: 12,
-            completion_tokens: 7
+            completion_tokens: 7,
+            reasoning_tokens: 0,
         })
     );
     assert_eq!(
@@ -489,7 +490,10 @@ async fn openai_stream_finish_length_is_truncated() {
     assert_eq!(items.len(), 3, "{items:?}");
     assert_eq!(items[0].as_ref().unwrap(), "{\"a\"");
     assert_eq!(items[1].as_ref().unwrap(), ":");
-    assert!(matches!(items[2], Err(LlmError::Truncated(_))), "{items:?}");
+    assert!(
+        matches!(&items[2], Err(LlmError::Truncated { partial, .. }) if partial.is_empty()),
+        "{items:?}"
+    );
 }
 
 #[tokio::test]
@@ -658,11 +662,69 @@ async fn truncated_reply_says_to_raise_max_tokens() {
     let err = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+    let LlmError::Truncated { partial, usage, .. } = &err else {
+        panic!("expected Truncated, got {err:?}");
+    };
+    // The cut text and its tokens come back, for the caller to salvage.
+    assert_eq!(partial, "{\"a\": [1, 2");
+    assert_eq!(usage.completion_tokens, 3);
+    let err = err.to_string();
     assert!(err.contains("max_tokens (100)"), "{err}");
+    assert!(
+        err.contains("truncated") && err.contains("finish_reason=length"),
+        "{err}"
+    );
     // A truncated reply is not retried: the same limit would truncate again.
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+/// Reasoning tokens are read from `completion_tokens_details`, and a reply
+/// cut short says how many of its tokens went to reasoning.
+#[tokio::test]
+async fn reasoning_tokens_are_reported() {
+    let server = MockServer::start().await;
+    let usage = json!({
+        "prompt_tokens": 5,
+        "completion_tokens": 100,
+        "completion_tokens_details": {"reasoning_tokens": 90}
+    });
+    Mock::given(method("POST"))
+        .respond_with(in_turn(vec![
+            ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": "{\"a\":1}"}, "finish_reason": "stop"}],
+                "usage": usage,
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"content": "{\"a\""}, "finish_reason": "length"}],
+                "usage": usage,
+            })),
+        ]))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonObject);
+    let resp = c
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.usage,
+        Usage {
+            prompt_tokens: 5,
+            completion_tokens: 100,
+            reasoning_tokens: 90,
+        }
+    );
+    assert_eq!(resp.usage.answer_tokens(), 10);
+    let err = c
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("90 of 100 completion tokens spent reasoning"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -736,8 +798,52 @@ async fn reasoning_off_is_sent_unless_extra_body_sets_it() {
     );
 }
 
+/// A model that rejects `reasoning: {enabled: false}` is asked with
+/// minimal effort instead, and the client remembers that.
 #[tokio::test]
-async fn a_rejected_reasoning_switch_is_dropped() {
+async fn a_rejected_reasoning_switch_steps_down_to_minimal_effort() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v["reasoning"] == json!({"enabled": false})
+        })
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
+    for _ in 0..2 {
+        let resp = c
+            .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "{\"a\":1}");
+    }
+    let reqs = server.received_requests().await.unwrap();
+    let sent: Vec<Value> = reqs
+        .iter()
+        .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()["reasoning"].clone())
+        .collect();
+    // Rejected once; minimal effort from then on.
+    assert_eq!(
+        sent,
+        vec![
+            json!({"enabled": false}),
+            json!({"effort": "minimal"}),
+            json!({"effort": "minimal"}),
+        ]
+    );
+}
+
+/// When minimal effort is rejected too, `reasoning` is no longer sent.
+#[tokio::test]
+async fn a_rejected_reasoning_setting_is_dropped() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(|r: &Request| {
@@ -763,8 +869,8 @@ async fn a_rejected_reasoning_switch_is_dropped() {
             .unwrap();
         assert_eq!(resp.content, "{\"a\":1}");
     }
-    // Rejected once, then never sent again.
-    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    // Off, then minimal effort, rejected once each; then never sent again.
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
 }
 
 #[tokio::test]
@@ -779,4 +885,81 @@ async fn other_endpoints_get_no_reasoning_switch() {
         .await
         .unwrap();
     assert!(wire_body(&server).await.get("reasoning").is_none());
+}
+
+/// Two calls rejected for the same setting step it down once: the client
+/// goes to minimal effort, not past it.
+#[tokio::test]
+async fn concurrent_rejections_step_down_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v["reasoning"] == json!({"enabled": false})
+        })
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_delay(Duration::from_millis(200))
+                .set_body_string(
+                    r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}"#,
+                ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
+    let (a, b) = tokio::join!(
+        c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2))),
+        c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+    );
+    a.unwrap();
+    b.unwrap();
+    c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let reqs = server.received_requests().await.unwrap();
+    let last: Value = serde_json::from_slice(&reqs[reqs.len() - 1].body).unwrap();
+    assert_eq!(last["reasoning"], json!({"effort": "minimal"}));
+    assert!(
+        reqs.iter().all(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["reasoning"] != Value::Null
+        }),
+        "never stepped past minimal effort"
+    );
+}
+
+/// An error that only mentions reasoning is not a rejection of the
+/// reasoning parameter: nothing steps down.
+#[tokio::test]
+async fn an_unrelated_400_mentioning_reasoning_keeps_the_setting() {
+    for message in [
+        "This model's maximum context length is 8192 tokens (including reasoning). Please reduce the length of the messages.",
+        "Invalid schema for response_format: property 'effort' has no type",
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(json!({"error": {"message": message}}).to_string()),
+            )
+            .mount(&server)
+            .await;
+        let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
+        for _ in 0..2 {
+            let _ = c
+                .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+                .await;
+        }
+        let sent: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()["reasoning"].clone())
+            .collect();
+        assert_eq!(sent, vec![json!({"enabled": false}); 2], "{message}");
+    }
 }

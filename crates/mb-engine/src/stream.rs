@@ -99,6 +99,7 @@ impl Engine {
             upstream,
             repair_system,
             lines: VecDeque::new(),
+            cut_line: None,
             permit: None,
             prompt_bytes: 0,
             completion_bytes: 0,
@@ -177,6 +178,7 @@ fn estimate_usage(prompt_bytes: usize, completion_bytes: usize) -> Usage {
     Usage {
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens: 0,
     }
 }
 
@@ -197,6 +199,9 @@ struct StreamState {
     repair_system: Option<ChatMessage>,
     /// Complete lines received but not yet consumed.
     lines: VecDeque<String>,
+    /// The last line of a provider stream cut at `max_tokens`, read after
+    /// `lines`: the only line salvaged (see `accept`).
+    cut_line: Option<String>,
     /// The generation permit, held from opening the provider stream until
     /// it has no more candidates (or this stream is done or dropped).
     permit: Option<GenerationPermit>,
@@ -224,7 +229,7 @@ impl StreamState {
             tokio::time::sleep(self.interval).await;
         }
         let (value, source) = match (self.next_candidate().await, self.provider.clone()) {
-            (Some(line), Some(provider)) => self.accept(provider.as_ref(), &line).await,
+            (Some((line, cut)), Some(provider)) => self.accept(provider.as_ref(), &line, cut).await,
             _ => (self.fake(), Source::Fallback),
         };
         self.emitted += 1;
@@ -259,6 +264,9 @@ impl StreamState {
             completion_tokens: total
                 .completion_tokens
                 .saturating_sub(self.attributed.completion_tokens),
+            reasoning_tokens: total
+                .reasoning_tokens
+                .saturating_sub(self.attributed.reasoning_tokens),
         };
         self.attributed = total;
         stream + std::mem::take(&mut self.repair_usage)
@@ -268,7 +276,8 @@ impl StreamState {
     /// nothing more within the deadline: the provider's total timeout from
     /// opening for the first item, the request timeout for each later one
     /// (measured after any item interval).
-    async fn next_candidate(&mut self) -> Option<String> {
+    /// The flag marks the last line of a stream cut at `max_tokens`.
+    async fn next_candidate(&mut self) -> Option<(String, bool)> {
         let provider = self.provider.clone()?;
         let timeout = self.engine.config.timeout;
         let deadline = Instant::now()
@@ -279,11 +288,16 @@ impl StreamState {
         loop {
             while let Some(line) = self.lines.pop_front() {
                 if let Some(candidate) = candidate(&line) {
-                    return Some(candidate.to_string());
+                    return Some((candidate.to_string(), false));
                 }
             }
             match std::mem::replace(&mut self.upstream, Upstream::Closed) {
                 Upstream::Closed => {
+                    if let Some(line) = self.cut_line.take()
+                        && let Some(candidate) = candidate(&line)
+                    {
+                        return Some((candidate.to_string(), true));
+                    }
                     self.permit = None;
                     return None;
                 }
@@ -335,7 +349,14 @@ impl StreamState {
                         };
                     }
                     Ok(None) => self.lines.extend(splitter.finish()),
-                    Ok(Some(Err(e))) => self.give_up(&e.to_string()),
+                    Ok(Some(Err(e))) => {
+                        // The line cut at max_tokens is still a candidate,
+                        // for salvage (see `accept`).
+                        if matches!(e, mb_llm::LlmError::Truncated { .. }) {
+                            self.cut_line = splitter.finish();
+                        }
+                        self.give_up(&e.to_string());
+                    }
                     Err(_) => self.give_up("LLM stream timed out"),
                 },
             }
@@ -382,13 +403,21 @@ impl StreamState {
         );
     }
 
-    /// A candidate line as an item: valid → `Llm`, fixed locally →
+    /// A candidate line as an item: valid → `Llm`, fixed locally (or, the
+    /// `cut` last line of a stream stopped at `max_tokens`, salvaged) →
     /// `Patched`; otherwise one repair call → `Repaired`, else a faker item.
-    async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
-        let errors = match self
-            .engine
-            .check_output(&self.validator, line, &Checks::default())
-        {
+    async fn accept(&mut self, provider: &dyn Provider, line: &str, cut: bool) -> (Value, Source) {
+        let checks = Checks::default();
+        let checked = match self.engine.check_output(&self.validator, line, &checks) {
+            Checked::Invalid(errors) if cut => {
+                match self.engine.check_truncated(&self.validator, line, &checks) {
+                    salvaged @ Checked::Patched(_) => salvaged,
+                    _ => Checked::Invalid(errors),
+                }
+            }
+            other => other,
+        };
+        let errors = match checked {
             Checked::Valid(value) => return (value, Source::Llm),
             Checked::Patched(value) => return (value, Source::Patched),
             Checked::Rejected(reason) => {

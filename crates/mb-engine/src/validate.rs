@@ -12,6 +12,10 @@ use crate::faker::Costs;
 
 const MAX_ERRORS: usize = 10;
 
+/// Violations [`SchemaValidator::validate`] orders by depth before keeping
+/// [`MAX_ERRORS`].
+const MAX_SCANNED: usize = 100;
+
 /// A string longer than this, where the schema sets no `maxLength`, is a
 /// runaway generation.
 pub const RUNAWAY_CHARS: usize = 2_000;
@@ -536,14 +540,18 @@ impl SchemaValidator {
     }
 
     /// Returns up to 10 violations formatted as `"<instance path>:
-    /// <keyword>: <message>"`. A failed `anyOf`/`oneOf` names the errors of
-    /// its closest branch; quoted values are capped.
+    /// <keyword>: <message>"`, shallowest first (of the first 100 found): a
+    /// wrong shape near the root is what a repair must fix first. A failed
+    /// `anyOf`/`oneOf` names the errors of its closest branch; quoted values
+    /// are capped.
     pub fn validate(&self, instance: &Value) -> Result<(), Vec<String>> {
-        let errors: Vec<String> = self
-            .inner
-            .iter_errors(instance)
+        let mut found: Vec<_> = self.inner.iter_errors(instance).take(MAX_SCANNED).collect();
+        // Stable: errors at one depth keep the validator's order.
+        found.sort_by_key(|e| e.instance_path().as_str().matches('/').count());
+        let errors: Vec<String> = found
+            .iter()
             .take(MAX_ERRORS)
-            .map(|e| describe(&e, 0))
+            .map(|e| describe(e, 0))
             .collect();
         if errors.is_empty() {
             Ok(())

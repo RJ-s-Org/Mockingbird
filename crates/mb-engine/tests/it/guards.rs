@@ -323,6 +323,7 @@ async fn budget_receives_spent_tokens() {
     let usage = |p, c| Usage {
         prompt_tokens: p,
         completion_tokens: c,
+        reasoning_tokens: 0,
     };
     let provider = Arc::new(ScriptedProvider::with_usage(vec![
         Ok(("not json".into(), usage(100, 7))),

@@ -206,6 +206,7 @@ async fn stream_items_charge_the_reported_usage() {
     let reported = Usage {
         prompt_tokens: 100_000,
         completion_tokens: 5_000,
+        reasoning_tokens: 0,
     };
     let provider = Arc::new(
         ScriptedProvider::new(vec![])
@@ -525,4 +526,45 @@ fn source_worst_orders_fallback_repaired_patched_llm() {
     assert_eq!(Source::Repaired.worst(Source::Llm), Source::Repaired);
     assert_eq!(Source::Fallback.worst(Source::Repaired), Source::Fallback);
     assert_eq!(Source::Llm.worst(Source::Fallback), Source::Fallback);
+}
+
+/// A stream stopped at `max_tokens` mid-item: the cut line is salvaged
+/// (`Patched`) instead of repaired or faked.
+#[tokio::test]
+async fn a_line_cut_at_max_tokens_is_salvaged() {
+    let bundle = stream_bundle();
+    let provider = Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![
+        Ok("{\"id\":\"a\",\"n\":1}\n{\"id\":\"b\",\"n\":2,\"note\":\"x".into()),
+        Err(LlmError::Truncated {
+            message: "stopped at max_tokens (64)".into(),
+            partial: String::new(),
+            usage: Usage::default(),
+        }),
+    ])]));
+    let engine = engine_with(&provider, EngineConfig::default());
+    let items = collect(&engine, &bundle, StreamContext::default(), Some(3)).await;
+    let sources: Vec<Source> = items.iter().map(|i| i.source).collect();
+    assert_eq!(
+        sources,
+        vec![Source::Llm, Source::Patched, Source::Fallback]
+    );
+    assert_eq!(items[1].value["id"], "b");
+    assert!(provider.requests().is_empty(), "no repair call");
+}
+
+/// Only the last line of a stream the provider cut is salvaged: a stream
+/// that ended normally with a broken last line is repaired instead.
+#[tokio::test]
+async fn an_uncut_stream_line_is_not_salvaged() {
+    let bundle = stream_bundle();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![Ok("{\"id\":\"b\",\"n\":2}".into())]).with_streams(vec![Ok(
+            vec![Ok("{\"id\":\"a\",\"n\":1}\n{\"id\":\"b\",\"n\":2".into())],
+        )]),
+    );
+    let engine = engine_with(&provider, EngineConfig::default());
+    let items = collect(&engine, &bundle, StreamContext::default(), Some(2)).await;
+    let sources: Vec<Source> = items.iter().map(|i| i.source).collect();
+    assert_eq!(sources, vec![Source::Llm, Source::Repaired]);
+    assert_eq!(provider.requests().len(), 1, "one repair call");
 }

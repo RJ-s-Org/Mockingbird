@@ -189,6 +189,7 @@ async fn fallback_metered_stream_reports_the_serving_hops_usage() {
     let usage = mb_llm::Usage {
         prompt_tokens: 40,
         completion_tokens: 4,
+        reasoning_tokens: 0,
     };
     let primary =
         Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Err(LlmError::Timeout)]));
@@ -305,4 +306,24 @@ async fn fallback_stream_fails_over_on_openai_empty_stream() {
     let items = collect(fallback.stream(request()).await.unwrap()).await;
     let items: Vec<String> = items.into_iter().map(Result::unwrap).collect();
     assert_eq!(items, vec!["from secondary"]);
+}
+
+/// The primary's tokens on a truncated reply are not lost when the
+/// secondary answers.
+#[tokio::test]
+async fn fallback_keeps_the_primarys_usage_on_truncation() {
+    let spent = mb_llm::Usage {
+        prompt_tokens: 10,
+        completion_tokens: 64,
+        reasoning_tokens: 0,
+    };
+    let primary = Arc::new(ScriptedProvider::new(vec![Err(LlmError::Truncated {
+        message: "stopped at max_tokens (64)".into(),
+        partial: "{\"a\"".into(),
+        usage: spent,
+    })]));
+    let secondary = Arc::new(ScriptedProvider::new(vec![Ok("{}".into())]));
+    let fallback = FallbackProvider::new(primary, secondary);
+    let response = fallback.complete(request()).await.unwrap();
+    assert_eq!(response.usage, spent);
 }

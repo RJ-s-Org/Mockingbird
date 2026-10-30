@@ -617,6 +617,7 @@ pub async fn preview(
     event.latency = started.elapsed();
     event.prompt_tokens = generated.usage.prompt_tokens;
     event.completion_tokens = generated.usage.completion_tokens;
+    event.reasoning_tokens = generated.usage.reasoning_tokens;
     st.ext.usage.record(&event);
     Ok(Json(PreviewResponse {
         status: generated.status,

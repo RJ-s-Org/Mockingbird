@@ -294,6 +294,7 @@ pub(crate) fn meter(
     event.latency = latency;
     event.prompt_tokens = usage.prompt_tokens;
     event.completion_tokens = usage.completion_tokens;
+    event.reasoning_tokens = usage.reasoning_tokens;
     rt.ext.usage.record(&event);
 }
 
@@ -1536,6 +1537,7 @@ async fn report_with(
         event.latency = r.latency;
         event.prompt_tokens = r.usage.prompt_tokens;
         event.completion_tokens = r.usage.completion_tokens;
+        event.reasoning_tokens = r.usage.reasoning_tokens;
         rt.ext.usage.record(&event);
     }
     if recorded {

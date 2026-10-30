@@ -155,6 +155,7 @@ async fn garbage_chunk_skipped_with_warning() {
         Usage {
             prompt_tokens: 10,
             completion_tokens: 2,
+            reasoning_tokens: 0,
         },
     ))]));
     let result = extract_chunk(&llm(provider), &chunk(PETS_TEXT), 5, "pets.md").await;
@@ -343,10 +344,12 @@ fn budget_accounting() {
     budget.add(Usage {
         prompt_tokens: 30,
         completion_tokens: 20,
+        reasoning_tokens: 0,
     });
     budget.add(Usage {
         prompt_tokens: 5,
         completion_tokens: 5,
+        reasoning_tokens: 0,
     });
     assert_eq!(budget.used.prompt_tokens, 35);
     assert_eq!(budget.used.completion_tokens, 25);

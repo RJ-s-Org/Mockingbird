@@ -36,6 +36,7 @@ fn usage(prompt_tokens: u32, completion_tokens: u32) -> Usage {
     Usage {
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens: 0,
     }
 }
 
