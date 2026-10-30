@@ -148,17 +148,39 @@ dependencies separately from workspace sources are the next levers.
   `protocols.graphql.max_batch_operations` key. It also covers API-key revokes and
   cache resets on the change bus, `Arc` responses in the response cache and the
   live tail, and the `mb-auth` testing panics.
-- **Product calls:** opt-in scenarios, chaos and limits in snapshots (STUB-3);
-  rebuilding only the mocks of a changed LLM profile (PERF-8a); following
-  `wsdl:import`; URL imports with relative `$ref`s.
 - **Follow-ups:** the Shopify `Query.products` deep-recursion body (an ignored
-  failing test, left to the LLM-validity work); `faker_seed` in the Admin API;
-  storing an import job's tenant across restarts (a migration); event channels and
-  webhooks using the per-call provider policy; mb-protocols PERF-4/5/6 and mb-import
-  PERF-7 leftovers; `missing_docs` for mb-store's model fields.
+  failing test, left to the LLM-validity work); `missing_docs` for mb-store's model
+  fields; the rest of CI-8 (`release.yml` still writes image caches from tags); a
+  target-dir cache mount for the image's ~55 s workspace compile; PERF-6 (a store
+  method for the highest path-field number); manual Admin API publishes using the
+  provider policy (needs a `PublishError` variant, 0.2.0); `faker_seed` in snapshot
+  export and on `mocks create`; WSDL over URL imports.
 - **Behaviour notes:** a retried webhook event can arrive after later ones; a
   deleted contract's version number can be reused; LLM answers with an invalid
   `uuid` or other asserted format are now labelled `repaired`; existing OIDC
   deployments now sign users out after 1 hour idle (`auth.session_idle_timeout: 0`
   restores the old behaviour); contracts uploaded before D6 keep empty non-JSON
   bodies until re-imported.
+
+## Wave 8
+
+After the program, on the user's answers (2026-10-30). All merged with every
+required check green; none touched the LLM-validity sessions' files.
+
+| PR | Change |
+|---|---|
+| #138, #145 | e2e image: PRs read main's cache only, `rust-cache` saves only on main, the dependency layer split into five parallel layers |
+| #151 | CI-4: `check` starts its service containers in the background; CI-5: console without debuginfo (the large runner was not worth it) |
+| #141 | Snapshots: `--include scenarios,chaos,limits` is opt-in; the default export is unchanged |
+| #140 | A changed LLM profile rebuilds only the mocks that use it |
+| #146 | Uploads follow `wsdl:import` (depth 16, cycles stop) |
+| #152 | URL imports read OpenAPI/Swagger contracts directly and resolve relative `$ref`s through the fetch guards |
+| #150 | `faker_seed` in the Admin API, CLI and MCP |
+| #153 | An import job's tenant is stored (appended migration `1100`), so any node bills it |
+| #149 | Event channels and webhooks use the per-call provider policy |
+| #147, #154 | mb-protocols PERF-4/5 and mb-import PERF-3/4/7 leftovers |
+| #148 | One rustls provider (aws-lc-rs): `rediss://` no longer panics, ring is gone |
+
+e2e on PRs that change crate sources: image build 139–149 s → 95 s, job
+202–213 s → 168 s (one warm sample, run 41012573654). A `Cargo.lock` change still
+rebuilds the dependency stage (186–189 s). `check` lost its 14–16 s container start.
