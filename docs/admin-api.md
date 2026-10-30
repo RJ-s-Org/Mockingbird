@@ -10,6 +10,7 @@ Workspace resources live under `/workspaces/{ws}` (`/workspaces/{ws}/mocks…`, 
 | --- | --- |
 | Workspaces | `GET/POST /workspaces`, `GET/PATCH/DELETE /workspaces/{ws}` (`?force=true` also deletes its mocks and profiles, unless the config file declares any of them: `409`; see [Console and auth](console.md)) |
 | Caller | `GET /me` (the caller's principal and roles) |
+| Console sessions | `GET /console-sessions` (`?subject=`), `DELETE /console-sessions/{id}`, `DELETE /console-sessions?subject=<sub>` (every session of a principal); your own, or anyone's as a sysadmin (see [Console and auth](console.md#auth-modes)) |
 | API keys | `GET/POST /workspaces/{ws}/api-keys`, `DELETE …/api-keys/{key_id}` (revoke) |
 | Audit | `GET /workspaces/{ws}/audit`, `GET /audit` (all workspaces, sysadmin) |
 | Mocks | `GET/POST /mocks`, `GET/PATCH/DELETE /mocks/{mock}` |

@@ -449,7 +449,7 @@ fn percent_encode(s: &str) -> String {
 }
 
 /// The value of the first cookie called `name` across all `Cookie` headers.
-fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(header::COOKIE)
         .iter()

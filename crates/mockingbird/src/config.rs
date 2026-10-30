@@ -1146,7 +1146,8 @@ async fn admin_auth(
         .context("auth.external_url")?;
     let client = Arc::new(client);
     let secure = auth.secure_cookies();
-    let sessions = mb_auth::SessionManager::new(store.clone(), auth.session_ttl, secure);
+    let sessions = mb_auth::SessionManager::new(store.clone(), auth.session_ttl, secure)
+        .with_idle_timeout(auth.session_idle_timeout);
     let authenticator = mb_auth::Authenticator {
         api_keys: api_keys.clone(),
         sessions: Some(sessions.clone()),

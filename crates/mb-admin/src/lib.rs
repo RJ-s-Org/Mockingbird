@@ -50,6 +50,7 @@ mod apikeys;
 mod audit;
 mod auth_routes;
 pub mod channels;
+mod console_sessions;
 mod contracts;
 mod drafts;
 pub mod imports;
@@ -72,6 +73,7 @@ pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
 pub use auth_routes::{
     LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
 };
+pub use console_sessions::{ConsoleSessionView, RevokedSessions};
 pub use imports::llm::{LlmAccessError, LlmResolver, OfflineLlm};
 pub use imports::worker::{ImportWorkers, run_next_import, spawn_import_workers};
 pub use imports::{
@@ -368,6 +370,14 @@ pub fn router(st: AdminState) -> Router {
         .merge(resources)
         .route("/audit", get(audit::list_global))
         .route("/me", get(auth_routes::me))
+        .route(
+            "/console-sessions",
+            get(console_sessions::list).delete(console_sessions::revoke_all),
+        )
+        .route(
+            "/console-sessions/{id}",
+            axum::routing::delete(console_sessions::revoke),
+        )
         .route("/brokers", get(channels::brokers))
         .route_layer(axum::middleware::from_fn_with_state(
             st.clone(),

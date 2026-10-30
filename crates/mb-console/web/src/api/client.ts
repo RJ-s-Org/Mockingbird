@@ -51,6 +51,17 @@ export async function signOut(): Promise<string> {
   }
 }
 
+/**
+ * Sign out everywhere: ends every console session of `subject`
+ * (`DELETE /api/v1/console-sessions?subject=`), this one included, then signs
+ * out as [`signOut`] does. Throws [`ApiError`], without signing out, when the
+ * sessions could not be ended.
+ */
+export async function signOutEverywhere(subject: string): Promise<string> {
+  unwrap(await api.DELETE("/api/v1/console-sessions", { params: { query: { subject } } }));
+  return signOut();
+}
+
 function isProblem(v: unknown): v is Problem {
   return typeof v === "object" && v !== null && "title" in v && "status" in v;
 }

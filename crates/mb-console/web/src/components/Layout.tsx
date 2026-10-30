@@ -1,6 +1,6 @@
 import { Link, Outlet } from "@tanstack/react-router";
-import { useEffect } from "react";
-import { signOut } from "../api/client";
+import { useEffect, useState } from "react";
+import { signOut, signOutEverywhere } from "../api/client";
 import { rememberWorkspace, useWorkspaces } from "../api/queries";
 import { useMe } from "../auth/me";
 import { useTheme, type Theme } from "../lib/theme";
@@ -43,7 +43,7 @@ export function Layout({ ws, global = false }: { ws?: string; global?: boolean }
             </div>
             <div className="ml-auto flex min-w-0 items-center gap-2">
               <ThemeSelect />
-              {me.data ? <UserMenu name={me.data.display_name} local={me.data.kind === "local"} /> : null}
+              {me.data ? <UserMenu name={me.data.display_name} subject={me.data.subject} local={me.data.kind === "local"} /> : null}
             </div>
           </div>
           <nav aria-label="Main" className="-mx-1 flex gap-1 overflow-x-auto">
@@ -168,10 +168,21 @@ function ThemeSelect() {
   );
 }
 
-/** The signed-in user's name and, unless they are the local user, Sign out. */
-function UserMenu({ name, local }: { name: string; local: boolean }) {
+/**
+ * The signed-in user's name and, unless they are the local user, Sign out and
+ * Sign out everywhere (which ends all of the user's console sessions first).
+ */
+function UserMenu({ name, subject, local }: { name: string; subject: string; local: boolean }) {
+  const [failed, setFailed] = useState<unknown>(null);
   const onSignOut = async () => {
     window.location.href = await signOut();
+  };
+  const onSignOutEverywhere = async () => {
+    try {
+      window.location.href = await signOutEverywhere(subject);
+    } catch (e) {
+      setFailed(e);
+    }
   };
   const initial = name.trim().charAt(0).toUpperCase() || "?";
   return (
@@ -187,9 +198,24 @@ function UserMenu({ name, local }: { name: string; local: boolean }) {
         <span className="sr-only text-sm font-medium sm:not-sr-only sm:max-w-[10rem] sm:truncate">{name}</span>
       </span>
       {local ? null : (
-        <button type="button" className={`${secondaryButton} py-1`} onClick={() => void onSignOut()}>
-          Sign out
-        </button>
+        <>
+          <button type="button" className={`${secondaryButton} py-1`} onClick={() => void onSignOut()}>
+            Sign out
+          </button>
+          <button
+            type="button"
+            className={`${secondaryButton} py-1`}
+            title="End your console sessions in every browser"
+            onClick={() => void onSignOutEverywhere()}
+          >
+            Sign out everywhere
+          </button>
+          {failed ? (
+            <span role="alert" className="text-sm text-bad-fg">
+              Could not sign out everywhere
+            </span>
+          ) : null}
+        </>
       )}
     </div>
   );

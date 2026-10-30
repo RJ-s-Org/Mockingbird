@@ -1652,6 +1652,44 @@ impl ControlStore for PgStore {
         )
     }
 
+    async fn list_admin_sessions(
+        &self,
+        subject: Option<&str>,
+    ) -> Result<Vec<AdminSession>, StoreError> {
+        let sql = format!(
+            "SELECT {SESSION_SELECT} FROM admin_sessions \
+             WHERE $1::text IS NULL OR principal->>'subject' = $1 \
+             ORDER BY created_at DESC, id_hash"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(subject)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(session_from_row)
+            .collect()
+    }
+
+    async fn delete_admin_sessions_of(&self, subject: &str) -> Result<u64, StoreError> {
+        Ok(
+            sqlx::query("DELETE FROM admin_sessions WHERE principal->>'subject' = $1")
+                .bind(subject)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
+    async fn delete_idle_admin_sessions(&self, before: DateTime<Utc>) -> Result<u64, StoreError> {
+        Ok(
+            sqlx::query("DELETE FROM admin_sessions WHERE last_seen < $1")
+                .bind(before)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
     async fn put_oidc_pending_login(
         &self,
         p: &OidcPendingLogin,
