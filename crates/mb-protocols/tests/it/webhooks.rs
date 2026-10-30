@@ -9,7 +9,6 @@ use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
 use mb_protocols::webhooks::deliver::{
     DispatchSettings, MAX_RETRIES, OutboundEvent, ResolvedTarget, SecretBytes, WebhookDispatcher,
-    retry_delay,
 };
 use mb_protocols::webhooks::log::{
     DeliveryLog, DeliveryRecord, DeliveryStatus, SharedDeliveryLog, redacted_url,
@@ -206,7 +205,7 @@ fn default_settings_are_pinned() {
         (s.backoff_base, s.max_pending, s.attempt_timeout),
         (Duration::from_secs(1), 256, Duration::from_secs(10))
     );
-    let delays: Vec<_> = (1..=MAX_RETRIES).map(|n| retry_delay(&s, n)).collect();
+    let delays: Vec<_> = (1..=MAX_RETRIES).map(|n| s.retry_delay(n)).collect();
     assert_eq!(delays, [1, 2, 4].map(Duration::from_secs));
 }
 

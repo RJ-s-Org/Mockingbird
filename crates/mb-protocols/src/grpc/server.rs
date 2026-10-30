@@ -36,6 +36,21 @@ pub struct GrpcServer {
     health_service: Router,
 }
 
+/// Shows the published services and the mock serving each.
+impl std::fmt::Debug for GrpcServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let published = self.current();
+        let services: BTreeMap<&str, &str> = published
+            .by_service
+            .iter()
+            .map(|(service, mock)| (service.as_str(), mock.name()))
+            .collect();
+        f.debug_struct("GrpcServer")
+            .field("services", &services)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What one [`GrpcServer::publish`] installed.
 struct Published {
     /// Service full name → the mock serving it.
@@ -144,6 +159,12 @@ impl GrpcServer {
     /// serve the same service or their descriptors cannot be reflected.
     /// Health then reports `""` and every published service as `SERVING`,
     /// and services no longer published as `NOT_SERVING`.
+    ///
+    /// # Errors
+    ///
+    /// [`GrpcError::ServiceCollision`] when two mocks serve the same
+    /// service, and [`GrpcError::Descriptors`] when a mock's descriptors
+    /// cannot be served by reflection.
     pub async fn publish(&self, mocks: Vec<Arc<GrpcMock>>) -> Result<(), GrpcError> {
         let _publishing = self.publishing.lock().await;
         let mut by_service: BTreeMap<String, Arc<GrpcMock>> = BTreeMap::new();

@@ -3,8 +3,13 @@ use std::collections::HashMap;
 use mb_mcm::{Binding, Bundle, HttpMethod};
 use serde_json::{Map, Value};
 
+/// Why a contract's HTTP bindings cannot be routed ([`RouteTable::new`]).
 #[derive(Debug, thiserror::Error)]
 pub enum RouteError {
+    /// Operation `op`'s path conflicts with an earlier route of the same
+    /// method, or is not a valid route pattern. The message includes the
+    /// `matchit` error, which is also the
+    /// [`source`](std::error::Error::source).
     #[error("operation {op}: cannot route {method:?} {path}: {source}")]
     Insert {
         op: String,
@@ -17,6 +22,15 @@ pub enum RouteError {
 /// Maps `(method, path)` to an operation id.
 pub struct RouteTable {
     by_method: HashMap<HttpMethodKey, matchit::Router<String>>,
+}
+
+/// Shows how many methods have routes; `matchit` routers are opaque.
+impl std::fmt::Debug for RouteTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouteTable")
+            .field("methods", &self.by_method.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// `HttpMethod` is not `Hash`; key the table by its declaration order.
@@ -37,6 +51,12 @@ const ALL_METHODS: [HttpMethod; 7] = [
 ];
 
 impl RouteTable {
+    /// The routes of every HTTP operation of `bundle`.
+    ///
+    /// # Errors
+    ///
+    /// [`RouteError::Insert`] when two operations of one method claim the
+    /// same path, or a path is not a valid route.
     pub fn new(bundle: &Bundle) -> Result<Self, RouteError> {
         let mut by_method: HashMap<HttpMethodKey, matchit::Router<String>> = HashMap::new();
         for op in &bundle.operations {

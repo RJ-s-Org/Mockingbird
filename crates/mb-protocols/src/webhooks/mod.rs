@@ -3,15 +3,12 @@
 //! the deliveries.
 
 pub mod deliver;
-#[cfg_attr(
-    not(any(
-        feature = "http-rest",
-        feature = "graphql",
-        feature = "grpc",
-        feature = "soap"
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(
+    feature = "http-rest",
+    feature = "graphql",
+    feature = "grpc",
+    feature = "soap"
+))]
 pub(crate) mod emit;
 pub mod event;
 pub mod log;

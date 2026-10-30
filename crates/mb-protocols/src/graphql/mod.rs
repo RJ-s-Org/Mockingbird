@@ -64,6 +64,11 @@ struct GraphqlState {
 /// A router serving `rt.bundle`'s GraphQL schema at
 /// `rt.protocols.graphql_path`, over `POST` and `GET`, and subscriptions
 /// over a WebSocket upgrade of a `GET`.
+///
+/// # Errors
+///
+/// [`GraphqlError::MissingSdl`] when the bundle carries no schema, and
+/// [`GraphqlError::Schema`] when the schema cannot be built.
 pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, GraphqlError> {
     let schema = build_schema(&rt)?;
     let state = Arc::new(GraphqlState {

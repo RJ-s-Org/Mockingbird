@@ -31,6 +31,14 @@ pub struct KafkaClient {
     producer: FutureProducer,
 }
 
+/// Shows nothing of the client configuration, which holds the SASL
+/// password.
+impl std::fmt::Debug for KafkaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaClient").finish_non_exhaustive()
+    }
+}
+
 /// The client configuration of `cfg`, with `password` as the SASL
 /// password. The password is kept out of the config's `Debug` output.
 pub(crate) fn kafka_client_config(cfg: &BrokerConfig, password: Option<&str>) -> ClientConfig {
@@ -173,6 +181,11 @@ fn kafka_topic(binding: &ChannelBinding) -> Result<&str, BrokerError> {
 impl KafkaClient {
     /// Create the producer and check that the cluster answers a metadata
     /// request within 10 s.
+    ///
+    /// # Errors
+    ///
+    /// A [`BrokerError`] when the producer cannot be created or the
+    /// cluster does not answer in time.
     pub async fn connect(
         cfg: &BrokerConfig,
         password: Option<String>,
@@ -184,6 +197,10 @@ impl KafkaClient {
     /// cluster to answer the metadata request. librdkafka retries an
     /// unreachable bootstrap server until then, so a refused connection
     /// fails only once the timeout has passed.
+    ///
+    /// # Errors
+    ///
+    /// As [`KafkaClient::connect`].
     pub async fn connect_with_timeout(
         cfg: &BrokerConfig,
         password: Option<String>,

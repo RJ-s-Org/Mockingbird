@@ -35,6 +35,18 @@ pub struct AmqpClient {
     declared: Mutex<HashSet<String>>,
 }
 
+/// Shows the declared exchanges; never the connection, whose URI may hold
+/// credentials.
+impl std::fmt::Debug for AmqpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut declared: Vec<String> = lock(&self.declared).iter().cloned().collect();
+        declared.sort();
+        f.debug_struct("AmqpClient")
+            .field("declared", &declared)
+            .finish_non_exhaustive()
+    }
+}
+
 fn lock(set: &Mutex<HashSet<String>>) -> MutexGuard<'_, HashSet<String>> {
     set.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -216,6 +228,11 @@ async fn confirm_channel(connection: &Connection) -> Result<Channel, lapin::Erro
 
 impl AmqpClient {
     /// Connect to `cfg.url` and open the publish channel.
+    ///
+    /// # Errors
+    ///
+    /// A [`BrokerError`] when the connection or the publish channel cannot
+    /// be opened.
     pub async fn connect(
         cfg: &BrokerConfig,
         password: Option<String>,

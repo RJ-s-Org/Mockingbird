@@ -1,7 +1,58 @@
 //! Protocol adapters that expose a compiled contract as a live mock.
 //!
-//! Each adapter sits behind a cargo feature (`http-rest`, `sse`, `graphql`,
-//! `grpc`, `soap`, `websocket`, `events`); all of them share the `call` pipeline.
+//! This is an internal crate of Mockingbird, published for `mockingbird-cli`;
+//! its API carries no stability guarantee. Extensions build against `mb-ext`.
+//!
+//! A [`MockRuntime`] holds everything one mock needs: the compiled contract
+//! (an `mb_mcm::Bundle`), the generation engine, the state store, the
+//! extension hooks and the mock's settings. Each adapter turns a runtime into
+//! something to serve: an axum `Router` (REST, GraphQL, SOAP), a gRPC
+//! service (`grpc::GrpcMock`), or event-channel consumers and triggers
+//! (`events::ChannelRuntime`). All of them share one per-call pipeline:
+//! admission, data-plane auth, override headers and scenarios, state reads
+//! and writes around generation, and usage and request-log reporting.
+//!
+//! # Features
+//!
+//! | Feature | Adapter |
+//! |---|---|
+//! | `http-rest` | REST over HTTP |
+//! | `sse` | Server-sent event streams on REST operations |
+//! | `graphql` | GraphQL over HTTP and WebSocket subscriptions |
+//! | `grpc` | gRPC over h2c, with health and reflection |
+//! | `soap` | SOAP 1.1 and 1.2, and the `?wsdl` document |
+//! | `websocket` | The WebSocket channel shared by GraphQL subscriptions and `events` |
+//! | `events` | AsyncAPI channels: WebSocket and the in-process memory broker |
+//! | `mqtt`, `amqp`, `kafka` | The broker clients for `events` (off by default) |
+//!
+//! # Example
+//!
+//! Serve a compiled OpenAPI contract over REST, answered by the offline
+//! faker (no LLM provider) with in-memory session state:
+//!
+//! ```
+//! # #[cfg(feature = "http-rest")]
+//! # fn build(bundle: mb_mcm::Bundle) -> Result<axum::Router, mb_protocols::http_rest::RouteError> {
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! use mb_engine::{Engine, EngineConfig};
+//! use mb_protocols::{MockRuntime, http_rest};
+//! use mb_state::MemoryStore;
+//!
+//! let rt = MockRuntime::new(
+//!     "orders",
+//!     Arc::new(bundle),
+//!     Arc::new(Engine::new(None, EngineConfig::default())),
+//!     Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+//! );
+//! // Serve it with `axum::serve`.
+//! let router = http_rest::try_router(Arc::new(rt))?;
+//! # Ok(router)
+//! # }
+//! ```
+
+#![warn(missing_debug_implementations)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,6 +109,29 @@ pub use dp_auth::{
 };
 pub use limits::{RateLimiter, RuntimeLimits};
 pub use record::{RequestKind, RequestRecord, RequestRecorder};
+
+/// A string that names no variant of an enum parsed with `FromStr`
+/// ([`RequestKind`], `BrokerKind`, `DeliveryStatus`).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {what} \"{name}\"")]
+pub struct ParseNameError {
+    what: &'static str,
+    name: String,
+}
+
+impl ParseNameError {
+    pub(crate) fn new(what: &'static str, name: &str) -> Self {
+        Self {
+            what,
+            name: name.to_string(),
+        }
+    }
+
+    /// The string that was parsed.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 /// Request header capping how many items a streamed response carries
 /// (an integer in `1..=10000`; the engine clamps it to its own maximum).
@@ -154,6 +228,7 @@ impl ScenarioRuntime {
 
     /// This scenario with each operation in `instructions` given its own
     /// instructions in place of the scenario-wide ones.
+    #[must_use]
     pub fn with_operation_instructions(mut self, instructions: BTreeMap<String, String>) -> Self {
         for (operation_id, text) in instructions {
             let mut variant = self.clone();
@@ -193,6 +268,8 @@ impl StateHealth {
     /// Default time between store attempts while degraded.
     pub const DEFAULT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+    /// A healthy breaker that, once degraded, lets one call try the store
+    /// every `retry_interval`.
     pub fn new(retry_interval: Duration) -> Self {
         Self {
             degraded: AtomicBool::new(false),
@@ -303,8 +380,36 @@ pub struct MockRuntime {
     index: call::BundleIndex,
 }
 
+/// Shows the mock's settings; leaves out the contract, the engine, the
+/// state store and the extension hooks. Webhook target URLs are shown
+/// without credentials (see [`webhooks::deliver::ResolvedTarget`]).
+impl std::fmt::Debug for MockRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut scenarios: Vec<&String> = self.scenarios.keys().collect();
+        scenarios.sort();
+        f.debug_struct("MockRuntime")
+            .field("name", &self.name)
+            .field("workspace", &self.workspace)
+            .field("header_overrides", &self.header_overrides)
+            .field("scenarios", &scenarios)
+            .field("recorder", &self.recorder.is_some())
+            .field("state_health", &self.state_health)
+            .field("data_plane_auth", &self.data_plane_auth)
+            .field("data_plane_keys", &self.data_plane_keys.is_some())
+            .field("protocols", &self.protocols)
+            .field("limits", &self.limits)
+            .field("chaos", &self.chaos)
+            .field("shutdown", &self.shutdown)
+            .field("consistency", &self.consistency)
+            .field("unknown_ids", &self.unknown_ids)
+            .field("default_scenario", &self.default_scenario)
+            .field("webhooks", &self.webhooks)
+            .finish_non_exhaustive()
+    }
+}
+
 /// How a read of a path id the session holds no resource for is answered.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum UnknownIds {
     /// Generate a resource for the id (the default).
     #[default]
@@ -397,6 +502,7 @@ impl MockRuntime {
     }
 
     /// [`MockRuntime::set_data_plane_auth`], builder style.
+    #[must_use]
     pub fn with_data_plane_auth(mut self, auth: DataPlaneAuth) -> Self {
         self.set_data_plane_auth(auth);
         self

@@ -14,20 +14,23 @@ use super::memory::MemoryBroker;
 use super::{InMessage, OutMessage};
 
 /// How long connecting to a broker may take.
-#[cfg_attr(
-    not(any(feature = "kafka", feature = "amqp", feature = "mqtt")),
-    allow(dead_code)
-)]
+#[cfg(any(feature = "kafka", feature = "amqp", feature = "mqtt"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Why a broker operation failed.
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum BrokerError {
+    /// The broker is not configured, its credentials cannot be resolved,
+    /// or connecting failed.
     #[error("cannot connect: {0}")]
     Connect(String),
+    /// The broker did not take a message.
     #[error("publish failed: {0}")]
     Publish(String),
+    /// A subscription could not be opened, or failed while open.
     #[error("subscribe failed: {0}")]
     Subscribe(String),
+    /// The broker kind, binding or option is not supported here.
     #[error("{0}")]
     Unsupported(String),
 }
@@ -104,9 +107,19 @@ impl SubscriptionSender {
 #[async_trait]
 pub trait BrokerClient: Send + Sync {
     /// `target` has its parameters resolved.
+    ///
+    /// # Errors
+    ///
+    /// [`BrokerError::Publish`] when the broker does not take the message,
+    /// and [`BrokerError::Unsupported`] for a binding of another protocol.
     async fn publish(&self, target: &ChannelBinding, msg: OutMessage) -> Result<(), BrokerError>;
     /// `binding` keeps `{param}` placeholders, which match any one segment.
     /// `group` names the consumer group.
+    ///
+    /// # Errors
+    ///
+    /// [`BrokerError::Subscribe`] when the subscription cannot be opened,
+    /// and [`BrokerError::Unsupported`] for a binding of another protocol.
     async fn subscribe(
         &self,
         binding: &ChannelBinding,
@@ -115,6 +128,10 @@ pub trait BrokerClient: Send + Sync {
     /// [`BrokerClient::subscribe`] when several nodes consume the same
     /// channel and each message should reach one of them (default: the
     /// consumer group already shares the messages).
+    ///
+    /// # Errors
+    ///
+    /// As [`BrokerClient::subscribe`].
     async fn subscribe_shared(
         &self,
         binding: &ChannelBinding,
@@ -131,20 +148,27 @@ pub trait BrokerClient: Send + Sync {
     }
     /// The client's current connection problem, for a client that
     /// reconnects by itself (default: none).
+    ///
+    /// # Errors
+    ///
+    /// The problem, while the client is not connected.
     fn health(&self) -> Result<(), String> {
         Ok(())
     }
 }
 
-/// Which kind of broker a configured connection talks to.
 /// Why an MQTT broker cannot use TLS: this build's rumqttc has no TLS
 /// stack (its rustls-webpki 0.102 has open advisories).
 pub const MQTT_TLS_UNSUPPORTED: &str = "MQTT over TLS is not supported in this build (rumqttc TLS stack has open advisories); use a TLS-terminating proxy or plain MQTT";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which kind of broker a configured connection talks to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BrokerKind {
+    /// Apache Kafka (the `kafka` feature).
     Kafka,
+    /// AMQP 0-9-1, e.g. RabbitMQ (the `amqp` feature).
     Amqp,
+    /// MQTT 5 (the `mqtt` feature).
     Mqtt,
     /// The in-process [`MemoryBroker`].
     Memory,
@@ -185,6 +209,27 @@ impl BrokerKind {
     }
 }
 
+impl std::fmt::Display for BrokerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parses the names [`BrokerKind::as_str`] returns.
+impl std::str::FromStr for BrokerKind {
+    type Err = crate::ParseNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "kafka" => Ok(Self::Kafka),
+            "amqp" => Ok(Self::Amqp),
+            "mqtt" => Ok(Self::Mqtt),
+            "memory" => Ok(Self::Memory),
+            _ => Err(crate::ParseNameError::new("broker kind", s)),
+        }
+    }
+}
+
 /// SASL credentials; the password is a secret reference.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SaslConfig {
@@ -194,8 +239,9 @@ pub struct SaslConfig {
     pub password_ref: String,
 }
 
-/// One configured broker connection (the `brokers:` config section).
-#[derive(Clone, Debug, PartialEq)]
+/// One configured broker connection (the `brokers:` config section). Its
+/// `Debug` shows the URL without userinfo ([`BrokerConfig::display_url`]).
+#[derive(Clone, PartialEq)]
 pub struct BrokerConfig {
     pub name: String,
     pub kind: BrokerKind,
@@ -205,6 +251,20 @@ pub struct BrokerConfig {
     pub ca_file: Option<PathBuf>,
     pub sasl: Option<SaslConfig>,
     pub client_id_prefix: String,
+}
+
+impl std::fmt::Debug for BrokerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerConfig")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("url", &self.display_url())
+            .field("tls", &self.tls)
+            .field("ca_file", &self.ca_file)
+            .field("sasl", &self.sasl)
+            .field("client_id_prefix", &self.client_id_prefix)
+            .finish()
+    }
 }
 
 impl BrokerConfig {
@@ -257,6 +317,19 @@ pub struct Brokers {
     health: Mutex<HashMap<String, Health>>,
 }
 
+/// Shows the configs (URLs without userinfo) and the connected broker
+/// names; never the secret store.
+impl std::fmt::Debug for Brokers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut connected: Vec<String> = lock(&self.clients).keys().cloned().collect();
+        connected.sort();
+        f.debug_struct("Brokers")
+            .field("configs", &self.configs)
+            .field("connected", &connected)
+            .finish_non_exhaustive()
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -264,6 +337,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Brokers {
+    /// The brokers of `configs` (by name), resolving SASL passwords through
+    /// `secrets` when each first connects.
     pub fn new(configs: Vec<BrokerConfig>, secrets: Arc<dyn SecretStore>) -> Arc<Self> {
         Arc::new(Self {
             configs: configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
@@ -279,6 +354,7 @@ impl Brokers {
         Self::new(Vec::new(), Arc::new(EnvFileSecrets))
     }
 
+    /// The configuration of broker `name`.
     pub fn config(&self, name: &str) -> Option<&BrokerConfig> {
         self.configs.get(name)
     }
@@ -290,6 +366,12 @@ impl Brokers {
 
     /// The connected client of broker `name`, connecting on first use.
     /// Every call reports its outcome through [`Brokers::report`].
+    ///
+    /// # Errors
+    ///
+    /// [`BrokerError::Connect`] when `name` is not configured, its SASL
+    /// password cannot be resolved or connecting fails or times out, and
+    /// [`BrokerError::Unsupported`] when its kind is not compiled in.
     pub async fn client(&self, name: &str) -> Result<Arc<dyn BrokerClient>, BrokerError> {
         let Some(config) = self.configs.get(name) else {
             return Err(BrokerError::Connect(format!(
@@ -355,11 +437,12 @@ impl Brokers {
             BrokerKind::Mqtt => {
                 connect_within(super::mqtt::MqttClient::connect(config, password)).await
             }
-            #[allow(unreachable_patterns)]
-            other => Err(BrokerError::Unsupported(format!(
-                "{} support is not compiled into this build",
-                other.as_str()
-            ))),
+            #[cfg(not(feature = "kafka"))]
+            BrokerKind::Kafka => Err(not_compiled(BrokerKind::Kafka)),
+            #[cfg(not(feature = "amqp"))]
+            BrokerKind::Amqp => Err(not_compiled(BrokerKind::Amqp)),
+            #[cfg(not(feature = "mqtt"))]
+            BrokerKind::Mqtt => Err(not_compiled(BrokerKind::Mqtt)),
         }
     }
 
@@ -447,6 +530,15 @@ impl Brokers {
         }))
         .await;
     }
+}
+
+/// The error for a broker kind whose support this build leaves out.
+#[cfg(not(all(feature = "kafka", feature = "amqp", feature = "mqtt")))]
+fn not_compiled(kind: BrokerKind) -> BrokerError {
+    BrokerError::Unsupported(format!(
+        "{} support is not compiled into this build",
+        kind.as_str()
+    ))
 }
 
 /// Run a broker connect future under [`CONNECT_TIMEOUT`].

@@ -97,6 +97,16 @@ pub struct MqttClient {
     event_loop: tokio::task::JoinHandle<()>,
 }
 
+/// Shows only whether subscription identifiers are in use; never the
+/// connection options, which hold the credentials.
+impl std::fmt::Debug for MqttClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttClient")
+            .field("sub_ids", &self.sub_ids)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for MqttClient {
     fn drop(&mut self) {
         self.event_loop.abort();
@@ -354,6 +364,11 @@ async fn first_connack(event_loop: &mut EventLoop) -> Result<ConnAck, BrokerErro
 
 impl MqttClient {
     /// Connect to `cfg.url`, waiting for the broker's `ConnAck`.
+    ///
+    /// # Errors
+    ///
+    /// A [`BrokerError`] when the URL is invalid or the broker refuses or
+    /// cannot be reached.
     pub async fn connect(
         cfg: &BrokerConfig,
         password: Option<String>,

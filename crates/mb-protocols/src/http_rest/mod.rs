@@ -40,6 +40,11 @@ pub fn router(rt: Arc<MockRuntime>) -> Router {
 ///
 /// Mocks are meant to be called from browsers, so a permissive CORS layer
 /// answers preflights and exposes `X-Mockingbird-Source`.
+///
+/// # Errors
+///
+/// [`RouteError`] when the bundle's routes conflict (see
+/// [`RouteTable::new`]).
 pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, RouteError> {
     let state = handler::RestState::new(rt)?;
     Ok(Router::new()
