@@ -506,7 +506,7 @@ async fn url_import_uses_content_type() {
 }
 
 #[tokio::test]
-async fn url_json_openapi_rejected() {
+async fn url_json_openapi_is_read_as_written() {
     let yaml = fixture("openapi/orders-3.0.yaml");
     let doc: Value = serde_saphyr::from_slice(&yaml).unwrap();
     let server = MockServer::start().await;
@@ -518,8 +518,34 @@ async fn url_json_openapi_rejected() {
         )
         .mount(&server)
         .await;
-    let err = run_import(
+    let draft = run_import(
         ImportInput::Url(format!("{}/openapi.json", server.uri())),
+        None,
+        &loopback_options(),
+        &NoopObserver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(draft.meta.chunk_count, 0);
+    assert_eq!(draft.bundle.operations.len(), 5);
+    assert!(draft.meta.operations.values().all(|m| m.confidence == 1.0));
+}
+
+#[tokio::test]
+async fn url_json_asyncapi_rejected() {
+    let yaml = fixture("asyncapi/orders-amqp-2.6.yaml");
+    let doc: Value = serde_saphyr::from_slice(&yaml).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/asyncapi.json"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(serde_json::to_vec(&doc).unwrap(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let err = run_import(
+        ImportInput::Url(format!("{}/asyncapi.json", server.uri())),
         None,
         &loopback_options(),
         &NoopObserver,

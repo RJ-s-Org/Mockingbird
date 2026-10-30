@@ -38,3 +38,5 @@ mod smart_llm;
 mod smart_postman;
 #[cfg(feature = "smart")]
 mod smart_text;
+#[cfg(feature = "smart")]
+mod smart_url_refs;
