@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-09",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "1e13912328",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Coffee menu, sensible cents (325, 495), good SKUs; ids CAT000...1 and ITM000...1 are sequential and unlike Square. Variation item_id and category refs all resolve, item versions track updated_at, cursor null ends the page."
+  },
+  {
+   "opaque_id": "08d7ef788e",
+   "realism": 2,
+   "coherence": 4,
+   "rationale": "Ids GARNETITEM000... derive from the request's types value, and objects have no names, prices or item_data; versions are round-ish. Timestamps and versions roughly align, but ITEM/CATEGORY objects lacking their data is a minor gap."
+  },
+  {
+   "opaque_id": "3b254e1004",
+   "realism": 1,
+   "coherence": 5,
+   "rationale": "objects is an empty array with null cursor, so there is no catalog data. Consistent though: null cursor fits an empty last page, and unknown types \"juniper\" can explain no matches."
+  },
+  {
+   "opaque_id": "8aaaba621c",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Random-looking 24-char ids, Cold Brew at 425/525 cents, realistic SKUs; ITEM/CATG id prefixes are a slight tell. Item and category refs resolve; variation version 1793295921 is in seconds while item versions are 1600000000038, a scale mismatch."
+  },
+  {
+   "opaque_id": "957b172053",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Lone category \"Peach Cobbler\" with id A1B2C3D4E5F6... is bland, and is_top_level false with no parent; cursor looks real. Next cursor with one object is fine, but version 1600000001000 (2020) conflicts with updated_at 2026."
+  },
+  {
+   "opaque_id": "9dfb899d7e",
+   "realism": 2,
+   "coherence": 4,
+   "rationale": "Ids A1B2C3D4E5F6G7H8I9J0K1L2 and M1N2O3P4Q5R6... are alphabet patterns, cursor fjord234567... is filler, CATEGORY objects have no names and identical versions. Types and timestamps agree; cursor derived from request; version 1600000000001 predates updated_at."
+  }
+ ]
+}

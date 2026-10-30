@@ -473,6 +473,7 @@ class Proxy:
         self.memo_lock = threading.Lock()
         self.reasoning_rejected: set = set()
         self.response_format_rejected: set = set()
+        self.format_fallback = not getattr(args, "no_format_fallback", False)
 
     def price(self, model: str) -> Tuple[float, float]:
         return self.prices.get(base_model(model), self.fallback)
@@ -695,7 +696,8 @@ class Handler(BaseHTTPRequestHandler):
                     px.reasoning_rejected.add(model)
                 continue
             if (
-                "response_format" in up
+                px.format_fallback
+                and "response_format" in up
                 and status in RESPONSE_FORMAT_REJECT_STATUSES
                 and any(m in low for m in RESPONSE_FORMAT_MARKERS)
             ):
@@ -876,6 +878,8 @@ def main() -> int:
         help="another ledger whose cost counts toward the budget (repeatable; read only)",
     )
     ap.add_argument("--no-stream-upgrade", action="store_true")
+    ap.add_argument("--no-format-fallback", action="store_true",
+                    help="pass a rejected response_format's error to the client instead of retrying without it")
     ap.add_argument("--dump", help="exchanges.jsonl: append each call's messages and answer")
     ap.add_argument("--upstream", default=OPENROUTER_URL, help=argparse.SUPPRESS)
     args = ap.parse_args()

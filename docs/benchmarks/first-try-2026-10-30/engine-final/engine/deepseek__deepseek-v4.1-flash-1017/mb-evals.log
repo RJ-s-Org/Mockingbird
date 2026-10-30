@@ -1,0 +1,82 @@
+# 2026-10-30T22:35:57+00:00 /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/target/release/mb-evals run --manifest /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/workloads.json --repeat 3 --concurrency 4 --samples /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/first-try-2026-10-30/engine-final/engine/deepseek__deepseek-v4.1-flash-1017/samples.jsonl --out /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/first-try-2026-10-30/engine-final/engine/deepseek__deepseek-v4.1-flash-1017 --output-mode json_schema
+evaluating 18 contracts with deepseek/deepseek-v4.1-flash-1017 at http://127.0.0.1:60974/r/deepseek__deepseek-v4.1-flash-1017~engine/api/v1
+[2m2026-10-30T22:37:09.336426Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0msearch/repos [3mreason[0m[2m=[0mLLM returned no content: provider SiliconFlow, finish_reason stop, empty content
+[2m2026-10-30T22:37:55.070217Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0masyncapi/commerce-events-kafka [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 2404 }
+[2m2026-10-30T22:37:55.070264Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0masyncapi/orders-amqp-2.6 [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 6, repaired: 0, fallback: 0, p95_ms: 1044 }
+[2m2026-10-30T22:37:55.070279Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgraphql/devtools-github [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 8689 }
+[2m2026-10-30T22:37:55.070291Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgraphql/ecommerce-shopify-admin [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 14328 }
+[2m2026-10-30T22:37:55.070301Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgrpc/otlp-trace-service [3mstats[0m[2m=[0mContractStats { calls: 3, llm: 3, repaired: 0, fallback: 0, p95_ms: 672 }
+[2m2026-10-30T22:37:55.070311Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgrpc/route-guide [3mstats[0m[2m=[0mContractStats { calls: 3, llm: 3, repaired: 0, fallback: 0, p95_ms: 908 }
+[2m2026-10-30T22:37:55.070330Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/devtools-github [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 11, repaired: 0, fallback: 1, p95_ms: 4583 }
+[2m2026-10-30T22:37:55.070340Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/ecommerce-orders-3.1 [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 2902 }
+[2m2026-10-30T22:37:55.070350Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/ecommerce-square [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 5759 }
+[2m2026-10-30T22:37:55.070359Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/payments-paypal-orders [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 5371 }
+[2m2026-10-30T22:37:55.070368Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/payments-stripe [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 2360 }
+[2m2026-10-30T22:37:55.070377Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-discord [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 3711 }
+[2m2026-10-30T22:37:55.070415Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-spotify [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 11416 }
+[2m2026-10-30T22:37:55.070424Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-tmdb [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 11, repaired: 1, fallback: 0, p95_ms: 6925 }
+[2m2026-10-30T22:37:55.070431Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/travel-booking [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 10, repaired: 2, fallback: 0, p95_ms: 31602 }
+[2m2026-10-30T22:37:55.070437Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/travel-hotels [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 6, repaired: 0, fallback: 0, p95_ms: 11910 }
+[2m2026-10-30T22:37:55.070444Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0msoap/accounts-rpc [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 6, repaired: 0, fallback: 0, p95_ms: 1653 }
+[2m2026-10-30T22:37:55.070451Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0msoap/calculator [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 877 }
+# Mockingbird LLM evals
+
+Model `deepseek/deepseek-v4.1-flash-1017` at `http://127.0.0.1:60974/r/deepseek__deepseek-v4.1-flash-1017~engine/api/v1`, started 2026-10-30T22:35:58.667131+00:00.
+
+| Metric | Value |
+| --- | --- |
+| Calls | 162 |
+| Schema-valid rate | 99.4% |
+| First-pass rate | 97.5% |
+| Repair rate | 1.9% |
+| Fallback rate | 0.6% |
+| p50 latency | 2142 ms |
+| p95 latency | 7630 ms |
+| Prompt tokens per call | 1058.9 |
+| Completion tokens per call | 504.0 |
+| Streaming operations not evaluated | 3 |
+
+## Per contract
+
+| Contract | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| asyncapi/commerce-events-kafka | 9 | 9 | 0 | 0 | 2404 |
+| asyncapi/orders-amqp-2.6 | 6 | 6 | 0 | 0 | 1044 |
+| graphql/devtools-github | 12 | 12 | 0 | 0 | 8689 |
+| graphql/ecommerce-shopify-admin | 12 | 12 | 0 | 0 | 14328 |
+| grpc/otlp-trace-service | 3 | 3 | 0 | 0 | 672 |
+| grpc/route-guide | 3 | 3 | 0 | 0 | 908 |
+| rest/devtools-github | 12 | 11 | 0 | 1 | 4583 |
+| rest/ecommerce-orders-3.1 | 9 | 9 | 0 | 0 | 2902 |
+| rest/ecommerce-square | 12 | 12 | 0 | 0 | 5759 |
+| rest/payments-paypal-orders | 9 | 9 | 0 | 0 | 5371 |
+| rest/payments-stripe | 12 | 12 | 0 | 0 | 2360 |
+| rest/social-discord | 9 | 9 | 0 | 0 | 3711 |
+| rest/social-spotify | 9 | 9 | 0 | 0 | 11416 |
+| rest/social-tmdb | 12 | 11 | 1 | 0 | 6925 |
+| rest/travel-booking | 12 | 10 | 2 | 0 | 31602 |
+| rest/travel-hotels | 6 | 6 | 0 | 0 | 11910 |
+| soap/accounts-rpc | 6 | 6 | 0 | 0 | 1653 |
+| soap/calculator | 9 | 9 | 0 | 0 | 877 |
+
+## Per API type
+
+| API type | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| asyncapi | 15 | 15 | 0 | 0 | 2404 |
+| graphql | 24 | 24 | 0 | 0 | 8689 |
+| grpc | 6 | 6 | 0 | 0 | 908 |
+| rest | 102 | 98 | 3 | 1 | 8022 |
+| soap | 15 | 15 | 0 | 0 | 1653 |
+
+## Per domain
+
+| Domain | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| devtools | 27 | 26 | 0 | 1 | 4707 |
+| ecommerce | 48 | 48 | 0 | 0 | 5061 |
+| generic | 18 | 18 | 0 | 0 | 1653 |
+| payments | 21 | 21 | 0 | 0 | 4469 |
+| social-media | 30 | 29 | 1 | 0 | 9404 |
+| travel | 18 | 16 | 2 | 0 | 31602 |
+threshold violated: p95_ms 7630 > 3000

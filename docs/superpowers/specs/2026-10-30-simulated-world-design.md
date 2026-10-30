@@ -30,7 +30,7 @@ The LLM should spend its effort on judgement (what is plausible, what a request 
 ## Rejected
 
 - **A blueprint or pre-built world as a required, reviewed artifact.** Even when the LLM writes it, a team has to review and maintain it, and a frozen dataset cannot answer the unanticipated. Optional context (constraint 1) is different: a mock works without it.
-- **Constrained decoding as the core approach.** Provider support varies, and it fixes neither placeholder values nor wrong sums.
+- **Constrained decoding as the core approach.** Provider support varies, and it fixes neither placeholder values nor wrong sums. It is still the best lever on first-try validity, and [became the default](../../benchmarks/first-try-2026-10-30/README.md), but it does not address the rest of this design.
 
 ## Evidence
 

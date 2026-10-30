@@ -1,0 +1,2067 @@
+hints+low	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	4444	745	522	934	
+hints+low	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	5289	672	537	894	
+hints+low	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	invalid	120005	0	0	0	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1110	319	256	586	
+hints+low	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	56396	3022	2788	958	
+hints+low	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1031	166	86	552	
+hints+low	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	5333	783	443	2055	
+hints+low	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	18022	2571	1958	586	
+hints+low	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	9794	2738	2395	1932	
+hints+low	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	23199	2566	2498	584	
+hints+low	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	21943	2323	1753	1927	
+hints+low	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	6662	2892	2787	1827	
+hints+low	nvidia/nemotron-3.5-lightning	orders.get	rest	patched	25051	6328	5836	1939	
+hints+low	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	37225	4187	3766	2118	
+hints+low	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	11416	1441	420	1102	
+hints+low	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	3350	1066	932	876	
+hints+low	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	6867	1480	1179	880	
+hints+low	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	2641	341	304	457	
+hints+low	nvidia/nemotron-3.5-lightning	orders.capture	rest	invalid	32330	6665	6211	1942	required+required
+hints+low	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	2551	329	56	504	
+hints+low	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	1752	193	131	459	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	900	114	19	545	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	7608	938	330	1481	
+hints+low	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	119355	13008	6574	1837	
+hints+low	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	72483	10385	9401	1119	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	9366	1343	94	1121	
+hints+low	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	41993	6029	5776	889	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	3980	897	810	690	
+hints+low	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	3521	941	682	1427	
+hints+low	nvidia/nemotron-3.5-lightning	ListLocations	rest	patched	34968	4322	3036	884	
+hints+low	nvidia/nemotron-3.5-lightning	getOrder	rest	invalid	120003	0	0	0	output is not valid JSON
+hints+low	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	15816	2656	2301	503	
+hints+low	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	34295	3740	3683	458	
+hints+low	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	13282	1414	1311	551	
+hints+low	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	23388	3030	2580	1500	
+hints+low	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	patched	10968	2365	1854	1523	
+hints+low	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	8814	2468	1918	970	
+hints+low	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	30611	5001	3568	1138	
+hints+low	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	23338	2860	2713	689	
+hints+low	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	4368	514	398	717	
+hints+low	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	21390	3716	2991	3149	
+hints+low	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	19228	2937	2164	2095	
+hints+low	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	49531	8355	8056	1479	
+hints+low	nvidia/nemotron-3.5-lightning	movie-credits	rest	invalid	87248	16384	16384	998	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	5892	1638	1180	1988	
+hints+low	nvidia/nemotron-3.5-lightning	tv-series-details	rest	patched	82900	13247	12627	1551	
+hints+low	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	4761	510	328	1426	
+hints+low	nvidia/nemotron-3.5-lightning	person-details	rest	valid	66710	6458	4039	737	
+hints+low	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	5704	1063	372	1488	
+hints+low	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	patched	7606	468	83	1148	
+hints+low	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	68652	16384	16384	3208	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	4378	917	611	1675	
+hints+low	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	invalid	88833	16384	16384	2151	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	patched	5401	897	169	2046	
+hints+low	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	patched	2937	836	382	1756	
+hints+low	nvidia/nemotron-3.5-lightning	get-track	rest	valid	28740	5109	4240	2053	
+hints+low	nvidia/nemotron-3.5-lightning	get_message	rest	valid	38820	9816	9445	1629	
+hints+low	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	7213	2946	2121	1785	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	2553	694	355	1067	
+hints+low	nvidia/nemotron-3.5-lightning	list_messages	rest	invalid	120002	0	0	0	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	3268	948	496	1330	
+hints+low	nvidia/nemotron-3.5-lightning	get_guild	rest	invalid	120002	0	0	0	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	9657	1233	732	991	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1645	373	307	664	
+hints+low	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	patched	7656	1195	153	1565	
+hints+low	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	78690	7118	4563	1727	
+hints+low	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	7196	1541	1148	1766	
+hints+low	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	8389	948	307	2436	
+hints+low	nvidia/nemotron-3.5-lightning	pulls/get	rest	invalid	120004	0	0	0	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	7074	2157	1503	2318	
+hints+low	nvidia/nemotron-3.5-lightning	issues/get	rest	invalid	120002	0	0	0	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	8972	896	143	1071	
+hints+low	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	686	101	0	705	
+hints+low	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	1579	84	62	634	
+hints+low	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	1466	270	232	952	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	275	8	0	416	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	563	29	20	422	
+hints+low	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	1515	226	214	405	
+hints+low	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	1737	165	116	528	
+hints+low	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	1857	308	252	569	
+hints+low	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	5057	1092	947	704	
+hints+low	nvidia/nemotron-3.5-lightning	search/repos	rest	invalid	115234	16384	15567	1839	output is not valid JSON
+hints+low	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	patched	4749	979	813	575	
+hints+low	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	8093	1235	1054	575	
+hints+low	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	invalid	120003	0	0	0	output is not valid JSON
+hints+low	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	29856	4126	3665	1456	
+hints+low	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	975	128	105	258	
+hints+low	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	33221	6071	5524	1018	
+hints+low	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	18630	2352	2257	678	
+hints+low	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	53467	6418	5319	1630	required+required+required+required
+hints+low	nvidia/nemotron-3.5-lightning	getOffer	rest	valid	60505	3187	2836	1835	
+hints+low	nvidia/nemotron-3.5-lightning	createBooking	rest	valid	54101	8219	7512	2477	
+hints+low	nvidia/nemotron-3.5-lightning	getBooking	rest	valid	60766	10051	8860	2348	
+hints+low	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	70062	9724	8509	1150	
+hints+low	nvidia/nemotron-3.5-lightning	cancelBooking	rest	valid	20026	2766	2622	711	
+hints+low	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	31579	2271	2045	641	
+hints+low	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	15517	3274	3258	941	
+hints+low	nvidia/nemotron-3.5-lightning	Add	soap	valid	11334	1459	1449	484	
+hints+low	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	10786	883	784	438	
+hints+low	nvidia/nemotron-3.5-lightning	Divide	soap	valid	30494	2640	2143	421	
+hints+low	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	20956	2152	2082	579	
+hints+low	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	44134	3770	3399	573	
+hints+low	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	invalid	120003	0	0	0	output is not valid JSON
+hints+low	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	patched	117107	4025	3847	624	
+hints+low	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	patched	60117	6893	4154	567	
+hints+low	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	33852	2688	2385	251	
+hints+low	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	3560	280	115	817	
+hints+low	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	4558	429	266	832	
+hints+low	openai/gpt-6-luna	GetCustomersCustomer	rest	valid	2148	124	37	541	
+hints+low	openai/gpt-6-luna	PostRefunds	rest	valid	3658	273	199	486	
+hints+low	openai/gpt-6-luna	orders.create	rest	valid	3351	412	125	1864	
+hints+low	openai/gpt-6-luna	orders.get	rest	valid	2778	260	136	1748	
+hints+low	openai/gpt-6-luna	orders.capture	rest	valid	3298	321	120	1748	
+hints+low	openai/gpt-6-luna	GetPayment	rest	valid	4098	332	188	1680	
+hints+low	openai/gpt-6-luna	ListCatalog	rest	valid	6576	686	117	1022	
+hints+low	openai/gpt-6-luna	RetrieveCustomer	rest	valid	3369	199	43	822	
+hints+low	openai/gpt-6-luna	getOrder	rest	valid	2154	112	47	422	
+hints+low	openai/gpt-6-luna	ListLocations	rest	valid	3007	248	46	822	
+hints+low	openai/gpt-6-luna	createOrder	rest	valid	1730	89	33	424	
+hints+low	openai/gpt-6-luna	listOrders	rest	valid	4232	232	46	471	
+hints+low	openai/gpt-6-luna	Query.shop	graphql	valid	1555	99	0	510	
+hints+low	openai/gpt-6-luna	Query.order	graphql	valid	4320	425	79	1372	
+hints+low	openai/gpt-6-luna	Query.products	graphql	valid	6748	865	94	1043	
+hints+low	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	3107	172	71	642	
+hints+low	openai/gpt-6-luna	movie-details	rest	valid	4313	366	101	1325	
+hints+low	openai/gpt-6-luna	movie-credits	rest	valid	6159	625	139	912	
+hints+low	openai/gpt-6-luna	person-details	rest	valid	2565	184	85	655	
+hints+low	openai/gpt-6-luna	tv-series-details	rest	patched	4923	637	114	1405	
+hints+low	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	10303	1313	212	1883	
+hints+low	openai/gpt-6-luna	get-playlist	rest	patched	13082	1228	206	2866	
+hints+low	openai/gpt-6-luna	get-track	rest	valid	5990	730	152	1834	
+hints+low	openai/gpt-6-luna	get_message	rest	valid	2258	170	0	1338	
+hints+low	openai/gpt-6-luna	list_messages	rest	valid	7594	859	172	1381	
+hints+low	openai/gpt-6-luna	get_guild	rest	patched	3877	392	80	1024	
+hints+low	openai/gpt-6-luna	repos/get	rest	valid	3946	392	67	1594	
+hints+low	openai/gpt-6-luna	pulls/get	rest	valid	7597	818	122	1914	
+hints+low	openai/gpt-6-luna	issues/get	rest	valid	4611	429	109	1663	
+hints+low	openai/gpt-6-luna	search/repos	rest	valid	9078	1088	87	1681	
+hints+low	openai/gpt-6-luna	Query.viewer	graphql	valid	4113	492	71	1003	
+hints+low	openai/gpt-6-luna	Query.repository	graphql	valid	4770	479	73	1249	
+hints+low	openai/gpt-6-luna	Query.user	graphql	valid	3952	387	64	905	
+hints+low	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	2332	157	73	616	
+hints+low	openai/gpt-6-luna	searchFlights	rest	valid	7157	626	125	1429	
+hints+low	openai/gpt-6-luna	getOffer	rest	valid	4921	524	62	1627	
+hints+low	openai/gpt-6-luna	createBooking	rest	valid	5180	512	75	2262	
+hints+low	openai/gpt-6-luna	getBooking	rest	valid	3717	452	0	2147	
+hints+low	openai/gpt-6-luna	listHotels	rest	valid	6274	626	126	1003	
+hints+low	openai/gpt-6-luna	cancelBooking	rest	valid	1757	167	63	649	
+hints+low	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	1759	103	82	565	
+hints+low	openai/gpt-6-luna	TraceService.Export	grpc	valid	1660	81	74	875	
+hints+low	openai/gpt-6-luna	Subtract	soap	valid	988	26	14	386	
+hints+low	openai/gpt-6-luna	Add	soap	valid	911	26	14	383	
+hints+low	openai/gpt-6-luna	Divide	soap	valid	3012	196	180	373	
+hints+low	openai/gpt-6-luna	GetAccount	soap	valid	1733	91	39	488	
+hints+low	openai/gpt-6-luna	CreateAccount	soap	valid	1465	93	35	529	
+hints+low	openai/gpt-6-luna	orderCreated	asyncapi	valid	5115	496	266	649	
+hints+low	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	3531	348	183	524	
+hints+low	openai/gpt-6-luna	shipmentDispatched	asyncapi	valid	6280	473	290	517	
+hints+low	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1498	62	24	227	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	1804	252	0	759	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	1699	245	0	742	
+schema+r2	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	2593	197	0	760	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1169	92	0	476	
+schema+r2	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	3731	237	0	775	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	976	75	0	424	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	1932	345	0	1787	
+schema+r2	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	1440	124	0	501	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	2604	710	0	1659	
+schema+r2	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1262	108	0	447	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	2032	537	0	1659	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	2255	565	0	1465	
+schema+r2	nvidia/nemotron-3.5-lightning	orders.get	rest	valid	3147	464	0	1685	
+schema+r2	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	4517	365	0	1813	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	2191	171	0	1626	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2603	260	0	731	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	2780	422	0	723	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	684	86	0	391	
+schema+r2	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	19335	347	0	3119	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	1327	300	0	438	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	779	72	0	393	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	916	90	0	479	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	2344	453	0	1415	
+schema+r2	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	31112	634	0	2746	
+schema+r2	nvidia/nemotron-3.5-lightning	ListCatalog	rest	patched	3763	460	0	901	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	4810	1269	0	1055	
+schema+r2	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2774	353	0	755	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	1279	104	0	624	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	1480	368	0	1153	
+schema+r2	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	3616	307	0	743	
+schema+r2	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	2128	73	0	601	
+schema+r2	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	2636	215	0	462	
+schema+r2	nvidia/nemotron-3.5-lightning	createOrder	rest	patched	2738	98	0	606	
+schema+r2	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	1699	133	0	510	
+schema+r2	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	3629	496	0	1459	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	2884	686	0	1247	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	5605	785	0	783	
+schema+r2	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	2057	464	0	1097	
+schema+r2	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1381	145	0	648	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1834	154	0	600	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	3872	1308	0	2203	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	4098	1419	0	1407	
+schema+r2	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	3720	455	0	1224	
+schema+r2	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	11002	833	0	813	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4337	813	0	2728	
+schema+r2	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	6700	963	0	1292	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1478	295	0	1110	
+schema+r2	nvidia/nemotron-3.5-lightning	person-details	rest	valid	2607	205	0	634	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	5029	619	0	1134	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	2753	487	0	937	
+schema+r2	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	18560	519	0	4209	pattern+required+pattern+pattern
+schema+r2	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	1710	390	0	1407	
+schema+r2	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	6073	876	0	1449	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	5301	724	0	1459	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	1607	504	0	1310	
+schema+r2	nvidia/nemotron-3.5-lightning	get-track	rest	valid	5453	904	0	1409	
+schema+r2	nvidia/nemotron-3.5-lightning	get_message	rest	invalid	18626	934	0	2120	required+required+required+required
+schema+r2	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	3135	1147	0	1476	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3845	508	0	1921	
+schema+r2	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	1733	805	0	1249	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	1896	431	0	1264	
+schema+r2	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	3516	503	0	999	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	3819	476	0	1702	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	911	95	0	598	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	3522	1076	0	1357	
+schema+r2	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	3744	543	0	1475	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	3233	530	0	1535	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	4022	638	0	4309	
+schema+r2	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	2804	805	0	1508	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	5059	702	0	4191	
+schema+r2	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	3097	369	0	1367	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	2572	558	0	934	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	646	100	0	577	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	551	11	0	545	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	483	13	0	859	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	334	7	0	350	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	548	8	0	356	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	432	15	0	339	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	501	66	0	462	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	599	56	0	503	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1312	255	0	679	
+schema+r2	nvidia/nemotron-3.5-lightning	search/repos	rest	invalid	11125	551	0	2836	required+pattern+pattern
+schema+r2	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1480	163	0	550	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	1740	202	0	550	
+schema+r2	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	5287	413	0	1948	
+schema+r2	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	2986	293	0	1360	
+schema+r2	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	2116	35	0	233	
+schema+r2	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	11589	323	0	1700	
+schema+r2	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	2816	142	0	637	
+schema+r2	nvidia/nemotron-3.5-lightning	searchFlights	rest	valid	12679	1174	0	2492	
+schema+r2	nvidia/nemotron-3.5-lightning	getOffer	rest	valid	4599	504	0	1570	
+schema+r2	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	6267	692	0	2209	type+type
+schema+r2	nvidia/nemotron-3.5-lightning	getBooking	rest	invalid	9229	702	0	2079	pattern+type
+schema+r2	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	1349	636	0	982	
+schema+r2	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	2645	124	0	950	additionalProperties+type+type
+schema+r2	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	915	31	0	600	
+schema+r2	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	2442	49	0	1392	
+schema+r2	nvidia/nemotron-3.5-lightning	Add	soap	valid	691	12	0	388	
+schema+r2	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	864	12	0	397	
+schema+r2	nvidia/nemotron-3.5-lightning	Divide	soap	valid	2070	25	0	526	
+schema+r2	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	2912	89	0	747	
+schema+r2	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	1397	88	0	532	
+schema+r2	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	14390	302	0	695	
+schema+r2	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	invalid	2555	17	0	956	required+required+required+required
+schema+r2	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	6282	227	0	567	
+schema+r2	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	879	44	0	251	
+schema+r2	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	2538	223	0	694	
+schema+r2	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	2486	202	0	707	
+schema+r2	openai/gpt-6-luna	GetCustomersCustomer	rest	patched	1401	87	0	458	
+schema+r2	openai/gpt-6-luna	PostRefunds	rest	valid	1477	74	0	406	
+schema+r2	openai/gpt-6-luna	orders.create	rest	valid	2342	285	0	1645	
+schema+r2	openai/gpt-6-luna	orders.get	rest	valid	3035	289	0	1526	
+schema+r2	openai/gpt-6-luna	orders.capture	rest	valid	3532	384	0	1527	
+schema+r2	openai/gpt-6-luna	GetPayment	rest	patched	3019	221	0	1353	
+schema+r2	openai/gpt-6-luna	ListCatalog	rest	valid	1094	12	0	817	
+schema+r2	openai/gpt-6-luna	RetrieveCustomer	rest	valid	1761	107	0	706	
+schema+r2	openai/gpt-6-luna	getOrder	rest	valid	1814	64	0	381	
+schema+r2	openai/gpt-6-luna	ListLocations	rest	patched	3500	370	0	693	
+schema+r2	openai/gpt-6-luna	createOrder	rest	valid	1082	52	0	383	
+schema+r2	openai/gpt-6-luna	listOrders	rest	valid	2964	205	0	430	
+schema+r2	openai/gpt-6-luna	Query.shop	graphql	valid	1871	97	0	469	
+schema+r2	openai/gpt-6-luna	Query.order	graphql	valid	1107	5	0	1331	
+schema+r2	openai/gpt-6-luna	Query.products	graphql	valid	7028	760	0	1002	
+schema+r2	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1835	99	0	601	
+schema+r2	openai/gpt-6-luna	movie-details	rest	valid	3488	266	0	1085	
+schema+r2	openai/gpt-6-luna	movie-credits	rest	valid	4110	488	0	755	
+schema+r2	openai/gpt-6-luna	person-details	rest	valid	1252	76	0	564	
+schema+r2	openai/gpt-6-luna	tv-series-details	rest	patched	4901	448	0	1170	
+schema+r2	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	1046	8	0	1316	
+schema+r2	openai/gpt-6-luna	get-playlist	rest	patched	9147	1105	0	2033	
+schema+r2	openai/gpt-6-luna	get-track	rest	patched	6444	673	0	1280	
+schema+r2	openai/gpt-6-luna	get_message	rest	valid	2066	176	0	1054	
+schema+r2	openai/gpt-6-luna	list_messages	rest	valid	4180	500	0	1080	
+schema+r2	openai/gpt-6-luna	get_guild	rest	patched	2651	291	0	866	
+schema+r2	openai/gpt-6-luna	repos/get	rest	valid	4946	509	0	1353	
+schema+r2	openai/gpt-6-luna	pulls/get	rest	valid	7148	864	0	1391	
+schema+r2	openai/gpt-6-luna	issues/get	rest	valid	3246	344	0	1253	
+schema+r2	openai/gpt-6-luna	search/repos	rest	valid	923	19	0	1415	
+schema+r2	openai/gpt-6-luna	Query.viewer	graphql	valid	4461	418	0	962	
+schema+r2	openai/gpt-6-luna	Query.repository	graphql	valid	4035	487	0	1208	
+schema+r2	openai/gpt-6-luna	Query.user	graphql	valid	1018	5	0	864	
+schema+r2	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	1416	88	0	575	
+schema+r2	openai/gpt-6-luna	searchFlights	rest	valid	1355	48	0	1270	
+schema+r2	openai/gpt-6-luna	getOffer	rest	valid	4555	459	0	1439	
+schema+r2	openai/gpt-6-luna	createBooking	rest	valid	3624	450	0	2032	
+schema+r2	openai/gpt-6-luna	getBooking	rest	valid	3713	432	0	1921	
+schema+r2	openai/gpt-6-luna	listHotels	rest	valid	944	21	0	898	
+schema+r2	openai/gpt-6-luna	cancelBooking	rest	invalid	1294	99	0	552	additionalProperties+type
+schema+r2	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	891	19	0	524	
+schema+r2	openai/gpt-6-luna	TraceService.Export	grpc	valid	965	5	0	807	
+schema+r2	openai/gpt-6-luna	Subtract	soap	valid	1077	10	0	345	
+schema+r2	openai/gpt-6-luna	Add	soap	valid	1086	10	0	342	
+schema+r2	openai/gpt-6-luna	Divide	soap	valid	1055	17	0	332	
+schema+r2	openai/gpt-6-luna	GetAccount	soap	valid	1213	50	0	447	
+schema+r2	openai/gpt-6-luna	CreateAccount	soap	valid	1291	56	0	488	
+schema+r2	openai/gpt-6-luna	orderCreated	asyncapi	valid	2670	231	0	649	
+schema+r2	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	2065	165	0	524	
+schema+r2	openai/gpt-6-luna	shipmentDispatched	asyncapi	patched	2110	155	0	517	
+schema+r2	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1277	36	0	227	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	2680	240	0	759	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	2444	227	0	742	
+schema+strict	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	998	191	0	760	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1042	93	0	476	
+schema+strict	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	3734	215	0	775	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	949	74	0	424	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	2164	364	0	1787	
+schema+strict	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	2305	133	0	501	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	3026	389	0	1659	
+schema+strict	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	5037	108	0	661	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	3191	548	0	1659	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	2500	552	0	1465	
+schema+strict	nvidia/nemotron-3.5-lightning	orders.get	rest	invalid	106332	16384	0	1685	output is not valid JSON
+schema+strict	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	4454	286	0	1813	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	5497	965	0	1626	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2041	252	0	731	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	3411	408	0	723	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	857	88	0	391	
+schema+strict	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	15273	392	0	3128	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	2031	319	0	438	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	709	75	0	393	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	909	94	0	479	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	1591	441	0	1415	
+schema+strict	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	5622	877	0	1490	
+schema+strict	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	1949	156	0	901	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	3803	853	0	1055	
+schema+strict	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2834	335	0	755	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	704	103	0	624	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	2498	368	0	1153	
+schema+strict	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	4316	599	0	743	
+schema+strict	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	3335	85	0	610	
+schema+strict	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	6140	248	0	462	
+schema+strict	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	1034	107	0	417	
+schema+strict	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	6569	126	0	778	
+schema+strict	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	6316	515	0	1459	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	2789	811	0	1247	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	8704	872	0	783	
+schema+strict	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	2970	399	0	1097	
+schema+strict	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1879	150	0	648	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1519	146	0	600	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	5432	1338	0	2203	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	5109	1473	0	1407	
+schema+strict	nvidia/nemotron-3.5-lightning	movie-details	rest	patched	17012	456	0	2202	
+schema+strict	nvidia/nemotron-3.5-lightning	movie-credits	rest	patched	14323	508	0	1383	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	5194	916	0	2728	
+schema+strict	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	4144	543	0	1292	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1606	250	0	1110	
+schema+strict	nvidia/nemotron-3.5-lightning	person-details	rest	valid	2366	208	0	634	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	6131	702	0	1134	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	1661	365	0	937	
+schema+strict	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	20820	529	0	4218	required+pattern+pattern
+schema+strict	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	2005	472	0	1407	
+schema+strict	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	11799	1787	0	1449	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	7110	711	0	1459	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	1735	516	0	1310	
+schema+strict	nvidia/nemotron-3.5-lightning	get-track	rest	valid	10731	894	0	1409	
+schema+strict	nvidia/nemotron-3.5-lightning	get_message	rest	patched	21973	1771	0	2129	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	5084	1460	0	1476	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3730	517	0	1921	
+schema+strict	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	1489	836	0	1249	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2900	461	0	1264	
+schema+strict	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	876	393	0	999	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	3427	464	0	1702	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1839	95	0	598	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	3083	1066	0	1357	
+schema+strict	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	2308	484	0	1475	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	3311	526	0	1535	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	3899	644	0	4309	
+schema+strict	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	8499	905	0	1508	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	4686	700	0	4191	
+schema+strict	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	4286	364	0	1367	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	3212	686	0	934	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	530	90	0	577	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	invalid	68667	16384	0	545	output is not valid JSON
+schema+strict	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	432	13	0	859	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	332	7	0	350	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	776	8	0	356	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	392	12	0	339	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	818	69	0	462	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	1023	56	0	503	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1737	251	0	679	
+schema+strict	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	23148	551	0	2845	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1342	166	0	550	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	2003	193	0	550	
+schema+strict	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	7308	349	0	1957	
+schema+strict	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	2274	378	0	1360	
+schema+strict	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	544	62	0	233	
+schema+strict	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	5220	484	0	1709	
+schema+strict	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	1538	119	0	637	
+schema+strict	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	13569	432	0	2501	oneOf
+schema+strict	nvidia/nemotron-3.5-lightning	getOffer	rest	valid	5110	522	0	1570	
+schema+strict	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	5224	694	0	2209	type+type+pattern
+schema+strict	nvidia/nemotron-3.5-lightning	getBooking	rest	invalid	7455	708	0	2079	type
+schema+strict	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	2108	609	0	982	
+schema+strict	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	3215	124	0	959	additionalProperties+type+type
+schema+strict	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	891	31	0	600	
+schema+strict	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	11441	26	0	873	
+schema+strict	nvidia/nemotron-3.5-lightning	Add	soap	valid	656	12	0	388	
+schema+strict	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	637	13	0	397	
+schema+strict	nvidia/nemotron-3.5-lightning	Divide	soap	valid	746	17	0	380	
+schema+strict	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	3593	91	0	756	
+schema+strict	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	1531	89	0	805	
+schema+strict	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	1130	278	0	695	
+schema+strict	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	patched	5454	199	0	965	
+schema+strict	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	3672	247	0	567	
+schema+strict	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	860	48	0	251	
+schema+strict	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	3150	226	0	694	
+schema+strict	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	2264	198	0	707	
+schema+strict	openai/gpt-6-luna	GetCustomersCustomer	rest	valid	1556	86	0	458	
+schema+strict	openai/gpt-6-luna	PostRefunds	rest	valid	2132	74	0	406	
+schema+strict	openai/gpt-6-luna	orders.create	rest	valid	2826	260	0	1645	
+schema+strict	openai/gpt-6-luna	orders.get	rest	valid	3170	289	0	1526	
+schema+strict	openai/gpt-6-luna	orders.capture	rest	invalid	4046	362	0	1527	type
+schema+strict	openai/gpt-6-luna	GetPayment	rest	patched	3042	230	0	1353	
+schema+strict	openai/gpt-6-luna	ListCatalog	rest	patched	813	12	0	817	
+schema+strict	openai/gpt-6-luna	RetrieveCustomer	rest	valid	1900	107	0	706	
+schema+strict	openai/gpt-6-luna	getOrder	rest	valid	1390	69	0	381	
+schema+strict	openai/gpt-6-luna	ListLocations	rest	valid	3765	383	0	693	
+schema+strict	openai/gpt-6-luna	createOrder	rest	valid	1629	54	0	383	
+schema+strict	openai/gpt-6-luna	listOrders	rest	valid	2998	210	0	430	
+schema+strict	openai/gpt-6-luna	Query.shop	graphql	valid	2108	102	0	469	
+schema+strict	openai/gpt-6-luna	Query.order	graphql	valid	3336	356	0	1331	
+schema+strict	openai/gpt-6-luna	Query.products	graphql	valid	8384	871	0	1002	
+schema+strict	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1558	96	0	601	
+schema+strict	openai/gpt-6-luna	movie-details	rest	valid	3693	280	0	1085	
+schema+strict	openai/gpt-6-luna	movie-credits	rest	valid	5243	434	0	755	
+schema+strict	openai/gpt-6-luna	person-details	rest	valid	2083	142	0	564	
+schema+strict	openai/gpt-6-luna	tv-series-details	rest	patched	6748	555	0	1170	
+schema+strict	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	1064	8	0	1316	
+schema+strict	openai/gpt-6-luna	get-playlist	rest	patched	8747	937	0	2033	
+schema+strict	openai/gpt-6-luna	get-track	rest	patched	5127	684	0	1280	
+schema+strict	openai/gpt-6-luna	get_message	rest	valid	2744	181	0	1054	
+schema+strict	openai/gpt-6-luna	list_messages	rest	valid	4408	506	0	1080	
+schema+strict	openai/gpt-6-luna	get_guild	rest	patched	3212	317	0	866	
+schema+strict	openai/gpt-6-luna	repos/get	rest	valid	4871	365	0	1353	
+schema+strict	openai/gpt-6-luna	pulls/get	rest	valid	8037	851	0	1391	
+schema+strict	openai/gpt-6-luna	issues/get	rest	patched	3730	326	0	1253	
+schema+strict	openai/gpt-6-luna	search/repos	rest	valid	1205	19	0	1415	
+schema+strict	openai/gpt-6-luna	Query.viewer	graphql	valid	4571	368	0	962	
+schema+strict	openai/gpt-6-luna	Query.repository	graphql	valid	1246	5	0	1208	
+schema+strict	openai/gpt-6-luna	Query.user	graphql	valid	4130	320	0	864	
+schema+strict	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	1694	90	0	575	
+schema+strict	openai/gpt-6-luna	searchFlights	rest	valid	1205	46	0	1270	
+schema+strict	openai/gpt-6-luna	getOffer	rest	valid	4157	333	0	1439	
+schema+strict	openai/gpt-6-luna	createBooking	rest	valid	4442	456	0	2032	
+schema+strict	openai/gpt-6-luna	getBooking	rest	valid	4267	417	0	1921	
+schema+strict	openai/gpt-6-luna	listHotels	rest	valid	1052	21	0	898	
+schema+strict	openai/gpt-6-luna	cancelBooking	rest	invalid	1340	99	0	552	additionalProperties+required+additionalProperties+type
+schema+strict	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	1043	19	0	524	
+schema+strict	openai/gpt-6-luna	TraceService.Export	grpc	valid	835	5	0	807	
+schema+strict	openai/gpt-6-luna	Subtract	soap	valid	1065	10	0	345	
+schema+strict	openai/gpt-6-luna	Add	soap	valid	968	10	0	342	
+schema+strict	openai/gpt-6-luna	Divide	soap	valid	1324	17	0	332	
+schema+strict	openai/gpt-6-luna	GetAccount	soap	valid	1397	50	0	447	
+schema+strict	openai/gpt-6-luna	CreateAccount	soap	valid	1237	56	0	488	
+schema+strict	openai/gpt-6-luna	orderCreated	asyncapi	valid	2963	235	0	649	
+schema+strict	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	1986	165	0	524	
+schema+strict	openai/gpt-6-luna	shipmentDispatched	asyncapi	valid	2279	184	0	517	
+schema+strict	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1285	36	0	227	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	2473	262	0	759	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	2416	298	0	742	
+schema+strict+require	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	1447	200	0	760	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1641	109	0	476	
+schema+strict+require	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	1440	261	0	775	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1717	74	0	424	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	2433	413	0	1787	
+schema+strict+require	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	15546	150	0	501	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	1774	598	0	1659	
+schema+strict+require	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	932	108	0	447	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	1558	566	0	1659	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	1498	467	0	1465	
+schema+strict+require	nvidia/nemotron-3.5-lightning	orders.get	rest	valid	56019	469	0	1685	
+schema+strict+require	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	5025	375	0	1813	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	2485	161	0	1626	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2366	247	0	731	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	4231	406	0	723	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	684	81	0	391	
+schema+strict+require	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	7397	400	0	3128	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	3190	363	0	438	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	847	76	0	393	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	1072	101	0	479	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	1964	435	0	1415	
+schema+strict+require	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	5697	875	0	1490	
+schema+strict+require	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	958	154	0	901	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	3678	1178	0	1055	
+schema+strict+require	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2939	345	0	755	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	682	104	0	624	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	1997	336	0	1153	
+schema+strict+require	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	30900	292	0	743	
+schema+strict+require	nvidia/nemotron-3.5-lightning	getOrder	rest	invalid	712	13	0	610	required+required+required+required
+schema+strict+require	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	1464	222	0	462	
+schema+strict+require	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	1704	201	0	417	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	889	133	0	510	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	3720	506	0	1459	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	3246	693	0	1247	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	7387	1245	0	783	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	3017	394	0	1097	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1505	158	0	648	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1538	175	0	600	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	4735	1332	0	2203	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	4623	1384	0	1407	
+schema+strict+require	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	49535	492	0	1224	
+schema+strict+require	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	4471	785	0	813	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4564	819	0	2728	
+schema+strict+require	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	4080	615	0	1292	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1607	236	0	1110	
+schema+strict+require	nvidia/nemotron-3.5-lightning	person-details	rest	valid	1654	183	0	634	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	6183	694	0	1134	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	1636	469	0	937	
+schema+strict+require	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	5279	520	0	4218	required+pattern
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	2093	463	0	1407	
+schema+strict+require	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	11517	1866	0	1449	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	4114	704	0	1459	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	1845	582	0	1310	
+schema+strict+require	nvidia/nemotron-3.5-lightning	get-track	rest	valid	5130	901	0	1409	
+schema+strict+require	nvidia/nemotron-3.5-lightning	get_message	rest	valid	5391	343	0	1199	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	4014	1163	0	1476	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	4133	493	0	1921	
+schema+strict+require	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	1691	822	0	1249	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2332	533	0	1264	
+schema+strict+require	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	5317	475	0	1749	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	4994	452	0	1702	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1374	99	0	598	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	2546	764	0	1357	
+schema+strict+require	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	3585	549	0	1475	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	3054	558	0	1535	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	3197	487	0	4309	
+schema+strict+require	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	5610	887	0	1508	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	4378	708	0	4191	
+schema+strict+require	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	4192	574	0	1367	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	2426	554	0	934	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	835	90	0	577	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	invalid	62503	16384	0	545	output is not valid JSON
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	484	13	0	859	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	441	7	0	350	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	304	9	0	356	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	457	14	0	339	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	662	69	0	462	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	569	56	0	503	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1157	254	0	679	
+schema+strict+require	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	5947	540	0	2845	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1374	167	0	550	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	1901	202	0	550	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	39869	385	0	1098	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	2175	378	0	1360	
+schema+strict+require	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	705	35	0	233	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	7606	513	0	1709	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	1388	134	0	637	
+schema+strict+require	nvidia/nemotron-3.5-lightning	searchFlights	rest	patched	45737	397	0	1392	
+schema+strict+require	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	2877	504	0	1570	required+required+required+required
+schema+strict+require	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	5078	694	0	2209	type+type
+schema+strict+require	nvidia/nemotron-3.5-lightning	getBooking	rest	invalid	3680	696	0	2079	type+type+type
+schema+strict+require	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	4953	602	0	982	
+schema+strict+require	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	1399	143	0	959	additionalProperties+type+type
+schema+strict+require	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	597	31	0	600	
+schema+strict+require	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	invalid	13203	311	0	1401	additionalProperties
+schema+strict+require	nvidia/nemotron-3.5-lightning	Add	soap	valid	664	12	0	388	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	797	13	0	397	
+schema+strict+require	nvidia/nemotron-3.5-lightning	Divide	soap	valid	846	17	0	380	
+schema+strict+require	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	1182	93	0	756	
+schema+strict+require	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	12574	92	0	532	
+schema+strict+require	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	1579	277	0	695	
+schema+strict+require	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	patched	2802	176	0	965	
+schema+strict+require	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	25641	247	0	567	
+schema+strict+require	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	640	46	0	251	
+schema+strict+require	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	invalid	68	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	invalid	69	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	GetCustomersCustomer	rest	invalid	72	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	PostRefunds	rest	invalid	73	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	orders.create	rest	invalid	78	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	orders.get	rest	invalid	72	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	orders.capture	rest	invalid	71	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	GetPayment	rest	invalid	62	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	ListCatalog	rest	invalid	62	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	RetrieveCustomer	rest	invalid	88	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	getOrder	rest	invalid	76	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	ListLocations	rest	invalid	69	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	createOrder	rest	invalid	86	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	listOrders	rest	invalid	69	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Query.shop	graphql	invalid	68	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Query.order	graphql	invalid	67	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Query.products	graphql	invalid	81	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Mutation.productCreate	graphql	invalid	75	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	movie-details	rest	invalid	65	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	movie-credits	rest	invalid	70	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	person-details	rest	invalid	76	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	tv-series-details	rest	invalid	74	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	get-an-artists-top-tracks	rest	invalid	108	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	get-playlist	rest	invalid	77	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	get-track	rest	invalid	77	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	get_message	rest	invalid	66	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	list_messages	rest	invalid	104	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	get_guild	rest	invalid	78	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	repos/get	rest	invalid	63	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	pulls/get	rest	invalid	66	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	issues/get	rest	invalid	70	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	search/repos	rest	invalid	63	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Query.viewer	graphql	invalid	95	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Query.repository	graphql	invalid	68	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Query.user	graphql	invalid	73	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Mutation.createIssue	graphql	invalid	63	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	searchFlights	rest	invalid	70	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	getOffer	rest	invalid	70	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	createBooking	rest	invalid	141	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	getBooking	rest	invalid	83	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	listHotels	rest	invalid	68	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	cancelBooking	rest	invalid	67	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	invalid	88	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	TraceService.Export	grpc	invalid	86	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Subtract	soap	invalid	71	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Add	soap	invalid	72	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	Divide	soap	invalid	73	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	GetAccount	soap	invalid	69	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	CreateAccount	soap	invalid	69	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	orderCreated	asyncapi	invalid	61	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	paymentAuthorized	asyncapi	invalid	74	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	shipmentDispatched	asyncapi	invalid	80	0	0	0	output is not valid JSON
+schema+strict+require	openai/gpt-6-luna	orderCancelled	asyncapi	invalid	60	0	0	0	output is not valid JSON
+control	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	patched	4062	212	0	759	
+control	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	patched	4037	218	0	742	
+control	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	invalid	2621	182	0	760	required+required+required+required
+control	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	3558	105	0	476	
+control	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	invalid	3215	213	0	775	required+required+required+required
+control	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	patched	3429	64	0	424	
+control	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	3951	306	0	1787	
+control	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	patched	1132	108	0	501	
+control	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	patched	3678	603	0	1659	
+control	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1219	108	0	447	
+control	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	patched	1779	597	0	1659	
+control	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	1694	443	0	1465	
+control	nvidia/nemotron-3.5-lightning	orders.get	rest	invalid	3400	436	0	1685	required+required+required+required
+control	nvidia/nemotron-3.5-lightning	orders.create	rest	invalid	3686	437	0	1813	required+required+required+required
+control	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	patched	1727	731	0	864	
+control	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2082	243	0	731	
+control	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	patched	2822	405	0	723	
+control	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	784	83	0	391	
+control	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	12271	380	0	1739	
+control	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	944	305	0	438	
+control	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	490	59	0	393	
+control	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	701	92	0	479	
+control	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	1800	452	0	1415	
+control	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	4200	625	0	1490	
+control	nvidia/nemotron-3.5-lightning	ListCatalog	rest	patched	2021	162	0	901	
+control	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	invalid	4785	833	0	1055	required
+control	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2686	346	0	755	
+control	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	759	104	0	624	
+control	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	3468	376	0	1153	
+control	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	13522	278	0	798	
+control	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	2245	77	0	412	
+control	nvidia/nemotron-3.5-lightning	listOrders	rest	patched	4421	198	0	462	
+control	nvidia/nemotron-3.5-lightning	createOrder	rest	patched	884	98	0	417	
+control	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	2463	141	0	510	
+control	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	2263	400	0	1459	
+control	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	patched	3049	712	0	1247	
+control	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	patched	6709	1224	0	783	
+control	nvidia/nemotron-3.5-lightning	Query.products	graphql	invalid	2914	409	0	1097	required+required
+control	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	invalid	987	155	0	648	anyOf
+control	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	995	83	0	600	
+control	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	patched	4785	1278	0	2203	
+control	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	patched	4441	1451	0	1407	
+control	nvidia/nemotron-3.5-lightning	movie-details	rest	patched	9678	489	0	1279	
+control	nvidia/nemotron-3.5-lightning	movie-credits	rest	patched	11255	700	0	813	
+control	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4939	833	0	1388	
+control	nvidia/nemotron-3.5-lightning	tv-series-details	rest	invalid	4042	639	0	1292	required+pattern+maximum+pattern
+control	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	919	239	0	1110	
+control	nvidia/nemotron-3.5-lightning	person-details	rest	patched	1354	181	0	634	
+control	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	4210	681	0	1134	
+control	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	patched	1323	341	0	937	
+control	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	20315	505	0	2286	pattern+required+pattern+pattern
+control	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	patched	1147	403	0	1407	
+control	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	patched	10012	1835	0	1449	
+control	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	patched	4106	703	0	1459	
+control	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	patched	1597	487	0	1310	
+control	nvidia/nemotron-3.5-lightning	get-track	rest	invalid	4900	957	0	1409	maxItems+pattern+pattern
+control	nvidia/nemotron-3.5-lightning	get_message	rest	patched	7024	284	0	1254	
+control	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	patched	2569	1193	0	1476	
+control	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3609	484	0	1001	
+control	nvidia/nemotron-3.5-lightning	list_messages	rest	invalid	4313	1088	0	1249	required+required+required+required
+control	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	1613	508	0	1264	
+control	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	3771	477	0	999	
+control	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	7097	454	0	903	
+control	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	681	87	0	598	
+control	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	7090	772	0	1357	
+control	nvidia/nemotron-3.5-lightning	repos/get	rest	invalid	14436	685	0	1530	required+required+required+required
+control	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	2736	526	0	1535	
+control	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	2857	491	0	2163	
+control	nvidia/nemotron-3.5-lightning	pulls/get	rest	patched	5027	880	0	1508	
+control	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	1857	709	0	2045	
+control	nvidia/nemotron-3.5-lightning	issues/get	rest	patched	2332	459	0	1367	
+control	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	3522	929	0	934	
+control	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	596	100	0	577	
+control	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	400	16	0	545	
+control	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	392	17	0	859	
+control	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	351	8	0	350	
+control	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	281	8	0	356	
+control	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	738	12	0	360	
+control	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	564	71	0	462	
+control	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	632	55	0	503	
+control	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1110	259	0	679	
+control	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	15092	544	0	1600	
+control	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1602	159	0	550	
+control	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	patched	1547	199	0	550	
+control	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	5430	547	0	1098	
+control	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	3053	287	0	1360	
+control	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	392	29	0	233	
+control	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	10446	401	0	1032	
+control	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	patched	3500	236	0	637	
+control	nvidia/nemotron-3.5-lightning	searchFlights	rest	patched	3151	400	0	1392	
+control	nvidia/nemotron-3.5-lightning	getOffer	rest	valid	8726	779	0	1570	
+control	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	5986	690	0	2209	type+type+pattern
+control	nvidia/nemotron-3.5-lightning	getBooking	rest	patched	9158	743	0	2079	
+control	nvidia/nemotron-3.5-lightning	listHotels	rest	invalid	23058	1093	0	1037	required+additionalProperties+type
+control	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	4790	142	0	664	additionalProperties+type+type
+control	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	661	31	0	600	
+control	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	530	27	0	873	
+control	nvidia/nemotron-3.5-lightning	Add	soap	valid	375	12	0	388	
+control	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	1070	13	0	397	
+control	nvidia/nemotron-3.5-lightning	Divide	soap	valid	428	21	0	380	
+control	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	3194	79	0	538	
+control	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	2114	93	0	587	
+control	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	3638	303	0	750	
+control	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	invalid	9849	572	0	624	required+required+required+required
+control	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	patched	6244	242	0	622	
+control	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	1037	74	0	251	
+control	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	3074	232	0	694	
+control	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	2690	186	0	707	
+control	openai/gpt-6-luna	GetCustomersCustomer	rest	patched	1469	88	0	458	
+control	openai/gpt-6-luna	PostRefunds	rest	valid	1645	76	0	406	
+control	openai/gpt-6-luna	orders.create	rest	valid	3051	288	0	1645	
+control	openai/gpt-6-luna	orders.get	rest	valid	2559	217	0	1526	
+control	openai/gpt-6-luna	orders.capture	rest	valid	4521	416	0	1527	
+control	openai/gpt-6-luna	GetPayment	rest	valid	5954	553	0	1353	
+control	openai/gpt-6-luna	ListCatalog	rest	valid	9378	1041	0	817	
+control	openai/gpt-6-luna	RetrieveCustomer	rest	valid	1480	97	0	706	
+control	openai/gpt-6-luna	getOrder	rest	valid	1642	70	0	381	
+control	openai/gpt-6-luna	ListLocations	rest	patched	3956	380	0	693	
+control	openai/gpt-6-luna	createOrder	rest	valid	1345	52	0	383	
+control	openai/gpt-6-luna	listOrders	rest	valid	2992	210	0	430	
+control	openai/gpt-6-luna	Query.shop	graphql	valid	1870	101	0	469	
+control	openai/gpt-6-luna	Query.order	graphql	valid	3846	360	0	1331	
+control	openai/gpt-6-luna	Query.products	graphql	valid	7602	829	0	1002	
+control	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1824	102	0	601	
+control	openai/gpt-6-luna	movie-details	rest	valid	3946	297	0	1085	
+control	openai/gpt-6-luna	movie-credits	rest	valid	4332	483	0	755	
+control	openai/gpt-6-luna	person-details	rest	valid	3781	131	0	564	
+control	openai/gpt-6-luna	tv-series-details	rest	patched	4491	429	0	1170	
+control	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	1236	11	0	1316	
+control	openai/gpt-6-luna	get-playlist	rest	patched	8584	988	0	2033	
+control	openai/gpt-6-luna	get-track	rest	patched	5739	674	0	1280	
+control	openai/gpt-6-luna	get_message	rest	valid	2132	181	0	1054	
+control	openai/gpt-6-luna	list_messages	rest	valid	4244	499	0	1080	
+control	openai/gpt-6-luna	get_guild	rest	patched	3408	329	0	866	
+control	openai/gpt-6-luna	repos/get	rest	valid	4403	387	0	1353	
+control	openai/gpt-6-luna	pulls/get	rest	valid	6118	634	0	1391	
+control	openai/gpt-6-luna	issues/get	rest	patched	3580	329	0	1253	
+control	openai/gpt-6-luna	search/repos	rest	valid	1335	22	0	1415	
+control	openai/gpt-6-luna	Query.viewer	graphql	valid	5877	658	0	962	
+control	openai/gpt-6-luna	Query.repository	graphql	valid	3880	486	0	1208	
+control	openai/gpt-6-luna	Query.user	graphql	valid	3791	318	0	864	
+control	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	1789	85	0	575	
+control	openai/gpt-6-luna	searchFlights	rest	valid	4117	418	0	1270	
+control	openai/gpt-6-luna	getOffer	rest	valid	3707	346	0	1439	
+control	openai/gpt-6-luna	createBooking	rest	valid	4166	457	0	2032	
+control	openai/gpt-6-luna	getBooking	rest	valid	4324	430	0	1921	
+control	openai/gpt-6-luna	listHotels	rest	valid	1065	24	0	898	
+control	openai/gpt-6-luna	cancelBooking	rest	invalid	1968	102	0	552	additionalProperties+required+additionalProperties+type
+control	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	1081	22	0	524	
+control	openai/gpt-6-luna	TraceService.Export	grpc	valid	957	18	0	807	
+control	openai/gpt-6-luna	Subtract	soap	valid	952	13	0	345	
+control	openai/gpt-6-luna	Add	soap	valid	1000	13	0	342	
+control	openai/gpt-6-luna	Divide	soap	valid	1052	19	0	332	
+control	openai/gpt-6-luna	GetAccount	soap	valid	1441	65	0	447	
+control	openai/gpt-6-luna	CreateAccount	soap	valid	1341	59	0	488	
+control	openai/gpt-6-luna	orderCreated	asyncapi	valid	2526	229	0	649	
+control	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	2003	164	0	524	
+control	openai/gpt-6-luna	shipmentDispatched	asyncapi	valid	2534	177	0	517	
+control	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1099	39	0	227	
+hints	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	1037	179	0	883	
+hints	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	1200	230	0	868	
+hints	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	patched	1545	210	0	884	
+hints	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	patched	1361	115	0	560	
+hints	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	patched	1459	198	0	899	
+hints	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	patched	3756	75	0	527	
+hints	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	1932	321	0	2031	
+hints	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	patched	2594	72	0	644	
+hints	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	patched	1634	600	0	1906	
+hints	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1119	102	0	529	
+hints	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	patched	3810	590	0	1904	
+hints	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	1620	561	0	1797	
+hints	nvidia/nemotron-3.5-lightning	orders.get	rest	patched	10640	544	0	1990	
+hints	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	3175	486	0	2066	
+hints	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	4403	637	0	1084	
+hints	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	1532	233	0	874	
+hints	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	2509	405	0	857	
+hints	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	671	84	0	432	
+hints	nvidia/nemotron-3.5-lightning	orders.capture	rest	invalid	3535	394	0	1939	required+required
+hints	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	2130	229	0	479	
+hints	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	1150	66	0	434	
+hints	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	805	95	0	520	
+hints	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	3417	441	0	1456	
+hints	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	3825	578	0	1843	
+hints	nvidia/nemotron-3.5-lightning	ListCatalog	rest	invalid	2774	407	0	1129	type
+hints	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	7592	872	0	1096	
+hints	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	1894	301	0	887	
+hints	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	634	103	0	665	
+hints	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	3245	421	0	1404	
+hints	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	2220	300	0	881	
+hints	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	2105	89	0	508	
+hints	nvidia/nemotron-3.5-lightning	listOrders	rest	patched	1515	311	0	503	
+hints	nvidia/nemotron-3.5-lightning	createOrder	rest	patched	1050	99	0	458	
+hints	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	1706	127	0	551	
+hints	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	4691	525	0	1500	
+hints	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	patched	1390	384	0	1504	
+hints	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	2289	735	0	949	
+hints	nvidia/nemotron-3.5-lightning	Query.products	graphql	invalid	3575	408	0	1138	required+required
+hints	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1559	145	0	689	
+hints	deepseek/deepseek-v4.1-flash-1017	person-details	rest	patched	1205	160	0	693	
+hints	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	7894	1178	0	3114	
+hints	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	5485	1277	0	2074	
+hints	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	3186	461	0	1485	
+hints	nvidia/nemotron-3.5-lightning	movie-credits	rest	patched	3870	462	0	990	
+hints	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4317	739	0	1978	
+hints	nvidia/nemotron-3.5-lightning	tv-series-details	rest	patched	3585	522	0	1551	
+hints	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1423	282	0	1403	
+hints	nvidia/nemotron-3.5-lightning	person-details	rest	valid	2409	254	0	734	
+hints	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	1960	700	0	1461	
+hints	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	patched	2665	337	0	1101	
+hints	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	7254	492	0	3217	required+pattern
+hints	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	2097	389	0	1656	
+hints	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	patched	6597	840	0	2137	
+hints	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	patched	2173	656	0	2007	
+hints	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	patched	1537	579	0	1726	
+hints	nvidia/nemotron-3.5-lightning	get-track	rest	invalid	6582	910	0	2062	maxItems+maxItems+maximum
+hints	nvidia/nemotron-3.5-lightning	get_message	rest	invalid	2829	287	0	1629	required
+hints	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	6173	1133	0	1764	
+hints	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3343	501	0	1042	
+hints	nvidia/nemotron-3.5-lightning	list_messages	rest	invalid	6161	709	0	1711	type
+hints	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2828	495	0	1305	
+hints	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	3763	475	0	1238	
+hints	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	3018	459	0	966	
+hints	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	611	88	0	639	
+hints	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	4343	668	0	1564	
+hints	nvidia/nemotron-3.5-lightning	repos/get	rest	patched	3200	404	0	1726	
+hints	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	1122	543	0	1743	
+hints	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	patched	2565	471	0	2433	
+hints	nvidia/nemotron-3.5-lightning	pulls/get	rest	invalid	5817	727	0	2111	required+required+required+required
+hints	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	2191	720	0	2294	
+hints	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	4047	350	0	1813	
+hints	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	3581	918	0	1046	
+hints	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	1092	100	0	703	
+hints	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	1067	15	0	609	
+hints	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	471	17	0	927	
+hints	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	847	7	0	391	
+hints	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	527	8	0	397	
+hints	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	513	13	0	380	
+hints	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	442	74	0	503	
+hints	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	605	55	0	544	
+hints	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	patched	1299	249	0	679	
+hints	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	13519	2471	0	1841	
+hints	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1629	166	0	550	
+hints	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	patched	1585	198	0	550	
+hints	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	12774	511	0	1194	
+hints	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	10673	283	0	1456	
+hints	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	506	34	0	233	
+hints	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	3570	492	0	1018	
+hints	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	patched	1587	134	0	678	
+hints	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	6620	763	0	1573	oneOf+oneOf
+hints	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	12090	495	0	1835	oneOf
+hints	nvidia/nemotron-3.5-lightning	createBooking	rest	valid	4666	703	0	2475	
+hints	nvidia/nemotron-3.5-lightning	getBooking	rest	valid	4362	695	0	2345	
+hints	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	5329	813	0	1097	
+hints	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	2450	138	0	767	additionalProperties+type
+hints	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	637	18	0	641	
+hints	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	461	27	0	943	
+hints	nvidia/nemotron-3.5-lightning	Add	soap	valid	1445	12	0	484	
+hints	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	360	10	0	438	
+hints	nvidia/nemotron-3.5-lightning	Divide	soap	valid	872	15	0	421	
+hints	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	1108	89	0	524	
+hints	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	968	88	0	573	
+hints	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	3414	320	0	750	
+hints	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	invalid	5883	551	0	624	required+required+required+required
+hints	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	patched	2995	242	0	567	
+hints	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	865	46	0	251	
+hints	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	2433	186	0	815	
+hints	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	2019	175	0	828	
+hints	openai/gpt-6-luna	GetCustomersCustomer	rest	patched	1464	81	0	541	
+hints	openai/gpt-6-luna	PostRefunds	rest	valid	1524	73	0	487	
+hints	openai/gpt-6-luna	orders.create	rest	valid	2793	284	0	1866	
+hints	openai/gpt-6-luna	orders.get	rest	valid	2973	294	0	1750	
+hints	openai/gpt-6-luna	orders.capture	rest	patched	3025	334	0	1748	
+hints	openai/gpt-6-luna	GetPayment	rest	patched	5437	530	0	1670	
+hints	openai/gpt-6-luna	ListCatalog	rest	valid	6269	741	0	1025	
+hints	openai/gpt-6-luna	RetrieveCustomer	rest	valid	2344	154	0	822	
+hints	openai/gpt-6-luna	getOrder	rest	valid	1755	79	0	422	
+hints	openai/gpt-6-luna	ListLocations	rest	valid	5011	382	0	818	
+hints	openai/gpt-6-luna	createOrder	rest	valid	1639	50	0	424	
+hints	openai/gpt-6-luna	listOrders	rest	valid	2581	217	0	471	
+hints	openai/gpt-6-luna	Query.shop	graphql	valid	1624	97	0	510	
+hints	openai/gpt-6-luna	Query.order	graphql	valid	3873	361	0	1372	
+hints	openai/gpt-6-luna	Query.products	graphql	valid	7390	759	0	1043	
+hints	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1678	99	0	642	
+hints	openai/gpt-6-luna	movie-details	rest	valid	4321	348	0	1321	
+hints	openai/gpt-6-luna	movie-credits	rest	valid	7005	668	0	909	
+hints	openai/gpt-6-luna	person-details	rest	valid	1977	143	0	655	
+hints	openai/gpt-6-luna	tv-series-details	rest	patched	7896	642	0	1409	
+hints	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	927	8	0	1904	
+hints	openai/gpt-6-luna	get-playlist	rest	patched	8927	1042	0	2809	
+hints	openai/gpt-6-luna	get-track	rest	patched	5467	683	0	1832	
+hints	openai/gpt-6-luna	get_message	rest	valid	2082	162	0	1334	
+hints	openai/gpt-6-luna	list_messages	rest	valid	5452	517	0	1378	
+hints	openai/gpt-6-luna	get_guild	rest	patched	3461	321	0	1019	
+hints	openai/gpt-6-luna	repos/get	rest	patched	3977	356	0	1593	
+hints	openai/gpt-6-luna	pulls/get	rest	valid	7080	818	0	1919	
+hints	openai/gpt-6-luna	issues/get	rest	patched	3679	340	0	1659	
+hints	openai/gpt-6-luna	search/repos	rest	valid	1192	19	0	1686	
+hints	openai/gpt-6-luna	Query.viewer	graphql	valid	3959	370	0	1003	
+hints	openai/gpt-6-luna	Query.repository	graphql	valid	4813	481	0	1249	
+hints	openai/gpt-6-luna	Query.user	graphql	valid	3728	335	0	905	
+hints	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	1763	86	0	616	
+hints	openai/gpt-6-luna	searchFlights	rest	valid	3031	272	0	1429	
+hints	openai/gpt-6-luna	getOffer	rest	valid	4579	340	0	1628	
+hints	openai/gpt-6-luna	createBooking	rest	valid	5793	621	0	2260	
+hints	openai/gpt-6-luna	getBooking	rest	valid	4191	436	0	2148	
+hints	openai/gpt-6-luna	listHotels	rest	valid	942	21	0	1003	
+hints	openai/gpt-6-luna	cancelBooking	rest	valid	1435	102	0	649	
+hints	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	1170	19	0	565	
+hints	openai/gpt-6-luna	TraceService.Export	grpc	valid	1300	38	0	875	
+hints	openai/gpt-6-luna	Subtract	soap	valid	866	10	0	386	
+hints	openai/gpt-6-luna	Add	soap	valid	1481	10	0	383	
+hints	openai/gpt-6-luna	Divide	soap	valid	1412	17	0	373	
+hints	openai/gpt-6-luna	GetAccount	soap	valid	1254	50	0	488	
+hints	openai/gpt-6-luna	CreateAccount	soap	valid	1174	56	0	529	
+hints	openai/gpt-6-luna	orderCreated	asyncapi	valid	2730	238	0	649	
+hints	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	2118	164	0	524	
+hints	openai/gpt-6-luna	shipmentDispatched	asyncapi	patched	2283	182	0	517	
+hints	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1031	36	0	227	
+schema+require	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	1748	207	0	759	
+schema+require	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	2090	252	0	742	
+schema+require	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	4171	254	0	760	
+schema+require	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1571	99	0	476	
+schema+require	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	5557	221	0	775	
+schema+require	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1510	75	0	424	
+schema+require	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	2005	341	0	1787	
+schema+require	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	1789	134	0	501	
+schema+require	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	4399	597	0	1659	
+schema+require	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1088	107	0	447	
+schema+require	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	4386	527	0	1659	
+schema+require	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	6579	572	0	1465	
+schema+require	nvidia/nemotron-3.5-lightning	orders.get	rest	invalid	12702	449	0	3120	required+required+required+required
+schema+require	nvidia/nemotron-3.5-lightning	orders.create	rest	invalid	10328	525	0	3248	required+required+required+required
+schema+require	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	2877	239	0	1626	
+schema+require	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	1808	232	0	731	
+schema+require	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	2762	425	0	723	
+schema+require	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	714	79	0	391	
+schema+require	nvidia/nemotron-3.5-lightning	orders.capture	rest	invalid	4214	129	0	3119	required+required+required+pattern
+schema+require	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	1576	302	0	438	
+schema+require	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	999	77	0	393	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	1001	97	0	479	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	3313	454	0	1415	
+schema+require	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	4972	879	0	1490	
+schema+require	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	2550	147	0	901	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	3741	1283	0	1055	
+schema+require	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	3514	343	0	755	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	857	104	0	624	
+schema+require	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	2615	422	0	1153	
+schema+require	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	7616	621	0	743	
+schema+require	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	1096	72	0	601	
+schema+require	nvidia/nemotron-3.5-lightning	listOrders	rest	invalid	102211	16384	0	462	output is not valid JSON
+schema+require	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	2029	202	0	417	
+schema+require	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	2083	131	0	510	
+schema+require	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	4926	495	0	1459	
+schema+require	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	3080	718	0	1247	
+schema+require	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	2190	242	0	783	
+schema+require	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	3512	386	0	1097	
+schema+require	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1546	151	0	648	
+schema+require	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	2061	153	0	600	
+schema+require	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	3747	1315	0	2203	
+schema+require	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	3819	1475	0	1407	
+schema+require	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	7945	485	0	1224	
+schema+require	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	12298	942	0	813	
+schema+require	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4758	913	0	2728	
+schema+require	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	5437	628	0	1292	
+schema+require	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1816	296	0	1110	
+schema+require	nvidia/nemotron-3.5-lightning	person-details	rest	valid	2959	212	0	634	
+schema+require	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	3743	646	0	1134	
+schema+require	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	1253	442	0	937	
+schema+require	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	25062	601	0	4209	required+pattern+pattern+pattern
+schema+require	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	2326	479	0	1407	
+schema+require	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	10851	1879	0	1449	
+schema+require	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	4149	705	0	1459	
+schema+require	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	1343	343	0	1310	
+schema+require	nvidia/nemotron-3.5-lightning	get-track	rest	valid	7863	1057	0	1409	
+schema+require	nvidia/nemotron-3.5-lightning	get_message	rest	patched	15016	1653	0	2120	
+schema+require	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	6814	1406	0	1476	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3829	508	0	1921	
+schema+require	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	4466	240	0	2187	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2900	610	0	1264	
+schema+require	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	5137	454	0	1740	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	3483	466	0	1702	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1118	97	0	598	
+schema+require	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	3257	914	0	1357	
+schema+require	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	3526	548	0	1475	
+schema+require	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	2881	571	0	1535	
+schema+require	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	3061	485	0	4309	
+schema+require	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	4643	880	0	1508	
+schema+require	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	4510	702	0	4191	
+schema+require	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	3252	372	0	1367	
+schema+require	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	2758	712	0	934	
+schema+require	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	539	91	0	577	
+schema+require	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	526	15	0	545	
+schema+require	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	390	13	0	859	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	537	7	0	350	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	356	8	0	356	
+schema+require	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	538	14	0	339	
+schema+require	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	498	63	0	462	
+schema+require	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	570	56	0	503	
+schema+require	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1086	254	0	679	
+schema+require	nvidia/nemotron-3.5-lightning	search/repos	rest	valid	59816	520	0	2836	
+schema+require	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1302	168	0	550	
+schema+require	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	2234	204	0	550	
+schema+require	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	4471	424	0	1948	
+schema+require	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	3041	292	0	1360	
+schema+require	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	436	37	0	233	
+schema+require	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	5264	421	0	1700	
+schema+require	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	4322	160	0	637	
+schema+require	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	4565	417	0	1392	oneOf
+schema+require	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	6978	479	0	1570	oneOf
+schema+require	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	4309	690	0	2209	type+type+pattern
+schema+require	nvidia/nemotron-3.5-lightning	getBooking	rest	invalid	10028	749	0	2079	required+pattern
+schema+require	nvidia/nemotron-3.5-lightning	listHotels	rest	invalid	42453	1079	0	1689	additionalProperties
+schema+require	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	2669	124	0	950	additionalProperties+type+type
+schema+require	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	541	31	0	600	
+schema+require	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	1377	49	0	1392	
+schema+require	nvidia/nemotron-3.5-lightning	Add	soap	valid	618	12	0	388	
+schema+require	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	517	13	0	397	
+schema+require	nvidia/nemotron-3.5-lightning	Divide	soap	valid	455	17	0	380	
+schema+require	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	1346	89	0	747	
+schema+require	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	1810	90	0	532	
+schema+require	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	invalid	5919	291	0	1216	required+required+required+required
+schema+require	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	invalid	23022	624	0	956	required+required+required+required
+schema+require	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	2613	248	0	567	
+schema+require	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	1094	56	0	251	
+schema+require	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	invalid	97	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	invalid	65	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	GetCustomersCustomer	rest	invalid	88	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	PostRefunds	rest	invalid	164	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	orders.create	rest	invalid	132	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	orders.get	rest	invalid	95	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	orders.capture	rest	invalid	112	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	GetPayment	rest	invalid	71	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	ListCatalog	rest	invalid	235	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	RetrieveCustomer	rest	invalid	75	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	getOrder	rest	invalid	89	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	ListLocations	rest	invalid	73	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	createOrder	rest	invalid	70	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	listOrders	rest	invalid	67	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Query.shop	graphql	invalid	106	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Query.order	graphql	invalid	72	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Query.products	graphql	invalid	70	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Mutation.productCreate	graphql	invalid	411	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	movie-details	rest	invalid	1088	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	movie-credits	rest	invalid	71	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	person-details	rest	invalid	85	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	tv-series-details	rest	invalid	88	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	get-an-artists-top-tracks	rest	invalid	107	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	get-playlist	rest	invalid	99	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	get-track	rest	invalid	1076	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	get_message	rest	invalid	91	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	list_messages	rest	invalid	117	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	get_guild	rest	invalid	505	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	repos/get	rest	invalid	93	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	pulls/get	rest	invalid	77	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	issues/get	rest	invalid	119	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	search/repos	rest	invalid	81	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Query.viewer	graphql	invalid	82	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Query.repository	graphql	invalid	73	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Query.user	graphql	invalid	123	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Mutation.createIssue	graphql	invalid	99	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	searchFlights	rest	invalid	87	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	getOffer	rest	invalid	90	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	createBooking	rest	invalid	90	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	getBooking	rest	invalid	62	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	listHotels	rest	invalid	427	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	cancelBooking	rest	invalid	782	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	invalid	497	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	TraceService.Export	grpc	invalid	1136	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Subtract	soap	invalid	137	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Add	soap	invalid	61	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	Divide	soap	invalid	59	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	GetAccount	soap	invalid	57	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	CreateAccount	soap	invalid	64	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	orderCreated	asyncapi	invalid	69	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	paymentAuthorized	asyncapi	invalid	97	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	shipmentDispatched	asyncapi	invalid	105	0	0	0	output is not valid JSON
+schema+require	openai/gpt-6-luna	orderCancelled	asyncapi	invalid	73	0	0	0	output is not valid JSON
+schema+r3	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	1874	253	0	759	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	2036	284	0	742	
+schema+r3	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	1633	252	0	760	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	916	112	0	476	
+schema+r3	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	4438	242	0	775	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1258	142	0	424	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	1801	386	0	1787	
+schema+r3	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	1225	122	0	501	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	2791	628	0	1659	
+schema+r3	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1149	101	0	447	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	2363	561	0	1659	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	2823	545	0	1465	
+schema+r3	nvidia/nemotron-3.5-lightning	orders.get	rest	valid	4410	432	0	1685	
+schema+r3	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	7314	505	0	1813	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	8168	958	0	1626	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2341	251	0	731	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	3001	419	0	723	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	772	87	0	391	
+schema+r3	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	7941	421	0	3119	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	1501	296	0	438	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	799	66	0	393	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	1373	97	0	479	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	1680	411	0	1415	
+schema+r3	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	6020	888	0	1490	
+schema+r3	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	3875	141	0	901	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	3189	895	0	1055	
+schema+r3	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2442	342	0	755	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	660	104	0	624	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	1643	342	0	1153	
+schema+r3	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	3402	290	0	743	
+schema+r3	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	8259	101	0	601	
+schema+r3	nvidia/nemotron-3.5-lightning	listOrders	rest	invalid	112032	16384	0	462	output is not valid JSON
+schema+r3	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	1488	260	0	417	
+schema+r3	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	1639	133	0	510	
+schema+r3	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	5548	525	0	1459	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	3219	676	0	1247	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	9028	1239	0	783	
+schema+r3	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	4076	391	0	1097	
+schema+r3	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1450	145	0	648	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1359	145	0	600	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	5821	1343	0	2203	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	5591	1338	0	1407	
+schema+r3	nvidia/nemotron-3.5-lightning	movie-details	rest	patched	1215	416	0	1224	
+schema+r3	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	9291	666	0	813	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	3867	817	0	2728	
+schema+r3	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	3006	822	0	1292	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1478	263	0	1110	
+schema+r3	nvidia/nemotron-3.5-lightning	person-details	rest	valid	1842	183	0	634	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	5088	765	0	1134	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	1722	445	0	937	
+schema+r3	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	10965	478	0	4209	pattern+required+pattern+pattern
+schema+r3	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	1742	452	0	1407	
+schema+r3	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	7109	890	0	1449	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	5717	722	0	1459	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	1361	347	0	1310	
+schema+r3	nvidia/nemotron-3.5-lightning	get-track	rest	valid	7750	1034	0	1409	
+schema+r3	nvidia/nemotron-3.5-lightning	get_message	rest	invalid	11847	985	0	2120	required+required+required+required
+schema+r3	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	3830	1150	0	1476	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3837	473	0	1921	
+schema+r3	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	1230	337	0	1249	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2590	507	0	1264	
+schema+r3	nvidia/nemotron-3.5-lightning	get_guild	rest	patched	1383	371	0	999	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	4766	470	0	1702	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1085	88	0	598	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	3839	1052	0	1357	
+schema+r3	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	4789	496	0	1475	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	3491	522	0	1535	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	3631	488	0	4309	
+schema+r3	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	6132	882	0	1508	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	5638	703	0	4191	
+schema+r3	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	4051	548	0	1367	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	3899	730	0	934	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	903	90	0	577	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	invalid	103742	16384	0	545	output is not valid JSON
+schema+r3	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	659	13	0	859	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	484	8	0	350	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	472	8	0	356	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	426	12	0	339	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	662	67	0	462	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	1380	56	0	503	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1420	256	0	679	
+schema+r3	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	13165	546	0	2836	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1611	166	0	550	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	2151	201	0	550	
+schema+r3	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	14647	507	0	1948	
+schema+r3	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	2729	288	0	1360	
+schema+r3	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	813	34	0	233	
+schema+r3	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	12317	499	0	1700	
+schema+r3	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	1921	132	0	637	
+schema+r3	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	9645	783	0	2492	oneOf+oneOf
+schema+r3	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	4560	501	0	1570	oneOf
+schema+r3	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	6596	689	0	2209	type+type+pattern
+schema+r3	nvidia/nemotron-3.5-lightning	getBooking	rest	invalid	7642	717	0	2079	type+type+type
+schema+r3	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	1745	588	0	982	
+schema+r3	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	4931	124	0	950	additionalProperties+type+type
+schema+r3	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	614	18	0	600	
+schema+r3	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	1600	49	0	1392	
+schema+r3	nvidia/nemotron-3.5-lightning	Add	soap	valid	672	12	0	388	
+schema+r3	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	350	13	0	397	
+schema+r3	nvidia/nemotron-3.5-lightning	Divide	soap	valid	540	28	0	380	
+schema+r3	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	2186	89	0	747	
+schema+r3	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	2694	91	0	796	
+schema+r3	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	12972	310	0	695	
+schema+r3	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	invalid	16121	571	0	956	required+required+required+required
+schema+r3	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	4571	200	0	567	
+schema+r3	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	583	46	0	251	
+schema+r3	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	2521	203	0	694	
+schema+r3	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	2630	199	0	707	
+schema+r3	openai/gpt-6-luna	GetCustomersCustomer	rest	valid	1699	82	0	458	
+schema+r3	openai/gpt-6-luna	PostRefunds	rest	valid	1669	73	0	406	
+schema+r3	openai/gpt-6-luna	orders.create	rest	valid	2671	278	0	1645	
+schema+r3	openai/gpt-6-luna	orders.get	rest	valid	2699	208	0	1526	
+schema+r3	openai/gpt-6-luna	orders.capture	rest	patched	4029	443	0	1527	
+schema+r3	openai/gpt-6-luna	GetPayment	rest	valid	2692	183	0	1353	
+schema+r3	openai/gpt-6-luna	ListCatalog	rest	valid	5838	711	0	817	
+schema+r3	openai/gpt-6-luna	RetrieveCustomer	rest	valid	1765	94	0	706	
+schema+r3	openai/gpt-6-luna	getOrder	rest	valid	1404	69	0	381	
+schema+r3	openai/gpt-6-luna	ListLocations	rest	patched	3459	380	0	693	
+schema+r3	openai/gpt-6-luna	createOrder	rest	valid	1176	53	0	383	
+schema+r3	openai/gpt-6-luna	listOrders	rest	valid	2644	197	0	430	
+schema+r3	openai/gpt-6-luna	Query.shop	graphql	valid	1613	102	0	469	
+schema+r3	openai/gpt-6-luna	Query.order	graphql	valid	3782	373	0	1331	
+schema+r3	openai/gpt-6-luna	Query.products	graphql	valid	7090	839	0	1002	
+schema+r3	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1635	99	0	601	
+schema+r3	openai/gpt-6-luna	movie-details	rest	valid	3810	317	0	1085	
+schema+r3	openai/gpt-6-luna	movie-credits	rest	valid	3509	349	0	755	
+schema+r3	openai/gpt-6-luna	person-details	rest	valid	2270	129	0	564	
+schema+r3	openai/gpt-6-luna	tv-series-details	rest	patched	5270	498	0	1170	
+schema+r3	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	1061	9	0	1316	
+schema+r3	openai/gpt-6-luna	get-playlist	rest	patched	9052	1116	0	2033	
+schema+r3	openai/gpt-6-luna	get-track	rest	patched	5039	675	0	1280	
+schema+r3	openai/gpt-6-luna	get_message	rest	valid	2163	181	0	1054	
+schema+r3	openai/gpt-6-luna	list_messages	rest	patched	4228	495	0	1080	
+schema+r3	openai/gpt-6-luna	get_guild	rest	patched	3023	306	0	866	
+schema+r3	openai/gpt-6-luna	repos/get	rest	valid	4668	380	0	1353	
+schema+r3	openai/gpt-6-luna	pulls/get	rest	patched	8307	958	0	1391	
+schema+r3	openai/gpt-6-luna	issues/get	rest	valid	4268	451	0	1253	
+schema+r3	openai/gpt-6-luna	search/repos	rest	valid	993	19	0	1415	
+schema+r3	openai/gpt-6-luna	Query.viewer	graphql	valid	7328	678	0	962	
+schema+r3	openai/gpt-6-luna	Query.repository	graphql	valid	4010	485	0	1208	
+schema+r3	openai/gpt-6-luna	Query.user	graphql	valid	4490	325	0	864	
+schema+r3	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	1856	88	0	575	
+schema+r3	openai/gpt-6-luna	searchFlights	rest	valid	4128	501	0	1270	
+schema+r3	openai/gpt-6-luna	getOffer	rest	valid	3805	332	0	1439	
+schema+r3	openai/gpt-6-luna	createBooking	rest	valid	3712	440	0	2032	
+schema+r3	openai/gpt-6-luna	getBooking	rest	valid	4180	415	0	1921	
+schema+r3	openai/gpt-6-luna	listHotels	rest	valid	1080	21	0	898	
+schema+r3	openai/gpt-6-luna	cancelBooking	rest	invalid	1215	89	0	552	additionalProperties+required+additionalProperties+type
+schema+r3	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	1090	19	0	524	
+schema+r3	openai/gpt-6-luna	TraceService.Export	grpc	valid	883	5	0	807	
+schema+r3	openai/gpt-6-luna	Subtract	soap	valid	841	10	0	345	
+schema+r3	openai/gpt-6-luna	Add	soap	valid	988	10	0	342	
+schema+r3	openai/gpt-6-luna	Divide	soap	valid	973	16	0	332	
+schema+r3	openai/gpt-6-luna	GetAccount	soap	valid	1323	59	0	447	
+schema+r3	openai/gpt-6-luna	CreateAccount	soap	valid	1154	56	0	488	
+schema+r3	openai/gpt-6-luna	orderCreated	asyncapi	valid	2541	237	0	649	
+schema+r3	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	1988	163	0	524	
+schema+r3	openai/gpt-6-luna	shipmentDispatched	asyncapi	valid	2318	185	0	517	
+schema+r3	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1037	36	0	227	
+schema	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	1750	227	0	759	
+schema	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	1841	237	0	742	
+schema	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	2099	226	0	760	
+schema	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1633	107	0	476	
+schema	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	1988	230	0	775	
+schema	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1457	74	0	424	
+schema	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	2024	388	0	1787	
+schema	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	1428	115	0	501	
+schema	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	1799	566	0	1659	
+schema	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1110	106	0	447	
+schema	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	1637	548	0	1659	
+schema	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	2132	680	0	1465	
+schema	nvidia/nemotron-3.5-lightning	orders.get	rest	valid	3353	504	0	1685	
+schema	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	4086	514	0	1813	
+schema	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	6205	1209	0	1626	
+schema	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	1650	238	0	731	
+schema	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	2964	432	0	723	
+schema	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	877	85	0	391	
+schema	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	5261	200	0	3119	
+schema	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	1166	309	0	438	
+schema	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	1505	71	0	393	
+schema	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	1415	100	0	479	
+schema	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	1250	425	0	1415	
+schema	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	5753	877	0	1490	
+schema	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	1716	144	0	901	
+schema	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	2184	1067	0	1055	
+schema	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2242	355	0	755	
+schema	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	604	126	0	624	
+schema	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	1230	355	0	1153	
+schema	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	3413	590	0	743	
+schema	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	2634	137	0	601	
+schema	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	2535	274	0	462	
+schema	nvidia/nemotron-3.5-lightning	createOrder	rest	invalid	78100	16384	0	417	output is not valid JSON
+schema	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	1293	133	0	510	
+schema	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	2812	505	0	1459	
+schema	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	2986	640	0	1247	
+schema	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	8396	1195	0	783	
+schema	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	1928	406	0	1097	
+schema	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1152	145	0	648	
+schema	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1690	156	0	600	
+schema	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	3877	1374	0	2203	
+schema	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	3958	1471	0	1407	
+schema	nvidia/nemotron-3.5-lightning	movie-details	rest	patched	11133	437	0	2193	
+schema	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	8675	824	0	813	
+schema	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	5063	781	0	2728	
+schema	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	2267	754	0	1292	
+schema	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1875	247	0	1110	
+schema	nvidia/nemotron-3.5-lightning	person-details	rest	valid	788	209	0	634	
+schema	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	5333	701	0	1134	
+schema	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	1607	579	0	937	
+schema	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	14702	500	0	4209	required+pattern+pattern+pattern
+schema	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	1888	403	0	1407	
+schema	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	5943	906	0	1449	
+schema	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	4056	659	0	1459	
+schema	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	1730	528	0	1310	
+schema	nvidia/nemotron-3.5-lightning	get-track	rest	valid	5520	917	0	1409	
+schema	nvidia/nemotron-3.5-lightning	get_message	rest	patched	7793	254	0	2120	
+schema	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	3606	1400	0	1476	
+schema	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3471	478	0	1921	
+schema	nvidia/nemotron-3.5-lightning	list_messages	rest	invalid	7037	635	0	2187	type
+schema	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	1868	465	0	1264	
+schema	nvidia/nemotron-3.5-lightning	get_guild	rest	invalid	72471	16384	0	999	output is not valid JSON
+schema	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	2744	441	0	1702	
+schema	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	956	88	0	598	
+schema	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	2430	763	0	1357	
+schema	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	1753	482	0	1475	
+schema	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	4279	546	0	1535	
+schema	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	2755	488	0	4309	
+schema	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	4561	894	0	1508	
+schema	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	3850	714	0	4191	
+schema	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	2159	372	0	1367	
+schema	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	2131	508	0	934	
+schema	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	616	90	0	577	
+schema	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	invalid	64500	16384	0	545	output is not valid JSON
+schema	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	445	13	0	859	
+schema	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	361	7	0	350	
+schema	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	331	9	0	356	
+schema	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	366	11	0	339	
+schema	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	471	63	0	462	
+schema	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	518	56	0	503	
+schema	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1948	251	0	1294	
+schema	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	11048	575	0	2836	
+schema	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1629	165	0	550	
+schema	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	3247	194	0	550	
+schema	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	18696	440	0	1948	
+schema	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	2357	290	0	1360	
+schema	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	399	35	0	233	
+schema	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	6880	400	0	1700	
+schema	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	1724	154	0	637	
+schema	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	5539	416	0	2492	oneOf
+schema	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	3783	501	0	1570	oneOf
+schema	nvidia/nemotron-3.5-lightning	createBooking	rest	invalid	3828	690	0	2209	pattern+type+type+pattern
+schema	nvidia/nemotron-3.5-lightning	getBooking	rest	invalid	6634	748	0	2079	required+required+required+required
+schema	nvidia/nemotron-3.5-lightning	listHotels	rest	patched	13142	706	0	1689	
+schema	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	2825	141	0	950	additionalProperties+type+type
+schema	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	818	31	0	600	
+schema	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	1691	49	0	1392	
+schema	nvidia/nemotron-3.5-lightning	Add	soap	valid	613	12	0	388	
+schema	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	420	13	0	397	
+schema	nvidia/nemotron-3.5-lightning	Divide	soap	valid	516	28	0	380	
+schema	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	2206	92	0	747	
+schema	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	1060	88	0	532	
+schema	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	invalid	2568	315	0	1216	required+required+required+required
+schema	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	valid	2646	214	0	956	
+schema	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	3908	241	0	567	
+schema	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	531	48	0	251	
+schema	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	3511	214	0	1039	
+schema	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	3289	178	0	1052	
+schema	openai/gpt-6-luna	GetCustomersCustomer	rest	patched	1608	81	0	605	
+schema	openai/gpt-6-luna	PostRefunds	rest	valid	1723	77	0	526	
+schema	openai/gpt-6-luna	orders.create	rest	valid	3776	287	0	2586	
+schema	openai/gpt-6-luna	orders.get	rest	valid	2790	218	0	2467	
+schema	openai/gpt-6-luna	orders.capture	rest	patched	3378	290	0	2468	
+schema	openai/gpt-6-luna	GetPayment	rest	valid	2489	222	0	2206	
+schema	openai/gpt-6-luna	ListCatalog	rest	valid	3810	353	0	1240	
+schema	openai/gpt-6-luna	RetrieveCustomer	rest	valid	2782	157	0	1053	
+schema	openai/gpt-6-luna	getOrder	rest	valid	1931	70	0	496	
+schema	openai/gpt-6-luna	ListLocations	rest	patched	4614	386	0	1037	
+schema	openai/gpt-6-luna	createOrder	rest	valid	2448	55	0	498	
+schema	openai/gpt-6-luna	listOrders	rest	valid	4709	194	0	430	
+schema	openai/gpt-6-luna	Query.shop	graphql	valid	1670	102	0	634	
+schema	openai/gpt-6-luna	Query.order	graphql	valid	799	5	0	1331	
+schema	openai/gpt-6-luna	Query.products	graphql	valid	8995	993	0	1002	
+schema	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1939	99	0	601	
+schema	openai/gpt-6-luna	movie-details	rest	valid	4491	430	0	1085	
+schema	openai/gpt-6-luna	movie-credits	rest	valid	5006	471	0	755	
+schema	openai/gpt-6-luna	person-details	rest	valid	2113	141	0	564	
+schema	openai/gpt-6-luna	tv-series-details	rest	patched	6492	717	0	1170	
+schema	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	919	9	0	1316	
+schema	openai/gpt-6-luna	get-playlist	rest	patched	11301	999	0	2033	
+schema	openai/gpt-6-luna	get-track	rest	patched	5155	685	0	1280	
+schema	openai/gpt-6-luna	get_message	rest	valid	2075	171	0	1054	
+schema	openai/gpt-6-luna	list_messages	rest	valid	4811	519	0	1080	
+schema	openai/gpt-6-luna	get_guild	rest	patched	3566	327	0	866	
+schema	openai/gpt-6-luna	repos/get	rest	valid	4257	374	0	1353	
+schema	openai/gpt-6-luna	pulls/get	rest	valid	7481	958	0	1391	
+schema	openai/gpt-6-luna	issues/get	rest	valid	4404	334	0	1253	
+schema	openai/gpt-6-luna	search/repos	rest	valid	1099	19	0	1415	
+schema	openai/gpt-6-luna	Query.viewer	graphql	valid	6879	661	0	962	
+schema	openai/gpt-6-luna	Query.repository	graphql	valid	4898	492	0	1208	
+schema	openai/gpt-6-luna	Query.user	graphql	valid	2259	154	0	864	
+schema	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	2207	81	0	575	
+schema	openai/gpt-6-luna	searchFlights	rest	valid	1239	53	0	1270	
+schema	openai/gpt-6-luna	getOffer	rest	valid	5303	494	0	1439	
+schema	openai/gpt-6-luna	createBooking	rest	valid	5095	629	0	2032	
+schema	openai/gpt-6-luna	getBooking	rest	valid	4594	406	0	1921	
+schema	openai/gpt-6-luna	listHotels	rest	valid	946	21	0	898	
+schema	openai/gpt-6-luna	cancelBooking	rest	invalid	1523	89	0	552	additionalProperties+required+additionalProperties+type
+schema	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	993	19	0	524	
+schema	openai/gpt-6-luna	TraceService.Export	grpc	valid	1032	5	0	807	
+schema	openai/gpt-6-luna	Subtract	soap	valid	1106	10	0	345	
+schema	openai/gpt-6-luna	Add	soap	valid	1536	10	0	342	
+schema	openai/gpt-6-luna	Divide	soap	valid	1074	16	0	332	
+schema	openai/gpt-6-luna	GetAccount	soap	valid	1173	57	0	447	
+schema	openai/gpt-6-luna	CreateAccount	soap	valid	1109	56	0	488	
+schema	openai/gpt-6-luna	orderCreated	asyncapi	valid	2983	231	0	649	
+schema	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	2301	163	0	524	
+schema	openai/gpt-6-luna	shipmentDispatched	asyncapi	patched	2296	181	0	517	
+schema	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1047	37	0	227	
+low	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	2043	714	585	784	
+low	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	2498	862	709	767	
+low	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	58824	7123	4481	760	
+low	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	2303	399	329	501	
+low	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	58306	6848	5309	775	
+low	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	patched	862	165	116	449	
+low	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	2456	931	645	1812	
+low	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	patched	11669	2356	2246	501	
+low	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	patched	11612	2477	1721	1684	
+low	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	14385	2517	2417	447	
+low	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	invalid	11586	2194	1713	1684	required+required+maxItems+type
+low	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	9508	1749	1361	1490	
+low	nvidia/nemotron-3.5-lightning	orders.get	rest	patched	42084	6697	6082	1685	
+low	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	45842	8529	7983	1813	
+low	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	8364	1306	459	912	
+low	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2606	404	125	756	
+low	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	patched	4367	469	53	748	
+low	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	1124	263	183	416	
+low	nvidia/nemotron-3.5-lightning	orders.capture	rest	patched	59304	4206	3939	1739	
+low	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	2034	352	160	463	
+low	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	758	118	51	418	
+low	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	925	115	5	504	
+low	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	2975	976	281	1440	
+low	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	57030	11833	11062	1490	
+low	nvidia/nemotron-3.5-lightning	ListCatalog	rest	patched	90841	13547	8240	901	
+low	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	5473	1161	461	1080	
+low	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	32809	5917	5557	755	
+low	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	1849	490	348	649	
+low	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	4644	1753	1413	1178	
+low	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	41292	4785	4253	798	
+low	nvidia/nemotron-3.5-lightning	getOrder	rest	valid	50908	3110	3067	467	
+low	nvidia/nemotron-3.5-lightning	listOrders	rest	patched	21773	2297	1689	462	
+low	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	16880	2078	2013	417	
+low	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	13645	1654	1381	510	
+low	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	15751	3837	3217	1459	
+low	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	patched	5161	1254	500	1272	
+low	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	13012	1785	631	808	
+low	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	33672	6345	5156	1097	
+low	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	8903	2554	2408	648	
+low	deepseek/deepseek-v4.1-flash-1017	person-details	rest	patched	2133	173	8	625	
+low	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	14998	3313	2555	2228	
+low	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	11653	2586	1815	1432	
+low	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	64458	4795	4506	1279	
+low	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	32495	5805	3972	813	
+low	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4992	831	0	1413	
+low	nvidia/nemotron-3.5-lightning	tv-series-details	rest	patched	38559	7678	7272	1292	
+low	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	1539	288	90	1135	
+low	nvidia/nemotron-3.5-lightning	person-details	rest	valid	14119	2646	2457	634	
+low	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	12797	1752	1039	1159	
+low	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	patched	1357	493	227	962	
+low	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	120003	0	0	0	output is not valid JSON
+low	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	1930	648	240	1432	
+low	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	invalid	73159	16384	15307	1449	output is not valid JSON
+low	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	patched	7686	1190	464	1484	
+low	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	3380	1144	820	1335	
+low	nvidia/nemotron-3.5-lightning	get-track	rest	patched	32947	7946	6991	1409	
+low	nvidia/nemotron-3.5-lightning	get_message	rest	valid	19861	6619	6329	1199	
+low	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	18793	2067	1149	1501	
+low	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	5751	677	162	1049	
+low	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	14909	4533	3865	1249	
+low	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2169	630	7	1289	
+low	nvidia/nemotron-3.5-lightning	get_guild	rest	valid	40803	4653	4136	1054	
+low	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	5045	548	63	950	
+low	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1032	101	0	623	
+low	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	21228	3097	2266	1382	
+low	nvidia/nemotron-3.5-lightning	repos/get	rest	patched	30118	6237	5812	1475	
+low	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	7175	1436	613	1560	
+low	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	6106	972	402	2211	
+low	nvidia/nemotron-3.5-lightning	pulls/get	rest	patched	71858	12813	11778	1508	
+low	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	4706	697	0	2093	
+low	nvidia/nemotron-3.5-lightning	issues/get	rest	valid	28660	4654	4084	1367	
+low	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	2685	1194	587	959	
+low	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	858	222	121	602	
+low	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	1107	96	79	570	
+low	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	2997	135	115	884	
+low	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	480	36	31	375	
+low	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	489	36	26	381	
+low	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	816	194	187	364	
+low	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	887	207	158	487	
+low	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	1621	243	186	528	
+low	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	4440	851	697	704	
+low	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	83055	11442	9533	1600	
+low	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	patched	2815	629	466	575	
+low	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	patched	4453	763	564	575	
+low	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	43466	2834	2226	1153	
+low	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	18531	3253	2484	1360	
+low	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	690	120	97	258	
+low	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	67383	2853	2501	1032	
+low	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	19981	2875	2481	637	
+low	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	120003	0	0	0	output is not valid JSON
+low	nvidia/nemotron-3.5-lightning	getOffer	rest	valid	43404	7857	5457	1570	
+low	nvidia/nemotron-3.5-lightning	createBooking	rest	patched	25120	4987	4282	2209	
+low	nvidia/nemotron-3.5-lightning	getBooking	rest	patched	45159	8727	4824	2079	
+low	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	52346	6675	5188	1037	
+low	nvidia/nemotron-3.5-lightning	cancelBooking	rest	valid	58402	3872	3764	664	
+low	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	16772	3779	3756	600	
+low	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	9681	1785	1769	873	
+low	nvidia/nemotron-3.5-lightning	Add	soap	valid	8892	1235	1226	388	
+low	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	9327	1310	1300	397	
+low	nvidia/nemotron-3.5-lightning	Divide	soap	valid	9947	2244	2231	380	
+low	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	48890	2120	2044	538	
+low	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	17699	2308	2221	587	
+low	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	invalid	120003	0	0	0	output is not valid JSON
+low	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	valid	53625	3497	3278	624	
+low	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	patched	73828	7388	4528	567	
+low	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	7238	1493	1434	251	
+low	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	4126	268	38	694	
+low	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	4340	427	245	707	
+low	openai/gpt-6-luna	GetCustomersCustomer	rest	valid	2206	140	48	458	
+low	openai/gpt-6-luna	PostRefunds	rest	valid	2187	163	91	406	
+low	openai/gpt-6-luna	orders.create	rest	patched	4001	365	79	1645	
+low	openai/gpt-6-luna	orders.get	rest	valid	4882	465	164	1526	
+low	openai/gpt-6-luna	orders.capture	rest	patched	5465	558	227	1527	
+low	openai/gpt-6-luna	GetPayment	rest	valid	3987	275	64	1353	
+low	openai/gpt-6-luna	ListCatalog	rest	patched	6444	712	169	817	
+low	openai/gpt-6-luna	RetrieveCustomer	rest	valid	3040	241	84	706	
+low	openai/gpt-6-luna	getOrder	rest	valid	2513	115	29	381	
+low	openai/gpt-6-luna	ListLocations	rest	patched	2878	246	45	693	
+low	openai/gpt-6-luna	createOrder	rest	valid	1725	83	24	383	
+low	openai/gpt-6-luna	listOrders	rest	valid	3621	245	42	430	
+low	openai/gpt-6-luna	Query.shop	graphql	valid	2321	132	30	469	
+low	openai/gpt-6-luna	Query.order	graphql	valid	4196	404	43	1331	
+low	openai/gpt-6-luna	Query.products	graphql	valid	8882	977	109	1002	
+low	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	2131	157	53	601	
+low	openai/gpt-6-luna	movie-details	rest	valid	4876	383	146	1085	
+low	openai/gpt-6-luna	movie-credits	rest	valid	6067	619	77	755	
+low	openai/gpt-6-luna	person-details	rest	valid	2674	213	103	564	
+low	openai/gpt-6-luna	tv-series-details	rest	patched	6442	552	126	1170	
+low	openai/gpt-6-luna	get-an-artists-top-tracks	rest	patched	10861	1422	190	1316	
+low	openai/gpt-6-luna	get-playlist	rest	patched	10145	1061	120	2033	
+low	openai/gpt-6-luna	get-track	rest	patched	6133	668	0	1280	
+low	openai/gpt-6-luna	get_message	rest	valid	3035	252	99	1054	
+low	openai/gpt-6-luna	list_messages	rest	valid	8504	693	183	1080	
+low	openai/gpt-6-luna	get_guild	rest	patched	3673	334	36	866	
+low	openai/gpt-6-luna	repos/get	rest	valid	4623	604	89	1353	
+low	openai/gpt-6-luna	pulls/get	rest	valid	8907	895	116	1391	
+low	openai/gpt-6-luna	issues/get	rest	valid	4343	417	68	1253	
+low	openai/gpt-6-luna	search/repos	rest	patched	11232	1340	188	1415	
+low	openai/gpt-6-luna	Query.viewer	graphql	valid	4516	372	0	962	
+low	openai/gpt-6-luna	Query.repository	graphql	valid	4760	549	62	1208	
+low	openai/gpt-6-luna	Query.user	graphql	valid	3787	359	43	864	
+low	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	6051	138	49	575	
+low	openai/gpt-6-luna	searchFlights	rest	valid	7747	936	172	1270	
+low	openai/gpt-6-luna	getOffer	rest	valid	5603	338	0	1439	
+low	openai/gpt-6-luna	createBooking	rest	valid	5716	609	144	2032	
+low	openai/gpt-6-luna	getBooking	rest	valid	4825	505	76	1921	
+low	openai/gpt-6-luna	listHotels	rest	valid	1815	107	81	898	
+low	openai/gpt-6-luna	cancelBooking	rest	valid	2327	174	67	552	
+low	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	2481	82	58	524	
+low	openai/gpt-6-luna	TraceService.Export	grpc	valid	2567	135	125	807	
+low	openai/gpt-6-luna	Subtract	soap	valid	1403	31	16	345	
+low	openai/gpt-6-luna	Add	soap	valid	1266	30	15	342	
+low	openai/gpt-6-luna	Divide	soap	valid	3004	162	143	332	
+low	openai/gpt-6-luna	GetAccount	soap	valid	1916	107	41	447	
+low	openai/gpt-6-luna	CreateAccount	soap	valid	1765	90	29	488	
+low	openai/gpt-6-luna	orderCreated	asyncapi	valid	4939	599	272	649	
+low	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	4291	396	232	524	
+low	openai/gpt-6-luna	shipmentDispatched	asyncapi	patched	3942	245	59	517	
+low	openai/gpt-6-luna	orderCancelled	asyncapi	valid	22860	67	26	227	
+minimal	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	2678	664	541	784	
+minimal	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	2955	757	615	767	
+minimal	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	55034	6215	4588	760	
+minimal	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1467	272	203	501	
+minimal	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	patched	42951	4659	3126	775	
+minimal	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1200	195	145	449	
+minimal	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	3914	1165	922	1812	
+minimal	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	patched	23448	3927	3793	501	
+minimal	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	patched	5928	1874	1493	1684	
+minimal	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	13163	2119	2015	447	
+minimal	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	8204	2450	2026	1684	
+minimal	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	6705	2411	1866	1490	
+minimal	nvidia/nemotron-3.5-lightning	orders.get	rest	patched	25537	4929	4576	1685	
+minimal	nvidia/nemotron-3.5-lightning	orders.create	rest	patched	34044	7070	6462	1813	
+minimal	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	patched	7077	1779	426	912	
+minimal	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	2211	280	43	756	
+minimal	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	patched	3754	476	56	748	
+minimal	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	1443	431	348	416	
+minimal	nvidia/nemotron-3.5-lightning	orders.capture	rest	invalid	38829	4759	3177	1684	required+required
+minimal	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	1561	375	188	463	
+minimal	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	855	134	81	441	
+minimal	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	1082	116	17	504	
+minimal	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	2869	930	476	1440	
+minimal	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	68130	15161	14481	1490	
+minimal	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	89915	12502	8961	901	
+minimal	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	3078	1228	559	1080	
+minimal	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	36756	5873	5638	755	
+minimal	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	1177	124	82	649	
+minimal	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	patched	3458	970	691	1178	
+minimal	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	47337	5404	5183	798	
+minimal	nvidia/nemotron-3.5-lightning	getOrder	rest	valid	49048	1939	1863	467	
+minimal	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	20244	2737	1723	462	
+minimal	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	10479	1715	1647	417	
+minimal	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	9403	1254	1073	510	
+minimal	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	12390	3329	2805	1459	
+minimal	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	patched	4655	1744	878	1272	
+minimal	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	patched	8890	1239	0	808	
+minimal	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	32207	7291	5723	1097	
+minimal	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	invalid	18475	3333	3192	648	anyOf
+minimal	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1691	191	20	625	
+minimal	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	11658	3025	2298	2228	
+minimal	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	10119	2817	2042	1432	
+minimal	nvidia/nemotron-3.5-lightning	movie-details	rest	invalid	120002	0	0	0	output is not valid JSON
+minimal	nvidia/nemotron-3.5-lightning	movie-credits	rest	patched	44272	5812	3743	813	
+minimal	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	13098	2154	1110	1413	
+minimal	nvidia/nemotron-3.5-lightning	tv-series-details	rest	patched	42173	12165	11416	1292	
+minimal	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	2273	400	180	1135	
+minimal	nvidia/nemotron-3.5-lightning	person-details	rest	valid	14900	2901	2717	634	
+minimal	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	5059	746	111	1159	
+minimal	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	patched	1604	403	145	962	
+minimal	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	120002	0	0	0	output is not valid JSON
+minimal	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	patched	2355	845	449	1432	
+minimal	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	patched	49453	13943	12168	1449	
+minimal	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	patched	5090	941	267	1484	
+minimal	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	3532	1038	566	1335	
+minimal	nvidia/nemotron-3.5-lightning	get-track	rest	valid	48142	12313	11395	1409	
+minimal	nvidia/nemotron-3.5-lightning	get_message	rest	valid	16416	4145	3889	1199	
+minimal	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	15423	2001	1151	1501	
+minimal	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	3220	484	0	1049	
+minimal	nvidia/nemotron-3.5-lightning	list_messages	rest	patched	34290	6788	5739	1249	
+minimal	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2713	754	129	1289	
+minimal	nvidia/nemotron-3.5-lightning	get_guild	rest	valid	49400	4914	4370	1054	
+minimal	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	2922	462	0	950	
+minimal	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	1290	174	79	623	
+minimal	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	5377	1916	1365	1382	
+minimal	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	66744	7814	7311	1530	
+minimal	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	patched	25575	1151	567	1583	
+minimal	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	12056	2301	1436	2211	
+minimal	nvidia/nemotron-3.5-lightning	pulls/get	rest	patched	67002	15153	14093	1508	
+minimal	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	4636	1068	54	2093	
+minimal	nvidia/nemotron-3.5-lightning	issues/get	rest	patched	20712	5972	5423	1367	
+minimal	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	3706	1333	729	959	
+minimal	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	817	215	114	602	
+minimal	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	valid	913	128	106	570	
+minimal	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	1111	167	144	884	
+minimal	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	521	36	31	375	
+minimal	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	304	9	0	381	
+minimal	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	1417	197	121	385	
+minimal	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	2926	204	149	487	
+minimal	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	782	130	73	528	
+minimal	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	7428	1046	891	704	
+minimal	nvidia/nemotron-3.5-lightning	search/repos	rest	patched	102116	11226	9718	1600	
+minimal	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	6135	1030	863	575	
+minimal	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	patched	1510	199	0	575	
+minimal	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	24290	3566	3030	1153	
+minimal	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	24029	4931	4215	1360	
+minimal	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	772	37	0	258	
+minimal	nvidia/nemotron-3.5-lightning	Query.user	graphql	invalid	120005	0	0	0	output is not valid JSON
+minimal	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	patched	17904	2136	1786	637	
+minimal	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	120006	0	0	0	output is not valid JSON
+minimal	nvidia/nemotron-3.5-lightning	getOffer	rest	valid	23706	3488	2274	1570	
+minimal	nvidia/nemotron-3.5-lightning	createBooking	rest	valid	23358	5172	4461	2209	
+minimal	nvidia/nemotron-3.5-lightning	getBooking	rest	patched	35594	5587	3552	2079	
+minimal	nvidia/nemotron-3.5-lightning	listHotels	rest	invalid	120005	0	0	0	output is not valid JSON
+minimal	nvidia/nemotron-3.5-lightning	cancelBooking	rest	invalid	38187	2119	2009	664	additionalProperties+type+type
+minimal	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	10270	1898	1866	600	
+minimal	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	8713	2026	2010	873	
+minimal	nvidia/nemotron-3.5-lightning	Add	soap	valid	5996	1337	1328	388	
+minimal	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	7416	1014	1004	397	
+minimal	nvidia/nemotron-3.5-lightning	Divide	soap	valid	12583	2552	2539	380	
+minimal	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	32439	1899	1826	538	
+minimal	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	17198	1768	1705	587	
+minimal	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	patched	36901	4419	4185	750	
+minimal	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	invalid	120006	0	0	0	output is not valid JSON
+minimal	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	patched	79410	2977	2748	622	
+minimal	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	13996	1900	1851	251	
+minimal	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	4701	317	84	694	
+minimal	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	3827	330	124	707	
+minimal	openai/gpt-6-luna	GetCustomersCustomer	rest	patched	1912	107	25	458	
+minimal	openai/gpt-6-luna	PostRefunds	rest	valid	2135	178	100	406	
+minimal	openai/gpt-6-luna	orders.create	rest	valid	7130	566	157	1645	
+minimal	openai/gpt-6-luna	orders.get	rest	valid	5662	399	144	1526	
+minimal	openai/gpt-6-luna	orders.capture	rest	valid	5346	585	156	1527	
+minimal	openai/gpt-6-luna	GetPayment	rest	valid	4785	360	134	1353	
+minimal	openai/gpt-6-luna	ListCatalog	rest	valid	3188	210	193	817	
+minimal	openai/gpt-6-luna	RetrieveCustomer	rest	valid	2545	151	41	706	
+minimal	openai/gpt-6-luna	getOrder	rest	valid	2316	121	35	381	
+minimal	openai/gpt-6-luna	ListLocations	rest	patched	4149	400	57	693	
+minimal	openai/gpt-6-luna	createOrder	rest	valid	1694	83	25	383	
+minimal	openai/gpt-6-luna	listOrders	rest	valid	3316	247	76	430	
+minimal	openai/gpt-6-luna	Query.shop	graphql	valid	1803	105	0	469	
+minimal	openai/gpt-6-luna	Query.order	graphql	valid	5158	446	74	1331	
+minimal	openai/gpt-6-luna	Query.products	graphql	valid	7395	880	74	1002	
+minimal	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	2291	159	56	601	
+minimal	openai/gpt-6-luna	movie-details	rest	valid	6124	530	160	1085	
+minimal	openai/gpt-6-luna	movie-credits	rest	valid	6030	606	97	755	
+minimal	openai/gpt-6-luna	person-details	rest	valid	3137	287	139	564	
+minimal	openai/gpt-6-luna	tv-series-details	rest	patched	6844	633	134	1170	
+minimal	openai/gpt-6-luna	get-an-artists-top-tracks	rest	patched	10599	1293	183	1316	
+minimal	openai/gpt-6-luna	get-playlist	rest	patched	12017	1218	275	2033	
+minimal	openai/gpt-6-luna	get-track	rest	valid	8915	804	176	1280	
+minimal	openai/gpt-6-luna	get_message	rest	valid	3872	257	106	1054	
+minimal	openai/gpt-6-luna	list_messages	rest	valid	5883	583	105	1080	
+minimal	openai/gpt-6-luna	get_guild	rest	patched	4382	377	56	866	
+minimal	openai/gpt-6-luna	repos/get	rest	valid	4916	600	93	1353	
+minimal	openai/gpt-6-luna	pulls/get	rest	valid	9022	974	111	1391	
+minimal	openai/gpt-6-luna	issues/get	rest	valid	5418	498	109	1253	
+minimal	openai/gpt-6-luna	search/repos	rest	valid	10331	1172	104	1415	
+minimal	openai/gpt-6-luna	Query.viewer	graphql	valid	6352	445	82	962	
+minimal	openai/gpt-6-luna	Query.repository	graphql	valid	5272	492	88	1208	
+minimal	openai/gpt-6-luna	Query.user	graphql	valid	3998	366	52	864	
+minimal	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	3238	235	141	575	
+minimal	openai/gpt-6-luna	searchFlights	rest	valid	11117	1370	286	1270	
+minimal	openai/gpt-6-luna	getOffer	rest	valid	4935	477	141	1439	
+minimal	openai/gpt-6-luna	createBooking	rest	valid	7285	808	164	2032	
+minimal	openai/gpt-6-luna	getBooking	rest	valid	5961	598	53	1921	
+minimal	openai/gpt-6-luna	listHotels	rest	valid	2312	137	111	898	
+minimal	openai/gpt-6-luna	cancelBooking	rest	valid	2724	194	87	552	
+minimal	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	1879	102	78	524	
+minimal	openai/gpt-6-luna	TraceService.Export	grpc	valid	2396	159	116	807	
+minimal	openai/gpt-6-luna	Subtract	soap	valid	1199	29	14	345	
+minimal	openai/gpt-6-luna	Add	soap	valid	988	28	13	342	
+minimal	openai/gpt-6-luna	Divide	soap	valid	3978	201	182	332	
+minimal	openai/gpt-6-luna	GetAccount	soap	valid	2023	108	40	447	
+minimal	openai/gpt-6-luna	CreateAccount	soap	valid	1767	106	45	488	
+minimal	openai/gpt-6-luna	orderCreated	asyncapi	valid	5026	544	265	649	
+minimal	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	4592	451	285	524	
+minimal	openai/gpt-6-luna	shipmentDispatched	asyncapi	valid	4810	325	134	517	
+minimal	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1570	74	32	227	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	3055	224	0	885	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	1510	289	0	869	
+schema+hints	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	patched	2656	187	0	1417	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	893	109	0	560	
+schema+hints	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	2721	220	0	900	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	1943	73	0	507	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	1775	332	0	2028	
+schema+hints	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	1936	114	0	588	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	5823	574	0	1900	
+schema+hints	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1739	104	0	531	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	4630	574	0	1906	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	2835	597	0	1804	
+schema+hints	nvidia/nemotron-3.5-lightning	orders.get	rest	valid	5706	413	0	1939	
+schema+hints	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	4325	379	0	2067	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	2403	685	0	1078	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	1586	236	0	850	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	1987	413	0	857	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	567	81	0	432	
+schema+hints	nvidia/nemotron-3.5-lightning	orders.capture	rest	valid	7040	355	0	1943	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	3552	369	0	479	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	790	67	0	434	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	1338	102	0	520	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	3559	358	0	1456	
+schema+hints	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	8099	782	0	1837	
+schema+hints	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	2559	150	0	1126	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	7509	1079	0	1096	
+schema+hints	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2571	355	0	887	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	749	104	0	665	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	1356	416	0	1406	
+schema+hints	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	2525	296	0	883	
+schema+hints	nvidia/nemotron-3.5-lightning	getOrder	rest	patched	2365	72	0	642	
+schema+hints	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	3228	251	0	503	
+schema+hints	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	2478	193	0	458	
+schema+hints	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	1045	131	0	551	
+schema+hints	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	4314	452	0	1500	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	3010	591	0	1500	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	2875	1073	0	946	
+schema+hints	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	3327	400	0	1138	
+schema+hints	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1575	145	0	689	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	2537	143	0	694	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	6163	1191	0	3119	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	8276	1476	0	2078	
+schema+hints	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	5152	454	0	1479	
+schema+hints	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	3433	471	0	995	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	4166	811	0	1986	
+schema+hints	nvidia/nemotron-3.5-lightning	tv-series-details	rest	patched	19257	709	0	2604	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	2493	257	0	1408	
+schema+hints	nvidia/nemotron-3.5-lightning	person-details	rest	patched	9199	201	0	737	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	5162	654	0	1459	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	2314	367	0	1105	
+schema+hints	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	29757	505	0	5166	required+pattern
+schema+hints	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	3284	386	0	1653	
+schema+hints	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	7523	866	0	2161	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	3921	624	0	2006	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	3288	509	0	1724	
+schema+hints	nvidia/nemotron-3.5-lightning	get-track	rest	valid	6032	862	0	2060	
+schema+hints	nvidia/nemotron-3.5-lightning	get_message	rest	valid	20633	322	0	2547	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	3745	1169	0	1760	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	1911	462	0	1042	
+schema+hints	nvidia/nemotron-3.5-lightning	list_messages	rest	valid	43292	1705	0	2653	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2926	508	0	1305	
+schema+hints	nvidia/nemotron-3.5-lightning	get_guild	rest	valid	5262	459	0	1980	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	4391	447	0	1743	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	680	87	0	639	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	2472	932	0	1543	
+schema+hints	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	4522	487	0	1730	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	2507	524	0	1741	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	2017	480	0	2410	
+schema+hints	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	11735	907	0	2114	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	2926	742	0	2294	
+schema+hints	nvidia/nemotron-3.5-lightning	issues/get	rest	invalid	94984	16384	0	1816	output is not valid JSON
+schema+hints	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	3400	749	0	1045	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	1122	90	0	680	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	invalid	41233	16384	0	586	output is not valid JSON
+schema+hints	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	597	13	0	927	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	1107	7	0	391	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	815	8	0	397	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	561	14	0	380	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	1581	68	0	503	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	1728	56	0	544	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1481	253	0	679	
+schema+hints	nvidia/nemotron-3.5-lightning	search/repos	rest	valid	1459	435	0	1833	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	1185	164	0	550	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	2965	202	0	550	
+schema+hints	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	13099	466	0	1989	
+schema+hints	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	5629	282	0	1401	
+schema+hints	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	948	29	0	233	
+schema+hints	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	13619	326	0	1741	
+schema+hints	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	3154	131	0	678	
+schema+hints	nvidia/nemotron-3.5-lightning	searchFlights	rest	invalid	4657	389	0	1573	required+oneOf
+schema+hints	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	5582	515	0	1783	oneOf
+schema+hints	nvidia/nemotron-3.5-lightning	createBooking	rest	valid	9229	716	0	4294	
+schema+hints	nvidia/nemotron-3.5-lightning	getBooking	rest	valid	7976	704	0	2351	
+schema+hints	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	19744	819	0	1804	
+schema+hints	nvidia/nemotron-3.5-lightning	cancelBooking	rest	valid	871	147	0	712	
+schema+hints	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	719	18	0	641	
+schema+hints	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	valid	3500	27	0	1460	
+schema+hints	nvidia/nemotron-3.5-lightning	Add	soap	valid	2031	12	0	595	
+schema+hints	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	557	10	0	438	
+schema+hints	nvidia/nemotron-3.5-lightning	Divide	soap	valid	1081	25	0	421	
+schema+hints	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	1573	66	0	524	
+schema+hints	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	1385	91	0	573	
+schema+hints	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	1108	280	0	695	
+schema+hints	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	valid	7486	210	0	956	
+schema+hints	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	3172	242	0	946	
+schema+hints	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	987	49	0	251	
+schema+hints	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	valid	2729	200	0	817	
+schema+hints	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	valid	2175	173	0	830	
+schema+hints	openai/gpt-6-luna	GetCustomersCustomer	rest	patched	1626	70	0	541	
+schema+hints	openai/gpt-6-luna	PostRefunds	rest	valid	1421	65	0	485	
+schema+hints	openai/gpt-6-luna	orders.create	rest	valid	2984	284	0	1869	
+schema+hints	openai/gpt-6-luna	orders.get	rest	valid	2855	223	0	1753	
+schema+hints	openai/gpt-6-luna	orders.capture	rest	patched	3745	413	0	1757	
+schema+hints	openai/gpt-6-luna	GetPayment	rest	valid	5569	611	0	1669	
+schema+hints	openai/gpt-6-luna	ListCatalog	rest	valid	7182	631	0	1015	
+schema+hints	openai/gpt-6-luna	RetrieveCustomer	rest	valid	1845	154	0	823	
+schema+hints	openai/gpt-6-luna	getOrder	rest	valid	1787	76	0	422	
+schema+hints	openai/gpt-6-luna	ListLocations	rest	patched	3918	388	0	819	
+schema+hints	openai/gpt-6-luna	createOrder	rest	valid	1042	50	0	424	
+schema+hints	openai/gpt-6-luna	listOrders	rest	valid	2494	212	0	471	
+schema+hints	openai/gpt-6-luna	Query.shop	graphql	valid	1477	101	0	510	
+schema+hints	openai/gpt-6-luna	Query.order	graphql	valid	827	5	0	1372	
+schema+hints	openai/gpt-6-luna	Query.products	graphql	valid	1032	34	0	1043	
+schema+hints	openai/gpt-6-luna	Mutation.productCreate	graphql	valid	1731	99	0	642	
+schema+hints	openai/gpt-6-luna	movie-details	rest	valid	4571	230	0	1318	
+schema+hints	openai/gpt-6-luna	movie-credits	rest	patched	8392	647	0	912	
+schema+hints	openai/gpt-6-luna	person-details	rest	valid	2649	137	0	655	
+schema+hints	openai/gpt-6-luna	tv-series-details	rest	patched	4913	525	0	1411	
+schema+hints	openai/gpt-6-luna	get-an-artists-top-tracks	rest	valid	966	8	0	1909	
+schema+hints	openai/gpt-6-luna	get-playlist	rest	patched	9017	1126	0	2876	
+schema+hints	openai/gpt-6-luna	get-track	rest	patched	4818	610	0	1837	
+schema+hints	openai/gpt-6-luna	get_message	rest	valid	1871	162	0	1332	
+schema+hints	openai/gpt-6-luna	list_messages	rest	valid	5698	537	0	1372	
+schema+hints	openai/gpt-6-luna	get_guild	rest	patched	3220	314	0	1024	
+schema+hints	openai/gpt-6-luna	repos/get	rest	valid	3627	362	0	1592	
+schema+hints	openai/gpt-6-luna	pulls/get	rest	valid	5136	632	0	1930	
+schema+hints	openai/gpt-6-luna	issues/get	rest	valid	4133	412	0	1657	
+schema+hints	openai/gpt-6-luna	search/repos	rest	valid	1222	19	0	1683	
+schema+hints	openai/gpt-6-luna	Query.viewer	graphql	valid	4690	360	0	1003	
+schema+hints	openai/gpt-6-luna	Query.repository	graphql	valid	5252	486	0	1249	
+schema+hints	openai/gpt-6-luna	Query.user	graphql	valid	1037	5	0	905	
+schema+hints	openai/gpt-6-luna	Mutation.createIssue	graphql	valid	1434	92	0	616	
+schema+hints	openai/gpt-6-luna	searchFlights	rest	valid	5551	469	0	1428	
+schema+hints	openai/gpt-6-luna	getOffer	rest	valid	3172	330	0	1627	
+schema+hints	openai/gpt-6-luna	createBooking	rest	valid	4194	442	0	2261	
+schema+hints	openai/gpt-6-luna	getBooking	rest	valid	3922	428	0	2150	
+schema+hints	openai/gpt-6-luna	listHotels	rest	valid	1846	21	0	1003	
+schema+hints	openai/gpt-6-luna	cancelBooking	rest	valid	1763	102	0	649	
+schema+hints	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	valid	956	17	0	565	
+schema+hints	openai/gpt-6-luna	TraceService.Export	grpc	valid	1543	42	0	875	
+schema+hints	openai/gpt-6-luna	Subtract	soap	valid	1123	10	0	386	
+schema+hints	openai/gpt-6-luna	Add	soap	valid	1521	10	0	383	
+schema+hints	openai/gpt-6-luna	Divide	soap	valid	1694	16	0	373	
+schema+hints	openai/gpt-6-luna	GetAccount	soap	valid	1154	60	0	488	
+schema+hints	openai/gpt-6-luna	CreateAccount	soap	valid	1269	56	0	529	
+schema+hints	openai/gpt-6-luna	orderCreated	asyncapi	valid	3266	235	0	649	
+schema+hints	openai/gpt-6-luna	paymentAuthorized	asyncapi	valid	2177	156	0	524	
+schema+hints	openai/gpt-6-luna	shipmentDispatched	asyncapi	patched	2076	184	0	517	
+schema+hints	openai/gpt-6-luna	orderCancelled	asyncapi	valid	1200	36	0	227	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	PostPaymentIntentsIntentConfirm	rest	valid	2193	211	0	882	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	GetPaymentIntentsIntent	rest	valid	3162	287	0	866	
+schema+hints+require	nvidia/nemotron-3.5-lightning	GetPaymentIntentsIntent	rest	valid	1577	224	0	891	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	GetCustomersCustomer	rest	valid	1361	82	0	563	
+schema+hints+require	nvidia/nemotron-3.5-lightning	PostPaymentIntentsIntentConfirm	rest	valid	1479	222	0	906	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	PostRefunds	rest	valid	846	76	0	505	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	orders.create	rest	valid	2462	331	0	2035	
+schema+hints+require	nvidia/nemotron-3.5-lightning	GetCustomersCustomer	rest	valid	2663	116	0	860	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	orders.get	rest	valid	3273	498	0	1910	
+schema+hints+require	nvidia/nemotron-3.5-lightning	PostRefunds	rest	valid	1039	108	0	529	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	orders.capture	rest	valid	2708	576	0	1902	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	GetPayment	rest	valid	6910	624	0	1795	
+schema+hints+require	nvidia/nemotron-3.5-lightning	orders.get	rest	valid	3458	324	0	1939	
+schema+hints+require	nvidia/nemotron-3.5-lightning	orders.create	rest	valid	3187	447	0	2070	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	ListCatalog	rest	valid	3524	694	0	1077	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	RetrieveCustomer	rest	valid	1634	244	0	850	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	ListLocations	rest	valid	3483	428	0	857	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	getOrder	rest	valid	848	75	0	432	
+schema+hints+require	nvidia/nemotron-3.5-lightning	orders.capture	rest	valid	904	331	0	1938	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	listOrders	rest	valid	2880	373	0	479	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	createOrder	rest	valid	1306	68	0	434	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Query.shop	graphql	valid	939	97	0	520	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Query.order	graphql	valid	3293	443	0	1456	
+schema+hints+require	nvidia/nemotron-3.5-lightning	GetPayment	rest	valid	4415	759	0	1836	
+schema+hints+require	nvidia/nemotron-3.5-lightning	ListCatalog	rest	valid	1063	113	0	1125	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Query.products	graphql	valid	5657	874	0	1096	
+schema+hints+require	nvidia/nemotron-3.5-lightning	RetrieveCustomer	rest	valid	2406	354	0	886	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Mutation.productCreate	graphql	valid	735	103	0	665	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	movie-details	rest	valid	1552	285	0	1409	
+schema+hints+require	nvidia/nemotron-3.5-lightning	ListLocations	rest	valid	3039	289	0	882	
+schema+hints+require	nvidia/nemotron-3.5-lightning	getOrder	rest	valid	13793	111	0	453	
+schema+hints+require	nvidia/nemotron-3.5-lightning	listOrders	rest	valid	3349	337	0	503	
+schema+hints+require	nvidia/nemotron-3.5-lightning	createOrder	rest	valid	892	104	0	458	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Query.shop	graphql	valid	15584	131	0	551	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Query.order	graphql	valid	3253	499	0	1500	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	tv-series-details	rest	valid	1927	508	0	1496	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	movie-credits	rest	valid	3859	725	0	948	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Query.products	graphql	valid	3112	546	0	1138	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Mutation.productCreate	graphql	valid	1189	145	0	689	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	person-details	rest	valid	1041	151	0	693	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	get-playlist	rest	valid	4033	1198	0	3100	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	get-an-artists-top-tracks	rest	valid	4980	1331	0	2072	
+schema+hints+require	nvidia/nemotron-3.5-lightning	movie-details	rest	valid	3146	437	0	1488	
+schema+hints+require	nvidia/nemotron-3.5-lightning	movie-credits	rest	valid	39849	318	0	995	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	get-track	rest	valid	2951	722	0	1971	
+schema+hints+require	nvidia/nemotron-3.5-lightning	tv-series-details	rest	valid	3323	572	0	1550	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	get_message	rest	valid	2292	361	0	1399	
+schema+hints+require	nvidia/nemotron-3.5-lightning	person-details	rest	valid	1062	187	0	732	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	list_messages	rest	valid	3285	725	0	1465	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	get_guild	rest	valid	2217	353	0	1106	
+schema+hints+require	nvidia/nemotron-3.5-lightning	get-playlist	rest	invalid	2940	509	0	3198	required
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	repos/get	rest	valid	2078	467	0	1652	
+schema+hints+require	nvidia/nemotron-3.5-lightning	get-an-artists-top-tracks	rest	valid	4589	879	0	2157	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	pulls/get	rest	valid	2763	645	0	2017	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	issues/get	rest	valid	3425	508	0	1722	
+schema+hints+require	nvidia/nemotron-3.5-lightning	get-track	rest	valid	2234	792	0	2053	
+schema+hints+require	nvidia/nemotron-3.5-lightning	get_message	rest	invalid	7139	271	0	2545	required
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	search/repos	rest	valid	4724	1159	0	1768	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Query.viewer	graphql	valid	2182	469	0	1042	
+schema+hints+require	nvidia/nemotron-3.5-lightning	list_messages	rest	valid	2772	254	0	1707	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Query.repository	graphql	valid	2374	512	0	1305	
+schema+hints+require	nvidia/nemotron-3.5-lightning	get_guild	rest	invalid	18447	346	0	1973	minItems
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Query.user	graphql	valid	4140	450	0	1743	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Mutation.createIssue	graphql	valid	676	95	0	639	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	searchFlights	rest	valid	3137	679	0	1539	
+schema+hints+require	nvidia/nemotron-3.5-lightning	repos/get	rest	valid	5295	486	0	1721	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	getOffer	rest	valid	2271	493	0	1742	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	createBooking	rest	valid	3648	498	0	2411	
+schema+hints+require	nvidia/nemotron-3.5-lightning	pulls/get	rest	valid	2137	750	0	2103	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	getBooking	rest	valid	3571	703	0	2293	
+schema+hints+require	nvidia/nemotron-3.5-lightning	issues/get	rest	patched	3878	336	0	2933	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	listHotels	rest	valid	4067	909	0	1045	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	cancelBooking	rest	valid	942	100	0	680	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	RouteGuide.GetFeature	grpc	invalid	33060	16384	0	586	output is not valid JSON
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	TraceService.Export	grpc	valid	1773	13	0	927	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Add	soap	valid	300	8	0	391	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Subtract	soap	valid	620	8	0	397	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	Divide	soap	valid	595	11	0	380	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	GetAccount	soap	valid	1082	64	0	503	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	CreateAccount	soap	valid	691	56	0	544	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	orderCreated	asyncapi	valid	1326	253	0	679	
+schema+hints+require	nvidia/nemotron-3.5-lightning	search/repos	rest	valid	5079	527	0	1838	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	paymentAuthorized	asyncapi	valid	2011	157	0	550	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	shipmentDispatched	asyncapi	valid	1792	197	0	550	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Query.viewer	graphql	valid	820	243	0	1139	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Query.repository	graphql	valid	8491	282	0	2502	
+schema+hints+require	deepseek/deepseek-v4.1-flash-1017	orderCancelled	asyncapi	valid	502	61	0	233	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Query.user	graphql	valid	4088	409	0	1018	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Mutation.createIssue	graphql	valid	1988	135	0	678	
+schema+hints+require	nvidia/nemotron-3.5-lightning	searchFlights	rest	patched	4005	429	0	1572	
+schema+hints+require	nvidia/nemotron-3.5-lightning	getOffer	rest	invalid	47006	493	0	1780	oneOf
+schema+hints+require	nvidia/nemotron-3.5-lightning	createBooking	rest	valid	5475	723	0	2482	
+schema+hints+require	nvidia/nemotron-3.5-lightning	getBooking	rest	valid	5134	742	0	2348	
+schema+hints+require	nvidia/nemotron-3.5-lightning	listHotels	rest	valid	2017	602	0	1095	
+schema+hints+require	nvidia/nemotron-3.5-lightning	cancelBooking	rest	valid	7508	154	0	712	
+schema+hints+require	nvidia/nemotron-3.5-lightning	RouteGuide.GetFeature	grpc	valid	801	18	0	641	
+schema+hints+require	nvidia/nemotron-3.5-lightning	TraceService.Export	grpc	invalid	5629	326	0	1462	additionalProperties
+schema+hints+require	nvidia/nemotron-3.5-lightning	Add	soap	valid	1009	12	0	595	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Subtract	soap	valid	444	13	0	438	
+schema+hints+require	nvidia/nemotron-3.5-lightning	Divide	soap	valid	653	13	0	421	
+schema+hints+require	nvidia/nemotron-3.5-lightning	GetAccount	soap	valid	1342	92	0	524	
+schema+hints+require	nvidia/nemotron-3.5-lightning	CreateAccount	soap	valid	706	90	0	573	
+schema+hints+require	nvidia/nemotron-3.5-lightning	orderCreated	asyncapi	valid	2855	304	0	695	
+schema+hints+require	nvidia/nemotron-3.5-lightning	paymentAuthorized	asyncapi	patched	2134	206	0	956	
+schema+hints+require	nvidia/nemotron-3.5-lightning	shipmentDispatched	asyncapi	valid	1919	245	0	567	
+schema+hints+require	nvidia/nemotron-3.5-lightning	orderCancelled	asyncapi	valid	571	44	0	251	
+schema+hints+require	openai/gpt-6-luna	GetPaymentIntentsIntent	rest	invalid	69	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	PostPaymentIntentsIntentConfirm	rest	invalid	70	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	GetCustomersCustomer	rest	invalid	66	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	PostRefunds	rest	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	orders.create	rest	invalid	84	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	orders.get	rest	invalid	98	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	orders.capture	rest	invalid	84	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	GetPayment	rest	invalid	62	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	ListCatalog	rest	invalid	87	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	RetrieveCustomer	rest	invalid	80	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	getOrder	rest	invalid	68	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	ListLocations	rest	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	createOrder	rest	invalid	80	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	listOrders	rest	invalid	64	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Query.shop	graphql	invalid	61	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Query.order	graphql	invalid	70	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Query.products	graphql	invalid	90	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Mutation.productCreate	graphql	invalid	59	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	movie-details	rest	invalid	74	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	movie-credits	rest	invalid	77	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	person-details	rest	invalid	66	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	tv-series-details	rest	invalid	118	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	get-an-artists-top-tracks	rest	invalid	59	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	get-playlist	rest	invalid	73	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	get-track	rest	invalid	58	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	get_message	rest	invalid	148	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	list_messages	rest	invalid	117	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	get_guild	rest	invalid	80	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	repos/get	rest	invalid	73	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	pulls/get	rest	invalid	66	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	issues/get	rest	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	search/repos	rest	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Query.viewer	graphql	invalid	73	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Query.repository	graphql	invalid	61	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Query.user	graphql	invalid	79	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Mutation.createIssue	graphql	invalid	78	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	searchFlights	rest	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	getOffer	rest	invalid	56	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	createBooking	rest	invalid	80	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	getBooking	rest	invalid	59	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	listHotels	rest	invalid	82	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	cancelBooking	rest	invalid	78	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	RouteGuide.GetFeature	grpc	invalid	61	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	TraceService.Export	grpc	invalid	941	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Subtract	soap	invalid	71	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Add	soap	invalid	73	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	Divide	soap	invalid	59	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	GetAccount	soap	invalid	67	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	CreateAccount	soap	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	orderCreated	asyncapi	invalid	65	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	paymentAuthorized	asyncapi	invalid	67	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	shipmentDispatched	asyncapi	invalid	63	0	0	0	output is not valid JSON
+schema+hints+require	openai/gpt-6-luna	orderCancelled	asyncapi	invalid	58	0	0	0	output is not valid JSON

@@ -1,0 +1,1658 @@
+{
+  "seed": "mb-ft-2026-10-30",
+  "models": [
+    "deepseek/deepseek-v4.1-flash-1017#json_object",
+    "deepseek/deepseek-v4.1-flash-1017#json_schema",
+    "nvidia/nemotron-3.5-lightning#json_object",
+    "nvidia/nemotron-3.5-lightning#json_schema",
+    "openai/gpt-6-luna#json_object",
+    "openai/gpt-6-luna#json_schema"
+  ],
+  "pool": {
+    "candidates": 54,
+    "no_common_rep": [],
+    "duplicates_ignored": 0,
+    "warnings": []
+  },
+  "strata": [
+    {
+      "stratum": "domain:asyncapi/commerce-events-kafka#0",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:asyncapi/orders-amqp-2.6#0",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:graphql/devtools-github#0",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:graphql/ecommerce-shopify-admin#0",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:grpc/otlp-trace-service#0",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:grpc/route-guide#0",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/devtools-github#0",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/ecommerce-orders-3.1#0",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/ecommerce-square#0",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/payments-paypal-orders#0",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/payments-stripe#0",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/social-discord#0",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/social-spotify#0",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/social-tmdb#0",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/travel-booking#0",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:rest/travel-hotels#0",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:soap/accounts-rpc#0",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "candidates": 1
+    },
+    {
+      "stratum": "domain:soap/calculator#0",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "candidates": 1
+    }
+  ],
+  "strata_skipped": [],
+  "presentation_order": [
+    "batch-12",
+    "batch-10",
+    "batch-14",
+    "batch-02",
+    "batch-07",
+    "batch-16",
+    "batch-13",
+    "batch-17",
+    "batch-03",
+    "batch-05",
+    "batch-09",
+    "batch-06",
+    "batch-18",
+    "batch-15",
+    "batch-11",
+    "batch-08",
+    "batch-01",
+    "batch-04"
+  ],
+  "recheck_batches": [
+    "batch-12",
+    "batch-10"
+  ],
+  "batches": [
+    {
+      "batch_id": "batch-01",
+      "file": "judge/batch-01.json",
+      "stratum": "domain:asyncapi/commerce-events-kafka#0",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "api_type": "asyncapi",
+      "domain": "asyncapi/commerce-events-kafka#0",
+      "target_kind": "channel",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "a586174356",
+        "73d7f96ae5",
+        "ec3b7da569",
+        "7b2a798088",
+        "4d33982ece",
+        "40b82b0bac"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-02",
+      "file": "judge/batch-02.json",
+      "stratum": "domain:asyncapi/orders-amqp-2.6#0",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "api_type": "asyncapi",
+      "domain": "asyncapi/orders-amqp-2.6#0",
+      "target_kind": "channel",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "b1e9c18ef8",
+        "53dd838b92",
+        "b65a9af226",
+        "9098c21e6f",
+        "08bd94054c",
+        "5ccb45385a"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-03",
+      "file": "judge/batch-03.json",
+      "stratum": "domain:graphql/devtools-github#0",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "api_type": "graphql",
+      "domain": "graphql/devtools-github#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "7965c71b51",
+        "c4ecdb57ae",
+        "c397272218",
+        "936b8b64ff",
+        "e2cbac50ce"
+      ],
+      "auto": [
+        "80503e3122"
+      ]
+    },
+    {
+      "batch_id": "batch-04",
+      "file": "judge/batch-04.json",
+      "stratum": "domain:graphql/ecommerce-shopify-admin#0",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "api_type": "graphql",
+      "domain": "graphql/ecommerce-shopify-admin#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "dd257b48c1",
+        "b7c451d970",
+        "a6a96ad29a",
+        "98f0133ad2",
+        "36c2baaafb",
+        "558032a23d"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-05",
+      "file": "judge/batch-05.json",
+      "stratum": "domain:grpc/otlp-trace-service#0",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "api_type": "grpc",
+      "domain": "grpc/otlp-trace-service#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "fc06058f63",
+        "cf8f0902d6",
+        "db9e0032cb",
+        "d0ac088cdb",
+        "90b7cec7ab",
+        "33dd85aed6"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-06",
+      "file": "judge/batch-06.json",
+      "stratum": "domain:grpc/route-guide#0",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "api_type": "grpc",
+      "domain": "grpc/route-guide#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "47c30a721e",
+        "a8891c5b55",
+        "f993f23b3f",
+        "587a19fdb6",
+        "5f4b821730",
+        "b4811fc461"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-07",
+      "file": "judge/batch-07.json",
+      "stratum": "domain:rest/devtools-github#0",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "api_type": "rest",
+      "domain": "rest/devtools-github#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "dd6d7cd9e5",
+        "2d5fea4ea2",
+        "820207ef50",
+        "94b7d0eed9",
+        "239dd57170",
+        "721f103e53"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-08",
+      "file": "judge/batch-08.json",
+      "stratum": "domain:rest/ecommerce-orders-3.1#0",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "api_type": "rest",
+      "domain": "rest/ecommerce-orders-3.1#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "caee025170",
+        "c593f4f1e3",
+        "fb358596c4",
+        "1fb3c285bd",
+        "1510de2828",
+        "a0b8aed29b"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-09",
+      "file": "judge/batch-09.json",
+      "stratum": "domain:rest/ecommerce-square#0",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "api_type": "rest",
+      "domain": "rest/ecommerce-square#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "1e13912328",
+        "08d7ef788e",
+        "3b254e1004",
+        "8aaaba621c",
+        "957b172053",
+        "9dfb899d7e"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-10",
+      "file": "judge/batch-10.json",
+      "stratum": "domain:rest/payments-paypal-orders#0",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "api_type": "rest",
+      "domain": "rest/payments-paypal-orders#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "52ceeaa9d2",
+        "4433ca5dc6",
+        "2ad03e09a4",
+        "746ecf5526",
+        "fd6d0895c3"
+      ],
+      "auto": [
+        "fff1748ff3"
+      ]
+    },
+    {
+      "batch_id": "batch-11",
+      "file": "judge/batch-11.json",
+      "stratum": "domain:rest/payments-stripe#0",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "api_type": "rest",
+      "domain": "rest/payments-stripe#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "b180bcc355",
+        "b8e9f90b2b",
+        "720922cf83",
+        "614230d54e",
+        "d531560ab4",
+        "6bb762af31"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-12",
+      "file": "judge/batch-12.json",
+      "stratum": "domain:rest/social-discord#0",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "api_type": "rest",
+      "domain": "rest/social-discord#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "cd0509dbf2",
+        "ad84034b5e",
+        "add1b69f5e",
+        "a85171aab3",
+        "22b263ee95",
+        "52403dcaaf"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-13",
+      "file": "judge/batch-13.json",
+      "stratum": "domain:rest/social-spotify#0",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "api_type": "rest",
+      "domain": "rest/social-spotify#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "7d36397638",
+        "30ed1b4d6e",
+        "dbf56c981a",
+        "7973b7e7e9",
+        "99bc565053",
+        "c233322a0e"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-14",
+      "file": "judge/batch-14.json",
+      "stratum": "domain:rest/social-tmdb#0",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "api_type": "rest",
+      "domain": "rest/social-tmdb#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "191052a06c",
+        "18f63a3f5d",
+        "754144e861",
+        "cf824420f6",
+        "e749b89d38",
+        "ce3c2350e1"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-15",
+      "file": "judge/batch-15.json",
+      "stratum": "domain:rest/travel-booking#0",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "api_type": "rest",
+      "domain": "rest/travel-booking#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "e4f5b1eb5b",
+        "f61cacf303",
+        "3c2b3675a1",
+        "d614c7b36e",
+        "6e404ea3f6",
+        "8e5b7aa527"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-16",
+      "file": "judge/batch-16.json",
+      "stratum": "domain:rest/travel-hotels#0",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "api_type": "rest",
+      "domain": "rest/travel-hotels#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "490a79281a",
+        "a23242f4fc",
+        "5025373d11",
+        "17654603b6",
+        "bd97175327",
+        "1813217731"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-17",
+      "file": "judge/batch-17.json",
+      "stratum": "domain:soap/accounts-rpc#0",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "api_type": "soap",
+      "domain": "soap/accounts-rpc#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "5389fbae13",
+        "328610a584",
+        "7b87e415a6",
+        "0c572b37d2",
+        "5840a91956",
+        "b6e593c4ab"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-18",
+      "file": "judge/batch-18.json",
+      "stratum": "domain:soap/calculator#0",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "api_type": "soap",
+      "domain": "soap/calculator#0",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 1,
+      "judged": [
+        "7ad8c6dc9a",
+        "de4028a1ba",
+        "2b2cbf62f8",
+        "1e8c58ed31",
+        "71cb651eb1",
+        "4ea868555a"
+      ],
+      "auto": []
+    }
+  ],
+  "items": {
+    "a586174356": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7b2a798088": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "40b82b0bac": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "73d7f96ae5": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "ec3b7da569": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "4d33982ece": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-01",
+      "contract": "asyncapi/commerce-events-kafka",
+      "target": "shipmentDispatched",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "9098c21e6f": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b1e9c18ef8": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "5ccb45385a": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "08bd94054c": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "53dd838b92": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b65a9af226": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-02",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCreated",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e2cbac50ce": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "936b8b64ff": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "80503e3122": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "auto": true,
+      "auto_reason": "fallback",
+      "auto_scores": {
+        "realism": 1,
+        "coherence": 1
+      }
+    },
+    "c4ecdb57ae": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "c397272218": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7965c71b51": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-03",
+      "contract": "graphql/devtools-github",
+      "target": "Query.repository",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "98f0133ad2": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "558032a23d": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "36c2baaafb": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b7c451d970": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a6a96ad29a": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "dd257b48c1": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-04",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.shop",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "db9e0032cb": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "33dd85aed6": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "90b7cec7ab": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "d0ac088cdb": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fc06058f63": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "cf8f0902d6": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-05",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b4811fc461": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "f993f23b3f": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a8891c5b55": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "47c30a721e": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "5f4b821730": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "587a19fdb6": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-06",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "2d5fea4ea2": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "721f103e53": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "94b7d0eed9": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "239dd57170": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "dd6d7cd9e5": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "820207ef50": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-07",
+      "contract": "rest/devtools-github",
+      "target": "repos/get",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "1fb3c285bd": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "c593f4f1e3": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a0b8aed29b": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fb358596c4": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "caee025170": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "1510de2828": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-08",
+      "contract": "rest/ecommerce-orders-3.1",
+      "target": "listOrders",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "8aaaba621c": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "08d7ef788e": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "957b172053": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "9dfb899d7e": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "3b254e1004": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "1e13912328": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-09",
+      "contract": "rest/ecommerce-square",
+      "target": "ListCatalog",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fd6d0895c3": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "2ad03e09a4": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fff1748ff3": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "auto": true,
+      "auto_reason": "fallback",
+      "auto_scores": {
+        "realism": 1,
+        "coherence": 1
+      }
+    },
+    "52ceeaa9d2": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "746ecf5526": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "4433ca5dc6": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-10",
+      "contract": "rest/payments-paypal-orders",
+      "target": "orders.create",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "d531560ab4": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "6bb762af31": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b180bcc355": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b8e9f90b2b": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "614230d54e": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "720922cf83": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-11",
+      "contract": "rest/payments-stripe",
+      "target": "PostRefunds",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "add1b69f5e": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "22b263ee95": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "ad84034b5e": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "52403dcaaf": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a85171aab3": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "cd0509dbf2": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-12",
+      "contract": "rest/social-discord",
+      "target": "get_guild",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "dbf56c981a": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "99bc565053": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7d36397638": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7973b7e7e9": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "c233322a0e": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "30ed1b4d6e": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-13",
+      "contract": "rest/social-spotify",
+      "target": "get-an-artists-top-tracks",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "cf824420f6": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "754144e861": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e749b89d38": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "18f63a3f5d": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "191052a06c": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "ce3c2350e1": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-14",
+      "contract": "rest/social-tmdb",
+      "target": "movie-credits",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "d614c7b36e": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "3c2b3675a1": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "8e5b7aa527": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "6e404ea3f6": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "f61cacf303": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e4f5b1eb5b": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-15",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "bd97175327": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "17654603b6": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a23242f4fc": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "1813217731": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "490a79281a": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "5025373d11": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-16",
+      "contract": "rest/travel-hotels",
+      "target": "listHotels",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "0c572b37d2": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7b87e415a6": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "5389fbae13": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "328610a584": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "5840a91956": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "b6e593c4ab": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-17",
+      "contract": "soap/accounts-rpc",
+      "target": "CreateAccount",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "2b2cbf62f8": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_object",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "de4028a1ba": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#json_schema",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "71cb651eb1": {
+      "model": "nvidia/nemotron-3.5-lightning#json_object",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "4ea868555a": {
+      "model": "nvidia/nemotron-3.5-lightning#json_schema",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "1e8c58ed31": {
+      "model": "openai/gpt-6-luna#json_object",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7ad8c6dc9a": {
+      "model": "openai/gpt-6-luna#json_schema",
+      "batch_id": "batch-18",
+      "contract": "soap/calculator",
+      "target": "Subtract",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    }
+  }
+}

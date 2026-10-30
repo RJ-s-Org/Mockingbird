@@ -75,7 +75,7 @@ export function ProfileEditor({
   const [baseUrl, setBaseUrl] = useState(profile?.base_url ?? "");
   const [model, setModel] = useState(profile?.model ?? "");
   const [secretRef, setSecretRef] = useState(profile?.secret_ref ?? "");
-  const [outputMode, setOutputMode] = useState<OutputMode>(profile?.output_mode ?? "json_object");
+  const [outputMode, setOutputMode] = useState<OutputMode>(profile?.output_mode ?? "json_schema");
   const [temperature, setTemperature] = useState(String(profile?.temperature ?? 0.7));
   const [timeoutMs, setTimeoutMs] = useState(String(profile?.timeout_ms ?? 3000));
   const [maxTokens, setMaxTokens] = useState(String(profile?.max_tokens ?? 2048));

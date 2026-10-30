@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-05",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "fc06058f63",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Empty {} is the actual OTLP success reply from a real collector, so it passes though it carries no values. Fully accepted export with an empty span in the request; nothing contradicts it."
+  },
+  {
+   "opaque_id": "cf8f0902d6",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "errorMessage is a natural developer-facing warning with rejectedSpans \"0\", a pattern the OTLP spec permits. It accurately refers to the request's empty attribute value and empty span, and full acceptance matches rejectedSpans 0."
+  },
+  {
+   "opaque_id": "db9e0032cb",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "partialSuccess with errorMessage \"\" and rejectedSpans \"0\" is valid, though a real server would normally omit empty defaults. Zero rejections with an empty message is a consistent full success."
+  },
+  {
+   "opaque_id": "d0ac088cdb",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "errorMessage \"\" and rejectedSpans \"0\" is valid OTLP, though real servers usually omit defaults. Zero rejected with no message is consistent full acceptance of the request."
+  },
+  {
+   "opaque_id": "90b7cec7ab",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "rejectedSpans \"0\" with empty errorMessage is a valid reply, slightly unusual since defaults are normally omitted. Consistent full-success semantics for the request."
+  },
+  {
+   "opaque_id": "33dd85aed6",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "partialSuccess with only rejectedSpans \"0\" is plausible, though a real server would likely omit it. Int64-as-string form is correct, and zero rejections consistently means full acceptance."
+  }
+ ]
+}

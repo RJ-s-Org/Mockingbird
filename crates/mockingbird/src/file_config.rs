@@ -792,7 +792,7 @@ impl FileProfile {
     }
 
     /// The output mode: `output_mode`, else the deprecated `json_schema`,
-    /// else `json_object`.
+    /// else `json_schema`.
     pub fn mode(&self) -> OutputMode {
         self.output_mode
             .or(self.json_schema.map(OutputMode::from_json_schema))

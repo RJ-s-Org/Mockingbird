@@ -12,6 +12,8 @@ The short version:
 - `thinkingmachines/inkling` now runs, with `output_mode: none`: SV 0.992, J 4.00. Its Value (32.6) is the lowest, because it costs $2.21 per 1,000 responses.
 - After these results, the shipped default moved from `deepseek/deepseek-v4.1-flash` to `deepseek/deepseek-v4.1-flash-1017`. No figure here was re-based: `deepseek/deepseek-v4.1-flash` is still Value 100. C is what OpenRouter charged under default routing, which spreads calls across many providers at different prices: `deepseek/deepseek-v4.1-flash-1017`'s $0.324 per 1,000 responses is below what its listed price implies. That listed price was $0.15/$0.60 per million tokens in round 1, $0.30/$1.20 when round 2 started, and $0.15/$0.60 again later that day, so expect its cost to move.
 
+- Since these rounds, `output_mode` defaults to `json_schema`. On the default model, first try per call rose from 66% to about 98% with no measured quality cost; other models gain less. See [the experiments](benchmarks/first-try-2026-10-30/README.md).
+
 ![The live bench view during part 2 of the full run: a table of 16 models with schema-valid, fallback, latency and cost columns filling in as Gemini, Beam and the Inkling variants run, followed by the server suites](benchmarks/media/05-full-run-part2-short.gif)
 
 ## Round 2 (2026-10-30)

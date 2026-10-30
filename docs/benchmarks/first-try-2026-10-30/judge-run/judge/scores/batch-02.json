@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-02",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "b1e9c18ef8",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "id ord_8f3a2c91 and total 129.99 look like production data. A newly created order with status placed is exactly right for orderCreated."
+  },
+  {
+   "opaque_id": "53dd838b92",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Dated id order-20261030-073611-8f3c2a and total 64.95 look production-grade. status placed matches orderCreated, and the id date is sensible."
+  },
+  {
+   "opaque_id": "b65a9af226",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "id ord_8f31c2a7 and total 84.5 are plausible order values. status placed fits orderCreated; no conflicting fields."
+  },
+  {
+   "opaque_id": "9098c21e6f",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "id ord_8842f1c7 and total 129.99 are realistic. status placed fits an orderCreated event; nothing conflicts."
+  },
+  {
+   "opaque_id": "08bd94054c",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "id order_abc123 is a textbook placeholder though total 149.99 is plausible. status placed fits orderCreated."
+  },
+  {
+   "opaque_id": "5ccb45385a",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "id order_550e8400e29b41f4a3a3 reuses the well-known example UUID prefix; total 129.99 and created_at are fine. status placed fits orderCreated and the timestamp is sensible."
+  }
+ ]
+}

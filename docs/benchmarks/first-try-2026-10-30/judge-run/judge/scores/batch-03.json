@@ -1,0 +1,36 @@
+{
+ "batch_id": "batch-03",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "7965c71b51",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Natural issue and PR titles, R_kgDO id, Python color #3572A5 correct; example.com urls and avatar are the tells. Owner/name echoed, but issue #16 (10-27) predates the repo's createdAt (10-28)."
+  },
+  {
+   "opaque_id": "c4ecdb57ae",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "Description \"pepper2's Policy All\" is nonsense, id \"pebble/cedar\" is not a node id, license key \"MIT\" should be lowercase, avatar is an error image. Owner/name echoed; empty connections match totalCount 0; new fork with equal timestamps holds."
+  },
+  {
+   "opaque_id": "c397272218",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Titles and logins feel real, JavaScript color correct; id R_kgDOEmber01 and github.example.test urls are tells. raven/ember echoed and timestamps ordered, but issues totalCount 12 with only 4 nodes despite first:5."
+  },
+  {
+   "opaque_id": "936b8b64ff",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Rich believable titles (jitter backoff, parquet sinks) that link issues to PRs, plausible counts; example.com urls and avatar are minor tells. lumen/garnet echoed, but issues totalCount 87 with only 3 nodes despite first:5."
+  },
+  {
+   "opaque_id": "e2cbac50ce",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Specific titles, Go color #00ADD8, scheduler_test.go matches language; example.com urls are minor tells, buildbot42 typed User. nectar/quartz echoed, timestamps ordered, but issues totalCount 37 with only 3 nodes despite first:5."
+  }
+ ]
+}

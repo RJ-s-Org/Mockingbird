@@ -76,9 +76,9 @@ pub enum OutputMode {
     /// No `response_format`; the prompt alone asks for JSON.
     None,
     /// JSON mode (`json_object`), which forces an object at the top level.
-    #[default]
     JsonObject,
     /// Structured outputs (`json_schema`) with the answer's schema.
+    #[default]
     JsonSchema,
 }
 

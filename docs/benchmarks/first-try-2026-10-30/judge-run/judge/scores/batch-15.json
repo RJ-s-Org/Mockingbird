@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-15",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "e4f5b1eb5b",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Morgan Ellis, SFO-SEA, full airport names and H7K2Q9 ref look real; carrier HV is a European airline on a US domestic route. Id echoed, 09:15-11:25 equals 130 min, ticketed with ticket number, tax below total, all USD."
+  },
+  {
+   "opaque_id": "f61cacf303",
+   "realism": 5,
+   "coherence": 3,
+   "rationale": "Highly convincing: BA274 LHR-JFK, GB/US taxes in GBP, 684.50 fare, UK phone, ticket number. Id echoed, but times labeled Z (10:25Z-13:15Z) give 170 min against durationMinutes 470; they appear to be local times."
+  },
+  {
+   "opaque_id": "3c2b3675a1",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Jane and John Doe, XYZ123, offerId a1b2c3d4-e5f6..., ticket 1234567890123 and round 1500.00/150.00 are generic. Id echoed, but 08:00Z-11:30Z is 210 min against durationMinutes 330, and confirmed status already has ticket numbers."
+  },
+  {
+   "opaque_id": "d614c7b36e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Rich multimodal LIS-CDG plus TGV to Lyon, PT/FR/YQ taxes, Portuguese phone; patterned passenger uuids and a short 105 min Lisbon-Paris flight are tells. Id echoed, durations match times, rail follows flight, ticketed with numbers."
+  },
+  {
+   "opaque_id": "6e404ea3f6",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Real MAD-BCN route, but offerId 123e4567-..., passenger id 1111..., ticket 1234567890123, reference A1B2C3 and tax codes TA/TB are placeholders. Id echoed and 90 min matches times; status confirmed yet a ticketNumber is present."
+  },
+  {
+   "opaque_id": "8e5b7aa527",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Alice Smith, BK1234, ticket 1234567890123, AVIOS123456789 and round GBP amounts are generic, though LHR-CDG is real. Id echoed and 90 min matches times; flight of 10-27 is past while status stays confirmed with a ticket number."
+  }
+ ]
+}

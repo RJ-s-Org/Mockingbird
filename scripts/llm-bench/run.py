@@ -296,6 +296,8 @@ class ProxyProc:
         for p in list(prior) + list(args.prior_ledger or []):
             if os.path.exists(p):
                 cmd += ["--prior-ledger", p]
+        # The engine steps down from a rejected schema itself; let it.
+        cmd.append("--no-format-fallback")
         if args.no_stream_upgrade:
             cmd.append("--no-stream-upgrade")
         if args.upstream:
@@ -862,7 +864,7 @@ def main() -> int:
         p.add_argument("--llm-timeout-secs", type=int, help="passed to mb-evals (default: the profile default)")
         p.add_argument("--max-tokens", type=int, help="passed to mb-evals (default: the profile default)")
         p.add_argument("--output-budget", type=int, help="passed to mb-evals (default: the limits default)")
-        p.add_argument("--output-mode", default="json_object", choices=["none", "json_object", "json_schema"],
+        p.add_argument("--output-mode", default="json_schema", choices=["none", "json_object", "json_schema"],
                        help="the engine's output_mode; an @nojson model always runs with none")
         p.add_argument("--prior-ledger", action="append",
                        help="an earlier run's calls.jsonl(.gz) whose spend counts toward --budget-usd (repeatable)")

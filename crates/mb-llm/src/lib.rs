@@ -43,7 +43,7 @@ pub mod scripted;
 
 pub use fallback::{FallbackProvider, HopSettings};
 pub use http::{HttpOptions, http_client};
-pub use openai::{OpenAiCompatible, OpenAiConfig, OutputMode};
+pub use openai::{MAX_FREE_TEXT_CHARS, OpenAiCompatible, OpenAiConfig, OutputMode};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;
 

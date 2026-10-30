@@ -1,0 +1,90 @@
+# 2026-10-30T22:25:33+00:00 /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/target/release/mb-evals run --manifest /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/workloads.json --repeat 3 --concurrency 4 --samples /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/first-try-2026-10-30/engine-final/engine/openai__gpt-6-luna/samples.jsonl --out /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/first-try-2026-10-30/engine-final/engine/openai__gpt-6-luna --output-mode json_schema
+evaluating 18 contracts with openai/gpt-6-luna at http://127.0.0.1:60496/r/openai__gpt-6-luna~engine/api/v1
+[2m2026-10-30T22:26:04.713042Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mQuery_order
+[2m2026-10-30T22:26:09.019566Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mMutation_productCreate
+[2m2026-10-30T22:27:13.376102Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mQuery_repository
+[2m2026-10-30T22:27:18.008297Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mQuery_user
+[2m2026-10-30T22:27:22.663056Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mMutation_createIssue
+[2m2026-10-30T22:27:22.981793Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mMutation.createIssue [3mreason[0m[2m=[0mLLM returned HTTP 400: {"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\n  \"error\": {\n    \"message\": \"Invalid schema for response_format 'Mutation_createIssue': schema must be a JSON Schema of 'type: \\\"object\\\"', got 'type: \\\"None\\\"'.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": \"text.format.schema\",\n    \"code\": \"invalid_json_schema\"\n  }\n}","provider_name":"Azure","is_byok":false,"provider_error_code":"invalid_json_schema","previous_errors":[{"code":400,"message":"Provider returned error","provider_name":"OpenAI","raw":"{\n  \"error\": {\n    \"message\": \"Invalid schema for response_format 'Mutation_createIssue': schema must be a JSON Schema of 'type: \\\"object\\\"', got 'type: \\\"None\\\"'.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": \"text.format.schema\",\n    \"code\": \"invalid_json_schema\"\n  }\n}"}]}},"user_id":"user_37RWa11sXgFyPyjRNhxxPau6NR9"}
+[2m2026-10-30T22:27:25.479001Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mgetOffer
+[2m2026-10-30T22:27:27.186148Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mcreateBooking
+[2m2026-10-30T22:27:29.906463Z[0m [33m WARN[0m [2mmb_llm::openai[0m[2m:[0m the endpoint rejects this response schema; asking for it in JSON mode [3mmodel[0m[2m=[0mopenai/gpt-6-luna [3mschema[0m[2m=[0mgetBooking
+[2m2026-10-30T22:27:52.760316Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0masyncapi/commerce-events-kafka [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 8, repaired: 1, fallback: 0, p95_ms: 2748 }
+[2m2026-10-30T22:27:52.760375Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0masyncapi/orders-amqp-2.6 [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 6, repaired: 0, fallback: 0, p95_ms: 2431 }
+[2m2026-10-30T22:27:52.760439Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgraphql/devtools-github [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 11, repaired: 0, fallback: 1, p95_ms: 5878 }
+[2m2026-10-30T22:27:52.760451Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgraphql/ecommerce-shopify-admin [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 9662 }
+[2m2026-10-30T22:27:52.760460Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgrpc/otlp-trace-service [3mstats[0m[2m=[0mContractStats { calls: 3, llm: 3, repaired: 0, fallback: 0, p95_ms: 1575 }
+[2m2026-10-30T22:27:52.760468Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgrpc/route-guide [3mstats[0m[2m=[0mContractStats { calls: 3, llm: 3, repaired: 0, fallback: 0, p95_ms: 1756 }
+[2m2026-10-30T22:27:52.760476Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/devtools-github [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 7, repaired: 5, fallback: 0, p95_ms: 8539 }
+[2m2026-10-30T22:27:52.760484Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/ecommerce-orders-3.1 [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 2892 }
+[2m2026-10-30T22:27:52.760493Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/ecommerce-square [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 11, repaired: 1, fallback: 0, p95_ms: 6085 }
+[2m2026-10-30T22:27:52.760500Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/payments-paypal-orders [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 4, repaired: 5, fallback: 0, p95_ms: 4558 }
+[2m2026-10-30T22:27:52.760507Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/payments-stripe [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 2733 }
+[2m2026-10-30T22:27:52.760515Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-discord [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 5, repaired: 4, fallback: 0, p95_ms: 7892 }
+[2m2026-10-30T22:27:52.760522Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-spotify [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 3, repaired: 6, fallback: 0, p95_ms: 57572 }
+[2m2026-10-30T22:27:52.760530Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-tmdb [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 8, repaired: 4, fallback: 0, p95_ms: 6829 }
+[2m2026-10-30T22:27:52.760540Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/travel-booking [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 5447 }
+[2m2026-10-30T22:27:52.760547Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/travel-hotels [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 4, repaired: 2, fallback: 0, p95_ms: 3069 }
+[2m2026-10-30T22:27:52.760555Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0msoap/accounts-rpc [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 6, repaired: 0, fallback: 0, p95_ms: 1919 }
+[2m2026-10-30T22:27:52.760562Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0msoap/calculator [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 1552 }
+# Mockingbird LLM evals
+
+Model `openai/gpt-6-luna` at `http://127.0.0.1:60496/r/openai__gpt-6-luna~engine/api/v1`, started 2026-10-30T22:25:34.304272+00:00.
+
+| Metric | Value |
+| --- | --- |
+| Calls | 162 |
+| Schema-valid rate | 99.4% |
+| First-pass rate | 82.1% |
+| Repair rate | 17.3% |
+| Fallback rate | 0.6% |
+| p50 latency | 2722 ms |
+| p95 latency | 6829 ms |
+| Prompt tokens per call | 1245.8 |
+| Completion tokens per call | 382.7 |
+| Streaming operations not evaluated | 3 |
+
+## Per contract
+
+| Contract | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| asyncapi/commerce-events-kafka | 9 | 8 | 1 | 0 | 2748 |
+| asyncapi/orders-amqp-2.6 | 6 | 6 | 0 | 0 | 2431 |
+| graphql/devtools-github | 12 | 11 | 0 | 1 | 5878 |
+| graphql/ecommerce-shopify-admin | 12 | 12 | 0 | 0 | 9662 |
+| grpc/otlp-trace-service | 3 | 3 | 0 | 0 | 1575 |
+| grpc/route-guide | 3 | 3 | 0 | 0 | 1756 |
+| rest/devtools-github | 12 | 7 | 5 | 0 | 8539 |
+| rest/ecommerce-orders-3.1 | 9 | 9 | 0 | 0 | 2892 |
+| rest/ecommerce-square | 12 | 11 | 1 | 0 | 6085 |
+| rest/payments-paypal-orders | 9 | 4 | 5 | 0 | 4558 |
+| rest/payments-stripe | 12 | 12 | 0 | 0 | 2733 |
+| rest/social-discord | 9 | 5 | 4 | 0 | 7892 |
+| rest/social-spotify | 9 | 3 | 6 | 0 | 57572 |
+| rest/social-tmdb | 12 | 8 | 4 | 0 | 6829 |
+| rest/travel-booking | 12 | 12 | 0 | 0 | 5447 |
+| rest/travel-hotels | 6 | 4 | 2 | 0 | 3069 |
+| soap/accounts-rpc | 6 | 6 | 0 | 0 | 1919 |
+| soap/calculator | 9 | 9 | 0 | 0 | 1552 |
+
+## Per API type
+
+| API type | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| asyncapi | 15 | 14 | 1 | 0 | 2748 |
+| graphql | 24 | 23 | 0 | 1 | 6898 |
+| grpc | 6 | 6 | 0 | 0 | 1756 |
+| rest | 102 | 75 | 27 | 0 | 7249 |
+| soap | 15 | 15 | 0 | 0 | 1919 |
+
+## Per domain
+
+| Domain | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| devtools | 27 | 21 | 5 | 1 | 7972 |
+| ecommerce | 48 | 46 | 2 | 0 | 6085 |
+| generic | 18 | 18 | 0 | 0 | 1919 |
+| payments | 21 | 16 | 5 | 0 | 3871 |
+| social-media | 30 | 16 | 14 | 0 | 7892 |
+| travel | 18 | 16 | 2 | 0 | 5447 |
+threshold violated: p95_ms 6829 > 3000

@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-07",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "dd6d7cd9e5",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Very GitHub-like: true Apache license node_id, plausible counts, topics. Owner node_id U_kgDOa1b2C3d4 is a small tell. owner/repo echoed across all URLs, watchers equal stars, created < pushed < updated."
+  },
+  {
+   "opaque_id": "2d5fea4ea2",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Believable description, counts and homepage, but topic \"p80tl07x9ymmeh-qcu1pd\" is random junk. All URLs and ids echo alpha/harbor, watchers equal stars; pushed_at (10-29) postdating updated_at (10-28) is a minor oddity."
+  },
+  {
+   "opaque_id": "820207ef50",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "True MIT license node_id, realistic counts and topics; owner node_id U_kgDOaBcD1234 is a slight tell. ember/fjord echoed everywhere, Rust fits the description, timestamps ordered, watchers equal stars."
+  },
+  {
+   "opaque_id": "94b7d0eed9",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Timestamps stale at 2024, random topic \"inqg19sq69-w\", license carries a stray type \"license-simple\", clone/ssh urls and subscribers absent. sable/iris echoed, Python fits description; MIT license uses the Apache node_id."
+  },
+  {
+   "opaque_id": "239dd57170",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "\"A test repository for tundra operations\", testing topic, owner id 12345678 and round size 1024 read as synthetic. cedar/tundra echoed in all URLs, watchers equal stars, created < pushed < updated."
+  },
+  {
+   "opaque_id": "721f103e53",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Natural description, topics and counts with the true MIT license node_id; homepage pebble.example.dev is the one tell. bravo/pebble echoed, Rust matches topics, timestamps ordered; created_at 10 days ago is young but not contradictory."
+  }
+ ]
+}

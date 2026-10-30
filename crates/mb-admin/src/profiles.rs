@@ -37,13 +37,13 @@ const RAW_KEY_FIELDS: [&str; 2] = ["api_key", "apiKey"];
 
 /// How a profile's endpoint is asked for JSON: `none` (no
 /// `response_format`; the prompt alone asks for JSON), `json_object` (JSON
-/// mode, the default) or `json_schema` (structured output).
+/// mode) or `json_schema` (structured output, the default).
 #[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     None,
-    #[default]
     JsonObject,
+    #[default]
     JsonSchema,
 }
 

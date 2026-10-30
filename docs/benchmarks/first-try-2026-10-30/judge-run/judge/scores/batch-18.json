@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-18",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "7ad8c6dc9a",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "SubtractResult 25 is the plain integer a real calculator returns. 58 - 33 = 25 is correct."
+  },
+  {
+   "opaque_id": "de4028a1ba",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "SubtractResult 58 is the plain integer a real calculator returns. 88 - 30 = 58 is correct."
+  },
+  {
+   "opaque_id": "2b2cbf62f8",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "SubtractResult 4 is the plain integer a real calculator returns. 11 - 7 = 4 is correct."
+  },
+  {
+   "opaque_id": "1e8c58ed31",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "SubtractResult 1 is the plain integer a real calculator returns. 3 - 2 = 1 is correct."
+  },
+  {
+   "opaque_id": "71cb651eb1",
+   "realism": 5,
+   "coherence": 2,
+   "rationale": "SubtractResult 58 has the right form for a calculator reply. But 24 - 82 = -58: the sign is wrong, so the only relation in the body fails and a client test would break."
+  },
+  {
+   "opaque_id": "4ea868555a",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "SubtractResult 48 is the plain integer a real calculator returns. 52 - 4 = 48 is correct."
+  }
+ ]
+}

@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-04",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "dd257b48c1",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "\"Northstar Outfitters\", Shop id 8142067391 and Denver timezone look real; .example domains and -demo suffix are mild tells. Domain, email, url and name all agree, Basic plan with shopifyPlus false."
+  },
+  {
+   "opaque_id": "b7c451d970",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "\"Example Store\", owner@example.com, Shop/12345 and example-store.myshopify.com are all placeholders. Internally consistent: name matches domain, url matches myshopify domain, Basic plan with shopifyPlus false."
+  },
+  {
+   "opaque_id": "a6a96ad29a",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "\"Maple & Moss\", hello@ mailbox, Shop id 839274615 are believable; .example domains and -demo suffix are mild tells. Name, domain, email and url agree, Basic plan with shopifyPlus false."
+  },
+  {
+   "opaque_id": "98f0133ad2",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "\"Example Store\", owner@example-store.test and Shop/1000000001 are placeholders. Name, domain, email and url agree, Basic plan with shopifyPlus false."
+  },
+  {
+   "opaque_id": "36c2baaafb",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "\"Example Store\", shop@example.com and Shop/12345 are placeholders, though plan \"Basic Shopify\" is a true plan name. Name, domain and url agree, shopifyPlus false fits the plan."
+  },
+  {
+   "opaque_id": "558032a23d",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "\"Example Store\", admin@example-store.test, Shop/1000000001 and .test url are placeholders. Name, domain, email and url agree, Basic plan with shopifyPlus false."
+  }
+ ]
+}

@@ -638,9 +638,14 @@ impl Engine {
                     user.content.push_str("\n\n");
                     user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
                 }
+                let prompt_schema = compact::response_prompt_schema(bundle, written);
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
-                    schema: compact::response_prompt_schema(bundle, written),
+                    schema: if items_envelope {
+                        guards::items_schema(prompt_schema)
+                    } else {
+                        prompt_schema
+                    },
                 };
                 let hints = FakerHints::from_call(op, call);
                 let fill = shaped.as_deref().map(|shaped| Fill {

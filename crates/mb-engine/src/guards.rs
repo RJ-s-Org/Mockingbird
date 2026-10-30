@@ -392,7 +392,7 @@ pub(crate) const ITEMS_KEY: &str = "items";
 /// The instruction added to the prompt when an array answer is asked for
 /// as an [`ITEMS_KEY`] envelope.
 pub(crate) const ITEMS_ENVELOPE_NOTE: &str = "The response schema describes a JSON array, but \
-JSON mode only allows an object at the top level. Output {\"items\": [...]}: one object whose only \
+Only an object is allowed at the top level. Output {\"items\": [...]}: one object whose only \
 member, \"items\", is the array the schema describes. Add no other members.";
 
 /// The error of output that holds no JSON value.
@@ -531,7 +531,22 @@ without the wrapper."
 /// envelope (`{"orders": [...]}`) is still unwrapped by the envelope checks
 /// in `check_value`.
 pub(crate) fn items_envelope(caps: mb_llm::Capabilities, schema: &Value) -> bool {
-    caps.json_mode && !caps.json_schema && is_array_root(schema)
+    caps.json_mode && is_array_root(schema)
+}
+
+/// `schema` (an array root) as the object [`items_envelope`] asks for: some
+/// endpoints refuse a response schema whose root is not an object.
+pub(crate) fn items_schema(mut schema: Value) -> Value {
+    let defs = schema.as_object_mut().and_then(|root| root.remove("$defs"));
+    let mut wrapped = serde_json::json!({
+        "type": "object",
+        "required": [ITEMS_KEY],
+        "properties": {ITEMS_KEY: schema},
+    });
+    if let (Some(defs), Some(root)) = (defs, wrapped.as_object_mut()) {
+        root.insert("$defs".to_string(), defs);
+    }
+    wrapped
 }
 
 /// `doc`'s root schema object, following local `$ref`s within `doc`.

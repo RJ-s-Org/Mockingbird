@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-06",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "47c30a721e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "name \"\" with location echoed is exactly what real RouteGuide returns for an unnamed point; no invented data but correct. latitude 57 and longitude 27 echoed."
+  },
+  {
+   "opaque_id": "a8891c5b55",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Empty name with echoed location matches real RouteGuide behavior for an unnamed point. latitude 83 and longitude 93 echoed exactly."
+  },
+  {
+   "opaque_id": "f993f23b3f",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "\"North Point Overlook at 51°N 9°E\" is an invented name embedding coordinates, unlike real feature addresses. location is missing, so the point is not echoed, and it reads 51 as degrees where the contract uses E7."
+  },
+  {
+   "opaque_id": "587a19fdb6",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Empty name with echoed location matches real RouteGuide behavior for an unnamed point. latitude 43 and longitude 42 echoed exactly."
+  },
+  {
+   "opaque_id": "5f4b821730",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Empty name with echoed location matches real RouteGuide behavior for an unnamed point. latitude 13 and longitude 37 echoed exactly."
+  },
+  {
+   "opaque_id": "b4811fc461",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Empty name with echoed location matches real RouteGuide behavior for an unnamed point. latitude 10 and longitude 27 echoed exactly."
+  }
+ ]
+}

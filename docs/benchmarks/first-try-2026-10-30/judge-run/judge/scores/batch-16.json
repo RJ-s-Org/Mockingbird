@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-16",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "490a79281a",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "data is an empty array with total 0, so no hotel data to assess; default-like body. Still consistent: page 27 and pageSize 16 echoed, and empty fits checkOut 10-28 before checkIn 10-29."
+  },
+  {
+   "opaque_id": "a23242f4fc",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Grand Hotel, 123 Main St, postal 12345, ids 12345678-1234... and 11111111-... are generic. All in city DGI yet geo is SF, LA and Philadelphia; page 33 x 72 far exceeds total 150; 3 rows; checkOut valid here."
+  },
+  {
+   "opaque_id": "5025373d11",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "Empty data with total 0 gives no hotel content; default-like body. Consistent: page 55 and pageSize 56 echoed and empty result is sensible for a zero-night stay (checkIn equals checkOut)."
+  },
+  {
+   "opaque_id": "17654603b6",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Harbor Grand, Seaside Inn, tight NYC geo and varied prices look fine; example.com sites and patterned uuids are bland. total 3 with rows returned on page 58 of size 44 is impossible, and checkOut before checkIn is ignored."
+  },
+  {
+   "opaque_id": "bd97175327",
+   "realism": 5,
+   "coherence": 3,
+   "rationale": "Excellent London data: Wapping and Rotherhithe streets, valid postcodes, nearby geo, GBP, rating tracks stars, rates vary. But 5 rows with total 5 on page 52 of size 26 is impossible and checkOut before checkIn is ignored."
+  },
+  {
+   "opaque_id": "1813217731",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "123 Main St, postal 12345/67890 and ids 1111.../2222... are placeholders, though names and geo are plausible. total 120 cannot reach page 53 x 63, only 2 rows on the page, ZIPs do not match NYC geo, reversed dates ignored."
+  }
+ ]
+}

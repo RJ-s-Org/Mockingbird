@@ -1012,7 +1012,7 @@ async fn profiles_never_return_secret_values() {
     assert_eq!(body["temperature"], 0.7);
     assert_eq!(body["timeout_ms"], 60_000);
     assert_eq!(body["max_tokens"], 16_384);
-    assert_eq!(body["json_schema"], false);
+    assert_eq!(body["json_schema"], true);
 
     let r = h.get("/api/v1/llm-profiles/fast").await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text);

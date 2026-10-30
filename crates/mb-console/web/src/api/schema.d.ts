@@ -1685,7 +1685,7 @@ export interface components {
         /**
          * @description How a profile's endpoint is asked for JSON: `none` (no
          *     `response_format`; the prompt alone asks for JSON), `json_object` (JSON
-         *     mode, the default) or `json_schema` (structured output).
+         *     mode) or `json_schema` (structured output, the default).
          * @enum {string}
          */
         OutputMode: "none" | "json_object" | "json_schema";
