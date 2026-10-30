@@ -521,7 +521,7 @@ fn validate_channels(
             .as_ref()
             .map(|ts| ts.iter().map(|t| t.to_trigger()).collect::<Vec<_>>());
         if let Some(triggers) = &triggers {
-            mb_import::validate_triggers(triggers, channel.direction)
+            mb_import::check_triggers(triggers, channel.direction)
                 .map_err(|e| anyhow!("mocks.{name}.channels.{id}.triggers: {e}"))?;
         }
         channels.insert(id.clone(), (fc.enabled, triggers));

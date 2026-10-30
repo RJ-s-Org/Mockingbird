@@ -1,22 +1,35 @@
 //! Smart import: turns API documentation (Markdown, HTML, PDF, plain text),
 //! HAR recordings and Postman collections into reviewable draft contracts.
+//!
+//! [`run_import`] is the entry point. The hidden submodules are public only
+//! for this crate's integration tests; they are not part of its API and
+//! become private in 0.2.
 
 pub mod assemble;
+#[doc(hidden)]
 pub mod chunk;
+#[doc(hidden)]
 pub mod complete;
+#[doc(hidden)]
 pub mod embedded;
 pub mod fetch;
+#[doc(hidden)]
 pub mod har;
+#[doc(hidden)]
 pub mod infer;
+#[doc(hidden)]
 pub mod llm;
 pub mod merge;
 pub mod model;
+#[doc(hidden)]
 pub mod paths;
 mod pdfscan;
+#[doc(hidden)]
 pub mod postman;
 mod probe;
 pub mod redact;
 mod swagger2;
+#[doc(hidden)]
 pub mod text;
 
 use std::collections::HashSet;
@@ -46,20 +59,29 @@ pub const MAX_EXAMPLES: usize = 5;
 /// Default token budget of one import job.
 pub const DEFAULT_IMPORT_TOKENS: u64 = 200_000;
 
+/// Why a smart import failed.
 #[derive(thiserror::Error, Debug)]
 pub enum SmartError {
+    /// The input cannot be decoded or parsed as its kind.
     #[error("cannot read the input: {0}")]
     Unreadable(String),
+    /// The input is not something smart import handles.
     #[error("{0}")]
     Unsupported(String),
+    /// A URL could not be fetched (the [`fetch::FetchError`] message).
     #[error("fetch failed: {0}")]
     Fetch(String),
+    /// Documentation was given but no LLM is available.
     #[error("document imports need an LLM profile; the mock has none or the server runs offline")]
     LlmRequired,
+    /// Nothing in the input described an operation; the text, empty or
+    /// starting with `: `, quotes the first reasons.
     #[error("no operations were found{0}")]
     NoOperations(String),
+    /// The observer canceled the import.
     #[error("the import was canceled")]
     Canceled,
+    /// The assembled draft does not compile (its first problem).
     #[error("the draft does not compile: {0}")]
     Compile(String),
 }
@@ -152,7 +174,7 @@ impl Default for ImportOptions {
 }
 
 /// What to import.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ImportInput {
     /// Uploaded bytes of a known kind.
     Bytes {
@@ -164,19 +186,60 @@ pub enum ImportInput {
     Url(String),
 }
 
+/// Shows the length of uploaded bytes, not the bytes, and a URL without its
+/// user, password or credential-like query values.
+impl std::fmt::Debug for ImportInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes { kind, name, bytes } => f
+                .debug_struct("Bytes")
+                .field("kind", kind)
+                .field("name", name)
+                .field("len", &bytes.len())
+                .finish(),
+            Self::Url(raw) => {
+                let shown = match url::Url::parse(raw.trim()) {
+                    Ok(mut url) => {
+                        // Neither setter fails on a URL with a host, and
+                        // one without a host has no userinfo.
+                        let _ = url.set_username("");
+                        let _ = url.set_password(None);
+                        redact::redacted_url(&url)
+                    }
+                    Err(_) => format!("<unparsed URL, {} bytes>", raw.len()),
+                };
+                f.debug_tuple("Url").field(&shown).finish()
+            }
+        }
+    }
+}
+
 /// The phase an import is in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    /// Fetching a URL.
     Fetching,
+    /// Extracting operations from the sources.
     Extracting,
+    /// Analyzing the extracted operations.
     Analyzing,
+    /// Writing operation summaries.
     Summarizing,
+    /// Assembling and compiling the draft.
     Assembling,
+}
+
+/// The wire string, as [`Phase::as_str`].
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Phase {
     /// The wire string of the phase.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fetching => "fetching",
@@ -196,6 +259,7 @@ pub trait ImportObserver: Send + Sync {
 }
 
 /// An observer that never cancels.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct NoopObserver;
 
 #[async_trait]
@@ -215,8 +279,6 @@ pub struct DraftResult {
     pub meta: DraftMeta,
 }
 
-/// Reports progress; errs with [`SmartError::Canceled`] when the observer
-/// cancels.
 /// The job error for a draft that does not compile: its first problem.
 pub(crate) fn compile_error(issues: &[DraftIssue]) -> SmartError {
     let first = issues.first();
@@ -227,6 +289,8 @@ pub(crate) fn compile_error(issues: &[DraftIssue]) -> SmartError {
     ))
 }
 
+/// Reports progress; errs with [`SmartError::Canceled`] when the observer
+/// cancels.
 pub(crate) async fn report(
     observer: &dyn ImportObserver,
     phase: Phase,
@@ -392,6 +456,10 @@ async fn extract_document(
 }
 
 /// Imports with the system resolver; see [`run_import_with`].
+///
+/// # Errors
+///
+/// As [`run_import_sources`].
 pub async fn run_import(
     input: ImportInput,
     llm: Option<&ExtractLlm>,
@@ -404,6 +472,10 @@ pub async fn run_import(
 /// Turns the input into a compiled draft: fetch (for a URL), extract
 /// operations (LLM for documentation, deterministic for HAR/Postman, with
 /// LLM summaries when available), assemble OpenAPI 3.1 and compile it.
+///
+/// # Errors
+///
+/// As [`run_import_sources`].
 pub async fn run_import_with(
     input: ImportInput,
     llm: Option<&ExtractLlm>,
@@ -572,6 +644,15 @@ fn combine(parts: Vec<(SourceInfo, Extracted)>) -> Option<(SourceInfo, Extracted
 /// fetched or read is skipped with a `source_skipped` warning; when all
 /// fail, the first error is returned. [`SmartError::LlmRequired`] and
 /// [`SmartError::Canceled`] end the import at once.
+///
+/// # Errors
+///
+/// [`SmartError::Unsupported`] for more than [`MAX_IMPORT_SOURCES`]
+/// inputs; [`SmartError::LlmRequired`] for documentation without an LLM;
+/// [`SmartError::Canceled`] when the observer cancels; the first source's
+/// [`SmartError::Fetch`] or [`SmartError::Unreadable`] when every source
+/// fails; [`SmartError::NoOperations`] when nothing was found; and
+/// [`SmartError::Compile`] when the assembled draft does not compile.
 pub async fn run_import_sources(
     inputs: Vec<ImportInput>,
     llm: Option<&ExtractLlm>,

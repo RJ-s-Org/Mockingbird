@@ -499,6 +499,23 @@ enum Side {
     Output,
 }
 
+/// The SOAP binding style of an operation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SoapStyle {
+    Document,
+    Rpc,
+}
+
+/// What [`Wsdl::body`] needs of one operation, shared by its input and
+/// output messages.
+struct OpContext<'c, 'x, 's> {
+    xsd: &'c Xsd<'x>,
+    service: &'c Service<'s>,
+    name: &'c str,
+    style: SoapStyle,
+    binding_op: Option<&'c Element>,
+}
+
 impl<'a> Wsdl<'a> {
     fn new(root: &'a Element, file: &'a str) -> Self {
         Wsdl {
@@ -630,16 +647,11 @@ impl<'a> Wsdl<'a> {
         Ok(Value::Object(out))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn body(
         &self,
-        xsd: &Xsd<'_>,
-        service: &Service<'_>,
-        op_name: &str,
-        rpc: bool,
+        op: &OpContext<'_, '_, '_>,
         side: Side,
         msg: Option<&'a Element>,
-        binding_op: Option<&Element>,
     ) -> Result<Option<Value>, ImportError> {
         let Some(msg) = msg else {
             return Ok(None);
@@ -648,21 +660,22 @@ impl<'a> Wsdl<'a> {
             Side::Input => "input",
             Side::Output => "output",
         };
-        let soap_body = binding_op
+        let soap_body = op
+            .binding_op
             .and_then(|b| b.child(WSDL_NS, tag))
-            .and_then(|io| io.child(service.soap_ns, "body"));
+            .and_then(|io| io.child(op.service.soap_ns, "body"));
         let parts = Self::parts(msg, soap_body);
-        if !rpc {
-            return self.document_body(xsd, msg, &parts);
+        if op.style == SoapStyle::Document {
+            return self.document_body(op.xsd, msg, &parts);
         }
         let namespace = soap_body
             .and_then(|b| b.attr("namespace"))
             .unwrap_or(self.tns);
         let wrapper = match side {
-            Side::Input => op_name.to_owned(),
-            Side::Output => format!("{op_name}Response"),
+            Side::Input => op.name.to_owned(),
+            Side::Output => format!("{}Response", op.name),
         };
-        self.rpc_body(xsd, &parts, wrapper, namespace).map(Some)
+        self.rpc_body(op.xsd, &parts, wrapper, namespace).map(Some)
     }
 
     fn fault(&self, xsd: &Xsd<'_>, op: &Element) -> Result<Option<Value>, ImportError> {
@@ -712,19 +725,21 @@ impl<'a> Wsdl<'a> {
                     .and_then(|b| b.attr("style"))
             })
             .unwrap_or("document");
-        let rpc = style == "rpc";
-        let input_msg = self.message(op.child(WSDL_NS, "input"))?;
-        let output_msg = self.message(op.child(WSDL_NS, "output"))?;
-        let input = self.body(xsd, service, name, rpc, Side::Input, input_msg, binding_op)?;
-        let output = self.body(
+        let ctx = OpContext {
             xsd,
             service,
             name,
-            rpc,
-            Side::Output,
-            output_msg,
+            style: if style == "rpc" {
+                SoapStyle::Rpc
+            } else {
+                SoapStyle::Document
+            },
             binding_op,
-        )?;
+        };
+        let input_msg = self.message(op.child(WSDL_NS, "input"))?;
+        let output_msg = self.message(op.child(WSDL_NS, "output"))?;
+        let input = self.body(&ctx, Side::Input, input_msg)?;
+        let output = self.body(&ctx, Side::Output, output_msg)?;
         let identity = id_field(output.as_ref(), defs).map(|field| Identity {
             path_param: None,
             field,

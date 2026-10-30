@@ -26,6 +26,7 @@ pub enum ImportKind {
 
 impl ImportKind {
     /// The wire string of the kind.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
@@ -38,6 +39,7 @@ impl ImportKind {
     }
 
     /// The kind with the wire string `s`.
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "markdown" => Self::Markdown,
@@ -51,13 +53,35 @@ impl ImportKind {
     }
 
     /// Whether the kind is documentation that an LLM must read.
+    #[must_use]
     pub fn needs_llm(self) -> bool {
         matches!(self, Self::Markdown | Self::Html | Self::Pdf | Self::Text)
     }
 }
 
+/// The wire string, as [`ImportKind::as_str`].
+impl std::fmt::Display for ImportKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// An unknown [`ImportKind`] wire string.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+#[error("unknown import kind {0:?} (expected markdown, html, pdf, text, har or postman)")]
+pub struct UnknownImportKind(pub String);
+
+/// The kind with this wire string, as [`ImportKind::parse`].
+impl std::str::FromStr for ImportKind {
+    type Err = UnknownImportKind;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| UnknownImportKind(s.to_owned()))
+    }
+}
+
 /// Where a parameter is sent.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamLocation {
     Path,
@@ -159,6 +183,8 @@ pub struct DraftWarning {
 }
 
 impl DraftWarning {
+    /// A warning with this code and message, about no particular operation.
+    #[must_use]
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
@@ -167,6 +193,8 @@ impl DraftWarning {
         }
     }
 
+    /// The warning, about the operation with this target (`"GET /pets"`).
+    #[must_use]
     pub fn for_operation(mut self, target: String) -> Self {
         self.operation = Some(target);
         self

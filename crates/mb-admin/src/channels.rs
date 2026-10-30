@@ -493,8 +493,8 @@ pub async fn put(
                         .map_err(|e| Problem::unprocessable(format!("triggers[{i}]: {e}")))
                 })
                 .collect::<ApiResult<Vec<_>>>()?;
-            mb_import::validate_triggers(&triggers, channel.direction)
-                .map_err(Problem::unprocessable)?;
+            mb_import::check_triggers(&triggers, channel.direction)
+                .map_err(|e| Problem::unprocessable(e.to_string()))?;
             Some(triggers)
         }
     };

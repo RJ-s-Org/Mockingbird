@@ -1642,7 +1642,7 @@ async fn urls_job_fetches_each_url_into_one_draft() {
     };
     st.llm = Arc::new(TestLlm(Some(scripted(vec![pets_answer()]))));
     st.imports.settings.fetch =
-        mb_import::smart::fetch::FetchPolicy::from_allowlist(&["127.0.0.1/32".to_string()])
+        mb_import::smart::fetch::FetchPolicy::parse_allowlist(&["127.0.0.1/32".to_string()])
             .unwrap();
     let h = Harness {
         app: router(st.clone()),

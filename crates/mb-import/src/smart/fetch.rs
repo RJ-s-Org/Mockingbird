@@ -59,7 +59,7 @@ const V4_MAPPED: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0, 0, 0, 0, 0, 0xff
 const NAT64: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96);
 
 /// One `import.url_allowlist` entry.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AllowEntry {
     /// An exact host name (lower-case).
     Host(String),
@@ -69,19 +69,41 @@ pub enum AllowEntry {
     Net(IpNet),
 }
 
-impl FromStr for AllowEntry {
-    type Err = String;
+/// Why an `import.url_allowlist` entry was rejected. The `Display` text is
+/// the message the config loader reports.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum AllowlistError {
+    /// The entry is empty or only whitespace.
+    #[error("an empty allowlist entry")]
+    Empty,
+    /// The entry has a `/` but is not a CIDR range.
+    #[error("{0:?} is not a valid CIDR range")]
+    InvalidCidr(String),
+    /// The entry starts with `*.` but the rest is not a host name.
+    #[error("{0:?} is not a valid host suffix")]
+    InvalidSuffix(String),
+    /// The entry is neither an address nor a host name.
+    #[error("{0:?} is not a valid host name")]
+    InvalidHost(String),
+}
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl AllowEntry {
+    /// Parses one entry: a CIDR range, an address, `*.suffix` or a host
+    /// name (surrounding whitespace is ignored).
+    ///
+    /// # Errors
+    ///
+    /// An [`AllowlistError`] naming the entry when it is none of these.
+    pub fn parse_entry(s: &str) -> Result<Self, AllowlistError> {
         let entry = s.trim();
         if entry.is_empty() {
-            return Err("an empty allowlist entry".into());
+            return Err(AllowlistError::Empty);
         }
         if entry.contains('/') {
             return entry
                 .parse::<IpNet>()
                 .map(AllowEntry::Net)
-                .map_err(|_| format!("{entry:?} is not a valid CIDR range"));
+                .map_err(|_| AllowlistError::InvalidCidr(entry.to_owned()));
         }
         if let Ok(ip) = entry.parse::<IpAddr>() {
             return Ok(AllowEntry::Net(IpNet::from(ip)));
@@ -89,11 +111,20 @@ impl FromStr for AllowEntry {
         if let Some(suffix) = entry.strip_prefix("*.") {
             return valid_host_name(suffix)
                 .map(AllowEntry::Suffix)
-                .ok_or_else(|| format!("{entry:?} is not a valid host suffix"));
+                .ok_or_else(|| AllowlistError::InvalidSuffix(entry.to_owned()));
         }
         valid_host_name(entry)
             .map(AllowEntry::Host)
-            .ok_or_else(|| format!("{entry:?} is not a valid host name"))
+            .ok_or_else(|| AllowlistError::InvalidHost(entry.to_owned()))
+    }
+}
+
+/// [`AllowEntry::parse_entry`], with the error as its message.
+impl FromStr for AllowEntry {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_entry(s).map_err(|e| e.to_string())
     }
 }
 
@@ -136,10 +167,14 @@ impl Default for FetchPolicy {
 
 impl FetchPolicy {
     /// The default policy with the given allowlist entries.
-    pub fn from_allowlist(entries: &[String]) -> Result<Self, String> {
+    ///
+    /// # Errors
+    ///
+    /// The [`AllowlistError`] of the first entry that does not parse.
+    pub fn parse_allowlist(entries: &[String]) -> Result<Self, AllowlistError> {
         let allowlist = entries
             .iter()
-            .map(|e| e.parse::<AllowEntry>())
+            .map(|e| AllowEntry::parse_entry(e))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             allowlist,
@@ -147,8 +182,23 @@ impl FetchPolicy {
         })
     }
 
+    /// [`FetchPolicy::parse_allowlist`], with the error as its message.
+    ///
+    /// # Errors
+    ///
+    /// The [`AllowlistError`] message of the first entry that does not
+    /// parse.
+    #[deprecated(
+        since = "0.1.1",
+        note = "use parse_allowlist, which returns a typed AllowlistError"
+    )]
+    pub fn from_allowlist(entries: &[String]) -> Result<Self, String> {
+        Self::parse_allowlist(entries).map_err(|e| e.to_string())
+    }
+
     /// Whether a `Host`/`Suffix` entry names this host, which exempts every
     /// address it resolves to.
+    #[must_use]
     pub fn host_allowed(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
         self.allowlist.iter().any(|entry| match entry {
@@ -175,10 +225,12 @@ impl FetchPolicy {
 /// Name resolution used by [`fetch_with`].
 #[async_trait]
 pub trait Resolver: Send + Sync {
+    /// The addresses of `host`, each with `port`.
     async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
 }
 
 /// The system resolver (`tokio::net::lookup_host`).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SystemResolver;
 
 #[async_trait]
@@ -195,11 +247,15 @@ pub struct Fetched {
     pub url: Url,
     /// The media type, lower-case, without parameters.
     pub content_type: Option<String>,
+    /// The response body.
     pub bytes: Vec<u8>,
 }
 
+/// Why a fetch failed.
 #[derive(thiserror::Error, Debug)]
 pub enum FetchError {
+    /// The URL does not parse, is not http or https, has no host or carries
+    /// credentials.
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
     /// The host or a redirect resolves to a private or reserved address.
@@ -209,23 +265,38 @@ pub enum FetchError {
         "destination not allowed: the URL or a redirect leads to an address imports may not fetch \
          (an administrator can allow it with import.url_allowlist)"
     )]
-    Blocked { host: String, ip: IpAddr },
+    Blocked {
+        /// The host that was resolved.
+        host: String,
+        /// The blocked address it resolved to.
+        ip: IpAddr,
+    },
+    /// The host does not resolve.
     #[error("cannot resolve {0}")]
     Resolve(String),
+    /// The redirect chain is longer than the policy allows.
     #[error("more than {0} redirects")]
     TooManyRedirects(usize),
+    /// The body is larger than the policy allows.
     #[error("the response exceeds {0} bytes")]
     TooLarge(usize),
+    /// The whole fetch took longer than the policy allows.
     #[error("the fetch timed out")]
     Timeout,
+    /// The final response is not a success.
     #[error("the server answered HTTP {0}")]
     Http(u16),
+    /// The connection or the TLS handshake failed.
     #[error("transport error: {0}")]
     Transport(String),
 }
 
 /// Parses a URL and accepts only http/https URLs with a host and without
 /// userinfo.
+///
+/// # Errors
+///
+/// [`FetchError::InvalidUrl`] when the URL breaks one of these rules.
 pub fn validate_url(raw: &str) -> Result<Url, FetchError> {
     let url = Url::parse(raw.trim()).map_err(|e| FetchError::InvalidUrl(format!("{raw}: {e}")))?;
     check_url(url)
@@ -264,6 +335,7 @@ fn embedded_v4(ip: IpAddr) -> Option<Ipv4Addr> {
 /// Whether the address is private, loopback, link-local, reserved,
 /// documentation or multicast (IPv4-mapped and NAT64 addresses are judged by
 /// their embedded IPv4 address).
+#[must_use]
 pub fn is_blocked_ip(ip: IpAddr) -> bool {
     if let Some(v4) = embedded_v4(ip) {
         return BLOCKED_V4.iter().any(|net| net.contains(&v4));
@@ -275,6 +347,10 @@ pub fn is_blocked_ip(ip: IpAddr) -> bool {
 }
 
 /// Fetches a URL with the system resolver.
+///
+/// # Errors
+///
+/// As [`fetch_with`].
 pub async fn fetch(raw: &str, policy: &FetchPolicy) -> Result<Fetched, FetchError> {
     fetch_with(raw, policy, &SystemResolver).await
 }
@@ -282,6 +358,13 @@ pub async fn fetch(raw: &str, policy: &FetchPolicy) -> Result<Fetched, FetchErro
 /// Fetches a URL, following up to `policy.max_redirects` redirects, each hop
 /// validated, resolved once through `resolver` and checked against the
 /// blocked ranges.
+///
+/// # Errors
+///
+/// A [`FetchError`]: an invalid URL, a host that does not resolve or
+/// resolves to a blocked address (outside the allowlist), too many
+/// redirects, a non-success status, a body over `policy.max_bytes`, the
+/// `policy.timeout` passing, or a transport failure.
 pub async fn fetch_with(
     raw: &str,
     policy: &FetchPolicy,

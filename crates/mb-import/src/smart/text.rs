@@ -46,6 +46,12 @@ pub fn is_endpoint_line(line: &str) -> bool {
 
 /// Extract the text of an upload of the given kind. Markdown and plain text
 /// are read as Markdown.
+///
+/// # Errors
+///
+/// [`SmartError::Unreadable`] when the bytes are not UTF-8 (Markdown, text,
+/// HTML) or the PDF cannot be read, and [`SmartError::Unsupported`] for HAR
+/// and Postman, which are not documents.
 pub fn extract_text(kind: ImportKind, bytes: &[u8]) -> Result<TextDoc, SmartError> {
     match kind {
         ImportKind::Markdown | ImportKind::Text => Ok(extract_markdown(utf8(bytes)?)),
@@ -434,6 +440,11 @@ fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, SmartError> {
 /// Extract a PDF: one prose block per page under `Page N`, split further at
 /// endpoint lines. Pages whose text cannot be extracted are skipped; when no
 /// page can be read the PDF is unreadable.
+///
+/// # Errors
+///
+/// [`SmartError::Unreadable`] when the PDF is malformed, exceeds the
+/// decompression limits, or has no readable page.
 pub fn extract_pdf(bytes: &[u8]) -> Result<TextDoc, SmartError> {
     // Bound every decompression before lopdf runs one without limits.
     super::pdfscan::check(bytes).map_err(|refusal| {
