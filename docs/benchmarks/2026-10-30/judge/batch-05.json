@@ -1,0 +1,81 @@
+{
+  "batch_id": "batch-05",
+  "contract": "asyncapi/orders-amqp-2.6",
+  "api_type": "asyncapi",
+  "domain": "ecommerce",
+  "target": "orderCreated",
+  "items": [
+    {
+      "opaque_id": "f4909bf4af",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8f3a1c92\",\n  \"status\": \"placed\",\n  \"total\": 149.99\n}"
+    },
+    {
+      "opaque_id": "3a727315ba",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"created_at\": \"2026-10-30T07:33:15Z\",\n  \"id\": \"order_550e8400e29b41f4a3a3\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    },
+    {
+      "opaque_id": "4721e438c9",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord-8f3a2b1c\",\n  \"status\": \"placed\",\n  \"total\": 149.99\n}"
+    },
+    {
+      "opaque_id": "15dbb3e84c",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord-8291\",\n  \"status\": \"placed\",\n  \"total\": 124.5\n}"
+    },
+    {
+      "opaque_id": "d52716d19f",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_20261030_8821\",\n  \"status\": \"placed\",\n  \"total\": 149.97\n}"
+    },
+    {
+      "opaque_id": "96f1961bd8",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"createdAt\": \"2026-10-30T07:48:32Z\",\n  \"id\": \"ord_8f42c1d7\",\n  \"status\": \"placed\",\n  \"total\": 129.95\n}"
+    },
+    {
+      "opaque_id": "58e3cf870f",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"order-20261030-073611-8f3c2a\",\n  \"status\": \"placed\",\n  \"total\": 64.95\n}"
+    },
+    {
+      "opaque_id": "13ec7e8209",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_7Qk2Xr9VbT4mZ\",\n  \"status\": \"placed\",\n  \"total\": 84.5\n}"
+    },
+    {
+      "opaque_id": "1aea9a1098",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord-8832\",\n  \"status\": \"placed\",\n  \"total\": 149.99\n}"
+    },
+    {
+      "opaque_id": "c9f8ebdaed",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_9f2c81a4\",\n  \"status\": \"placed\",\n  \"total\": 184.99\n}"
+    },
+    {
+      "opaque_id": "1e560b43d9",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8f3a2c9e1b4d7f6\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    },
+    {
+      "opaque_id": "d9e6ad9e23",
+      "request": "{\n  \"trigger\": {\n    \"kind\": \"eval\"\n  }\n}",
+      "schema": "{\"$defs\":{\"Order\":{\"properties\":{\"id\":{\"type\":\"string\"},\"status\":{\"enum\":[\"placed\",\"paid\",\"shipped\"],\"type\":\"string\"},\"total\":{\"minimum\":0,\"type\":\"number\"}},\"required\":[\"id\",\"status\",\"total\"],\"type\":\"object\"}},\"$ref\":\"#/$defs/Order\"}",
+      "body": "{\n  \"id\": \"ord_8842f1c7\",\n  \"status\": \"placed\",\n  \"total\": 129.99\n}"
+    }
+  ]
+}

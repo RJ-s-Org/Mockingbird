@@ -179,7 +179,8 @@ def preflight(args: argparse.Namespace) -> int:
     roster: List[Dict[str, Any]] = []
     missing: List[str] = []
     for mid in models:
-        m = by_id.get(mid)
+        # A bench variant (`<id>@nojson`) is priced as its base model.
+        m = by_id.get(mid) or by_id.get(mid.split("@", 1)[0])
         if m is None:
             missing.append(mid)
             roster.append({"id": mid, "found": False})
@@ -261,6 +262,9 @@ def slice_manifest(manifest: Dict[str, Any], calls: int) -> Dict[str, Any]:
         e = dict(entries[i])
         if e.get("operations"):
             e["operations"] = e["operations"][: counts[i]]
+            # mb-evals refuses a selection for an operation that is not a target.
+            if e.get("selections"):
+                e["selections"] = {k: v for k, v in e["selections"].items() if k in e["operations"]}
         e["max_ops"] = counts[i]
         out.append(e)
     return {"entries": out}

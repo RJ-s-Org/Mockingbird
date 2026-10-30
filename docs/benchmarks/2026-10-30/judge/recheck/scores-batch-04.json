@@ -1,0 +1,14 @@
+{"batch_id": "batch-04", "judge": "claude-opus-5-5", "scores": [
+{"opaque_id": "412fa56c56", "realism": 3, "coherence": 5, "rationale": "id 'onyx' echoed in id and @id; name is just 'Onyx' and email onyx@example.test reads synthetic. Status active with recent createdAt is consistent."},
+{"opaque_id": "2d688dc0dc", "realism": 4, "coherence": 5, "rationale": "'Meadow Holdings' with billing@meadow.example.com and enterprise/billing tags look plausible. id and @id echo 'meadow'; all fields consistent."},
+{"opaque_id": "ed1f53ed44", "realism": 3, "coherence": 5, "rationale": "Bare name 'Garnet', garnet@example.com, round createdAt 10:30:00Z, and the redundant tags premium/gold read synthetic. id and @id echo 'garnet'."},
+{"opaque_id": "aedac0d9e6", "realism": 4, "coherence": 5, "rationale": "'Juniper Reed' is a plausible person name; juniper@example.com is generic. id and @id echo 'juniper'; tags and status consistent."},
+{"opaque_id": "a511b141bf", "realism": 4, "coherence": 5, "rationale": "'Garnet Holdings', contact@garnet.example and priority/enterprise tags are plausible. Optional @id omitted; top-level id echoes 'garnet'; no contradictions."},
+{"opaque_id": "73bcd0f249", "realism": 4, "coherence": 5, "rationale": "'Juniper Hart' and juniper.hart@example.com are realistic, and beta/priority-support tags are varied. id and @id echo 'juniper'."},
+{"opaque_id": "d3aac03911", "realism": 5, "coherence": 5, "rationale": "'Fjord Analytics' with admin@fjordanalytics.io looks like production data; @id is a URN in the matching namespace urn:example:accounts:fjord; id echoed."},
+{"opaque_id": "b84d229985", "realism": 4, "coherence": 5, "rationale": "'Kestrel Logistics', ops@kestrel.example and logistics/partner tags fit together. id and @id echo 'kestrel'; the timestamp is plausible."},
+{"opaque_id": "c557637d58", "realism": 4, "coherence": 5, "rationale": "'Lumen Analytics', ops@lumen-analytics.example and three tags that fit the domain. id and @id echo 'lumen'; consistent."},
+{"opaque_id": "acd53584e4", "realism": 3, "coherence": 3, "rationale": "@id 'acc-12345' is a placeholder-like sequential id and contradicts the requested and echoed id 'juniper'. Name 'Juniper Tech Solutions' fits; createdAt is a round 10:00:00Z."},
+{"opaque_id": "bf7393cf15", "realism": 4, "coherence": 5, "rationale": "'Bravo Systems Ltd' with ops@bravo-systems.example is plausible; enterprise/priority tags. id and @id echo 'bravo'; consistent."},
+{"opaque_id": "c55e5a3cdc", "realism": 3, "coherence": 5, "rationale": "Bare name 'Raven', raven@example.com and generic premium/beta tags read synthetic. Optional @id omitted; id 'raven' echoed; no contradictions."}
+]}

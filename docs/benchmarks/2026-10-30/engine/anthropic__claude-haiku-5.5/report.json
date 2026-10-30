@@ -1,0 +1,224 @@
+{
+  "model": "anthropic/claude-haiku-5.5",
+  "base_url": "http://127.0.0.1:58482/r/anthropic__claude-haiku-5.5~engine/api/v1",
+  "started_at": "2026-10-30T07:43:16.482426Z",
+  "calls": 162,
+  "schema_valid_rate": 0.9938271604938271,
+  "first_pass_rate": 0.7345679012345679,
+  "repair_rate": 0.25925925925925924,
+  "fallback_rate": 0.006172839506172839,
+  "p50_ms": 2267,
+  "p95_ms": 6538,
+  "prompt_tokens_per_call": 1631.5617283950617,
+  "completion_tokens_per_call": 540.1481481481482,
+  "per_contract": {
+    "asyncapi/commerce-events-kafka": {
+      "calls": 9,
+      "llm": 7,
+      "repaired": 2,
+      "fallback": 0,
+      "p95_ms": 2267
+    },
+    "asyncapi/orders-amqp-2.6": {
+      "calls": 6,
+      "llm": 6,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 880
+    },
+    "graphql/devtools-github": {
+      "calls": 12,
+      "llm": 10,
+      "repaired": 2,
+      "fallback": 0,
+      "p95_ms": 6822
+    },
+    "graphql/ecommerce-shopify-admin": {
+      "calls": 12,
+      "llm": 12,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 6533
+    },
+    "grpc/otlp-trace-service": {
+      "calls": 3,
+      "llm": 3,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 1158
+    },
+    "grpc/route-guide": {
+      "calls": 3,
+      "llm": 3,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 797
+    },
+    "rest/devtools-github": {
+      "calls": 12,
+      "llm": 1,
+      "repaired": 10,
+      "fallback": 1,
+      "p95_ms": 6760
+    },
+    "rest/ecommerce-orders-3.1": {
+      "calls": 9,
+      "llm": 9,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 1959
+    },
+    "rest/ecommerce-square": {
+      "calls": 12,
+      "llm": 12,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 4937
+    },
+    "rest/payments-paypal-orders": {
+      "calls": 9,
+      "llm": 4,
+      "repaired": 5,
+      "fallback": 0,
+      "p95_ms": 3553
+    },
+    "rest/payments-stripe": {
+      "calls": 12,
+      "llm": 7,
+      "repaired": 5,
+      "fallback": 0,
+      "p95_ms": 2067
+    },
+    "rest/social-discord": {
+      "calls": 9,
+      "llm": 2,
+      "repaired": 7,
+      "fallback": 0,
+      "p95_ms": 7506
+    },
+    "rest/social-spotify": {
+      "calls": 9,
+      "llm": 6,
+      "repaired": 3,
+      "fallback": 0,
+      "p95_ms": 12532
+    },
+    "rest/social-tmdb": {
+      "calls": 12,
+      "llm": 5,
+      "repaired": 7,
+      "fallback": 0,
+      "p95_ms": 5951
+    },
+    "rest/travel-booking": {
+      "calls": 12,
+      "llm": 12,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 4554
+    },
+    "rest/travel-hotels": {
+      "calls": 6,
+      "llm": 6,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 3660
+    },
+    "soap/accounts-rpc": {
+      "calls": 6,
+      "llm": 6,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 1024
+    },
+    "soap/calculator": {
+      "calls": 9,
+      "llm": 8,
+      "repaired": 1,
+      "fallback": 0,
+      "p95_ms": 1802
+    }
+  },
+  "per_api_type": {
+    "asyncapi": {
+      "calls": 15,
+      "llm": 13,
+      "repaired": 2,
+      "fallback": 0,
+      "p95_ms": 2267
+    },
+    "graphql": {
+      "calls": 24,
+      "llm": 22,
+      "repaired": 2,
+      "fallback": 0,
+      "p95_ms": 6533
+    },
+    "grpc": {
+      "calls": 6,
+      "llm": 6,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 1158
+    },
+    "rest": {
+      "calls": 102,
+      "llm": 64,
+      "repaired": 37,
+      "fallback": 1,
+      "p95_ms": 6738
+    },
+    "soap": {
+      "calls": 15,
+      "llm": 14,
+      "repaired": 1,
+      "fallback": 0,
+      "p95_ms": 1802
+    }
+  },
+  "per_domain": {
+    "devtools": {
+      "calls": 27,
+      "llm": 14,
+      "repaired": 12,
+      "fallback": 1,
+      "p95_ms": 6760
+    },
+    "ecommerce": {
+      "calls": 48,
+      "llm": 46,
+      "repaired": 2,
+      "fallback": 0,
+      "p95_ms": 4465
+    },
+    "generic": {
+      "calls": 18,
+      "llm": 17,
+      "repaired": 1,
+      "fallback": 0,
+      "p95_ms": 1802
+    },
+    "payments": {
+      "calls": 21,
+      "llm": 11,
+      "repaired": 10,
+      "fallback": 0,
+      "p95_ms": 3117
+    },
+    "social-media": {
+      "calls": 30,
+      "llm": 13,
+      "repaired": 17,
+      "fallback": 0,
+      "p95_ms": 7506
+    },
+    "travel": {
+      "calls": 18,
+      "llm": 18,
+      "repaired": 0,
+      "fallback": 0,
+      "p95_ms": 4554
+    }
+  },
+  "skipped_streaming_operations": 3
+}

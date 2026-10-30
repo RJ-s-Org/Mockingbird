@@ -1,0 +1,14 @@
+{"batch_id": "batch-04", "judge": "claude-opus-5-5", "scores": [
+{"opaque_id": "c55e5a3cdc", "realism": 3, "coherence": 5, "rationale": "name is just 'Raven' and email raven@example.com read as synthetic; generic tags premium/beta. id echoed, active status and createdAt consistent; @id omitted but nothing contradicts."},
+{"opaque_id": "bf7393cf15", "realism": 4, "coherence": 5, "rationale": "'Bravo Systems Ltd' with ops@bravo-systems.example is plausible; tags enterprise/priority a bit stock. id and @id both echo 'bravo'; status and timestamp consistent."},
+{"opaque_id": "acd53584e4", "realism": 3, "coherence": 3, "rationale": "@id 'acc-12345' is a placeholder-like sequential value and contradicts the requested id 'juniper'; juniper@example.com generic. Name 'Juniper Tech Solutions' plausible."},
+{"opaque_id": "c557637d58", "realism": 4, "coherence": 5, "rationale": "'Lumen Analytics', ops@lumen-analytics.example and tags analytics/partner/priority are plausible and fit together. id and @id echo 'lumen'; consistent status/timestamp."},
+{"opaque_id": "b84d229985", "realism": 4, "coherence": 5, "rationale": "'Kestrel Logistics' with logistics/partner tags and ops@kestrel.example is plausible and on-theme. id and @id echo 'kestrel'; status active with sensible createdAt."},
+{"opaque_id": "d3aac03911", "realism": 5, "coherence": 5, "rationale": "@id 'urn:example:accounts:fjord' matches the namespace; admin@fjordanalytics.io is a real-looking domain matching 'Fjord Analytics'. id echoed, all fields consistent."},
+{"opaque_id": "73bcd0f249", "realism": 4, "coherence": 5, "rationale": "Person-style account 'Juniper Hart' with juniper.hart@example.com matches the name; tags beta/priority-support plausible. id and @id echo 'juniper'; consistent."},
+{"opaque_id": "a511b141bf", "realism": 4, "coherence": 5, "rationale": "'Garnet Holdings' with contact@garnet.example is plausible; tags priority/enterprise stock. id echoed; @id omitted but optional; status and createdAt consistent."},
+{"opaque_id": "aedac0d9e6", "realism": 4, "coherence": 5, "rationale": "'Juniper Reed' is a realistic name; email juniper@example.com is generic. id and @id echo 'juniper'; premium/verified tags fit an active account."},
+{"opaque_id": "ed1f53ed44", "realism": 3, "coherence": 5, "rationale": "Name is just 'Garnet' with garnet@example.com: echoes the id rather than a real account; tags premium/gold generic. id and @id echoed, fields consistent."},
+{"opaque_id": "2d688dc0dc", "realism": 4, "coherence": 5, "rationale": "'Meadow Holdings' with billing@meadow.example.com and enterprise/billing tags is plausible. id and @id echo 'meadow'; status and createdAt consistent."},
+{"opaque_id": "412fa56c56", "realism": 3, "coherence": 5, "rationale": "Name 'Onyx' just repeats the id; onyx@example.test and standard/verified tags read as test data. id and @id echoed; status and timestamp consistent."}
+]}

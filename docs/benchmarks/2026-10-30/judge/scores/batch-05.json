@@ -1,0 +1,14 @@
+{"batch_id": "batch-05", "judge": "claude-opus-5-5", "scores": [
+{"opaque_id": "f4909bf4af", "realism": 4, "coherence": 5, "rationale": "id ord_8f3a1c92 is plausible; total 149.99 is a common retail price but generic. status placed fits an orderCreated event."},
+{"opaque_id": "3a727315ba", "realism": 4, "coherence": 5, "rationale": "Adds a sensible created_at (2026-10-30T07:33:15Z). id order_550e8400e29b41f4a3a3 borrows the well-known example UUID prefix, which is slightly synthetic. status placed suits orderCreated."},
+{"opaque_id": "4721e438c9", "realism": 4, "coherence": 5, "rationale": "ord-8f3a2b1c looks realistic; total 149.99 is a stock price point. placed status matches a newly created order."},
+{"opaque_id": "15dbb3e84c", "realism": 4, "coherence": 5, "rationale": "ord-8291 is a short, bland sequential-looking id; total 124.5 is plausible. placed status fits orderCreated."},
+{"opaque_id": "d52716d19f", "realism": 5, "coherence": 5, "rationale": "Date-stamped id ord_20261030_8821 matches today; total 149.97 reads like a sum of line items. placed fits orderCreated."},
+{"opaque_id": "96f1961bd8", "realism": 5, "coherence": 5, "rationale": "createdAt timestamp is plausible and consistent with an order just placed; id ord_8f42c1d7 and total 129.95 look like real data."},
+{"opaque_id": "58e3cf870f", "realism": 5, "coherence": 5, "rationale": "id order-20261030-073611-8f3c2a has an embedded date and time that fit the event date; total 64.95 is varied and realistic. placed status is right."},
+{"opaque_id": "13ec7e8209", "realism": 5, "coherence": 5, "rationale": "Base62 id ord_7Qk2Xr9VbT4mZ looks production-like; total 84.5 is plausible; placed fits orderCreated."},
+{"opaque_id": "1aea9a1098", "realism": 4, "coherence": 5, "rationale": "ord-8832 is a short, bland id; total 149.99 is a stock price. placed status is consistent with order creation."},
+{"opaque_id": "c9f8ebdaed", "realism": 4, "coherence": 5, "rationale": "ord_9f2c81a4 is plausible; total 184.99 is realistic but generic .99 pricing. placed status fits orderCreated."},
+{"opaque_id": "1e560b43d9", "realism": 4, "coherence": 5, "rationale": "id ord_8f3a2c9e1b4d7f6 is a plausible hex id; total 129.99 is a stock price point. placed matches orderCreated."},
+{"opaque_id": "d9e6ad9e23", "realism": 4, "coherence": 5, "rationale": "ord_8842f1c7 is plausible; total 129.99 is generic .99 pricing that repeats across the batch. placed status fits orderCreated."}
+]}

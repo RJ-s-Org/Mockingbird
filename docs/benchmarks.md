@@ -1,16 +1,180 @@
 # Model benchmarks
 
-Mockingbird can use any OpenAI-compatible model. This page records a benchmark of 16 OpenRouter configurations (14 models, plus two variants with JSON mode off) on Mockingbird's own generation code, run on 2026-10-29. It measures schema validity, conformance, blinded realism and coherence scores, latency, reliability and cost per 1,000 mock responses, and combines them into one Value score against the shipped default, `deepseek/deepseek-v4.1-flash`.
+Mockingbird can use any OpenAI-compatible model. This page records two benchmark rounds on Mockingbird's own generation code. Each round measures schema validity, conformance, blinded realism and coherence scores, latency, reliability and cost per 1,000 mock responses, and combines them into one Value score against the shipped default, `deepseek/deepseek-v4.1-flash`.
+
+- **Round 2 (2026-10-30):** 12 configurations, at production settings (16,384 output tokens, 60 s timeout), after the engine's output-validity fixes.
+- **Round 1 (2026-10-29):** 16 configurations, at the bench's earlier 2,048-token cap and 30 s timeout.
 
 The short version:
 
-- Four configurations clear every gate and are close on quality: `openai/gpt-6-luna`, `deepseek/deepseek-v4.1-flash` (the default), `deepseek/deepseek-v4.1-flash-1017` and `anthropic/claude-haiku-5.5`. Their quality scores (Q 0.882 to 0.901) are statistical ties at this sample size.
-- `openai/gpt-6-luna` has the best Value (125.1 against the default's 100) under all three exponent sets tried. The lead comes from price: $0.238 against $0.432 per 1,000 responses. It does not come from quality.
-- The schema-valid gate (0.90) excludes 11 of the 16 configurations, and most of that comes from limits of this benchmark harness rather than from the models: a 2,048-token output cap, two GraphQL targets no model can answer, and a 30 s engine timeout. See [harness limits](#harness-limits-found-in-this-run).
-- `thinkingmachines/inkling` cannot be used with JSON mode, and Mockingbird has no setting to turn JSON mode off. See [known gap](#known-gap-json-mode-cannot-be-turned-off).
-- The shipped default does not change. Re-run after the harness fixes before revisiting it.
+- Every round-2 configuration clears the 0.90 schema-valid gate; in round 1, 5 of 16 did. On the same 12 models and the same 1,944 calls, fallbacks to the faker fell from 239 to 59. See [round 2](#round-2-2026-10-30).
+- `openai/gpt-6-luna` has the best Value in both rounds (160.5 in round 2). `deepseek/deepseek-v4.1-flash-1017` is second (144.0). `anthropic/claude-haiku-5.5` has the best quality score (Q 0.934). The top quality scores are close to each other given the sample size.
+- `thinkingmachines/inkling` now runs, with `output_mode: none`: SV 0.992, J 4.00. Its Value (32.6) is the lowest, because it costs $2.21 per 1,000 responses.
+- The shipped default does not change on this page; whether to switch is a separate decision.
 
 ![The live bench view during part 2 of the full run: a table of 16 models with schema-valid, fallback, latency and cost columns filling in as Gemini, Beam and the Inkling variants run, followed by the server suites](benchmarks/media/05-full-run-part2-short.gif)
+
+## Round 2 (2026-10-30)
+
+Round 2 re-ran 12 configurations after the output-validity work. Raw data and full tables are in [`2026-10-30/`](https://github.com/RJ-s-Org/Mockingbird/tree/main/docs/benchmarks/2026-10-30), with [`tables.md`](benchmarks/2026-10-30/tables.md) for every breakdown.
+
+### What changed since round 1
+
+Engine (what a Mockingbird user gets):
+
+- JSON extraction takes the first complete value. Two objects back to back, or trailing prose with braces, no longer fail. A broken or cut answer is never reduced to an inner fragment ([#142](https://github.com/RJ-s-Org/Mockingbird/pull/142)).
+- `output_mode: none | json_object | json_schema` replaces `json_schema: bool`. With `none`, no `response_format` is sent ([#142](https://github.com/RJ-s-Org/Mockingbird/pull/142)).
+- In JSON mode, an array-root schema is asked for as `{"items": [...]}` and unwrapped ([#142](https://github.com/RJ-s-Org/Mockingbird/pull/142)).
+- A local fix with no second call is reported as `patched`, separate from `repaired`, which now means only an LLM repair round trip ([#142](https://github.com/RJ-s-Org/Mockingbird/pull/142)).
+- The faker's fallback bodies are schema-valid for every example contract ([#139](https://github.com/RJ-s-Org/Mockingbird/pull/139), [#144](https://github.com/RJ-s-Org/Mockingbird/pull/144)).
+- Repair prompts say what is wrong with the shape before listing errors ([#158](https://github.com/RJ-s-Org/Mockingbird/pull/158)).
+- An answer cut at the token limit is closed and refilled instead of discarded ([#158](https://github.com/RJ-s-Org/Mockingbird/pull/158)).
+- A provider that rejects the reasoning-off switch is retried once with minimal effort ([#158](https://github.com/RJ-s-Org/Mockingbird/pull/158)).
+
+Bench (how it measures):
+
+- mb-evals runs with the production profile settings: `max_tokens` 16,384, a 60 s timeout and the 1,500-token output budget ([#104](https://github.com/RJ-s-Org/Mockingbird/pull/104)).
+- GraphQL targets are called with a selection set ([#104](https://github.com/RJ-s-Org/Mockingbird/pull/104)).
+- A format violation that echoes a request value (a path id like `garnet` in a `uuid` field) is not counted against the model ([#104](https://github.com/RJ-s-Org/Mockingbird/pull/104)).
+- Fallbacks are classified by cause ([#104](https://github.com/RJ-s-Org/Mockingbird/pull/104)).
+- `@nojson` configurations run the engine with `output_mode: none` ([#157](https://github.com/RJ-s-Org/Mockingbird/pull/157)).
+
+Both kinds of change move the numbers, and this run cannot separate them. Truncation was mostly the bench's 2,048-token cap. Doubled JSON objects were an engine defect.
+
+### Roster
+
+The same 12 configurations as round 1, minus four. The models were checked against the live OpenRouter catalog on 2026-10-30, and nothing newer had shipped in these families.
+
+| Dropped | Why |
+| --- | --- |
+| `google/gemini-3.8-flash` | Cost: $1.16 of round 1's ledger, the second largest. Reasoning-heavy: 53 calls cut at the token limit. |
+| `reflection/beam-1.0-501b-a23b` | Cost and reasoning: 78 calls cut at the token limit, the most of any model. |
+| `thinkingmachines/inkling` (JSON mode) | It does not work with JSON mode (round 1 SV 0.000). The `@nojson` configuration covers the model. |
+| `thinkingmachines/inkling-small` (JSON mode) | The same; the `@nojson` configuration covers it. |
+
+Round 2 had to fit in about $4 so that the two rounds together stay under $10. Their round-1 figures are below, labelled round 1.
+
+### Leaderboard
+
+Sorted by Value, the default-exponent formula against `deepseek/deepseek-v4.1-flash` = 100. All 12 pass every gate. Q is quality, SV the macro schema-valid rate, J the judge score, C the cost per 1,000 responses, L the p50 end-to-end latency. "Round 1 Value" is the ungated figure in parentheses where round 1 gated the model.
+
+| # | Model | Value | Q | SV | First try | J (1-5) | C $/1k | L p50 ms | Round 1 Value |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `openai/gpt-6-luna` | 160.5 | 0.925 | 1.000 | 0.953 | 4.33 | 0.198 | 2,660 | 125.1 |
+| 2 | `deepseek/deepseek-v4.1-flash-1017` | 144.0 | 0.909 | 0.998 | 0.852 | 4.36 | 0.324 | 1,882 | 87.4 |
+| 3 | `nvidia/nemotron-3.5-lightning` | 134.6 | 0.797 | 0.931 | 0.664 | 3.71 | 0.160 | 2,579 | (94.5) |
+| 4 | `inception/mercury-3` | 128.6 | 0.788 | 0.975 | 0.710 | 3.43 | 0.435 | 989 | (137.1) |
+| 5 | `anthropic/claude-haiku-5.5` | 120.4 | 0.934 | 0.998 | 0.869 | 4.57 | 0.433 | 2,240 | 84.1 |
+| 6 | `nvidia/nemotron-3.5-super-vl` | 102.1 | 0.887 | 0.992 | 0.811 | 4.21 | 0.439 | 2,498 | (64.9) |
+| 7 | `deepseek/deepseek-v4.1-flash` (default) | 100.0 | 0.911 | 0.996 | 0.864 | 4.36 | 0.365 | 3,491 | 100.0 |
+| 8 | `minimax/minimax-m3.1-flash` | 88.1 | 0.908 | 0.959 | 0.762 | 4.57 | 0.607 | 2,671 | (101.3) |
+| 9 | `z-ai/glm-5.3-flash` | 79.2 | 0.884 | 0.998 | 0.815 | 4.17 | 0.409 | 4,411 | (61.1) |
+| 10 | `qwen/qwen3.8-flash` | 64.8 | 0.864 | 1.000 | 0.796 | 4.00 | 0.311 | 7,887 | (52.7) |
+| 11 | `thinkingmachines/inkling-small@nojson` | 63.6 | 0.842 | 0.975 | 0.735 | 3.93 | 0.887 | 2,596 | (61.8) |
+| 12 | `thinkingmachines/inkling@nojson` | 32.6 | 0.855 | 0.992 | 0.750 | 4.00 | 2.211 | 4,202 | 31.9 |
+
+Round 1 only, not re-run (2,048 tokens, 30 s):
+
+| Model | Round 1 Value (ungated) | Round 1 SV | Round 1 J |
+| --- | ---: | ---: | ---: |
+| `google/gemini-3.8-flash` | (11.6) | 0.826 | 4.14 |
+| `reflection/beam-1.0-501b-a23b` | (21.7) | 0.722 | 3.43 |
+| `thinkingmachines/inkling-small` | (41.4) | 0.803 | 3.93 |
+| `thinkingmachines/inkling` | — | 0.000 | 1.00 |
+
+The default's own p50 latency rose from 2,204 to 3,491 ms between rounds. Value is relative to the default, so that rise lifts every other model's Value; compare Q, C and L directly as well.
+
+Value sensitivity, rank in parentheses:
+
+| Model | (2, 0.5, 0.5) default | (1, 1, 1) | (2, 0.25, 1) |
+| --- | ---: | ---: | ---: |
+| `openai/gpt-6-luna` | 160.5 (1) | 246.1 (3) | 157.7 (3) |
+| `deepseek/deepseek-v4.1-flash-1017` | 144.0 (2) | 208.6 (4) | 190.3 (2) |
+| `nvidia/nemotron-3.5-lightning` | 134.6 (3) | 270.5 (1) | 127.4 (5) |
+| `inception/mercury-3` | 128.6 (4) | 256.0 (2) | 252.4 (1) |
+| `anthropic/claude-haiku-5.5` | 120.4 (5) | 134.6 (5) | 156.8 (4) |
+| `deepseek/deepseek-v4.1-flash` | 100.0 (7) | 100.0 (7) | 100.0 (8) |
+
+### Validity, round 1 against round 2
+
+Same 12 configurations, same workload, 1,944 engine calls per round. SV is the macro schema-valid rate (1 minus fallback, averaged over API types). Patched answers were counted as repaired in round 1.
+
+| Model | SV round 1 | SV round 2 | Fallback round 1 | Fallback round 2 | Patched round 2 | Repaired round 2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `openai/gpt-6-luna` | 0.949 | 1.000 | 6% | 0% | 14% | 1% |
+| `qwen/qwen3.8-flash` | 0.898 | 1.000 | 8% | 0% | 36% | 1% |
+| `deepseek/deepseek-v4.1-flash-1017` | 0.936 | 0.998 | 6% | 1% | 31% | 2% |
+| `z-ai/glm-5.3-flash` | 0.853 | 0.998 | 17% | 1% | 25% | 11% |
+| `anthropic/claude-haiku-5.5` | 0.930 | 0.998 | 8% | 1% | 20% | 6% |
+| `deepseek/deepseek-v4.1-flash` | 0.929 | 0.996 | 6% | 1% | 31% | 0% |
+| `nvidia/nemotron-3.5-super-vl` | 0.872 | 0.992 | 14% | 2% | 38% | 5% |
+| `thinkingmachines/inkling@nojson` | 0.909 | 0.992 | 9% | 2% | 41% | 7% |
+| `inception/mercury-3` | 0.837 | 0.975 | 14% | 4% | 46% | 4% |
+| `thinkingmachines/inkling-small@nojson` | 0.846 | 0.975 | 17% | 8% | 36% | 7% |
+| `minimax/minimax-m3.1-flash` | 0.889 | 0.959 | 13% | 5% | 23% | 14% |
+| `nvidia/nemotron-3.5-lightning` | 0.746 | 0.931 | 30% | 12% | 31% | 20% |
+
+Fallbacks by cause, same 12 configurations:
+
+| Cause | Round 1 | Round 2 |
+| --- | ---: | ---: |
+| Truncated at the token limit | 87 | 2 |
+| Not JSON after repair | 26 | 5 |
+| Schema-invalid after repair | 108 | 51 |
+| Timeout | 12 | 1 |
+| Other | 6 | 0 |
+| **Total** | **239** | **59** |
+
+A patched answer is the model's own answer fixed locally, with no second call. That is usually a member the output budget left out, or a format value refilled. Patch rates of 14% to 46% mean the engine's local fixes do much of the work. First-try rate is the stricter view of what each model gets right unaided.
+
+Schema-invalid answers are the largest remaining cause. `nvidia/nemotron-3.5-lightning` accounts for 18 of the 51 (14 of its 19 fallbacks are REST targets).
+
+Two cached calls, replayed side by side at their measured latency (no new LLM calls):
+
+![Discord list_messages, an array-root response: Nemotron 3.5 Super VL and GPT-6 Luna fell back to the faker in round 1 (placeholder values like "garnet" and "kestrel") and answered with realistic messages in round 2, one after a local patch and one on the first try](benchmarks/media/08-discord-list-messages-r1-vs-r2.gif)
+
+![Shopify Query.products: DeepSeek v4.1 Flash and Inkling without JSON mode fell back in round 1, with about 5,300 lines of recursive faker output and amounts like "ember". In round 2 both were valid on the first try, answering the selection set a real client sends](benchmarks/media/09-shopify-products-r1-vs-r2.gif)
+
+### Judging
+
+The same 7 targets as round 1 (same seed), one Claude Opus 5.5 judge per batch, 84 items, with 1 fallback auto-scored. A model's `{}` is now judged instead of auto-scored 1/1, and a schema-valid `{}` is left out of J, as round 1's write-up intended. Order check: fresh judges re-scored 2 batches in reverse order. The mean absolute difference was 0.06 over 24 items, against a limit of 0.5.
+
+### Spend
+
+| Item | Amount |
+| --- | ---: |
+| Round 2, key usage delta | $1.33 |
+| Round 2 pilot ledger | $0.04 |
+| Round 2 full-run ledger | $1.34 |
+| Round 1 ledgers (full, pilot, superseded) | $5.39 |
+| Both rounds | $6.77 |
+
+The proxy enforced a hard stop at $9.50 across both rounds and refused no calls. The judges did not go through OpenRouter.
+
+### Caveats
+
+- Sample sizes are small: 162 engine samples per model, 6 or 7 judge items, 18 consistency rows and 4 import inputs. One judge item moving one point shifts Q by about 0.014.
+- Measurement and engine changes landed together, so this run cannot say how much of the improvement each one caused.
+- One judge model, from the same vendor as one roster model (Claude Haiku 5.5).
+- K, keyword conformance, is 1.000 for 11 of 12 models, partly because request-id echoes no longer count against them.
+
+### Recommendations
+
+| Use case | Suggestion | Evidence |
+| --- | --- | --- |
+| Value | `openai/gpt-6-luna` | Best Value in both rounds; $0.198/1k; SV 1.000, first try 0.953 |
+| Quality | `anthropic/claude-haiku-5.5` | Q 0.934, J 4.57; $0.433/1k |
+| Balance | `deepseek/deepseek-v4.1-flash-1017` | Value 144.0, Q 0.909, consistency and import 100% |
+| Lowest latency | `inception/mercury-3` | L 989 ms, but J 3.43 and consistency 78% |
+| Inkling | `thinkingmachines/inkling-small@nojson` over `thinkingmachines/inkling@nojson` | Similar Q (0.842 against 0.855) at 40% of the cost; full Inkling's smart import produced 1 valid draft of 4 |
+
+To run any `@nojson` configuration, set `llm.profiles.<name>.output_mode: none` ([configuration](configuration.md)).
+
+The shipped default stays `deepseek/deepseek-v4.1-flash` until a decision to change it. Several models now beat it on Value. The round-2 leaders (Luna, DeepSeek 1017, Haiku) match or beat it on quality.
+
+# Round 1 (2026-10-29)
+
+Everything from here to [Re-running](#re-running) is round 1. It ran at a 2,048-token cap and a 30 s engine timeout, with no GraphQL selections and no echo-aware grading. The method sections still describe how both rounds score.
 
 ## Method
 
@@ -408,30 +572,34 @@ Everything is under [`docs/benchmarks/2026-10-29/`](https://github.com/RJ-s-Org/
 
 The large JSONL files are gzipped; `gunzip -k docs/benchmarks/2026-10-29/*.gz` restores the names the scripts read. Per-model duplicate samples and the proxy and server logs are not committed.
 
-## Re-running
+# Re-running
 
-The run needs `OPENROUTER_API_KEY` in the environment. Only the proxy and the preflight metadata calls read it, and children get placeholders. See [`scripts/llm-bench/README.md`](../scripts/llm-bench/README.md) for the budget, stopping and testing without spend.
+The run needs `OPENROUTER_API_KEY` in the environment. Only the proxy and the preflight metadata calls read it, and children get placeholders. See [`scripts/llm-bench/README.md`](../scripts/llm-bench/README.md) for the budget, stopping and testing without spend. Round 2 was run like this:
 
 ```sh
 cargo build --release -p mb-evals -p mockingbird-cli
+OUT=docs/benchmarks/2026-10-30
+R1=docs/benchmarks/2026-10-29
+MODELS=deepseek/deepseek-v4.1-flash,...,thinkingmachines/inkling@nojson   # the 12 above
+# Earlier spend that counts toward --budget-usd
+PRIOR="--prior-ledger $R1/calls.jsonl.gz --prior-ledger $R1/pilot/calls.jsonl.gz --prior-ledger $R1/superseded/calls.jsonl.gz"
 
 # 1. Model metadata and prices -> roster.json; key usage -> key-before.json
-python3 scripts/llm-bench/run.py preflight
+python3 scripts/llm-bench/run.py preflight --out $OUT --models $MODELS
 
 # 2. Pilot: about 10 engine calls per model, then a cost projection
-python3 scripts/llm-bench/run.py pilot --calls 10 --repeat 3
+python3 scripts/llm-bench/run.py pilot --out $OUT --models $MODELS --calls 10 --repeat 3 --budget-usd 9.5 $PRIOR
 
 # 3. Full run: cheapest first, 3 models at a time, Inkling models last
-python3 scripts/llm-bench/run.py full --repeat 3 --parallel 3 --concurrency 4
+python3 scripts/llm-bench/run.py full --out $OUT --models $MODELS --repeat 3 --parallel 3 --concurrency 4 --budget-usd 9.5 $PRIOR
 
 # 4. Grade, judge and aggregate
-python3 scripts/llm-bench/grade.py --samples docs/benchmarks/2026-10-29/samples.jsonl \
-    --out docs/benchmarks/2026-10-29/grades.jsonl --summary docs/benchmarks/2026-10-29/grade-summary.json
-python3 scripts/llm-bench/judge_prep.py build --out docs/benchmarks/2026-10-29
-#    (a judge scores judge/batch-XX.json into judge/scores/; see judge/README.md)
-python3 scripts/llm-bench/judge_prep.py merge --out docs/benchmarks/2026-10-29 \
-    --scores docs/benchmarks/2026-10-29/judge/scores/*.json
-python3 scripts/llm-bench/aggregate.py --out docs/benchmarks/2026-10-29
+python3 scripts/llm-bench/grade.py --samples $OUT/samples.jsonl --out $OUT/grades.jsonl --summary $OUT/grade-summary.json
+python3 scripts/llm-bench/judge_prep.py build --out $OUT
+#    (a judge scores judge/batch-XX.json into judge/scores/, and recheck/ in reverse order; see judge/README.md)
+python3 scripts/llm-bench/judge_prep.py merge --out $OUT --scores $OUT/judge/scores/*.json \
+    --recheck $OUT/judge/recheck/scores-*.json
+python3 scripts/llm-bench/aggregate.py --out $OUT
 ```
 
-`python3 scripts/llm-bench/live.py --out docs/benchmarks/2026-10-29` shows the run live in a second terminal; it reads only the files the run writes. All results go to `--out`. Compare models only within one run: provider routing and load change from day to day.
+`python3 scripts/llm-bench/live.py --out $OUT` shows the run live in a second terminal; it reads only the files the run writes. Compare models only within one run: provider routing and load change from day to day.

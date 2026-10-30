@@ -18,7 +18,7 @@ This harness runs OpenRouter models through Mockingbird's real LLM code paths: t
 
 ```sh
 source ~/.zshenv >/dev/null 2>&1
-cargo build --release -p mb-evals -p mockingbird
+cargo build --release -p mb-evals -p mockingbird-cli
 
 # 1. Model metadata and prices -> roster.json; key credit numbers -> key-before.json
 python3 scripts/llm-bench/run.py preflight

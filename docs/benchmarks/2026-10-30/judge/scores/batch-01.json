@@ -1,0 +1,72 @@
+{
+  "batch_id": "batch-01",
+  "judge": "claude-opus-5-5",
+  "scores": [
+    {
+      "opaque_id": "f045ed7ac4",
+      "realism": 3,
+      "coherence": 3,
+      "rationale": "LHR-JFK BA real carrier/airports, but ticketNumber 1234567890123, passenger id a1b2c3d4-..., reference A1B2C3 are placeholders. departureAt 10:30Z to arrivalAt 14:45Z is 255 min vs durationMinutes 315."
+    },
+    {
+      "opaque_id": "1c673e47cc",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "LIS-MAD TP A320 with PT/ES taxes in EUR is plausible; 08:25Z-09:35Z matches 70 min. ticketNumber 1234567890123 and patterned passenger uuid read synthetic. Request fields echoed."
+    },
+    {
+      "opaque_id": "4c9fd089a6",
+      "realism": 3,
+      "coherence": 5,
+      "rationale": "LIS-AMS 08:15Z-11:05Z matches 170 min; PT/NL taxes in EUR. ticketNumber 0000000000000 is filler, carrier HR (Hahn Air) odd for this route. Status pending fits bank transfer; request echoed."
+    },
+    {
+      "opaque_id": "f9d1da0826",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "Three TP segments LIS-OPO-FNC-LIS chain correctly and durations match timestamps; ticketed with real-looking ticket number. OPO-FNC 55 min is too short, same-day loop itinerary odd, tax codes TX/PS/AP generic."
+    },
+    {
+      "opaque_id": "1044bac42f",
+      "realism": 3,
+      "coherence": 5,
+      "rationale": "MNL-SIN 08:30Z-11:45Z matches 195 min, request echoed. Carrier HT and tax code XY are not real, ticketNumber 0000000000000 and sequential id 9f8e7d6c-5b4a-3210-... are placeholders."
+    },
+    {
+      "opaque_id": "bb2e9f9e97",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "LIS-AMS TP1082 A320, YQ/YR taxes in EUR, realistic ticket number and uuids; 06:35Z-10:05Z matches 210 min, though real block time is ~2h50. All request fields echoed."
+    },
+    {
+      "opaque_id": "c1387ca30a",
+      "realism": 3,
+      "coherence": 4,
+      "rationale": "CPH-OSL SK142 plausible, but booking id a1b2c3d4-e5f6-7890-abcd-ef1234567890 and ticket 1234567890123 are placeholders. Prices in USD with a US tax code on a Denmark-Norway route is inconsistent."
+    },
+    {
+      "opaque_id": "d322cf56b6",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "AMS-LIS TP1291 with NL/PT taxes in EUR, pending fits bank transfer, 10:25Z-12:40Z matches 135 min. Block time is short for real (~3h) and ticket prefix 074 is KLM, not TP."
+    },
+    {
+      "opaque_id": "3ffe121757",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "CMN-RAK AT482 55 min with MA tax in MAD is domain-correct and timestamps match duration. Total 68.40 MAD (~7 USD) is implausibly low for a fare. Ticket and ids look real; request echoed."
+    },
+    {
+      "opaque_id": "23cc45e481",
+      "realism": 3,
+      "coherence": 3,
+      "rationale": "CDG-JFK AF A350 plausible, but ticketNumber 1234567890123, patterned passenger uuid and AF1234 are filler. departureAt 09:30Z to arrivalAt 12:45Z is 195 min vs durationMinutes 435."
+    },
+    {
+      "opaque_id": "2d38970532",
+      "realism": 3,
+      "coherence": 4,
+      "rationale": "JNB-FRA in 315 min is impossible (real ~10.5h); LH400 is a FRA-JFK number; total 1245.50 ZAR is too low for long-haul; ticket 1234567890123 filler. GB tax code on a ZA-DE route is inconsistent."
+    }
+  ]
+}

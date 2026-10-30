@@ -1,0 +1,1951 @@
+{
+  "keyword_categories": {
+    "format": [
+      "format"
+    ],
+    "enum": [
+      "const",
+      "enum"
+    ],
+    "constraint": [
+      "exclusiveMaximum",
+      "exclusiveMinimum",
+      "maxItems",
+      "maxLength",
+      "maximum",
+      "minItems",
+      "minLength",
+      "minimum",
+      "pattern",
+      "uniqueItems"
+    ]
+  },
+  "overall": {
+    "samples": 1944,
+    "graded": 1944,
+    "ungradable": 0,
+    "conforming": 1943,
+    "sample_conformance": 0.9995,
+    "keywords": {
+      "format": {
+        "checked": 4853,
+        "passed": 4816,
+        "pass_rate": 0.9924
+      },
+      "enum": {
+        "checked": 16074,
+        "passed": 16074,
+        "pass_rate": 1.0
+      },
+      "constraint": {
+        "checked": 33612,
+        "passed": 33612,
+        "pass_rate": 1.0
+      }
+    },
+    "skipped": {
+      "19 reply.": 124,
+      "format:snowflake": 750
+    }
+  },
+  "by_model": {
+    "anthropic/claude-haiku-5.5": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 381,
+          "passed": 378,
+          "pass_rate": 0.9921
+        },
+        "enum": {
+          "checked": 1268,
+          "passed": 1268,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2768,
+          "passed": 2768,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 10,
+        "format:snowflake": 55
+      }
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 488,
+          "passed": 485,
+          "pass_rate": 0.9939
+        },
+        "enum": {
+          "checked": 1609,
+          "passed": 1609,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 3299,
+          "passed": 3299,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 12,
+        "format:snowflake": 66
+      }
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 471,
+          "passed": 468,
+          "pass_rate": 0.9936
+        },
+        "enum": {
+          "checked": 1545,
+          "passed": 1545,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 3257,
+          "passed": 3257,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 12,
+        "format:snowflake": 64
+      }
+    },
+    "inception/mercury-3": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 436,
+          "passed": 433,
+          "pass_rate": 0.9931
+        },
+        "enum": {
+          "checked": 1466,
+          "passed": 1466,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 3032,
+          "passed": 3032,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 11,
+        "format:snowflake": 66
+      }
+    },
+    "minimax/minimax-m3.1-flash": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 462,
+          "passed": 459,
+          "pass_rate": 0.9935
+        },
+        "enum": {
+          "checked": 1519,
+          "passed": 1519,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2972,
+          "passed": 2972,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 10,
+        "format:snowflake": 82
+      }
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 161,
+      "sample_conformance": 0.9938,
+      "keywords": {
+        "format": {
+          "checked": 302,
+          "passed": 298,
+          "pass_rate": 0.9868
+        },
+        "enum": {
+          "checked": 909,
+          "passed": 909,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2099,
+          "passed": 2099,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 10,
+        "format:snowflake": 54
+      }
+    },
+    "nvidia/nemotron-3.5-super-vl": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 464,
+          "passed": 461,
+          "pass_rate": 0.9935
+        },
+        "enum": {
+          "checked": 1498,
+          "passed": 1498,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 3255,
+          "passed": 3255,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 12,
+        "format:snowflake": 64
+      }
+    },
+    "openai/gpt-6-luna": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 283,
+          "passed": 280,
+          "pass_rate": 0.9894
+        },
+        "enum": {
+          "checked": 1025,
+          "passed": 1025,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2013,
+          "passed": 2013,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 7,
+        "format:snowflake": 44
+      }
+    },
+    "qwen/qwen3.8-flash": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 365,
+          "passed": 362,
+          "pass_rate": 0.9918
+        },
+        "enum": {
+          "checked": 1283,
+          "passed": 1283,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2532,
+          "passed": 2532,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 13,
+        "format:snowflake": 59
+      }
+    },
+    "thinkingmachines/inkling-small@nojson": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 384,
+          "passed": 381,
+          "pass_rate": 0.9922
+        },
+        "enum": {
+          "checked": 1258,
+          "passed": 1258,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2703,
+          "passed": 2703,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 8,
+        "format:snowflake": 71
+      }
+    },
+    "thinkingmachines/inkling@nojson": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 364,
+          "passed": 361,
+          "pass_rate": 0.9918
+        },
+        "enum": {
+          "checked": 1140,
+          "passed": 1140,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 2557,
+          "passed": 2557,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 7,
+        "format:snowflake": 54
+      }
+    },
+    "z-ai/glm-5.3-flash": {
+      "samples": 162,
+      "graded": 162,
+      "ungradable": 0,
+      "conforming": 162,
+      "sample_conformance": 1.0,
+      "keywords": {
+        "format": {
+          "checked": 453,
+          "passed": 450,
+          "pass_rate": 0.9934
+        },
+        "enum": {
+          "checked": 1554,
+          "passed": 1554,
+          "pass_rate": 1.0
+        },
+        "constraint": {
+          "checked": 3125,
+          "passed": 3125,
+          "pass_rate": 1.0
+        }
+      },
+      "skipped": {
+        "19 reply.": 12,
+        "format:snowflake": 71
+      }
+    }
+  },
+  "by_model_api_type": {
+    "anthropic/claude-haiku-5.5": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 36,
+            "passed": 36,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 93,
+            "passed": 93,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 285,
+            "passed": 285,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 218,
+            "passed": 218,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 351,
+            "passed": 348,
+            "pass_rate": 0.9915
+          },
+          "enum": {
+            "checked": 941,
+            "passed": 941,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2430,
+            "passed": 2430,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 10,
+          "format:snowflake": 55
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 36,
+            "passed": 36,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 93,
+            "passed": 93,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 334,
+            "passed": 334,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 258,
+            "passed": 258,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 458,
+            "passed": 455,
+            "pass_rate": 0.9934
+          },
+          "enum": {
+            "checked": 1233,
+            "passed": 1233,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2921,
+            "passed": 2921,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 12,
+          "format:snowflake": 66
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 36,
+            "passed": 36,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 97,
+            "passed": 97,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 326,
+            "passed": 326,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 250,
+            "passed": 250,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 441,
+            "passed": 438,
+            "pass_rate": 0.9932
+          },
+          "enum": {
+            "checked": 1177,
+            "passed": 1177,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2883,
+            "passed": 2883,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 12,
+          "format:snowflake": 64
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "inception/mercury-3": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 36,
+            "passed": 36,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 93,
+            "passed": 93,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 306,
+            "passed": 306,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 246,
+            "passed": 246,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 406,
+            "passed": 403,
+            "pass_rate": 0.9926
+          },
+          "enum": {
+            "checked": 1118,
+            "passed": 1118,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2666,
+            "passed": 2666,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 11,
+          "format:snowflake": 66
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "minimax/minimax-m3.1-flash": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 40,
+            "passed": 40,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 109,
+            "passed": 109,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 344,
+            "passed": 344,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 256,
+            "passed": 256,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 3,
+            "passed": 3,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 432,
+            "passed": 429,
+            "pass_rate": 0.9931
+          },
+          "enum": {
+            "checked": 1129,
+            "passed": 1129,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2592,
+            "passed": 2592,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 10,
+          "format:snowflake": 82
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 14,
+        "sample_conformance": 0.9333,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 23,
+            "pass_rate": 0.9583
+          },
+          "enum": {
+            "checked": 33,
+            "passed": 33,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 75,
+            "passed": 75,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 178,
+            "passed": 178,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 128,
+            "passed": 128,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 272,
+            "passed": 269,
+            "pass_rate": 0.989
+          },
+          "enum": {
+            "checked": 692,
+            "passed": 692,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 1869,
+            "passed": 1869,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 10,
+          "format:snowflake": 54
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "nvidia/nemotron-3.5-super-vl": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 35,
+            "passed": 35,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 83,
+            "passed": 83,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 286,
+            "passed": 286,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 210,
+            "passed": 210,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 434,
+            "passed": 431,
+            "pass_rate": 0.9931
+          },
+          "enum": {
+            "checked": 1171,
+            "passed": 1171,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2935,
+            "passed": 2935,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 12,
+          "format:snowflake": 64
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "openai/gpt-6-luna": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 22,
+            "passed": 22,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 32,
+            "passed": 32,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 87,
+            "passed": 87,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 261,
+            "passed": 261,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 202,
+            "passed": 202,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 255,
+            "passed": 252,
+            "pass_rate": 0.9882
+          },
+          "enum": {
+            "checked": 726,
+            "passed": 726,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 1700,
+            "passed": 1700,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 7,
+          "format:snowflake": 44
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "qwen/qwen3.8-flash": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 36,
+            "passed": 36,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 91,
+            "passed": 91,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 301,
+            "passed": 301,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 224,
+            "passed": 224,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 335,
+            "passed": 332,
+            "pass_rate": 0.991
+          },
+          "enum": {
+            "checked": 940,
+            "passed": 940,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2190,
+            "passed": 2190,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 13,
+          "format:snowflake": 59
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "thinkingmachines/inkling-small@nojson": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 33,
+            "passed": 33,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 75,
+            "passed": 75,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 288,
+            "passed": 288,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 210,
+            "passed": 210,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 354,
+            "passed": 351,
+            "pass_rate": 0.9915
+          },
+          "enum": {
+            "checked": 931,
+            "passed": 931,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2391,
+            "passed": 2391,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 8,
+          "format:snowflake": 71
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "thinkingmachines/inkling@nojson": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 24,
+            "passed": 24,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 33,
+            "passed": 33,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 75,
+            "passed": 75,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 255,
+            "passed": 255,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 184,
+            "passed": 184,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 15,
+            "passed": 15,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 334,
+            "passed": 331,
+            "pass_rate": 0.991
+          },
+          "enum": {
+            "checked": 846,
+            "passed": 846,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2271,
+            "passed": 2271,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 7,
+          "format:snowflake": 54
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    },
+    "z-ai/glm-5.3-flash": {
+      "asyncapi": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 23,
+            "passed": 23,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 36,
+            "passed": 36,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 91,
+            "passed": 91,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "graphql": {
+        "samples": 24,
+        "graded": 24,
+        "ungradable": 0,
+        "conforming": 24,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 342,
+            "passed": 342,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 254,
+            "passed": 254,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "grpc": {
+        "samples": 6,
+        "graded": 6,
+        "ungradable": 0,
+        "conforming": 6,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "enum": {
+            "checked": 0,
+            "passed": 0,
+            "pass_rate": null
+          },
+          "constraint": {
+            "checked": 13,
+            "passed": 13,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      },
+      "rest": {
+        "samples": 102,
+        "graded": 102,
+        "ungradable": 0,
+        "conforming": 102,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 424,
+            "passed": 421,
+            "pass_rate": 0.9929
+          },
+          "enum": {
+            "checked": 1170,
+            "passed": 1170,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 2755,
+            "passed": 2755,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {
+          "19 reply.": 12,
+          "format:snowflake": 71
+        }
+      },
+      "soap": {
+        "samples": 15,
+        "graded": 15,
+        "ungradable": 0,
+        "conforming": 15,
+        "sample_conformance": 1.0,
+        "keywords": {
+          "format": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "enum": {
+            "checked": 6,
+            "passed": 6,
+            "pass_rate": 1.0
+          },
+          "constraint": {
+            "checked": 12,
+            "passed": 12,
+            "pass_rate": 1.0
+          }
+        },
+        "skipped": {}
+      }
+    }
+  }
+}
