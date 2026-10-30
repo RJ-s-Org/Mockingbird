@@ -1,7 +1,7 @@
 //! Builds a [`MockRuntime`] for a stored mock: its active contract, LLM
 //! provider chain, engine settings and scenarios.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -174,7 +174,35 @@ const IMPORT_MAX_TEMPERATURE: f32 = 0.2;
 /// Fails when the mock's profile chain cannot be built (see
 /// [`build_provider`]) or its guards do not compile.
 pub async fn build_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
-    Ok(build_engine_with_budget(deps, mock).await?.0)
+    Ok(build_engine_with_budget(deps, mock, &ProfileUse::default())
+        .await?
+        .0)
+}
+
+/// The LLM profiles a mock runtime generates with: every profile of the
+/// chains its engines were built from, the configured one's and those the
+/// provider policy picked per call. Shared by the registry (to rebuild only
+/// the mocks a profile change affects) and the runtime's [`PolicyEngines`],
+/// which adds to it as calls build engines.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProfileUse(Arc<std::sync::Mutex<BTreeSet<String>>>);
+
+impl ProfileUse {
+    /// Records the profiles of `chain`.
+    fn record(&self, chain: &[LlmProfile]) {
+        if let Ok(mut used) = self.0.lock() {
+            used.extend(chain.iter().map(|p| p.name.clone()));
+        }
+    }
+
+    /// Whether an engine was built with profile `name`. A poisoned lock
+    /// answers `true`, so the mock is rebuilt rather than kept stale.
+    pub(crate) fn uses(&self, name: &str) -> bool {
+        self.0
+            .lock()
+            .map(|used| used.contains(name))
+            .unwrap_or(true)
+    }
 }
 
 /// [`build_engine`], also returning the mock's token budget (when it has
@@ -182,8 +210,9 @@ pub async fn build_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Eng
 async fn build_engine_with_budget(
     deps: &RuntimeDeps,
     mock: &Mock,
+    used: &ProfileUse,
 ) -> anyhow::Result<(Engine, Option<Arc<StoreTokenBudget>>)> {
-    let engine = build_bare_engine(deps, mock).await?;
+    let engine = build_bare_engine(deps, mock, used).await?;
     let (guards, budget) = engine_guards(deps, mock);
     Ok((engine.with_guards(guards), budget))
 }
@@ -230,23 +259,29 @@ pub fn runtime_limits(deps: &RuntimeDeps, mock: &Mock) -> RuntimeLimits {
     }
 }
 
-/// The engine of the mock's configured profile, without guards.
-async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
+/// The engine of the mock's configured profile, without guards; its
+/// profiles are recorded in `used`.
+async fn build_bare_engine(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    used: &ProfileUse,
+) -> anyhow::Result<Engine> {
     let profile = configured_profile(deps, mock);
     let workspace = match &profile {
         Some(name) if !deps.offline => Some(profile_workspace(deps, mock, name).await?),
         _ => None,
     };
-    bare_engine(deps, mock, profile.zip(workspace)).await
+    bare_engine(deps, mock, profile.zip(workspace), used).await
 }
 
 /// `mock`'s engine generating with `profile` (its name and the workspace
 /// it is loaded from), or with no LLM for `None` or offline; without
-/// guards.
+/// guards. The profiles of its chain are recorded in `used`.
 async fn bare_engine(
     deps: &RuntimeDeps,
     mock: &Mock,
     profile: Option<(String, String)>,
+    used: &ProfileUse,
 ) -> anyhow::Result<Engine> {
     let mut config = EngineConfig {
         persona: mock.persona.clone(),
@@ -257,6 +292,7 @@ async fn bare_engine(
     let provider = match profile {
         Some((name, workspace)) if !deps.offline => {
             let chain = load_chain(deps, &workspace, &name).await?;
+            used.record(&chain);
             let head = chain
                 .first()
                 .map(hop_settings)
@@ -355,6 +391,7 @@ pub async fn preview_engine_for(
         deps,
         mock,
         policy_profile(deps, mock, chosen.as_deref()).await?,
+        &ProfileUse::default(),
     )
     .await?;
     let (guards, _) = engine_guards(deps, mock);
@@ -450,6 +487,18 @@ pub async fn build_runtime_with_budget(
     deps: &RuntimeDeps,
     mock: &Mock,
 ) -> anyhow::Result<Option<(MockRuntime, Option<Arc<StoreTokenBudget>>)>> {
+    Ok(build_runtime_tracked(deps, mock)
+        .await?
+        .map(|(rt, budget, _)| (rt, budget)))
+}
+
+/// [`build_runtime_with_budget`], also returning the profiles the runtime
+/// generates with, which grows as its calls build the engines the provider
+/// policy picks.
+pub(crate) async fn build_runtime_tracked(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+) -> anyhow::Result<Option<(MockRuntime, Option<Arc<StoreTokenBudget>>, ProfileUse)>> {
     let Some(contract) = deps
         .store
         .active_contract(mock.id)
@@ -459,7 +508,8 @@ pub async fn build_runtime_with_budget(
         return Ok(None);
     };
 
-    let (engine, budget) = build_engine_with_budget(deps, mock).await?;
+    let used = ProfileUse::default();
+    let (engine, budget) = build_engine_with_budget(deps, mock, &used).await?;
 
     let scenarios = deps
         .store
@@ -483,6 +533,7 @@ pub async fn build_runtime_with_budget(
             deps: deps.clone(),
             mock: mock.clone(),
             guards: rt.engine.guards().clone(),
+            used: used.clone(),
         }));
     }
     rt.set_data_plane_auth(data_plane_auth(&mock.data_plane_auth));
@@ -510,7 +561,7 @@ pub async fn build_runtime_with_budget(
     rt.default_scenario = mock.behavior.default_scenario.clone();
     rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
-    Ok(Some((rt, budget)))
+    Ok(Some((rt, budget, used)))
 }
 
 /// The runtime form of a mock's stored data-plane auth settings.
@@ -653,11 +704,13 @@ fn choose_profile(
 /// Builds the engines of the profiles `mock`'s provider policy picks
 /// instead of the configured one ([`mb_protocols::ProfileEngines`]): the
 /// same persona, stream settings and guards (the token budget included),
-/// another provider chain.
+/// another provider chain. The profiles it builds with are recorded in
+/// `used`, so a change of one rebuilds the runtime and drops its engine.
 struct PolicyEngines {
     deps: RuntimeDeps,
     mock: Mock,
     guards: EngineGuards,
+    used: ProfileUse,
 }
 
 impl std::fmt::Debug for PolicyEngines {
@@ -673,7 +726,7 @@ impl mb_protocols::ProfileEngines for PolicyEngines {
     async fn engine(&self, profile: Option<&str>) -> Result<Arc<Engine>, String> {
         let built = async {
             let profile = policy_profile(&self.deps, &self.mock, profile).await?;
-            bare_engine(&self.deps, &self.mock, profile).await
+            bare_engine(&self.deps, &self.mock, profile, &self.used).await
         }
         .await
         .map_err(|e| format!("{e:#}"))?;

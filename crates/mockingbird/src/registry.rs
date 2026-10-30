@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 use crate::budget::StoreTokenBudget;
 use crate::ha::HubEvent;
-use crate::runtime::{RuntimeDeps, ServeMode, build_runtime_with_budget};
+use crate::runtime::{ProfileUse, RuntimeDeps, ServeMode, build_runtime_tracked};
 
 /// How a mock is named in logs and `/readyz`: `name` in the default
 /// workspace, `workspace/name` elsewhere.
@@ -58,6 +58,10 @@ struct Mounted {
     channels: Vec<Channel>,
     /// The mock's daily token budget, when it has one.
     budget: Option<Arc<StoreTokenBudget>>,
+    /// The LLM profiles its runtime generates with.
+    profiles: ProfileUse,
+    /// The mock names no LLM profile: it uses the default one.
+    uses_default: bool,
 }
 
 /// How a mounted mock is reached.
@@ -81,6 +85,13 @@ enum Served {
 }
 
 impl Mounted {
+    /// Whether a change of profile `name` in `workspace` may change this
+    /// mock: it generates with a profile of that name, loaded from its own
+    /// workspace or, for a default or policy-picked profile, `default`.
+    fn uses_profile(&self, workspace: &str, name: &str) -> bool {
+        (workspace == self.workspace || workspace == DEFAULT_WORKSPACE) && self.profiles.uses(name)
+    }
+
     fn is(&self, workspace: &str, name: &str) -> bool {
         self.workspace == workspace && self.name == name
     }
@@ -292,21 +303,121 @@ impl MockRegistry {
     /// may now be mountable, so every mock is rebuilt instead.
     pub async fn reload_mock(&self, deps: &RuntimeDeps, workspace: &str, name: &str) {
         let _guard = self.reload.lock().await;
-        let label = mock_label(workspace, name);
-        let built = match deps.store.get_mock(workspace, name).await {
+        if let Some(built) = self.fetch_and_build(deps, workspace, name).await {
+            self.apply_built(deps, workspace, name, built).await;
+        }
+    }
+
+    /// Rebuilds the mocks a change of LLM profile `name` in `workspace`
+    /// affects: those whose runtime generates with it (the profile they
+    /// name, or the default one, or one in that chain's fallbacks, or one
+    /// the provider policy picked for a call), and those whose last build
+    /// failed. The rest keep their runtimes.
+    pub async fn reload_profile(&self, deps: &RuntimeDeps, workspace: &str, name: &str) {
+        let _guard = self.reload.lock().await;
+        let profiles = BTreeSet::from([(workspace.to_owned(), name.to_owned())]);
+        self.reload_keys_locked(deps, self.profile_dependents(&profiles))
+            .await;
+    }
+
+    /// Rebuilds the mocks naming no LLM profile, and those whose last build
+    /// failed: what a change of `llm.default_profile` affects.
+    pub async fn reload_default_profile_mocks(&self, deps: &RuntimeDeps) {
+        let _guard = self.reload.lock().await;
+        let keys = self.dependents(|m| m.uses_default, |_| true);
+        self.reload_keys_locked(deps, keys).await;
+    }
+
+    /// The mocks a change of any of `profiles` (`(workspace, name)`)
+    /// affects (see [`Self::reload_profile`]).
+    fn profile_dependents(&self, profiles: &BTreeSet<MockKey>) -> BTreeSet<MockKey> {
+        self.dependents(
+            |m| profiles.iter().any(|(ws, name)| m.uses_profile(ws, name)),
+            |key| {
+                profiles
+                    .iter()
+                    .any(|(ws, _)| *ws == key.0 || ws == DEFAULT_WORKSPACE)
+            },
+        )
+    }
+
+    /// The mounted mocks matching `mounted`, with the failed mocks matching
+    /// `failed`.
+    fn dependents(
+        &self,
+        mounted: impl Fn(&Mounted) -> bool,
+        failed: impl Fn(&MockKey) -> bool,
+    ) -> BTreeSet<MockKey> {
+        let mut keys: BTreeSet<MockKey> = self
+            .mounted
+            .load()
+            .iter()
+            .filter(|m| mounted(m))
+            .map(|m| (m.workspace.clone(), m.name.clone()))
+            .collect();
+        if let Ok(slot) = self.failed.lock() {
+            keys.extend(slot.keys().filter(|k| failed(k)).cloned());
+        }
+        keys
+    }
+
+    /// [`Self::reload_mock`] for each of `keys`, built concurrently and
+    /// applied in `(workspace, name)` order, for a caller holding
+    /// `self.reload`. Stops once applying one reloaded every mock.
+    async fn reload_keys_locked(&self, deps: &RuntimeDeps, keys: BTreeSet<MockKey>) {
+        let builds: Vec<_> = futures::stream::iter(keys)
+            .map(|(workspace, name)| async move {
+                let built = self.fetch_and_build(deps, &workspace, &name).await;
+                (workspace, name, built)
+            })
+            .buffered(RELOAD_CONCURRENCY)
+            .collect()
+            .await;
+        for (workspace, name, built) in builds {
+            if let Some(built) = built
+                && self.apply_built(deps, &workspace, &name, built).await
+            {
+                return;
+            }
+        }
+    }
+
+    /// Loads mock `name` and builds it: `Ok(None)` when it was deleted or
+    /// has no active contract; `None` (logged) when it cannot be loaded.
+    async fn fetch_and_build(
+        &self,
+        deps: &RuntimeDeps,
+        workspace: &str,
+        name: &str,
+    ) -> Option<Result<Option<Mounted>, String>> {
+        match deps.store.get_mock(workspace, name).await {
             Ok(Some(mock)) => {
                 self.set_configured_hosts(workspace, name, &mock.hosts);
-                build_mounted(deps, &mock).await
+                Some(build_mounted(deps, &mock).await)
             }
             Ok(None) => {
                 self.set_configured_hosts(workspace, name, &[]);
-                Ok(None)
+                Some(Ok(None))
             }
             Err(error) => {
+                let label = mock_label(workspace, name);
                 tracing::error!(mock = %label, %error, "cannot load mock; leaving it as it was");
-                return;
+                None
             }
-        };
+        }
+    }
+
+    /// Mounts what [`Self::fetch_and_build`] built for mock `name`, for a
+    /// caller holding `self.reload`. Returns whether every mock was
+    /// reloaded instead (the mock released a prefix).
+    async fn apply_built(
+        &self,
+        deps: &RuntimeDeps,
+        workspace: &str,
+        name: &str,
+        built: Result<Option<Mounted>, String>,
+    ) -> bool {
+        let label = mock_label(workspace, name);
         let mounted = match built {
             Ok(mounted) => {
                 self.set_failed(workspace, name, None);
@@ -316,7 +427,7 @@ impl MockRegistry {
                 // Whatever is mounted (the previous version, or nothing)
                 // stays as it is.
                 self.set_failed(workspace, name, Some(error));
-                return;
+                return false;
             }
         };
 
@@ -335,7 +446,7 @@ impl MockRegistry {
         };
         if released {
             match self.reload_all_locked(deps).await {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(error) => {
                     tracing::error!(
                         mock = %label,
@@ -380,12 +491,14 @@ impl MockRegistry {
             }
         }
         self.publish(next).await;
+        false
     }
 
     /// Applies control-plane changes as the HA hub delivers them (see
     /// [`Ha::changes`](crate::ha::Ha::changes)): a mock change (in any
-    /// workspace, from any node) reloads that mock; a workspace or profile
-    /// change, a resync request, or missed changes, reload all.
+    /// workspace, from any node) reloads that mock; a profile change
+    /// reloads the mocks using that profile (see [`Self::reload_profile`]);
+    /// a workspace change, a resync request, or missed changes, reload all.
     ///
     /// Changes queued while a reload runs are applied together: each mock
     /// is rebuilt once however many changes name it (one store write
@@ -416,15 +529,29 @@ impl MockRegistry {
                         tracing::error!(%error, "cannot reload mocks");
                     }
                 } else {
-                    for (workspace, name) in &batch.mocks {
-                        registry.reload_mock(&deps, workspace, name).await;
-                    }
+                    registry
+                        .reload_batch(&deps, batch.mocks, &batch.profiles)
+                        .await;
                 }
                 if batch.closed {
                     break;
                 }
             }
         })
+    }
+
+    /// Rebuilds `mocks` and the mocks using any of `profiles`, each once.
+    async fn reload_batch(
+        &self,
+        deps: &RuntimeDeps,
+        mut mocks: BTreeSet<MockKey>,
+        profiles: &BTreeSet<MockKey>,
+    ) {
+        let _guard = self.reload.lock().await;
+        if !profiles.is_empty() {
+            mocks.extend(self.profile_dependents(profiles));
+        }
+        self.reload_keys_locked(deps, mocks).await;
     }
 
     /// The data-plane router: forwards each request to the mock with the
@@ -792,11 +919,14 @@ impl MockRegistry {
 /// The hub events the watcher applies in one turn, deduplicated.
 #[derive(Debug, Default, PartialEq)]
 struct ChangeBatch {
-    /// Reload every mock: a workspace or profile change, a resync
-    /// request, or missed changes.
+    /// Reload every mock: a workspace change, a resync request, or missed
+    /// changes.
     all: bool,
     /// The mocks to reload when not `all`.
     mocks: BTreeSet<MockKey>,
+    /// The changed profiles, `(workspace, name)`, whose mocks to reload
+    /// when not `all`.
+    profiles: BTreeSet<(String, String)>,
     /// The hub closed: stop once the batch is applied.
     closed: bool,
 }
@@ -807,9 +937,12 @@ impl ChangeBatch {
             HubEvent::Change(ControlChange::Mock { workspace, name }) => {
                 self.mocks.insert((workspace, name));
             }
-            HubEvent::Change(ControlChange::Workspace { .. })
-            | HubEvent::Change(ControlChange::Profile { .. })
-            | HubEvent::Resync => self.all = true,
+            HubEvent::Change(ControlChange::Profile { workspace, name }) => {
+                self.profiles.insert((workspace, name));
+            }
+            HubEvent::Change(ControlChange::Workspace { .. }) | HubEvent::Resync => {
+                self.all = true;
+            }
         }
     }
 
@@ -871,7 +1004,7 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
 /// contract; `Err` (logged) when it cannot be built.
 async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted>, String> {
     let label = mock_label(&mock.workspace, &mock.name);
-    let (runtime, budget) = match build_runtime_with_budget(deps, mock).await {
+    let (runtime, budget, profiles) = match build_runtime_tracked(deps, mock).await {
         Ok(Some(built)) => built,
         Ok(None) => return Ok(None),
         Err(error) => {
@@ -936,6 +1069,8 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
             events,
             channels,
             budget,
+            profiles,
+            uses_default: mock.llm_profile.is_none(),
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
@@ -1053,6 +1188,19 @@ mod tests {
         tx.send(HubEvent::Change(ControlChange::Profile {
             workspace: "default".into(),
             name: "p".into(),
+        }))
+        .unwrap();
+        let mut batch = ChangeBatch::default();
+        batch.drain(&mut rx);
+        assert!(!batch.all);
+        assert_eq!(batch.mocks.len(), 1);
+        assert_eq!(
+            batch.profiles.into_iter().collect::<Vec<_>>(),
+            [("default".to_owned(), "p".to_owned())]
+        );
+
+        tx.send(HubEvent::Change(ControlChange::Workspace {
+            name: "w".into(),
         }))
         .unwrap();
         let mut batch = ChangeBatch::default();

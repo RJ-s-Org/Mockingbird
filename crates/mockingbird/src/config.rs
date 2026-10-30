@@ -1293,8 +1293,8 @@ fn host_policy(cfg: &FileConfig) -> anyhow::Result<Option<HostPolicy>> {
 }
 
 /// Applies the settings a reload changed that live outside the store: the
-/// request-log settings, and the default LLM profile, rebuilding every mock
-/// when it changed (mocks naming no profile resolve it at build time).
+/// request-log settings, and the default LLM profile, rebuilding the mocks
+/// naming no profile when it changed (they resolve it at build time).
 fn applied_hook(
     registry: Arc<MockRegistry>,
     deps: RuntimeDeps,
@@ -1312,11 +1312,9 @@ fn applied_hook(
             if deps.default_profile.set(cfg.llm.default_profile) {
                 tracing::info!(
                     default_profile = ?deps.default_profile.get(),
-                    "default LLM profile changed; rebuilding mocks"
+                    "default LLM profile changed; rebuilding the mocks naming no profile"
                 );
-                if let Err(error) = registry.reload_all(&deps).await {
-                    tracing::error!(error = %format!("{error:#}"), "cannot reload mocks");
-                }
+                registry.reload_default_profile_mocks(&deps).await;
             }
         })
     })
