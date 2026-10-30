@@ -64,6 +64,8 @@ impl Shaped {
             .contains(&(location.to_string(), property.to_string()))
     }
 
+    /// Whether any required member was left out of the schema.
+    #[must_use]
     pub fn fills_any(&self) -> bool {
         !self.dropped.is_empty()
     }

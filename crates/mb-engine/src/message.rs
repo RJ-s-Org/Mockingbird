@@ -21,12 +21,16 @@ pub struct MessageContext {
     pub context: Option<Value>,
     /// The consumed message being replied to.
     pub received: Option<Value>,
+    /// Stored resources the message may refer to.
     pub related: Vec<StoredResource>,
 }
 
+/// A generated event message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedMessage {
+    /// The message payload.
     pub payload: Value,
+    /// Where the payload came from.
     pub source: Source,
     /// Tokens spent, summed over the primary and repair calls; zero when no
     /// LLM call was made.
@@ -36,6 +40,11 @@ pub struct GeneratedMessage {
 impl Engine {
     /// Generate one message for `channel`: the LLM (repaired once), else the
     /// faker.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Schema`] when the channel's message schema does not
+    /// compile.
     pub async fn generate_message(
         &self,
         bundle: &Bundle,
@@ -96,6 +105,10 @@ impl Engine {
 
     /// Validate `value` against `channel`'s message schema. A schema that
     /// cannot compile is reported as a single error.
+    ///
+    /// # Errors
+    ///
+    /// The validation errors, one message each.
     pub fn validate_message(
         &self,
         bundle: &Bundle,
@@ -111,6 +124,7 @@ impl Engine {
     /// A faker value for `schema`, validated against it: other
     /// `oneOf`/`anyOf` branches and fresh draws are tried before an invalid
     /// value is accepted. An uncompilable schema is faked unvalidated.
+    #[must_use]
     pub fn fake(&self, bundle: &Bundle, schema: &Value) -> Value {
         match self.schema_validator(bundle, schema) {
             Ok(validator) => self.fake_value(

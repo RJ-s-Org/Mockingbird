@@ -58,7 +58,7 @@ struct Pair {
 
 async fn pair(mocks: &str) -> Pair {
     let dir = tempfile::tempdir().unwrap();
-    let hub = MemoryBusHub::new();
+    let hub = MemoryBusHub::new_shared();
     let a = node(dir.path(), hub.join("node-a".into()), mocks).await;
     let b = node(dir.path(), hub.join("node-b".into()), mocks).await;
     Pair { hub, a, b, dir }
@@ -326,7 +326,7 @@ impl Bus for ToggleBus {
 async fn bus_down_degrades_readyz() {
     let dir = tempfile::tempdir().unwrap();
     let bus = Arc::new(ToggleBus {
-        inner: LocalBus::new("toggle".into()),
+        inner: LocalBus::new_shared("toggle".into()),
         health: Mutex::new(Ok(())),
     });
     let n = node(dir.path(), bus.clone(), "").await;
@@ -404,7 +404,7 @@ fn thing(i: usize) -> StoredResource {
 async fn slow_bus_does_not_delay_local_state_changes() {
     use mb_state::{MemoryStore, StateStore};
     let bus = Arc::new(SlowBus {
-        inner: LocalBus::new("slow".into()),
+        inner: LocalBus::new_shared("slow".into()),
         delay: Duration::from_millis(200),
     });
     let store = mockingbird::ha::BusStateStore::new(
@@ -437,7 +437,7 @@ async fn bench_state_bridge_over_slow_bus() {
     use mb_state::{MemoryStore, StateStore};
     for n in [100usize, 500] {
         let bus = Arc::new(SlowBus {
-            inner: LocalBus::new("slow".into()),
+            inner: LocalBus::new_shared("slow".into()),
             delay: Duration::from_millis(1),
         });
         let store = mockingbird::ha::BusStateStore::new(

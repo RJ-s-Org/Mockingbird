@@ -14,9 +14,10 @@
 //! [`SAFETY_RESYNC_INTERVAL`] (jittered), and after a failed publish it
 //! announces `Resync` to the other nodes once the bus works again.
 
+use std::fmt;
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -34,26 +35,43 @@ use crate::{CHANGE_CHANNEL_CAPACITY, StateError};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BusEvent {
+    /// A mock was created, changed or deleted.
     Mock {
+        /// The mock's workspace.
         workspace: String,
+        /// The mock's name.
         name: String,
     },
+    /// An LLM profile was created, changed or deleted.
     Profile {
+        /// The profile's workspace.
         workspace: String,
+        /// The profile's name.
         name: String,
     },
+    /// A workspace was created, changed or deleted.
     Workspace {
+        /// The workspace's name.
         name: String,
     },
+    /// A stored resource was upserted or deleted.
     State {
+        /// The session's workspace.
         workspace: String,
+        /// The session's mock.
         mock: String,
+        /// The session id.
         session: String,
+        /// The resource's type.
         resource_type: String,
+        /// The resource's id.
         id: String,
+        /// `true` for a delete, `false` for an upsert.
         deleted: bool,
     },
+    /// A request-log entry was written.
     RequestLogged {
+        /// The entry's id.
         id: i64,
     },
     /// Delivered locally after a reconnect, or sent instead of an event over MAX_BUS_PAYLOAD: receivers reload everything.
@@ -77,14 +95,18 @@ impl BusEvent {
 /// What travels on the wire: the event and the node that sent it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct BusEnvelope {
+    /// The node id of the sender.
     pub origin: String,
+    /// The event.
     pub event: BusEvent,
 }
 
 /// Largest encoded envelope sent as-is (below Postgres' 8000-byte NOTIFY
 /// limit). A larger event is sent as [`BusEvent::Resync`].
 pub const MAX_BUS_PAYLOAD: usize = 7900;
+/// The Postgres `NOTIFY` channel of [`PgBus`].
 pub const PG_BUS_CHANNEL: &str = "mockingbird_bus";
+/// The Redis pub/sub channel of [`RedisBus`].
 pub const REDIS_BUS_CHANNEL: &str = "mockingbird:bus";
 
 /// First reconnect delay; doubles on each failure up to [`MAX_BACKOFF`].
@@ -156,6 +178,7 @@ enum Wake<T> {
 const EVENTS_METRIC: &str = "mb_bus_events_total";
 const CONNECTED_METRIC: &str = "mb_bus_connected";
 
+/// Carries [`BusEvent`]s between the nodes of a cluster.
 #[async_trait]
 pub trait Bus: Send + Sync {
     /// Announces `event` to the other nodes. Never delivered back to this node.
@@ -164,6 +187,7 @@ pub trait Bus: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<BusEvent>;
     /// `Err(reason)` while the bus is disconnected.
     fn health(&self) -> Result<(), String>;
+    /// This node's id, the [`BusEnvelope::origin`] of what it publishes.
     fn node_id(&self) -> &str;
     /// `true` for the in-process bus of a single node.
     fn is_local(&self) -> bool;
@@ -192,6 +216,13 @@ fn encode(origin: &str, event: BusEvent) -> Result<(String, BusEvent), StateErro
     Ok((payload, env.event))
 }
 
+/// Locks one of the bus mutexes, ignoring poison. Every critical section
+/// under these locks is a single assignment, push, clone or read, so a
+/// panic elsewhere cannot leave the guarded value half-updated.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn count(direction: &'static str, event: &BusEvent) {
     metrics::counter!(EVENTS_METRIC, "direction" => direction, "type" => event.type_name())
         .increment(1);
@@ -205,9 +236,28 @@ pub struct LocalBus {
 }
 
 impl LocalBus {
+    /// A shared local bus of node `node_id`.
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `LocalBus::new_shared`; in 0.2.0 `new` returns `Self`"
+    )]
     pub fn new(node_id: String) -> Arc<Self> {
+        Self::new_shared(node_id)
+    }
+
+    /// A shared local bus of node `node_id`.
+    #[must_use]
+    pub fn new_shared(node_id: String) -> Arc<Self> {
         let (tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         Arc::new(Self { node_id, tx })
+    }
+}
+
+impl fmt::Debug for LocalBus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalBus")
+            .field("node_id", &self.node_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -237,18 +287,28 @@ pub struct MemoryBusHub {
 }
 
 impl MemoryBusHub {
+    /// An empty shared hub.
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `MemoryBusHub::new_shared`; in 0.2.0 `new` returns `Self`"
+    )]
     pub fn new() -> Arc<Self> {
+        Self::new_shared()
+    }
+
+    /// An empty shared hub.
+    #[must_use]
+    pub fn new_shared() -> Arc<Self> {
         Arc::new(Self {
             nodes: Mutex::new(Vec::new()),
         })
     }
 
+    /// A bus of node `node_id` joined to this hub: it delivers to every
+    /// other node of the hub, never back to itself.
     pub fn join(self: &Arc<Self>, node_id: String) -> Arc<dyn Bus> {
         let (tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
-        self.nodes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((node_id.clone(), tx.clone()));
+        lock(&self.nodes).push((node_id.clone(), tx.clone()));
         Arc::new(MemoryBus {
             hub: Arc::clone(self),
             node_id,
@@ -259,13 +319,22 @@ impl MemoryBusHub {
     fn deliver(&self, payload: &str) -> Result<(), StateError> {
         let env: BusEnvelope = serde_json::from_str(payload)
             .map_err(|e| StateError::Backend(format!("bus: decode event: {e}")))?;
-        let nodes = self.nodes.lock().unwrap_or_else(PoisonError::into_inner);
+        let nodes = lock(&self.nodes);
         for (id, tx) in nodes.iter().filter(|(id, _)| *id != env.origin) {
             tracing::trace!(node = %id, "memory bus delivery");
             // No subscribers is fine.
             let _ = tx.send(env.event.clone());
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for MemoryBusHub {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let nodes: Vec<String> = lock(&self.nodes).iter().map(|(id, _)| id.clone()).collect();
+        f.debug_struct("MemoryBusHub")
+            .field("nodes", &nodes)
+            .finish()
     }
 }
 
@@ -348,15 +417,12 @@ impl Receiver {
     }
 
     fn health(&self) -> Result<(), String> {
-        self.health
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.health).clone()
     }
 
     fn set_health(&self, h: Result<(), String>) {
         metrics::gauge!(CONNECTED_METRIC).set(if h.is_ok() { 1.0 } else { 0.0 });
-        *self.health.lock().unwrap_or_else(PoisonError::into_inner) = h;
+        *lock(&self.health) = h;
     }
 
     /// Decodes a payload from the wire and hands it to subscribers unless this
@@ -431,7 +497,23 @@ pub struct PgBus {
     task: JoinHandle<()>,
 }
 
+impl fmt::Debug for PgBus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgBus")
+            .field("node_id", &self.recv.node_id)
+            .field("health", &self.recv.health())
+            .finish_non_exhaustive()
+    }
+}
+
 impl PgBus {
+    /// Connects to the Postgres at `url` and listens on [`PG_BUS_CHANNEL`]
+    /// as node `node_id`; a lost connection is re-established in the
+    /// background.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Backend`] when the first connection or `LISTEN` fails.
     pub async fn connect(url: &str, node_id: String) -> Result<Arc<Self>, StateError> {
         Self::connect_with_timing(url, node_id, BusTiming::default()).await
     }
@@ -620,11 +702,7 @@ impl RedisPublisher {
     }
 
     async fn publish(&self, payload: &str) -> Result<(), String> {
-        let mut con = self
-            .con
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let mut con = lock(&self.con).clone();
         let published = with_timeout(
             "redis publish",
             redis::cmd("PUBLISH")
@@ -642,13 +720,30 @@ impl RedisPublisher {
     /// Swaps in a fresh connection (made on its first use).
     fn replace(&self) {
         match ConnectionManager::new_lazy_with_config(self.client.clone(), Self::config()) {
-            Ok(fresh) => *self.con.lock().unwrap_or_else(PoisonError::into_inner) = fresh,
+            Ok(fresh) => *lock(&self.con) = fresh,
             Err(error) => tracing::warn!(%error, "cannot replace the bus publish connection"),
         }
     }
 }
 
+impl fmt::Debug for RedisBus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedisBus")
+            .field("node_id", &self.recv.node_id)
+            .field("health", &self.recv.health())
+            .finish_non_exhaustive()
+    }
+}
+
 impl RedisBus {
+    /// Connects to the Redis at `url` (`redis://` or `rediss://`) and
+    /// subscribes to [`REDIS_BUS_CHANNEL`] as node `node_id`; a lost
+    /// connection is re-established in the background.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Backend`] when the URL has another scheme, or the
+    /// first connection or subscription fails.
     pub async fn connect(url: &str, node_id: String) -> Result<Arc<Self>, StateError> {
         Self::connect_with_timing(url, node_id, BusTiming::default()).await
     }

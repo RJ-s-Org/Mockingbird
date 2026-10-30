@@ -180,7 +180,7 @@ fn scrubber() -> Arc<Scrubber> {
 #[tokio::test(start_paused = true)]
 async fn saturated_limiter_falls_back_within_timeout() {
     let bundle = Arc::new(bundle());
-    let limiter = GenerationLimiter::new(1);
+    let limiter = GenerationLimiter::new_shared(1);
     let guards = EngineGuards {
         limiter: Some(Arc::clone(&limiter)),
         ..EngineGuards::default()
@@ -226,7 +226,7 @@ async fn saturated_limiter_falls_back_within_timeout() {
 #[tokio::test]
 async fn limiter_releases_permits() {
     let bundle = Arc::new(bundle());
-    let limiter = GenerationLimiter::new(2);
+    let limiter = GenerationLimiter::new_shared(2);
     assert_eq!(limiter.max(), 2);
     let guards = EngineGuards {
         limiter: Some(Arc::clone(&limiter)),

@@ -50,7 +50,7 @@ fn deps(store: Arc<dyn ControlStore>, log: SharedDeliveryLog) -> RuntimeDeps {
         protocols: ProtocolSettings::default(),
         stream: StreamConfig::default(),
         events: EventDeps::default(),
-        limiter: mb_engine::GenerationLimiter::new(64),
+        limiter: mb_engine::GenerationLimiter::new_shared(64),
         scrubber: None,
         limits: Default::default(),
         http: Default::default(),

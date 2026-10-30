@@ -178,7 +178,7 @@ async fn data_role_rejects_watch() {
 #[tokio::test]
 async fn only_leader_reconciles() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = MemoryBusHub::new();
+    let hub = MemoryBusHub::new_shared();
     let mocks = mocks_section(&[("orders", "openapi/orders-3.0.yaml")]);
     let (_lead_tx, lead_rx) = watch::channel(true);
     let (_follow_tx, follow_rx) = watch::channel(false);
@@ -216,7 +216,7 @@ async fn only_leader_reconciles() {
 #[tokio::test]
 async fn leader_gain_starts_watch() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = MemoryBusHub::new();
+    let hub = MemoryBusHub::new_shared();
     let (leader_tx, leader_rx) = watch::channel(false);
     let app = leader_node(
         dir.path(),
@@ -277,7 +277,7 @@ async fn leader_gain_starts_watch() {
 #[tokio::test]
 async fn readyz_reports_role_and_leader() {
     let dir = tempfile::tempdir().unwrap();
-    let hub = MemoryBusHub::new();
+    let hub = MemoryBusHub::new_shared();
     let (leader_tx, leader_rx) = watch::channel(false);
     let app = leader_node(
         dir.path(),

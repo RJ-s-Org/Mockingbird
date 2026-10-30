@@ -529,7 +529,7 @@ pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
     let operations: Vec<Value> = bundle
         .operations
         .iter()
-        .map(|op| json!({ "id": op.id, "target": op.target(), "kind": op.kind.label() }))
+        .map(|op| json!({ "id": op.id, "target": op.target(), "kind": op.kind.as_str() }))
         .collect();
     let channels: Vec<Value> = bundle
         .channels

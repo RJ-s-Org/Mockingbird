@@ -1,3 +1,5 @@
+//! The in-memory [`StateStore`]: [`MemoryStore`].
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -194,11 +196,26 @@ impl Inner {
     }
 }
 
+/// A [`StateStore`] in process memory: nothing survives
+/// a restart, and sessions idle for the TTL are swept every minute.
 pub struct MemoryStore {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for MemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryStore")
+            .field("sessions", &self.inner.sessions.len())
+            .field("ttl", &self.inner.ttl)
+            .finish_non_exhaustive()
+    }
+}
+
 impl MemoryStore {
+    /// An empty store whose sessions expire after `ttl` without a touch.
+    /// With a Tokio runtime, a task sweeps expired sessions while the store
+    /// lives.
+    #[must_use]
     pub fn new(ttl: Duration) -> Self {
         let (tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         let inner = Arc::new(Inner {

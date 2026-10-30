@@ -284,7 +284,7 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
     for op in &bundle.operations {
         let streams = op.kind.streams_request() || op.kind.streams_response();
         if streams {
-            println!("{:<32} {} [{}]", op.id, op.target(), op.kind.label());
+            println!("{:<32} {} [{}]", op.id, op.target(), op.kind.as_str());
         } else {
             println!("{:<32} {}", op.id, op.target());
         }

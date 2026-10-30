@@ -38,6 +38,9 @@ const MESSAGE_ROLE_STATEMENT: &str = "You generate realistic synthetic event mes
 asynchronous API. Output only a single JSON value conforming to the message schema. Never output \
 real personal data.";
 
+/// The system and user messages of one generation of `status` for `call`,
+/// with `schema` the body schema the answer must match.
+#[must_use]
 pub fn build_messages(
     bundle: &Bundle,
     op: &Operation,

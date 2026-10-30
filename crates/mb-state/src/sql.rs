@@ -151,15 +151,29 @@ impl Inner {
     }
 }
 
+/// A [`StateStore`] in SQLite or Postgres.
 pub struct SqlStateStore {
     inner: Arc<Inner>,
     tx: broadcast::Sender<StateChanged>,
+}
+
+impl std::fmt::Debug for SqlStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlStateStore")
+            .field("ttl_ms", &self.inner.ttl_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SqlStateStore {
     /// Opens `sqlite::memory:`, `sqlite://<path>` (created if missing) or
     /// `postgres://…`, runs migrations, and sweeps expired sessions every
     /// 60 s while the store lives.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Backend`] when the URL is not a SQLite or Postgres
+    /// URL, or the database cannot be opened, reached or migrated.
     pub async fn connect(url: &str, ttl: Duration) -> Result<Self, StateError> {
         let (pool, keeper) = if url.starts_with("sqlite:") {
             let (pool, keeper) = connect_sqlite(url).await?;
@@ -178,6 +192,10 @@ impl SqlStateStore {
     /// A Postgres store whose pool connects on first use and which runs no
     /// migrations (the schema must already exist). Unlike [`Self::connect`]
     /// it succeeds while the database is unreachable.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Backend`] when `url` is not a valid Postgres URL.
     pub fn connect_lazy(url: &str, ttl: Duration) -> Result<Self, StateError> {
         if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
             return Err(StateError::Backend(

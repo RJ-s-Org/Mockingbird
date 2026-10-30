@@ -277,15 +277,15 @@ fn new_bindings_and_kinds_round_trip() {
 
     let kind: OperationKind = serde_json::from_value(json!("stream_bidi")).unwrap();
     assert_eq!(kind, OperationKind::StreamBidi);
-    assert_eq!(serde_json::to_value(&kind).unwrap(), json!("stream_bidi"));
+    assert_eq!(serde_json::to_value(kind).unwrap(), json!("stream_bidi"));
     assert!(kind.streams_request() && kind.streams_response());
     assert!(OperationKind::StreamServer.streams_response());
     assert!(!OperationKind::StreamServer.streams_request());
     assert!(OperationKind::StreamClient.streams_request());
     assert!(!OperationKind::StreamClient.streams_response());
     assert!(!OperationKind::Query.streams_request() && !OperationKind::Query.streams_response());
-    assert_eq!(OperationKind::StreamClient.label(), "stream-client");
-    assert_eq!(OperationKind::Command(Effect::Delete).label(), "delete");
+    assert_eq!(OperationKind::StreamClient.as_str(), "stream-client");
+    assert_eq!(OperationKind::Command(Effect::Delete).as_str(), "delete");
 
     let soap = Binding::Soap {
         service: "Calculator".into(),
@@ -670,4 +670,43 @@ fn grpc_services_lists_full_service_names() {
     };
     let services: Vec<String> = bundle.grpc_services().into_iter().collect();
     assert_eq!(services, ["Bare", "routeguide.RouteGuide"]);
+}
+
+#[test]
+fn string_forms_match_display() {
+    for (m, text) in [(HttpMethod::Get, "GET"), (HttpMethod::Options, "OPTIONS")] {
+        assert_eq!(m.as_str(), text);
+        assert_eq!(m.to_string(), text);
+    }
+    assert_eq!(GraphqlOperationType::Mutation.to_string(), "mutation");
+    let kind = OperationKind::Command(Effect::Update);
+    assert_eq!(kind.as_str(), "update");
+    assert_eq!(kind.to_string(), kind.as_str());
+}
+
+#[test]
+fn effective_trigger_slice_matches_effective_triggers() {
+    let mut channel: Channel = serde_json::from_value(json!({
+        "id": "orders",
+        "title": "Orders",
+        "address": "orders",
+        "binding": { "kafka": { "topic": "orders" } },
+        "direction": "publish",
+        "message_schema": { "type": "object" },
+        "message_names": [],
+        "content_type": "application/json"
+    }))
+    .unwrap();
+    assert_eq!(channel.effective_trigger_slice(), &[Trigger::Manual]);
+    assert_eq!(channel.effective_triggers(), vec![Trigger::Manual]);
+    channel.triggers = vec![Trigger::Cron {
+        expr: "* * * * *".into(),
+    }];
+    assert_eq!(
+        channel.effective_trigger_slice(),
+        channel.triggers.as_slice()
+    );
+    channel.direction = Direction::Subscribe;
+    assert!(channel.effective_trigger_slice().is_empty());
+    assert!(channel.effective_triggers().is_empty());
 }

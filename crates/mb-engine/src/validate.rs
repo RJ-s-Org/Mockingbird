@@ -1,3 +1,6 @@
+//! JSON Schema validation of requests and generated output, and the local
+//! patching of output that breaks only what a fresh value fixes.
+
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -67,10 +70,23 @@ pub struct SchemaValidator {
     formats: OnceLock<Option<jsonschema::Validator>>,
 }
 
+impl std::fmt::Debug for SchemaValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchemaValidator")
+            .field("schema", &self.schema)
+            .field("assert_formats", &self.assert_formats)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SchemaValidator {
     /// A validator for which `format` is an annotation, as JSON Schema
     /// 2020-12 has it: the one for requests, whose values a mock must not
     /// reject over a format the real API may not check.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Schema`] when the schema does not compile.
     pub fn new(schema_with_defs: &Value) -> Result<Self, EngineError> {
         let inner = jsonschema::draft202012::new(schema_with_defs)
             .map_err(|e| EngineError::Schema(e.to_string()))?;

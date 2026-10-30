@@ -28,29 +28,43 @@ pub fn declared_headers(bundle: &Bundle, op: &Operation, status: u16) -> Vec<(St
         rng.random_range(limit / 2..limit)
     };
     let window = rng.random_range(1..=60u64);
+    let rate_limit = RateLimit {
+        limit,
+        remaining,
+        window,
+    };
     variant
         .headers
         .iter()
         .map(|(name, schema)| {
-            let value = header_value(
-                bundle, name, schema, status, limit, remaining, window, &mut rng,
-            );
+            let value = header_value(bundle, name, schema, status, rate_limit, &mut rng);
             (name.clone(), value)
         })
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The rate-limit numbers every header of one response agrees on.
+#[derive(Clone, Copy)]
+struct RateLimit {
+    limit: u64,
+    remaining: u64,
+    /// Seconds until the window resets.
+    window: u64,
+}
+
 fn header_value(
     bundle: &Bundle,
     name: &str,
     schema: &Value,
     status: u16,
-    limit: u64,
-    remaining: u64,
-    window: u64,
+    rate_limit: RateLimit,
     rng: &mut impl Rng,
 ) -> String {
+    let RateLimit {
+        limit,
+        remaining,
+        window,
+    } = rate_limit;
     let lower = name.to_ascii_lowercase();
     let rate = lower.contains("ratelimit") || lower.contains("rate-limit");
     if lower == "retry-after" {

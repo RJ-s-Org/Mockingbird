@@ -34,6 +34,11 @@ impl Engine {
     /// (`Repaired`) or replaced by faker output (`Fallback`); once the
     /// provider stream ends, fails or times out, the remaining items come
     /// from the faker. Offline, every item comes from the faker.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NoOutput`] when `op` declares no stream item schema,
+    /// and [`EngineError::Schema`] when that schema does not compile.
     pub fn generate_stream(
         self: &Arc<Self>,
         bundle: Arc<Bundle>,

@@ -71,7 +71,7 @@ fn root_fields_become_operations() {
             "Subscription.issueAdded",
         ]
     );
-    let kind = |id: &str| b.operation(id).unwrap().kind.clone();
+    let kind = |id: &str| b.operation(id).unwrap().kind;
     assert_eq!(kind("Query.repository"), OperationKind::Query);
     assert_eq!(
         kind("Mutation.createIssue"),

@@ -121,7 +121,7 @@ async fn time_narrowed_generate_and_fake() {
         println!("narrowed generate x{n}: {per:?} per call");
         let started = Instant::now();
         for _ in 0..n {
-            engine.fake(&bundle, &schema);
+            std::hint::black_box(engine.fake(&bundle, &schema));
         }
         let per = started.elapsed() / n as u32;
         println!("fake x{n}: {per:?} per call");
@@ -179,14 +179,14 @@ async fn time_engine_hot_paths() {
         let faker = Faker::new(6);
         let mut rng = rand::rng();
         let per = per_call(n, || {
-            faker.fake(&with_defs, &mut rng);
+            std::hint::black_box(faker.fake(&with_defs, &mut rng));
         });
         println!("PERF-3 Faker::fake (48 patterned fields) x{n}: {per:?}");
     }
     // PERF-4: Engine::fake rebuilds the reachable-defs schema and costs.
     for n in [200usize, 2000] {
         let per = per_call(n, || {
-            engine.fake(&bundle, &item);
+            std::hint::black_box(engine.fake(&bundle, &item));
         });
         println!("PERF-4 Engine::fake (4 defs) x{n}: {per:?}");
     }

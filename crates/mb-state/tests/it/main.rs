@@ -12,6 +12,7 @@
 mod bus;
 mod cache;
 mod conformance;
+mod debug;
 mod leader;
 mod memory;
 mod perf;
