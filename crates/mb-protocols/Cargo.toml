@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Internal crate of Mockingbird (protocol adapters), published for mockingbird-cli; no API stability guarantee. Use mockingbird-cli for the binary and mb-ext for extensions."
+keywords = ["mock", "graphql", "grpc", "soap", "asyncapi"]
+categories = ["development-tools::testing"]
+
+# Document every adapter, the broker clients included.
+[package.metadata.docs.rs]
+all-features = true
 
 # The library keeps its name (`use mb_protocols::…`).
 [lib]

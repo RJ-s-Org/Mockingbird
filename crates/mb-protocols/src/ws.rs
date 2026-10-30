@@ -63,6 +63,14 @@ pub struct ChannelIo {
     pub outgoing: mpsc::Sender<Outbound>,
 }
 
+impl std::fmt::Debug for ChannelIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelIo")
+            .field("protocol", &self.protocol)
+            .finish_non_exhaustive()
+    }
+}
+
 /// How a channel is served.
 #[derive(Clone, Debug)]
 pub struct ChannelConfig {

@@ -244,7 +244,13 @@ pub(crate) async fn handle(
     }
     let delay = log.delay;
     let latency = started.elapsed() + delay.unwrap_or_default();
-    report(rt, &method, &uri, &headers, &raw_body, log, status, latency)
+    let request = RequestParts {
+        method: &method,
+        uri: &uri,
+        headers: &headers,
+        raw_body: &raw_body,
+    };
+    report(rt, request, log, status, latency)
         .instrument(span.clone())
         .await;
     if let Some(delay) = delay {
@@ -590,18 +596,28 @@ fn stream(
     )
 }
 
+/// The parts of the HTTP request that [`report`] records.
+struct RequestParts<'a> {
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    raw_body: &'a [u8],
+}
+
 /// Report a served call to the usage sink and the request recorder.
-#[allow(clippy::too_many_arguments)]
 async fn report(
     rt: &MockRuntime,
-    method: &Method,
-    uri: &Uri,
-    headers: &HeaderMap,
-    raw_body: &[u8],
+    request: RequestParts<'_>,
     log: CallLog,
     status: u16,
     latency: Duration,
 ) {
+    let RequestParts {
+        method,
+        uri,
+        headers,
+        raw_body,
+    } = request;
     // The record's request is built only when a recorder will receive it.
     let request = if rt.recorder.is_some() {
         let media = media_type(headers).or(log.declared_body_type);

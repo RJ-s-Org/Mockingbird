@@ -23,10 +23,16 @@ use super::runtime::{ChannelInner, Origin};
 pub trait LeaseProvider: Send + Sync {
     /// Take or renew the lease `key` for `holder` for `ttl`. `Ok(true)`
     /// when `holder` now holds it.
+    ///
+    /// # Errors
+    ///
+    /// Why the lease store could not be asked. The caller keeps leading
+    /// until its last grant runs out.
     async fn try_acquire(&self, key: &str, holder: &str, ttl: Duration) -> Result<bool, String>;
 }
 
 /// A lease provider for a single replica: every holder always leads.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AlwaysLeader;
 
 #[async_trait]

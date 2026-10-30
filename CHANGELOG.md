@@ -29,6 +29,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 - Metrics `mb_faker_invalid_total` (a faker answer that matched no schema-valid draw) and `mb_scenario_set_ignored_total{reason}` (a scenario `set` dropped at request time: `invalid` or `not_an_object`).
 - `mb-ext` (additive): `Rejection` implements `Display` (`429 Quota exceeded: …`) and `std::error::Error`, and gains `Rejection::from_status(http::StatusCode, …)`; `Extensions` implements `Debug` (it names no extension); `UsageEvent::SOURCE_*` name the documented `source` values. The crate docs have a worked example, and fallible functions and trait methods have `# Errors` sections.
 - `mockingbird-llm`, `mockingbird-store`: every public type implements `Debug`, and none prints a secret: `HttpOptions` shows a proxy URL without its user and password (as do `OpenAiConfig`'s `base_url` and the client's "invalid proxy" error), `OpenAiCompatible` shows its redacted config, and `PgStore`/`SqliteControlStore` show pool sizes, never the connection URL. `mb_llm::Role` and the store's `ResourceSource`, `ContractStatus`, `ImportJobStatus` and `RequestKind` implement `Display` (their wire names) and, in the store, `FromStr`; those store enums and `DataPlaneAuthMode` are also `Copy`, `Eq` and `Hash`. By-value builders are `#[must_use]`.
+- `mockingbird-protocols`: every public type implements `Debug` (`MockRuntime`, `Brokers`, `GrpcServer` and the broker clients among them; none shows a credential, a secret or the contract); `RequestKind`, `BrokerKind` and `DeliveryStatus` implement `Display` and `FromStr` (an unknown name is a `ParseNameError`); its small enums derive `Hash`; `DispatchSettings::retry_delay` replaces the free function `webhooks::deliver::retry_delay`, now deprecated. The crate docs gain an example, `# Errors` and `# Panics` sections, and docs.rs builds them with every feature.
 
 ### Changed
 
@@ -50,6 +51,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- `mockingbird-protocols`: the `Debug` output of `BrokerConfig` and of a webhook `ResolvedTarget` (and so of `WebhookDispatcher`) shows the URL without userinfo (`amqp://user:password@…`), and for webhooks without the query and fragment, which can carry a token; it printed the URL as configured.
 - `mockingbird run --offline`, `--record`, `--replay` and `-c` reusing a server that already answers print a warning naming the flags that do not apply to it; a leftover dev server silently turned `run --replay snap -- npm test` into live LLM calls.
 - `mockingbird snapshot export` writes each mock's `path_rewrite` and `header_overrides`, and `snapshot import` creates the mock with them, so an imported mock routes like the original; older snapshots import as before. `docs/ci.md` lists what a mock file carries.
 - `mockingbird server stop` (and `mockingbird run`) ask the background server to stop through a stop file it watches (`MB_STOP_FILE`, set by `server start`), so on Windows it shuts down gracefully instead of being killed with `taskkill /F`; `/F` is used only after 10 s, and `forced` says when it was.

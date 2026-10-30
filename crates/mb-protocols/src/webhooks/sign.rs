@@ -7,7 +7,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 /// How a webhook body is signed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Signing {
     /// `Stripe-Signature: t=<ts>,v1=<hex HMAC-SHA256(secret, "<ts>.<body>")>`.
     Stripe,

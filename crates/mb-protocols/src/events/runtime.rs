@@ -52,6 +52,17 @@ pub struct EventDeps {
     pub shared_subscriptions: bool,
 }
 
+/// Leaves out the lease provider.
+impl std::fmt::Debug for EventDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventDeps")
+            .field("brokers", &self.brokers)
+            .field("holder", &self.holder)
+            .field("shared_subscriptions", &self.shared_subscriptions)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for EventDeps {
     /// No brokers, a single replica that always leads, a random holder id.
     fn default() -> Self {
@@ -65,7 +76,7 @@ impl Default for EventDeps {
 }
 
 /// What a channel runtime runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ChannelMode {
     /// Consumers, triggers, WebSocket routes and manual publish.
     #[default]
@@ -119,18 +130,26 @@ pub struct Published {
     pub source: Source,
 }
 
+/// Why a manual publish ([`ChannelRuntime::publish_manual`]) failed.
 #[derive(thiserror::Error, Debug, Clone, PartialEq)]
 pub enum PublishError {
+    /// The mock's contract declares no channel with this id.
     #[error("channel {0:?} does not exist")]
     UnknownChannel(String),
+    /// The mock consumes the channel, or (on a data node) it is a
+    /// WebSocket channel served elsewhere.
     #[error("channel {0:?} is consumed by this mock, not published")]
     NotPublishable(String),
+    /// The channel is turned off in the mock's event setup.
     #[error("channel {0:?} is disabled")]
     Disabled(String),
+    /// No broker can carry the channel; the reason says why.
     #[error("{0}")]
     NoBroker(String),
+    /// The broker did not take the message.
     #[error("broker publish failed: {0}")]
     Broker(String),
+    /// The generated message is larger than 1 MiB.
     #[error("generated message is {0} bytes, over the 1 MiB limit")]
     TooLarge(usize),
 }
@@ -512,12 +531,29 @@ pub struct ChannelRuntime {
     tasks: Mutex<JoinSet<()>>,
 }
 
+/// Shows the mock, the resolved broker and why channels are inactive.
+impl std::fmt::Debug for ChannelRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelRuntime")
+            .field("mock", &self.inner.rt.name)
+            .field("broker", &self.inner.broker)
+            .field("mode", &self.inner.setup.mode)
+            .field("inactive", &self.inner.inactive)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ChannelRuntime {
     /// Resolve the broker, open the hub of every WebSocket channel, start
     /// a consumer for every enabled, active broker channel the mock
     /// consumes and the triggers of every enabled, active channel it
     /// publishes. In [`ChannelMode::PublishOnly`] only the broker is
-    /// resolved: nothing is started. Must run inside a Tokio runtime.
+    /// resolved: nothing is started.
+    ///
+    /// # Panics
+    ///
+    /// When called outside a Tokio runtime and there are tasks to start
+    /// (consumers or triggers).
     pub fn start(rt: Arc<MockRuntime>, deps: EventDeps, setup: EventSetup) -> Arc<Self> {
         let publish_only = setup.mode == ChannelMode::PublishOnly;
         let inner = Arc::new(ChannelInner::new(rt, deps, setup));
@@ -570,6 +606,12 @@ impl ChannelRuntime {
     /// `channel`, in order. After the first error no further message is
     /// started; those already under way finish, and the failure carries
     /// every message that was delivered.
+    ///
+    /// # Errors
+    ///
+    /// A [`PublishFailure`] when the channel is unknown, not publishable,
+    /// disabled or without a broker, or when generating or publishing a
+    /// message fails; it carries the messages published before the error.
     pub async fn publish_manual(
         &self,
         channel: &str,

@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 /// What kind of call a [`RequestRecord`] records.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RequestKind {
     Http,
     Graphql,
@@ -17,6 +17,7 @@ pub enum RequestKind {
 }
 
 impl RequestKind {
+    /// `http`, `graphql`, `grpc`, `soap` or `event`.
     pub fn as_str(self) -> &'static str {
         match self {
             RequestKind::Http => "http",
@@ -24,6 +25,28 @@ impl RequestKind {
             RequestKind::Grpc => "grpc",
             RequestKind::Soap => "soap",
             RequestKind::Event => "event",
+        }
+    }
+}
+
+impl std::fmt::Display for RequestKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parses the names [`RequestKind::as_str`] returns.
+impl std::str::FromStr for RequestKind {
+    type Err = crate::ParseNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "http" => Ok(Self::Http),
+            "graphql" => Ok(Self::Graphql),
+            "grpc" => Ok(Self::Grpc),
+            "soap" => Ok(Self::Soap),
+            "event" => Ok(Self::Event),
+            _ => Err(crate::ParseNameError::new("request kind", s)),
         }
     }
 }

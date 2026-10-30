@@ -52,15 +52,21 @@ impl RateLimiter {
         }
     }
 
+    /// The sustained rate.
     pub fn requests_per_second(&self) -> f64 {
         self.requests_per_second
     }
 
+    /// The bucket size.
     pub fn burst(&self) -> u32 {
         self.burst
     }
 
     /// Takes one token, or answers how long until one is available.
+    ///
+    /// # Errors
+    ///
+    /// The wait until the next token, when the bucket is empty.
     pub fn try_acquire(&self) -> Result<(), Duration> {
         let mut bucket = self.bucket.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();

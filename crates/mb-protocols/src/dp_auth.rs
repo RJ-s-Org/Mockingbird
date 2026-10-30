@@ -16,7 +16,7 @@ use crate::MockRuntime;
 pub const API_KEY_QUERY_PARAM: &str = "api_key";
 
 /// How a mock authenticates data-plane callers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum DataPlaneAuthMode {
     /// Every caller is served.
     #[default]
@@ -188,7 +188,7 @@ pub(crate) fn presented_key<'a>(
 /// key in `api_key` mode; in `passthrough_validate` mode the credentials
 /// of at least one operation (an operation without requirements always
 /// passes).
-#[cfg_attr(not(any(feature = "soap", feature = "grpc")), allow(dead_code))]
+#[cfg(any(feature = "soap", feature = "grpc"))]
 pub(crate) async fn authenticate_contract(
     rt: &MockRuntime,
     headers: &HeaderMap,

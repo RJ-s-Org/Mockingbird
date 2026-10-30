@@ -4,28 +4,24 @@
 //! ([`change_feed`]) and usage/request-log reporting ([`report`]).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::HeaderMap;
-use futures::StreamExt;
-use futures::stream::{self, BoxStream};
 use mb_engine::consistency::{ENVELOPE_KEYS, item_identity, list_items, list_members};
 use mb_engine::{
     EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext, OFFLINE_REASON,
-    OperationCall, Source, StreamContext, StreamItem,
+    OperationCall, Source,
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
 use mb_mcm::{Binding, Effect, Operation, OperationKind, Protocol};
-use mb_state::{CacheEpoch, CachedResponse, ChangeKind, SessionKey, StateError, StoredResource};
+use mb_state::{CacheEpoch, CachedResponse, SessionKey, StateError, StoredResource};
 use serde_json::{Map, Value};
-use tokio::sync::broadcast::error::RecvError;
 use tracing::Instrument;
 
 use crate::chaos::{self, CHAOS_HEADER, ChaosDecision};
 pub(crate) use crate::dp_auth::Unauthorized;
-use crate::dp_auth::{authenticate, verify_key};
+use crate::dp_auth::authenticate;
 use crate::{
     MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
 };
@@ -164,6 +160,7 @@ pub(crate) struct CallPlan<'a> {
     /// capped at 30 s.
     pub delay: Option<Duration>,
     /// Header item count, else the scenario's.
+    #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
     pub stream_items: Option<usize>,
     pub tenancy: Tenancy,
     /// The call's faults. An injected error comes with `forced_status` set
@@ -202,7 +199,7 @@ pub(crate) struct Presented<'a> {
 /// with operation id `operation_id`, for adapters that check the
 /// data-plane key once per request ([`check_key`]) and must admit first.
 /// `Err` carries the tenancy when it resolved.
-#[cfg_attr(not(any(feature = "graphql", feature = "events")), allow(dead_code))]
+#[cfg(any(feature = "graphql", feature = "events"))]
 pub(crate) async fn admit(
     rt: &MockRuntime,
     operation_id: &str,
@@ -254,7 +251,7 @@ pub(crate) fn rate_limit(rt: &MockRuntime) -> Result<(), Rejection> {
 /// Admission of one more inbound message of a streaming call already
 /// admitted with `tenancy` (gRPC client and bidi streams): `quota.admit`,
 /// then the mock's rate limit, as for a new call.
-#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+#[cfg(feature = "grpc")]
 pub(crate) async fn admit_item(
     rt: &MockRuntime,
     tenancy: &Tenancy,
@@ -269,7 +266,7 @@ pub(crate) async fn admit_item(
 /// One usage event for a single engine call of a streaming call (a gRPC
 /// bidi reply); the call's own [`report`] is then sent with
 /// [`report_unmetered`], so nothing is counted twice.
-#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+#[cfg(feature = "grpc")]
 pub(crate) fn meter(
     rt: &MockRuntime,
     tenancy: Tenancy,
@@ -290,7 +287,7 @@ pub(crate) fn meter(
 /// The answer to a rate-limited call of `op` when the contract declares a
 /// `429` response: the engine's fallback for that variant (never an LLM
 /// call). `None` when the operation declares no `429`.
-#[cfg_attr(not(any(feature = "http-rest", feature = "soap")), allow(dead_code))]
+#[cfg(any(feature = "http-rest", feature = "soap"))]
 pub(crate) fn declared_rate_limited(rt: &MockRuntime, op: &Operation) -> Option<GeneratedResponse> {
     let variant = op
         .outputs
@@ -313,18 +310,18 @@ pub(crate) fn declared_rate_limited(rt: &MockRuntime, op: &Operation) -> Option<
 /// The data-plane key check of `api_key` mode for a whole request, for
 /// adapters that answer it once before planning each call (GraphQL over
 /// HTTP); `Ok` in every other mode.
-#[cfg_attr(not(feature = "graphql"), allow(dead_code))]
+#[cfg(feature = "graphql")]
 pub(crate) async fn check_key(
     rt: &MockRuntime,
     headers: &HeaderMap,
     query: &[(String, String)],
 ) -> Result<(), Unauthorized> {
-    verify_key(rt, headers, query).await
+    crate::dp_auth::verify_key(rt, headers, query).await
 }
 
 /// `pairs` without the mock's credential query parameters: they never
 /// reach the engine or the record.
-#[cfg_attr(not(feature = "http-rest"), allow(dead_code))]
+#[cfg(feature = "http-rest")]
 pub(crate) fn public_query(rt: &MockRuntime, pairs: &[(String, String)]) -> Vec<(String, String)> {
     let secret = &rt.credential_names().query;
     pairs
@@ -451,6 +448,7 @@ pub(crate) async fn plan<'a>(
         scenario,
         forced_status,
         delay,
+        #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
         stream_items,
         tenancy,
         chaos,
@@ -595,10 +593,7 @@ fn reference_prefix(field: &str) -> Option<&str> {
 
 /// Reads the target and related resources, generates one response, writes
 /// state for a 2xx and keeps the session alive.
-#[cfg_attr(
-    not(any(feature = "http-rest", feature = "grpc", feature = "soap")),
-    allow(dead_code)
-)]
+#[cfg(any(feature = "http-rest", feature = "grpc", feature = "soap"))]
 pub(crate) async fn generate_once(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -798,8 +793,7 @@ pub(crate) async fn complete(
     let session = &plan.session;
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
-    let writes = async {
-        let mut writes = Vec::new();
+    async {
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
@@ -819,15 +813,17 @@ pub(crate) async fn complete(
                 } else {
                     WriteOrigin::Call
                 };
-                writes = write_state(
+                write_state(
                     &mut state,
-                    session,
-                    op,
-                    t,
-                    target_id.clone(),
-                    &generated,
-                    call.body.as_ref(),
-                    origin,
+                    WriteRequest {
+                        session,
+                        op,
+                        resource_type: t,
+                        target_id: target_id.clone(),
+                        generated: &generated,
+                        request_body: call.body.as_ref(),
+                        origin,
+                    },
                 )
                 .await;
             }
@@ -838,12 +834,9 @@ pub(crate) async fn complete(
             store_wrapped(&mut state, session, &generated).await;
         }
         state.touch(session).await;
-        writes
     }
     .instrument(state_span())
     .await;
-    // Seeded writes come from reads, which send no webhooks.
-    drop(writes);
     // Any successful command may change what a cached read would answer,
     // even one that stored nothing or stored another resource type (Slack's
     // `chat.postMessage` and `conversations.history`).
@@ -853,6 +846,13 @@ pub(crate) async fn complete(
     {
         response_cache.clear_session(session);
     }
+    // Every caller of `complete` is one of these adapters.
+    #[cfg(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    ))]
     crate::webhooks::emit::emit(rt, op, call, &generated, target_id.as_deref(), session);
 
     // Seeded first, then cached: a later list never clears a cached one.
@@ -1212,13 +1212,15 @@ fn state_span() -> tracing::Span {
 /// Reads the target and related resources like [`generate_once`], keeps
 /// the session alive, then opens an engine stream. Generated items are
 /// never written to state.
-#[cfg_attr(not(feature = "sse"), allow(dead_code))] // also used by the GraphQL and gRPC adapters
+#[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
 pub(crate) async fn open_stream(
-    rt: &Arc<MockRuntime>,
+    rt: &std::sync::Arc<MockRuntime>,
     plan: &CallPlan<'_>,
     call: OperationCall,
     request_stream: Vec<Value>,
-) -> Result<BoxStream<'static, StreamItem>, EngineError> {
+) -> Result<futures::stream::BoxStream<'static, mb_engine::StreamItem>, EngineError> {
+    use std::sync::Arc;
+
     let op = plan.op;
     let mut state = StateAccess::new(rt);
     let target_id = target_id(op, &call);
@@ -1230,7 +1232,7 @@ pub(crate) async fn open_stream(
     }
     .instrument(state_span())
     .await;
-    let ctx = StreamContext {
+    let ctx = mb_engine::StreamContext {
         related,
         target,
         scenario: plan.scenario.map(|s| s.spec.clone()),
@@ -1243,19 +1245,26 @@ pub(crate) async fn open_stream(
 
 /// Whether a stored resource can be sent as a stream item, when the
 /// caller reads less than the whole item (a GraphQL selection).
-pub(crate) type ItemCheck = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
+#[cfg(any(feature = "sse", feature = "graphql"))]
+pub(crate) type ItemCheck = std::sync::Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 
 /// The data of every resource of `op`'s resource type upserted in
 /// `session` from now on, when it is a valid stream item of `op` (or
 /// passes `check`). Events missed because the receiver lagged are skipped.
 /// Empty when `op` has no resource type.
-#[cfg_attr(not(feature = "sse"), allow(dead_code))] // also used by the GraphQL adapter
+#[cfg(any(feature = "sse", feature = "graphql"))]
 pub(crate) fn change_feed(
-    rt: &Arc<MockRuntime>,
+    rt: &std::sync::Arc<MockRuntime>,
     session: SessionKey,
     op: &Operation,
     check: Option<ItemCheck>,
-) -> BoxStream<'static, Value> {
+) -> futures::stream::BoxStream<'static, Value> {
+    use futures::StreamExt;
+    use futures::stream;
+    use mb_state::ChangeKind;
+    use std::sync::Arc;
+    use tokio::sync::broadcast::error::RecvError;
+
     let Some(resource_type) = op.resource_type.clone() else {
         return stream::empty().boxed();
     };
@@ -1301,8 +1310,9 @@ pub(crate) fn change_feed(
     .boxed()
 }
 
+#[cfg(any(feature = "sse", feature = "graphql"))]
 struct Feed {
-    rt: Arc<MockRuntime>,
+    rt: std::sync::Arc<MockRuntime>,
     op: Operation,
     session: SessionKey,
     resource_type: String,
@@ -1361,7 +1371,7 @@ pub(crate) fn record_request(rt: &MockRuntime, r: Report) {
 
 /// [`report`] to the request recorder only: the call's usage was already
 /// recorded item by item (see [`meter`]).
-#[cfg_attr(not(feature = "grpc"), allow(dead_code))]
+#[cfg(feature = "grpc")]
 pub(crate) async fn report_unmetered(rt: &MockRuntime, headers: &HeaderMap, r: Report) {
     report_with(rt, headers, r, false, true).await;
 }
@@ -1486,7 +1496,7 @@ fn safe_headers(rt: &MockRuntime, headers: &HeaderMap, keep_overrides: bool) -> 
 /// record: not credential-like (see [`is_sensitive`]) and not one of the
 /// mock's credential headers. Used for headers outside a `HeaderMap`
 /// (consumed broker messages).
-#[cfg_attr(not(feature = "events"), allow(dead_code))]
+#[cfg(feature = "events")]
 pub(crate) fn is_recordable_header(rt: &MockRuntime, name: &str) -> bool {
     !is_sensitive(name)
         && !rt
@@ -1857,37 +1867,33 @@ pub(crate) enum WriteOrigin {
     Seeded,
 }
 
-/// One state write the store took.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // read by post-write hooks
-pub(crate) struct StateWrite {
-    pub origin: WriteOrigin,
-    /// `Effect::Create` for seeded items.
-    pub effect: Effect,
-    pub resource_type: String,
-    pub id: String,
-    /// `None` for deletes.
-    pub data: Option<Value>,
+/// A 2xx answer to write to state, and where it came from.
+struct WriteRequest<'a> {
+    session: &'a SessionKey,
+    op: &'a Operation,
+    resource_type: &'a str,
+    target_id: Option<String>,
+    generated: &'a GeneratedResponse,
+    request_body: Option<&'a Value>,
+    origin: WriteOrigin,
 }
 
 /// Writes a 2xx answer to state: a call's create, update or delete, or
 /// (`Seeded`) every identified item of a list answer that the session does
-/// not hold yet. Returns the writes the store took.
-#[allow(clippy::too_many_arguments)]
-async fn write_state(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    op: &Operation,
-    resource_type: &str,
-    target_id: Option<String>,
-    generated: &GeneratedResponse,
-    request_body: Option<&Value>,
-    origin: WriteOrigin,
-) -> Vec<StateWrite> {
-    let mut writes = Vec::new();
+/// not hold yet.
+async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
+    let WriteRequest {
+        session,
+        op,
+        resource_type,
+        target_id,
+        generated,
+        request_body,
+        origin,
+    } = w;
     if origin == WriteOrigin::Seeded {
         let Some(items) = generated.body.as_ref().and_then(list_items) else {
-            return writes;
+            return;
         };
         let field = item_identity(
             state.rt.bundle(),
@@ -1903,61 +1909,45 @@ async fn write_state(
                 id: id.clone(),
                 data: item.clone(),
             };
-            if state.insert_seeded(session, resource).await {
-                writes.push(StateWrite {
-                    origin,
-                    effect: Effect::Create,
-                    resource_type: resource_type.into(),
-                    id,
-                    data: Some(item.clone()),
-                });
-            }
+            state.insert_seeded(session, resource).await;
         }
-        return writes;
+        return;
     }
     let data = generated.body.clone().or_else(|| request_body.cloned());
-    let (effect, id, data) = match op.kind {
+    let (id, data) = match op.kind {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-            let Some(data) = data else { return writes };
+            let Some(data) = data else { return };
             let Some(id) = data.get(field).and_then(id_string) else {
-                return writes;
+                return;
             };
-            (Effect::Create, id, Some(data))
+            (id, Some(data))
         }
         OperationKind::Command(Effect::Update) => {
             let (Some(id), Some(data)) = (target_id, data) else {
-                return writes;
+                return;
             };
-            (Effect::Update, id, Some(data))
+            (id, Some(data))
         }
         OperationKind::Command(Effect::Delete) => {
-            let Some(id) = target_id else { return writes };
-            (Effect::Delete, id, None)
+            let Some(id) = target_id else { return };
+            (id, None)
         }
-        _ => return writes,
+        _ => return,
     };
-    let stored = match &data {
+    match data {
         Some(data) => {
             let resource = StoredResource {
                 resource_type: resource_type.into(),
-                id: id.clone(),
-                data: data.clone(),
+                id,
+                data,
             };
-            state.upsert(session, resource).await
+            state.upsert(session, resource).await;
         }
-        None => state.delete(session, resource_type, &id).await,
-    };
-    if stored {
-        writes.push(StateWrite {
-            origin,
-            effect,
-            resource_type: resource_type.into(),
-            id,
-            data,
-        });
+        None => {
+            state.delete(session, resource_type, &id).await;
+        }
     }
-    writes
 }
 
 /// `reason` as a header value: printable ASCII only (anything else becomes
@@ -1983,11 +1973,14 @@ pub(crate) fn reason_header(reason: &str) -> axum::http::HeaderValue {
 mod tests {
 
     use super::*;
+    use futures::StreamExt;
+    use mb_engine::StreamItem;
     use mb_engine::{Engine, EngineConfig, ScenarioSpec};
     use mb_import::compile;
     use mb_mcm::{Bundle, Identity, Protocol};
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn request_kind_follows_protocol() {

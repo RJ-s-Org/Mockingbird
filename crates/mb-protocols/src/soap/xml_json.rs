@@ -102,6 +102,11 @@ fn is_null_schema(s: &Value) -> bool {
 }
 
 /// The first child of the envelope's Body, converted per `schema_with_defs`.
+///
+/// # Errors
+///
+/// A fault string when `envelope` is not well-formed XML, is not a SOAP
+/// 1.1 or 1.2 Envelope, or has no Body or an empty one.
 pub fn envelope_body_to_json(envelope: &str, schema_with_defs: &Value) -> Result<Value, String> {
     let child = body_child(envelope)?;
     Ok(element_to_json(&child, schema_with_defs))

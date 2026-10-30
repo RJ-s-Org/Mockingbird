@@ -84,6 +84,11 @@ struct SoapState {
 
 /// A router serving every SOAP operation of `rt.bundle` at its
 /// `address_path` (`POST`), plus the WSDL at `GET <address_path>?wsdl`.
+///
+/// # Errors
+///
+/// [`SoapError::MissingWsdl`] when the bundle carries no WSDL, and
+/// [`SoapError::NoOperations`] when it has no SOAP operation.
 pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, SoapError> {
     let Some(ProtocolPayload::Soap { wsdl }) = &rt.bundle.protocol_payload else {
         return Err(SoapError::MissingWsdl);

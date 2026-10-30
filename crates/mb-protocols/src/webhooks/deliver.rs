@@ -37,8 +37,10 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
-/// A webhook target with its secret reference resolved.
-#[derive(Clone, Debug)]
+/// A webhook target with its secret reference resolved. Its `Debug` shows
+/// the URL without userinfo, query or fragment ([`redacted_url`]) and never
+/// the secret.
+#[derive(Clone)]
 pub struct ResolvedTarget {
     pub url: String,
     /// Operation ids, event types or `"*"`.
@@ -51,6 +53,19 @@ pub struct ResolvedTarget {
     pub delay: Duration,
 }
 
+impl fmt::Debug for ResolvedTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedTarget")
+            .field("url", &redacted_url(&self.url))
+            .field("events", &self.events)
+            .field("signing", &self.signing)
+            .field("secret", &self.secret)
+            .field("delay", &self.delay)
+            .finish()
+    }
+}
+
+/// Retry, concurrency and timeout settings of a [`WebhookDispatcher`].
 #[derive(Clone, Debug)]
 pub struct DispatchSettings {
     /// The wait before the first retry; doubled for each later one.
@@ -70,12 +85,21 @@ impl Default for DispatchSettings {
     }
 }
 
+impl DispatchSettings {
+    /// The wait before retry `retry` (1-based): `backoff_base * 2^(retry-1)`,
+    /// saturating.
+    pub fn retry_delay(&self, retry: u32) -> Duration {
+        let factor = 1u32
+            .checked_shl(retry.saturating_sub(1))
+            .unwrap_or(u32::MAX);
+        self.backoff_base.saturating_mul(factor)
+    }
+}
+
 /// The wait before retry `retry` (1-based): `backoff_base * 2^(retry-1)`.
+#[deprecated(since = "0.1.1", note = "use `DispatchSettings::retry_delay`")]
 pub fn retry_delay(settings: &DispatchSettings, retry: u32) -> Duration {
-    let factor = 1u32
-        .checked_shl(retry.saturating_sub(1))
-        .unwrap_or(u32::MAX);
-    settings.backoff_base.saturating_mul(factor)
+    settings.retry_delay(retry)
 }
 
 /// One event to send: the serialised body and what the log records.
@@ -155,7 +179,12 @@ impl WebhookDispatcher {
     }
 
     /// Records one `Pending` delivery per listed target and spawns it;
-    /// never awaits the network. Must run inside a Tokio runtime.
+    /// never awaits the network.
+    ///
+    /// # Panics
+    ///
+    /// When called outside a Tokio runtime with at least one target to send
+    /// to.
     pub fn send(self: &Arc<Self>, event: OutboundEvent, targets: &[usize]) {
         let event = Arc::new(event);
         for &index in targets {
@@ -227,7 +256,7 @@ impl WebhookDispatcher {
         let mut last_error = None;
         for attempt in 1..=1 + MAX_RETRIES {
             if attempt > 1 {
-                tokio::time::sleep(retry_delay(&self.settings, attempt - 1)).await;
+                tokio::time::sleep(self.settings.retry_delay(attempt - 1)).await;
             }
             let outcome = self.attempt(target, secret, &event).await;
             let status = outcome.as_ref().ok().copied();

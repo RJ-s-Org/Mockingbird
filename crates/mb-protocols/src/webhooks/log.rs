@@ -10,7 +10,7 @@ use serde::Serialize;
 /// Deliveries kept per `(workspace, mock)`; older ones are forgotten.
 pub const DELIVERY_LOG_CAPACITY: usize = 200;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     /// Waiting for its delay or between attempts.
@@ -23,12 +23,34 @@ pub enum DeliveryStatus {
 }
 
 impl DeliveryStatus {
+    /// `pending`, `delivered`, `failed` or `dropped` (as serialized).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Delivered => "delivered",
             Self::Failed => "failed",
             Self::Dropped => "dropped",
+        }
+    }
+}
+
+impl std::fmt::Display for DeliveryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parses the names [`DeliveryStatus::as_str`] returns.
+impl std::str::FromStr for DeliveryStatus {
+    type Err = crate::ParseNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "delivered" => Ok(Self::Delivered),
+            "failed" => Ok(Self::Failed),
+            "dropped" => Ok(Self::Dropped),
+            _ => Err(crate::ParseNameError::new("delivery status", s)),
         }
     }
 }
@@ -57,6 +79,7 @@ pub struct DeliveryRecord {
 
 type Key = (String, String);
 
+/// The newest [`DELIVERY_LOG_CAPACITY`] deliveries of each mock.
 #[derive(Default, Debug)]
 pub struct DeliveryLog {
     by_mock: Mutex<HashMap<Key, VecDeque<DeliveryRecord>>>,
