@@ -1,7 +1,7 @@
 #![cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::support::serve;
@@ -33,12 +33,23 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-/// A SQLite control store whose `ping` can fail and whose
-/// `append_request_log` can stall forever.
+/// A SQLite control store whose `ping` can fail, whose
+/// `append_request_log` can stall forever, and whose contract and
+/// scenario reads can take `read_delay_ms` (a network store's round trip).
 struct StubControl {
     inner: SqliteControlStore,
     ping_fails: AtomicBool,
     stall_append: AtomicBool,
+    read_delay_ms: AtomicU64,
+}
+
+impl StubControl {
+    async fn read_delay(&self) {
+        let ms = self.read_delay_ms.load(Ordering::Relaxed);
+        if ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -118,9 +129,11 @@ impl ControlStore for StubControl {
         self.inner.activate_contract_version(mock_id, version).await
     }
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError> {
+        self.read_delay().await;
         self.inner.active_contract(mock_id).await
     }
     async fn list_scenarios(&self, mock_id: Uuid) -> Result<Vec<Scenario>, StoreError> {
+        self.read_delay().await;
         self.inner.list_scenarios(mock_id).await
     }
     async fn put_scenario(&self, s: &Scenario) -> Result<(), StoreError> {
@@ -426,6 +439,7 @@ async fn stub_store() -> Arc<StubControl> {
             .unwrap(),
         ping_fails: AtomicBool::new(false),
         stall_append: AtomicBool::new(false),
+        read_delay_ms: AtomicU64::new(0),
     })
 }
 
@@ -437,12 +451,17 @@ fn fixture_source() -> String {
 
 /// Creates mock `orders` at `/orders` with the fixture contract active.
 async fn orders_mock(store: &Arc<dyn ControlStore>) -> Mock {
+    named_mock(store, "orders").await
+}
+
+/// Creates mock `name` at `/<name>` with the fixture contract active.
+async fn named_mock(store: &Arc<dyn ControlStore>, name: &str) -> Mock {
     let mock = store
         .create_mock(
             DEFAULT_WORKSPACE,
             NewMock {
-                name: "orders".into(),
-                route_prefix: Some("/orders".into()),
+                name: name.into(),
+                route_prefix: Some(format!("/{name}")),
                 persona: None,
                 llm_profile: None,
                 header_overrides: true,
@@ -1179,4 +1198,33 @@ async fn recorder_shutdown_drains_queue() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// MOCKINGBIRD-PERF-8 benchmark: `reload_all` of `m` mocks on a store
+/// whose contract and scenario reads take 2 ms, as over a network.
+/// `cargo nextest run -p mockingbird-cli --run-ignored only -E 'test(bench_)' --no-capture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark"]
+async fn bench_reload_all() {
+    for m in [10usize, 40] {
+        let stub = stub_store().await;
+        let store: Arc<dyn ControlStore> = stub.clone();
+        for i in 0..m {
+            named_mock(&store, &format!("m{i}")).await;
+        }
+        let deps = deps(store, memory_state(), None);
+        let registry = MockRegistry::new();
+        registry.reload_all(&deps).await.unwrap();
+        assert_eq!(registry.mounted().len(), m);
+        for delay in [0u64, 2] {
+            stub.read_delay_ms.store(delay, Ordering::Relaxed);
+            let mut best = Duration::MAX;
+            for _ in 0..3 {
+                let start = Instant::now();
+                registry.reload_all(&deps).await.unwrap();
+                best = best.min(start.elapsed());
+            }
+            println!("PERF-8 reload_all of {m} mocks, {delay} ms reads: {best:?} (best of 3)");
+        }
+    }
 }

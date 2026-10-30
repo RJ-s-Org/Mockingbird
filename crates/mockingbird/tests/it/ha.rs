@@ -355,3 +355,114 @@ async fn bus_down_degrades_readyz() {
     *bus.health.lock().unwrap() = Ok(());
     assert_eq!(readyz().await["status"], "ready");
 }
+
+/// A bus whose publishes each take `delay`.
+struct SlowBus {
+    inner: Arc<dyn Bus>,
+    delay: Duration,
+}
+
+#[async_trait]
+impl Bus for SlowBus {
+    async fn publish(&self, event: BusEvent) -> Result<(), StateError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.publish(event).await
+    }
+    fn subscribe(&self) -> broadcast::Receiver<BusEvent> {
+        self.inner.subscribe()
+    }
+    fn health(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn node_id(&self) -> &str {
+        self.inner.node_id()
+    }
+    fn is_local(&self) -> bool {
+        false
+    }
+}
+
+fn state_session() -> SessionKey {
+    SessionKey {
+        workspace: DEFAULT_WORKSPACE.into(),
+        mock: "m".into(),
+        session: "s".into(),
+    }
+}
+
+fn thing(i: usize) -> StoredResource {
+    StoredResource {
+        resource_type: "things".into(),
+        id: i.to_string(),
+        data: json!({"id": i}),
+    }
+}
+
+/// Local state changes reach this node's subscribers without waiting on
+/// the bus: a slow bus does not hold the merged feed back.
+#[tokio::test]
+async fn slow_bus_does_not_delay_local_state_changes() {
+    use mb_state::{MemoryStore, StateStore};
+    let bus = Arc::new(SlowBus {
+        inner: LocalBus::new("slow".into()),
+        delay: Duration::from_millis(200),
+    });
+    let store = mockingbird::ha::BusStateStore::new(
+        Arc::new(MemoryStore::new(Duration::from_secs(60))),
+        bus,
+    );
+    let mut rx = store.subscribe();
+    let start = Instant::now();
+    for i in 0..5 {
+        store.upsert(&state_session(), thing(i)).await.unwrap();
+    }
+    for _ in 0..5 {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "5 local changes took {:?}",
+        start.elapsed()
+    );
+}
+
+/// MOCKINGBIRD-PERF-11 benchmark: `n` local state changes over a bus whose
+/// publishes take 1 ms; time until the merged feed delivers them all.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark"]
+async fn bench_state_bridge_over_slow_bus() {
+    use mb_state::{MemoryStore, StateStore};
+    for n in [100usize, 500] {
+        let bus = Arc::new(SlowBus {
+            inner: LocalBus::new("slow".into()),
+            delay: Duration::from_millis(1),
+        });
+        let store = mockingbird::ha::BusStateStore::new(
+            Arc::new(MemoryStore::new(Duration::from_secs(60))),
+            bus,
+        );
+        let mut rx = store.subscribe();
+        let start = Instant::now();
+        let mut got = 0;
+        for i in 0..n {
+            store.upsert(&state_session(), thing(i)).await.unwrap();
+            while rx.try_recv().is_ok() {
+                got += 1;
+            }
+        }
+        while got < n {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Ok(_)) => got += 1,
+                Ok(Err(broadcast::error::RecvError::Lagged(k))) => got += k as usize,
+                _ => break,
+            }
+        }
+        println!(
+            "PERF-11 {n} local state changes delivered in {:?}",
+            start.elapsed()
+        );
+    }
+}

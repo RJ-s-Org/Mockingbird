@@ -1280,3 +1280,74 @@ async fn runtime_carries_mock_behavior() {
     assert_eq!(rt.unknown_ids, mb_protocols::UnknownIds::NotFound);
     assert_eq!(rt.default_scenario.as_deref(), Some("gift"));
 }
+
+/// A mock change for `name` in the default workspace, as the hub delivers it.
+fn mock_change(name: &str) -> mockingbird::ha::HubEvent {
+    mockingbird::ha::HubEvent::Change(mb_store::ControlChange::Mock {
+        workspace: DEFAULT_WORKSPACE.into(),
+        name: name.into(),
+    })
+}
+
+/// Waits until mock `name` is mounted.
+async fn wait_mounted(registry: &MockRegistry, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !registry.mounted_mocks().iter().any(|(_, n)| n == name) {
+        assert!(Instant::now() < deadline, "{name} mounted within 10s");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// A burst of change events for one mock (what one reconcile of a changed
+/// mock publishes) is applied without losing a change queued behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn watcher_applies_every_mock_of_a_burst() {
+    let store = store().await;
+    let deps = deps(store.clone());
+    let registry = MockRegistry::new();
+    let a = create_mock(&store, "a", "/a", None).await;
+    activate(&store, &a, &fixture_source()).await;
+    registry.reload_all(&deps).await.unwrap();
+    let (tx, rx) = tokio::sync::broadcast::channel(1024);
+    let _watcher = registry.spawn_watcher(deps.clone(), rx);
+    let b = create_mock(&store, "b", "/b", None).await;
+    activate(&store, &b, &fixture_source()).await;
+    for _ in 0..20 {
+        tx.send(mock_change("a")).unwrap();
+    }
+    tx.send(mock_change("b")).unwrap();
+    wait_mounted(&registry, "b").await;
+    let mut names: Vec<String> = registry.mounted().into_iter().map(|m| m.1).collect();
+    names.sort();
+    assert_eq!(names, ["a", "b"]);
+}
+
+/// MOCKINGBIRD-PERF-1 benchmark: time from a burst of `n` change events
+/// for mock `a` (plus one for a new mock `b`) until `b` is mounted.
+/// `cargo nextest run -p mockingbird-cli --run-ignored only -E 'test(bench_)' --no-capture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark"]
+async fn bench_change_burst() {
+    for n in [10usize, 100] {
+        let store = store().await;
+        let deps = deps(store.clone());
+        let registry = MockRegistry::new();
+        let a = create_mock(&store, "a", "/a", None).await;
+        activate(&store, &a, &fixture_source()).await;
+        registry.reload_all(&deps).await.unwrap();
+        let (tx, rx) = tokio::sync::broadcast::channel(4096);
+        let _watcher = registry.spawn_watcher(deps.clone(), rx);
+        let b = create_mock(&store, "b", "/b", None).await;
+        activate(&store, &b, &fixture_source()).await;
+        let start = Instant::now();
+        for _ in 0..n {
+            tx.send(mock_change("a")).unwrap();
+        }
+        tx.send(mock_change("b")).unwrap();
+        wait_mounted(&registry, "b").await;
+        println!(
+            "PERF-1 burst of {n} changes: new mock mounted after {:?}",
+            start.elapsed()
+        );
+    }
+}

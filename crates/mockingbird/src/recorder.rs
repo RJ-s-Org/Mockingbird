@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
@@ -74,10 +74,10 @@ impl StoreRecorder {
     ) -> Arc<Self> {
         let (queue, rx) = mpsc::channel(QUEUE_CAPACITY);
         let (live, _) = broadcast::channel(LIVE_CAPACITY);
-        let settings = Arc::new(ArcSwap::from_pointee(Settings {
+        let settings = Arc::new(ArcSwap::from_pointee(Settings::new(
             retention,
             redact_fields,
-        }));
+        )));
         let announce = Arc::new(OnceLock::new());
         let writer = Writer {
             changes: store.subscribe(),
@@ -121,6 +121,7 @@ impl StoreRecorder {
             store: Arc::clone(&self.store),
             live: self.live.clone(),
             mocks: HashMap::new(),
+            listed: None,
         };
         let tasks = vec![
             tokio::spawn(announce(rx, Arc::clone(&bus))),
@@ -134,10 +135,8 @@ impl StoreRecorder {
     /// Replaces the retention and the redacted fields; records written from
     /// now on use the new values.
     pub fn set_settings(&self, retention: u32, redact_fields: Vec<String>) {
-        self.settings.store(Arc::new(Settings {
-            retention,
-            redact_fields,
-        }));
+        self.settings
+            .store(Arc::new(Settings::new(retention, redact_fields)));
     }
 
     /// Redacted, truncated records as they are written.
@@ -217,7 +216,14 @@ struct Remote {
     live: broadcast::Sender<RequestRecord>,
     /// mock id → (workspace, name), filled from `list_all_mocks` on a miss.
     mocks: HashMap<Uuid, (String, String)>,
+    /// When `mocks` was last listed: misses list again at most once per
+    /// [`RELIST_INTERVAL`].
+    listed: Option<Instant>,
 }
+
+/// How often an entry of an unknown mock (deleted, or created since the
+/// last listing) may make [`Remote`] list the mocks again.
+const RELIST_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Remote {
     async fn run(mut self, mut events: broadcast::Receiver<BusEvent>) {
@@ -255,8 +261,13 @@ impl Remote {
         let _ = self.live.send(from_entry(&entry, &workspace, &mock));
     }
 
+    /// `(workspace, name)` of mock `id`. An unknown id lists the mocks
+    /// again, at most once per [`RELIST_INTERVAL`] (entries of a deleted
+    /// mock would otherwise list them once each).
     async fn mock(&mut self, id: Uuid) -> Option<(String, String)> {
-        if !self.mocks.contains_key(&id) {
+        let stale = self.listed.is_none_or(|at| at.elapsed() >= RELIST_INTERVAL);
+        if !self.mocks.contains_key(&id) && stale {
+            self.listed = Some(Instant::now());
             match self.store.list_all_mocks().await {
                 Ok(mocks) => {
                     self.mocks = mocks
@@ -306,7 +317,17 @@ pub fn from_entry(e: &RequestLogEntry, workspace: &str, mock: &str) -> RequestRe
 /// Request-log settings that a config reload may change.
 struct Settings {
     retention: u32,
+    /// The redacted fields, normalized (see [`normalize_fields`]).
     redact_fields: Vec<String>,
+}
+
+impl Settings {
+    fn new(retention: u32, redact_fields: Vec<String>) -> Self {
+        Self {
+            retention,
+            redact_fields: normalize_fields(&redact_fields),
+        }
+    }
 }
 
 /// The background half of a [`StoreRecorder`].
@@ -355,9 +376,10 @@ impl Writer {
     /// Redacts and truncates a record, then broadcasts and stores it.
     async fn write(&mut self, mut r: RequestRecord) {
         let settings = self.settings.load_full();
-        redact(&mut r.request, &settings.redact_fields);
+        let mut scratch = String::new();
+        redact_normalized(&mut r.request, &settings.redact_fields, &mut scratch);
         if let Some(response) = &mut r.response {
-            redact(response, &settings.redact_fields);
+            redact_normalized(response, &settings.redact_fields, &mut scratch);
         }
         if let Some(body) = r.request.get_mut("body") {
             truncate_body(body);
@@ -365,8 +387,7 @@ impl Writer {
         if let Some(response) = &mut r.response {
             truncate_body(response);
         }
-        // No receivers is not an error: nobody is tailing.
-        let _ = self.live.send(r.clone());
+        send_live(&self.live, &r);
 
         let Some(mock_id) = self.mock_id(&r.workspace, &r.mock).await else {
             return;
@@ -427,26 +448,57 @@ impl Writer {
     }
 }
 
+/// Sends `r` to the live tail; nothing (not even a clone) when nobody
+/// tails. A subscriber joining meanwhile misses this record, which a
+/// best-effort tail allows.
+fn send_live(live: &broadcast::Sender<RequestRecord>, r: &RequestRecord) {
+    if live.receiver_count() > 0 {
+        // Every receiver gone since is not an error either.
+        let _ = live.send(r.clone());
+    }
+}
+
 /// Replaces a body whose serialized JSON exceeds
 /// [`MAX_RECORDED_BODY_BYTES`] with `{"truncated": true, "bytes": N,
 /// "preview": "<first PREVIEW_BYTES of the JSON>"}`. Run it after
 /// [`redact`], so the preview holds no redacted values.
 pub fn truncate_body(body: &mut Value) {
-    let Ok(text) = serde_json::to_string(body) else {
+    // One pass that counts the serialized bytes and keeps only the first
+    // PREVIEW_BYTES: the whole JSON text is never held in memory.
+    let mut out = Preview::default();
+    if serde_json::to_writer(&mut out, body).is_err() || out.len <= MAX_RECORDED_BODY_BYTES {
         return;
+    }
+    // The cut may split a character; keep the valid prefix.
+    let preview = match std::str::from_utf8(&out.head) {
+        Ok(text) => text,
+        Err(e) => std::str::from_utf8(&out.head[..e.valid_up_to()]).unwrap_or_default(),
     };
-    if text.len() <= MAX_RECORDED_BODY_BYTES {
-        return;
-    }
-    let mut end = PREVIEW_BYTES.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
     *body = serde_json::json!({
         "truncated": true,
-        "bytes": text.len(),
-        "preview": &text[..end],
+        "bytes": out.len,
+        "preview": preview,
     });
+}
+
+/// A writer that counts every byte and keeps the first [`PREVIEW_BYTES`].
+#[derive(Default)]
+struct Preview {
+    len: usize,
+    head: Vec<u8>,
+}
+
+impl std::io::Write for Preview {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = PREVIEW_BYTES.saturating_sub(self.head.len());
+        self.head.extend_from_slice(&buf[..room.min(buf.len())]);
+        self.len += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Replaces with `"[redacted]"` the value of every object key, at any depth
@@ -456,39 +508,263 @@ pub fn truncate_body(body: &mut Value) {
 /// `api_key` and `x-api-key`; it also redacts `tokenizer_version`, erring
 /// on the side of hiding a value.
 pub fn redact(value: &mut Value, fields: &[String]) {
-    let fields: Vec<String> = fields
-        .iter()
-        .map(|f| normalize_key(f))
-        .filter(|f| !f.is_empty())
-        .collect();
-    redact_normalized(value, &fields);
+    redact_normalized(value, &normalize_fields(fields), &mut String::new());
 }
 
-fn redact_normalized(value: &mut Value, fields: &[String]) {
+/// `fields` normalized (see [`normalize_key_into`]), empty ones dropped.
+fn normalize_fields(fields: &[String]) -> Vec<String> {
+    fields
+        .iter()
+        .map(|f| {
+            let mut key = String::new();
+            normalize_key_into(f, &mut key);
+            key
+        })
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
+/// [`redact`] with `fields` already normalized; `scratch` holds each
+/// normalized key in turn, so no key allocates.
+fn redact_normalized(value: &mut Value, fields: &[String], scratch: &mut String) {
+    if fields.is_empty() {
+        return;
+    }
     match value {
         Value::Object(map) => {
             for (key, v) in map.iter_mut() {
-                let key = normalize_key(key);
-                if fields.iter().any(|f| key.contains(f.as_str())) {
+                normalize_key_into(key, scratch);
+                if fields.iter().any(|f| scratch.contains(f.as_str())) {
                     *v = Value::String(REDACTED.to_string());
                 } else {
-                    redact_normalized(v, fields);
+                    redact_normalized(v, fields, scratch);
                 }
             }
         }
         Value::Array(items) => {
             for v in items {
-                redact_normalized(v, fields);
+                redact_normalized(v, fields, scratch);
             }
         }
         _ => {}
     }
 }
 
-/// `key` ASCII-lowercased without `_`, `-` and `.`.
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|c| !matches!(c, '_' | '-' | '.'))
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
+/// Replaces `out` with `key` ASCII-lowercased without `_`, `-` and `.`.
+fn normalize_key_into(key: &str, out: &mut String) {
+    out.clear();
+    out.extend(
+        key.chars()
+            .filter(|c| !matches!(c, '_' | '-' | '.'))
+            .map(|c| c.to_ascii_lowercase()),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use mb_store::{NewMock, ResourceSource, SqliteControlStore};
+    use serde_json::json;
+
+    use super::*;
+
+    /// A JSON body of `items` objects (about 120 bytes each), some keys
+    /// redacted.
+    fn body(items: usize) -> Value {
+        let items: Vec<Value> = (0..items)
+            .map(|i| {
+                json!({
+                    "id": i,
+                    "user_name": format!("user-{i}"),
+                    "access_token": "secret-secret",
+                    "address": {"street": "Main St", "Zip-Code": "12345"},
+                })
+            })
+            .collect();
+        json!({"data": items})
+    }
+
+    fn record(request: Value, response: Value) -> RequestRecord {
+        RequestRecord {
+            workspace: "default".into(),
+            mock: "m".into(),
+            operation_id: Some("op".into()),
+            session: "s".into(),
+            method: "POST".into(),
+            path: "/x".into(),
+            status: 200,
+            source: Some("faker".into()),
+            fallback_reason: None,
+            latency: Duration::from_millis(3),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            request: json!({"body": request}),
+            request_body_bytes: None,
+            response: Some(response),
+            kind: RequestKind::Http,
+        }
+    }
+
+    #[test]
+    fn truncated_preview_matches_the_whole_text_cut_at_a_char_boundary() {
+        // `"`, 1022 `a`, then two-byte characters: byte 1024 splits one.
+        let text = format!("{}{}", "a".repeat(1022), "é".repeat(40_000));
+        let mut body = Value::String(text.clone());
+        let whole = serde_json::to_string(&body).unwrap();
+        truncate_body(&mut body);
+        assert_eq!(body["truncated"], true);
+        assert_eq!(body["bytes"], whole.len());
+        assert_eq!(body["preview"], whole[..1023]);
+
+        let mut small = json!({"a": "é".repeat(100)});
+        let before = small.clone();
+        truncate_body(&mut small);
+        assert_eq!(small, before);
+    }
+
+    #[test]
+    fn redaction_normalizes_keys_and_fields() {
+        let mut v = json!({
+            "Access-Token": "x",
+            "nested": [{"x.api_key": "y", "keep": {"Password": "z"}}],
+            "user": "u",
+        });
+        redact(
+            &mut v,
+            &[
+                "token".into(),
+                "API-Key".into(),
+                "pass_word".into(),
+                "_".into(),
+            ],
+        );
+        assert_eq!(
+            v,
+            json!({
+                "Access-Token": REDACTED,
+                "nested": [{"x.api_key": REDACTED, "keep": {"Password": REDACTED}}],
+                "user": "u",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_mock_ids_relist_at_most_once_per_interval() {
+        let store = sqlite_with_mocks(1).await;
+        let (live, _rx) = broadcast::channel(LIVE_CAPACITY);
+        let mut remote = Remote {
+            store: Arc::clone(&store),
+            live,
+            mocks: HashMap::new(),
+            listed: None,
+        };
+        let known = store.list_all_mocks().await.unwrap()[0].id;
+        assert_eq!(
+            remote.mock(known).await,
+            Some(("default".into(), "m0".into()))
+        );
+        let first = remote.listed;
+        assert!(remote.mock(Uuid::new_v4()).await.is_none());
+        assert_eq!(remote.listed, first, "no relisting within the interval");
+        remote.listed = first.map(|at| at - RELIST_INTERVAL);
+        assert!(remote.mock(Uuid::new_v4()).await.is_none());
+        assert_ne!(remote.listed, first.map(|at| at - RELIST_INTERVAL));
+    }
+
+    /// MOCKINGBIRD-PERF-4 benchmark: redacting and truncating a response
+    /// body of about `mb` MB, as the writer does for every record.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_redact_and_truncate() {
+        let fields: Vec<String> = ["token", "password", "apiKey", "secret"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        for mb in [1usize, 10] {
+            let original = body(mb * 8_700);
+            let size = serde_json::to_vec(&original).map(|v| v.len()).unwrap_or(0);
+            let mut best = Duration::MAX;
+            for _ in 0..3 {
+                let mut v = original.clone();
+                let start = Instant::now();
+                redact(&mut v, &fields);
+                truncate_body(&mut v);
+                best = best.min(start.elapsed());
+                assert_eq!(v["truncated"], true);
+            }
+            println!("PERF-4 redact+truncate of a {size}-byte body: {best:?} (best of 3)");
+        }
+    }
+
+    /// MOCKINGBIRD-PERF-3 benchmark: writing records with 64 KiB bodies
+    /// to the live tail while nobody tails.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_live_send_without_subscribers() {
+        let (live, rx) = broadcast::channel::<RequestRecord>(LIVE_CAPACITY);
+        drop(rx);
+        let r = record(body(500), body(500));
+        let n = 2_000;
+        let start = Instant::now();
+        for _ in 0..n {
+            send_live(&live, &r);
+        }
+        println!(
+            "PERF-3 live send of a 2x60 KiB record, no subscriber: {:?} per record",
+            start.elapsed() / n
+        );
+    }
+
+    async fn sqlite_with_mocks(m: usize) -> Arc<dyn ControlStore> {
+        let store = SqliteControlStore::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for i in 0..m {
+            store
+                .create_mock(
+                    mb_store::DEFAULT_WORKSPACE,
+                    NewMock {
+                        name: format!("m{i}"),
+                        route_prefix: Some(format!("/m{i}")),
+                        persona: None,
+                        llm_profile: None,
+                        header_overrides: true,
+                        source: ResourceSource::Api,
+                        chaos: None,
+                        limits: Default::default(),
+                        data_plane_auth: Default::default(),
+                        hosts: vec![],
+                        behavior: Default::default(),
+                        webhooks: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        Arc::new(store)
+    }
+
+    /// MOCKINGBIRD-PERF-14 benchmark: resolving `n` announced entries of a
+    /// mock id the relay does not know, with 200 mocks stored.
+    #[tokio::test]
+    #[ignore = "benchmark"]
+    async fn bench_relay_unknown_mock() {
+        let store = sqlite_with_mocks(200).await;
+        let (live, _rx) = broadcast::channel(LIVE_CAPACITY);
+        let mut remote = Remote {
+            store,
+            live,
+            mocks: HashMap::new(),
+            listed: None,
+        };
+        let unknown = Uuid::new_v4();
+        let n = 200u32;
+        let start = Instant::now();
+        for _ in 0..n {
+            assert!(remote.mock(unknown).await.is_none());
+        }
+        println!(
+            "PERF-14 {n} lookups of an unknown mock id (200 mocks): {:?}",
+            start.elapsed()
+        );
+    }
 }

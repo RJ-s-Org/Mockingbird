@@ -13,7 +13,7 @@
 //! operation and status (the same system message). Repeated prompts are
 //! answered in recorded order, the last answer repeating.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -60,25 +60,28 @@ struct Answer {
     content: String,
 }
 
+/// The recorded answers, each held once and shared by its two lists.
 #[derive(Default)]
 struct Answers {
-    exact: HashMap<String, Vec<String>>,
-    operation: HashMap<String, Vec<String>>,
+    exact: HashMap<String, Vec<Arc<str>>>,
+    operation: HashMap<String, Vec<Arc<str>>>,
+    /// `(prompt digest, answer)` of every answer, for the duplicate check.
+    recorded: HashSet<(String, Arc<str>)>,
     /// How many times each list was served, by `exact:`/`operation:` key.
     served: HashMap<String, usize>,
 }
 
 impl Answers {
     fn insert(&mut self, a: Answer) -> bool {
-        let list = self.exact.entry(a.key).or_default();
-        if list.contains(&a.content) {
+        let content: Arc<str> = Arc::from(a.content);
+        if !self.recorded.insert((a.key.clone(), Arc::clone(&content))) {
             return false;
         }
-        list.push(a.content.clone());
-        self.operation
-            .entry(a.operation)
+        self.exact
+            .entry(a.key)
             .or_default()
-            .push(a.content);
+            .push(Arc::clone(&content));
+        self.operation.entry(a.operation).or_default().push(content);
         true
     }
 
@@ -89,7 +92,10 @@ impl Answers {
             _ => self.operation.get(key)?,
         };
         let served = self.served.entry(format!("{kind}:{key}")).or_default();
-        let answer = list.get(*served).or_else(|| list.last()).cloned();
+        let answer = list
+            .get(*served)
+            .or_else(|| list.last())
+            .map(|a| a.to_string());
         *served += 1;
         answer
     }
@@ -206,13 +212,16 @@ impl Snapshot {
             operation,
             content: content.to_string(),
         };
-        let line = serde_json::to_string(&answer)?;
+        let mut line = serde_json::to_vec(&answer)?;
+        line.push(b'\n');
         if !self.answers().insert(answer) {
             return Ok(false);
         }
+        // One append of the whole line: the file is unbuffered, so a
+        // formatted write would be several system calls.
         let mut file = writer.lock().unwrap_or_else(|p| p.into_inner());
-        writeln!(file, "{line}").context("appending to the recorded answers")?;
-        file.flush()?;
+        file.write_all(&line)
+            .context("appending to the recorded answers")?;
         Ok(true)
     }
 
@@ -788,6 +797,30 @@ mod tests {
         );
         assert_eq!(get(req("op", "b")).1, Hit::Operation);
         assert!(play.lookup(&req("other", "a")).is_none());
+    }
+
+    /// MOCKINGBIRD-PERF-13 benchmark: recording `k` distinct answers to one
+    /// prompt (the duplicate check scanned every earlier answer).
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_answers_insert() {
+        for k in [1_000usize, 10_000] {
+            let mut answers = Answers::default();
+            let content = "x".repeat(512);
+            let start = std::time::Instant::now();
+            for i in 0..k {
+                answers.insert(Answer {
+                    v: FORMAT_VERSION,
+                    key: "k".into(),
+                    operation: "op".into(),
+                    content: format!("{content}{i}"),
+                });
+            }
+            println!(
+                "PERF-13 {k} answers to one prompt recorded in {:?}",
+                start.elapsed()
+            );
+        }
     }
 
     #[tokio::test]
