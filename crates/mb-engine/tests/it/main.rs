@@ -10,6 +10,7 @@
 mod budget;
 mod debug;
 mod faker;
+mod faker_validity;
 mod generate;
 mod guards;
 mod message;

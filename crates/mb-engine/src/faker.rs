@@ -135,6 +135,17 @@ const PATTERN_CACHE_MAX: usize = 1024;
 /// text; `None` when unsupported. Compiling is a pure function of the key.
 static PATTERNS: LazyLock<PatternCache> = LazyLock::new(DashMap::new);
 
+impl Ctx<'_> {
+    /// Whether `schema` has a finite instance (see [`Costs`]). Where the
+    /// schema leaves a choice (an optional member, list items beyond
+    /// `minItems`, a `oneOf`/`anyOf` branch, a non-null type), only positions
+    /// that can terminate are generated: entering one that cannot would end
+    /// at the hard limit with members missing.
+    fn finite(&self, schema: &Value) -> bool {
+        self.costs.of(self.root, schema) != INFINITE
+    }
+}
+
 /// Compiled patterns by (repeat cap, source text).
 type PatternCache = DashMap<(u32, String), Option<Arc<Pattern>>>;
 
@@ -209,7 +220,8 @@ impl Faker {
     }
 
     /// Like [`Faker::fake`], but the outermost `oneOf`/`anyOf` choice is
-    /// branch `branch` (modulo the branch count) instead of a random one.
+    /// branch `branch` (modulo the branch count; counting only branches
+    /// with a finite instance when some have none) instead of a random one.
     /// Callers that validate the output can try each branch in turn.
     pub fn fake_with_branch(
         &self,
@@ -269,7 +281,9 @@ impl Faker {
         // minimal instance.
         let at_limit = depth >= self.max_depth || ctx.generated > NODE_BUDGET;
         // Absolute cutoff: past it, containers are emitted empty so that even
-        // an unsatisfiable required self-reference terminates.
+        // an unsatisfiable required self-reference terminates. Choices avoid
+        // positions with no finite instance (see `Ctx::finite`), so only a
+        // schema with no valid instance at all gets here.
         let hard_limit = depth >= self.max_depth + HARD_DEPTH_SLACK || hard_exhausted(ctx);
         let pick = match branch {
             Some(i) => Pick::Forced(i),
@@ -285,16 +299,20 @@ impl Faker {
         if let Some(c) = s.get("const") {
             return c.clone();
         }
+        let types = type_names(s);
         if let Some(Value::Array(options)) = s.get("enum")
             && !options.is_empty()
         {
+            // Options of another type than the declared one are skipped (a
+            // YAML `enum: [d, n]` reads `n` as `false`).
+            let typed: Vec<&Value> = options
+                .iter()
+                .filter(|o| types.is_empty() || types.iter().any(|t| has_type(o, t)))
+                .collect();
+            if !typed.is_empty() {
+                return typed[rng.random_range(0..typed.len())].clone();
+            }
             return options[rng.random_range(0..options.len())].clone();
-        }
-
-        let types = type_names(s);
-        // A list is never null: at the limit it is empty instead.
-        if at_limit && types.contains(&"null") && !types.contains(&"array") {
-            return Value::Null;
         }
 
         let chosen = types
@@ -303,6 +321,15 @@ impl Faker {
             .find(|t| *t != "null")
             .or(types.first().copied())
             .unwrap_or_else(|| infer_type(s));
+        // A list is never null: at the limit it is empty instead. A nullable
+        // value is null at the limit, and whenever its other type has no
+        // finite instance.
+        if types.contains(&"null")
+            && !types.contains(&"array")
+            && (at_limit || (chosen == "object" && !ctx.finite(&with_type(s, chosen))))
+        {
+            return Value::Null;
+        }
 
         if depth == 1
             && let Some(echo) = field
@@ -358,7 +385,7 @@ impl Faker {
                 if at_limit || ctx.generated >= NODE_BUDGET || max.is_some_and(|m| out.len() >= m) {
                     break;
                 }
-                if !out.contains_key(name) {
+                if !out.contains_key(name) && ctx.finite(sub) {
                     let value = self.gen_value(ctx, sub, Some(name), depth + 1, None, rng);
                     out.insert(name.clone(), value);
                 }
@@ -367,7 +394,8 @@ impl Faker {
         // A map (no declared members, values from `patternProperties` or an
         // `additionalProperties` schema) gets one entry, as a list gets one
         // item; `minProperties` adds members to any object.
-        let map_like = props.is_none_or(Map::is_empty) && map_value_schema(s).is_some();
+        let map_like =
+            props.is_none_or(Map::is_empty) && map_value_schema(s).is_some_and(|v| ctx.finite(v));
         let wanted = if map_like && !at_limit {
             min.max(1)
         } else {
@@ -461,7 +489,8 @@ impl Faker {
         let max = count("maxItems");
         let any = Value::Bool(true);
         let items = s.get("items").unwrap_or(&any);
-        let mut len = if at_limit {
+        // Items with no finite instance are generated only when required.
+        let mut len = if at_limit || !ctx.finite(items) {
             min
         } else {
             min.max(1).max(prefix.len())
@@ -854,6 +883,27 @@ fn type_names(s: &Map<String, Value>) -> Vec<&str> {
     }
 }
 
+/// Whether `value` is an instance of the JSON Schema type `name`.
+fn has_type(value: &Value, name: &str) -> bool {
+    match name {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "number" => value.is_number(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => false,
+    }
+}
+
+/// `s` with its `type` narrowed to `name`.
+fn with_type(s: &Map<String, Value>, name: &str) -> Value {
+    let mut narrowed = s.clone();
+    narrowed.insert("type".into(), Value::String(name.into()));
+    Value::Object(narrowed)
+}
+
 fn infer_type(s: &Map<String, Value>) -> &'static str {
     let has = |keys: &[&str]| keys.iter().any(|k| s.contains_key(*k));
     if has(&[
@@ -934,10 +984,21 @@ fn flatten<R: Rng>(
         {
             // A nullable list takes its list branch: lists are never null.
             let has_list = branches.iter().any(|b| is_array_schema(root, b));
-            let eligible: Vec<usize> = (0..branches.len())
+            let mut eligible: Vec<usize> = (0..branches.len())
                 .filter(|i| !(has_list && is_null_schema(&branches[*i])))
                 .collect();
+            // Branches with no finite instance are taken only when every
+            // branch is one.
+            let finite: Vec<usize> = eligible
+                .iter()
+                .copied()
+                .filter(|i| costs.of(root, &branches[*i]) != INFINITE)
+                .collect();
+            if !finite.is_empty() {
+                eligible = finite;
+            }
             let index = match pick {
+                Pick::Forced(i) if eligible.len() < branches.len() => eligible[i % eligible.len()],
                 Pick::Forced(i) => i % branches.len(),
                 Pick::Random => eligible[rng.random_range(0..eligible.len())],
                 Pick::Shallow => eligible

@@ -301,14 +301,12 @@ fn shopify() -> Bundle {
     compile(&std::fs::read(path).unwrap()).unwrap()
 }
 
-/// Every seeded offline answer of every Shopify operation validates. Fails
-/// today for `Query.products` (every seed): `InventoryItem.variant` and
-/// `ProductVariant.inventoryItem` require each other, so the faker reaches
-/// its hard depth limit and emits empty objects that miss their required
-/// members (`inventoryLevels.pageInfo.__typename`). The answer is flagged
-/// with `FAKER_INVALID_REASON`, never passed off as valid.
+/// Every seeded offline answer of every Shopify operation validates, so
+/// none is flagged with `FAKER_INVALID_REASON`. `InventoryItem.variant` and
+/// `ProductVariant.inventoryItem` require each other (no finite instance):
+/// the faker leaves lists of variants empty instead of recursing to its
+/// hard depth limit (`Query.products` used to fail on every seed).
 #[tokio::test]
-#[ignore = "LLM-validity follow-up: the faker drops required members at its hard depth limit (Shopify Query.products)"]
 async fn seeded_shopify_answers_validate_offline() {
     let bundle = shopify();
     let engine = offline();
