@@ -61,6 +61,9 @@ impl Engine {
             .unwrap_or(limits.default_items)
             .clamp(1, limits.max_items.max(1));
         let interval = ctx.item_interval.unwrap_or(limits.item_interval);
+        // One generator for the stream: its items differ from each other,
+        // and a seeded stream repeats item for item.
+        let draws = self.call_draws(&bundle, &op.id, status, &call);
 
         let (upstream, repair_system) = match &self.provider {
             None => (Upstream::Closed, None),
@@ -102,6 +105,7 @@ impl Engine {
             reported: StreamUsage::new(),
             attributed: Usage::default(),
             repair_usage: Usage::default(),
+            draws,
         };
         Ok(futures::stream::unfold(state, |mut state| async move {
             let item = state.next_item().await?;
@@ -206,6 +210,8 @@ struct StreamState {
     attributed: Usage,
     /// Repair-call tokens not yet attributed to an item.
     repair_usage: Usage,
+    /// The faker draws of the stream's fallback items.
+    draws: crate::seed::Draws,
 }
 
 impl StreamState {
@@ -461,12 +467,13 @@ impl StreamState {
         }
     }
 
-    fn fake(&self) -> Value {
+    fn fake(&mut self) -> Value {
         self.engine.fake_value(
             &self.bundle,
             &self.schema,
             Some(&self.validator),
             &crate::FakerHints::default(),
+            &mut self.draws,
         )
     }
 

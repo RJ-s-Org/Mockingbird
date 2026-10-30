@@ -34,7 +34,7 @@ Sessions can be exported as fixtures, seeded from fixtures and reset ([CLI](cli.
 ## Personas, overrides and chaos
 
 - A **persona** is free text added to every prompt of a mock: locale, realism, style ("Terse, realistic retail data in en-GB").
-- **Override headers** change one request: `X-Mockingbird-Status`, `X-Mockingbird-Latency`, `X-Mockingbird-Scenario`, `X-Mockingbird-Session` and `X-Mockingbird-Chaos: off`. The [protocols](protocols.md#override-mapping-per-protocol) page shows how each maps onto GraphQL, gRPC and SOAP.
+- **Override headers** change one request: `X-Mockingbird-Status`, `X-Mockingbird-Latency`, `X-Mockingbird-Scenario`, `X-Mockingbird-Session`, `X-Mockingbird-Seed` (an integer seeding this request's faker values, see [`faker_seed`](configuration.md)) and `X-Mockingbird-Chaos: off`. The [protocols](protocols.md#override-mapping-per-protocol) page shows how each maps onto GraphQL, gRPC and SOAP.
 - **Chaos** injects errors in the contract's own error shape, latency jitter and dropped streams, per mock or per scenario ([configuration](configuration.md#mocksnamechaos)).
 - **Webhooks** POST signed events after writes, the way Stripe or GitHub would ([Webhooks](webhooks.md)).
 

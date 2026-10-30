@@ -326,6 +326,46 @@ async fn status_override_returns_error_variant() {
     assert_eq!(body_json(resp).await["title"], "Undeclared status override");
 }
 
+/// `GET uri` with `X-Mockingbird-Seed: seed` when given, and its answer.
+async fn seeded_get(h: &Harness, uri: &str, seed: Option<&str>) -> Response {
+    let mut req = Request::get(uri);
+    if let Some(seed) = seed {
+        req = req.header("x-mockingbird-seed", seed);
+    }
+    send(h, req.body(Body::empty()).unwrap()).await
+}
+
+#[tokio::test]
+async fn offline_answers_are_seeded_and_the_seed_header_overrides_it() {
+    // Separate mocks (engines and state): the same request, the same body.
+    let first = body_json(seeded_get(&offline(), "/orders/o1", None).await).await;
+    let second = body_json(seeded_get(&offline(), "/orders/o1", None).await).await;
+    assert_eq!(first, second);
+
+    let h = offline();
+    let seven = body_json(seeded_get(&h, "/orders/o1", Some("7")).await).await;
+    assert_ne!(seven, first, "another seed, another body");
+    assert_eq!(
+        seven,
+        body_json(seeded_get(&offline(), "/orders/o1", Some("7")).await).await
+    );
+    // The session's cached read is kept per seed.
+    let eight = body_json(seeded_get(&h, "/orders/o1", Some("8")).await).await;
+    assert_ne!(eight, seven);
+
+    let resp = seeded_get(&h, "/orders/o1", Some("abc")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        header_str(&resp, "content-type"),
+        "application/problem+json"
+    );
+
+    // Without override headers the seed header is ignored.
+    let closed = harness(None, false);
+    let ignored = body_json(seeded_get(&closed, "/orders/o1", Some("7")).await).await;
+    assert_eq!(ignored, first);
+}
+
 #[tokio::test(start_paused = true)]
 async fn latency_override_delays() {
     let h = offline();

@@ -53,6 +53,9 @@ const INFINITE: u64 = u64::MAX;
 pub struct Faker {
     max_depth: usize,
     hints: FakerHints,
+    /// The Unix time generated moments are drawn back from; `None` reads
+    /// the clock once per fake call.
+    now: Option<i64>,
 }
 
 /// Prints the hint names, not their values (request values may be
@@ -62,6 +65,7 @@ impl std::fmt::Debug for Faker {
         f.debug_struct("Faker")
             .field("max_depth", &self.max_depth)
             .field("hints", &self.hints.echoes.keys().collect::<Vec<_>>())
+            .field("now", &self.now)
             .finish()
     }
 }
@@ -114,6 +118,8 @@ struct Ctx<'a> {
     root: &'a Value,
     costs: &'a Costs,
     generated: usize,
+    /// Unix seconds generated moments are drawn back from.
+    now: i64,
 }
 
 /// A `pattern` ready to draw from, with the regex its draws must match.
@@ -175,7 +181,17 @@ impl Faker {
         Self {
             max_depth,
             hints: FakerHints::default(),
+            now: None,
         }
+    }
+
+    /// This faker, drawing dates, times and timestamps back from
+    /// `unix_secs` instead of the clock, so that the same draws give the
+    /// same values at any time (a seeded, reproducible run).
+    #[must_use]
+    pub fn with_now(mut self, unix_secs: i64) -> Self {
+        self.now = Some(unix_secs);
+        self
     }
 
     /// This faker, echoing `hints` into same-named root fields.
@@ -233,6 +249,7 @@ impl Faker {
             root,
             costs,
             generated: 0,
+            now: self.now.unwrap_or_else(|| chrono::Utc::now().timestamp()),
         };
         self.gen_value(&mut ctx, node, None, 0, branch, rng)
     }
@@ -298,9 +315,9 @@ impl Faker {
         match chosen {
             "null" => Value::Null,
             "boolean" => Value::Bool(rng.random_bool(0.5)),
-            "integer" => fake_integer(s, field, rng),
+            "integer" => fake_integer(s, field, ctx.now, rng),
             "number" => fake_number(s, rng),
-            "string" => Value::String(fake_string(s, rng)),
+            "string" => Value::String(fake_string(s, ctx.now, rng)),
             "array" if hard_limit => Value::Array(Vec::new()),
             "object" if hard_limit => Value::Object(Map::new()),
             "array" => self.fake_array(ctx, s, depth, at_limit, rng),
@@ -1012,7 +1029,7 @@ fn word<R: Rng>(rng: &mut R) -> String {
     WORDS[rng.random_range(0..WORDS.len())].to_string()
 }
 
-fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
+fn fake_string<R: Rng>(s: &Map<String, Value>, now: i64, rng: &mut R) -> String {
     match s.get("format").and_then(Value::as_str) {
         Some("uuid") => {
             let mut bytes = [0u8; 16];
@@ -1022,9 +1039,9 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
                 .to_string();
         }
         Some("date-time") => {
-            return random_datetime(rng).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            return random_datetime(now, rng).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         }
-        Some("date") => return random_datetime(rng).format("%Y-%m-%d").to_string(),
+        Some("date") => return random_datetime(now, rng).format("%Y-%m-%d").to_string(),
         Some("email") => return format!("{}@example.com", word(rng)),
         Some("uri") => return format!("https://example.com/{}", word(rng)),
         Some("uri-reference") => return format!("/{}/{}", word(rng), word(rng)),
@@ -1048,7 +1065,7 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
             rng.fill(&mut bytes[..]);
             return base64::engine::general_purpose::STANDARD.encode(bytes);
         }
-        Some("time") => return random_datetime(rng).format("%H:%M:%SZ").to_string(),
+        Some("time") => return random_datetime(now, rng).format("%H:%M:%SZ").to_string(),
         Some("duration") => {
             return format!(
                 "PT{}H{}M{}S",
@@ -1109,10 +1126,9 @@ fn fake_string<R: Rng>(s: &Map<String, Value>, rng: &mut R) -> String {
     out
 }
 
-/// A moment in the last 30 days, mostly in the last 3: generated records
-/// read as recent activity.
-fn random_datetime<R: Rng>(rng: &mut R) -> chrono::DateTime<chrono::Utc> {
-    let now = chrono::Utc::now().timestamp();
+/// A moment in the 30 days before `now` (Unix seconds), mostly in the
+/// last 3: generated records read as recent activity.
+fn random_datetime<R: Rng>(now: i64, rng: &mut R) -> chrono::DateTime<chrono::Utc> {
     let window = if rng.random_bool(0.7) {
         3 * 86_400
     } else {
@@ -1252,7 +1268,12 @@ const COUNT_SUFFIXES: [&str; 8] = [
 /// An integer within the declared bounds. Without tight bounds (missing,
 /// wider than 10 000, or at the 32-bit limits) and for count-like fields,
 /// it comes from a small non-negative window instead.
-fn fake_integer<R: Rng>(s: &Map<String, Value>, field: Option<&str>, rng: &mut R) -> Value {
+fn fake_integer<R: Rng>(
+    s: &Map<String, Value>,
+    field: Option<&str>,
+    now: i64,
+    rng: &mut R,
+) -> Value {
     let num = |k: &str| s.get(k).and_then(Value::as_f64);
     let mut lo = num("minimum").map(f64::ceil);
     if let Some(x) = num("exclusiveMinimum") {
@@ -1266,7 +1287,7 @@ fn fake_integer<R: Rng>(s: &Map<String, Value>, field: Option<&str>, rng: &mut R
     }
     // Unix seconds, unless the bounds rule recent ones out.
     if field.is_some_and(timestamp_field) {
-        let secs = random_datetime(rng).timestamp() as f64;
+        let secs = random_datetime(now, rng).timestamp() as f64;
         if lo.is_none_or(|l| l <= secs) && hi.is_none_or(|h| h >= secs) {
             return Value::from(secs as i64);
         }

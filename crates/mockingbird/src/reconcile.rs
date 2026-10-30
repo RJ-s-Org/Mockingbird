@@ -787,6 +787,7 @@ fn behavior(mock: &FileMock) -> mb_store::MockBehavior {
         default_scenario: mock.default_scenario.clone(),
         path_rewrite: mock.path_rewrite.clone(),
         graphql_path: mock.graphql_path.clone(),
+        faker_seed: mock.faker_seed,
     }
 }
 

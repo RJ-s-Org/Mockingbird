@@ -60,6 +60,7 @@ impl Engine {
                     schema,
                     Some(&validator),
                     &crate::FakerHints::default(),
+                    &mut Self::unseeded_draws(),
                 ),
                 source: Source::Fallback,
                 usage: Usage::default(),
@@ -91,6 +92,7 @@ impl Engine {
                         schema,
                         Some(&validator),
                         &crate::FakerHints::default(),
+                        &mut Self::unseeded_draws(),
                     ),
                     Source::Fallback,
                 )
@@ -132,10 +134,17 @@ impl Engine {
                 schema,
                 Some(validator.as_ref()),
                 &crate::FakerHints::default(),
+                &mut Self::unseeded_draws(),
             ),
             Err(e) => {
                 tracing::warn!(error = %e, "schema cannot be validated; faking unvalidated");
-                self.fake_value(bundle, schema, None, &crate::FakerHints::default())
+                self.fake_value(
+                    bundle,
+                    schema,
+                    None,
+                    &crate::FakerHints::default(),
+                    &mut Self::unseeded_draws(),
+                )
             }
         }
     }

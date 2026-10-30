@@ -354,6 +354,11 @@ pub struct MockBehavior {
     /// server-wide `protocols.graphql.path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql_path: Option<String>,
+    /// Seeds the faker: the same seed, contract and request give the same
+    /// faker body. `None`: offline answers use the engine's default seed,
+    /// LLM fallbacks are random.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faker_seed: Option<u64>,
 }
 
 /// A mock's path rewrite: `strip_prefix` is removed from the path below the

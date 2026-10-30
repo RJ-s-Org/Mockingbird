@@ -269,7 +269,11 @@ async fn bare_engine(
         _ => None,
     };
     let provider = crate::snapshot::wrap(&mock_label(&mock.workspace, &mock.name), provider);
-    Ok(Engine::new(provider, config))
+    let engine = Engine::new(provider, config);
+    Ok(match mock.behavior.faker_seed {
+        Some(seed) => engine.with_faker_seed(seed),
+        None => engine,
+    })
 }
 
 /// The provider an import of `mock` extracts with, or `None` when the

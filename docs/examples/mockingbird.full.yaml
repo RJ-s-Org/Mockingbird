@@ -171,6 +171,7 @@ mocks:
     consistency: on
     unknown_ids: generate
     default_scenario: friendly
+    faker_seed: 42
     data_plane_auth:
       mode: api_key
       header: x-api-key

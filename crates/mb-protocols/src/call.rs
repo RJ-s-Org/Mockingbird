@@ -125,6 +125,16 @@ impl Overrides {
             }
             out.chaos_off = true;
         }
+        // The engine reads the seed from the forwarded headers; only its
+        // form is checked here.
+        if let Some(s) = header_text(headers, mb_engine::SEED_HEADER)?
+            && s.trim().parse::<u64>().is_err()
+        {
+            return Err(format!(
+                "X-Mockingbird-Seed must be an integer from 0 to {}, got {s:?}",
+                u64::MAX
+            ));
+        }
         Ok(out)
     }
 }
@@ -1153,7 +1163,8 @@ async fn store_wrapped(
 }
 
 /// The response cache key of a read: its operation, path parameters,
-/// query (sorted), a query operation's body and the narrowed selection.
+/// query (sorted), a query operation's body, the narrowed selection and the
+/// call's faker seed (`X-Mockingbird-Seed`).
 fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Value>) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let body = match op.kind {
@@ -1171,6 +1182,7 @@ fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Valu
         canonical(&Value::Object(call.query.clone())),
         body,
         selection,
+        mb_engine::seed::request_seed(call),
     ])
     .to_string()
 }
@@ -1515,9 +1527,18 @@ pub(crate) fn is_recordable_header(rt: &MockRuntime, name: &str) -> bool {
             .contains(&name.to_ascii_lowercase())
 }
 
-/// Headers forwarded to the prompt.
+/// Headers forwarded to the engine (and the prompt), with
+/// `X-Mockingbird-Seed` when the mock honours override headers.
 pub(crate) fn forwarded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(rt, headers, false)
+    let mut out = safe_headers(rt, headers, false);
+    if rt.header_overrides
+        && let Some(seed) = headers
+            .get(mb_engine::SEED_HEADER)
+            .and_then(|v| v.to_str().ok())
+    {
+        out.insert(mb_engine::SEED_HEADER.into(), Value::String(seed.into()));
+    }
+    out
 }
 
 /// Headers kept in the request record (overrides included).

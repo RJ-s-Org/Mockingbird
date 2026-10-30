@@ -218,12 +218,23 @@ impl PersonaFormats {
         body: &Value,
         protected: &[&Value],
     ) -> Option<Value> {
+        self.apply_with(validator, body, protected, &mut rand::rng())
+    }
+
+    /// [`PersonaFormats::apply`], drawing the random characters from
+    /// `rng` (a seeded generator repeats them).
+    pub fn apply_with(
+        &self,
+        validator: &SchemaValidator,
+        body: &Value,
+        protected: &[&Value],
+        rng: &mut impl Rng,
+    ) -> Option<Value> {
         if self.is_empty() {
             return None;
         }
         let mut out = body.clone();
-        let mut rng = rand::rng();
-        if !self.walk(&mut out, protected, &mut rng) {
+        if !self.walk(&mut out, protected, rng) {
             return None;
         }
         validator.is_valid(&out).then_some(out)
