@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import aggregate  # noqa: E402
 import grade  # noqa: E402
+import run  # noqa: E402
 import server_suites  # noqa: E402
 
 UUID_ID = {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}
@@ -59,6 +60,13 @@ class PatchedSourceTest(unittest.TestCase):
         self.assertEqual(t["patch"], 0.25)
         self.assertEqual(t["repair"], 0.25)
         self.assertIn("patched", aggregate.ENGINE_SOURCES)
+
+
+class OutputModeTest(unittest.TestCase):
+    def test_nojson_variant_runs_the_engine_with_no_response_format(self):
+        self.assertEqual(run.output_mode("thinkingmachines/inkling@nojson", "json_object"), "none")
+        self.assertEqual(run.output_mode("deepseek/deepseek-v4.1-flash", "json_object"), "json_object")
+        self.assertEqual(run.output_mode("deepseek/deepseek-v4.1-flash", "json_schema"), "json_schema")
 
 
 class SessionSlugTest(unittest.TestCase):
