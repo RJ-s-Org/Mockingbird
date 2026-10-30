@@ -10,6 +10,11 @@ use mockingbird::telemetry;
 use mockingbird::{mcp, providers};
 
 fn main() -> ExitCode {
+    // aws-lc-rs is the only rustls provider compiled in, but installing it
+    // keeps `ClientConfig::builder()` in dependencies (redis, sqlx, reqwest)
+    // from panicking should a second provider ever be enabled. `Err` means
+    // one is installed already.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cli = mockingbird::config::parse();
     if matches!(&cli, Invocation::Cli(c) if matches!(c.cmd, Command::Mcp(_))) {
         // SAFETY: nothing else runs yet; the runtime starts below.
