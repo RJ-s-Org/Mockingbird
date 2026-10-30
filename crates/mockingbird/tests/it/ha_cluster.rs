@@ -13,7 +13,7 @@ use crate::support::{ephemeral, fixture, wait_until};
 use mb_ext::Extensions;
 use mb_store::DEFAULT_WORKSPACE;
 use mockingbird::config::{ServeArgs, build_app_with};
-use mockingbird::server::{Listeners, binds_for, serve_app};
+use mockingbird::server::{Binds, Listeners, serve_app};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -144,7 +144,7 @@ async fn start(dir: &Path, name: &str, role: &str, pg: &str, redis: &str) -> Nod
     let app = build_app_with(&args, None, Extensions::default())
         .await
         .unwrap();
-    let (data, _, grpc) = binds_for(app.role);
+    let Binds { data, grpc, .. } = Binds::for_role(app.role);
     let data = match data {
         true => Some(ephemeral().await),
         false => None,

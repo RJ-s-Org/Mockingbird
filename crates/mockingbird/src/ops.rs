@@ -43,6 +43,18 @@ pub struct OpsState {
     pub reload: crate::watch::ReloadStatus,
 }
 
+impl std::fmt::Debug for OpsState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpsState")
+            .field("role", &self.role)
+            .field("leader", &*self.leader.borrow())
+            .field("readyz_auth", &self.readyz_auth.is_some())
+            .field("bus", &self.bus.is_some())
+            .field("reload", &self.reload)
+            .finish_non_exhaustive()
+    }
+}
+
 /// - `/healthz`: liveness, always `200 {"status":"ok"}`.
 /// - `/readyz`: `503 unavailable` when the control store is unreachable;
 ///   `200 degraded` (with `reasons`) when the state store is unreachable,

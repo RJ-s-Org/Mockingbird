@@ -124,8 +124,6 @@ pub enum ProfilesCommand {
     Delete { name: String },
 }
 
-// The doc comments are clap help text, not Markdown.
-#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum ChannelsCommand {
     /// List a mock's channels with their effective settings.
@@ -139,8 +137,13 @@ pub enum ChannelsCommand {
         /// Disable the channel.
         #[arg(long)]
         disable: bool,
-        /// every:<duration> | cron:<expr> | state:<resource_type>[:upserted|deleted|any] | manual (repeatable)
-        #[arg(long = "trigger")]
+        /// `every:<duration>`, `cron:<expr>`,
+        /// `state:<resource_type>[:upserted|deleted|any]` or `manual`
+        /// (repeatable).
+        #[arg(
+            long = "trigger",
+            help = "every:<duration> | cron:<expr> | state:<resource_type>[:upserted|deleted|any] | manual (repeatable)"
+        )]
         triggers: Vec<String>,
         /// Use the contract's triggers (conflicts with --trigger)
         #[arg(long, conflicts_with = "triggers")]
@@ -168,8 +171,6 @@ pub enum BrokersCommand {
     List,
 }
 
-// The doc comments are clap help text, not Markdown.
-#[allow(rustdoc::invalid_html_tags)]
 #[derive(Subcommand, Debug)]
 pub enum MocksCommand {
     /// List every mock.
@@ -179,8 +180,8 @@ pub enum MocksCommand {
     /// Create a mock.
     Create {
         name: String,
-        /// Route prefix [default: /<name>].
-        #[arg(long)]
+        /// Route prefix (default: `/<name>`).
+        #[arg(long, help = "Route prefix [default: /<name>]")]
         prefix: Option<String>,
         /// Persona (style instructions) for generated responses.
         #[arg(long)]
@@ -283,8 +284,34 @@ pub enum ClientError {
     /// The command ran but did not do everything asked: `output` is
     /// printed on stdout, `message` on stderr, and the exit code is 1.
     Incomplete { output: Value, message: String },
-    /// The request could not be made, or a local input was invalid.
+    /// The request could not be made, or a local input was invalid. It is
+    /// transparent: it displays the error's own message and returns its
+    /// causes from [`source`](std::error::Error::source).
     Other(anyhow::Error),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientError::Api { status, body } => {
+                write!(f, "the Admin API answered {status}: {body}")
+            }
+            ClientError::Usage(msg) => f.write_str(msg),
+            ClientError::Incomplete { message, .. } => f.write_str(message),
+            ClientError::Other(e) => std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ClientError::Other(e) => e.source(),
+            ClientError::Api { .. } | ClientError::Usage(_) | ClientError::Incomplete { .. } => {
+                None
+            }
+        }
+    }
 }
 
 impl From<anyhow::Error> for ClientError {
@@ -303,6 +330,13 @@ impl From<reqwest::Error> for ClientError {
 /// `admin_url`, sending `Authorization: Bearer <token>` when `token` is
 /// set. Returns the JSON to print, or `None` when the API answered without
 /// a body.
+///
+/// # Errors
+///
+/// [`ClientError::Usage`] for an inconsistent command line,
+/// [`ClientError::Api`] for a non-2xx answer, [`ClientError::Incomplete`]
+/// when the command did only part of its work, and [`ClientError::Other`]
+/// when the request cannot be made or a local input is invalid.
 pub async fn run(
     admin_url: &str,
     token: Option<&str>,
@@ -547,6 +581,10 @@ async fn channels(api: &AdminClient, cmd: ChannelsCommand) -> Result<Option<Valu
 /// `state:<type>[:<kind>]` → `{"on_state_change":{"resource_type":…,"kind":…}}`
 /// (kind `upserted`, `deleted` or `any`, the default) and
 /// `manual` → `"manual"`.
+///
+/// # Errors
+///
+/// Fails, listing the accepted forms, for a spec in none of them.
 pub fn parse_trigger_spec(spec: &str) -> Result<Value, String> {
     let parsed = match spec.split_once(':') {
         None if spec == "manual" => Some(Value::String("manual".into())),
@@ -995,6 +1033,11 @@ fn read_json(path: &Path) -> anyhow::Result<Value> {
 /// Sends one Admin API request: `segments` under the `workspace`
 /// workspace (`/api/v1/workspaces/<ws>/…`), or under `/api/v1/` when
 /// `workspace` is `None`, with `query` appended. Used by the MCP server.
+///
+/// # Errors
+///
+/// [`ClientError::Api`] for a non-2xx answer, [`ClientError::Other`] when
+/// the request cannot be made.
 pub async fn api(
     admin_url: &str,
     token: Option<&str>,
@@ -1025,6 +1068,13 @@ const MAX_RAW_BODY: usize = 1 << 20;
 /// other body of up to 1 MiB as `{content_type, text}` when it is UTF-8,
 /// else `{content_type, bytes, base64}`. An event stream is refused before
 /// it is read (it would never end).
+///
+/// # Errors
+///
+/// [`ClientError::Usage`] for a path that does not start with `/`, does not
+/// parse or names an event stream, [`ClientError::Api`] for a non-2xx
+/// answer, [`ClientError::Other`] when the request cannot be made or the
+/// body cannot be read.
 pub async fn api_path(
     admin_url: &str,
     token: Option<&str>,

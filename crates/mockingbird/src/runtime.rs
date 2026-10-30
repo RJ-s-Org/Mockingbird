@@ -98,12 +98,39 @@ pub struct RuntimeDeps {
     pub webhook_log: SharedDeliveryLog,
 }
 
+impl std::fmt::Debug for RuntimeDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeDeps")
+            .field("ext", &self.ext)
+            .field("offline", &self.offline)
+            .field("default_profile", &self.default_profile)
+            .field("data_plane_keys", &self.data_plane_keys.is_some())
+            .field("protocols", &self.protocols)
+            .field("stream", &self.stream)
+            .field("limiter", &self.limiter)
+            .field("scrubber", &self.scrubber.is_some())
+            .field("limits", &self.limits)
+            .field("http", &self.http)
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The profile used by mocks that name none: a shared, swappable cell, so
 /// a config reload can change it for every holder at once.
 #[derive(Clone, Default)]
 pub struct DefaultProfile(Arc<ArcSwapOption<String>>);
 
+impl std::fmt::Debug for DefaultProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DefaultProfile")
+            .field(&self.0.load_full())
+            .finish()
+    }
+}
+
 impl DefaultProfile {
+    /// A default profile starting as `name`.
     pub fn new(name: Option<String>) -> Self {
         Self(Arc::new(ArcSwapOption::from(name.map(Arc::new))))
     }
@@ -141,6 +168,11 @@ const IMPORT_MAX_TEMPERATURE: f32 = 0.2;
 /// settings, its guards (see [`engine_guards`]) and, unless offline or no
 /// profile applies, the provider chain of its profile with the head
 /// profile's timeout, temperature and token limit.
+///
+/// # Errors
+///
+/// Fails when the mock's profile chain cannot be built (see
+/// [`build_provider`]) or its guards do not compile.
 pub async fn build_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
     Ok(build_engine_with_budget(deps, mock).await?.0)
 }
@@ -231,6 +263,10 @@ async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<En
 /// one the mock is served with; each hop's settings are raised to the
 /// import minimums ([`IMPORT_MIN_TIMEOUT`], [`IMPORT_MIN_MAX_TOKENS`]) and
 /// its temperature capped at 0.2.
+///
+/// # Errors
+///
+/// As [`build_provider`].
 pub async fn import_provider(
     deps: &RuntimeDeps,
     mock: &Mock,
@@ -292,6 +328,10 @@ fn import_hop(profile: &LlmProfile) -> HopSettings {
 }
 
 /// The runtime serving `mock`'s active contract, or `None` when it has none.
+///
+/// # Errors
+///
+/// As [`build_runtime_with_budget`].
 pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<MockRuntime>> {
     Ok(build_runtime_with_budget(deps, mock)
         .await?
@@ -300,6 +340,11 @@ pub async fn build_runtime(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Op
 
 /// [`build_runtime`], also returning the mock's token budget (when it has
 /// one), which lives as long as the runtime's engine.
+///
+/// # Errors
+///
+/// Fails when the active contract cannot be read or compiled, or the
+/// engine cannot be built (see [`build_engine`]).
 pub async fn build_runtime_with_budget(
     deps: &RuntimeDeps,
     mock: &Mock,
@@ -385,6 +430,11 @@ async fn profile_workspace(deps: &RuntimeDeps, mock: &Mock, name: &str) -> anyho
 /// its own profile's timeout, temperature and token limit. A cycle, a chain
 /// longer than [`MAX_FALLBACK_DEPTH`] hops, a missing profile or an
 /// unresolvable secret is an error.
+///
+/// # Errors
+///
+/// Fails for a cycle, a chain longer than [`MAX_FALLBACK_DEPTH`] hops, a
+/// missing profile or an unresolvable secret.
 pub async fn build_provider(
     deps: &RuntimeDeps,
     profile_name: &str,

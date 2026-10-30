@@ -241,6 +241,12 @@ pub fn default_profile_env_names(config: &Path) -> Vec<String> {
 /// kept so that [`stop`] and [`status`] in a long-lived caller (the MCP
 /// server) reap it once it exits, instead of seeing the exited process (a
 /// zombie) as still running.
+///
+/// # Errors
+///
+/// Fails when the state directory or the log cannot be written, the ports
+/// or proxy settings do not resolve, the binary cannot be located or
+/// started, or the server does not become ready.
 pub async fn start(args: &StartArgs) -> anyhow::Result<Value> {
     let (info, child) = start_child(args).await?;
     if let Ok(mut started) = STARTED.lock() {
@@ -271,6 +277,10 @@ fn started_alive(pid: u32) -> Option<bool> {
 
 /// [`start`], also returning the server process, which the caller reaps
 /// (`mockingbird run` stops it itself; a dropped handle is not waited for).
+///
+/// # Errors
+///
+/// As [`start`].
 pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::process::Child)> {
     let dir = &args.state.state_dir;
     if let Some(pid) = read_pid(dir)
@@ -465,6 +475,11 @@ fn request_stop(dir: &Path, pid: u32) {
 /// Stops `child`, a server [`start_child`] started in this process: a
 /// graceful stop request (its stop file, see [`STOP_FILE_ENV`], and a
 /// SIGTERM on Unix), then a kill after 10 seconds, and reaps it.
+///
+/// # Errors
+///
+/// Fails when the stop file cannot be written or the process cannot be
+/// signalled, killed or reaped.
 pub async fn stop_child(args: &StateArgs, mut child: std::process::Child) -> anyhow::Result<()> {
     request_stop(&args.state_dir, child.id());
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -482,6 +497,11 @@ pub async fn stop_child(args: &StateArgs, mut child: std::process::Child) -> any
 }
 
 /// `server stop`.
+///
+/// # Errors
+///
+/// Fails when the state directory cannot be read or the server cannot be
+/// stopped.
 pub async fn stop(args: &StateArgs) -> anyhow::Result<Value> {
     let dir = &args.state_dir;
     let Some(pid) = read_pid(dir) else {
@@ -504,6 +524,10 @@ pub async fn stop(args: &StateArgs) -> anyhow::Result<Value> {
 }
 
 /// `server status`.
+///
+/// # Errors
+///
+/// Fails when the state directory cannot be read.
 pub async fn status(args: &StateArgs) -> anyhow::Result<Value> {
     let dir = &args.state_dir;
     let info: Value = std::fs::read(info_file(dir))
@@ -565,6 +589,10 @@ pub fn strip_ansi(text: &str) -> String {
 }
 
 /// `server logs`, as plain text.
+///
+/// # Errors
+///
+/// Fails when the log file cannot be read.
 pub fn logs(args: &StateArgs, lines: usize) -> anyhow::Result<String> {
     let path = log_file(&args.state_dir);
     if !path.exists() {
@@ -625,6 +653,8 @@ pub struct DoctorArgs {
     pub state: StateArgs,
 }
 
+/// `mockingbird doctor`: what is set up and what is missing (the config,
+/// the LLM key, a server answering at `admin_url`), as JSON.
 pub async fn doctor(args: &DoctorArgs, admin_url: &str) -> Value {
     let mut problems: Vec<String> = Vec::new();
     let shell_env = crate::shell_env::imported();

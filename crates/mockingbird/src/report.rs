@@ -157,6 +157,10 @@ pub struct Report {
 const PAGE: usize = 500;
 
 /// Builds the report from the server at `admin_url`.
+///
+/// # Errors
+///
+/// Fails when the Admin API cannot be reached or answers with an error.
 pub async fn collect(
     admin_url: &str,
     token: Option<&str>,
@@ -339,6 +343,10 @@ pub struct Failure {
 }
 
 /// The assertions of `args` that `report` fails.
+///
+/// # Errors
+///
+/// Fails for a `--called` assertion that does not parse.
 pub fn check(report: &Report, args: &VerifyArgs) -> anyhow::Result<Vec<Failure>> {
     let mut failures = Vec::new();
     let mut fail = |check: &str, detail: String| {
@@ -472,6 +480,10 @@ fn parse_called(spec: &str) -> anyhow::Result<(&str, u64)> {
 }
 
 /// The report (and any failures) in `format`.
+///
+/// # Errors
+///
+/// Fails when the report cannot be serialised.
 pub fn render(
     report: &Report,
     failures: Option<&[Failure]>,
@@ -700,6 +712,10 @@ fn junit(report: &Report, failures: Option<&[Failure]>) -> String {
 }
 
 /// Writes `text` to `output`, else stdout.
+///
+/// # Errors
+///
+/// Fails when `output` or stdout cannot be written.
 pub fn emit(text: &str, output: Option<&std::path::Path>) -> anyhow::Result<()> {
     match output {
         Some(path) => {

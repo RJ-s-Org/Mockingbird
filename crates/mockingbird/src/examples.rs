@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 /// One embedded example: its directory name, catalog entry and files.
+#[derive(Debug)]
 pub struct Example {
     pub name: &'static str,
     pub meta: &'static str,
@@ -174,6 +175,11 @@ pub struct InitArgs {
 }
 
 impl Example {
+    /// The example's `example.json`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when its embedded `example.json` does not parse.
     pub fn meta(&self) -> anyhow::Result<Meta> {
         serde_json::from_str(self.meta)
             .with_context(|| format!("examples/apis/{}/example.json is invalid", self.name))
@@ -185,6 +191,10 @@ impl Example {
 }
 
 /// The example called `name`.
+///
+/// # Errors
+///
+/// Fails, listing the known examples, when none is called `name`.
 pub fn find(name: &str) -> anyhow::Result<&'static Example> {
     EXAMPLES.iter().find(|e| e.name == name).ok_or_else(|| {
         let names: Vec<&str> = EXAMPLES.iter().map(|e| e.name).collect();
@@ -196,6 +206,11 @@ pub fn find(name: &str) -> anyhow::Result<&'static Example> {
 }
 
 /// Runs an `examples` subcommand and returns its JSON output.
+///
+/// # Errors
+///
+/// Fails when the example is unknown, its metadata does not parse, or
+/// `init` cannot write its files.
 pub async fn run(cmd: ExamplesCommand) -> anyhow::Result<Value> {
     match cmd {
         ExamplesCommand::List { protocol, category } => {

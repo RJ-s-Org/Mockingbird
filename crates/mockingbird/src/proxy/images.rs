@@ -27,6 +27,11 @@ pub struct ImageRule {
 
 impl ImageRule {
     /// Parses `host` or `host/path/prefix` (lowercased host, no port).
+    ///
+    /// # Errors
+    ///
+    /// Fails for an invalid host or a path that does not look like
+    /// `/seg/seg`.
     pub fn parse(entry: &str) -> Result<ImageRule, String> {
         let (host, prefix) = match entry.split_once('/') {
             Some((host, rest)) => (host, Some(format!("/{}", rest.trim_end_matches('/')))),
@@ -56,6 +61,10 @@ impl ImageRule {
 }
 
 /// Checks every `proxy.images` entry.
+///
+/// # Errors
+///
+/// Fails with the first entry [`ImageRule::parse`] rejects.
 pub fn validate_image_entries(entries: &[String]) -> Result<(), String> {
     entries
         .iter()

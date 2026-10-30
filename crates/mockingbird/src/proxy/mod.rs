@@ -71,7 +71,23 @@ pub struct ProxyState {
     seen_full: AtomicBool,
 }
 
+impl std::fmt::Debug for ProxyState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyState")
+            .field("unmapped", &self.unmapped)
+            .field("images", &self.images)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ProxyState {
+    /// The proxy's state: `claims` decides which hosts are intercepted and
+    /// `upstream` serves them; `images` are the `proxy.images` entries.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an `images` entry is invalid (see
+    /// [`images::ImageRule::parse`]) or the forwarding client cannot be built.
     pub fn new(
         claims: Arc<dyn HostClaims>,
         upstream: axum::Router,

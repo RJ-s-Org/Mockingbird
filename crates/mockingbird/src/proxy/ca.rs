@@ -38,6 +38,10 @@ pub const TRUSTSTORE_PASSWORD: &str = "changeit";
 const CERT_WAIT: Duration = Duration::from_secs(2);
 
 /// `MB_CA_DIR` when set and non-empty, else `~/.mockingbird/ca`.
+///
+/// # Errors
+///
+/// Fails when `MB_CA_DIR` is unset and the home directory cannot be found.
 pub fn default_ca_dir() -> anyhow::Result<PathBuf> {
     if let Some(dir) = std::env::var_os("MB_CA_DIR").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
@@ -51,6 +55,10 @@ pub fn default_ca_dir() -> anyhow::Result<PathBuf> {
 
 /// The local CA's certificate path in [`default_ca_dir`], creating the CA
 /// when it is missing.
+///
+/// # Errors
+///
+/// Fails as [`default_ca_dir`] and [`LocalCa::load_or_create`] do.
 pub fn ca_cert_path() -> anyhow::Result<PathBuf> {
     Ok(LocalCa::load_or_create(&default_ca_dir()?)?.cert_path())
 }
@@ -77,6 +85,11 @@ impl LocalCa {
     /// there is none. Safe against another process creating it at the same
     /// time: the key is created exclusively, and the loser loads the
     /// winner's CA.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `dir` or the CA files cannot be created or read, or an
+    /// existing CA does not parse.
     pub fn load_or_create(dir: &Path) -> anyhow::Result<LocalCa> {
         if !dir.exists() {
             std::fs::create_dir_all(dir)
@@ -135,6 +148,10 @@ impl LocalCa {
 
     /// A TLS server configuration presenting a leaf for `host` (a DNS name
     /// or IP address) signed by this CA, issued once per host.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the leaf certificate cannot be issued for `host`.
     pub fn server_config(&self, host: &str) -> anyhow::Result<Arc<ServerConfig>> {
         if let Some(config) = self.leaves.lock().ok().and_then(|l| l.get(host).cloned()) {
             return Ok(config);
@@ -170,6 +187,10 @@ impl LocalCa {
     /// (Mozilla's when the system has none), then this CA. For
     /// `SSL_CERT_FILE`-style variables, so passthrough hosts keep working.
     /// Rewritten on each call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the bundle cannot be written.
     pub fn write_bundle(&self) -> anyhow::Result<PathBuf> {
         let mut text = String::new();
         for der in root_ders() {
@@ -186,6 +207,10 @@ impl LocalCa {
     /// the same certificates as [`write_bundle`](Self::write_bundle), for
     /// `-Djavax.net.ssl.trustStore`. Its password is
     /// [`TRUSTSTORE_PASSWORD`]. Rewritten on each call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the keystore cannot be built or written.
     pub fn write_truststore(&self) -> anyhow::Result<PathBuf> {
         let mut certs = root_ders();
         certs.push(self.cert_der.to_vec());

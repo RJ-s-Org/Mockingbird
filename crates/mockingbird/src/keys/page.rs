@@ -54,6 +54,7 @@ pub struct SavedKey {
 
 /// A running key page; dropping it (or [`KeyPage::wait`] returning) stops
 /// the server.
+#[must_use = "dropping the page stops its server"]
 pub struct KeyPage {
     /// `http://127.0.0.1:<port>/<token>`.
     pub url: String,
@@ -87,6 +88,10 @@ struct PageState {
 }
 
 /// Starts the page on `127.0.0.1:<random port>`.
+///
+/// # Errors
+///
+/// Fails when the listener cannot be bound.
 pub async fn start(opts: PageOptions) -> anyhow::Result<KeyPage> {
     if !store::valid_name(&opts.name) {
         return Err(anyhow!(
@@ -146,6 +151,10 @@ impl KeyPage {
     }
 
     /// Waits until a key is saved, at most the page's timeout.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no key is saved before the timeout or the page stops.
     pub async fn wait(self) -> anyhow::Result<SavedKey> {
         let timeout = self.timeout;
         match tokio::time::timeout(timeout, self.saved).await {
@@ -160,6 +169,10 @@ impl KeyPage {
 }
 
 /// Lets the page run on without a caller waiting: logs the outcome.
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn detach(page: KeyPage) {
     tokio::spawn(async move {
         match page.wait().await {

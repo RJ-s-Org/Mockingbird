@@ -142,8 +142,6 @@ pub enum Command {
     Client(ClientCommand),
 }
 
-// The doc comments are clap help text, not Markdown.
-#[allow(rustdoc::invalid_html_tags)]
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ServeArgs {
     /// Config file (`mockingbird.yaml`); without it the contracts are served
@@ -162,8 +160,12 @@ pub struct ServeArgs {
     /// gRPC port [default: 50051].
     #[arg(long)]
     pub grpc_port: Option<u16>,
-    /// Control-plane storage: sqlite::memory:, sqlite://<path> or postgres://….
-    #[arg(long)]
+    /// Control-plane storage: `sqlite::memory:`, `sqlite://<path>` or
+    /// `postgres://…`.
+    #[arg(
+        long,
+        help = "Control-plane storage: sqlite::memory:, sqlite://<path> or postgres://…"
+    )]
     pub storage_url: Option<String>,
     /// Allow binding a non-loopback address without authentication
     /// (`auth.mode: none`).
@@ -226,6 +228,10 @@ impl LlmEnv {
 }
 
 /// The mock name for a contract file: its stem.
+///
+/// # Errors
+///
+/// Fails when `path` has no file stem usable as a mock name.
 pub fn mock_name(path: &Path) -> anyhow::Result<String> {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -284,6 +290,17 @@ pub struct App {
     pub proxy: Option<Arc<crate::proxy::ProxyState>>,
 }
 
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("role", &self.role)
+            .field("leader_work", &self.leader_work.is_some())
+            .field("tls", &self.tls.is_some())
+            .field("proxy", &self.proxy.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// How long [`App::shutdown`] waits for the request log to drain.
 pub const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -312,8 +329,13 @@ fn open_snapshot(args: &ServeArgs) -> anyhow::Result<Option<Arc<crate::snapshot:
         }
         (Some(dir), _) | (None, Some(dir)) => dir,
     };
-    let snapshot =
-        crate::snapshot::Snapshot::open(dir, args.replay.is_some(), args.record.is_some())?;
+    let snapshot = crate::snapshot::Snapshot::open_with(
+        dir,
+        crate::snapshot::SnapshotMode {
+            replay: args.replay.is_some(),
+            record: args.record.is_some(),
+        },
+    )?;
     Ok(Some(Arc::new(snapshot)))
 }
 
@@ -327,6 +349,11 @@ pub fn replay_only(args: &ServeArgs) -> bool {
 /// other invalid characters replaced by `-`), at `/` for a single contract
 /// or `/<mock name>` for several; and, unless `--offline`, a default profile
 /// from `llm` whose key is the reference `env:MB_LLM_API_KEY`.
+///
+/// # Errors
+///
+/// Fails when a contract path has no usable file stem, or two contracts
+/// map to the same mock name.
 pub fn zero_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<FileConfig> {
     let mut cfg = FileConfig::default();
     let multi = args.contracts.len() > 1;
@@ -420,6 +447,11 @@ pub fn apply_flags(cfg: &mut FileConfig, args: &ServeArgs) {
 /// The effective configuration: the config file (or the zero-config one)
 /// with the `MB_*` environment and then the flags applied. In zero-config
 /// mode `llm` stands in for the `MB_LLM_*` variables.
+///
+/// # Errors
+///
+/// Fails when the config file cannot be read or parsed, an `MB_*` variable
+/// is invalid, or the result breaks a range, auth or TLS rule.
 pub fn resolve_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<FileConfig> {
     let mut cfg = match &args.config {
         Some(path) => {
@@ -466,6 +498,11 @@ pub fn missing_env_api_key(cfg: &FileConfig, offline: bool) -> bool {
 /// already in use, logs a warning and returns `None`: the data plane still
 /// serves, without the Admin API and ops endpoints. Any other failure, or
 /// a busy explicitly set port, is an error.
+///
+/// # Errors
+///
+/// Fails when the address cannot be bound for any reason other than a busy
+/// port that was not set explicitly.
 pub async fn bind_admin(
     addr: std::net::SocketAddr,
     explicit: bool,
@@ -485,6 +522,11 @@ pub async fn bind_admin(
 
 /// Binds the gRPC listener, with the same policy as [`bind_admin`]: a busy
 /// port that was not set explicitly is skipped with a warning (`None`).
+///
+/// # Errors
+///
+/// As [`bind_admin`]: any bind failure except a busy port that was not set
+/// explicitly.
 pub async fn bind_grpc(
     addr: std::net::SocketAddr,
     explicit: bool,
@@ -505,6 +547,11 @@ pub async fn bind_grpc(
 /// [`build_app_with`] with the self-hosted [`Extensions`].
 /// Its Vault client follows `outbound.proxy`, `outbound.no_proxy` and
 /// `outbound.ca_file`.
+///
+/// # Errors
+///
+/// Fails as [`build_app_with`] does, and when the Vault client cannot be
+/// built.
 pub async fn build_app(args: &ServeArgs, llm: Option<LlmEnv>) -> anyhow::Result<App> {
     self_hosted_app(args, llm).await
 }
@@ -534,6 +581,12 @@ pub(crate) async fn self_hosted_app(args: &ServeArgs, llm: Option<LlmEnv>) -> an
 /// when set, is what the reference `env:MB_LLM_API_KEY` resolves to.
 ///
 /// Must be called inside a Tokio runtime.
+///
+/// # Errors
+///
+/// Fails when the configuration is invalid, a store or the bus cannot be
+/// opened, OIDC discovery fails, the first reconcile is rejected, or the TLS
+/// files cannot be loaded.
 pub async fn build_app_with(
     args: &ServeArgs,
     llm: Option<LlmEnv>,
@@ -1184,6 +1237,11 @@ fn applied_hook(
 /// "brokers changed: restart required" (and naming what changed), so a
 /// `--watch` reload that changes brokers is rejected and the previous
 /// state kept.
+///
+/// # Errors
+///
+/// Fails, naming what changed, when the brokers in `cfg` differ from
+/// `initial` or do not validate.
 pub fn ensure_brokers_unchanged(
     initial: &[mb_protocols::events::BrokerConfig],
     cfg: &FileConfig,

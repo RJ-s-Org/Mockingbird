@@ -13,6 +13,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
 /// One embedded skill: its directory name and `SKILL.md` text.
+#[derive(Debug)]
 pub struct Skill {
     pub name: &'static str,
     pub text: &'static str,
@@ -411,6 +412,12 @@ fn write_skills(dir: &Path, kiro: bool, dry_run: bool) -> anyhow::Result<Vec<Pat
 }
 
 /// `agent install`.
+///
+/// # Errors
+///
+/// Fails for `--no-mcp` with `--no-skills` or an invalid `--pass-env`
+/// name, and when the agent's configuration or a skill file cannot be read,
+/// parsed or written.
 pub fn install(args: &InstallArgs) -> anyhow::Result<Value> {
     if args.no_mcp && args.no_skills {
         bail!("--no-mcp and --no-skills leave nothing to do");
@@ -500,6 +507,10 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<Value> {
 }
 
 /// `agent skills <dir>`.
+///
+/// # Errors
+///
+/// Fails when `dir` or a skill file cannot be written.
 pub fn skills(dir: &Path) -> anyhow::Result<Value> {
     Ok(json!({ "written": write_skills(dir, false, false)? }))
 }

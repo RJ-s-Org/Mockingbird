@@ -135,6 +135,11 @@ async fn fetch_hosts(client: &reqwest::Client, admin_url: &str) -> anyhow::Resul
 /// Runs the proxy on `listener` until `stop` turns true, intercepting the
 /// hosts the server at `opts.admin_url` claims (refreshed every 2 s) and
 /// forwarding those requests to `opts.data_url` with their `Host`.
+///
+/// # Errors
+///
+/// Fails when no server answers at `opts.admin_url`, the CA cannot be
+/// loaded, or the proxy state cannot be built.
 pub async fn run_standalone(
     listener: TcpListener,
     opts: StandaloneOptions,
@@ -205,6 +210,10 @@ fn upstream_url(data_url: &reqwest::Url, path_and_query: &str) -> reqwest::Url {
 }
 
 /// Prints the local CA certificate path, creating the CA if missing.
+///
+/// # Errors
+///
+/// Fails when the CA cannot be loaded or created.
 pub fn ca_command(cmd: CaCommand) -> anyhow::Result<()> {
     match cmd {
         CaCommand::Path => {
@@ -216,6 +225,11 @@ pub fn ca_command(cmd: CaCommand) -> anyhow::Result<()> {
 
 /// `mockingbird proxy …`: prints the environment (`env`), or runs the
 /// proxy in front of the server at `admin_url` until SIGINT/SIGTERM.
+///
+/// # Errors
+///
+/// Fails for an invalid `--data-url` or `--image-host`, a config that does
+/// not load, or when the CA or the listener cannot be set up.
 pub async fn run(args: ProxyArgs, admin_url: &str) -> anyhow::Result<()> {
     if let Some(ProxyCommand::Browser(browser)) = args.cmd {
         return super::browser::run(browser).await;

@@ -181,6 +181,12 @@ fn secret_steps(profile: &FileProfile, preset: &str) -> (Vec<Value>, Vec<String>
 }
 
 /// `mockingbird init`.
+///
+/// # Errors
+///
+/// Fails for missing or conflicting arguments, an invalid provider profile
+/// or mock name, or when the config file cannot be written or does not load
+/// afterwards.
 pub fn init(args: &InitArgs) -> anyhow::Result<Value> {
     if args.output.exists() && !args.force {
         bail!(
@@ -316,6 +322,12 @@ fn relative_to(path: &Path, base: &Path) -> String {
 
 /// `mockingbird llm configure` without `--apply`: the profile, and the
 /// config file's new text unless `dry_run`.
+///
+/// # Errors
+///
+/// Fails for an unknown provider or invalid answers, an invalid profile
+/// name, or a config file that cannot be read or parsed or whose `llm:`
+/// section is not a mapping.
 pub fn configure_file(args: &ConfigureArgs) -> anyhow::Result<Value> {
     let id = preset_id(&args.provider)?;
     let profile = args.provider.profile()?;
@@ -419,6 +431,11 @@ fn rewrite_config(
 
 /// The LLM profile of `config` to update: `profile` (which must exist),
 /// else `llm.default_profile`, else the only profile.
+///
+/// # Errors
+///
+/// Fails when `config` does not load, `profile` does not exist, or no
+/// profile can be chosen.
 pub fn resolve_profile(config: &Path, profile: Option<&str>) -> anyhow::Result<String> {
     let cfg = file_config::load(config)?;
     if let Some(name) = profile {
@@ -447,6 +464,10 @@ pub fn resolve_profile(config: &Path, profile: Option<&str>) -> anyhow::Result<S
 
 /// Points `llm.profiles.<profile>.api_key` of `config` at `reference` (a
 /// secret reference, never a value). A missing profile writes nothing.
+///
+/// # Errors
+///
+/// Fails when `config` cannot be read, parsed or written.
 pub fn set_profile_api_key(config: &Path, profile: &str, reference: &str) -> anyhow::Result<Value> {
     let backup = rewrite_config(config, |root| {
         let entry = root
@@ -469,6 +490,11 @@ fn mb_admin_identifier(name: &str) -> bool {
 }
 
 /// The profile `mockingbird llm test` checks.
+///
+/// # Errors
+///
+/// Fails when no profile is given and none can be found, or the config
+/// file does not load.
 pub fn test_profile(args: &TestArgs) -> anyhow::Result<FileProfile> {
     if args.provider.provider.is_some() {
         return args.provider.profile();
@@ -511,6 +537,10 @@ fn capped(items: Vec<Value>) -> (Vec<Value>, usize) {
 /// by protocol, and the first [`SUMMARY_OPERATIONS`] operations and
 /// channels (`operations_truncated` / `channels_truncated` say how many
 /// more there are).
+///
+/// # Errors
+///
+/// Fails when `path` cannot be read or does not compile as a contract.
 pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
     let bytes =
         mb_import::read_source(path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -561,6 +591,10 @@ pub fn contract_summary(path: &Path) -> anyhow::Result<Value> {
 }
 
 /// The Admin API body for `mockingbird llm configure --apply`.
+///
+/// # Errors
+///
+/// Fails for an unknown provider preset or missing answers.
 pub fn configure_api_body(args: &ConfigureArgs) -> anyhow::Result<(String, Value)> {
     let id = preset_id(&args.provider)?;
     let profile = args.provider.profile()?;
