@@ -344,3 +344,71 @@ fn replay_and_record_must_share_a_directory() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("same directory"));
 }
+
+/// MOCKINGBIRD-STUB-6: the stop file `server start` names in
+/// `MB_STOP_FILE` shuts `serve` down gracefully (the path `server stop`
+/// takes on Windows, where a detached server has no console signal).
+#[tokio::test]
+async fn the_stop_file_shuts_the_server_down_gracefully() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stop_file = tmp.path().join("server.stop");
+    let ports = Ports::new();
+    let (data, admin, grpc) = (
+        ports.data.to_string(),
+        ports.admin.to_string(),
+        ports.grpc.to_string(),
+    );
+    let contract = fixture();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+        .args([
+            "serve",
+            "--offline",
+            "--port",
+            &data,
+            "--admin-port",
+            &admin,
+            "--grpc-port",
+            &grpc,
+            contract.to_str().unwrap(),
+        ])
+        .env("MB_STOP_FILE", &stop_file)
+        .env_remove("MB_LLM_API_KEY")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let http = reqwest::Client::new();
+    let readyz = format!("{}/readyz", ports.admin_url());
+    let mut ready = false;
+    for _ in 0..200 {
+        if let Ok(r) = http.get(&readyz).send().await
+            && r.status().is_success()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if !ready {
+        let _ = child.kill();
+        panic!("serve did not become ready");
+    }
+    std::fs::write(&stop_file, b"").unwrap();
+    let mut status = None;
+    for _ in 0..150 {
+        if let Some(s) = child.try_wait().unwrap() {
+            status = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        panic!("serve did not stop within 15 s of the stop file");
+    };
+    assert!(status.success(), "a graceful stop exits 0: {status}");
+    assert!(
+        !stop_file.exists(),
+        "serve removes the stop file it acted on"
+    );
+}

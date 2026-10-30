@@ -1821,7 +1821,8 @@ impl McpServer {
                 "tools": { "listChanged": false },
                 "resources": { "listChanged": false, "subscribe": false },
                 "prompts": { "listChanged": false },
-                "logging": {},
+                // No `logging`: the server sends no log notifications
+                // (`logging/setLevel` is still accepted, as a no-op).
             },
             "serverInfo": {
                 "name": "mockingbird",
@@ -2208,6 +2209,57 @@ mod tests {
         assert_eq!(r, json!([{"id":1,"request":{}}]));
     }
 
+    /// MOCKINGBIRD-STUB-8: `admin_api` returns text and binary bodies
+    /// instead of failing on them, and refuses an event stream up front.
+    #[tokio::test]
+    async fn admin_api_returns_non_json_bodies() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        let admin = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/m/contracts/1/source")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw("openapi: 3.1.0\n", "application/yaml"),
+            )
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/blob")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(vec![0u8, 159, 146, 150], "application/octet-stream"),
+            )
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/stream")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw("data: x\n\n", "text/event-stream"),
+            )
+            .mount(&admin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"name":"m"}])))
+            .mount(&admin)
+            .await;
+        let s = against(&admin);
+        let get = |p: &str| json!({ "method": "GET", "path": format!("/workspaces/default{p}") });
+        let r = call_tool(&s, "admin_api", get("/mocks/m/contracts/1/source")).await;
+        assert_eq!(
+            r,
+            json!({ "content_type": "application/yaml", "text": "openapi: 3.1.0\n" })
+        );
+        let r = call_tool(&s, "admin_api", get("/blob")).await;
+        assert_eq!(r["content_type"], "application/octet-stream");
+        assert_eq!(r["bytes"], 4);
+        assert_eq!(r["base64"], "AJ+Slg==");
+        let text = call_tool_error(&s, "admin_api", get("/stream")).await;
+        assert!(text.contains("event stream"), "{text}");
+        let r = call_tool(&s, "admin_api", get("/mocks")).await;
+        assert_eq!(r, json!([{"name":"m"}]), "JSON is unchanged");
+    }
+
     fn draft_view() -> Value {
         json!({
             "version": 2,
@@ -2454,6 +2506,14 @@ mod tests {
             .await
             .unwrap_or_default();
         assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+        // MOCKINGBIRD-STUB-7: no log notifications are sent, so the
+        // capability is not advertised (setLevel is still accepted).
+        assert!(r["result"]["capabilities"].get("logging").is_none(), "{r}");
+        let r = s
+            .handle(json!({"jsonrpc":"2.0","id":3,"method":"logging/setLevel","params":{"level":"debug"}}))
+            .await
+            .unwrap_or_default();
+        assert_eq!(r["result"], json!({}), "{r}");
         let r = s
             .handle(json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}))
             .await

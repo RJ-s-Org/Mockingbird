@@ -94,3 +94,43 @@ fn run_needs_a_config() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("needs a config"));
 }
+
+/// MOCKINGBIRD-STUB-2: `--offline` (like `--record`, `--replay` and `-c`)
+/// applies only to a server `run` starts; reusing a running server says so.
+#[test]
+fn run_warns_when_its_server_flags_do_not_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let admin = write_config(dir.path());
+    let first = assert_cmd::Command::cargo_bin("mockingbird")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("MB_CA_DIR", dir.path().join("ca"))
+        .args(["run", "--keep", "--state-dir"])
+        .arg(dir.path().join("state"))
+        .args(["--", "true"])
+        .timeout(std::time::Duration::from_secs(90))
+        .output()
+        .unwrap();
+    let stop = || {
+        let _ = assert_cmd::Command::cargo_bin("mockingbird")
+            .unwrap()
+            .args(["server", "stop", "--state-dir"])
+            .arg(dir.path().join("state"))
+            .output();
+    };
+    if !first.status.success() {
+        stop();
+        panic!("{}", String::from_utf8_lossy(&first.stderr));
+    }
+    assert!(admin_answers(admin), "--keep leaves the server running");
+    let out = run(dir.path(), &["true"]);
+    stop();
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already answers") && stderr.contains("--offline"),
+        "{stderr}"
+    );
+    let first = String::from_utf8_lossy(&first.stderr);
+    assert!(!first.contains("already answers"), "{first}");
+}

@@ -1016,9 +1016,15 @@ pub async fn api(
     api.request(method, url, body.map(Body::Json)).await
 }
 
+/// The largest non-JSON body [`api_path`] returns.
+const MAX_RAW_BODY: usize = 1 << 20;
+
 /// Sends `method` to `<admin_url>/api/v1<path>` as given (`path` starts
 /// with `/` and may carry a query). Used by the MCP server's generic
-/// `admin_api` tool.
+/// `admin_api` tool. A JSON (or empty) answer is returned as such; any
+/// other body of up to 1 MiB as `{content_type, text}` when it is UTF-8,
+/// else `{content_type, bytes, base64}`. An event stream is refused before
+/// it is read (it would never end).
 pub async fn api_path(
     admin_url: &str,
     token: Option<&str>,
@@ -1035,7 +1041,52 @@ pub async fn api_path(
     let base = api.base.as_str().trim_end_matches('/');
     let url = Url::parse(&format!("{base}/api/v1{path}"))
         .map_err(|e| ClientError::Usage(format!("invalid path {path:?}: {e}")))?;
-    api.request(method, url, body.map(Body::Json)).await
+    let resp = api.send_request(method, url, body.map(Body::Json)).await?;
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let status = resp.status();
+    if !status.is_success() || essence.is_empty() || is_json(&essence) {
+        return AdminClient::parse(resp).await;
+    }
+    if essence == "text/event-stream" {
+        return Err(ClientError::Usage(format!(
+            "{path} answers with an event stream, which this call cannot read to its end; read recorded requests with list_requests or get_request instead"
+        )));
+    }
+    let bytes = resp.bytes().await.map_err(anyhow::Error::from)?;
+    if bytes.len() > MAX_RAW_BODY {
+        return Err(ClientError::Usage(format!(
+            "{path} answered {} bytes of {content_type}, more than the {MAX_RAW_BODY} this call returns",
+            bytes.len()
+        )));
+    }
+    Ok(Some(match std::str::from_utf8(&bytes) {
+        Ok(text) => serde_json::json!({ "content_type": content_type, "text": text }),
+        Err(_) => {
+            use base64::Engine as _;
+            serde_json::json!({
+                "content_type": content_type,
+                "bytes": bytes.len(),
+                "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            })
+        }
+    }))
+}
+
+/// Whether the media type `essence` (lowercase, without parameters) is
+/// JSON: `application/json` or a `+json` suffix type.
+fn is_json(essence: &str) -> bool {
+    essence == "application/json" || essence.ends_with("+json")
 }
 
 enum Body {
@@ -1105,6 +1156,17 @@ impl AdminClient {
         url: Url,
         body: Option<Body>,
     ) -> Result<Option<Value>, ClientError> {
+        let resp = self.send_request(method, url, body).await?;
+        Self::parse(resp).await
+    }
+
+    /// Sends the request and returns the response, whatever its status.
+    async fn send_request(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Body>,
+    ) -> Result<reqwest::Response, ClientError> {
         let mut req = self.http.request(method, url.clone());
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
@@ -1119,10 +1181,15 @@ impl AdminClient {
                 .body(bytes),
             None => req,
         };
-        let resp = req
+        Ok(req
             .send()
             .await
-            .with_context(|| format!("cannot reach the Admin API at {url}"))?;
+            .with_context(|| format!("cannot reach the Admin API at {url}"))?)
+    }
+
+    /// An error for a non-2xx status, `None` for an empty body, else the
+    /// body as JSON.
+    async fn parse(resp: reqwest::Response) -> Result<Option<Value>, ClientError> {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {

@@ -12,7 +12,7 @@ mockingbird run -c mockingbird.yaml -- npm test
 mockingbird run [-c <config>] [--offline] [--record <dir> | --replay <dir>] [--wait <duration>] [--keep] [--state-dir <dir>] -- <command> [args…]
 ```
 
-1. Starts the server with its proxy (`server start --proxy`, watching the config) unless something already answers on the config's admin port. A running server without its proxy gets one in front of it for the duration of the command.
+1. Starts the server with its proxy (`server start --proxy`, watching the config) unless something already answers on the config's admin port. A running server without its proxy gets one in front of it for the duration of the command. `--offline`, `--record`, `--replay` and `-c` shape only a server `run` starts: when it reuses a running one, `run` prints a warning naming the flags that do not apply to it (stop that server with `mockingbird server stop` to use them).
 2. Waits until `/readyz` is ready (`--wait`, default `60s`); if it is not, prints the end of the server log and exits 1.
 3. Runs the command with the [proxy variables](#the-variables) for every runtime, stdin/stdout/stderr attached. SIGINT and SIGTERM sent to `run` reach the command.
 4. Stops what it started (unless `--keep`) and exits with the command's exit code: `128 + n` when signal `n` ended it, `127` when it cannot be started, `1` when Mockingbird itself failed before the command ran.

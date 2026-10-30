@@ -15,6 +15,17 @@ use tracing_subscriber::{EnvFilter, Layer};
 /// Turns on OTLP span export when set (the standard OpenTelemetry variable).
 pub const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
+/// The traces-only endpoint variable, which also turns on OTLP span
+/// export (and wins over [`OTLP_ENDPOINT_ENV`] for spans).
+pub const OTLP_TRACES_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
+
+/// The protocol variables: the exporter speaks HTTP/protobuf only, so a
+/// `grpc` value is warned about.
+const OTLP_PROTOCOL_ENVS: [&str; 2] = [
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+];
+
 /// Keeps span export running; dropping it flushes and shuts the exporter down.
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
@@ -38,11 +49,41 @@ impl Drop for TelemetryGuard {
 }
 
 /// Installs the global `tracing` subscriber: a stderr fmt layer filtered by
-/// `RUST_LOG` (default `info`) and, when [`OTLP_ENDPOINT_ENV`] is set, an
-/// OpenTelemetry layer exporting spans over OTLP HTTP/protobuf. Fails when
-/// a global subscriber is already installed.
+/// `RUST_LOG` (default `info`) and, when [`OTLP_TRACES_ENDPOINT_ENV`] or
+/// [`OTLP_ENDPOINT_ENV`] is set, an OpenTelemetry layer exporting spans
+/// over OTLP HTTP/protobuf (a `grpc` protocol variable is warned about and
+/// not followed). Fails when a global subscriber is already installed.
 pub fn init(service_name: &str) -> anyhow::Result<TelemetryGuard> {
-    init_with(service_name, std::env::var(OTLP_ENDPOINT_ENV).ok())
+    let env = |name: &str| std::env::var(name).ok();
+    let guard = init_with(service_name, otlp_endpoint(env))?;
+    if guard.otlp_enabled()
+        && let Some(name) = grpc_protocol(env)
+    {
+        tracing::warn!(
+            "{name}=grpc is not supported: spans are exported over OTLP HTTP/protobuf (point the endpoint at the collector's HTTP port, usually 4318)"
+        );
+    }
+    Ok(guard)
+}
+
+/// The endpoint that turns on span export: the traces-only variable, else
+/// the general one (blank values count as unset).
+fn otlp_endpoint(env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    [OTLP_TRACES_ENDPOINT_ENV, OTLP_ENDPOINT_ENV]
+        .into_iter()
+        .filter_map(env)
+        .find(|v| !v.trim().is_empty())
+}
+
+/// The protocol variable that asks for gRPC, if one does: the traces-only
+/// one when set, else the general one.
+fn grpc_protocol(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let (name, value) = OTLP_PROTOCOL_ENVS.into_iter().find_map(|name| {
+        env(name)
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| (name, v))
+    })?;
+    value.trim().eq_ignore_ascii_case("grpc").then_some(name)
 }
 
 /// [`init`] with the value of [`OTLP_ENDPOINT_ENV`] given rather than read
@@ -140,4 +181,54 @@ pub fn install_prometheus() -> anyhow::Result<PrometheusHandle> {
         .map_err(|e| anyhow!("installing the Prometheus recorder: {e}"))?;
     *installed = Some(handle.clone());
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    /// MOCKINGBIRD-STUB-10: the traces-only endpoint turns export on too.
+    #[test]
+    fn either_endpoint_variable_enables_export() {
+        assert_eq!(otlp_endpoint(env(&[])), None);
+        assert_eq!(otlp_endpoint(env(&[(OTLP_ENDPOINT_ENV, " ")])), None);
+        assert_eq!(
+            otlp_endpoint(env(&[(
+                OTLP_TRACES_ENDPOINT_ENV,
+                "http://c:4318/v1/traces"
+            )])),
+            Some("http://c:4318/v1/traces".into())
+        );
+        assert_eq!(
+            otlp_endpoint(env(&[(OTLP_ENDPOINT_ENV, "http://c:4318")])),
+            Some("http://c:4318".into())
+        );
+    }
+
+    /// MOCKINGBIRD-STUB-10: a grpc protocol is detected (to be warned
+    /// about), the traces-only variable taking precedence.
+    #[test]
+    fn a_grpc_protocol_is_detected() {
+        let general = "OTEL_EXPORTER_OTLP_PROTOCOL";
+        let traces = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL";
+        assert_eq!(grpc_protocol(env(&[])), None);
+        assert_eq!(grpc_protocol(env(&[(general, "http/protobuf")])), None);
+        assert_eq!(grpc_protocol(env(&[(general, "gRPC")])), Some(general));
+        assert_eq!(
+            grpc_protocol(env(&[(general, "grpc"), (traces, "http/protobuf")])),
+            None
+        );
+        assert_eq!(
+            grpc_protocol(env(&[(general, "http/protobuf"), (traces, "grpc")])),
+            Some(traces)
+        );
+    }
 }

@@ -39,7 +39,7 @@ Desktop agents and IDEs often start MCP servers without the user's shell environ
 | Agent | What `agent install` writes |
 | --- | --- |
 | Claude Code (project `.mcp.json`) | `"env": {"NAME": "${NAME:-}"}` (empty rather than the literal text when Claude Code lacks the variable; the MCP server then takes it from the login shell) |
-| Claude Code (`--scope user`, a printed `claude mcp add`) | nothing (a shell would expand the value into `~/.claude.json`) |
+| Claude Code (`--scope user`, a printed `claude mcp add`) | nothing (a shell would expand the value into `~/.claude.json`); `passthrough_unsupported` suggests `--scope project` or `mockingbird keys setup` |
 | Codex | `env_vars = ["NAME"]` in `[mcp_servers.mockingbird]` |
 | Cursor, VS Code, Windsurf | `"env": {"NAME": "${env:NAME}"}` |
 | Gemini CLI | `"env": {"NAME": "${NAME}"}` |

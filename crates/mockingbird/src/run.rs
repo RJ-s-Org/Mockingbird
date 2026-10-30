@@ -183,6 +183,9 @@ async fn prepare(
         );
         return Ok(());
     }
+    if let Some(warning) = reuse_warning(args, admin_url) {
+        eprintln!("{warning}");
+    }
     wait_ready(admin_url, Duration::from(args.wait)).await?;
     if TcpStream::connect(proxy_addr).await.is_ok() {
         return Ok(());
@@ -203,6 +206,29 @@ async fn prepare(
     started.proxy = Some((stop_tx, task));
     eprintln!("mockingbird: proxy http://{proxy_addr} in front of the server at {admin_url}");
     Ok(())
+}
+
+/// The warning `run` prints when it reuses the server at `admin_url`
+/// although flags that only shape a server it starts were given (a
+/// leftover dev server would otherwise turn `run --replay` into live LLM
+/// calls without a word).
+fn reuse_warning(args: &RunArgs, admin_url: &str) -> Option<String> {
+    let ignored: Vec<&str> = [
+        (args.config.is_some(), "-c"),
+        (args.offline, "--offline"),
+        (args.record.is_some(), "--record"),
+        (args.replay.is_some(), "--replay"),
+    ]
+    .into_iter()
+    .filter_map(|(given, flag)| given.then_some(flag))
+    .collect();
+    if ignored.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "mockingbird: warning: a server already answers at {admin_url}; {} only shape a server `run` starts and do not change this one (stop it with `mockingbird server stop` to apply them)",
+        ignored.join(", ")
+    ))
 }
 
 fn http() -> reqwest::Client {

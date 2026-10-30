@@ -85,7 +85,7 @@ The snapshot directory:
 |---|---|---|
 | `answers.jsonl` | `serve --record` | One recorded answer per line (prompt digests and the answer text). Re-recording appends; delete it to start over. |
 | `sessions/<mock>/<session>.json` | `snapshot export` | Each session's stored resources, seeded on `serve --replay` and by `snapshot import`. |
-| `mocks/<mock>.json`, `contracts/<mock>.<ext>` | `snapshot export` | The mocks and their active contracts, for `snapshot import` into a server without the config (mocks created through the API or the console). |
+| `mocks/<mock>.json`, `contracts/<mock>.<ext>` | `snapshot export` | The mocks and their active contracts, for `snapshot import` into a server without the config (mocks created through the API or the console). A mock file carries `name`, `route_prefix`, `persona`, `consistency`, `unknown_ids`, `hosts`, `path_rewrite` and `header_overrides`; not the LLM profile, scenarios, data-plane auth, chaos, limits or webhooks, which name profiles, secrets and targets of the source environment (set them on the target after the import). |
 | `snapshot.json` | `snapshot export` | Format version and the workspace the sessions came from. |
 
 The answers and sessions hold what the LLM generated for your tests:

@@ -4,7 +4,7 @@ Mockingbird reads one YAML file, `mockingbird.yaml`, passed with `mockingbird se
 
 **Precedence:** the file < `MB_*` environment variables < command-line flags. An empty environment variable counts as unset.
 
-**Reloading:** with `--watch`, a change to the file or to a contract it names reconciles mocks, scenarios, LLM profiles and workspaces again. Keys marked *read at startup* are read once, when the process starts; change them with a restart (or a rolling restart, see the [runbook](operations/runbook.md#rolling-upgrades)).
+**Reloading:** with `--watch`, a change to the file or to a contract it names reconciles mocks, scenarios, LLM profiles and workspaces again. Keys marked *read at startup* are read once, when the process starts; change them with a restart (or a rolling restart, see the [runbook](operations/runbook.md#rolling-upgrades)). A reload that changes one of these sections (`server`, `storage`, `protocols`, `auth`, `audit`, `outbound`, `bus`, `limits`, `pii`, `import`, `proxy`) logs `config reload: the <section>: section changed; restart the server to apply it` and applies the rest; a `brokers` change rejects the reload.
 
 **Secrets** never appear in the file. A key that takes a secret takes a *reference*: `env:NAME` (an environment variable), `file:/path` (a file's contents, whitespace trimmed) or `vault:<mount>/<path>#<field>` (a HashiCorp Vault KV v2 field, enabled when `VAULT_ADDR` is set; see [Kubernetes secrets](deploy/kubernetes.md#secrets)). AWS, GCP and Azure secret managers have no native reference: inject their secrets as environment variables or files (on Kubernetes, the Secrets Store CSI driver mounts each one as a file for a `file:` reference) or serve them through Vault. A `file:` reference into the key store (`~/.mockingbird/secrets/`, written by `mockingbird keys setup`) is refused when the file is readable by group or others.
 
@@ -179,7 +179,7 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `observability.request_log_retention` | integer | `1000` | | | Request-log entries kept per mock. |
 | `observability.redact_fields` | list | `[password, token, secret, authorization, apiKey, api_key]` | | | A recorded JSON, form or query key is redacted when, lowercased and without `_`, `-` and `.`, it contains one of these (normalized the same way). |
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` enables OTLP trace export, and `RUST_LOG` sets the log filter (default `info`).
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` enables OTLP trace export, and `RUST_LOG` sets the log filter (default `info`). Spans are exported over HTTP/protobuf only: `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` (or `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=grpc`) is not followed and logs a warning at startup, so point the endpoint at the collector's HTTP port (usually 4318).
 
 ## `protocols`
 
@@ -355,11 +355,12 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | `MB_BUS_URL` | | `bus.url` |
 | `MB_LLM_BASE_URL`, `MB_LLM_MODEL`, `MB_LLM_API_KEY`, `MB_LLM_JSON_SCHEMA` | `--llm-timeout` | The `default` LLM profile. |
 | `MB_STATE_DIR` | `--state-dir` | Where `mockingbird server start` keeps the background server's pid, log and URLs (default `.mockingbird`). Not a config file key. |
+| `MB_STOP_FILE` | | Set by `mockingbird server start` on the server it spawns: `serve` shuts down gracefully once this file exists. `server stop` creates it (the graceful path on Windows, where a background server gets no Ctrl-C), then kills the server after 10 s and reports `forced: true`. |
 | | `--offline` | Faker only, no LLM calls. |
 | | `-c`, `--config` | The config file. |
 | | `--watch` | Reconcile again when the file or a contract changes (a usage error on `data` nodes). |
 | `MB_CHAOS_SEED` | | Seed of the chaos random choices. |
 | `VAULT_ADDR`, `VAULT_TOKEN`, `VAULT_TOKEN_FILE`, `VAULT_NAMESPACE`, `VAULT_CACERT` | | Enable and configure `vault:` secret references. |
 | `MB_ADMIN_URL`, `MB_ADMIN_TOKEN`, `MB_WORKSPACE` | `--admin-url`, `--token`, `--workspace` | The CLI client's Admin API, API key and workspace. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | | OTLP trace export. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | | OTLP trace export (HTTP/protobuf; a `grpc` protocol is warned about). |
 | `RUST_LOG` | | Log filter. |

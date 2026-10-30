@@ -587,8 +587,12 @@ fn api_error(e: ClientError) -> anyhow::Error {
     }
 }
 
-/// The mock settings `snapshot import` creates a missing mock with (not
-/// its LLM profile, scenarios or auth, which the target may not have).
+/// The mock settings `snapshot import` creates a missing mock with: what
+/// it is called and how requests reach it and are answered. Not its LLM
+/// profile, scenarios, data-plane auth, chaos, limits or webhooks, which
+/// name things of the source environment (profiles, secrets, targets) the
+/// target may not have. Snapshots written before `path_rewrite` and
+/// `header_overrides` were exported import with the defaults.
 const MOCK_FIELDS: &[&str] = &[
     "name",
     "route_prefix",
@@ -596,6 +600,8 @@ const MOCK_FIELDS: &[&str] = &[
     "consistency",
     "unknown_ids",
     "hosts",
+    "path_rewrite",
+    "header_overrides",
 ];
 
 async fn export(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
@@ -835,6 +841,75 @@ mod tests {
                 start.elapsed()
             );
         }
+    }
+
+    /// MOCKINGBIRD-STUB-3: a mock's path rewrite and header-override switch
+    /// survive export and import, so an imported mock routes as before.
+    #[tokio::test]
+    async fn export_then_import_keeps_routing_settings() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        const WS: &str = "/api/v1/workspaces/default";
+        let source = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "name": "tmdb",
+                "route_prefix": "/tmdb",
+                "hosts": ["api.tmdb.test"],
+                "header_overrides": false,
+                "path_rewrite": { "add_prefix": "/3" },
+                "llm_profile": "env-only",
+                "active_version": null,
+            }])))
+            .mount(&source)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/tmdb/sessions")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&source)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path().join("snap");
+        let api = Api {
+            admin_url: &source.uri(),
+            token: None,
+            workspace: "default",
+        };
+        export(&api, &snap).await.unwrap();
+
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/tmdb")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&target)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&target)
+            .await;
+        let api = Api {
+            admin_url: &target.uri(),
+            token: None,
+            workspace: "default",
+        };
+        let out = import(&api, &snap).await.unwrap();
+        assert_eq!(out["created_mocks"], json!(["tmdb"]));
+        let requests = target.received_requests().await.unwrap();
+        let created = requests
+            .iter()
+            .find(|r| r.method.as_str() == "POST")
+            .unwrap();
+        let body: Value = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(
+            body["path_rewrite"],
+            json!({ "add_prefix": "/3" }),
+            "{body}"
+        );
+        assert_eq!(body["header_overrides"], false, "{body}");
+        assert_eq!(body["hosts"], json!(["api.tmdb.test"]));
+        assert!(body.get("llm_profile").is_none(), "{body}");
     }
 
     #[tokio::test]

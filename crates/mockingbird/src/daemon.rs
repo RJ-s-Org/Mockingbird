@@ -107,6 +107,16 @@ fn info_file(dir: &Path) -> PathBuf {
     dir.join("server.json")
 }
 
+/// The variable naming the stop file of a server [`start`] spawns: `serve`
+/// shuts down gracefully once that file exists (and removes it). It is how
+/// [`stop`] asks a detached server on Windows, which has no console to
+/// receive Ctrl-C, to stop without killing it.
+pub const STOP_FILE_ENV: &str = "MB_STOP_FILE";
+
+fn stop_file(dir: &Path) -> PathBuf {
+    dir.join("server.stop")
+}
+
 /// The variables `mockingbird proxy env` sets that route HTTP traffic.
 const PROXY_VARS: &[&str] = &["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
 
@@ -315,6 +325,10 @@ pub async fn start_child(args: &StartArgs) -> anyhow::Result<(Value, std::proces
         cmd.arg("--replay").arg(dir);
     }
     cmd.args(&args.contracts);
+    // A stop file left by an earlier server would stop this one at once.
+    let stop = stop_file(dir);
+    let _ = std::fs::remove_file(&stop);
+    cmd.env(STOP_FILE_ENV, std::path::absolute(&stop).unwrap_or(stop));
     let log_path = log_file(dir);
     let log = OpenOptions::new()
         .create(true)
@@ -428,15 +442,31 @@ pub(crate) fn terminate(pid: u32, force: bool) -> bool {
     quiet(Command::new("kill").arg(signal).arg(pid.to_string()))
 }
 
+/// `taskkill`, with `/F` only when forcing (without it, a process that
+/// has a window is asked to close).
 #[cfg(not(unix))]
-pub(crate) fn terminate(pid: u32, _force: bool) -> bool {
-    quiet(Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]))
+pub(crate) fn terminate(pid: u32, force: bool) -> bool {
+    let pid = pid.to_string();
+    let mut args = vec!["/PID", pid.as_str(), "/T"];
+    if force {
+        args.push("/F");
+    }
+    quiet(Command::new("taskkill").args(args))
 }
 
-/// Stops `child`, a server [`start_child`] started in this process: SIGTERM,
-/// then SIGKILL after 10 seconds, and reaps it.
+/// Asks the server `pid` of state directory `dir` to stop gracefully: its
+/// stop file (see [`STOP_FILE_ENV`]), which works on every platform, and a
+/// SIGTERM on Unix.
+fn request_stop(dir: &Path, pid: u32) {
+    let _ = std::fs::write(stop_file(dir), b"");
+    terminate(pid, false);
+}
+
+/// Stops `child`, a server [`start_child`] started in this process: a
+/// graceful stop request (its stop file, see [`STOP_FILE_ENV`], and a
+/// SIGTERM on Unix), then a kill after 10 seconds, and reaps it.
 pub async fn stop_child(args: &StateArgs, mut child: std::process::Child) -> anyhow::Result<()> {
-    terminate(child.id(), false);
+    request_stop(&args.state_dir, child.id());
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
@@ -447,6 +477,7 @@ pub async fn stop_child(args: &StateArgs, mut child: std::process::Child) -> any
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let _ = std::fs::remove_file(pid_file(&args.state_dir));
+    let _ = std::fs::remove_file(stop_file(&args.state_dir));
     Ok(())
 }
 
@@ -458,7 +489,7 @@ pub async fn stop(args: &StateArgs) -> anyhow::Result<Value> {
     };
     let mut forced = false;
     if alive(pid) {
-        terminate(pid, false);
+        request_stop(dir, pid);
         let deadline = Instant::now() + Duration::from_secs(10);
         while alive(pid) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -468,6 +499,7 @@ pub async fn stop(args: &StateArgs) -> anyhow::Result<Value> {
         }
     }
     let _ = std::fs::remove_file(pid_file(dir));
+    let _ = std::fs::remove_file(stop_file(dir));
     Ok(json!({ "stopped": true, "pid": pid, "forced": forced }))
 }
 
