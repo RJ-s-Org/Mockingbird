@@ -1148,6 +1148,11 @@ pub struct FileMock {
     /// `/graphql.json`); default `protocols.graphql.path`.
     #[serde(default)]
     pub graphql_path: Option<String>,
+    /// Seeds the faker: the same seed, contract and request give the same
+    /// faker body. Unset: offline answers use seed 0, LLM fallbacks are
+    /// random. `X-Mockingbird-Seed` overrides it per request.
+    #[serde(default)]
+    pub faker_seed: Option<u64>,
     /// Where the mock POSTs an event after each successful write.
     #[serde(default)]
     pub webhooks: Vec<FileWebhook>,
@@ -1329,6 +1334,7 @@ impl FileMock {
             hosts: Vec::new(),
             path_rewrite: mb_store::PathRewrite::default(),
             graphql_path: None,
+            faker_seed: None,
             webhooks: Vec::new(),
         }
     }

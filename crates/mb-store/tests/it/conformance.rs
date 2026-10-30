@@ -274,6 +274,7 @@ pub(crate) async fn mock_behavior_round_trips(store: &Arc<dyn ControlStore>) {
             add_prefix: Some("/3".into()),
         },
         graphql_path: Some("/graphql.json".into()),
+        faker_seed: Some(42),
     };
     store.update_mock(&mock).await.expect("update");
     let got = store

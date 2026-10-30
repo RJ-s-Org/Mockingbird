@@ -16,5 +16,6 @@ mod message;
 mod perf;
 mod pii;
 mod scenario;
+mod seed;
 mod stream;
 mod support;

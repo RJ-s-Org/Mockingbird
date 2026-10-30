@@ -63,6 +63,7 @@ pub mod persona;
 pub mod pii;
 pub mod prompt;
 pub mod scenario;
+pub mod seed;
 pub mod stream;
 pub mod validate;
 
@@ -72,6 +73,7 @@ pub use guards::{EngineGuards, GenerationLimiter, TokenBudget};
 pub use message::{GeneratedMessage, MessageContext};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
+pub use seed::{DEFAULT_FAKER_SEED, SEED_HEADER};
 pub use validate::SchemaValidator;
 
 /// Why the engine could not answer at all (a contract problem, not an LLM
@@ -358,6 +360,8 @@ pub struct Engine {
     /// The formats the persona declares, kept on every generated body.
     persona_formats: persona::PersonaFormats,
     guards: EngineGuards,
+    /// Seeds the faker's draws (see [`seed`]); `None` draws at random.
+    faker_seed: Option<u64>,
 }
 
 /// The schema a response answers and what it belongs to: the input of
@@ -379,6 +383,13 @@ const SCHEMA_VALIDATORS_MAX: usize = 512;
 
 /// Most faker setups [`Engine::fake_setup`] keeps.
 const FAKE_SETUPS_MAX: usize = 512;
+
+/// What the faker draws one answer with: the request values it echoes
+/// and the answer's generator.
+struct AnswerDraws<'a> {
+    hints: FakerHints,
+    draws: &'a mut seed::Draws,
+}
 
 /// A schema ready for the faker: with the definitions it reaches, and the
 /// cost table of that.
@@ -402,6 +413,7 @@ impl fmt::Debug for Engine {
         f.debug_struct("Engine")
             .field("has_provider", &self.provider.is_some())
             .field("config", &self.config)
+            .field("faker_seed", &self.faker_seed)
             .field("guards", &self.guards)
             .field("validators", &self.validators.len())
             .field("schema_validators", &self.schema_validators.len())
@@ -412,7 +424,10 @@ impl fmt::Debug for Engine {
 
 impl Engine {
     /// An engine generating with `provider`, or offline (faker only) when
-    /// it is `None`, with no guards (see [`Engine::with_guards`]).
+    /// it is `None`, with no guards (see [`Engine::with_guards`]). An
+    /// offline engine's faker is seeded with [`DEFAULT_FAKER_SEED`]; one
+    /// with a provider draws its fallbacks at random until
+    /// [`Engine::with_faker_seed`] sets a seed.
     #[must_use]
     pub fn new(provider: Option<Arc<dyn Provider>>, config: EngineConfig) -> Self {
         let persona_formats = config
@@ -421,6 +436,7 @@ impl Engine {
             .map(persona::PersonaFormats::parse)
             .unwrap_or_default();
         Self {
+            faker_seed: provider.is_none().then_some(DEFAULT_FAKER_SEED),
             persona_formats,
             provider,
             config,
@@ -437,6 +453,47 @@ impl Engine {
     #[must_use]
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// This engine with its faker seeded by `seed`: the same seed, contract
+    /// and call give the same faker values (see [`seed`]). A call's
+    /// [`SEED_HEADER`] overrides it.
+    #[must_use]
+    pub fn with_faker_seed(mut self, seed: u64) -> Self {
+        self.faker_seed = Some(seed);
+        self
+    }
+
+    /// The seed of the faker's draws when a call names none; `None` when
+    /// they are random.
+    #[must_use]
+    pub fn faker_seed(&self) -> Option<u64> {
+        self.faker_seed
+    }
+
+    /// The faker draws of one answer: seeded by the call's [`SEED_HEADER`],
+    /// else the engine's seed, mixed with what identifies the answer (the
+    /// contract, operation, status and request); random without a seed.
+    fn call_draws(
+        &self,
+        bundle: &Bundle,
+        op_id: &str,
+        status: u16,
+        call: &OperationCall,
+    ) -> seed::Draws {
+        let [path, query, body] = seed::call_parts(call);
+        let status = status.to_string();
+        seed::Draws::new(
+            seed::request_seed(call).or(self.faker_seed),
+            &[&bundle.source_digest, op_id, &status],
+            &[&path, &query, &body],
+        )
+    }
+
+    /// The faker draws of a value that answers no call (an event message,
+    /// a request value): always random.
+    fn unseeded_draws() -> seed::Draws {
+        seed::Draws::random()
     }
 
     /// Whether the engine has an LLM provider; without one every response
@@ -524,6 +581,7 @@ impl Engine {
             None => self.validator(bundle, op, status, schema)?,
         };
         let mut usage = Usage::default();
+        let mut draws = self.call_draws(bundle, &op.id, status, call);
         let mut response = match &self.provider {
             None => {
                 let mut fake = self.fake_response(
@@ -532,7 +590,10 @@ impl Engine {
                     status,
                     schema,
                     Some(&validator),
-                    &FakerHints::from_call(op, call),
+                    &mut AnswerDraws {
+                        hints: FakerHints::from_call(op, call),
+                        draws: &mut draws,
+                    },
                 );
                 fake.fallback_reason = Some(with_faker_note(
                     OFFLINE_REASON.to_string(),
@@ -593,7 +654,10 @@ impl Engine {
                             status,
                             schema,
                             Some(&validator),
-                            &FakerHints::from_call(op, call),
+                            &mut AnswerDraws {
+                                hints: FakerHints::from_call(op, call),
+                                draws: &mut draws,
+                            },
                         );
                         fake.fallback_reason =
                             Some(with_faker_note(reason, fake.fallback_reason.take()));
@@ -609,7 +673,7 @@ impl Engine {
             schema,
             op,
         };
-        Ok(self.finish(target, call, &ctx, response))
+        Ok(self.finish(target, call, &ctx, response, &mut draws))
     }
 
     /// Answers every part with one LLM call: one object keyed by the parts'
@@ -726,7 +790,8 @@ impl Engine {
                 schema,
                 op: part.op,
             };
-            responses.push(self.finish(target, part.call, &part.ctx, response));
+            let mut draws = self.call_draws(bundle, &part.op.id, status, part.call);
+            responses.push(self.finish(target, part.call, &part.ctx, response, &mut draws));
         }
         Some(responses)
     }
@@ -754,6 +819,7 @@ impl Engine {
                 fallback_reason: None,
             };
         };
+        let mut draws = self.call_draws(bundle, &op.id, status, call);
         match self.validator(bundle, op, status, schema) {
             Ok(validator) => {
                 let response = self.fake_response(
@@ -762,7 +828,10 @@ impl Engine {
                     status,
                     schema,
                     Some(&validator),
-                    &FakerHints::from_call(op, call),
+                    &mut AnswerDraws {
+                        hints: FakerHints::from_call(op, call),
+                        draws: &mut draws,
+                    },
                 );
                 let target = Target {
                     validator: &validator,
@@ -770,7 +839,7 @@ impl Engine {
                     schema,
                     op,
                 };
-                self.finish(target, call, ctx, response)
+                self.finish(target, call, ctx, response, &mut draws)
             }
             Err(e) => {
                 tracing::warn!(operation = %op.id, error = %e, "fallback schema cannot be validated");
@@ -780,7 +849,10 @@ impl Engine {
                     status,
                     schema,
                     None,
-                    &FakerHints::from_call(op, call),
+                    &mut AnswerDraws {
+                        hints: FakerHints::from_call(op, call),
+                        draws: &mut draws,
+                    },
                 )
             }
         }
@@ -869,6 +941,7 @@ impl Engine {
         call: &OperationCall,
         ctx: &GenerationContext<'_>,
         response: GeneratedResponse,
+        draws: &mut seed::Draws,
     ) -> GeneratedResponse {
         let Target {
             validator,
@@ -878,12 +951,12 @@ impl Engine {
         } = target;
         let response = encode_base64(validator, bundle, schema, response);
         let response = reflect(validator, op, call, ctx, response);
-        let response = self.keep_persona_formats(validator, call, response);
+        let response = self.keep_persona_formats(validator, call, response, draws);
         let response = if matches!(op.kind, OperationKind::Query)
             && ctx.target.is_none()
             && (200..300).contains(&response.status)
         {
-            self.unique_list_ids(bundle, schema, op, validator, response)
+            self.unique_list_ids(bundle, schema, op, validator, response, draws)
         } else {
             response
         };
@@ -897,6 +970,7 @@ impl Engine {
         validator: &SchemaValidator,
         call: &OperationCall,
         mut response: GeneratedResponse,
+        draws: &mut seed::Draws,
     ) -> GeneratedResponse {
         if self.persona_formats.is_empty() || !(200..300).contains(&response.status) {
             return response;
@@ -908,7 +982,10 @@ impl Engine {
         if let Some(Value::Object(request)) = &call.body {
             protected.extend(request.values());
         }
-        if let Some(patched) = self.persona_formats.apply(validator, body, &protected) {
+        if let Some(patched) =
+            self.persona_formats
+                .apply_with(validator, body, &protected, &mut draws.rng)
+        {
             tracing::info!(operation = %call.operation_id, "patched values to the persona's formats");
             response.body = Some(patched);
         }
@@ -924,6 +1001,7 @@ impl Engine {
         op: &Operation,
         validator: &SchemaValidator,
         mut response: GeneratedResponse,
+        draws: &mut seed::Draws,
     ) -> GeneratedResponse {
         let Some(body) = &response.body else {
             return response;
@@ -963,7 +1041,7 @@ impl Engine {
                 continue;
             }
             let fresh = (0..IDENTITY_DRAWS)
-                .map(|_| self.fake_field(bundle, &field, &id_schema))
+                .map(|_| self.fake_field(bundle, &field, &id_schema, draws))
                 .find(|v| !v.is_null() && !used.contains(&v.to_string()));
             if let (Some(fresh), Value::Object(obj)) = (fresh, &mut *item) {
                 used.insert(fresh.to_string());
@@ -989,8 +1067,15 @@ impl Engine {
         let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
         let current = body.get(field)?;
         let id_schema = consistency::property_schema(bundle, schema, field)?;
+        // Seeded by the body whose identity it replaces: the same
+        // collision gets the same fresh identity.
+        let mut draws = seed::Draws::new(
+            self.faker_seed,
+            &[&bundle.source_digest, &op.id, "identity"],
+            &[body],
+        );
         (0..IDENTITY_DRAWS).find_map(|_| {
-            let fresh = self.fake_field(bundle, field, &id_schema);
+            let fresh = self.fake_field(bundle, field, &id_schema, &mut draws);
             if fresh.is_null() || &fresh == current {
                 return None;
             }
@@ -1007,9 +1092,10 @@ impl Engine {
         status: u16,
         schema: &Value,
         validator: Option<&SchemaValidator>,
-        hints: &FakerHints,
+        answer: &mut AnswerDraws<'_>,
     ) -> GeneratedResponse {
-        let (body, valid) = self.fake_checked(bundle, schema, validator, hints);
+        let (body, valid) =
+            self.fake_checked(bundle, schema, validator, &answer.hints, answer.draws);
         GeneratedResponse {
             status,
             content_type: variant.content_type.clone(),
@@ -1022,29 +1108,36 @@ impl Engine {
 
     /// A faker value for object member `field` of schema `schema`, so the
     /// faker's name-based rules (id ranges) apply.
-    fn fake_field(&self, bundle: &Bundle, field: &str, schema: &Value) -> Value {
+    fn fake_field(
+        &self,
+        bundle: &Bundle,
+        field: &str,
+        schema: &Value,
+        draws: &mut seed::Draws,
+    ) -> Value {
         let wrapper = serde_json::json!({
             "type": "object",
             "required": [field],
             "properties": {field: schema},
         });
-        self.fake_value(bundle, &wrapper, None, &FakerHints::default())
+        self.fake_value(bundle, &wrapper, None, &FakerHints::default(), draws)
             .get(field)
             .cloned()
             .unwrap_or(Value::Null)
     }
 
-    /// A faker value for `schema`, validated by `validator` when given:
-    /// other `oneOf`/`anyOf` branches and fresh draws are tried before an
-    /// invalid value is accepted.
+    /// A faker value for `schema` from `draws`, validated by `validator`
+    /// when given: other `oneOf`/`anyOf` branches and fresh draws are tried
+    /// before an invalid value is accepted.
     pub(crate) fn fake_value(
         &self,
         bundle: &Bundle,
         schema: &Value,
         validator: Option<&SchemaValidator>,
         hints: &FakerHints,
+        draws: &mut seed::Draws,
     ) -> Value {
-        self.fake_checked(bundle, schema, validator, hints).0
+        self.fake_checked(bundle, schema, validator, hints, draws).0
     }
 
     /// [`Engine::fake_value`], and whether the value validated (always
@@ -1056,16 +1149,20 @@ impl Engine {
         schema: &Value,
         validator: Option<&SchemaValidator>,
         hints: &FakerHints,
+        draws: &mut seed::Draws,
     ) -> (Value, bool) {
         // One schema and cost table for every attempt (and every call):
         // building them walks the schema.
         let setup = self.fake_setup(bundle, schema);
-        let faker = Faker::new(self.config.faker_depth).with_hints(hints.clone());
-        let mut rng = rand::rng();
+        let mut faker = Faker::new(self.config.faker_depth).with_hints(hints.clone());
+        if draws.seeded {
+            // A seeded answer does not move with the clock.
+            faker = faker.with_now(seed::SEEDED_NOW);
+        }
         let mut first: Option<Value> = None;
         for attempt in 0..FALLBACK_ATTEMPTS {
             let candidate =
-                faker.fake_with_costs(&setup.schema, Some(attempt), &setup.costs, &mut rng);
+                faker.fake_with_costs(&setup.schema, Some(attempt), &setup.costs, &mut draws.rng);
             match validator {
                 Some(v) if !v.is_valid(&candidate) => {
                     first.get_or_insert(candidate);

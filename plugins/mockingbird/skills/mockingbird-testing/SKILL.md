@@ -7,7 +7,7 @@ description: Use Mockingbird mocks in automated tests and CI - deterministic off
 
 ## Make runs repeatable
 
-- **No LLM in CI**: `--offline` serves faker data that always matches the schema; no key, no cost, no network. Keep an LLM profile for local exploration.
+- **No LLM in CI**: `--offline` serves faker data checked against the schema (an answer it cannot make valid says so in `X-Mockingbird-Fallback-Reason`); no key, no cost, no network. It is seeded: the same contract and request give the same body on every run. Set a mock's `faker_seed`, or send `X-Mockingbird-Seed: <n>` on one request, for other data. Keep an LLM profile for local exploration.
 - **Isolate each test** with its own session: send `X-Mockingbird-Session: <test-id>` (gRPC metadata `x-mockingbird-session`). State created in one session is invisible to others.
 - **Known data**: export a good session once and seed it in each run.
 

@@ -1269,6 +1269,7 @@ async fn runtime_carries_mock_behavior() {
         consistency: Consistency::Off,
         unknown_ids: UnknownIds::NotFound,
         default_scenario: Some("gift".into()),
+        faker_seed: Some(9),
         ..Default::default()
     };
     let mock = store.update_mock(&mock).await.unwrap();
@@ -1279,6 +1280,7 @@ async fn runtime_carries_mock_behavior() {
     assert!(!rt.consistency);
     assert_eq!(rt.unknown_ids, mb_protocols::UnknownIds::NotFound);
     assert_eq!(rt.default_scenario.as_deref(), Some("gift"));
+    assert_eq!(rt.engine.faker_seed(), Some(9));
 }
 
 /// A mock change for `name` in the default workspace, as the hub delivers it.
