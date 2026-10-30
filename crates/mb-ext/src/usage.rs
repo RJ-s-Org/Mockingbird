@@ -1,7 +1,10 @@
 //! Usage reporting: the `UsageSink` trait is part of the semver-stable surface
 //! `mockingbird-cloud` builds against.
 
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+
+use metrics::SharedString;
 
 use crate::Tenancy;
 
@@ -70,24 +73,27 @@ pub struct PrometheusUsage;
 
 impl UsageSink for PrometheusUsage {
     fn record(&self, event: &UsageEvent) {
+        // One shared copy of each label value, however many series use it.
+        let mock: Arc<str> = Arc::from(event.mock.as_str());
+        let operation: Arc<str> = Arc::from(event.operation_id.as_str());
         metrics::counter!(
             "mb_requests_total",
-            "mock" => event.mock.clone(),
-            "operation" => event.operation_id.clone(),
-            "status" => event.status.to_string(),
-            "source" => event.source.clone(),
+            "mock" => mock.clone(),
+            "operation" => operation.clone(),
+            "status" => status_label(event.status),
+            "source" => source_label(&event.source),
         )
         .increment(1);
         metrics::histogram!(
             "mb_request_duration_seconds",
-            "mock" => event.mock.clone(),
-            "operation" => event.operation_id.clone(),
+            "mock" => mock.clone(),
+            "operation" => operation,
         )
         .record(event.latency.as_secs_f64());
         if event.prompt_tokens > 0 {
             metrics::counter!(
                 "mb_llm_tokens_total",
-                "mock" => event.mock.clone(),
+                "mock" => mock.clone(),
                 "kind" => "prompt",
             )
             .increment(u64::from(event.prompt_tokens));
@@ -95,10 +101,40 @@ impl UsageSink for PrometheusUsage {
         if event.completion_tokens > 0 {
             metrics::counter!(
                 "mb_llm_tokens_total",
-                "mock" => event.mock.clone(),
+                "mock" => mock,
                 "kind" => "completion",
             )
             .increment(u64::from(event.completion_tokens));
         }
+    }
+}
+
+/// The statuses whose label text is kept, shared, for the life of the
+/// process: every HTTP status.
+const STATUS_LABELS: std::ops::Range<u16> = 100..600;
+
+/// `status` as label text, without formatting it for an HTTP status.
+fn status_label(status: u16) -> SharedString {
+    static LABELS: LazyLock<Vec<Arc<str>>> =
+        LazyLock::new(|| STATUS_LABELS.map(|s| Arc::from(s.to_string())).collect());
+    status
+        .checked_sub(STATUS_LABELS.start)
+        .and_then(|i| LABELS.get(usize::from(i)))
+        .map_or_else(
+            || SharedString::from(status.to_string()),
+            |label| SharedString::from_shared(label.clone()),
+        )
+}
+
+/// `source` as label text, without copying one of the sources Mockingbird
+/// reports.
+fn source_label(source: &str) -> SharedString {
+    match source {
+        "llm" => SharedString::const_str("llm"),
+        "repaired" => SharedString::const_str("repaired"),
+        "fallback" => SharedString::const_str("fallback"),
+        "not_generated" => SharedString::const_str("not_generated"),
+        "import" => SharedString::const_str("import"),
+        other => SharedString::from(other.to_string()),
     }
 }

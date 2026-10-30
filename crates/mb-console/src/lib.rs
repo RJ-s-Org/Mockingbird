@@ -92,7 +92,8 @@ fn file_response(file: rust_embed::EmbeddedFile, cache: &'static str, head: bool
     let body = if head {
         Body::empty()
     } else {
-        Body::from(file.data.into_owned())
+        // Embedded data is a `&'static [u8]`: the body borrows it.
+        Body::from(file.data)
     };
     let mut resp = (
         [
@@ -123,7 +124,7 @@ fn secured(mut resp: Response) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{PLACEHOLDER_MARKER, is_placeholder_index};
+    use super::{Dist, NO_CACHE, PLACEHOLDER_MARKER, file_response, is_placeholder_index};
 
     /// The page `build.rs` writes when `dist/` holds no build.
     const PLACEHOLDER: &str = include_str!("placeholder.html");
@@ -144,5 +145,19 @@ mod tests {
         let built = br#"<!doctype html><html><head><script type="module" src="/assets/index-abc123.js"></script></head><body><div id="root"></div></body></html>"#;
         assert!(!is_placeholder_index(Some(built)));
         assert!(!is_placeholder_index(Some(&[0xff, 0xfe])), "not UTF-8");
+    }
+
+    /// The body of an embedded file is the embedded bytes themselves, not a
+    /// per-request copy.
+    #[tokio::test]
+    async fn embedded_files_are_served_without_a_copy() {
+        use http_body_util::BodyExt;
+
+        let file = Dist::get("index.html").expect("index.html is embedded");
+        let embedded = file.data.as_ptr();
+        let resp = file_response(file, NO_CACHE, false);
+        let body = resp.into_body().collect().await.expect("body").to_bytes();
+        assert!(!body.is_empty());
+        assert_eq!(body.as_ptr(), embedded, "the body copies the file");
     }
 }

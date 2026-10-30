@@ -942,6 +942,10 @@ pub(crate) struct BundleIndex {
     /// Each operation's position in `bundle.operations`, by id (the first
     /// one of a repeated id, as [`mb_mcm::Bundle::operation`] finds).
     by_id: HashMap<String, usize>,
+    /// Each channel's position in `bundle.channels`, by id (the first one
+    /// of a repeated id, as [`mb_mcm::Bundle::channel`] finds).
+    #[cfg(any(test, feature = "events"))]
+    channel_by_id: HashMap<String, usize>,
     /// Per resource type: the fields its operations take from the path
     /// (GitHub's issue `number`), sorted and deduplicated.
     path_fields: HashMap<String, Vec<String>>,
@@ -982,8 +986,16 @@ impl BundleIndex {
             fields.sort_unstable();
             fields.dedup();
         }
+        #[cfg(any(test, feature = "events"))]
+        let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
+        #[cfg(any(test, feature = "events"))]
+        for (i, channel) in bundle.channels.iter().enumerate() {
+            channel_by_id.entry(channel.id.clone()).or_insert(i);
+        }
         Self {
             by_id,
+            #[cfg(any(test, feature = "events"))]
+            channel_by_id,
             path_fields,
             listed,
             list_members: list_members_of,
@@ -993,6 +1005,12 @@ impl BundleIndex {
     /// The position of operation `id`.
     pub(crate) fn operation(&self, id: &str) -> Option<usize> {
         self.by_id.get(id).copied()
+    }
+
+    /// The position of channel `id`.
+    #[cfg(any(test, feature = "events"))]
+    pub(crate) fn channel(&self, id: &str) -> Option<usize> {
+        self.channel_by_id.get(id).copied()
     }
 
     fn path_fields(&self, resource_type: &str) -> &[String] {
@@ -1013,6 +1031,13 @@ impl MockRuntime {
     #[cfg(any(test, feature = "http-rest", feature = "graphql", feature = "grpc"))]
     pub(crate) fn operation(&self, id: &str) -> Option<&Operation> {
         self.bundle.operations.get(self.index.operation(id)?)
+    }
+
+    /// The channel `id` of [`MockRuntime::bundle`] (the first of a repeated
+    /// id), without scanning the channels.
+    #[cfg(any(test, feature = "events"))]
+    pub(crate) fn channel(&self, id: &str) -> Option<&mb_mcm::Channel> {
+        self.bundle.channels.get(self.index.channel(id)?)
     }
 }
 
@@ -2291,6 +2316,62 @@ paths:
             }
             let scanned: HashSet<String> = scanned_listed(bundle).into_iter().collect();
             assert_eq!(rt.index().listed, scanned);
+        }
+    }
+
+    /// The runtime's channel index finds what scanning the channels finds,
+    /// the first of a repeated id included.
+    #[test]
+    fn channel_index_matches_a_scan() {
+        let mut bundle = example("kafka-events/commerce-events.asyncapi.yaml");
+        assert!(bundle.channels.len() > 1);
+        let mut twin = bundle.channels[1].clone();
+        twin.id = bundle.channels[0].id.clone();
+        bundle.channels.push(twin);
+        let rt = runtime_of(bundle);
+        let bundle = rt.bundle();
+        for channel in &bundle.channels {
+            assert!(std::ptr::eq(
+                rt.channel(&channel.id).unwrap(),
+                bundle.channel(&channel.id).unwrap()
+            ));
+        }
+        assert!(rt.channel("noSuchChannel").is_none());
+    }
+
+    /// Timing harness: `cargo test -p mockingbird-protocols --lib --
+    /// --ignored --nocapture channel_index_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn channel_index_timing() {
+        let events = example("kafka-events/commerce-events.asyncapi.yaml");
+        for copies in [10usize, 100] {
+            let mut bundle = events.clone();
+            bundle.channels = (0..copies)
+                .flat_map(|c| {
+                    events.channels.iter().map(move |ch| {
+                        let mut ch = ch.clone();
+                        ch.id = format!("{}{c}", ch.id);
+                        ch
+                    })
+                })
+                .collect();
+            let channels = bundle.channels.len();
+            let last = bundle.channels[channels - 1].id.clone();
+            let rt = runtime_of(bundle);
+            let bundle = rt.bundle();
+            let n = 20_000u32;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(bundle.channel(std::hint::black_box(&last)));
+            }
+            let scan = started.elapsed() / n;
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(rt.channel(std::hint::black_box(&last)));
+            }
+            let indexed = started.elapsed() / n;
+            println!("{channels} channels: lookup scan {scan:?}, index {indexed:?}");
         }
     }
 

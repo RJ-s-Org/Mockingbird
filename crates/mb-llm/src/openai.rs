@@ -361,6 +361,9 @@ fn json_in(text: &str) -> Option<&str> {
 
 /// The last complete top-level JSON object or array in `text`, and the byte
 /// offset where it ends. Values nested in one already found are skipped.
+///
+/// Each candidate is only validated (as a [`Probe`]), never built: a value
+/// that starts with `{` or `[` and parses is an object or an array.
 fn last_json(text: &str) -> Option<(&str, usize)> {
     let mut found = None;
     let mut next = 0;
@@ -369,16 +372,70 @@ fn last_json(text: &str) -> Option<(&str, usize)> {
             continue;
         }
         let rest = &text[start..];
-        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
-        if let Some(Ok(value)) = stream.next()
-            && (value.is_object() || value.is_array())
-        {
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Probe>();
+        if let Some(Ok(Probe)) = stream.next() {
             let end = stream.byte_offset();
             next = start + end;
             found = Some((&rest[..end], next));
         }
     }
     found
+}
+
+/// Any JSON value, read and dropped: what parsing into a [`Value`] accepts
+/// (nesting limit included), without building one.
+/// ([`serde::de::IgnoredAny`] skips values without serde_json's nesting
+/// limit, so it would accept more.)
+struct Probe;
+
+impl<'de> serde::Deserialize<'de> for Probe {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(ProbeVisitor)
+    }
+}
+
+struct ProbeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ProbeVisitor {
+    type Value = Probe;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Probe, E> {
+        Ok(Probe)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Probe, E> {
+        Ok(Probe)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Probe, E> {
+        Ok(Probe)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Probe, E> {
+        Ok(Probe)
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Probe, E> {
+        Ok(Probe)
+    }
+
+    fn visit_unit<E>(self) -> Result<Probe, E> {
+        Ok(Probe)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Probe, A::Error> {
+        while seq.next_element::<Probe>()?.is_some() {}
+        Ok(Probe)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Probe, A::Error> {
+        while map.next_entry::<Probe, Probe>()?.is_some() {}
+        Ok(Probe)
+    }
 }
 
 /// The first 300 bytes of `text`, cut at a character boundary.
@@ -472,5 +529,74 @@ impl Provider for OpenAiCompatible {
             }
         });
         Ok(Box::pin(deltas))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{json_in, last_json};
+
+    /// Timing harness for [`last_json`]: `cargo test -p mockingbird-llm --lib
+    /// -- --ignored --nocapture last_json_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn last_json_timing() {
+        let answer = r#"{"id": 7, "tags": ["a", "b"], "owner": {"name": "x"}}"#;
+        for n in [1_000usize, 10_000] {
+            // Planning prose quoting small fragments, then the answer.
+            let mut prose = String::new();
+            while prose.len() < n {
+                prose.push_str("Maybe {\"id\": 1} or [1, 2] fits; ");
+            }
+            prose.push_str(answer);
+            // Unclosed drafts: every '{' and '[' is a failed parse to the end.
+            let drafts = format!("{}{answer}", "{\"a\": [".repeat(n / 7));
+            let runs = 20u32;
+            for (name, text) in [("prose", &prose), ("drafts", &drafts)] {
+                let started = std::time::Instant::now();
+                for _ in 0..runs {
+                    std::hint::black_box(last_json(std::hint::black_box(text)));
+                }
+                println!(
+                    "{name} {} bytes: {:?} per call",
+                    text.len(),
+                    started.elapsed() / runs
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn last_json_finds_the_trailing_value_and_skips_nested_ones() {
+        let text = r#"try {"a": 1} then [2, {"b": 3}] and finally {"c": [4]}"#;
+        assert_eq!(last_json(text).map(|(j, _)| j), Some(r#"{"c": [4]}"#));
+        assert_eq!(json_in(text), Some(r#"{"c": [4]}"#));
+        assert_eq!(json_in(r#"{"a": 1} then prose"#), None);
+        assert_eq!(
+            json_in("{\"a\": [1, {\"b\": 2}]}\n```"),
+            Some("{\"a\": [1, {\"b\": 2}]}")
+        );
+        // An unclosed draft before the answer; a scalar never counts.
+        assert_eq!(
+            json_in(r#"{"a": [ 42 {"ok": true}"#),
+            Some(r#"{"ok": true}"#)
+        );
+        assert_eq!(last_json("only 42 and \"x\""), None);
+        // Strings, escapes, numbers and literals inside a candidate.
+        assert_eq!(
+            json_in(r#"so: {"s": "a\"}b", "n": -1.5e3, "t": true, "z": null, "e": {}}"#),
+            Some(r#"{"s": "a\"}b", "n": -1.5e3, "t": true, "z": null, "e": {}}"#)
+        );
+    }
+
+    /// Nesting past serde_json's limit is no JSON value, as parsing into a
+    /// `Value` says: only an inner part parses, and text follows it.
+    #[test]
+    fn nesting_past_the_limit_is_not_a_value() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        assert!(serde_json::from_str::<serde_json::Value>(&deep).is_err());
+        assert_eq!(json_in(&deep), None);
+        let ok = format!("{}{}", "[".repeat(100), "]".repeat(100));
+        assert_eq!(json_in(&ok), Some(ok.as_str()));
     }
 }
