@@ -47,6 +47,7 @@
 
 mod archive;
 mod asyncapi;
+mod base_paths;
 mod graphql;
 mod heuristics;
 mod openapi3;
@@ -67,6 +68,7 @@ pub use archive::{
 };
 use std::collections::{HashMap, HashSet};
 
+pub use base_paths::base_paths;
 use mb_mcm::Bundle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -687,17 +689,7 @@ fn compile_files_in(files: &[SourceFile], ctx: &mut Ctx) -> Result<Bundle, Impor
             .join(&b'\n');
         return graphql::compile_sdl(&sdl);
     }
-    // A lone file is compiled whatever its name; among several, only the
-    // contracts count.
-    let contracts: Vec<&SourceFile> = match files {
-        [one] => vec![one],
-        _ => roots(
-            files
-                .iter()
-                .filter(|f| !is_incidental(&f.path) && sniff(&f.bytes).is_ok())
-                .collect(),
-        ),
-    };
+    let contracts = contract_candidates(files);
     match contracts.as_slice() {
         [one] if archive::is_archive(&one.bytes) => Err(ImportError::Invalid {
             pointer: one.path.clone(),
@@ -723,6 +715,37 @@ fn compile_files_in(files: &[SourceFile], ctx: &mut Ctx) -> Result<Bundle, Impor
                 ),
             })
         }
+    }
+}
+
+/// The files of a multi-file upload that may be its contract: a lone file
+/// whatever its name; among several, the [`roots`] of the contracts that
+/// are not documentation.
+fn contract_candidates(files: &[SourceFile]) -> Vec<&SourceFile> {
+    match files {
+        [one] => vec![one],
+        _ => roots(
+            files
+                .iter()
+                .filter(|f| !is_incidental(&f.path) && sniff(&f.bytes).is_ok())
+                .collect(),
+        ),
+    }
+}
+
+/// The one file of a multi-file upload that [`compile_files`] compiles as
+/// an OpenAPI, Swagger or AsyncAPI contract (step 4); `None` when the
+/// upload holds `.proto`, `.wsdl` or GraphQL files, or not exactly one
+/// such contract.
+pub(crate) fn http_root(files: &[SourceFile]) -> Option<&SourceFile> {
+    if files.iter().any(|f| {
+        f.path.ends_with(".proto") || f.path.ends_with(".wsdl") || is_graphql_path(&f.path)
+    }) {
+        return None;
+    }
+    match contract_candidates(files).as_slice() {
+        [one] if !archive::is_archive(&one.bytes) => Some(one),
+        _ => None,
     }
 }
 

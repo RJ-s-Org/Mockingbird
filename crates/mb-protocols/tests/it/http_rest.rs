@@ -1959,3 +1959,89 @@ fn session_of(h: &Harness, id: &str) -> SessionKey {
         session: id.into(),
     }
 }
+
+#[test]
+fn base_paths_route_prefixed_and_unprefixed_paths() {
+    let bundle = orders();
+    let table = RouteTable::with_base_paths(&bundle, &["/v1".into(), "/api/v2".into()]).unwrap();
+    for path in ["/orders/o%201", "/v1/orders/o%201", "/api/v2/orders/o%201/"] {
+        let (op, params) = table.find(HttpMethod::Get, path).unwrap();
+        assert_eq!(op, "getOrder", "{path}");
+        assert_eq!(params["orderId"], "o 1", "{path}");
+    }
+    assert_eq!(
+        table.find(HttpMethod::Get, "/v1/orders").unwrap().0,
+        "listOrders"
+    );
+    assert_eq!(
+        table.allowed("/v1/orders"),
+        table.allowed("/orders"),
+        "the prefixed path allows the same methods"
+    );
+    // Only whole segments are a prefix, and the prefix alone is no route.
+    assert!(table.find(HttpMethod::Get, "/v1orders").is_none());
+    assert!(table.find(HttpMethod::Get, "/v1").is_none());
+    assert!(table.find(HttpMethod::Get, "/api/orders").is_none());
+}
+
+#[test]
+fn base_paths_are_normalized_and_bad_ones_skipped() {
+    let bundle = orders();
+    let table = RouteTable::with_base_paths(
+        &bundle,
+        &[
+            "v1".into(),
+            "/{tenant}".into(),
+            "/v2/".into(),
+            "/".into(),
+            "".into(),
+        ],
+    )
+    .unwrap();
+    assert!(table.find(HttpMethod::Get, "/v2/orders").is_some());
+    assert!(table.find(HttpMethod::Get, "/orders").is_some());
+    assert!(table.find(HttpMethod::Get, "/v1/orders").is_none());
+    assert!(table.find(HttpMethod::Get, "/acme/orders").is_none());
+}
+
+#[test]
+fn a_contract_route_wins_over_a_prefixed_route() {
+    let src = r#"{
+        "openapi": "3.0.3",
+        "info": {"title": "Versions", "version": "1"},
+        "servers": [{"url": "/v1"}],
+        "paths": {
+            "/orders": {"get": {"operationId": "plain", "responses": {"200": {"description": "ok"}}}},
+            "/v1/orders": {"get": {"operationId": "versioned", "responses": {"200": {"description": "ok"}}}}
+        }
+    }"#;
+    let bundle = compile(src.as_bytes()).unwrap();
+    let table = RouteTable::with_base_paths(&bundle, &["/v1".into()]).unwrap();
+    assert_eq!(table.find(HttpMethod::Get, "/orders").unwrap().0, "plain");
+    assert_eq!(
+        table.find(HttpMethod::Get, "/v1/orders").unwrap().0,
+        "versioned"
+    );
+    assert_eq!(
+        table.find(HttpMethod::Get, "/v1/v1/orders").unwrap().0,
+        "versioned"
+    );
+}
+
+#[tokio::test]
+async fn serves_under_the_runtime_base_paths() {
+    let h = harness_with(None, memory_state(), |rt| {
+        rt.base_paths = vec!["/v1".into()];
+    });
+    for uri in ["/v1/orders?status=shipped", "/orders"] {
+        let resp = send(&h, get(uri)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert!(body_json(resp).await.is_array(), "{uri}");
+    }
+    let req = Request::patch("/v1/orders").body(Body::empty()).unwrap();
+    assert_eq!(send(&h, req).await.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        send(&h, get("/v2/orders")).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}

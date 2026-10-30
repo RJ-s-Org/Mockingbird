@@ -399,6 +399,7 @@ pub async fn build_runtime_with_budget(
         StoredUnknownIds::NotFound => UnknownIds::NotFound,
     };
     rt.default_scenario = mock.behavior.default_scenario.clone();
+    rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
     Ok(Some((rt, budget)))
 }

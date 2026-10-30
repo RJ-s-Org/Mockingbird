@@ -372,6 +372,11 @@ pub struct MockRuntime {
     pub default_scenario: Option<String>,
     /// Sends webhook events after successful writes; `None` sends none.
     pub webhooks: Option<Arc<webhooks::deliver::WebhookDispatcher>>,
+    /// Path prefixes the contract's HTTP operations are also served under,
+    /// besides their own paths (`mb_import::base_paths` of the contract
+    /// source: Swagger `basePath`, OpenAPI `servers[].url` paths). Read
+    /// when the REST router is built. Empty by default.
+    pub base_paths: Vec<String>,
     /// The credential header and query names derived from
     /// `data_plane_auth` and `bundle`, recomputed whenever either changes
     /// (see [`MockRuntime::credential_names`]).
@@ -404,6 +409,7 @@ impl std::fmt::Debug for MockRuntime {
             .field("unknown_ids", &self.unknown_ids)
             .field("default_scenario", &self.default_scenario)
             .field("webhooks", &self.webhooks)
+            .field("base_paths", &self.base_paths)
             .finish_non_exhaustive()
     }
 }
@@ -479,6 +485,7 @@ impl MockRuntime {
             unknown_ids: UnknownIds::default(),
             default_scenario: None,
             webhooks: None,
+            base_paths: Vec::new(),
             credential_names,
             index,
         }
