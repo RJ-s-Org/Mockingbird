@@ -1,6 +1,6 @@
 #![cfg(test)]
 use mb_import::{SourceFormat, compile, sniff};
-use mb_mcm::Bundle;
+use mb_mcm::{Bundle, Effect, OperationKind};
 use serde_json::json;
 
 fn read(dir: &str, name: &str) -> Vec<u8> {
@@ -242,5 +242,46 @@ fn a_dangling_definition_ref_is_stubbed_with_a_warning() {
             .iter()
             .any(|w| w.code == "dangling_ref" && w.message.contains("#/definitions/Missing")),
         "{warnings:?}"
+    );
+}
+
+#[test]
+fn action_routes_act_on_their_parent() {
+    let src = json!({
+        "swagger": "2.0",
+        "info": {"title": "Actions", "version": "1"},
+        "paths": {
+            "/intents/{intent}": {"get": {
+                "operationId": "getIntent",
+                "parameters": [{"name": "intent", "in": "path", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "ok", "schema": {"$ref": "#/definitions/Intent"}}},
+            }},
+            "/intents/{intent}/confirm": {"post": {
+                "operationId": "confirmIntent",
+                "parameters": [{"name": "intent", "in": "path", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "ok", "schema": {"$ref": "#/definitions/Intent"}}},
+            }},
+            "/intents/{intent}/cancel": {"post": {
+                "operationId": "cancelIntent",
+                "parameters": [{"name": "intent", "in": "path", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "ok", "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}},
+            }},
+        },
+        "definitions": {"Intent": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}},
+    });
+    let b = compile(src.to_string().as_bytes()).unwrap();
+    let confirm = b.operation("confirmIntent").unwrap();
+    assert_eq!(confirm.kind, OperationKind::Command(Effect::Update));
+    assert_eq!(confirm.resource_type.as_deref(), Some("intents"));
+    assert_eq!(
+        confirm.identity.as_ref().unwrap().path_param.as_deref(),
+        Some("intent")
+    );
+    let cancel = b.operation("cancelIntent").unwrap();
+    assert_eq!(cancel.kind, OperationKind::Command(Effect::Other));
+    assert_eq!(cancel.resource_type.as_deref(), Some("intents"));
+    assert_eq!(
+        cancel.identity.as_ref().unwrap().path_param.as_deref(),
+        Some("intent")
     );
 }

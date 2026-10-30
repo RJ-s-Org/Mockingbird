@@ -1718,8 +1718,10 @@ fn encode_base64(
 /// Make a 2xx body consistent with the request and state (spec §1.2,
 /// criterion 4): queries reflect the stored target, creates reflect the
 /// request body, updates reflect the target then the request body, and the
-/// identity field always equals the path id. Every merge is validated; an
-/// invalid one keeps the best valid value.
+/// identity field always equals the path id. An action's LLM answer is the
+/// state after it, so it wins over the target instead (see
+/// [`Operation::is_action`]). Every merge is validated; an invalid one keeps
+/// the best valid value.
 fn reflect(
     validator: &SchemaValidator,
     op: &Operation,
@@ -1742,7 +1744,13 @@ fn reflect(
             overlay_request(validator, body, call.body.as_ref())
         }
         OperationKind::Command(Effect::Update) => {
-            let body = overlay(validator, body, ctx.target.map(|t| &t.data));
+            let from_llm = !matches!(response.source, Source::Fallback);
+            let body = match ctx.target {
+                Some(target) if op.is_action() && from_llm => {
+                    overlay(validator, target.data.clone(), Some(&body))
+                }
+                target => overlay(validator, body, target.map(|t| &t.data)),
+            };
             overlay_request(validator, body, call.body.as_ref())
         }
         OperationKind::Command(_) => body,
@@ -1835,7 +1843,9 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
 
 /// Set `body[identity.field]` to the path id (else the request body's
 /// `identity.input_field`), as a string or (when the schema wants one) a
-/// number.
+/// number. The answer of an action that does not return its resource is a
+/// record of its own: only a member named for the path parameter names the
+/// target, and any other `id` is the record's.
 fn force_identity(
     validator: &SchemaValidator,
     op: &Operation,
@@ -1845,6 +1855,12 @@ fn force_identity(
     let Some(identity) = &op.identity else {
         return body;
     };
+    if op.kind == OperationKind::Command(Effect::Other)
+        && op.is_action()
+        && identity.path_param.as_ref() != Some(&identity.field)
+    {
+        return body;
+    }
     let from_path = identity
         .path_param
         .as_ref()

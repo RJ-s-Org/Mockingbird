@@ -872,6 +872,21 @@ fn collect_def_refs(value: &Value, out: &mut Vec<String>) {
 }
 
 impl Operation {
+    /// Whether this is an action route: an HTTP call on a resource named
+    /// earlier in its path (`POST /payment_intents/{intent}/confirm`), so
+    /// its identity's path parameter is not the path's last segment.
+    #[must_use]
+    pub fn is_action(&self) -> bool {
+        let Binding::Http { path, .. } = &self.binding else {
+            return false;
+        };
+        let Some(param) = self.identity.as_ref().and_then(|i| i.path_param.as_deref()) else {
+            return false;
+        };
+        let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default();
+        !last.contains(&format!("{{{param}}}"))
+    }
+
     /// The schema of one response stream item (the single response, for
     /// client streaming): the success output's schema, for streaming kinds.
     #[must_use]

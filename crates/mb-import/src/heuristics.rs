@@ -1,7 +1,7 @@
 //! Inference of operation kind, resource type, and identity from HTTP shape.
 
 use crate::schema::defs_name;
-use mb_mcm::{Effect, HttpMethod, Identity, OperationKind};
+use mb_mcm::{Binding, Effect, HttpMethod, Identity, Operation, OperationKind};
 use serde_json::{Map, Value};
 
 fn segments(path: &str) -> Vec<&str> {
@@ -159,17 +159,34 @@ fn resolve<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Option<&'a Va
     None
 }
 
+/// The members a schema declares at its top level.
+fn schema_properties<'a>(
+    schema: Option<&'a Value>,
+    defs: &'a Map<String, Value>,
+) -> Option<&'a Map<String, Value>> {
+    schema
+        .and_then(|s| resolve(s, defs))
+        .and_then(|s| s.get("properties"))
+        .and_then(Value::as_object)
+}
+
 pub(crate) fn infer_identity(
     _kind: &OperationKind,
     path: &str,
     success_schema: Option<&Value>,
     defs: &Map<String, Value>,
 ) -> Option<Identity> {
-    let path_param = trailing_param(path);
-    let props = success_schema
-        .and_then(|s| resolve(s, defs))
-        .and_then(|s| s.get("properties"))
-        .and_then(Value::as_object)?;
+    identity_for(trailing_param(path), success_schema, defs)
+}
+
+/// The identity of a resource shaped like `schema`, addressed by
+/// `path_param`.
+fn identity_for(
+    path_param: Option<&str>,
+    success_schema: Option<&Value>,
+    defs: &Map<String, Value>,
+) -> Option<Identity> {
+    let props = schema_properties(success_schema, defs)?;
     let named = path_param.and_then(|p| param_field(p, props));
     let field = if props.contains_key("id") {
         "id"
@@ -186,6 +203,132 @@ pub(crate) fn infer_identity(
         input_field: None,
         path_field: named.filter(|n| *n != field).map(str::to_owned),
     })
+}
+
+/// A route that acts on the resource its path names, not on a collection of
+/// its own: `POST /payment_intents/{intent}/confirm` acts on the
+/// `payment_intents` named by `intent`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct ActionRoute {
+    resource_type: String,
+    path_param: String,
+}
+
+/// The action `method path` is, given every `(path, methods)` of the
+/// contract: a `POST` to `<static>/{param}/<verb>` whose `<verb>` is not
+/// plural, not a read verb, not readable by a `GET` on the same path and has
+/// no `<path>/{...}` route below it. Those mark `<verb>` as a collection.
+pub(crate) fn action_route(
+    method: HttpMethod,
+    path: &str,
+    all_paths: &[(&str, &[HttpMethod])],
+) -> Option<ActionRoute> {
+    if method != HttpMethod::Post || ends_in_read(path) {
+        return None;
+    }
+    let segs = segments(path);
+    let [.., resource, param, verb] = segs.as_slice() else {
+        return None;
+    };
+    let path_param = param_name(param)?;
+    let verb = without_format(verb);
+    if resource.contains('{') || verb.contains('{') || verb.ends_with('s') {
+        return None;
+    }
+    let is_collection = all_paths.iter().any(|(other, methods)| {
+        if *other == path {
+            return methods.contains(&HttpMethod::Get);
+        }
+        let other = segments(other);
+        other.starts_with(&segs) && other.get(segs.len()).is_some_and(|s| is_param(s))
+    });
+    (!is_collection).then(|| ActionRoute {
+        resource_type: without_format(resource).to_owned(),
+        path_param: path_param.to_owned(),
+    })
+}
+
+/// The `GET` of the resource an action at `action_path` acts on:
+/// `<static>/{param}`, whatever that route names its parameters.
+fn parent_read<'a>(operations: &'a [Operation], action_path: &str) -> Option<&'a Operation> {
+    let action = segments(action_path);
+    let parent = action.split_last()?.1;
+    operations.iter().find(|op| {
+        let Binding::Http {
+            method: HttpMethod::Get,
+            path,
+        } = &op.binding
+        else {
+            return false;
+        };
+        let read = segments(path);
+        read.len() == parent.len()
+            && read
+                .iter()
+                .zip(parent)
+                .all(|(a, b)| a == b || (is_param(a) && is_param(b)))
+    })
+}
+
+/// Points every [`action_route`] among the compiled `operations` at its
+/// parent resource. Its kind is an update when it answers with what the
+/// parent's `GET` answers, so the answer replaces the resource; otherwise
+/// it stores nothing and the resource is only its context. Streams stay
+/// streams.
+pub(crate) fn apply_action_routes(
+    operations: &mut [Operation],
+    all_paths: &[(&str, &[HttpMethod])],
+    defs: &Map<String, Value>,
+) {
+    for i in 0..operations.len() {
+        let op = &operations[i];
+        let Binding::Http { method, path } = &op.binding else {
+            continue;
+        };
+        if !matches!(op.kind, OperationKind::Command(_)) {
+            continue;
+        }
+        let Some(action) = action_route(*method, path, all_paths) else {
+            continue;
+        };
+        let read = parent_read(operations, path);
+        let answer = op.success_output().and_then(|o| o.schema.as_ref());
+        let replaces =
+            answer.is_some() && answer == read.and_then(|r| r.success_output()?.schema.as_ref());
+        let param = action.path_param;
+        let (effect, identity) = if replaces {
+            let identity = identity_for(Some(&param), answer, defs);
+            let identity = identity.unwrap_or_else(|| Identity {
+                path_param: Some(param.clone()),
+                field: "id".to_owned(),
+                input_field: None,
+                path_field: None,
+            });
+            (Effect::Update, identity)
+        } else {
+            // The answer is not the resource, so the identity is the read's,
+            // except that a member named for the parameter names the target.
+            let read = read.and_then(|r| r.identity.as_ref());
+            let names_target =
+                schema_properties(answer, defs).is_some_and(|p| p.contains_key(&param));
+            let field = if names_target {
+                param.clone()
+            } else {
+                read.map_or_else(|| "id".to_owned(), |r| r.field.clone())
+            };
+            let identity = Identity {
+                path_param: Some(param),
+                field,
+                input_field: None,
+                path_field: read.and_then(|r| r.path_field.clone()),
+            };
+            (Effect::Other, identity)
+        };
+        let op = &mut operations[i];
+        op.kind = OperationKind::Command(effect);
+        op.resource_type = Some(action.resource_type);
+        op.identity = Some(identity);
+    }
 }
 
 /// Verb prefixes of operation names, with the kind each implies.
@@ -244,6 +387,50 @@ pub(crate) fn resource_from_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_route_needs_a_singular_tail_under_a_static_and_a_param() {
+        let posts = [HttpMethod::Post];
+        let gets = [HttpMethod::Get];
+        let confirm = "/v1/payment_intents/{intent}/confirm";
+        let alone = [(confirm, posts.as_slice())];
+        assert_eq!(
+            action_route(HttpMethod::Post, confirm, &alone),
+            Some(ActionRoute {
+                resource_type: "payment_intents".into(),
+                path_param: "intent".into(),
+            })
+        );
+        assert_eq!(action_route(HttpMethod::Put, confirm, &alone), None);
+        for path in [
+            "/v1/customers/{id}/sources",
+            "/v1/calls/{Sid}/Messages.json",
+            "/repos/{o}/{r}/merge",
+            "/a/{x}/{verb}",
+            "/{x}/confirm",
+            "/a/{x}/confirm/{y}",
+            "/confirm",
+            "/v1/databases/{id}/query",
+        ] {
+            assert_eq!(action_route(HttpMethod::Post, path, &[]), None, "{path}");
+        }
+        assert_eq!(
+            action_route(HttpMethod::Post, "/v1/Calls/{CallSid}/Feedback.json", &[]),
+            Some(ActionRoute {
+                resource_type: "Calls".into(),
+                path_param: "CallSid".into(),
+            }),
+        );
+        let readable = [(confirm, gets.as_slice())];
+        assert_eq!(action_route(HttpMethod::Post, confirm, &readable), None);
+        let detail = format!("{confirm}/{{id}}");
+        let below = [(detail.as_str(), gets.as_slice())];
+        assert_eq!(action_route(HttpMethod::Post, confirm, &below), None);
+        // A longer static name is not a route below it.
+        let sibling = format!("{confirm}ation/{{id}}");
+        let beside = [(sibling.as_str(), gets.as_slice())];
+        assert!(action_route(HttpMethod::Post, confirm, &beside).is_some());
+    }
 
     #[test]
     fn rpc_style_posts_that_read_are_queries() {
