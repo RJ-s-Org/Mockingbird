@@ -2,8 +2,7 @@
 //! runs the smart import pipeline and stores each result as a draft
 //! contract version.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -304,36 +303,6 @@ async fn merge_into_base(
     }
 }
 
-/// The tenancies of the jobs queued on this node, by job id, each with when
-/// it was queued: the worker that claims a job bills its tenant. Entries of
-/// jobs another node claimed, or that were canceled while queued, are
-/// dropped after [`TENANCY_TTL`].
-static TENANCIES: LazyLock<Mutex<HashMap<Uuid, (Tenancy, Instant)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// How long the tenancy of a queued job is kept for its worker.
-const TENANCY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-
-fn tenancies() -> std::sync::MutexGuard<'static, HashMap<Uuid, (Tenancy, Instant)>> {
-    TENANCIES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Keeps the tenancy import job `job` was created for, for the worker
-/// that runs it.
-pub(crate) fn remember_tenancy(job: Uuid, tenancy: Tenancy) {
-    let mut map = tenancies();
-    let now = Instant::now();
-    map.retain(|_, (_, queued)| now.duration_since(*queued) < TENANCY_TTL);
-    map.insert(job, (tenancy, now));
-}
-
-/// The tenancy import job `job` was created for on this node, if any.
-fn take_tenancy(job: Uuid) -> Option<Tenancy> {
-    tenancies().remove(&job).map(|(tenancy, _)| tenancy)
-}
-
 /// Claims and runs one queued job to completion; Ok(false) when none was queued.
 ///
 /// # Errors
@@ -359,9 +328,13 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         Some(m) if m.id == job.mock_id => m,
         _ => return fail(st, job, MOCK_DELETED.to_string()).await,
     };
-    // The tenancy resolved when the job was created; a job queued on
-    // another node or before a restart is billed to the default tenant.
-    let tenancy = take_tenancy(job.id).unwrap_or_else(|| crate::tenancy(&job.workspace));
+    // The tenant resolved when the job was created, stored with it so any
+    // node bills it; a job queued before the tenant was stored is billed to
+    // the default tenant.
+    let tenancy = match st.store.import_job_tenant(job.id).await? {
+        Some(tenant) => Tenancy::new(tenant, &job.workspace),
+        None => crate::tenancy(&job.workspace),
+    };
     let llm = match st.llm.import_llm_for(&mock, &tenancy).await {
         // Every call is reported, whatever becomes of the job.
         Ok(llm) => llm.map(|llm| ExtractLlm {

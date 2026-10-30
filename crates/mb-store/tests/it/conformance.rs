@@ -98,6 +98,7 @@ macro_rules! conformance_checks {
             get_request_log_by_id,
             contract_version_warnings_round_trip,
             import_job_mode_round_trips,
+            import_job_tenant_round_trips,
             active_versions_in_one_call,
             active_bundle_leaves_out_the_source,
             active_bundles_in_one_call,
@@ -3801,6 +3802,50 @@ pub(crate) async fn import_job_mode_round_trips(store: &Arc<dyn ControlStore>) {
         .expect("queued");
     assert_eq!(claimed.id, created.id);
     assert_eq!(claimed.mode.as_deref(), Some("replace"));
+}
+
+pub(crate) async fn import_job_tenant_round_trips(store: &Arc<dyn ControlStore>) {
+    drain_queue(store).await;
+    let mock = create(store, "tenanted").await;
+    let billed = store
+        .create_import_job_for_tenant(new_job(mock.id, b"x"), Some("acme".into()))
+        .await
+        .expect("create");
+    assert_eq!(
+        store.import_job_tenant(billed.id).await.expect("tenant"),
+        Some("acme".to_string())
+    );
+    let claimed = store
+        .claim_import_job(now_us())
+        .await
+        .expect("claim")
+        .expect("queued");
+    assert_eq!(claimed.id, billed.id);
+    assert_eq!(
+        store.import_job_tenant(claimed.id).await.expect("tenant"),
+        Some("acme".to_string()),
+        "kept while running"
+    );
+
+    // A job created without one (or before the column) has none.
+    let plain = store
+        .create_import_job(new_job(mock.id, b"y"))
+        .await
+        .expect("create");
+    assert_eq!(
+        store.import_job_tenant(plain.id).await.expect("tenant"),
+        None
+    );
+    assert_eq!(
+        store
+            .import_job_tenant(Uuid::new_v4())
+            .await
+            .expect("tenant"),
+        None
+    );
+    for id in [billed.id, plain.id] {
+        assert!(store.cancel_import_job(id, now_us()).await.expect("cancel"));
+    }
 }
 
 /// A bundle with `ops` HTTP operations and `channels` Kafka channels.

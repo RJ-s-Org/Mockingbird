@@ -2027,6 +2027,14 @@ impl ControlStore for PgStore {
     }
 
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError> {
+        self.create_import_job_for_tenant(j, None).await
+    }
+
+    async fn create_import_job_for_tenant(
+        &self,
+        j: NewImportJob,
+        tenant: Option<String>,
+    ) -> Result<ImportJob, StoreError> {
         let progress = queued_progress();
         let progress_json = serde_json::to_string(&progress)?;
         let mut tx = self.pool.begin().await?;
@@ -2052,8 +2060,8 @@ impl ControlStore for PgStore {
         };
         sqlx::query(
             "INSERT INTO import_jobs (id, workspace, mock_id, mock, kind, source_name, input, status, \
-             progress, created_by, created_at, updated_at, mode) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12, $13)",
+             progress, created_by, created_at, updated_at, mode, tenant) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::json, $10, $11, $12, $13, $14)",
         )
         .bind(job.id)
         .bind(&job.workspace)
@@ -2068,6 +2076,7 @@ impl ControlStore for PgStore {
         .bind(job.created_at)
         .bind(job.updated_at)
         .bind(&job.mode)
+        .bind(tenant)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -2083,6 +2092,15 @@ impl ControlStore for PgStore {
             .as_ref()
             .map(job_from_row)
             .transpose()
+    }
+
+    async fn import_job_tenant(&self, id: Uuid) -> Result<Option<String>, StoreError> {
+        let tenant: Option<Option<String>> =
+            sqlx::query_scalar("SELECT tenant FROM import_jobs WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(tenant.flatten())
     }
 
     async fn import_job_input(&self, id: Uuid) -> Result<Option<Vec<u8>>, StoreError> {

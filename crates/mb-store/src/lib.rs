@@ -488,6 +488,26 @@ pub trait ControlStore: Send + Sync {
     /// Queues a job with progress `{"queued", 0, 0}`, copying the mock's
     /// workspace and name. `NotFound` if the mock does not exist.
     async fn create_import_job(&self, j: NewImportJob) -> Result<ImportJob, StoreError>;
+    /// [`Self::create_import_job`], also storing the tenant the job's LLM
+    /// calls are billed to, for whichever node runs it (read back with
+    /// [`Self::import_job_tenant`]). Both backends store it; the default, for
+    /// stores that do not, creates the job without one.
+    async fn create_import_job_for_tenant(
+        &self,
+        j: NewImportJob,
+        tenant: Option<String>,
+    ) -> Result<ImportJob, StoreError> {
+        let _ = tenant;
+        self.create_import_job(j).await
+    }
+    /// The tenant job `id` was created for (see
+    /// [`Self::create_import_job_for_tenant`]); `None` for an unknown job, one
+    /// created without a tenant or before tenants were stored, and from the
+    /// default, for stores that do not store it.
+    async fn import_job_tenant(&self, id: Uuid) -> Result<Option<String>, StoreError> {
+        let _ = id;
+        Ok(None)
+    }
     /// The import job, if any.
     async fn get_import_job(&self, id: Uuid) -> Result<Option<ImportJob>, StoreError>;
     /// The job's input; `None` for an unknown or finished job (finishing
