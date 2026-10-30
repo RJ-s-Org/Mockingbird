@@ -18,7 +18,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tracing::Instrument;
 
-use crate::guards::{Checked, Checks, GenerationPermit};
+use crate::guards::{self, Checked, Checks, GenerationPermit};
 use crate::ndjson::LineSplitter;
 use crate::prompt::{self, build_stream_messages};
 use crate::validate::SchemaValidator;
@@ -177,6 +177,7 @@ fn estimate_usage(prompt_bytes: usize, completion_bytes: usize) -> Usage {
     Usage {
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens: 0,
     }
 }
 
@@ -259,6 +260,9 @@ impl StreamState {
             completion_tokens: total
                 .completion_tokens
                 .saturating_sub(self.attributed.completion_tokens),
+            reasoning_tokens: total
+                .reasoning_tokens
+                .saturating_sub(self.attributed.reasoning_tokens),
         };
         self.attributed = total;
         stream + std::mem::take(&mut self.repair_usage)
@@ -335,7 +339,14 @@ impl StreamState {
                         };
                     }
                     Ok(None) => self.lines.extend(splitter.finish()),
-                    Ok(Some(Err(e))) => self.give_up(&e.to_string()),
+                    Ok(Some(Err(e))) => {
+                        // The line cut at max_tokens is still a candidate,
+                        // for salvage (see `accept`).
+                        if matches!(e, mb_llm::LlmError::Truncated { .. }) {
+                            self.lines.extend(splitter.finish());
+                        }
+                        self.give_up(&e.to_string());
+                    }
                     Err(_) => self.give_up("LLM stream timed out"),
                 },
             }
@@ -382,13 +393,21 @@ impl StreamState {
         );
     }
 
-    /// A candidate line as an item: valid → `Llm`, fixed locally →
-    /// `Patched`; otherwise one repair call → `Repaired`, else a faker item.
+    /// A candidate line as an item: valid → `Llm`, fixed locally (or cut
+    /// short and salvaged: the stream stopped at `max_tokens`) → `Patched`;
+    /// otherwise one repair call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str) -> (Value, Source) {
-        let errors = match self
-            .engine
-            .check_output(&self.validator, line, &Checks::default())
-        {
+        let checks = Checks::default();
+        let checked = match self.engine.check_output(&self.validator, line, &checks) {
+            Checked::Invalid(errors) if errors.len() == 1 && errors[0] == guards::NOT_JSON => {
+                match self.engine.check_truncated(&self.validator, line, &checks) {
+                    salvaged @ Checked::Patched(_) => salvaged,
+                    _ => Checked::Invalid(errors),
+                }
+            }
+            other => other,
+        };
+        let errors = match checked {
             Checked::Valid(value) => return (value, Source::Llm),
             Checked::Patched(value) => return (value, Source::Patched),
             Checked::Rejected(reason) => {

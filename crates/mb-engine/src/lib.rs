@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, Usage};
+use mb_llm::{ChatMessage, ChatRequest, LlmError, Provider, ResponseFormat, Role, Usage};
 use mb_mcm::{Bundle, Effect, Operation, OperationKind, OutputVariant, StatusSelector};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
@@ -63,6 +63,7 @@ pub mod ndjson;
 pub mod persona;
 pub mod pii;
 pub mod prompt;
+mod salvage;
 pub mod scenario;
 pub mod seed;
 pub mod stream;
@@ -1381,6 +1382,12 @@ impl Engine {
     /// Every completed call's tokens are added to `usage` and charged to the
     /// budget, including calls whose output is ultimately discarded.
     ///
+    /// An answer cut short (stopped at `max_tokens`, or ending inside the
+    /// value) is salvaged first (see [`Engine::check_truncated`]): closed
+    /// and completed locally, it is `Patched`. Otherwise the repair request
+    /// says it was cut, and a fallback reason then starts with the
+    /// truncation ("LLM output truncated: …").
+    ///
     /// Each provider call runs in an `mb.llm` span, the first output's check
     /// in `mb.validate`, and the repair (only when a repair call is made)
     /// in `mb.repair`.
@@ -1400,46 +1407,81 @@ impl Engine {
         let first = self
             .complete(provider, &messages, format, usage, deadline)
             .await?;
-        let checked = tracing::info_span!("mb.validate")
-            .in_scope(|| self.check_output(validator, &first, checks));
+        let (checked, cut) = tracing::info_span!("mb.validate")
+            .in_scope(|| self.check_reply(validator, &first, checks));
+        let truncated = cut.then(|| first.truncation());
         let errors = match checked {
             Checked::Valid(value) => return Ok((value, Source::Llm)),
             Checked::Patched(value) => return Ok((value, Source::Patched)),
-            Checked::Rejected(reason) => return Err(reason),
+            Checked::Rejected(reason) => return Err(with_cause(truncated.as_deref(), reason)),
             Checked::Invalid(errors) => errors,
         };
         if self.budget_exhausted() {
-            return Err("token budget exhausted".into());
+            return Err(with_cause(
+                truncated.as_deref(),
+                "token budget exhausted".into(),
+            ));
         }
-        tracing::info!(errors = %errors.join("; "), "LLM output invalid; asking for a repair");
+        tracing::info!(errors = %errors.join("; "), cut, "LLM output invalid; asking for a repair");
         async {
-            messages.push(ChatMessage {
-                role: Role::Assistant,
-                content: first,
-            });
-            let list: String = errors.iter().map(|e| format!("- {e}\n")).collect();
+            let request = guards::repair_request(validator, &first.text, &errors, checks, cut);
+            if !first.text.trim().is_empty() {
+                messages.push(ChatMessage {
+                    role: Role::Assistant,
+                    content: first.text,
+                });
+            }
             messages.push(ChatMessage {
                 role: Role::User,
-                content: format!(
-                    "The JSON above is invalid against the schema. Errors:\n{list}Return only corrected JSON."
-                ),
+                content: request,
             });
             let second = self
                 .complete(provider, &messages, format, usage, Instant::now() + limit)
-                .await?;
-            let checked = tracing::info_span!("mb.validate")
-                .in_scope(|| self.check_output(validator, &second, checks));
+                .await
+                .map_err(|reason| with_cause(truncated.as_deref(), reason))?;
+            let (checked, second_cut) = tracing::info_span!("mb.validate")
+                .in_scope(|| self.check_reply(validator, &second, checks));
+            let cause = if second_cut {
+                Some(second.truncation())
+            } else {
+                truncated
+            };
             match checked {
                 Checked::Valid(value) | Checked::Patched(value) => Ok((value, Source::Repaired)),
-                Checked::Rejected(reason) => Err(reason),
-                Checked::Invalid(errors) => Err(format!(
-                    "repaired output still invalid: {}",
-                    errors.join("; ")
+                Checked::Rejected(reason) => Err(with_cause(cause.as_deref(), reason)),
+                Checked::Invalid(errors) => Err(with_cause(
+                    cause.as_deref(),
+                    format!("repaired output still invalid: {}", errors.join("; ")),
                 )),
             }
         }
         .instrument(tracing::info_span!("mb.repair"))
         .await
+    }
+
+    /// [`Engine::check_output`] of `reply`, or [`Engine::check_truncated`]
+    /// when it was cut short: stopped at `max_tokens`, or ending inside its
+    /// JSON value. The flag says whether it was cut.
+    fn check_reply(
+        &self,
+        validator: &SchemaValidator,
+        reply: &Reply,
+        checks: &Checks<'_>,
+    ) -> (Checked, bool) {
+        if reply.truncated.is_some() {
+            return (self.check_truncated(validator, &reply.text, checks), true);
+        }
+        match self.check_output(validator, &reply.text, checks) {
+            Checked::Invalid(errors) if errors.len() == 1 && errors[0] == guards::NOT_JSON => {
+                match self.check_truncated(validator, &reply.text, checks) {
+                    Checked::Invalid(e) if e.len() == 1 && e[0] == guards::CUT_SHORT => {
+                        (Checked::Invalid(errors), false)
+                    }
+                    salvaged => (salvaged, true),
+                }
+            }
+            other => (other, false),
+        }
     }
 
     async fn complete(
@@ -1449,7 +1491,7 @@ impl Engine {
         format: &ResponseFormat,
         usage: &mut Usage,
         deadline: Instant,
-    ) -> Result<String, String> {
+    ) -> Result<Reply, String> {
         let request = ChatRequest {
             messages: messages.to_vec(),
             response_format: format.clone(),
@@ -1459,16 +1501,62 @@ impl Engine {
         };
         let span = llm_span();
         let call = provider.complete(request).instrument(span.clone());
+        let mut charge = |spent: Usage| {
+            record_usage(&span, spent);
+            *usage = *usage + spent;
+            self.spend(spent);
+        };
         match tokio::time::timeout_at(deadline, call).await {
             Ok(Ok(response)) => {
-                record_usage(&span, response.usage);
-                *usage = *usage + response.usage;
-                self.spend(response.usage);
-                Ok(response.content)
+                charge(response.usage);
+                Ok(Reply {
+                    text: response.content,
+                    truncated: None,
+                })
+            }
+            Ok(Err(LlmError::Truncated {
+                message,
+                partial,
+                usage: spent,
+            })) => {
+                charge(spent);
+                Ok(Reply {
+                    text: partial,
+                    truncated: Some(format!("LLM output truncated: {message}")),
+                })
             }
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err("LLM request timed out".into()),
         }
+    }
+}
+
+/// An LLM reply: its text, and, when the provider stopped it at
+/// `max_tokens`, the error saying so (the text is then the part received).
+struct Reply {
+    text: String,
+    truncated: Option<String>,
+}
+
+impl Reply {
+    /// Why the reply counts as truncated: the provider's message, or, for
+    /// a reply that ended inside its JSON value, a message saying that.
+    fn truncation(&self) -> String {
+        self.truncated
+            .clone()
+            .unwrap_or_else(|| TRUNCATED_JSON_REASON.to_string())
+    }
+}
+
+/// The fallback cause of an answer that ended inside its JSON value
+/// without the provider reporting a cut.
+const TRUNCATED_JSON_REASON: &str = "LLM output truncated: the JSON ends inside a value";
+
+/// `reason` to fall back, after the truncation `cause` when there is one.
+fn with_cause(cause: Option<&str>, reason: String) -> String {
+    match cause {
+        Some(cause) => format!("{cause}; not salvaged: {reason}"),
+        None => reason,
     }
 }
 
@@ -1481,6 +1569,7 @@ pub(crate) fn llm_span() -> tracing::Span {
         llm.model = Empty,
         llm.tokens.prompt = Empty,
         llm.tokens.completion = Empty,
+        llm.tokens.reasoning = Empty,
     )
 }
 
@@ -1488,6 +1577,9 @@ pub(crate) fn llm_span() -> tracing::Span {
 pub(crate) fn record_usage(span: &tracing::Span, usage: Usage) {
     span.record("llm.tokens.prompt", usage.prompt_tokens);
     span.record("llm.tokens.completion", usage.completion_tokens);
+    if usage.reasoning_tokens > 0 {
+        span.record("llm.tokens.reasoning", usage.reasoning_tokens);
+    }
 }
 
 /// Shapes (and member-name sets) cached in all; a full cache is emptied.

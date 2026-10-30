@@ -1261,6 +1261,7 @@ fn usage(prompt: u32, completion: u32) -> mb_llm::Usage {
     mb_llm::Usage {
         prompt_tokens: prompt,
         completion_tokens: completion,
+        reasoning_tokens: 0,
     }
 }
 

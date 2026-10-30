@@ -589,6 +589,7 @@ async fn recorder_and_usage_receive_events() {
         Usage {
             prompt_tokens: 120,
             completion_tokens: 30,
+            reasoning_tokens: 0,
         },
     ))]));
     let collect = Arc::new(Collect::default());

@@ -121,8 +121,21 @@ pub struct ChatRequest {
 pub struct Usage {
     /// Tokens of the request.
     pub prompt_tokens: u32,
-    /// Tokens of the answer.
+    /// Tokens of the answer, reasoning included.
     pub completion_tokens: u32,
+    /// The part of `completion_tokens` a reasoning model spent thinking
+    /// (`usage.completion_tokens_details.reasoning_tokens`), when the
+    /// provider reports it; 0 otherwise.
+    pub reasoning_tokens: u32,
+}
+
+impl Usage {
+    /// The completion tokens of the answer itself: completion less
+    /// reasoning.
+    #[must_use]
+    pub fn answer_tokens(self) -> u32 {
+        self.completion_tokens.saturating_sub(self.reasoning_tokens)
+    }
 }
 
 impl Add for Usage {
@@ -133,6 +146,7 @@ impl Add for Usage {
         Usage {
             prompt_tokens: self.prompt_tokens.saturating_add(rhs.prompt_tokens),
             completion_tokens: self.completion_tokens.saturating_add(rhs.completion_tokens),
+            reasoning_tokens: self.reasoning_tokens.saturating_add(rhs.reasoning_tokens),
         }
     }
 }
@@ -177,10 +191,19 @@ pub enum LlmError {
     /// The answer is not the JSON the client expects.
     #[error("LLM response decode error: {0}")]
     Decode(String),
-    /// The provider stopped at `max_tokens`, so the output is cut short.
-    /// Retrying with the same limit would truncate again.
-    #[error("LLM output truncated: {0}")]
-    Truncated(String),
+    /// The provider stopped at `max_tokens` (`finish_reason: "length"`), so
+    /// the output is cut short. Retrying with the same limit would truncate
+    /// again; a caller may salvage `partial` instead.
+    #[error("LLM output truncated: {message}")]
+    Truncated {
+        /// What was cut, and where.
+        message: String,
+        /// The text received before the cut (empty for a stream, whose
+        /// text was already yielded).
+        partial: String,
+        /// The tokens the provider reports for the cut reply.
+        usage: Usage,
+    },
     /// The reply carried no usable content: an empty answer, or reasoning
     /// with no JSON in it.
     #[error("LLM returned no content: {0}")]
@@ -195,7 +218,7 @@ impl LlmError {
         match self {
             LlmError::Transport(_) | LlmError::Empty(_) => true,
             LlmError::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
-            LlmError::Timeout | LlmError::Decode(_) | LlmError::Truncated(_) => false,
+            LlmError::Timeout | LlmError::Decode(_) | LlmError::Truncated { .. } => false,
         }
     }
 }

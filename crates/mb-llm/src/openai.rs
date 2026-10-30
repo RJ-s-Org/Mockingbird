@@ -3,7 +3,7 @@
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::{
     Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, MeteredStream, Provider,
@@ -124,10 +124,10 @@ impl std::str::FromStr for OutputMode {
 pub struct OpenAiCompatible {
     client: reqwest::Client,
     config: OpenAiConfig,
-    /// Whether requests ask for no reasoning (see
-    /// [`Self::with_reasoning_disabled`]);
-    /// cleared when the endpoint rejects that.
-    reasoning_off: AtomicBool,
+    /// The `reasoning` setting requests send (a [`Reasoning`] as `u8`; see
+    /// [`Self::with_reasoning_disabled`]), stepped down each time the
+    /// endpoint rejects it.
+    reasoning: AtomicU8,
     /// Whether streams ask for usage (`stream_options.include_usage`);
     /// cleared when the endpoint rejects that.
     stream_usage: AtomicBool,
@@ -137,7 +137,7 @@ impl std::fmt::Debug for OpenAiCompatible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenAiCompatible")
             .field("config", &self.config)
-            .field("reasoning_off", &self.reasoning_off.load(Ordering::Relaxed))
+            .field("reasoning", &self.reasoning_setting())
             .field("stream_usage", &self.stream_usage.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -152,11 +152,15 @@ impl OpenAiCompatible {
     /// [`OpenAiConfig::http`] (see [`HttpOptions::apply`]).
     pub fn new(config: OpenAiConfig) -> Result<Self, LlmError> {
         let client = crate::http_client(&config.http, None)?;
-        let reasoning_off = is_openrouter(&config.base_url);
+        let reasoning = if is_openrouter(&config.base_url) {
+            Reasoning::Off
+        } else {
+            Reasoning::Unset
+        };
         Ok(Self {
             client,
             config,
-            reasoning_off: AtomicBool::new(reasoning_off),
+            reasoning: AtomicU8::new(reasoning as u8),
             stream_usage: AtomicBool::new(true),
         })
     }
@@ -165,11 +169,21 @@ impl OpenAiCompatible {
     /// unless `extra_body` sets `reasoning`. Mock answers are data, not
     /// problems to think through, and hidden reasoning tokens were most of
     /// the completion of a large answer (DeepSeek: 2–5k tokens, 10–30 s).
-    /// An endpoint that rejects the switch (a model that always reasons) is
-    /// asked once more without it, and then never again.
+    ///
+    /// A model that always reasons rejects the switch with a 400. The request
+    /// is then sent once more with `reasoning: {"effort": "minimal"}`, which
+    /// keeps the reasoning short, and when that is rejected too, once more
+    /// without `reasoning`. The client remembers each step (it serves one
+    /// model), so later calls do not pay for the 400 again, and a warning
+    /// naming the model is logged once per step.
     #[must_use]
     pub fn with_reasoning_disabled(self, disabled: bool) -> Self {
-        self.reasoning_off.store(disabled, Ordering::Relaxed);
+        let setting = if disabled {
+            Reasoning::Off
+        } else {
+            Reasoning::Unset
+        };
+        self.reasoning.store(setting as u8, Ordering::Relaxed);
         self
     }
 
@@ -180,23 +194,52 @@ impl OpenAiCompatible {
         self.with_reasoning_disabled(on)
     }
 
-    fn sends_reasoning_off(&self) -> bool {
-        self.reasoning_off.load(Ordering::Relaxed)
-            && !self.config.extra_body.contains_key("reasoning")
+    fn reasoning_setting(&self) -> Reasoning {
+        Reasoning::from_u8(self.reasoning.load(Ordering::Relaxed))
     }
 
-    /// Whether `e` rejects the reasoning switch this client sent; if so the
-    /// switch is turned off for good.
-    fn rejected_reasoning_off(&self, e: &LlmError) -> bool {
-        let rejected = self.sends_reasoning_off()
-            && matches!(e, LlmError::Http { status: 400 | 404 | 422, body } if body.to_ascii_lowercase().contains("reasoning"));
-        if rejected {
-            tracing::info!(
-                "the endpoint rejects reasoning: {{enabled: false}}; not sending it again"
-            );
-            self.reasoning_off.store(false, Ordering::Relaxed);
+    /// The `reasoning` member requests send; `None` when `extra_body` sets
+    /// its own.
+    fn sent_reasoning(&self) -> Option<Value> {
+        if self.config.extra_body.contains_key("reasoning") {
+            return None;
         }
-        rejected
+        self.reasoning_setting().body()
+    }
+
+    /// Whether `e` rejects the `reasoning` setting this client sent; if so
+    /// the setting steps down for good (off, then minimal effort, then
+    /// none), with a warning naming the model.
+    fn rejected_reasoning(&self, e: &LlmError) -> bool {
+        let Some(sent) = self.sent_reasoning() else {
+            return false;
+        };
+        let rejected = matches!(e, LlmError::Http { status: 400 | 404 | 422, body }
+            if { let body = body.to_ascii_lowercase(); body.contains("reasoning") || body.contains("effort") });
+        if !rejected {
+            return false;
+        }
+        let current = self.reasoning_setting();
+        let next = current.step_down();
+        // Another call may have stepped down already; only one warns.
+        if self
+            .reasoning
+            .compare_exchange(
+                current as u8,
+                next as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            tracing::warn!(
+                model = %self.config.model,
+                rejected = %sent,
+                sending = %next.body().map_or_else(|| "no reasoning setting".to_string(), |b| b.to_string()),
+                "the model rejects the reasoning setting; it reasons, and its reasoning tokens count against max_tokens"
+            );
+        }
+        true
     }
 
     /// Whether streams send `stream_options: {"include_usage": true}`, so
@@ -259,8 +302,8 @@ impl OpenAiCompatible {
                     obj.insert(key.clone(), value.clone());
                 }
             }
-            if self.sends_reasoning_off() {
-                obj.insert("reasoning".to_string(), json!({"enabled": false}));
+            if let Some(reasoning) = self.sent_reasoning() {
+                obj.insert("reasoning".to_string(), reasoning);
             }
         }
         body
@@ -285,11 +328,12 @@ impl OpenAiCompatible {
     /// success status. A non-2xx status is an [`LlmError::Http`] carrying the
     /// response body.
     async fn open_stream(&self, req: &ChatRequest) -> Result<reqwest::Response, LlmError> {
-        // Each switch is dropped at most once, so this is three tries at most.
+        // The reasoning setting steps down at most twice and stream_options
+        // is dropped at most once, so this is four tries at most.
         let mut result = self.open_stream_once(req).await;
-        for _ in 0..2 {
+        for _ in 0..3 {
             match result {
-                Err(e) if self.rejected_reasoning_off(&e) || self.rejected_stream_usage(&e) => {
+                Err(e) if self.rejected_reasoning(&e) || self.rejected_stream_usage(&e) => {
                     result = self.open_stream_once(req).await;
                 }
                 other => return other,
@@ -322,10 +366,15 @@ impl OpenAiCompatible {
     }
 
     async fn send(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        match self.send_once(req).await {
-            Err(e) if self.rejected_reasoning_off(&e) => self.send_once(req).await,
-            other => other,
+        // The reasoning setting steps down at most twice.
+        let mut result = self.send_once(req).await;
+        for _ in 0..2 {
+            match result {
+                Err(e) if self.rejected_reasoning(&e) => result = self.send_once(req).await,
+                other => return other,
+            }
         }
+        result
     }
 
     async fn send_once(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -363,6 +412,44 @@ impl OpenAiCompatible {
     }
 }
 
+/// The `reasoning` member an [`OpenAiCompatible`] sends, in the order it
+/// steps down when the endpoint rejects one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Reasoning {
+    /// `{"enabled": false}` (OpenRouter's switch).
+    Off = 0,
+    /// `{"effort": "minimal"}`: for a model that always reasons.
+    Minimal = 1,
+    /// Nothing.
+    Unset = 2,
+}
+
+impl Reasoning {
+    fn from_u8(n: u8) -> Self {
+        match n {
+            0 => Reasoning::Off,
+            1 => Reasoning::Minimal,
+            _ => Reasoning::Unset,
+        }
+    }
+
+    fn body(self) -> Option<Value> {
+        match self {
+            Reasoning::Off => Some(json!({"enabled": false})),
+            Reasoning::Minimal => Some(json!({"effort": "minimal"})),
+            Reasoning::Unset => None,
+        }
+    }
+
+    fn step_down(self) -> Self {
+        match self {
+            Reasoning::Off => Reasoning::Minimal,
+            Reasoning::Minimal | Reasoning::Unset => Reasoning::Unset,
+        }
+    }
+}
+
 /// Whether `base_url` is OpenRouter's API.
 fn is_openrouter(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
@@ -388,16 +475,43 @@ fn provider_prefix(v: &Value) -> String {
 /// `stream_options.include_usage`).
 fn chunk_usage(v: &Value) -> Option<Usage> {
     let usage = v.get("usage").filter(|u| u.is_object())?;
-    let tok = |name: &str| {
+    usage.get("prompt_tokens").and_then(Value::as_u64)?;
+    Some(usage_of(usage))
+}
+
+/// The tokens a `usage` object reports (0 for each one it lacks). Reasoning
+/// tokens are read from `completion_tokens_details.reasoning_tokens`
+/// (OpenAI, OpenRouter), else a top-level `reasoning_tokens`.
+fn usage_of(usage: &Value) -> Usage {
+    let tok = |pointer: &str| {
         usage
-            .get(name)
+            .pointer(pointer)
             .and_then(Value::as_u64)
             .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
     };
-    Some(Usage {
-        prompt_tokens: tok("prompt_tokens")?,
-        completion_tokens: tok("completion_tokens").unwrap_or(0),
-    })
+    Usage {
+        prompt_tokens: tok("/prompt_tokens").unwrap_or(0),
+        completion_tokens: tok("/completion_tokens").unwrap_or(0),
+        reasoning_tokens: tok("/completion_tokens_details/reasoning_tokens")
+            .or_else(|| tok("/reasoning_tokens"))
+            .unwrap_or(0),
+    }
+}
+
+/// The message of a reply cut at `max_tokens`, saying how much of it went
+/// to reasoning when the provider reports that.
+fn truncated_message(provider: &str, max_tokens: u32, usage: Usage) -> String {
+    let reasoning = if usage.reasoning_tokens > 0 {
+        format!(
+            ", {} of {} completion tokens spent reasoning",
+            usage.reasoning_tokens, usage.completion_tokens
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{provider}stopped at max_tokens ({max_tokens}){reasoning} (finish_reason=length); raise the profile's max_tokens"
+    )
 }
 
 /// The `finish_reason` of the first choice, `"none"` without one.
@@ -447,11 +561,18 @@ fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
         .and_then(|m| m.get("content"))
         .and_then(Value::as_str)
         .filter(|c| !c.trim().is_empty());
+    let usage = v.get("usage").map(usage_of).unwrap_or_default();
     if finish == "length" {
-        return Err(LlmError::Truncated(format!(
-            "{provider}stopped at max_tokens ({max_tokens}); raise the profile's max_tokens (got {})",
-            excerpt(content.unwrap_or_default())
-        )));
+        let partial = content.unwrap_or_default();
+        return Err(LlmError::Truncated {
+            message: format!(
+                "{} (got {})",
+                truncated_message(&provider, max_tokens, usage),
+                excerpt(partial)
+            ),
+            partial: partial.to_string(),
+            usage,
+        });
     }
     let content = match content {
         Some(c) => c.to_string(),
@@ -481,19 +602,7 @@ fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
             }
         }
     };
-    let tok = |p: &str| {
-        v.pointer(p)
-            .and_then(Value::as_u64)
-            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
-            .unwrap_or(0)
-    };
-    Ok(ChatResponse {
-        content,
-        usage: Usage {
-            prompt_tokens: tok("/usage/prompt_tokens"),
-            completion_tokens: tok("/usage/completion_tokens"),
-        },
-    })
+    Ok(ChatResponse { content, usage })
 }
 
 /// The JSON object or array that `text` ends with (closing whitespace or a
@@ -670,11 +779,13 @@ impl Provider for OpenAiCompatible {
                         reported.set(u);
                     }
                     let truncated = (finish_reason(&v) == "length").then(|| {
-                    LlmError::Truncated(format!(
-                        "{}stopped at max_tokens ({max_tokens}); raise the profile's max_tokens",
-                        provider_prefix(&v)
-                    ))
-                });
+                        let usage = reported.get().unwrap_or_default();
+                        LlmError::Truncated {
+                            message: truncated_message(&provider_prefix(&v), max_tokens, usage),
+                            partial: String::new(),
+                            usage,
+                        }
+                    });
                     let text = v
                         .pointer("/choices/0/delta/content")
                         .and_then(Value::as_str)

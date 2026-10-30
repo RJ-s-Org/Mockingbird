@@ -33,8 +33,11 @@ pub struct UsageEvent {
     pub latency: Duration,
     /// LLM prompt tokens spent on the call.
     pub prompt_tokens: u32,
-    /// LLM completion tokens spent on the call.
+    /// LLM completion tokens spent on the call, reasoning included.
     pub completion_tokens: u32,
+    /// The part of `completion_tokens` a reasoning model spent thinking,
+    /// when the provider reports it.
+    pub reasoning_tokens: u32,
 }
 
 impl UsageEvent {
@@ -66,6 +69,7 @@ impl UsageEvent {
             latency: Duration::ZERO,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
         }
     }
 }
@@ -84,7 +88,9 @@ pub trait UsageSink: Send + Sync {
 ///   without generating a body (refused before generation, or a native
 ///   error answer)
 /// - `mb_request_duration_seconds{mock,operation}` histogram
-/// - `mb_llm_tokens_total{mock,kind="prompt"|"completion"}` counter
+/// - `mb_llm_tokens_total{mock,kind="prompt"|"completion"|"reasoning"}`
+///   counter; `reasoning` counts the part of `completion` a reasoning model
+///   spent thinking
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PrometheusUsage;
 
@@ -118,10 +124,18 @@ impl UsageSink for PrometheusUsage {
         if event.completion_tokens > 0 {
             metrics::counter!(
                 "mb_llm_tokens_total",
-                "mock" => mock,
+                "mock" => mock.clone(),
                 "kind" => "completion",
             )
             .increment(u64::from(event.completion_tokens));
+        }
+        if event.reasoning_tokens > 0 {
+            metrics::counter!(
+                "mb_llm_tokens_total",
+                "mock" => mock,
+                "kind" => "reasoning",
+            )
+            .increment(u64::from(event.reasoning_tokens));
         }
     }
 }

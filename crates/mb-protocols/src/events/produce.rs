@@ -518,6 +518,7 @@ impl ChannelInner {
             event.latency = latency;
             event.prompt_tokens = r.generated.usage.prompt_tokens;
             event.completion_tokens = r.generated.usage.completion_tokens;
+            event.reasoning_tokens = r.generated.usage.reasoning_tokens;
             rt.ext.usage.record(&event);
         }
         if let Some(recorder) = &rt.recorder {

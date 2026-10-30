@@ -189,6 +189,7 @@ async fn fallback_metered_stream_reports_the_serving_hops_usage() {
     let usage = mb_llm::Usage {
         prompt_tokens: 40,
         completion_tokens: 4,
+        reasoning_tokens: 0,
     };
     let primary =
         Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Err(LlmError::Timeout)]));

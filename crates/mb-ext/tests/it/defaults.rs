@@ -96,6 +96,7 @@ fn prometheus_usage_records() {
     event.latency = Duration::from_millis(42);
     event.prompt_tokens = 10;
     event.completion_tokens = 5;
+    event.reasoning_tokens = 3;
     metrics::with_local_recorder(&recorder, || PrometheusUsage.record(&event));
 
     let entries: Vec<_> = snapshotter
@@ -153,6 +154,13 @@ fn prometheus_usage_records() {
             &[("mock", "petstore"), ("kind", "completion")]
         ),
         Some(Some(5))
+    );
+    assert_eq!(
+        find(
+            "mb_llm_tokens_total",
+            &[("mock", "petstore"), ("kind", "reasoning")]
+        ),
+        Some(Some(3))
     );
     assert!(entries.iter().any(
         |(kind, n, _, _)| *kind == MetricKind::Histogram && n == "mb_request_duration_seconds"

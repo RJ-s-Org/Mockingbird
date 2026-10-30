@@ -158,6 +158,7 @@ impl Provider for MeteredProvider {
         event.latency = started.elapsed();
         event.prompt_tokens = usage.prompt_tokens;
         event.completion_tokens = usage.completion_tokens;
+        event.reasoning_tokens = usage.reasoning_tokens;
         self.usage.record(&event);
         metrics::counter!("mb_import_tokens_total").increment(
             u64::from(usage.prompt_tokens).saturating_add(u64::from(usage.completion_tokens)),

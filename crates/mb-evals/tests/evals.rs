@@ -193,6 +193,7 @@ async fn run_evals_with_scripted_provider_counts_sources() {
             mb_llm::Usage {
                 prompt_tokens: 100,
                 completion_tokens: 10,
+                reasoning_tokens: 0,
             },
         )),
         Ok((
@@ -200,6 +201,7 @@ async fn run_evals_with_scripted_provider_counts_sources() {
             mb_llm::Usage {
                 prompt_tokens: 100,
                 completion_tokens: 10,
+                reasoning_tokens: 0,
             },
         )),
         Ok((
@@ -207,6 +209,7 @@ async fn run_evals_with_scripted_provider_counts_sources() {
             mb_llm::Usage {
                 prompt_tokens: 100,
                 completion_tokens: 10,
+                reasoning_tokens: 0,
             },
         )),
     ]));
@@ -573,6 +576,7 @@ async fn run_contracts_repeats_samples_and_breaks_down() {
                     mb_llm::Usage {
                         prompt_tokens: 50,
                         completion_tokens: 5,
+                        reasoning_tokens: 0,
                     },
                 ))
             })

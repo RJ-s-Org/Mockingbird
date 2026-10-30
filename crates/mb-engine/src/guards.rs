@@ -222,15 +222,51 @@ impl Engine {
         text: &str,
         checks: &Checks<'_>,
     ) -> Checked {
-        let (fill, echoes) = (checks.fill, &checks.echoes);
-        let Some(mut value) = crate::extract_json(text) else {
-            return Checked::Invalid(vec!["output is not valid JSON".to_string()]);
+        let Some(value) = crate::extract_json(text) else {
+            return Checked::Invalid(vec![NOT_JSON.to_string()]);
         };
+        self.check_parsed(validator, value, text.len(), checks, false)
+    }
+
+    /// LLM output cut short (see [`crate::salvage`]), closed, then checked
+    /// as [`Engine::check_output`] does with every missing required member
+    /// filled by the faker. An answer completed that way is `Patched`, never
+    /// `Valid`. `Invalid` when nothing complete could be closed.
+    pub(crate) fn check_truncated(
+        &self,
+        validator: &SchemaValidator,
+        text: &str,
+        checks: &Checks<'_>,
+    ) -> Checked {
+        let Some(value) = crate::salvage::close_truncated(text) else {
+            return Checked::Invalid(vec![CUT_SHORT.to_string()]);
+        };
+        match self.check_parsed(validator, value, text.len(), checks, true) {
+            Checked::Valid(v) | Checked::Patched(v) => {
+                tracing::info!("salvaged an answer cut short");
+                Checked::Patched(v)
+            }
+            other => other,
+        }
+    }
+
+    /// [`Engine::check_output`] of a parsed `value` (of `text_len` bytes);
+    /// with `fill_missing`, every missing required member is filled when
+    /// the value does not validate without that.
+    fn check_parsed(
+        &self,
+        validator: &SchemaValidator,
+        mut value: Value,
+        text_len: usize,
+        checks: &Checks<'_>,
+        fill_missing: bool,
+    ) -> Checked {
+        let (fill, echoes) = (checks.fill, &checks.echoes);
         if checks.items_envelope {
             value = unwrap_items(validator, value);
         }
         if let Some(cap) = self.guards.max_response_bytes {
-            let size = serde_json::to_vec(&value).map_or(text.len(), |b| b.len());
+            let size = serde_json::to_vec(&value).map_or(text_len, |b| b.len());
             if size > cap {
                 return Checked::Rejected(format!(
                     "response of {size} bytes exceeds the {cap}-byte cap"
@@ -248,7 +284,20 @@ impl Engine {
         {
             value = filled;
         }
-        match self.check_value(validator, value, echoes) {
+        let checked = if fill_missing {
+            // Filled only when the value is not valid as it is (or
+            // unwrapped): members are never filled around a wrapper.
+            match self.check_value(validator, value.clone(), echoes) {
+                Checked::Invalid(errors) => match self.fill_missing(validator, &value) {
+                    Some(filled) => self.check_value(validator, filled, echoes),
+                    None => Checked::Invalid(errors),
+                },
+                checked => checked,
+            }
+        } else {
+            self.check_value(validator, value, echoes)
+        };
+        match checked {
             Checked::Valid(v) => match validator.truncate_runaway(&v) {
                 Some(cut) => {
                     tracing::info!("truncated runaway strings");
@@ -339,6 +388,131 @@ pub(crate) const ITEMS_ENVELOPE_NOTE: &str = "The response schema describes a JS
 JSON mode only allows an object at the top level. Output {\"items\": [...]}: one object whose only \
 member, \"items\", is the array the schema describes. Add no other members.";
 
+/// The error of output that holds no JSON value.
+pub(crate) const NOT_JSON: &str = "output is not valid JSON";
+
+/// The error of output cut short with nothing complete in it.
+pub(crate) const CUT_SHORT: &str = "output was cut short before any complete member";
+
+/// The repair request for `answer`, the LLM output that failed with
+/// `errors` (shallowest first, at most 10; see
+/// [`SchemaValidator::validate`]): what is wrong with its shape, if
+/// anything (see [`shape_hints`]), then the errors. `cut` marks output cut
+/// short (at `max_tokens`, or inside the value).
+pub(crate) fn repair_request(
+    validator: &SchemaValidator,
+    answer: &str,
+    errors: &[String],
+    checks: &Checks<'_>,
+    cut: bool,
+) -> String {
+    let mut hints = Vec::new();
+    if cut {
+        hints.push(
+            "Your answer was cut off at the output token limit before the JSON ended. Return a \
+complete answer that is shorter: fewer array items, short strings, no optional members."
+                .to_string(),
+        );
+    } else if let Some(value) = crate::extract_json(answer) {
+        hints.extend(shape_hints(validator, &value, checks.items_envelope));
+    }
+    let mut request = String::new();
+    for hint in &hints {
+        request.push_str(hint);
+        request.push('\n');
+    }
+    if !hints.is_empty() {
+        request.push('\n');
+    }
+    request.push_str("The JSON above is invalid against the schema. Errors:\n");
+    for e in errors {
+        request.push_str("- ");
+        request.push_str(e);
+        request.push('\n');
+    }
+    request.push_str("Return only corrected JSON.");
+    request
+}
+
+/// What is wrong with the shape of `value` as an answer of `validator`'s
+/// schema, in words a model acts on: an empty object, the schema itself, a
+/// wrapper around the answer, an object where an array belongs (or the
+/// reverse). `items_envelope`: the array was asked for as
+/// `{"items": [...]}` (see [`items_envelope`]).
+pub(crate) fn shape_hints(
+    validator: &SchemaValidator,
+    value: &Value,
+    items_envelope: bool,
+) -> Vec<String> {
+    let schema = validator.schema();
+    let wants_array = is_array_root(schema);
+    let wants_object = !wants_array && root_admits(schema, "object");
+    let declared = validator.declared_property_names();
+    let declares = |name: &str| declared.is_some_and(|d| d.contains(name));
+    let mut hints = Vec::new();
+    match value {
+        Value::Object(map) if map.is_empty() => hints.push(
+            "You returned `{}`, an empty object. Return the whole answer the schema describes, \
+with its required members."
+                .to_string(),
+        ),
+        Value::Object(map)
+            if (map.contains_key("$schema")
+                || (map.get("properties").is_some_and(Value::is_object)
+                    && (map.contains_key("type") || map.contains_key("required"))))
+                && !declares("$schema")
+                && !declares("properties") =>
+        {
+            hints.push(
+                "You returned the JSON Schema itself (`$schema`/`properties` at the root). Return \
+data that matches the schema, not the schema."
+                    .to_string(),
+            );
+        }
+        Value::Object(map) => {
+            let mut present = map.iter().filter(|(_, v)| !v.is_null());
+            let sole = match (present.next(), present.next()) {
+                (Some((key, inner)), None) if inner.is_object() || inner.is_array() => {
+                    Some((key, inner))
+                }
+                _ => None,
+            };
+            if wants_array && items_envelope {
+                if !matches!(sole, Some((key, inner)) if key == ITEMS_KEY && inner.is_array()) {
+                    hints.push(format!(
+                        "An array was expected. Return it under \"{ITEMS_KEY}\": \
+{{\"{ITEMS_KEY}\": [...]}}, with no other members."
+                    ));
+                }
+            } else if wants_array {
+                match sole {
+                    Some((key, inner)) if inner.is_array() => hints.push(format!(
+                        "You wrapped the answer in `{key}`. An array was expected at the root: \
+return the array itself."
+                    )),
+                    _ => hints.push(
+                        "An array was expected at the root, but you returned an object."
+                            .to_string(),
+                    ),
+                }
+            } else if let Some((key, _)) = sole
+                && wants_object
+                && !declares(key)
+            {
+                hints.push(format!(
+                    "You wrapped the answer in `{key}`. Return its contents at the top level, \
+without the wrapper."
+                ));
+            }
+        }
+        Value::Array(_) if wants_object => {
+            hints.push("An object was expected at the root, but you returned an array.".to_string())
+        }
+        _ => {}
+    }
+    hints
+}
+
 /// Whether an answer of `schema` (with its definitions) is asked for as an
 /// [`ITEMS_KEY`] envelope: the provider is in JSON-object mode (JSON mode
 /// without structured outputs), which forces an object at the top level,
@@ -355,35 +529,47 @@ pub(crate) fn items_envelope(caps: mb_llm::Capabilities, schema: &Value) -> bool
     caps.json_mode && !caps.json_schema && is_array_root(schema)
 }
 
+/// `doc`'s root schema object, following local `$ref`s within `doc`.
+fn root_schema(doc: &Value) -> Option<&serde_json::Map<String, Value>> {
+    let mut schema = doc;
+    // Bounded: a `$ref` cycle has no root.
+    for _ in 0..8 {
+        let obj = schema.as_object()?;
+        match obj.get("$ref").and_then(Value::as_str) {
+            Some(r) => schema = r.strip_prefix('#').and_then(|p| doc.pointer(p))?,
+            None => return Some(obj),
+        }
+    }
+    None
+}
+
 /// Whether `doc`'s root admits only arrays (or `null`), following local
 /// `$ref`s within `doc`.
 fn is_array_root(doc: &Value) -> bool {
-    let mut schema = doc;
-    // Bounded: a `$ref` cycle is not an array.
-    for _ in 0..8 {
-        let Some(obj) = schema.as_object() else {
-            return false;
-        };
-        if let Some(r) = obj.get("$ref").and_then(Value::as_str) {
-            match r.strip_prefix('#').and_then(|p| doc.pointer(p)) {
-                Some(target) => {
-                    schema = target;
-                    continue;
-                }
-                None => return false,
-            }
+    let Some(obj) = root_schema(doc) else {
+        return false;
+    };
+    match obj.get("type") {
+        Some(Value::String(t)) => t == "array",
+        Some(Value::Array(types)) => {
+            types.iter().any(|t| t == "array") && types.iter().all(|t| t == "array" || t == "null")
         }
-        return match obj.get("type") {
-            Some(Value::String(t)) => t == "array",
-            Some(Value::Array(types)) => {
-                types.iter().any(|t| t == "array")
-                    && types.iter().all(|t| t == "array" || t == "null")
-            }
-            Some(_) => false,
-            None => obj.contains_key("items") || obj.contains_key("prefixItems"),
-        };
+        Some(_) => false,
+        None => obj.contains_key("items") || obj.contains_key("prefixItems"),
     }
-    false
+}
+
+/// Whether `doc`'s root declares `type` (alone or among others), or, for
+/// an object, declares `properties`.
+fn root_admits(doc: &Value, type_name: &str) -> bool {
+    let Some(obj) = root_schema(doc) else {
+        return false;
+    };
+    match obj.get("type") {
+        Some(Value::String(t)) => t == type_name,
+        Some(Value::Array(types)) => types.iter().any(|t| t == type_name),
+        _ => type_name == "object" && obj.contains_key("properties"),
+    }
 }
 
 /// The array under [`ITEMS_KEY`] when `value` is the envelope asked for,
@@ -420,6 +606,18 @@ impl Engine {
         validator.fill_required_nodes(
             value,
             |location, property| fill.shaped.fills(location, property),
+            |node| faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng),
+        )
+    }
+
+    /// `value` with every missing required member filled by the faker;
+    /// `None` when nothing was missing.
+    fn fill_missing(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
+        let faker = crate::Faker::new(self.config.faker_depth);
+        let mut rng = rand::rng();
+        validator.fill_required_nodes(
+            value,
+            |_, _| true,
             |node| faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng),
         )
     }

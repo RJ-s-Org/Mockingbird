@@ -16,6 +16,7 @@ mod guards;
 mod message;
 mod perf;
 mod pii;
+mod salvage;
 mod scenario;
 mod seed;
 mod stream;
