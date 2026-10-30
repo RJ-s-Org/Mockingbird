@@ -325,7 +325,9 @@ fn keys(req: &ChatRequest) -> (String, String) {
     let format = match &req.response_format {
         ResponseFormat::Text => json!("text"),
         ResponseFormat::JsonObject => json!("json_object"),
-        ResponseFormat::JsonSchema { name, schema } => json!(["json_schema", name, schema]),
+        ResponseFormat::JsonSchema { name, schema } => {
+            json!(["json_schema", name, mb_engine::without_items_schema(schema)])
+        }
     };
     let messages: Vec<Value> = req
         .messages
@@ -1082,6 +1084,28 @@ pub fn workspace_of(dir: &Path) -> String {
 mod tests {
     use super::*;
     use mb_llm::ChatMessage;
+
+    /// A recording of an array answer asked for bare still replays when it is
+    /// asked for under `items`.
+    #[test]
+    fn asking_for_a_list_under_items_keeps_its_operation_key() {
+        let array = json!({"type": "array", "items": {"$ref": "#/$defs/T"}, "$defs": {"T": {"type": "string"}}});
+        let wrapped = json!({
+            "type": "object",
+            "required": ["items"],
+            "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/T"}}},
+            "$defs": {"T": {"type": "string"}}
+        });
+        let with = |schema: &Value| {
+            let mut r = req("sys", "user");
+            r.response_format = ResponseFormat::JsonSchema {
+                name: "listTags".into(),
+                schema: schema.clone(),
+            };
+            keys(&r)
+        };
+        assert_eq!(with(&array).1, with(&wrapped).1);
+    }
 
     fn req(system: &str, user: &str) -> ChatRequest {
         ChatRequest {

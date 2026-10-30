@@ -76,8 +76,8 @@ struct RunArgs {
     #[arg(long)]
     output_budget: Option<u32>,
     /// What the LLM client sends as `response_format`: `none`,
-    /// `json_object` (the server default) or `json_schema`.
-    #[arg(long, default_value_t = mb_llm::OutputMode::JsonObject)]
+    /// `json_object` or `json_schema` (the server default).
+    #[arg(long, default_value_t = mb_llm::OutputMode::JsonSchema)]
     output_mode: mb_llm::OutputMode,
     /// Directory `report.json` and `report.md` are written to.
     #[arg(long, default_value = "eval-report")]

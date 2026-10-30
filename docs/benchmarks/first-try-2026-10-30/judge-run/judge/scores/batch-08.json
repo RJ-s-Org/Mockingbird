@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-08",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "caee025170",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "cust-1048 style ids, varied totals and a natural note; UUID prefixes a1f4/b2d5/c3e6 climb in a visible pattern. All orders pending as filtered; note null and absent category are fine."
+  },
+  {
+   "opaque_id": "c593f4f1e3",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Random UUIDs, cus_7f3a91 ids, varied totals (128.45, 342), natural notes and categories look production-grade. All orders shipped as filtered; a \"Leave at front desk\" note on a shipped order is fine."
+  },
+  {
+   "opaque_id": "fb358596c4",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "cust-001/002/003 sequential, UUIDs are patterned, note \"None\" as a string is filler. All shipped as filtered; hierarchy is inverted in places (Books under Fiction, Electronics under Gadgets)."
+  },
+  {
+   "opaque_id": "1fb3c285bd",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Varied totals, repeated customer cus_10482 and natural notes look real; the 0 total is odd. All pending as filtered, but an Electronics order with gift wrap at total 0 is a minor inconsistency."
+  },
+  {
+   "opaque_id": "1510de2828",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "True random v4 UUIDs, cust_7f21a4 ids, varied totals and a natural note; indistinguishable from production. All orders pending as filtered; optional category and note vary sensibly."
+  },
+  {
+   "opaque_id": "a0b8aed29b",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Good UUIDs, varied totals, but cust_001/002/003 are sequential and notes \"Urgent order\", \"Standard shipment\" are bland. All orders pending as filtered, with nothing contradictory."
+  }
+ ]
+}

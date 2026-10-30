@@ -92,7 +92,7 @@ llm:
       base_url: https://openrouter.ai/api/v1
       model: deepseek/deepseek-v4.1-flash-1017
       api_key: env:OPENROUTER_API_KEY
-      output_mode: json_object
+      output_mode: json_schema
       timeout: 60s
       temperature: 0.7
       max_tokens: 16384

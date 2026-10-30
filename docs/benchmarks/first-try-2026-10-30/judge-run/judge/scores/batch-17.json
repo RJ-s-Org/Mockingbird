@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-17",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "5389fbae13",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "id acc_001 is a domain-styled if sequential id; email \"garnet\" is not an address. All account fields echo the request, but top-level id acc_001 differs from account @id juniper."
+  },
+  {
+   "opaque_id": "328610a584",
+   "realism": 2,
+   "coherence": 4,
+   "rationale": "id \"1\" is a bare placeholder and email \"nectar\", name \"quartz\" are not real values. Account fields echo the request exactly, but id 1 differs from @id juniper."
+  },
+  {
+   "opaque_id": "7b87e415a6",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "No realistic values: id \"raven\", email \"onyx\", tag \"quartz\" are words, not an id or address. Fully consistent: id equals @id raven and every field, including createdAt and suspended status, echoes the request."
+  },
+  {
+   "opaque_id": "0c572b37d2",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "id \"fjord\", email \"fjord\", tag \"fjord\" repeat one word and are not realistic. Fully consistent: id equals @id and all account fields, including status closed and createdAt, echo the request."
+  },
+  {
+   "opaque_id": "5840a91956",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "id \"cedar\" and email \"raven\" are plain words with no id or address format. Fully consistent: id equals @id cedar and all account fields echo the request with status active."
+  },
+  {
+   "opaque_id": "b6e593c4ab",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "id \"raven\" and email \"sable\" are plain words with no id or address format. Fully consistent: id equals @id raven and all account fields echo the request with status active."
+  }
+ ]
+}

@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-01",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "a586174356",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "ULID-style ids, varied SKUs, believable tracking; suffix B4C6D8F0G2H4J6 alternates in a pattern. Order and shipment ids differ, estimated_delivery 11-03 follows occurred_at, ground service with UPS 1Z tracking fits."
+  },
+  {
+   "opaque_id": "73d7f96ae5",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "order_id ord_ABCDEFGHJKMNPTVWXYZ1234567 and identical shp_ suffix are alphabet placeholders; PLT-12345 and 1Z999AA10123456789 are stock examples. Dates and carrier remain consistent: UPS 1Z, ground, delivery after occurred_at."
+  },
+  {
+   "opaque_id": "ec3b7da569",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Good uuid, SKU and tracking; ids are patterned (A6B4C5D7E8F9G0) and optional delivery, service and warehouse absent. UPS with 1Z tracking fits, but order_id and shipment_id share one identical ULID suffix."
+  },
+  {
+   "opaque_id": "7b2a798088",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Random-looking ULIDs, SKUs PLT-48213/90756, tracking 1Z8F4K2L9Q7T3V6B0N and PDX-1 look production-grade. Order and shipment ids distinct with shared time prefix, delivery 11-03 after occurred_at, ground fits."
+  },
+  {
+   "opaque_id": "4d33982ece",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "ord suffix X6W5V4M3T2S1R0Q9P8N7 counts down and tracking 1Z8A2B3C4D5E6F7G8H is a visible sequence; uuid and SKU are fine. Delivery 11-02 follows occurred_at, UPS tracking fits, ids distinct."
+  },
+  {
+   "opaque_id": "40b82b0bac",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Tracking and random ids look fine, though PLT-12345 is stock and event uuid c4c9e8b0-1a2b-3c4d-... is patterned; ids lack a time-like ULID prefix. Delivery 11-05 follows occurred_at, UPS tracking fits, ids distinct."
+  }
+ ]
+}

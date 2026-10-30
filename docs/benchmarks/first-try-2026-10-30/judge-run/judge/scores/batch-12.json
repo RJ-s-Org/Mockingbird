@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-12",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "cd0509dbf2",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Name \"Harborlight Creators\" and hex icon look real; emoji/role ids run nearly sequential from guild id. @everyone role id equals guild id as on Discord, with_counts=true is honored and presence 126 < members 842."
+  },
+  {
+   "opaque_id": "ad84034b5e",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "owner_id 123456789012345678 is an obvious placeholder, \"Mockingbird Guild\" and color 123456 are synthetic. Counts honored and id echoed, but the @everyone role id differs from the guild id."
+  },
+  {
+   "opaque_id": "add1b69f5e",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "\"testing and mock scenario discussion\" description, \"Mockingbird Commons\" and icon a1b2c3d4... read synthetic; ids sequential. Guild id echoed and @everyone id matches, but approximate counts returned despite with_counts=false."
+  },
+  {
+   "opaque_id": "a85171aab3",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "\"Maplewood Makers\", maple_leaf emoji and varied permissions are believable; icon tail aabbccdd and sequential ids are mild tells. @everyone id matches guild, but approximate counts appear despite with_counts=false."
+  },
+  {
+   "opaque_id": "22b263ee95",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "\"Lantern & Lute Tavern\" with d20/crit emojis is convincing; icon a1b2c3d4... and round permissions 2048000000 are bland. Consistent theme and @everyone id, but approximate counts appear despite with_counts=false."
+  },
+  {
+   "opaque_id": "52403dcaaf",
+   "realism": 2,
+   "coherence": 3,
+   "rationale": "test_emoji, \"for testing and development\", \"Mockingbird Server\" and permissions 1234567890/1/2 are placeholder-like. Counts returned despite with_counts=false, and @everyone role id differs from guild id."
+  }
+ ]
+}

@@ -1,0 +1,57 @@
+{
+  "started": "2026-10-30T22:04:49+00:00",
+  "finished": "2026-10-30T22:09:20+00:00",
+  "repeat": 3,
+  "parallel": 3,
+  "concurrency": 4,
+  "budget_usd": 0.45,
+  "manifest": "docs/benchmarks/workloads.json",
+  "order": [
+    "nvidia/nemotron-3.5-lightning",
+    "openai/gpt-6-luna",
+    "deepseek/deepseek-v4.1-flash-1017"
+  ],
+  "models": {
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "status": "done",
+      "projected_usd": 0.2121,
+      "projection_source": "roster",
+      "started": "2026-10-30T22:04:49+00:00",
+      "engine_exit": 1,
+      "server_exit": null,
+      "spent_usd": 0.055826,
+      "wall_s": 157.6,
+      "finished": "2026-10-30T22:07:27+00:00",
+      "stop_reason": null
+    },
+    "openai/gpt-6-luna": {
+      "status": "done",
+      "projected_usd": 0.0808,
+      "projection_source": "roster",
+      "started": "2026-10-30T22:04:49+00:00",
+      "engine_exit": 1,
+      "server_exit": null,
+      "spent_usd": 0.034002,
+      "wall_s": 123.5,
+      "finished": "2026-10-30T22:06:53+00:00",
+      "stop_reason": null
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "status": "done",
+      "projected_usd": 0.0414,
+      "projection_source": "roster",
+      "started": "2026-10-30T22:04:49+00:00",
+      "engine_exit": 1,
+      "server_exit": null,
+      "spent_usd": 0.032531,
+      "wall_s": 270.3,
+      "finished": "2026-10-30T22:09:20+00:00",
+      "stop_reason": null
+    }
+  },
+  "skipped": [],
+  "aborted": false,
+  "spent_usd": 0.131395,
+  "calls": 503,
+  "tripped": false
+}

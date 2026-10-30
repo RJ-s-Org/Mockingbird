@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-13",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "7d36397638",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Real artist, album and track names, plausible ids; ISRC DE4ZE2450177 is odd for Bon Iver. Artist id echoed, but \"For Emma, Forever Ago\" is album_type single with total_tracks 9, and Holocene is not on that album."
+  },
+  {
+   "opaque_id": "30ed1b4d6e",
+   "realism": 1,
+   "coherence": 5,
+   "rationale": "tracks is an empty array, leaving no mock data at all: an empty body for a top-tracks call. Nothing contradicts the request, and an unknown market \"garnet\" can explain zero results."
+  },
+  {
+   "opaque_id": "dbf56c981a",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "\"Vellmar Static\", \"Neon Cartography\", varied durations and ISRCs look real; image hash a1b2c3d4e5f6... and repeated id fragments are tells. Tracks belong to artist 4kMZQy..., not the requested NhJqOw... id."
+  },
+  {
+   "opaque_id": "7973b7e7e9",
+   "realism": 2,
+   "coherence": 3,
+   "rationale": "\"Artist Name\", \"Single Name\", \"Track Name\", duration 210000 and ISRC DE1232567890 are placeholders. Single with total_tracks 1 holds internally, but artist 4iV5W9... is returned instead of the requested sxEPQR... id."
+  },
+  {
+   "opaque_id": "99bc565053",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "\"Velvet Orchard\", \"Amber Static\", varied popularity, durations and ISRC years matching release dates feel real; image hash a1b2c3d4... is a tell. Requested artist id echoed everywhere; album/track ids, uris and hrefs agree."
+  },
+  {
+   "opaque_id": "c233322a0e",
+   "realism": 1,
+   "coherence": 5,
+   "rationale": "tracks is an empty array, so there is no data: an empty body for a top-tracks call. No contradiction with the request, and unknown market \"alpha\" can explain zero results."
+  }
+ ]
+}

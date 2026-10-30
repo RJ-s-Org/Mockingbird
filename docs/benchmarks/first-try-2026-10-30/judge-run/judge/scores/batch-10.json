@@ -1,0 +1,36 @@
+{
+ "batch_id": "batch-10",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "52ceeaa9d2",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Order id 89A5K7L3M2N1O6KQ9 and timestamps look real; example.com links and an /approve API link lack polish, links omit method. All request fields echoed, CREATED fits AUTHORIZE, payer country AU matches AUD."
+  },
+  {
+   "opaque_id": "4433ca5dc6",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Good PayPal-shaped id and self/approve links with methods; only example.com hosts are bland. Payment source and purchase unit echoed exactly (EUR 7.56), intent AUTHORIZE, status CREATED, create_time equals update_time."
+  },
+  {
+   "opaque_id": "2ad03e09a4",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Random-looking id 9KQ2LM4WTR7X8B5NC, self/approve/capture links resemble PayPal; example.com hosts are bland. PAYER_ACTION_REQUIRED fits an unapproved order with paypal source; EUR 833.01 and all fields echoed."
+  },
+  {
+   "opaque_id": "746ecf5526",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Id 8A7K2M9Q4R6T1V3W5 and self/approve links are believable, hosts are example.com. intent CAPTURE, CAD 18.81, experience_context and account id echoed; status CREATED with equal timestamps holds."
+  },
+  {
+   "opaque_id": "fd6d0895c3",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "payer-action rel matches the real API, though id 8QK3M2N1P0R9S8T7U has a descending run and hosts are example.com. PAYER_ACTION_REQUIRED, payer_id equals account_id, country CA fits CAD 9.23, request fields echoed."
+  }
+ ]
+}

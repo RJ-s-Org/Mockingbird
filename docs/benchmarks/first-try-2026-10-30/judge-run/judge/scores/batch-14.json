@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-14",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "191052a06c",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Invented names, hex credit_ids and 3-decimal popularity feel real; every profile_path null and sequential person ids are bland. movie id echoed, but gender is inverted (Mara, Nia, Tessa = 2; Eli, Oren = 1)."
+  },
+  {
+   "opaque_id": "18f63a3f5d",
+   "realism": 2,
+   "coherence": 3,
+   "rationale": "Jane Smith, John Smith, Alice Johnson, characters John Doe/Jane Doe, id 123456 and paths a1b2c3... are placeholder throughout. id echoed, but Jane Smith has gender 2 and plays John Doe while John Smith has gender 1."
+  },
+  {
+   "opaque_id": "754144e861",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Varied names, plausible paths, complete crew roles and fine popularity; credit_ids ending 12345678 and sequential person ids are minor tells. movie id echoed; order, department/job and gender all line up."
+  },
+  {
+   "opaque_id": "cf824420f6",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Real Dune cast and crew with some true TMDB ids, marred by credit_ids in sequence and fake paths like /aBcDEfGhIj.... Roster coherent with one film and id echoed, but genders wrong for Mary Parent (2) and Joe Walker (1)."
+  },
+  {
+   "opaque_id": "e749b89d38",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "credit_ids 1111..., 2222..., 3333... and id 123456 are placeholders despite real names. Contradictions: Tim Allen as Woody, Timothy Dalton as Buzz, Hanks as Himself; language en-US conflicts with mh-IP; stray paging fields on a credits body."
+  },
+  {
+   "opaque_id": "ce3c2350e1",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Invented names, hex credit_ids and two-decimal popularity feel real; profile paths follow a visibly alternating pattern and person ids are sequential. movie id echoed, cast order and department/job pairs hold."
+  }
+ ]
+}

@@ -1,0 +1,42 @@
+{
+ "batch_id": "batch-11",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "b180bcc355",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "id re_wV4ZwUQaTe5hfX4hvJImCIiz looks authentic, created is current; charge \"fjord\" and payment_intent \"alpha\" lack ch_/pi_ prefixes but come from the request. Amount 22, reason and refs echoed; succeeded fits."
+  },
+  {
+   "opaque_id": "b8e9f90b2b",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "id re_0N12k3p4q5r6s7t8u9v0w1x2 is an obvious alternating digit-letter sequence; charge \"juniper\" is non-Stripe but from the request. Amount 9, reason fraudulent and refs echoed; succeeded fits."
+  },
+  {
+   "opaque_id": "720922cf83",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "id re_7kP2mN8qR4vX9cT1aB6dF3hG is plausible and created is current; charge \"meadow\" is non-Stripe but from the request. Amount 30, reason fraudulent and refs echoed; succeeded fits."
+  },
+  {
+   "opaque_id": "614230d54e",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "id re_R8mQ2vL5xN1cT7kP3aF6zB0d is plausible and created is current; charge \"sable\" is non-Stripe but from the request. Amount 33, reason duplicate and refs echoed; succeeded fits."
+  },
+  {
+   "opaque_id": "d531560ab4",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "id re_9uPeV7tiieaTmy3BwPauA5ga looks authentic; charge and payment_intent both \"iris\" are non-Stripe but from the request. Amount 11, reason fraudulent and refs echoed; succeeded fits."
+  },
+  {
+   "opaque_id": "6bb762af31",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "id re_8VbT4nKpLmQw2XzR6sYdHJ3c is plausible and created is current; charge \"garnet\" is non-Stripe but from the request. Amount 34, reason fraudulent and refs echoed; succeeded fits."
+  }
+ ]
+}

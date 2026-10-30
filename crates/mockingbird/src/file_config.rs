@@ -751,8 +751,8 @@ pub struct FileProfile {
     /// `vault:<mount>/<path>#<field>`), never a raw key.
     #[serde(default)]
     pub api_key: Option<String>,
-    /// How the provider is asked for JSON: `none`, `json_object` (the
-    /// default) or `json_schema`. Read it with [`FileProfile::mode`].
+    /// How the provider is asked for JSON: `none`, `json_object` or
+    /// `json_schema` (the default). Read it with [`FileProfile::mode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_mode: Option<OutputMode>,
     /// Deprecated alias of `output_mode`: `true` is `json_schema`, `false`
@@ -792,7 +792,7 @@ impl FileProfile {
     }
 
     /// The output mode: `output_mode`, else the deprecated `json_schema`,
-    /// else `json_object`.
+    /// else `json_schema`.
     pub fn mode(&self) -> OutputMode {
         self.output_mode
             .or(self.json_schema.map(OutputMode::from_json_schema))

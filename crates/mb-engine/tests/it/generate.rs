@@ -1693,23 +1693,6 @@ async fn array_root_in_json_mode_is_asked_for_and_unwrapped_from_items() {
 #[tokio::test]
 async fn items_envelope_only_for_array_roots_in_json_mode() {
     let bundle = orders();
-    let list = json!([valid_order()]);
-    let (provider, engine) = scripted(vec![Ok(list.to_string())]);
-    let op = bundle.operation("listOrders").unwrap();
-    let out = engine
-        .generate(&bundle, op, &call("listOrders"), ctx())
-        .await
-        .unwrap();
-    assert_eq!(out.source, Source::Llm);
-    assert!(
-        !provider.requests()[0]
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains(r#""items""#)
-    );
-
     let (provider, engine) = json_mode(vec![Ok(valid_order().to_string())]);
     let op = bundle.operation("getOrder").unwrap();
     let out = engine
@@ -1725,6 +1708,77 @@ async fn items_envelope_only_for_array_roots_in_json_mode() {
             .content
             .contains(r#"{"items": [...]}"#)
     );
+}
+
+/// With a schema too, an array is asked for under `items`, because OpenAI
+/// requires an object at the schema's root.
+#[tokio::test]
+async fn a_list_under_a_schema_is_asked_for_as_items() {
+    let bundle = orders();
+    let answer = json!({"items": [valid_order()]});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let op = bundle.operation("listOrders").unwrap();
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body.unwrap(), json!([valid_order()]));
+    let request = &provider.requests()[0];
+    let mb_llm::ResponseFormat::JsonSchema { schema, .. } = &request.response_format else {
+        panic!("a schema was asked for");
+    };
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["items"]["type"], "array");
+    assert!(
+        request
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains(r#"{"items": [...]}"#)
+    );
+}
+
+/// An endpoint enforcing the schema may answer `{"items": null}` for a
+/// nullable list.
+#[tokio::test]
+async fn a_null_list_under_items_is_a_null_answer() {
+    let bundle = compile(
+        br#"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /tags:
+    get:
+      operationId: listTags
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: [array, "null"], items: {type: string}}}}}
+"#,
+    )
+    .unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"items": null}).to_string())]);
+    let op = bundle.operation("listTags").unwrap();
+    let out = engine
+        .generate(&bundle, op, &call("listTags"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body.unwrap(), Value::Null);
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// A bare array is still a good answer.
+#[tokio::test]
+async fn a_bare_list_under_a_schema_is_accepted() {
+    let bundle = orders();
+    let (_, engine) = scripted(vec![Ok(json!([valid_order()]).to_string())]);
+    let op = bundle.operation("listOrders").unwrap();
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
 }
 
 /// `none` mode reports no JSON mode: an array is asked for as an array.

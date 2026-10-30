@@ -37,13 +37,13 @@ const RAW_KEY_FIELDS: [&str; 2] = ["api_key", "apiKey"];
 
 /// How a profile's endpoint is asked for JSON: `none` (no
 /// `response_format`; the prompt alone asks for JSON), `json_object` (JSON
-/// mode, the default) or `json_schema` (structured output).
+/// mode) or `json_schema` (structured output, the default).
 #[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     None,
-    #[default]
     JsonObject,
+    #[default]
     JsonSchema,
 }
 
@@ -125,7 +125,7 @@ pub struct PutProfile {
     /// `env:` names, `file:` paths and `vault:<mount>/<path>#<field>`
     /// references are rejected unless the server allows them.
     pub secret_ref: Option<String>,
-    /// How the provider is asked for JSON; default `json_object`.
+    /// How the provider is asked for JSON; default `json_schema`.
     #[serde(default)]
     pub output_mode: Option<OutputMode>,
     /// Deprecated alias of `output_mode`: `true` is `json_schema`, `false`

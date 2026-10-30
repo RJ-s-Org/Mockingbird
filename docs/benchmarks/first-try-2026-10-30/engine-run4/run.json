@@ -1,0 +1,31 @@
+{
+  "started": "2026-10-30T23:06:39+00:00",
+  "finished": "2026-10-30T23:10:42+00:00",
+  "repeat": 6,
+  "parallel": 1,
+  "concurrency": 4,
+  "budget_usd": 0.39,
+  "manifest": "docs/benchmarks/workloads.json",
+  "order": [
+    "deepseek/deepseek-v4.1-flash-1017"
+  ],
+  "models": {
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "status": "done",
+      "projected_usd": 0.3822,
+      "projection_source": "roster",
+      "started": "2026-10-30T23:06:39+00:00",
+      "engine_exit": 1,
+      "server_exit": null,
+      "spent_usd": 0.108032,
+      "wall_s": 242.4,
+      "finished": "2026-10-30T23:10:42+00:00",
+      "stop_reason": null
+    }
+  },
+  "skipped": [],
+  "aborted": false,
+  "spent_usd": 0.108032,
+  "calls": 324,
+  "tripped": false
+}

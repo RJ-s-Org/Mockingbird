@@ -1,0 +1,98 @@
+# 2026-10-30T22:25:33+00:00 /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/target/release/mb-evals run --manifest /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/workloads.json --repeat 3 --concurrency 4 --samples /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/first-try-2026-10-30/engine-final/engine/nvidia__nemotron-3.5-lightning/samples.jsonl --out /Users/rjjain/Documents/Restia/Mockingbird/.claude/worktrees/llm-benchmark-f85581/docs/benchmarks/first-try-2026-10-30/engine-final/engine/nvidia__nemotron-3.5-lightning --output-mode json_schema
+evaluating 18 contracts with nvidia/nemotron-3.5-lightning at http://127.0.0.1:60496/r/nvidia__nemotron-3.5-lightning~engine/api/v1
+[2m2026-10-30T22:26:39.674787Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0morders.get [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:26:39.856889Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0morders.get [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:29:18.036319Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mpulls/get [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:29:43.946299Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mpulls/get [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:29:51.328196Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mpulls/get [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:30:18.041765Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0missues/get [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:30:51.337507Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0msearch/repos [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:30:58.353263Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0msearch/repos [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:31:18.045721Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0msearch/repos [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:32:32.152938Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mgetOffer [3mreason[0m[2m=[0mrepaired output still invalid: : required: "id" is a required property; : required: "expiresAt" is a required property; : required: "price" is a required property; : required: "segments" is a required property; : required: "cabin" is a required property; : required: "refundable" is a required property; : required: "seatsRemaining" is a required property; : required: "taxes" is a required property; : required: "baggage" is a required property; : required: "fareRules" is a required property
+[2m2026-10-30T22:32:38.587464Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mgetOffer [3mreason[0m[2m=[0mrepaired output still invalid: /segments/0: oneOf: no branch matches; closest: /segments/0: required: "operator" is a required property, /segments/0: required: "trainNumber" is a required property, /segments/0: required: "coach" is a required property, 2 more
+[2m2026-10-30T22:32:40.353978Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mgetOffer [3mreason[0m[2m=[0mrepaired output still invalid: /segments/0: oneOf: no branch matches; closest: /segments/0: required: "operator" is a required property, /segments/0: required: "trainNumber" is a required property, /segments/0: required: "coach" is a required property, 2 more; /segments/1: oneOf: no branch matches; closest: /segments/1: required: "operator" is a required property, /segments/1: required: "trainNumber" is a required property, /segments/1: required: "coach" is a required property, 2 more
+[2m2026-10-30T22:33:17.133021Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0msearchFlights [3mreason[0m[2m=[0mLLM request timed out
+[2m2026-10-30T22:33:31.077801Z[0m [33m WARN[0m [2mmb_engine[0m[2m:[0m LLM generation fell back to faker [3moperation[0m[2m=[0mcancelBooking [3mreason[0m[2m=[0mrepaired output still invalid: /refund: additionalProperties: Additional properties are not allowed ('currency' was unexpected); /refund/amount: type: "129.90" is not of type "object"; /refund/fee: type: "15.00" is not of type "object"
+[2m2026-10-30T22:33:52.982075Z[0m [33m WARN[0m [2mmb_engine::message[0m[2m:[0m LLM message generation fell back to faker [3mchannel[0m[2m=[0morderCreated [3mreason[0m[2m=[0mrepaired output still invalid: : required: "id" is a required property; : required: "status" is a required property; : required: "total" is a required property
+[2m2026-10-30T22:33:53.691187Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0masyncapi/commerce-events-kafka [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 8, repaired: 1, fallback: 0, p95_ms: 7941 }
+[2m2026-10-30T22:33:53.691240Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0masyncapi/orders-amqp-2.6 [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 5, repaired: 0, fallback: 1, p95_ms: 5168 }
+[2m2026-10-30T22:33:53.691268Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgraphql/devtools-github [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 50400 }
+[2m2026-10-30T22:33:53.691283Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgraphql/ecommerce-shopify-admin [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 9512 }
+[2m2026-10-30T22:33:53.691291Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgrpc/otlp-trace-service [3mstats[0m[2m=[0mContractStats { calls: 3, llm: 2, repaired: 1, fallback: 0, p95_ms: 12419 }
+[2m2026-10-30T22:33:53.691299Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mgrpc/route-guide [3mstats[0m[2m=[0mContractStats { calls: 3, llm: 3, repaired: 0, fallback: 0, p95_ms: 1255 }
+[2m2026-10-30T22:33:53.691307Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/devtools-github [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 4, repaired: 1, fallback: 7, p95_ms: 86184 }
+[2m2026-10-30T22:33:53.691314Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/ecommerce-orders-3.1 [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 5730 }
+[2m2026-10-30T22:33:53.691321Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/ecommerce-square [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 12496 }
+[2m2026-10-30T22:33:53.691328Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/payments-paypal-orders [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 5, repaired: 2, fallback: 2, p95_ms: 60007 }
+[2m2026-10-30T22:33:53.691334Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/payments-stripe [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 12, repaired: 0, fallback: 0, p95_ms: 2272 }
+[2m2026-10-30T22:33:53.691341Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-discord [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 2, repaired: 7, fallback: 0, p95_ms: 48890 }
+[2m2026-10-30T22:33:53.691396Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-spotify [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 5, repaired: 4, fallback: 0, p95_ms: 24450 }
+[2m2026-10-30T22:33:53.691402Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/social-tmdb [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 11, repaired: 1, fallback: 0, p95_ms: 10850 }
+[2m2026-10-30T22:33:53.691408Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/travel-booking [3mstats[0m[2m=[0mContractStats { calls: 12, llm: 2, repaired: 6, fallback: 4, p95_ms: 60003 }
+[2m2026-10-30T22:33:53.691414Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0mrest/travel-hotels [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 5, repaired: 0, fallback: 1, p95_ms: 21046 }
+[2m2026-10-30T22:33:53.691420Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0msoap/accounts-rpc [3mstats[0m[2m=[0mContractStats { calls: 6, llm: 6, repaired: 0, fallback: 0, p95_ms: 2008 }
+[2m2026-10-30T22:33:53.691425Z[0m [32m INFO[0m [2mmb_evals::report[0m[2m:[0m contract evaluated [3mcontract[0m[2m=[0msoap/calculator [3mstats[0m[2m=[0mContractStats { calls: 9, llm: 9, repaired: 0, fallback: 0, p95_ms: 2031 }
+# Mockingbird LLM evals
+
+Model `nvidia/nemotron-3.5-lightning` at `http://127.0.0.1:60496/r/nvidia__nemotron-3.5-lightning~engine/api/v1`, started 2026-10-30T22:25:34.304266+00:00.
+
+| Metric | Value |
+| --- | --- |
+| Calls | 162 |
+| Schema-valid rate | 90.7% |
+| First-pass rate | 76.5% |
+| Repair rate | 14.2% |
+| Fallback rate | 9.3% |
+| p50 latency | 3636 ms |
+| p95 latency | 60003 ms |
+| Prompt tokens per call | 1309.3 |
+| Completion tokens per call | 403.1 |
+| Streaming operations not evaluated | 3 |
+
+## Per contract
+
+| Contract | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| asyncapi/commerce-events-kafka | 9 | 8 | 1 | 0 | 7941 |
+| asyncapi/orders-amqp-2.6 | 6 | 5 | 0 | 1 | 5168 |
+| graphql/devtools-github | 12 | 12 | 0 | 0 | 50400 |
+| graphql/ecommerce-shopify-admin | 12 | 12 | 0 | 0 | 9512 |
+| grpc/otlp-trace-service | 3 | 2 | 1 | 0 | 12419 |
+| grpc/route-guide | 3 | 3 | 0 | 0 | 1255 |
+| rest/devtools-github | 12 | 4 | 1 | 7 | 86184 |
+| rest/ecommerce-orders-3.1 | 9 | 9 | 0 | 0 | 5730 |
+| rest/ecommerce-square | 12 | 12 | 0 | 0 | 12496 |
+| rest/payments-paypal-orders | 9 | 5 | 2 | 2 | 60007 |
+| rest/payments-stripe | 12 | 12 | 0 | 0 | 2272 |
+| rest/social-discord | 9 | 2 | 7 | 0 | 48890 |
+| rest/social-spotify | 9 | 5 | 4 | 0 | 24450 |
+| rest/social-tmdb | 12 | 11 | 1 | 0 | 10850 |
+| rest/travel-booking | 12 | 2 | 6 | 4 | 60003 |
+| rest/travel-hotels | 6 | 5 | 0 | 1 | 21046 |
+| soap/accounts-rpc | 6 | 6 | 0 | 0 | 2008 |
+| soap/calculator | 9 | 9 | 0 | 0 | 2031 |
+
+## Per API type
+
+| API type | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| asyncapi | 15 | 13 | 1 | 1 | 7941 |
+| graphql | 24 | 24 | 0 | 0 | 43955 |
+| grpc | 6 | 5 | 1 | 0 | 12419 |
+| rest | 102 | 67 | 21 | 14 | 60004 |
+| soap | 15 | 15 | 0 | 0 | 2031 |
+
+## Per domain
+
+| Domain | Calls | LLM | Repaired | Fallback | p95 ms |
+| --- | --- | --- | --- | --- | --- |
+| devtools | 27 | 18 | 2 | 7 | 60008 |
+| ecommerce | 48 | 46 | 1 | 1 | 8237 |
+| generic | 18 | 18 | 0 | 0 | 2031 |
+| payments | 21 | 17 | 2 | 2 | 60002 |
+| social-media | 30 | 18 | 12 | 0 | 24450 |
+| travel | 18 | 7 | 6 | 5 | 60003 |
+threshold violated: schema_valid_rate 0.907 < 0.950
+threshold violated: fallback_rate 0.093 > 0.050
+threshold violated: p95_ms 60003 > 3000

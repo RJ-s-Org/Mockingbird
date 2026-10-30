@@ -346,7 +346,7 @@ async fn data_with_type_and_properties_is_not_the_schema() {
     )
     .await;
     assert!(
-        request.starts_with("An array was expected at the root"),
+        request.starts_with("An array was expected. Return it under \"items\""),
         "{request}"
     );
 }
@@ -361,15 +361,12 @@ async fn an_empty_object_is_named() {
 async fn an_object_for_an_array_is_named() {
     let request = repair_request("listOrders", json!({"total": 3, "page": 1}), false).await;
     assert!(
-        request.starts_with("An array was expected at the root"),
+        request.starts_with("An array was expected. Return it under \"items\""),
         "{request}"
     );
     let request = repair_request("listOrders", json!({"orders": [{"id": "x"}]}), false).await;
-    assert!(
-        request.starts_with("You wrapped the answer in `orders`"),
-        "{request}"
-    );
-    // In JSON-object mode the array belongs under "items".
+    assert!(request.contains(r#"{"items": [...]}"#), "{request}");
+    // In JSON-object mode too, the array belongs under "items".
     let request = repair_request("listOrders", json!({"total": 3, "page": 1}), true).await;
     assert!(
         request.starts_with(r#"An array was expected. Return it under "items""#),
