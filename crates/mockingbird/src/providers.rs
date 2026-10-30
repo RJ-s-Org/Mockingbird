@@ -271,6 +271,10 @@ pub const PRESETS: &[Preset] = &[
 ];
 
 /// The preset called `id`.
+///
+/// # Errors
+///
+/// Fails, listing the presets, when none is called `id`.
 pub fn preset(id: &str) -> anyhow::Result<&'static Preset> {
     PRESETS.iter().find(|p| p.id == id).ok_or_else(|| {
         let ids: Vec<_> = PRESETS.iter().map(|p| p.id).collect();
@@ -351,6 +355,11 @@ impl ProviderArgs {
     }
 
     /// The profile these answers describe.
+    ///
+    /// # Errors
+    ///
+    /// Fails, naming the flag, when an answer the preset needs is missing or
+    /// invalid.
     pub fn profile(&self) -> anyhow::Result<FileProfile> {
         let id = self
             .provider
@@ -486,6 +495,11 @@ pub struct ProbeReport {
 
 /// Sends `profile` one small JSON-mode completion, resolving its secret
 /// references from this process's environment and files.
+///
+/// # Errors
+///
+/// Fails when a secret reference cannot be resolved or the provider client
+/// cannot be built; a failed completion is reported in the [`ProbeReport`].
 pub async fn probe(profile: &FileProfile) -> anyhow::Result<ProbeReport> {
     let api_key = profile.api_key.as_deref().map(resolve).transpose()?;
     let mut headers = Vec::new();

@@ -27,8 +27,17 @@ const OTLP_PROTOCOL_ENVS: [&str; 2] = [
 ];
 
 /// Keeps span export running; dropping it flushes and shuts the exporter down.
+#[must_use = "dropping the guard shuts span export down"]
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
+}
+
+impl std::fmt::Debug for TelemetryGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryGuard")
+            .field("otlp", &self.provider.is_some())
+            .finish()
+    }
 }
 
 impl TelemetryGuard {
@@ -53,6 +62,11 @@ impl Drop for TelemetryGuard {
 /// [`OTLP_ENDPOINT_ENV`] is set, an OpenTelemetry layer exporting spans
 /// over OTLP HTTP/protobuf (a `grpc` protocol variable is warned about and
 /// not followed). Fails when a global subscriber is already installed.
+///
+/// # Errors
+///
+/// Fails when a global subscriber is already installed or the OTLP
+/// exporter cannot be built.
 pub fn init(service_name: &str) -> anyhow::Result<TelemetryGuard> {
     let env = |name: &str| std::env::var(name).ok();
     let guard = init_with(service_name, otlp_endpoint(env))?;
@@ -89,6 +103,10 @@ fn grpc_protocol(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
 /// [`init`] with the value of [`OTLP_ENDPOINT_ENV`] given rather than read
 /// (`None` or blank: no OTLP export). The exporter itself still reads the
 /// standard `OTEL_EXPORTER_OTLP_*` variables.
+///
+/// # Errors
+///
+/// As [`init`].
 pub fn init_with(
     service_name: &str,
     otlp_endpoint: Option<String>,
@@ -161,6 +179,10 @@ static PROMETHEUS: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 /// that renders the text exposition. [`REQUEST_DURATION_METRIC`] is a
 /// histogram with [`REQUEST_DURATION_BUCKETS`] (other histograms are
 /// summaries). Later calls return the same handle.
+/// Fails when another global `metrics` recorder is installed.
+///
+/// # Errors
+///
 /// Fails when another global `metrics` recorder is installed.
 pub fn install_prometheus() -> anyhow::Result<PrometheusHandle> {
     let mut installed = PROMETHEUS

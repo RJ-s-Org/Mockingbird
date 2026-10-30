@@ -79,6 +79,12 @@ impl Started {
 
 /// Runs `args.command` against the mocks; the result is its exit code
 /// (`128 + n` when signal `n` ended it, 127 when it cannot be started).
+///
+/// # Errors
+///
+/// Fails when the config file does not load, the proxy options cannot be
+/// set up, or the server cannot be started or reached; a command that
+/// cannot be started is exit code 127, not an error.
 pub async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     let config = match &args.config {
         Some(path) => path.clone(),

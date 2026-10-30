@@ -61,12 +61,27 @@ pub struct StoreRecorder {
     bus_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+impl std::fmt::Debug for StoreRecorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreRecorder")
+            .field(
+                "dropped",
+                &self.dropped.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl StoreRecorder {
     /// Starts the writer task; it must be called inside a Tokio runtime.
     /// The task stops once the recorder is dropped and the queue drained.
     ///
     /// `retention` is the number of entries kept per mock; `redact_fields`
     /// are JSON keys whose values are replaced with `"[redacted]"`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn new(
         store: Arc<dyn ControlStore>,
         retention: u32,
@@ -107,6 +122,10 @@ impl StoreRecorder {
     /// (not on a single node's local bus), and entries other nodes
     /// announce are read from the store and sent to [`StoreRecorder::live`]
     /// subscribers. Only the first call has an effect.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn with_bus(self: Arc<Self>, ha: Arc<Ha>) {
         let bus = Arc::clone(&ha.bus);
         if bus.is_local() {

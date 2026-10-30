@@ -25,6 +25,10 @@ pub const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::
 pub enum ServeError {
     /// A command-line or configuration mistake (exit code 2).
     Usage(String),
+    /// Binding, building or serving failed (exit code 1). It is transparent:
+    /// it displays the error's own message and returns its causes from
+    /// [`source`](std::error::Error::source), so `{:#}` on an
+    /// [`anyhow::Error`] holding it prints each cause once.
     Other(anyhow::Error),
 }
 
@@ -38,15 +42,23 @@ impl std::fmt::Display for ServeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServeError::Usage(msg) => f.write_str(msg),
-            ServeError::Other(e) => write!(f, "{e:#}"),
+            ServeError::Other(e) => std::fmt::Display::fmt(e, f),
         }
     }
 }
 
-impl std::error::Error for ServeError {}
+impl std::error::Error for ServeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ServeError::Usage(_) => None,
+            ServeError::Other(e) => e.source(),
+        }
+    }
+}
 
 /// The bound listeners; `None` for a listener the role does not use (or a
 /// default admin/gRPC port that was busy).
+#[derive(Debug)]
 pub struct Listeners {
     pub data: Option<TcpListener>,
     pub admin: Option<TcpListener>,
@@ -55,24 +67,65 @@ pub struct Listeners {
     pub proxy: Option<TcpListener>,
 }
 
-/// Which listeners a role binds: (data, admin, grpc). A `control` node
-/// serves no mocks, so it binds neither the data nor the gRPC listener.
-pub fn binds_for(role: Role) -> (bool, bool, bool) {
-    match role {
-        Role::All | Role::Data => (true, true, true),
-        Role::Control => (false, true, false),
+/// Which listeners a role binds (see [`Binds::for_role`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Binds {
+    /// The data plane (the mocks).
+    pub data: bool,
+    /// The Admin API and ops endpoints.
+    pub admin: bool,
+    /// The gRPC mocks (h2c).
+    pub grpc: bool,
+}
+
+impl Binds {
+    /// The listeners `role` binds. A `control` node serves no mocks, so it
+    /// binds neither the data nor the gRPC listener.
+    #[must_use]
+    pub fn for_role(role: Role) -> Binds {
+        match role {
+            Role::All | Role::Data => Binds {
+                data: true,
+                admin: true,
+                grpc: true,
+            },
+            Role::Control => Binds {
+                data: false,
+                admin: true,
+                grpc: false,
+            },
+        }
     }
+}
+
+/// Which listeners a role binds: (data, admin, grpc).
+#[deprecated(
+    since = "0.1.1",
+    note = "use `Binds::for_role`, which names the listeners"
+)]
+pub fn binds_for(role: Role) -> (bool, bool, bool) {
+    let Binds { data, admin, grpc } = Binds::for_role(role);
+    (data, admin, grpc)
 }
 
 /// [`run_with`] with `MB_LLM_*` from the environment and the self-hosted
 /// [`Extensions`].
+///
+/// # Errors
+///
+/// As [`run_with`].
 pub async fn run(args: ServeArgs) -> Result<(), ServeError> {
     run_inner(args, Some(LlmEnv::from_env()), None).await
 }
 
 /// Validates the configuration, binds the role's listeners (see
-/// [`binds_for`]), builds the app and serves it until SIGINT/SIGTERM, then
+/// [`Binds::for_role`]), builds the app and serves it until SIGINT/SIGTERM, then
 /// shuts down gracefully (see [`serve_app`]).
+///
+/// # Errors
+///
+/// [`ServeError::Usage`] for a configuration or command-line mistake,
+/// [`ServeError::Other`] when binding, building or serving fails.
 pub async fn run_with(
     args: ServeArgs,
     llm: Option<LlmEnv>,
@@ -101,7 +154,11 @@ async fn run_inner(
             "MB_LLM_API_KEY is not set (use --offline for faker-only mode)".into(),
         ));
     }
-    let (bind_data, bind_admin_port, bind_grpc_port) = binds_for(role);
+    let Binds {
+        data: bind_data,
+        admin: bind_admin_port,
+        grpc: bind_grpc_port,
+    } = Binds::for_role(role);
     let data_addr = SocketAddr::new(cfg.server.host, cfg.server.port);
     let admin_addr = SocketAddr::new(cfg.server.host, cfg.server.admin_port);
     let grpc_addr = SocketAddr::new(cfg.server.host, cfg.server.grpc_port);
@@ -197,6 +254,10 @@ async fn run_inner(
 /// peer address, gRPC as h2c; all three over TLS when [`App::tls`] is set)
 /// until `stop` turns true, then drains the open connections for at most
 /// [`GRACEFUL_SHUTDOWN_TIMEOUT`] and calls [`App::shutdown`].
+///
+/// # Errors
+///
+/// Fails when a listener fails to serve.
 pub async fn serve_app(
     app: App,
     listeners: Listeners,

@@ -8,6 +8,10 @@ use anyhow::{Context, anyhow, bail};
 use serde_json::{Value, json};
 
 /// `<HOME or USERPROFILE>/.mockingbird/secrets`.
+///
+/// # Errors
+///
+/// Fails when neither `HOME` nor `USERPROFILE` is set.
 pub fn default_store_dir() -> anyhow::Result<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -29,6 +33,11 @@ pub fn valid_name(name: &str) -> bool {
 /// replacing any previous key atomically; `dir` is created (or tightened)
 /// to owner-only access. Returns the file's absolute path. The value is
 /// never logged.
+///
+/// # Errors
+///
+/// Fails for an invalid `name` or an empty value, and when `dir` or the
+/// file cannot be created, restricted or renamed into place.
 pub fn write_secret(dir: &Path, name: &str, value: &str) -> anyhow::Result<PathBuf> {
     if !valid_name(name) {
         bail!("key names are 1-64 characters of [A-Za-z0-9._-], not starting with a dot");

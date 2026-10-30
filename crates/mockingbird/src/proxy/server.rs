@@ -21,6 +21,10 @@ use crate::file_config::Unmapped;
 use crate::registry::{normalize_host, request_host};
 
 /// Accepts proxy connections on `listener` until `stop` turns true.
+///
+/// # Errors
+///
+/// Fails when accepting a connection fails.
 pub async fn serve(
     listener: TcpListener,
     state: Arc<ProxyState>,

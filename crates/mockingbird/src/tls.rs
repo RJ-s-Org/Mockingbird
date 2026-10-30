@@ -21,6 +21,11 @@ pub const RELOAD_INTERVAL: Duration = Duration::from_secs(60);
 /// Reads `server.tls`'s certificate chain and key into a rustls server
 /// configuration (aws-lc-rs, ALPN `h2` then `http/1.1`). An unreadable or
 /// invalid file is an error naming its key and path.
+///
+/// # Errors
+///
+/// Fails, naming the key and path, when a file cannot be read or holds no
+/// valid certificate chain or key.
 pub async fn load_rustls(cfg: &TlsConfig) -> anyhow::Result<RustlsConfig> {
     Ok(RustlsConfig::from_config(Arc::new(
         server_config(cfg).await?,
@@ -54,6 +59,10 @@ async fn server_config(cfg: &TlsConfig) -> anyhow::Result<ServerConfig> {
 
 /// A rustls server configuration serving `certs` (leaf first) with `key`:
 /// aws-lc-rs, safe default protocol versions, ALPN `h2` then `http/1.1`.
+///
+/// # Errors
+///
+/// Fails when rustls rejects the certificates or the key.
 pub fn server_config_from(
     certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
@@ -81,6 +90,10 @@ async fn read(path: &Path, key: &str) -> anyhow::Result<Vec<u8>> {
 
 /// Checks the certificate files every [`RELOAD_INTERVAL`] (see
 /// [`spawn_reloader_every`]).
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn spawn_reloader(cfg: TlsConfig, rustls: RustlsConfig) -> JoinHandle<()> {
     spawn_reloader_every(cfg, rustls, RELOAD_INTERVAL)
 }
@@ -89,6 +102,10 @@ pub fn spawn_reloader(cfg: TlsConfig, rustls: RustlsConfig) -> JoinHandle<()> {
 /// file's modification time changed since the last successful load. A bad
 /// file logs an error and keeps the old certificates (it is tried again
 /// on the next tick).
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn spawn_reloader_every(
     cfg: TlsConfig,
     rustls: RustlsConfig,
@@ -141,6 +158,11 @@ async fn mtimes(cfg: &TlsConfig) -> (Option<SystemTime>, Option<SystemTime>) {
 /// The outbound HTTP options from `outbound:`, reading `outbound.ca_file`.
 /// An unreadable file or one without a valid PEM certificate is an error
 /// naming `outbound.ca_file`; so is a proxy reqwest rejects.
+///
+/// # Errors
+///
+/// Fails, naming the key, for an unreadable `outbound.ca_file`, one
+/// without a valid PEM certificate, or a proxy reqwest rejects.
 pub fn outbound_options(cfg: &OutboundConfig) -> anyhow::Result<mb_llm::HttpOptions> {
     let extra_roots_pem = match &cfg.ca_file {
         Some(path) => {
@@ -167,6 +189,11 @@ pub fn outbound_options(cfg: &OutboundConfig) -> anyhow::Result<mb_llm::HttpOpti
 }
 
 /// With `server.tls`, `auth.external_url` must be an `https://` URL.
+///
+/// # Errors
+///
+/// Fails when `server.tls` is set and `auth.external_url` is not an
+/// `https://` URL.
 pub fn check_external_url(cfg: &FileConfig) -> Result<(), String> {
     if cfg.server.tls.is_some() && !cfg.auth.secure_cookies() {
         return Err(format!(
@@ -178,6 +205,8 @@ pub fn check_external_url(cfg: &FileConfig) -> Result<(), String> {
 }
 
 /// Stops a certificate reloader when dropped.
+#[derive(Debug)]
+#[must_use = "dropping the guard stops the certificate reloader"]
 pub struct ReloaderGuard(pub JoinHandle<()>);
 
 impl Drop for ReloaderGuard {

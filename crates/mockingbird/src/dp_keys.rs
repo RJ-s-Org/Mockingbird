@@ -17,7 +17,14 @@ pub struct StoreDataPlaneKeys {
     keys: ApiKeys,
 }
 
+impl std::fmt::Debug for StoreDataPlaneKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreDataPlaneKeys").finish_non_exhaustive()
+    }
+}
+
 impl StoreDataPlaneKeys {
+    /// Verifies against `store`, reading it on every call.
     pub fn new(store: Arc<dyn ControlStore>) -> Arc<Self> {
         Arc::new(Self {
             keys: ApiKeys::new(store),

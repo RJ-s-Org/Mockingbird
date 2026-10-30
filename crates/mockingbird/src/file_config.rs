@@ -100,6 +100,10 @@ impl Default for ProxyConfig {
 impl ProxyConfig {
     /// Refuses `unmapped: pass` on a non-loopback `host`: anyone who can
     /// reach the port could tunnel to any address through it.
+    ///
+    /// # Errors
+    ///
+    /// Fails, explaining why, for `unmapped: pass` on a non-loopback `host`.
     pub fn check_bind(&self, host: IpAddr) -> Result<(), String> {
         if host.is_loopback() || self.unmapped == Unmapped::Block {
             Ok(())
@@ -111,6 +115,10 @@ impl ProxyConfig {
     }
 
     /// `ca_dir`, else [`default_ca_dir`](crate::proxy::ca::default_ca_dir).
+    ///
+    /// # Errors
+    ///
+    /// Fails when no `ca_dir` is set and the home directory cannot be found.
     pub fn effective_ca_dir(&self) -> anyhow::Result<PathBuf> {
         match &self.ca_dir {
             Some(dir) => Ok(dir.clone()),
@@ -120,7 +128,9 @@ impl ProxyConfig {
 }
 
 /// What the proxy does with a host no mock claims (`proxy.unmapped`).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Unmapped {
     /// Tunnel `CONNECT` and forward plain requests to the real host.
@@ -131,6 +141,7 @@ pub enum Unmapped {
 }
 
 impl Unmapped {
+    /// The setting's name (`pass` or `block`).
     pub fn as_str(self) -> &'static str {
         match self {
             Unmapped::Pass => "pass",
@@ -139,8 +150,45 @@ impl Unmapped {
     }
 }
 
+impl std::fmt::Display for Unmapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A `proxy.unmapped` value that is neither `pass` nor `block`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseUnmappedError(String);
+
+impl std::fmt::Display for ParseUnmappedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown proxy.unmapped value {:?}; expected pass or block",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ParseUnmappedError {}
+
+impl std::str::FromStr for Unmapped {
+    type Err = ParseUnmappedError;
+
+    /// Parses `pass` or `block`, in any case.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "pass" => Ok(Unmapped::Pass),
+            "block" => Ok(Unmapped::Block),
+            _ => Err(ParseUnmappedError(s.to_owned())),
+        }
+    }
+}
+
 /// Which planes a node serves (`server.role`, `MB_ROLE`, `--role`).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default, clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     /// Control and data plane in one process.
@@ -153,12 +201,19 @@ pub enum Role {
 }
 
 impl Role {
+    /// The role's name (`all`, `control` or `data`).
     pub fn as_str(self) -> &'static str {
         match self {
             Role::All => "all",
             Role::Control => "control",
             Role::Data => "data",
         }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -352,6 +407,11 @@ pub const MIN_IMPORT_TOKENS: u64 = 1000;
 impl ImportConfig {
     /// The worker pool's settings; `Err("import.<field>: <reason>")` when a
     /// value is out of range or an allowlist entry does not parse.
+    ///
+    /// # Errors
+    ///
+    /// `Err("import.<field>: <reason>")` for an out-of-range value or an
+    /// allowlist entry that does not parse.
     pub fn settings(&self) -> Result<mb_admin::ImportSettings, String> {
         if !IMPORT_WORKERS.contains(&self.workers) {
             return Err(format!(
@@ -428,6 +488,11 @@ impl Default for AuthConfig {
 impl AuthConfig {
     /// In `oidc` mode: `auth.oidc` must be present and `external_url` an
     /// http(s) URL with a host. `none` mode has nothing to check.
+    ///
+    /// # Errors
+    ///
+    /// Fails, naming the key, in `oidc` mode without `auth.oidc` or with an
+    /// `external_url` that is not an http(s) URL with a host.
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == AuthMode::None {
             return Ok(());
@@ -441,6 +506,10 @@ impl AuthConfig {
     /// The `host[:port]` of `external_url`, lowercased (the port only when
     /// it is not the scheme's default). `Err` unless `external_url` is an
     /// http or https URL with a host.
+    ///
+    /// # Errors
+    ///
+    /// Fails unless `external_url` is an http or https URL with a host.
     pub fn external_host(&self) -> Result<String, String> {
         let invalid = || {
             format!(
@@ -608,6 +677,12 @@ impl ServerConfig {
     /// shares it): in `none` mode a non-loopback address needs
     /// `--insecure-no-auth`; `oidc` mode accepts any address once its
     /// settings are valid ([`AuthConfig::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails for a non-loopback address in `none` mode without
+    /// `--insecure-no-auth`, and in `oidc` mode when [`AuthConfig::validate`]
+    /// fails.
     pub fn check_bind(&self, auth: &AuthConfig) -> Result<(), String> {
         if auth.mode == AuthMode::Oidc {
             return auth.validate();
@@ -921,6 +996,12 @@ pub struct FileSasl {
 /// password in a `url`, a secret reference as the SASL password, and no
 /// TLS for MQTT (`mqtts://`/`ssl://` URLs, `tls` or `ca_file`; see
 /// [`MQTT_TLS_UNSUPPORTED`]).
+///
+/// # Errors
+///
+/// Fails, naming the broker, for an unknown or uncompiled `kind`, a missing
+/// address, a password in a `url`, a SASL password that is not a secret
+/// reference, or TLS for MQTT.
 pub fn broker_configs(cfg: &FileConfig) -> anyhow::Result<Vec<BrokerConfig>> {
     cfg.brokers
         .iter()
@@ -1090,6 +1171,7 @@ pub struct FileWebhook {
 }
 
 impl FileWebhook {
+    /// The webhook as the control store keeps it.
     pub fn to_store(&self) -> WebhookTarget {
         WebhookTarget {
             url: self.url.clone(),
@@ -1348,6 +1430,7 @@ pub struct FileScenarioOperationEntry {
 }
 
 impl FileScenarioOperation {
+    /// The operation id, in either form.
     pub fn id(&self) -> &str {
         match self {
             FileScenarioOperation::Id(id) => id,
@@ -1400,6 +1483,10 @@ impl FileConfig {
     /// `outbound.proxy`, the `limits:` and `protocols:` ranges, every mock's
     /// and scenario's `chaos`, `limits` and `stream_item_interval`, the
     /// `pii:` patterns and the `import:` section ([`ImportConfig::settings`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails with the first broken rule, naming its key.
     pub fn validate_ranges(&self) -> Result<(), String> {
         self.validate_file()?;
         self.validate_role()
@@ -1684,6 +1771,10 @@ fn is_redis(url: &str) -> bool {
 }
 
 /// Reads and parses `path`, resolving contract paths against its directory.
+///
+/// # Errors
+///
+/// Fails when `path` cannot be read or does not parse as a config file.
 pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read config file {}", path.display()))?;
@@ -1811,6 +1902,10 @@ fn explicit_ports(text: &str) -> ExplicitPorts {
 }
 
 /// Applies the `MB_*` environment variables (see [`apply_env_from`]).
+///
+/// # Errors
+///
+/// As [`apply_env_from`].
 pub fn apply_env(cfg: &mut FileConfig) -> anyhow::Result<()> {
     apply_env_from(cfg, |k| std::env::var(k).ok())
 }
@@ -1823,6 +1918,11 @@ pub fn apply_env(cfg: &mut FileConfig) -> anyhow::Result<()> {
 /// the documented defaults if absent, and made the default profile when
 /// none is set). `MB_LLM_API_KEY` is stored as the reference
 /// [`ENV_API_KEY_REF`], never as its value. Empty values count as unset.
+///
+/// # Errors
+///
+/// Fails, naming the variable, when a port, address, role or number does
+/// not parse.
 pub fn apply_env_from(
     cfg: &mut FileConfig,
     lookup: impl Fn(&str) -> Option<String>,

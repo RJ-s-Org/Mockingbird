@@ -16,7 +16,7 @@ use mb_ext::Extensions;
 use mb_state::{Bus, LeaderBackend, MemoryBusHub};
 use mockingbird::config::{App, ServeArgs, build_app_with, build_app_with_leader};
 use mockingbird::file_config::Role;
-use mockingbird::server::{Listeners, ServeError, binds_for, run_with, serve_app};
+use mockingbird::server::{Binds, Listeners, ServeError, run_with, serve_app};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -34,10 +34,10 @@ fn url(listener: &TcpListener) -> String {
     format!("http://{}", listener.local_addr().unwrap())
 }
 
-/// Binds what `app.role` binds (per `binds_for`) on ephemeral ports and
+/// Binds what `app.role` binds (per `Binds::for_role`) on ephemeral ports and
 /// serves the app.
 async fn run(app: App) -> Running {
-    let (data, admin, grpc) = binds_for(app.role);
+    let Binds { data, admin, grpc } = Binds::for_role(app.role);
     assert!(admin, "every role binds the admin port");
     let data = match data {
         true => Some(ephemeral().await),
@@ -150,9 +150,21 @@ async fn readyz(admin: &str) -> Value {
 
 #[test]
 fn control_role_binds_no_data_listener() {
-    assert_eq!(binds_for(Role::Control), (false, true, false));
-    assert_eq!(binds_for(Role::Data), (true, true, true));
-    assert_eq!(binds_for(Role::All), (true, true, true));
+    let all = Binds {
+        data: true,
+        admin: true,
+        grpc: true,
+    };
+    assert_eq!(
+        Binds::for_role(Role::Control),
+        Binds {
+            data: false,
+            admin: true,
+            grpc: false
+        }
+    );
+    assert_eq!(Binds::for_role(Role::Data), all);
+    assert_eq!(Binds::for_role(Role::All), all);
 }
 
 #[tokio::test]

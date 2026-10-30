@@ -93,6 +93,19 @@ pub struct McpServer {
     started_config: std::sync::Mutex<Option<PathBuf>>,
 }
 
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServer")
+            .field("admin_url", &self.admin_url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("workspace", &self.workspace)
+            .field("read_only", &self.read_only)
+            .field("local_tools", &self.local_tools)
+            .field("state_dir", &self.state_dir)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Tools that read or write this machine's files or environment, or run
 /// processes: hidden from HTTP clients unless `--allow-local-tools`, since a
 /// remote caller could otherwise send a local secret to a host it picks.
@@ -966,6 +979,9 @@ fn invalid_draft(body: &str) -> String {
 }
 
 impl McpServer {
+    /// A server for the Admin API at `admin_url` (with `token` as its bearer
+    /// token) and `workspace`. Tools that touch this machine are exposed over
+    /// stdio, or over HTTP with `--allow-local-tools`.
     pub fn new(admin_url: &str, token: Option<&str>, workspace: &str, args: &McpArgs) -> Self {
         Self {
             admin_url: admin_url.to_string(),
@@ -1954,6 +1970,10 @@ fn get_prompt(params: &Value) -> Result<Value, (i64, String)> {
 }
 
 /// `mockingbird mcp`.
+///
+/// # Errors
+///
+/// Fails when the stdio transport fails.
 pub async fn run(
     args: McpArgs,
     admin_url: &str,
@@ -2132,6 +2152,16 @@ mod tests {
             state_dir: std::env::temp_dir().join("mb-mcp-test-none"),
             started_config: std::sync::Mutex::new(None),
         }
+    }
+
+    #[test]
+    fn debug_hides_the_token() {
+        let mut s = server(false);
+        s.token = Some("mbk_live_s3cr3t-token".into());
+        let shown = format!("{s:?}");
+        assert!(!shown.contains("s3cr3t"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(shown.contains("http://127.0.0.1:1"), "{shown}");
     }
 
     /// Calls tool `name`; asserts it succeeded and parses its JSON text.

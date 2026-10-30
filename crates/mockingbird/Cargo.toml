@@ -24,6 +24,10 @@ pkg-fmt = "tgz"
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
 
+# docs.rs documents every broker feature.
+[package.metadata.docs.rs]
+all-features = true
+
 [lints]
 workspace = true
 

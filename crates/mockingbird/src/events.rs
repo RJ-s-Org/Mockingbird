@@ -24,6 +24,12 @@ pub struct StoreLease {
     pub store: Arc<dyn ControlStore>,
 }
 
+impl std::fmt::Debug for StoreLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreLease").finish_non_exhaustive()
+    }
+}
+
 #[async_trait]
 impl LeaseProvider for StoreLease {
     async fn try_acquire(&self, key: &str, holder: &str, ttl: Duration) -> Result<bool, String> {
@@ -40,6 +46,15 @@ impl LeaseProvider for StoreLease {
 pub struct RegistryChannels {
     pub registry: Arc<MockRegistry>,
     pub brokers: Arc<Brokers>,
+}
+
+impl std::fmt::Debug for RegistryChannels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryChannels")
+            .field("registry", &self.registry)
+            .field("brokers", &self.brokers)
+            .finish()
+    }
 }
 
 #[async_trait]

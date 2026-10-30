@@ -110,17 +110,71 @@ pub struct Snapshot {
     writer: Option<Mutex<std::fs::File>>,
 }
 
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("dir", &self.dir)
+            .field("replay", &self.replay)
+            .field("record", &self.writer.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`Snapshot::open_with`] opens a snapshot directory for
+/// (`--replay`, `--record`, or both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SnapshotMode {
+    /// Answer from the recorded answers.
+    pub replay: bool,
+    /// Append new answers to [`ANSWERS_FILE`].
+    pub record: bool,
+}
+
+impl SnapshotMode {
+    /// `--replay` alone.
+    pub const REPLAY: SnapshotMode = SnapshotMode {
+        replay: true,
+        record: false,
+    };
+    /// `--record` alone.
+    pub const RECORD: SnapshotMode = SnapshotMode {
+        replay: false,
+        record: true,
+    };
+}
+
 /// Where a replayed answer came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hit {
+    /// The same prompt was recorded.
     Exact,
+    /// Only the same operation was recorded.
     Operation,
 }
 
 impl Snapshot {
-    /// Opens `dir`: loads its answers for `replay` and, for `record`,
-    /// creates it and opens [`ANSWERS_FILE`] for appending.
+    /// [`Snapshot::open_with`] with `replay` and `record` as bare flags.
+    ///
+    /// # Errors
+    ///
+    /// As [`Snapshot::open_with`].
+    #[deprecated(
+        since = "0.1.1",
+        note = "use `Snapshot::open_with`, which names the mode"
+    )]
     pub fn open(dir: &Path, replay: bool, record: bool) -> anyhow::Result<Snapshot> {
+        Snapshot::open_with(dir, SnapshotMode { replay, record })
+    }
+
+    /// Opens `dir`: loads its answers for `mode.replay` and, for
+    /// `mode.record`, creates it and opens [`ANSWERS_FILE`] for appending.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an answers file does not parse or has an unsupported
+    /// version, or (for `record`) `dir` or the file cannot be created.
+    pub fn open_with(dir: &Path, mode: SnapshotMode) -> anyhow::Result<Snapshot> {
+        let SnapshotMode { replay, record } = mode;
         let path = dir.join(ANSWERS_FILE);
         let mut answers = Answers::default();
         if replay || record {
@@ -172,14 +226,17 @@ impl Snapshot {
         })
     }
 
+    /// The snapshot directory.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
+    /// Whether recorded answers are served (`--replay`).
     pub fn replays(&self) -> bool {
         self.replay
     }
 
+    /// Whether new answers are appended (`--record`).
     pub fn records(&self) -> bool {
         self.writer.is_some()
     }
@@ -201,6 +258,10 @@ impl Snapshot {
     }
 
     /// Appends `content` as the answer to `req` (a duplicate is skipped).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the answer cannot be serialised or appended.
     pub fn record(&self, req: &ChatRequest, content: &str) -> anyhow::Result<bool> {
         let Some(writer) = &self.writer else {
             return Ok(false);
@@ -228,6 +289,11 @@ impl Snapshot {
     /// Seeds the sessions under `<dir>/sessions/<mock>/<session>.json`
     /// into `workspace` (the one `snapshot export` read them from); returns
     /// how many were seeded.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a session file cannot be read or parsed, or the state store
+    /// rejects a write.
     pub async fn seed_sessions(
         &self,
         state: &dyn StateStore,
@@ -322,6 +388,16 @@ pub struct SnapshotProvider {
     inner: Option<Arc<dyn Provider>>,
     snapshot: Arc<Snapshot>,
     mock: String,
+}
+
+impl std::fmt::Debug for SnapshotProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotProvider")
+            .field("mock", &self.mock)
+            .field("snapshot", &self.snapshot)
+            .field("live", &self.inner.is_some())
+            .finish()
+    }
 }
 
 impl SnapshotProvider {
@@ -509,6 +585,11 @@ pub struct SnapshotArgs {
 }
 
 /// The `snapshot` subcommands; JSON summaries.
+///
+/// # Errors
+///
+/// Fails when the Admin API cannot be reached or answers with an error,
+/// or the snapshot directory cannot be read or written.
 pub async fn run(
     admin_url: &str,
     token: Option<&str>,
@@ -800,13 +881,13 @@ mod tests {
     #[test]
     fn records_then_replays_in_order_then_by_operation() {
         let dir = tempfile::tempdir().unwrap();
-        let rec = Snapshot::open(dir.path(), false, true).unwrap();
+        let rec = Snapshot::open_with(dir.path(), SnapshotMode::RECORD).unwrap();
         assert!(rec.record(&req("op", "a"), "1").unwrap());
         assert!(rec.record(&req("op", "a"), "2").unwrap());
         assert!(!rec.record(&req("op", "a"), "1").unwrap(), "duplicate");
         drop(rec);
 
-        let play = Snapshot::open(dir.path(), true, false).unwrap();
+        let play = Snapshot::open_with(dir.path(), SnapshotMode::REPLAY).unwrap();
         let get = |r| play.lookup(&r).unwrap();
         assert_eq!(get(req("op", "a")), ("1".into(), Hit::Exact));
         assert_eq!(get(req("op", "a")), ("2".into(), Hit::Exact));
@@ -917,7 +998,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let provider = SnapshotProvider {
             inner: None,
-            snapshot: Arc::new(Snapshot::open(dir.path(), true, false).unwrap()),
+            snapshot: Arc::new(Snapshot::open_with(dir.path(), SnapshotMode::REPLAY).unwrap()),
             mock: "m".into(),
         };
         let err = provider.complete(req("op", "a")).await.unwrap_err();

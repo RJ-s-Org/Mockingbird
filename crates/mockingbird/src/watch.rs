@@ -34,7 +34,7 @@ pub type Applied =
 
 /// The outcome of the last config reload, shared with `/readyz`: the
 /// error of the last reload when it failed, cleared by the next good one.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ReloadStatus(Arc<Mutex<Option<String>>>);
 
 impl ReloadStatus {
@@ -59,9 +59,18 @@ impl ReloadStatus {
 }
 
 /// Keeps the watch running; dropping it stops watching.
+#[must_use = "dropping the guard stops watching"]
 pub struct WatchGuard {
     _watcher: Arc<Mutex<Watcher>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for WatchGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatchGuard")
+            .field("task", &self.task)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for WatchGuard {
@@ -128,6 +137,15 @@ fn normalize(path: &Path) -> Option<(PathBuf, PathBuf)> {
 /// reconcile is logged and the previous state kept.
 ///
 /// Must be called inside a Tokio runtime.
+///
+/// # Errors
+///
+/// Fails when the file watcher cannot be created or a path cannot be
+/// watched.
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn spawn(
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,
@@ -138,6 +156,14 @@ pub fn spawn(
 
 /// [`spawn`] with a custom `prepare` step in place of applying the
 /// environment.
+///
+/// # Errors
+///
+/// As [`spawn`].
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn spawn_with(
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,
@@ -148,6 +174,14 @@ pub fn spawn_with(
 }
 
 /// [`spawn_with`] that also runs `applied` after each successful reload.
+///
+/// # Errors
+///
+/// As [`spawn`].
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn spawn_with_hook(
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,
@@ -166,6 +200,14 @@ pub fn spawn_with_hook(
 }
 
 /// [`spawn_with_hook`] that records each reload's outcome in `status`.
+///
+/// # Errors
+///
+/// As [`spawn`].
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn spawn_with_status(
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,

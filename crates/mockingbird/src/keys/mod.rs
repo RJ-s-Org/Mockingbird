@@ -40,6 +40,11 @@ pub struct SetupArgs {
 
 /// The page options for storing a key named `name` (default: the profile's
 /// name) and updating `profile` of `config` when that config exists.
+///
+/// # Errors
+///
+/// Fails when no key name can be chosen or it is invalid, or the profile
+/// cannot be resolved (see [`resolve_profile`](crate::onboard::resolve_profile)).
 pub fn page_options(
     name: Option<&str>,
     config: &Path,
@@ -78,6 +83,11 @@ pub fn page_options(
 
 /// `mockingbird keys setup`: prints the URL on stderr, waits for the key,
 /// and returns where it went (never the key).
+///
+/// # Errors
+///
+/// Fails when the page cannot start, no key is saved before the timeout,
+/// or the key or the config file cannot be written.
 pub async fn setup(args: &SetupArgs) -> anyhow::Result<Value> {
     let opts = page_options(
         args.name.as_deref(),

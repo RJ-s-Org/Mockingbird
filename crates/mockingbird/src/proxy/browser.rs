@@ -132,6 +132,11 @@ fn find_browser() -> anyhow::Result<PathBuf> {
 }
 
 /// `mockingbird proxy browser`.
+///
+/// # Errors
+///
+/// Fails when the proxy options or environment cannot be set up, or the
+/// browser cannot be started or exits with an error.
 pub async fn run(args: ProxyBrowserArgs) -> anyhow::Result<()> {
     let opts = options_for(args.config.as_deref(), args.port)?;
     let env = proxy_env(&opts)?;

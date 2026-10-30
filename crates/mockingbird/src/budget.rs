@@ -41,6 +41,16 @@ pub struct StoreTokenBudget {
     known_total: AtomicU64,
 }
 
+impl std::fmt::Debug for StoreTokenBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreTokenBudget")
+            .field("mock_id", &self.mock_id)
+            .field("label", &self.label)
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
+}
+
 impl StoreTokenBudget {
     /// A budget of `limit` tokens per UTC day for `mock`, with a task that
     /// flushes it every [`BUDGET_FLUSH_INTERVAL`] (the first time at once,
@@ -48,6 +58,10 @@ impl StoreTokenBudget {
     /// reference and ends once the budget is dropped with its runtime.
     ///
     /// Must be called inside a Tokio runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn spawn(store: Arc<dyn ControlStore>, mock: &Mock, limit: u64) -> Arc<Self> {
         let budget = Arc::new(Self {
             store,
@@ -67,6 +81,7 @@ impl StoreTokenBudget {
         &self.label
     }
 
+    /// Tokens per UTC day.
     pub fn limit(&self) -> u64 {
         self.limit
     }

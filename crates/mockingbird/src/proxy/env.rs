@@ -24,6 +24,11 @@ pub struct ProxyEnvOptions {
 /// - port: `port`, else `proxy.port` (8888 by default);
 /// - host: `proxy.host`, with `0.0.0.0`/`::` read as `127.0.0.1`;
 /// - CA directory: `proxy.ca_dir`, else `MB_CA_DIR` or `~/.mockingbird/ca`.
+///
+/// # Errors
+///
+/// Fails when `config` cannot be loaded or the `MB_*` environment is
+/// invalid.
 pub fn options_for(config: Option<&Path>, port: Option<u16>) -> anyhow::Result<ProxyEnvOptions> {
     let mut cfg = match config {
         Some(path) => file_config::load(path)?,
@@ -91,6 +96,10 @@ impl ProxyEnv {
 /// The proxy variables for `opts`, merged with this process's
 /// `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `PYTHONPATH` and `GODEBUG`; see
 /// [`proxy_env_with`].
+///
+/// # Errors
+///
+/// As [`proxy_env_with`].
 pub fn proxy_env(opts: &ProxyEnvOptions) -> anyhow::Result<ProxyEnv> {
     proxy_env_with(opts, |name| std::env::var(name).ok())
 }
@@ -114,6 +123,11 @@ pub fn proxy_env(opts: &ProxyEnvOptions) -> anyhow::Result<ProxyEnv> {
 /// `PYTHONPATH`/`GODEBUG`, which are kept after ours (once). Creates the CA
 /// when it is missing and rewrites the bundle, the truststore and the
 /// preloads.
+///
+/// # Errors
+///
+/// Fails when the CA, its bundle, its truststore or the preload scripts
+/// cannot be written.
 pub fn proxy_env_with(
     opts: &ProxyEnvOptions,
     inherited: impl Fn(&str) -> Option<String>,

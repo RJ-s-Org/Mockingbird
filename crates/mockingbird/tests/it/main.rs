@@ -12,6 +12,7 @@
 mod support;
 
 mod agent_toolkit;
+mod api_style;
 mod auth_serve;
 mod chaos;
 mod ci;

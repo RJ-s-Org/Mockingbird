@@ -46,6 +46,7 @@ pub struct ReconcileReport {
 }
 
 impl ReconcileReport {
+    /// Whether the reconcile changed nothing.
     pub fn is_empty(&self) -> bool {
         self.created.is_empty()
             && self.updated.is_empty()
@@ -99,6 +100,11 @@ type FileChannelSettings = (bool, Option<Vec<Trigger>>);
 /// API-owned resources, route prefixes and active gRPC services included);
 /// any error
 /// returns `Err` with nothing applied.
+///
+/// # Errors
+///
+/// Fails, naming the first problem, when `cfg` does not validate (nothing
+/// is written then), and when a store write fails.
 pub async fn reconcile(
     store: &dyn ControlStore,
     state: &dyn StateStore,

@@ -180,7 +180,16 @@ pub struct MockRegistry {
     reload: Mutex<()>,
 }
 
+impl std::fmt::Debug for MockRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockRegistry")
+            .field("mounted", &self.mounted.load().len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl MockRegistry {
+    /// An empty registry with its own gRPC server.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             mounted: ArcSwap::from_pointee(Vec::new()),
@@ -201,6 +210,11 @@ impl MockRegistry {
 
     /// Rebuilds every mock of every workspace. A mock that fails to build is logged, recorded
     /// as failed and keeps its previous version mounted, if it had one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the mocks cannot be listed from the store; a mock that fails
+    /// to build is recorded, not returned.
     pub async fn reload_all(&self, deps: &RuntimeDeps) -> anyhow::Result<()> {
         let _guard = self.reload.lock().await;
         self.reload_all_locked(deps).await
@@ -378,6 +392,10 @@ impl MockRegistry {
     /// publishes one change, so a reconcile publishes several per mock),
     /// and a reload of all covers every mock change with it. A rebuild
     /// reads the latest stored state, so nothing is lost.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn spawn_watcher(
         self: &Arc<Self>,
         deps: RuntimeDeps,

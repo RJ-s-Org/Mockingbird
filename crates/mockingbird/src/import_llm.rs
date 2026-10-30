@@ -13,6 +13,7 @@ use crate::runtime::{RuntimeDeps, build_engine, import_provider};
 /// Resolves import and preview LLM access the way the data plane does,
 /// with `import_profile` (`import.llm_profile`) overriding the mock's
 /// profile for imports.
+#[derive(Debug)]
 pub struct RuntimeLlm {
     pub deps: RuntimeDeps,
     pub import_profile: Option<String>,

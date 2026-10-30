@@ -28,12 +28,18 @@ pub const STATE_GAUGE_INTERVAL: Duration = Duration::from_secs(60);
 /// [`STATE_GAUGE_INTERVAL`] (first right away); a mock no longer mounted
 /// drops to 0. Runs on every node that serves the data plane, leader or
 /// not. Dropping it stops the task.
+#[derive(Debug)]
+#[must_use = "dropping the gauge stops its task"]
 pub struct StateGauge {
     task: JoinHandle<()>,
 }
 
 impl StateGauge {
     /// Must be called inside a Tokio runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn spawn(state: Arc<dyn StateStore>, registry: Arc<MockRegistry>) -> Self {
         Self {
             task: tokio::spawn(async move {
@@ -95,6 +101,8 @@ fn set_state_gauges(counts: Vec<(String, usize)>, previous: BTreeSet<String>) ->
 pub const TOKEN_USAGE_RETENTION_DAYS: u64 = 90;
 
 /// The running maintenance jobs; dropping it stops them.
+#[derive(Debug)]
+#[must_use = "dropping it stops the maintenance jobs"]
 pub struct Maintenance {
     _handles: Vec<JoinHandle<()>>,
 }
@@ -105,6 +113,10 @@ impl Maintenance {
     /// events older than `retention_days` and the daily pruning of token
     /// usage older than [`TOKEN_USAGE_RETENTION_DAYS`]. Must be called
     /// inside a Tokio runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn start(
         store: Arc<dyn ControlStore>,
         sessions: Option<&SessionManager>,
@@ -173,10 +185,20 @@ pub struct LeaderJobs {
     pub maintenance: StartMaintenance,
 }
 
+impl std::fmt::Debug for LeaderJobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaderJobs")
+            .field("watch", &self.watch.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The leader-watch task: on every transition to leader it reconciles once
 /// (logging errors), starts the `--watch` guard (when requested) and the
 /// [`Maintenance`] jobs; when leadership is lost it drops both. Dropping it
 /// stops the task and with it everything it started.
+#[derive(Debug)]
+#[must_use = "dropping it stops the leader-only work"]
 pub struct LeaderWork {
     task: JoinHandle<()>,
 }
@@ -186,6 +208,10 @@ impl LeaderWork {
     /// the current leader (at startup), so the first leading state starts
     /// the jobs without reconciling again. Must be called inside a Tokio
     /// runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn spawn(leader: watch::Receiver<bool>, reconciled: bool, jobs: LeaderJobs) -> Self {
         Self {
             task: tokio::spawn(follow(leader, reconciled, jobs)),

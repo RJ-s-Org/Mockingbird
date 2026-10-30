@@ -20,6 +20,10 @@ const HOP_BY_HOP: [&str; 8] = [
 
 /// The client forwarding uses: it ignores `HTTP(S)_PROXY` (which may point
 /// at this very proxy) and does not follow redirects (the caller does).
+///
+/// # Errors
+///
+/// Fails when the HTTP client cannot be built.
 pub fn forward_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .no_proxy()

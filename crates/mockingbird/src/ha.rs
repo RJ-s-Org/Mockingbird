@@ -47,6 +47,7 @@ pub enum HubEvent {
 
 /// This node's connection to the others: the bus, and the hub fed by the
 /// bridges. Dropping the last handle stops the bridges.
+#[must_use = "dropping the last handle stops the bridges"]
 pub struct Ha {
     pub bus: Arc<dyn Bus>,
     pub node_id: String,
@@ -54,9 +55,22 @@ pub struct Ha {
     tasks: Vec<JoinHandle<()>>,
 }
 
+impl std::fmt::Debug for Ha {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ha")
+            .field("node_id", &self.node_id)
+            .field("tasks", &self.tasks.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Ha {
     /// Connects the bus `cfg.bus_target()` names (as node `node_id`) and
     /// starts the bridges.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the bus cannot be connected.
     pub async fn start(
         cfg: &FileConfig,
         store: Arc<dyn ControlStore>,
@@ -75,6 +89,7 @@ impl Ha {
     }
 
     /// Starts the bridges over `bus`; the node id is the bus's.
+    #[must_use = "dropping the last handle stops the bridges"]
     pub async fn start_with_bus(bus: Arc<dyn Bus>, store: Arc<dyn ControlStore>) -> Arc<Self> {
         let (hub, _) = broadcast::channel(CHANNEL_CAPACITY);
         // Subscribe before returning, so nothing after it is missed.
@@ -98,11 +113,19 @@ impl Ha {
     }
 
     /// `inner` with a change feed shared across nodes (see [`BusStateStore`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn shared_state(&self, inner: Arc<dyn StateStore>) -> Arc<dyn StateStore> {
         BusStateStore::new(inner, Arc::clone(&self.bus))
     }
 
     /// [`cached_shared_state`] over this node's bus.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn cached_shared_state(
         &self,
         inner: Arc<dyn StateStore>,
@@ -136,6 +159,10 @@ impl Drop for Ha {
 /// reset, a seed or a mock reset on any node clears: this node's clear its
 /// cache directly, and other nodes' arrive as reset announcements (state
 /// events with an empty resource type).
+///
+/// # Panics
+///
+/// Panics when called outside a Tokio runtime.
 pub fn cached_shared_state(
     inner: Arc<dyn StateStore>,
     bus: Arc<dyn Bus>,
@@ -311,6 +338,7 @@ async fn bus_to_hub(mut events: broadcast::Receiver<BusEvent>, hub: broadcast::S
 /// method to the wrapped store, and [`StateStore::subscribe`] gives this
 /// node's changes ([`ChangeOrigin::Local`], each also announced as a
 /// [`BusEvent::State`]) merged with the other nodes' (`Remote`).
+#[must_use = "dropping it stops relaying state changes"]
 pub struct BusStateStore {
     inner: Arc<dyn StateStore>,
     bus: Arc<dyn Bus>,
@@ -320,7 +348,19 @@ pub struct BusStateStore {
     reset_task: OnceLock<JoinHandle<()>>,
 }
 
+impl std::fmt::Debug for BusStateStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BusStateStore").finish_non_exhaustive()
+    }
+}
+
 impl BusStateStore {
+    /// `inner` with a change feed that merges this node's changes with the
+    /// other nodes' over `bus`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a Tokio runtime.
     pub fn new(inner: Arc<dyn StateStore>, bus: Arc<dyn Bus>) -> Arc<Self> {
         let (merged, _) = broadcast::channel(CHANNEL_CAPACITY);
         let task = tokio::spawn(merge_state_changes(
