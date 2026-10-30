@@ -1740,6 +1740,34 @@ async fn a_list_under_a_schema_is_asked_for_as_items() {
     );
 }
 
+/// An endpoint enforcing the schema may answer `{"items": null}` for a
+/// nullable list.
+#[tokio::test]
+async fn a_null_list_under_items_is_a_null_answer() {
+    let bundle = compile(
+        br#"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /tags:
+    get:
+      operationId: listTags
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: [array, "null"], items: {type: string}}}}}
+"#,
+    )
+    .unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"items": null}).to_string())]);
+    let op = bundle.operation("listTags").unwrap();
+    let out = engine
+        .generate(&bundle, op, &call("listTags"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body.unwrap(), Value::Null);
+    assert_eq!(provider.requests().len(), 1);
+}
+
 /// A bare array is still a good answer.
 #[tokio::test]
 async fn a_bare_list_under_a_schema_is_accepted() {

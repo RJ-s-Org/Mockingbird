@@ -4,6 +4,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -123,11 +124,13 @@ impl std::str::FromStr for OutputMode {
 
 /// The limit a schema sent as `response_format` puts on a string with no
 /// shape of its own. Some endpoints enforce the schema while generating, and a
-/// model can then loop in an unbounded string until `max_tokens`. Answers are
-/// still validated against the contract's own schema.
-pub const MAX_FREE_TEXT_CHARS: u64 = 500;
+/// model can then loop in an unbounded string until `max_tokens`. A string
+/// this long is a runaway to the engine anyway, which cuts it, so the limit
+/// takes nothing a client would otherwise get. Answers are still validated
+/// against the contract's own schema.
+pub const MAX_FREE_TEXT_CHARS: u64 = 2_000;
 
-/// Rejected schema names remembered before the list starts over.
+/// Rejected schemas remembered before the list starts over.
 const MAX_REJECTED_SCHEMAS: usize = 4096;
 
 /// A [`Provider`] for an OpenAI-compatible `/chat/completions` endpoint.
@@ -143,9 +146,9 @@ pub struct OpenAiCompatible {
     /// Whether streams ask for usage (`stream_options.include_usage`);
     /// cleared when the endpoint rejects that.
     stream_usage: AtomicBool,
-    /// The names of the schemas the endpoint rejected, asked for in JSON mode
-    /// from then on (see [`MAX_REJECTED_SCHEMAS`]).
-    rejected_schemas: Mutex<HashSet<String>>,
+    /// The schemas the endpoint rejected, by name and content, asked for in
+    /// JSON mode from then on (see [`MAX_REJECTED_SCHEMAS`]).
+    rejected_schemas: Mutex<HashSet<(String, u64)>>,
 }
 
 impl std::fmt::Debug for OpenAiCompatible {
@@ -252,25 +255,32 @@ impl OpenAiCompatible {
         true
     }
 
-    fn schema_rejected(&self, name: &str) -> bool {
+    fn schema_rejected(&self, name: &str, schema: &Value) -> bool {
         self.rejected_schemas
             .lock()
-            .is_ok_and(|names| names.contains(name))
+            .is_ok_and(|rejected| rejected.contains(&schema_key(name, schema)))
     }
 
-    /// Whether `e` rejects the schema `req` sent; if so that schema is asked
-    /// for in JSON mode from now on.
+    /// Whether `req` goes out with its schema as `response_format`.
+    fn sends_schema(&self, req: &ChatRequest) -> bool {
+        self.config.output_mode == OutputMode::JsonSchema
+            && matches!(&req.response_format, ResponseFormat::JsonSchema { name, schema }
+                if !self.schema_rejected(name, schema))
+    }
+
+    /// Whether `e` says the endpoint refused the schema `req` was sent with;
+    /// if so that schema is asked for in JSON mode from now on.
     fn rejected_schema(&self, e: &LlmError, req: &ChatRequest) -> bool {
-        let ResponseFormat::JsonSchema { name, .. } = &req.response_format else {
+        let ResponseFormat::JsonSchema { name, schema } = &req.response_format else {
             return false;
         };
-        let rejected = self.config.output_mode == OutputMode::JsonSchema
-            && matches!(e, LlmError::Http { status: 400 | 404 | 422, body } if rejects_schema(body));
-        if rejected && let Ok(mut names) = self.rejected_schemas.lock() {
-            if names.len() >= MAX_REJECTED_SCHEMAS {
-                names.clear();
+        let rejected =
+            matches!(e, LlmError::Http { status: 400 | 404 | 422, body } if rejects_schema(body));
+        if rejected && let Ok(mut known) = self.rejected_schemas.lock() {
+            if known.len() >= MAX_REJECTED_SCHEMAS {
+                known.clear();
             }
-            if names.insert(name.clone()) {
+            if known.insert(schema_key(name, schema)) {
                 tracing::warn!(
                     model = %self.config.model,
                     schema = %name,
@@ -310,7 +320,7 @@ impl OpenAiCompatible {
         )
     }
 
-    fn body(&self, req: &ChatRequest, reasoning: Reasoning) -> Value {
+    fn body(&self, req: &ChatRequest, reasoning: Reasoning, json_only: bool) -> Value {
         let messages: Vec<Value> = req
             .messages
             .iter()
@@ -325,7 +335,7 @@ impl OpenAiCompatible {
         let format = match (&req.response_format, self.config.output_mode) {
             (ResponseFormat::Text, _) | (_, OutputMode::None) => None,
             (ResponseFormat::JsonSchema { name, schema }, OutputMode::JsonSchema)
-                if !self.schema_rejected(name) =>
+                if !json_only && !self.schema_rejected(name, schema) =>
             {
                 let mut schema = schema.clone();
                 limit_free_text(&mut schema);
@@ -376,16 +386,19 @@ impl OpenAiCompatible {
         // The reasoning setting steps down at most twice, and stream_options
         // and the schema are each dropped at most once: five tries at most.
         let mut sent = self.reasoning_setting();
-        let mut result = self.open_stream_once(req, sent).await;
+        let mut with_schema = self.sends_schema(req);
+        let mut json_only = false;
+        let mut result = self.open_stream_once(req, sent, json_only).await;
         for _ in 0..4 {
             match result {
-                Err(e)
-                    if self.rejected_reasoning(&e, sent)
-                        || self.rejected_stream_usage(&e)
-                        || self.rejected_schema(&e, req) =>
-                {
+                Err(e) if with_schema && self.rejected_schema(&e, req) => {
+                    with_schema = false;
+                    json_only = true;
+                    result = self.open_stream_once(req, sent, json_only).await;
+                }
+                Err(e) if self.rejected_reasoning(&e, sent) || self.rejected_stream_usage(&e) => {
                     sent = self.reasoning_setting();
-                    result = self.open_stream_once(req, sent).await;
+                    result = self.open_stream_once(req, sent, json_only).await;
                 }
                 other => return other,
             }
@@ -397,8 +410,9 @@ impl OpenAiCompatible {
         &self,
         req: &ChatRequest,
         reasoning: Reasoning,
+        json_only: bool,
     ) -> Result<reqwest::Response, LlmError> {
-        let mut body = self.body(req, reasoning);
+        let mut body = self.body(req, reasoning, json_only);
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), Value::Bool(true));
             if self.sends_stream_usage() {
@@ -422,14 +436,25 @@ impl OpenAiCompatible {
 
     async fn send(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         // The reasoning setting steps down at most twice and the schema is
-        // dropped at most once.
+        // dropped at most once. An empty answer under a schema (some routes
+        // lose it in that mode) is tried once in JSON mode, for this call only.
         let mut sent = self.reasoning_setting();
-        let mut result = self.send_once(req, sent).await;
+        let mut with_schema = self.sends_schema(req);
+        let mut json_only = false;
+        let mut result = self.send_once(req, sent, json_only).await;
         for _ in 0..3 {
             match result {
-                Err(e) if self.rejected_reasoning(&e, sent) || self.rejected_schema(&e, req) => {
+                Err(e)
+                    if with_schema
+                        && (matches!(e, LlmError::Empty(_)) || self.rejected_schema(&e, req)) =>
+                {
+                    with_schema = false;
+                    json_only = true;
+                    result = self.send_once(req, sent, json_only).await;
+                }
+                Err(e) if self.rejected_reasoning(&e, sent) => {
                     sent = self.reasoning_setting();
-                    result = self.send_once(req, sent).await;
+                    result = self.send_once(req, sent, json_only).await;
                 }
                 other => return other,
             }
@@ -441,8 +466,9 @@ impl OpenAiCompatible {
         &self,
         req: &ChatRequest,
         reasoning: Reasoning,
+        json_only: bool,
     ) -> Result<ChatResponse, LlmError> {
-        let resp = self.post(&self.body(req, reasoning)).await?;
+        let resp = self.post(&self.body(req, reasoning, json_only)).await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -514,24 +540,35 @@ impl Reasoning {
     }
 }
 
-/// Whether an error `body` rejects the request's `reasoning` parameter
-/// itself (`sent`): it names `reasoning` (or `effort`, when that was sent)
-/// and says the parameter or value is unsupported, invalid or mandatory. An
-/// error that only mentions reasoning (a context-length error counting
-/// reasoning tokens) is not one.
+/// What [`OpenAiCompatible::rejected_schemas`] remembers a schema by: selections
+/// of one operation share a name and may be rejected separately.
+fn schema_key(name: &str, schema: &Value) -> (String, u64) {
+    let mut hasher = DefaultHasher::new();
+    schema.to_string().hash(&mut hasher);
+    (name.to_string(), hasher.finish())
+}
+
 /// Whether an error body says the endpoint refused the response schema, or
 /// structured output altogether.
 fn rejects_schema(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     !body.contains("context length")
         && !body.contains("context_length")
-        && ["response_format", "json_schema", "structured output"]
-            .iter()
-            .any(|marker| body.contains(marker))
+        && [
+            "response_format",
+            "response format",
+            "response_schema",
+            "json_schema",
+            "json schema",
+            "structured output",
+            "requested parameters",
+        ]
+        .iter()
+        .any(|marker| body.contains(marker))
 }
 
 /// `schema` with [`MAX_FREE_TEXT_CHARS`] on every string that has no length,
-/// pattern, format or fixed values. `enum`, `const`, `default` and `examples`
+/// pattern, format, encoding or fixed values. `enum`, `const`, `default` and `examples`
 /// hold data, not schemas, and are left alone.
 fn limit_free_text(schema: &mut Value) {
     match schema {
@@ -541,9 +578,18 @@ fn limit_free_text(schema: &mut Value) {
                 Some(Value::Array(types)) => types.iter().any(|t| t == "string"),
                 _ => false,
             };
-            let shaped = ["maxLength", "pattern", "format", "enum", "const"]
-                .iter()
-                .any(|k| node.contains_key(*k));
+            let shaped = [
+                "maxLength",
+                "minLength",
+                "pattern",
+                "format",
+                "enum",
+                "const",
+                "contentEncoding",
+                "contentMediaType",
+            ]
+            .iter()
+            .any(|k| node.contains_key(*k));
             if is_string && !shaped {
                 node.insert("maxLength".to_string(), json!(MAX_FREE_TEXT_CHARS));
             }
@@ -558,6 +604,11 @@ fn limit_free_text(schema: &mut Value) {
     }
 }
 
+/// Whether an error `body` rejects the request's `reasoning` parameter
+/// itself (`sent`): it names `reasoning` (or `effort`, when that was sent)
+/// and says the parameter or value is unsupported, invalid or mandatory. An
+/// error that only mentions reasoning (a context-length error counting
+/// reasoning tokens) is not one.
 fn rejects_reasoning(body: &str, sent: Reasoning) -> bool {
     let body = body.to_ascii_lowercase();
     let names =

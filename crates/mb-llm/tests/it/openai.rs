@@ -869,7 +869,9 @@ async fn free_text_strings_are_sent_with_a_length_limit() {
                 "short": {"type": "string", "maxLength": 5},
                 "when": {"type": "string", "format": "date"},
                 "type": {"type": "integer"},
-                "fixed": {"const": {"type": "string"}}
+                "fixed": {"const": {"type": "string"}},
+                "long": {"type": "string", "minLength": 3000},
+                "blob": {"type": "string", "contentEncoding": "base64"}
             },
             "$defs": {"Text": {"type": "string"}}
         }),
@@ -887,7 +889,7 @@ async fn free_text_strings_are_sent_with_a_length_limit() {
     assert_eq!(props["note"]["maxLength"], limit);
     assert_eq!(schema["$defs"]["Text"]["maxLength"], limit);
     assert_eq!(props["short"]["maxLength"], json!(5));
-    for unchanged in ["code", "kind", "when", "type"] {
+    for unchanged in ["code", "kind", "when", "type", "long", "blob"] {
         assert!(props[unchanged].get("maxLength").is_none(), "{unchanged}");
     }
     assert_eq!(props["fixed"], json!({"const": {"type": "string"}}));
@@ -960,6 +962,108 @@ async fn concurrent_rejections_of_a_schema_all_fall_back() {
         c.complete(req(schema_format("bad"), Duration::from_secs(2))),
     );
     assert!(a.is_ok() && b.is_ok(), "{a:?} {b:?}");
+}
+
+/// JSON mode being refused too is not retried, and costs no extra requests.
+#[tokio::test]
+async fn a_rejection_of_json_mode_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"'messages' must contain the word 'json' to use response_format"}}"#,
+        ))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonSchema);
+    for _ in 0..2 {
+        assert!(
+            c.complete(req(schema_format("n"), Duration::from_secs(2)))
+                .await
+                .is_err()
+        );
+    }
+    // Schema then JSON mode, then JSON mode alone.
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
+/// A rejection is about one schema: a narrower selection under the same name
+/// is still asked for with its own.
+#[tokio::test]
+async fn a_rejection_is_remembered_per_schema_not_per_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v["response_format"]["json_schema"]["schema"]["type"] == "array"
+        })
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string(r#"{"error":{"message":"Invalid schema for response_format"}}"#),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonSchema);
+    c.complete(req(schema_format("same"), Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let other = ResponseFormat::JsonSchema {
+        name: "same".to_string(),
+        schema: json!({"type": "object"}),
+    };
+    c.complete(req(other, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let reqs = server.received_requests().await.unwrap();
+    let last: Value = serde_json::from_slice(&reqs.last().unwrap().body).unwrap();
+    assert_eq!(last["response_format"]["type"], "json_schema");
+}
+
+/// Some routes lose the answer in schema mode: an empty one is tried once in
+/// JSON mode, for this call only.
+#[tokio::test]
+async fn an_empty_answer_under_a_schema_is_retried_in_json_mode() {
+    let server = MockServer::start().await;
+    let empty = json!({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]});
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v["response_format"]["type"] == "json_schema"
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let c = client(&server, OutputMode::JsonSchema);
+    for _ in 0..2 {
+        let resp = c
+            .complete(req(schema_format("n"), Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "{\"a\":1}");
+    }
+    let reqs = server.received_requests().await.unwrap();
+    let sent: Vec<Value> = reqs
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.body).unwrap()["response_format"]["type"].clone()
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            json!("json_schema"),
+            json!("json_object"),
+            json!("json_schema")
+        ]
+    );
 }
 
 /// Any other 400 is the caller's to see, and is not retried.

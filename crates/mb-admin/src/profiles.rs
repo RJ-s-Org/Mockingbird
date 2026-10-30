@@ -125,7 +125,7 @@ pub struct PutProfile {
     /// `env:` names, `file:` paths and `vault:<mount>/<path>#<field>`
     /// references are rejected unless the server allows them.
     pub secret_ref: Option<String>,
-    /// How the provider is asked for JSON; default `json_object`.
+    /// How the provider is asked for JSON; default `json_schema`.
     #[serde(default)]
     pub output_mode: Option<OutputMode>,
     /// Deprecated alias of `output_mode`: `true` is `json_schema`, `false`

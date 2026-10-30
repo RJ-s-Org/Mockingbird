@@ -95,4 +95,4 @@ Finally serve (`mockingbird server start -c mockingbird.yaml`) and check a respo
 
 ## Profile fields
 
-A profile in `mockingbird.yaml` (`llm.profiles.<name>`): `base_url`, `model`, `api_key` (secret reference `env:NAME` or `file:/path`), `output_mode` (`none`, `json_object` (default) or `json_schema`), `timeout`, `temperature`, `max_tokens`, `fallback` (another profile tried on failure), `extra_body` (JSON merged into each request, e.g. OpenRouter `reasoning` settings), `headers` (values may embed `${env:NAME}`; credential-like names must). `llm.default_profile` applies to mocks without `llm_profile`.
+A profile in `mockingbird.yaml` (`llm.profiles.<name>`): `base_url`, `model`, `api_key` (secret reference `env:NAME` or `file:/path`), `output_mode` (`none`, `json_object` or `json_schema` (default)), `timeout`, `temperature`, `max_tokens`, `fallback` (another profile tried on failure), `extra_body` (JSON merged into each request, e.g. OpenRouter `reasoning` settings), `headers` (values may embed `${env:NAME}`; credential-like names must). `llm.default_profile` applies to mocks without `llm_profile`.

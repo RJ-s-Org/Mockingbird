@@ -1,24 +1,24 @@
 # First-try experiments, 2026-10-30
 
-What makes an LLM's first answer valid, and at what cost. Prompts were replayed from round 2 with [`scripts/llm-bench/first_try.py`](../../../scripts/llm-bench/first_try.py) and graded by the engine's own checks; 53 prompts per model across all 18 contracts. The final numbers come from the real engine through `mb-evals`. Spend was $0.75.
+What makes an LLM's first answer valid, and at what cost. Prompts were replayed from round 2 with [`scripts/llm-bench/first_try.py`](../../../scripts/llm-bench/first_try.py) and graded by the engine's own checks; 53 prompts per model across all 18 contracts. The final numbers come from the real engine through `mb-evals`. Spend was $1.39.
 
-**Result:** schema output (`output_mode: json_schema`) is by far the best lever, and is now the default. Reasoning is not worth its latency.
+**Result:** schema output (`output_mode: json_schema`) is by far the best lever, and is now the default. On the default model first try is 99.0% and no answer fell back, in 486 calls. Reasoning is not worth its latency.
 
 ## Real engine, default settings
 
-162 calls per model, against round 2's `json_object`. First try is per call, so REST carries its full weight.
+Round 2's `json_object` against the final code, per call, so REST carries its full weight. Luna and Lightning had 162 calls each (`engine-run3`); the default had 486 (`engine-run3` and `engine-run4`).
 
 | Model | First try | REST first try | Overall (no fallback) | p50 latency | Cost per 1k answers |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `deepseek/deepseek-v4.1-flash-1017` (default) | 66.0% to **97.5%** | 50% to 96% | 99.4% to **99.4%** | 1.9 s to 2.2 s | $0.32 to $0.40 |
-| `openai/gpt-6-luna` | 85.2% to 82.1% | 76% to 73% | 100% to 99.4% | 2.7 s to 2.7 s | $0.20 to $0.27 |
-| `nvidia/nemotron-3.5-lightning` | 37.0% to 76.5% | 15% to 66% | 88.3% to 90.7% | 2.8 s to 3.6 s | $0.16 to $0.22 |
+| `deepseek/deepseek-v4.1-flash-1017` (default) | 66.0% to **99.0%** | 50% to 98.7% | 99.4% to **100%** | 1.9 s to 2.2 s | $0.32 to $0.34 |
+| `openai/gpt-6-luna` | 85.2% to 82.1% | 76% to 73% | 100% to 99.4% | 2.7 s to 2.9 s | $0.20 to $0.27 |
+| `nvidia/nemotron-3.5-lightning` | 37.0% to 74.1% | 15% to 62% | 88.3% to 95.1% | 2.8 s to 2.8 s | $0.16 to $0.20 |
 
-An earlier engine run without the runaway limit gave the default 98.1%, and the replay pool 98.7% over 159 calls, so about 98% is the fair reading. 158 of 162 has a 95% interval of about 94–99%. **The 99% first-try goal is close on the default model but not shown, and is not met on the other two.** Luna and Lightning results include the race later fixed in the client (Luna's one fallback).
+On the default, 481 of 486 first answers were valid, with a 95% interval of 97.6–99.6%. The other 5 were patched locally, with no second LLM call and no repair. The first 162 calls scored 162 and the next 324 scored 319 (98.5%), so 100% was luck. **On the default model, 99% first try is met at the point estimate, though the data cannot rule out 98%, and 99% overall is met. Luna and Lightning miss 99% first try; Luna meets 99% overall and Lightning does not.**
 
-Luna does not benefit because OpenAI treats the schema as advice without `strict`, and strict mode refuses most API contracts. Its misses are exact-length patterns such as `^[0-9A-Za-z]{22}$`, which local patching fixes without a second call.
+Luna does not benefit because OpenAI treats the schema as advice without `strict`, and strict mode refuses most API contracts. Its misses are exact-length patterns such as `^[0-9A-Za-z]{22}$`, which local patching fixes without a second call. Its 14 HTTP rejections are schemas OpenAI refuses, which step down to JSON mode. Lightning's fallbacks are 3 timeouts and 5 answers still invalid after repair.
 
-Blind judging on 54 paired answers across all 18 contracts: realism -0.09 ± 0.26, coherence +0.33 ± 0.29. Schema output has no measured quality cost.
+Blind judging on 54 paired answers across all 18 contracts: realism -0.09 ± 0.26, coherence +0.33 ± 0.29. Schema output has no measured quality cost. Those answers (`engine-final`) predate the 2,000-character limit and the last client fixes.
 
 ## Variants, on replayed prompts
 
@@ -40,10 +40,11 @@ First try, p50 latency and cost per 1k answers, 53 prompts each.
 
 ## Runaways
 
-With a schema enforced, a model can loop in an unbounded string until `max_tokens`. On gRPC `RouteGuide.GetFeature`, 16 of 24 calls ran away to 16,384 tokens. With `maxLength` on free-text strings, 0 of 24 did, and the median fell from 16,384 tokens to 60, so strings now carry a 500-character limit on the wire. Models can still loop on whitespace or digits, which this does not catch: 1 of 164 calls on the default, 4 of 181 on Lightning. That is the largest remaining source of failures and slow answers.
+With a schema enforced, a model can loop in an unbounded string until `max_tokens`. On gRPC `RouteGuide.GetFeature`, 16 of 24 calls ran away to 16,384 tokens. With `maxLength` on free-text strings, 0 of 24 did, and the median fell from 16,384 tokens to 60, so free-text strings now carry a 2,000-character limit on the wire. Models can still loop on whitespace or digits, which this does not catch. In the final runs that was 0 of 486 calls on the default (longest answer 3,420 tokens), 1 of 179 on Luna and 3 of 184 on Lightning. It is the largest remaining source of failures and slow answers on the weaker models.
 
 ## Limits
 
-- A 162-call sample cannot separate 98% from 99%.
+- 486 calls cannot separate 98.5% from 99.5%.
 - The output budget's fill was not applied in the replay, which slightly understates the replay's first try.
 - Provider routing varies between runs, and runaways cluster on some providers.
+- `engine-schema` and `engine-final` are earlier runs on code before the final fixes, kept for the judging. They gave the default 98.1% and 97.5%.

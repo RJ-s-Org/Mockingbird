@@ -386,13 +386,13 @@ pub(crate) struct Checks<'a> {
     pub items_envelope: bool,
 }
 
-/// The member an array answer is asked for under in JSON-object mode.
+/// The member an array answer is asked for under (see [`items_envelope`]).
 pub(crate) const ITEMS_KEY: &str = "items";
 
 /// The instruction added to the prompt when an array answer is asked for
 /// as an [`ITEMS_KEY`] envelope.
 pub(crate) const ITEMS_ENVELOPE_NOTE: &str = "The response schema describes a JSON array, but \
-Only an object is allowed at the top level. Output {\"items\": [...]}: one object whose only \
+only an object is allowed at the top level. Output {\"items\": [...]}: one object whose only \
 member, \"items\", is the array the schema describes. Add no other members.";
 
 /// The error of output that holds no JSON value.
@@ -518,11 +518,40 @@ without the wrapper."
     hints
 }
 
+/// The array schema inside its `{"items": ...}` wrapping, else `schema`:
+/// recordings stay comparable whichever way an array answer was asked for.
+#[must_use]
+pub fn without_items_schema(schema: &Value) -> Value {
+    let Some(root) = schema.as_object() else {
+        return schema.clone();
+    };
+    let keys_match = root
+        .keys()
+        .all(|k| matches!(k.as_str(), "type" | "required" | "properties" | "$defs"));
+    let sole_item = root.get("required") == Some(&serde_json::json!([ITEMS_KEY]))
+        && root
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|p| p.len() == 1);
+    let Some(mut inner) = root
+        .get("properties")
+        .and_then(|p| p.get(ITEMS_KEY))
+        .filter(|_| keys_match && sole_item)
+        .cloned()
+    else {
+        return schema.clone();
+    };
+    if let (Some(defs), Some(inner)) = (root.get("$defs"), inner.as_object_mut()) {
+        inner.insert("$defs".to_string(), defs.clone());
+    }
+    inner
+}
+
 /// Whether an answer of `schema` (with its definitions) is asked for as an
-/// [`ITEMS_KEY`] envelope: the provider is in JSON-object mode (JSON mode
-/// without structured outputs), which forces an object at the top level,
-/// and the schema's root is an array. Models otherwise invent an envelope
-/// of their own (`{"messages": [...]}`), or answer one item.
+/// [`ITEMS_KEY`] envelope: the provider can be asked for JSON, which some
+/// endpoints only allow as an object at the top level, and the schema's root
+/// is an array. Models otherwise invent an envelope of their own
+/// (`{"messages": [...]}`), or answer one item.
 ///
 /// A fallback chain reports JSON mode only when every hop uses it (see
 /// `FallbackProvider::capabilities`), so a chain mixing `none` and
@@ -603,6 +632,12 @@ fn unwrap_items(validator: &SchemaValidator, value: Value) -> Value {
     let Value::Object(map) = &value else {
         return value;
     };
+    if map.len() == 1
+        && map.get(ITEMS_KEY).is_some_and(Value::is_null)
+        && validator.is_valid(&Value::Null)
+    {
+        return Value::Null;
+    }
     let Some(items @ Value::Array(_)) = map.get(ITEMS_KEY) else {
         return value;
     };
