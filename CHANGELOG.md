@@ -78,6 +78,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- A `rediss://` state, bus or leader URL no longer crashes the `mockingbird` binary. sqlx's `tls-rustls` feature enabled rustls's `ring` provider next to `aws-lc-rs`, so rustls could not choose a process default and `redis` panicked building its TLS config ("Could not automatically determine the process-level CryptoProvider"). sqlx now uses `tls-rustls-aws-lc-rs`, `ring` is no longer compiled into the CLI, and the binary installs the aws-lc-rs provider at startup.
 - `mockingbird-protocols`: the `Debug` output of `BrokerConfig` and of a webhook `ResolvedTarget` (and so of `WebhookDispatcher`) shows the URL without userinfo (`amqp://user:password@…`), and for webhooks without the query and fragment, which can carry a token; it printed the URL as configured.
 - `mockingbird run --offline`, `--record`, `--replay` and `-c` reusing a server that already answers print a warning naming the flags that do not apply to it; a leftover dev server silently turned `run --replay snap -- npm test` into live LLM calls.
 - `mockingbird snapshot export` writes each mock's `path_rewrite` and `header_overrides`, and `snapshot import` creates the mock with them, so an imported mock routes like the original; older snapshots import as before. `docs/ci.md` lists what a mock file carries.

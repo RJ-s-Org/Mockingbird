@@ -472,3 +472,31 @@ async fn external_url_must_be_https_with_tls() {
     assert!(msg.contains("auth.external_url"), "{msg}");
     assert!(msg.contains("https://"), "{msg}");
 }
+
+/// `rediss://` builds a rustls `ClientConfig` with the process-default
+/// crypto provider. With both `ring` and `aws_lc_rs` enabled on rustls
+/// (sqlx's `tls-rustls` used to add `ring`), there is no default and
+/// rustls panics. The listener accepts and then says nothing, so the
+/// handshake fails: the connect must come back as an error.
+#[tokio::test]
+async fn rediss_state_url_errors_instead_of_panicking() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let url = format!("rediss://127.0.0.1:{port}");
+    let joined = tokio::spawn(async move {
+        mb_state::RedisStateStore::connect(&url, Duration::from_secs(5))
+            .await
+            .map(|_| ())
+    })
+    .await;
+    match joined {
+        Ok(result) => assert!(result.is_err(), "connect to a silent peer succeeded"),
+        Err(e) => panic!("rediss:// connect panicked: {e}"),
+    }
+}

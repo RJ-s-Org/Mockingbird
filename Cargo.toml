@@ -90,7 +90,7 @@ url = "2.5"
 ipnet = "2.12"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "sqlite", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
 time = "0.3.55"
 hyper = { version = "1.12.0", features = ["server", "http1", "http2"] }
