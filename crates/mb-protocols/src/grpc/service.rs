@@ -679,7 +679,7 @@ impl Bidi {
             self.rep.set_body(&body);
             // The earlier messages only go in the LLM prompt: without a
             // provider they are neither kept nor copied.
-            let prompted = self.call.rt().engine.has_provider();
+            let prompted = self.plan.engine.has_provider();
             let (request_stream, kept) = if prompted {
                 (self.earlier.iter().cloned().collect(), Some(body.clone()))
             } else {
@@ -775,6 +775,7 @@ struct OwnedPlan {
     delay: Option<Duration>,
     stream_items: Option<usize>,
     tenancy: Tenancy,
+    engine: Arc<mb_engine::Engine>,
     forced_status: Option<u16>,
     chaos: ChaosDecision,
 }
@@ -805,6 +806,7 @@ impl OwnedPlan {
             delay: plan.delay,
             stream_items: plan.stream_items,
             tenancy: plan.tenancy.clone(),
+            engine: plan.engine.clone(),
             forced_status: plan.forced_status,
             chaos: plan.chaos,
         }
@@ -835,6 +837,7 @@ impl OwnedPlan {
             delay: self.delay,
             stream_items: self.stream_items,
             tenancy: self.tenancy.clone(),
+            engine: self.engine.clone(),
             chaos: self.chaos,
         })
     }

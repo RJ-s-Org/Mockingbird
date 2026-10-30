@@ -288,3 +288,115 @@ async fn import_llm_override_goes_through_provider_policy() {
         .unwrap();
     assert!(format!("{err:#}").contains("not allowed"), "{err:#}");
 }
+
+#[tokio::test]
+async fn admin_llm_access_asks_the_policy_with_the_resolved_tenancy() {
+    use mb_admin::{LlmAccessError, LlmResolver};
+
+    let store = store().await;
+    store.create_workspace("team-a", "Team A").await.unwrap();
+    for (name, timeout, tokens) in [("importer", 200_000, 32_000), ("vetted", 130_000, 10_000)] {
+        store
+            .put_profile(&profile(DEFAULT_WORKSPACE, name, timeout, tokens))
+            .await
+            .unwrap();
+    }
+    let m = mock(&store, "team-a", "pets", Some("importer")).await;
+    let policy = Arc::new(RemapPolicy(std::sync::Mutex::new(Vec::new())));
+    let mut deps = deps(store.clone(), false, None);
+    deps.ext.providers = policy.clone();
+    let acme = mb_ext::Tenancy::new("acme", "team-a");
+
+    let llm = mockingbird::runtime::import_provider_for(&deps, &m, None, &acme)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        llm.settings.timeout,
+        Duration::from_secs(130),
+        "the policy's pick"
+    );
+    let engine = mockingbird::runtime::preview_engine_for(&deps, &m, &acme)
+        .await
+        .unwrap();
+    assert_eq!(engine.config().timeout, Duration::from_millis(130_000));
+    let asked: Vec<_> = policy
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|a| a.0.clone())
+        .collect();
+    assert_eq!(asked, vec![acme.clone(), acme.clone()]);
+
+    // A rejection reaches the Admin API as the policy's own problem.
+    let resolver = mockingbird::import_llm::RuntimeLlm {
+        deps,
+        import_profile: Some("forbidden".into()),
+    };
+    match resolver.import_llm_for(&m, &acme).await {
+        Err(LlmAccessError::Rejected(r)) => assert_eq!(r.status, 403),
+        other => panic!("expected the policy's rejection, got {:?}", other.err()),
+    }
+}
+
+#[tokio::test]
+async fn data_plane_calls_use_the_engine_of_the_policy_choice() {
+    let store = store().await;
+    for (name, timeout) in [("importer", 4000), ("vetted", 7000)] {
+        store
+            .put_profile(&profile(DEFAULT_WORKSPACE, name, timeout, 1024))
+            .await
+            .unwrap();
+    }
+    let m = mock(&store, DEFAULT_WORKSPACE, "orders", Some("importer")).await;
+    let source = std::fs::read(format!(
+        "{}/../../fixtures/openapi/orders-3.0.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let v = store
+        .add_contract_version(
+            m.id,
+            mb_store::NewContractVersion {
+                bundle: mb_import::compile(&source).unwrap(),
+                source,
+                status: mb_store::ContractStatus::Approved,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .activate_contract_version(m.id, v.version)
+        .await
+        .unwrap();
+    let tenancy = mb_ext::Tenancy::new("default", DEFAULT_WORKSPACE);
+
+    // Self-hosted: the configured profile, and the mock's own engine.
+    let deps_configured = deps(store.clone(), false, None);
+    let rt = mockingbird::runtime::build_runtime(&deps_configured, &m)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rt.configured_profile.as_deref(), Some("importer"));
+    let engine = rt.engine_for(&tenancy).await.unwrap();
+    assert!(Arc::ptr_eq(&engine, &rt.engine));
+
+    // A policy picking another profile gets that profile's engine, built
+    // once, with the mock's guards.
+    let policy = Arc::new(RemapPolicy(std::sync::Mutex::new(Vec::new())));
+    let mut remapped = deps(store, false, None);
+    remapped.ext.providers = policy;
+    let rt = mockingbird::runtime::build_runtime(&remapped, &m)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rt.engine.config().timeout, Duration::from_millis(4000));
+    let engine = rt.engine_for(&tenancy).await.unwrap();
+    assert_eq!(engine.config().timeout, Duration::from_millis(7000));
+    assert_eq!(engine.config().persona.as_deref(), Some("terse"));
+    assert!(engine.guards().limiter.is_some());
+    let again = rt.engine_for(&tenancy).await.unwrap();
+    assert!(Arc::ptr_eq(&engine, &again), "built once");
+}

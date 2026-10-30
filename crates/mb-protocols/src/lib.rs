@@ -95,6 +95,7 @@ pub mod grpc;
 #[cfg(feature = "http-rest")]
 pub mod http_rest;
 pub mod limits;
+mod profiles;
 mod record;
 #[cfg(feature = "soap")]
 pub mod soap;
@@ -108,6 +109,7 @@ pub use dp_auth::{
     API_KEY_QUERY_PARAM, DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, passthrough_satisfied,
 };
 pub use limits::{RateLimiter, RuntimeLimits};
+pub use profiles::ProfileEngines;
 pub use record::{RequestKind, RequestRecord, RequestRecorder};
 
 /// A string that names no variant of an enum parsed with `FromStr`
@@ -333,7 +335,19 @@ pub struct MockRuntime {
     /// The compiled contract; fixed at construction (see
     /// [`MockRuntime::bundle`]).
     bundle: Arc<Bundle>,
+    /// The engine of [`MockRuntime::configured_profile`]; a call whose
+    /// provider policy picks another profile generates with that profile's
+    /// engine instead (see [`MockRuntime::engine_for`]).
     pub engine: Arc<Engine>,
+    /// The LLM profile `engine` was built with: the mock's own, else the
+    /// workspace default; `None` without one. The provider policy is asked
+    /// about it on every call.
+    pub configured_profile: Option<String>,
+    /// Builds the engines of the other profiles the provider policy picks;
+    /// `None` keeps every call on `engine`.
+    pub profile_engines: Option<Arc<dyn ProfileEngines>>,
+    /// The engines `profile_engines` built, by profile.
+    profile_cache: profiles::EngineCache,
     pub state: Arc<dyn StateStore>,
     /// Honour `X-Mockingbird-*` override headers. Defaults to `true`.
     pub header_overrides: bool,
@@ -390,6 +404,9 @@ impl std::fmt::Debug for MockRuntime {
         f.debug_struct("MockRuntime")
             .field("name", &self.name)
             .field("workspace", &self.workspace)
+            .field("configured_profile", &self.configured_profile)
+            .field("profile_engines", &self.profile_engines.is_some())
+            .field("profile_cache", &self.profile_cache)
             .field("header_overrides", &self.header_overrides)
             .field("scenarios", &scenarios)
             .field("recorder", &self.recorder.is_some())
@@ -448,7 +465,8 @@ impl MockRuntime {
     /// A runtime in workspace `default` with header overrides enabled, no
     /// scenarios, the self-hosted extensions, no recorder, no data-plane
     /// auth, default protocol settings, default limits (no rate limit,
-    /// 1 MiB requests) and no chaos.
+    /// 1 MiB requests), no chaos and no configured LLM profile (every call
+    /// uses `engine`).
     pub fn new(
         name: impl Into<String>,
         bundle: Arc<Bundle>,
@@ -463,6 +481,9 @@ impl MockRuntime {
             workspace: "default".into(),
             bundle,
             engine,
+            configured_profile: None,
+            profile_engines: None,
+            profile_cache: profiles::EngineCache::default(),
             state,
             header_overrides: true,
             scenarios: HashMap::new(),

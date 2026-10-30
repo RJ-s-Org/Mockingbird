@@ -439,6 +439,7 @@ async fn generate_in(
                                 target: pending.target.clone(),
                                 related: pending.related.clone(),
                                 scenario: plan.scenario.map(|s| s.spec.clone()),
+                                engine: plan.engine.clone(),
                             };
                             match b.join(rt, part).await {
                                 Some(Ok(joined)) => {

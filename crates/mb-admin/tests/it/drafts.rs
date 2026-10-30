@@ -804,6 +804,105 @@ async fn preview_is_admitted_and_recorded() {
     );
 }
 
+/// The tenant named by the `x-tenant` header of a `draft` call.
+struct DraftTenant;
+
+#[async_trait]
+impl mb_ext::TenantResolver for DraftTenant {
+    async fn resolve(
+        &self,
+        call: &mb_ext::CallInfo<'_>,
+    ) -> Result<mb_ext::Tenancy, mb_ext::Rejection> {
+        assert_eq!(call.operation_id, "draft");
+        let tenant = call
+            .headers
+            .get("x-tenant")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("default");
+        Ok(mb_ext::Tenancy::new(tenant, "default"))
+    }
+}
+
+/// Offline previews, except that the provider policy refuses tenant
+/// `broke` with 402 and `Retry-After: 60`.
+struct PolicyLlm;
+
+#[async_trait]
+impl mb_admin::LlmResolver for PolicyLlm {
+    async fn for_import(
+        &self,
+        _mock: &Mock,
+    ) -> Result<Option<mb_import::smart::ExtractLlm>, String> {
+        Ok(None)
+    }
+
+    async fn preview_engine(&self, _mock: &Mock) -> Result<Arc<mb_engine::Engine>, String> {
+        panic!("previews ask with the tenancy")
+    }
+
+    async fn preview_engine_for(
+        &self,
+        _mock: &Mock,
+        tenancy: &mb_ext::Tenancy,
+    ) -> Result<Arc<mb_engine::Engine>, mb_admin::LlmAccessError> {
+        if tenancy.tenant == "broke" {
+            return Err(mb_admin::LlmAccessError::Rejected(
+                mb_ext::Rejection::new(402, "Payment Required", "no LLM plan")
+                    .with_retry_after(Duration::from_secs(60)),
+            ));
+        }
+        Ok(Arc::new(mb_engine::Engine::new(
+            None,
+            mb_engine::EngineConfig::default(),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn preview_is_billed_to_the_resolved_tenant_and_refused_by_its_policy() {
+    let mut h = harness().await;
+    let sink = Arc::new(CollectPreview::default());
+    h.st.ext.usage = sink.clone();
+    h.st.ext.tenants = Arc::new(DraftTenant);
+    h.st.llm = Arc::new(PolicyLlm);
+    h.app = router(h.st.clone());
+    let v = h.har_draft().await;
+    let view = h.draft(v).await;
+    let op_id = operation(&view, "GET", PET_PATH)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let preview = |tenant: &'static str| {
+        Request::post(Harness::url(v, "/preview"))
+            .header(header::AUTHORIZATION, "Bearer editor")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-tenant", tenant)
+            .body(Body::from(json!({ "operation_id": op_id }).to_string()))
+            .unwrap()
+    };
+
+    h.send(preview("acme"))
+        .await
+        .expect(StatusCode::OK, "preview");
+    let events = sink.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].tenancy,
+        mb_ext::Tenancy::new("acme", DEFAULT_WORKSPACE)
+    );
+
+    let r = h.send(preview("broke")).await;
+    let p = r.expect(StatusCode::PAYMENT_REQUIRED, "refused by the policy");
+    assert_eq!(p["detail"], "no LLM plan");
+    assert_eq!(r.headers[header::RETRY_AFTER], "60");
+    assert_eq!(r.headers[header::CONTENT_TYPE], "application/problem+json");
+    assert_eq!(
+        sink.0.lock().unwrap().len(),
+        1,
+        "a refused preview is not recorded"
+    );
+}
+
 #[tokio::test]
 async fn put_draft_refreshes_schema_warnings() {
     let h = harness().await;

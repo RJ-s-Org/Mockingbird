@@ -515,6 +515,18 @@ pub struct ApproveRequest {
     pub activate: Option<bool>,
 }
 
+/// The operation id a draft preview's tenancy is resolved with.
+const DRAFT_OPERATION: &str = "draft";
+
+/// The problem answering an LLM access failure: the provider policy's
+/// rejection as it is, an unavailable LLM as a `502`.
+pub(crate) fn llm_problem(e: crate::LlmAccessError) -> Problem {
+    match e {
+        crate::LlmAccessError::Rejected(r) => Problem::from(r),
+        other => Problem::new(StatusCode::BAD_GATEWAY, other.to_string()),
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/preview",
@@ -560,8 +572,9 @@ pub async fn preview(
                 body.operation_id
             ))
         })?;
-    // Admitted and reported like a data-plane call of the operation.
-    let tenancy = crate::tenancy(&access.ws);
+    // Admitted and reported like a data-plane call of the operation, billed
+    // to the tenant the resolver gives a `draft` call.
+    let tenancy = crate::resolve_tenancy(&st, &access.ws, &mock, DRAFT_OPERATION, &headers).await?;
     let call_info = CallInfo::new(&mock, &op.id, &headers);
     st.ext
         .quota
@@ -570,9 +583,9 @@ pub async fn preview(
         .map_err(Problem::from)?;
     let engine = st
         .llm
-        .preview_engine(&m)
+        .preview_engine_for(&m, &tenancy)
         .await
-        .map_err(|e| Problem::new(StatusCode::BAD_GATEWAY, e))?;
+        .map_err(llm_problem)?;
     let started = std::time::Instant::now();
     let call = OperationCall {
         operation_id: body.operation_id.clone(),

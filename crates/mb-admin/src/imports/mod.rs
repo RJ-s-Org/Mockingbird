@@ -24,12 +24,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::AdminState;
 use crate::access::WsAccess;
 use crate::audit::snapshot;
 use crate::ensure_api_managed;
 use crate::mocks::MockPath;
 use crate::problem::{ApiResult, Json, Path, Problem, media_type, unsupported_media_type};
+use crate::{AdminState, LlmAccessError};
 
 /// Largest accepted HTTP body of `POST …/imports` (base64 and multipart
 /// framing around a [`MAX_IMPORT_BYTES`] input).
@@ -659,10 +659,17 @@ pub async fn create(
         json_job(&mock, body)?
     };
 
-    if (job.document.is_some_and(ImportKind::needs_llm) || job.kind == DOCUMENTS_KIND)
-        && matches!(st.llm.for_import(&m).await, Ok(None))
-    {
-        return Err(Problem::unprocessable(SmartError::LlmRequired.to_string()));
+    // Billed to the tenant the resolver gives an `import` call with this
+    // request's headers; the worker bills the same one.
+    let tenancy =
+        crate::resolve_tenancy(&st, &access.ws, &mock, IMPORT_OPERATION, &headers).await?;
+    if job.document.is_some_and(ImportKind::needs_llm) || job.kind == DOCUMENTS_KIND {
+        match st.llm.import_llm_for(&m, &tenancy).await {
+            Ok(None) => return Err(Problem::unprocessable(SmartError::LlmRequired.to_string())),
+            Err(LlmAccessError::Rejected(r)) => return Err(Problem::from(r)),
+            // An LLM that cannot be set up fails the job, with the reason.
+            Ok(Some(_)) | Err(_) => {}
+        }
     }
 
     // Checked just before queuing: concurrent creates can overshoot the
@@ -681,7 +688,7 @@ pub async fn create(
     let call = CallInfo::new(&mock, IMPORT_OPERATION, &headers);
     st.ext
         .quota
-        .admit(&crate::tenancy(&access.ws), &call)
+        .admit(&tenancy, &call)
         .await
         .map_err(Problem::from)?;
 
@@ -696,6 +703,7 @@ pub async fn create(
             mode: job.mode.map(|m| m.as_str().to_string()),
         })
         .await?;
+    worker::remember_tenancy(created.id, tenancy);
     st.imports.wake.notify_one();
     let view = ImportJobView::from(&created);
     access
