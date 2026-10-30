@@ -54,7 +54,7 @@ A typical HA layout is two `control` replicas (one leader at a time) and an auto
    - the mock's daily token budget (`mb_token_budget_used`, `mb_token_budget_exhausted_total`), shared across replicas through the `token_usage` table and flushed every 5 s (the leader deletes rows older than 90 days, daily);
    - the response size cap (`limits.max_response_bytes`).
    A refused guard never errors: the faker answers.
-6. **Validate → repair → fallback** (`mb.validate`, `mb.repair`). One repair call with the validation errors; then the faker. The response carries `X-Mockingbird-Source: llm | repaired | fallback`.
+6. **Validate → repair → fallback** (`mb.validate`, `mb.repair`). Values breaking a format the faker produces are refilled locally (never sent for repair). One repair call with the validation errors; then the faker, whose answer is flagged in its fallback reason (and `mb_faker_invalid_total`) when no draw validates. The response carries `X-Mockingbird-Source: llm | repaired | fallback`.
 7. **Scrub.** With `pii.enabled`, personal-data look-alikes are replaced with synthetic values of the same shape (`mb_pii_replacements_total{pattern}`). Scrubbed output still validates.
 8. **State write and encode** (`mb.encode`). Commands upsert or delete the resource and publish a state change; the adapter encodes the response. Streams (`drop_stream_rate`) may be cut short by chaos.
 

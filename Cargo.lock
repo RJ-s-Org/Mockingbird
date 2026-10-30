@@ -3747,6 +3747,7 @@ dependencies = [
  "json-patch",
  "jsonschema",
  "metrics 0.24.6",
+ "metrics-util 0.20.4",
  "mockingbird-import",
  "mockingbird-llm",
  "mockingbird-mcm",

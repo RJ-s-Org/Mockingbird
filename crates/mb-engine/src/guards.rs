@@ -100,6 +100,34 @@ pub(crate) enum Checked {
     Rejected(String),
 }
 
+/// Request values an answer may repeat where they break an asserted
+/// `format`: a path id or query value echoed into a `format: uuid` field
+/// is kept, not refilled (see [`SchemaValidator::patch_keeping`]).
+#[derive(Default)]
+pub(crate) struct Echoes<'a>(Vec<&'a Value>);
+
+impl<'a> Echoes<'a> {
+    /// The string path and query values of `calls` (and the strings of a
+    /// repeated query parameter).
+    pub(crate) fn of(calls: impl IntoIterator<Item = &'a crate::OperationCall>) -> Self {
+        let mut values = Vec::new();
+        for call in calls {
+            for value in call.path_params.values().chain(call.query.values()) {
+                match value {
+                    Value::String(_) => values.push(value),
+                    Value::Array(items) => values.extend(items.iter().filter(|v| v.is_string())),
+                    _ => {}
+                }
+            }
+        }
+        Self(values)
+    }
+
+    fn keeps(&self, value: &Value) -> bool {
+        self.0.contains(&value)
+    }
+}
+
 impl Engine {
     pub fn with_guards(mut self, guards: EngineGuards) -> Self {
         self.guards = guards;
@@ -146,12 +174,16 @@ impl Engine {
     }
 
     /// Parse LLM output, enforce the size cap, scrub PII, fill what the
-    /// output budget left out (see [`crate::budget`]), then validate.
+    /// output budget left out (see [`crate::budget`]), then validate. A
+    /// value breaking an asserted format (see
+    /// [`SchemaValidator::for_output`]) is refilled locally unless `echoes`
+    /// holds it; a format error alone never makes the answer `Invalid`.
     pub(crate) fn check_output(
         &self,
         validator: &SchemaValidator,
         text: &str,
         fill: Option<&Fill<'_>>,
+        echoes: &Echoes<'_>,
     ) -> Checked {
         let Some(mut value) = crate::extract_json(text) else {
             return Checked::Invalid(vec!["output is not valid JSON".to_string()]);
@@ -175,7 +207,7 @@ impl Engine {
         {
             value = filled;
         }
-        match self.check_value(validator, value) {
+        match self.check_value(validator, value, echoes) {
             Checked::Valid(v) => match validator.truncate_runaway(&v) {
                 Some(cut) => {
                     tracing::info!("truncated runaway strings");
@@ -190,17 +222,22 @@ impl Engine {
 
     /// Validate, unwrapping an envelope or patching locally when that makes
     /// the value valid.
-    fn check_value(&self, validator: &SchemaValidator, value: Value) -> Checked {
+    fn check_value(
+        &self,
+        validator: &SchemaValidator,
+        value: Value,
+        echoes: &Echoes<'_>,
+    ) -> Checked {
         match validator.validate(&value) {
-            Ok(()) => Checked::Valid(value),
+            Ok(()) => self.check_formats(validator, value, echoes),
             Err(errors) => match unwrap_envelope(validator, &value)
                 .or_else(|| wrap_single_item(validator, &value))
             {
-                Some(inner) => Checked::Valid(inner),
+                Some(inner) => self.check_formats(validator, inner, echoes),
                 None => match sole_list(&value)
-                    .and_then(|list| self.patch(validator, list))
+                    .and_then(|list| self.patch(validator, list, echoes))
                     .filter(Value::is_array)
-                    .or_else(|| self.patch(validator, &value))
+                    .or_else(|| self.patch(validator, &value, echoes))
                 {
                     Some(patched) => {
                         tracing::info!(errors = %errors.join("; "), "patched the answer locally");
@@ -211,12 +248,41 @@ impl Engine {
             },
         }
     }
+
+    /// A valid `value` whose asserted formats hold (or are echoes), else
+    /// the value with those formats refilled. When no refill validates, the
+    /// value is kept as it is: a format error is never sent for repair.
+    fn check_formats(
+        &self,
+        validator: &SchemaValidator,
+        value: Value,
+        echoes: &Echoes<'_>,
+    ) -> Checked {
+        if validator.formats_hold(&value, &|_, v| echoes.keeps(v)) {
+            return Checked::Valid(value);
+        }
+        match self.patch(validator, &value, echoes) {
+            Some(patched) => {
+                tracing::info!("patched values breaking their format");
+                Checked::Patched(patched)
+            }
+            None => Checked::Valid(value),
+        }
+    }
 }
 
 /// What an answer shaped to the output budget needs filled.
 pub(crate) struct Fill<'a> {
     pub shaped: &'a crate::budget::Shaped,
     pub hints: &'a crate::FakerHints,
+}
+
+/// What [`Engine::check_output`] needs besides the text: the output-budget
+/// fill, if any, and the request values the answer may echo.
+#[derive(Default)]
+pub(crate) struct Checks<'a> {
+    pub fill: Option<&'a Fill<'a>>,
+    pub echoes: Echoes<'a>,
 }
 
 impl Engine {
@@ -235,12 +301,19 @@ impl Engine {
         )
     }
 
-    fn patch(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
+    fn patch(
+        &self,
+        validator: &SchemaValidator,
+        value: &Value,
+        echoes: &Echoes<'_>,
+    ) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
         let mut rng = rand::rng();
-        validator.patch_nodes(value, |node| {
-            faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng)
-        })
+        validator.patch_nodes(
+            value,
+            |_, v| echoes.keeps(v),
+            |node| faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng),
+        )
     }
 }
 

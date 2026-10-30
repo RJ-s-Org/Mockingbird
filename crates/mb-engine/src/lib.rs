@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tracing::Instrument;
 use tracing::field::Empty;
 
-use crate::guards::{Checked, Fill};
+use crate::guards::{Checked, Checks, Echoes, Fill};
 
 pub mod budget;
 pub mod compact;
@@ -150,7 +150,9 @@ pub struct GeneratedResponse {
     pub usage: Usage,
     /// Why the faker answered instead of the LLM, when it did because an LLM
     /// call failed or was not made (`None` for LLM answers and for
-    /// deliberate fallbacks such as a forced status with no LLM).
+    /// deliberate fallbacks such as a forced status with no LLM). A faker
+    /// answer that matched no schema-valid draw carries
+    /// [`FAKER_INVALID_REASON`], after the primary reason when there is one.
     pub fallback_reason: Option<String>,
 }
 
@@ -213,8 +215,31 @@ pub struct StreamItem {
     pub usage: Usage,
 }
 
-/// The fallback reason of a mock with no LLM provider.
+/// The fallback reason of a mock with no LLM provider. A reason starting
+/// with it (see [`FAKER_INVALID_REASON`]) is an offline answer too.
 pub const OFFLINE_REASON: &str = "no LLM is configured for this mock (offline)";
+
+/// Added to a faker answer's fallback reason (after `; ` when there is one)
+/// when no faker draw validated against the schema, so the answer is not
+/// passed off as schema-valid. The faker does not generate for `not` or
+/// `if`/`then`/`else`; such schemas rely on its retries and can end here.
+pub const FAKER_INVALID_REASON: &str = "faker output does not validate against the schema";
+
+/// Counter of faker answers that matched no schema-valid draw.
+pub const FAKER_INVALID_METRIC: &str = "mb_faker_invalid_total";
+
+/// Counter of scenario `set` patches dropped at request time, labelled by
+/// `reason`: `invalid` (the patched body would not validate) or
+/// `not_an_object` (the body is not a JSON object).
+pub const SCENARIO_SET_IGNORED_METRIC: &str = "mb_scenario_set_ignored_total";
+
+/// `reason`, followed by the faker's own note when it has one.
+fn with_faker_note(reason: String, faker: Option<String>) -> String {
+    match faker {
+        Some(note) => format!("{reason}; {note}"),
+        None => reason,
+    }
+}
 
 /// Faker attempts (cycling through top-level `oneOf`/`anyOf` branches and
 /// fresh random draws) before an unvalidated fallback body is accepted.
@@ -359,13 +384,19 @@ impl Engine {
             .response_schema
             .filter(|_| (200..300).contains(&status) && variant.schema.is_some());
         let Some(schema) = narrowed.or(variant.schema.as_ref()) else {
+            // Nothing to generate: the contract decides the answer. Offline,
+            // it is labelled the faker's, like every other offline answer.
+            let (source, fallback_reason) = match self.provider {
+                Some(_) => (Source::Llm, None),
+                None => (Source::Fallback, Some(OFFLINE_REASON.to_string())),
+            };
             return Ok(GeneratedResponse {
                 status,
                 content_type: variant.content_type.clone(),
                 body: None,
-                source: Source::Llm,
+                source,
                 usage: Usage::default(),
-                fallback_reason: None,
+                fallback_reason,
             });
         };
 
@@ -386,7 +417,10 @@ impl Engine {
                     Some(&validator),
                     &FakerHints::from_call(op, call),
                 );
-                fake.fallback_reason = Some(OFFLINE_REASON.to_string());
+                fake.fallback_reason = Some(with_faker_note(
+                    OFFLINE_REASON.to_string(),
+                    fake.fallback_reason.take(),
+                ));
                 fake
             }
             Some(provider) => {
@@ -418,7 +452,10 @@ impl Engine {
                         &validator,
                         messages,
                         &format,
-                        fill.as_ref(),
+                        &Checks {
+                            fill: fill.as_ref(),
+                            echoes: Echoes::of([call]),
+                        },
                         &mut usage,
                     )
                     .await
@@ -441,7 +478,8 @@ impl Engine {
                             Some(&validator),
                             &FakerHints::from_call(op, call),
                         );
-                        fake.fallback_reason = Some(reason);
+                        fake.fallback_reason =
+                            Some(with_faker_note(reason, fake.fallback_reason.take()));
                         fake
                     }
                 }
@@ -530,7 +568,10 @@ impl Engine {
                 &validator,
                 messages,
                 &format,
-                None,
+                &Checks {
+                    fill: None,
+                    echoes: Echoes::of(parts.iter().map(|p| p.call)),
+                },
                 &mut usage,
             )
             .await
@@ -833,13 +874,14 @@ impl Engine {
         validator: Option<&SchemaValidator>,
         hints: &FakerHints,
     ) -> GeneratedResponse {
+        let (body, valid) = self.fake_checked(bundle, schema, validator, hints);
         GeneratedResponse {
             status,
             content_type: variant.content_type.clone(),
-            body: Some(self.fake_value(bundle, schema, validator, hints)),
+            body: Some(body),
             source: Source::Fallback,
             usage: Usage::default(),
-            fallback_reason: None,
+            fallback_reason: (!valid).then(|| FAKER_INVALID_REASON.to_string()),
         }
     }
 
@@ -867,6 +909,19 @@ impl Engine {
         validator: Option<&SchemaValidator>,
         hints: &FakerHints,
     ) -> Value {
+        self.fake_checked(bundle, schema, validator, hints).0
+    }
+
+    /// [`Engine::fake_value`], and whether the value validated (always
+    /// `true` without a validator). An invalid value is logged and counted
+    /// ([`FAKER_INVALID_METRIC`]).
+    fn fake_checked(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        validator: Option<&SchemaValidator>,
+        hints: &FakerHints,
+    ) -> (Value, bool) {
         // One schema and cost table for every attempt (and every call):
         // building them walks the schema.
         let setup = self.fake_setup(bundle, schema);
@@ -880,11 +935,12 @@ impl Engine {
                 Some(v) if !v.is_valid(&candidate) => {
                     first.get_or_insert(candidate);
                 }
-                _ => return candidate,
+                _ => return (candidate, true),
             }
         }
-        tracing::warn!("faker output does not validate against the schema");
-        first.unwrap_or(Value::Null)
+        tracing::warn!("{FAKER_INVALID_REASON}");
+        metrics::counter!(FAKER_INVALID_METRIC).increment(1);
+        (first.unwrap_or(Value::Null), false)
     }
 
     /// `schema` (a response of `op` with `status`) shaped to the output
@@ -960,7 +1016,9 @@ impl Engine {
         if let Some(v) = self.validators.get(&key) {
             return Ok(Arc::clone(&v));
         }
-        let v = Arc::new(SchemaValidator::new(&bundle.with_reachable_defs(schema))?);
+        let v = Arc::new(SchemaValidator::for_output(
+            &bundle.with_reachable_defs(schema),
+        )?);
         self.validators.insert(key, Arc::clone(&v));
         Ok(v)
     }
@@ -975,7 +1033,8 @@ impl Engine {
         bundle: &Bundle,
         schema: &Value,
     ) -> Result<Arc<SchemaValidator>, EngineError> {
-        let compile = || SchemaValidator::new(&bundle.with_reachable_defs(schema)).map(Arc::new);
+        let compile =
+            || SchemaValidator::for_output(&bundle.with_reachable_defs(schema)).map(Arc::new);
         if bundle.source_digest.is_empty() {
             return compile();
         }
@@ -1025,9 +1084,10 @@ impl Engine {
         validator: &SchemaValidator,
         mut messages: Vec<ChatMessage>,
         format: &ResponseFormat,
-        fill: Option<&Fill<'_>>,
+        checks: &Checks<'_>,
         usage: &mut Usage,
     ) -> Result<(Value, Source), String> {
+        let (fill, echoes) = (checks.fill, &checks.echoes);
         // A fallback chain gets every hop's timeout, not just the first's.
         let limit = provider.total_timeout(self.config.timeout);
         let deadline = Instant::now() + limit;
@@ -1036,7 +1096,7 @@ impl Engine {
             .complete(provider, &messages, format, usage, deadline)
             .await?;
         let checked = tracing::info_span!("mb.validate")
-            .in_scope(|| self.check_output(validator, &first, fill));
+            .in_scope(|| self.check_output(validator, &first, fill, echoes));
         let errors = match checked {
             Checked::Valid(value) => return Ok((value, Source::Llm)),
             Checked::Patched(value) => return Ok((value, Source::Repaired)),
@@ -1063,7 +1123,7 @@ impl Engine {
                 .complete(provider, &messages, format, usage, Instant::now() + limit)
                 .await?;
             let checked = tracing::info_span!("mb.validate")
-                .in_scope(|| self.check_output(validator, &second, fill));
+                .in_scope(|| self.check_output(validator, &second, fill, echoes));
             match checked {
                 Checked::Valid(value) | Checked::Patched(value) => Ok((value, Source::Repaired)),
                 Checked::Rejected(reason) => Err(reason),
@@ -1196,8 +1256,19 @@ fn apply_scenario(
     if !success && scenario.status != Some(response.status) {
         return response;
     }
-    let Some(body @ Value::Object(_)) = &response.body else {
-        return response;
+    let body = match &response.body {
+        Some(body @ Value::Object(_)) => body,
+        Some(_) => {
+            tracing::warn!(
+                operation = %op.id,
+                scenario = %scenario.name,
+                "scenario set applies to object bodies only; ignoring it"
+            );
+            metrics::counter!(SCENARIO_SET_IGNORED_METRIC, "reason" => "not_an_object")
+                .increment(1);
+            return response;
+        }
+        None => return response,
     };
     let patched = GeneratedResponse {
         body: Some(apply_set(body, set)),
@@ -1224,6 +1295,7 @@ fn apply_scenario(
                 errors = %errors.join("; "),
                 "scenario set produces an invalid body; ignoring it"
             );
+            metrics::counter!(SCENARIO_SET_IGNORED_METRIC, "reason" => "invalid").increment(1);
             response
         }
         None => response,

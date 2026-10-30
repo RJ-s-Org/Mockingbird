@@ -301,6 +301,9 @@ impl Faker {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+        let count = |k: &str| s.get(k).and_then(Value::as_u64).map(|n| n as usize);
+        let min = count("minProperties").unwrap_or(0);
+        let max = count("maxProperties");
         let any = Value::Bool(true);
         let mut out = Map::new();
         for name in &required {
@@ -313,7 +316,7 @@ impl Faker {
         if let Some(props) = props {
             for (name, sub) in props {
                 // Re-checked per property: the budget may run out mid-object.
-                if at_limit || ctx.generated >= NODE_BUDGET {
+                if at_limit || ctx.generated >= NODE_BUDGET || max.is_some_and(|m| out.len() >= m) {
                     break;
                 }
                 if !out.contains_key(name) {
@@ -322,7 +325,82 @@ impl Faker {
                 }
             }
         }
+        // A map (no declared members, values from `patternProperties` or an
+        // `additionalProperties` schema) gets one entry, as a list gets one
+        // item; `minProperties` adds members to any object.
+        let map_like = props.is_none_or(Map::is_empty) && map_value_schema(s).is_some();
+        let wanted = if map_like && !at_limit {
+            min.max(1)
+        } else {
+            min
+        };
+        let wanted = max.map_or(wanted, |m| wanted.min(m));
+        if out.len() < wanted {
+            self.fake_extra_members(ctx, s, &mut out, wanted, depth, rng);
+        }
         Value::Object(out)
+    }
+
+    /// Adds members to `out` until it has `wanted`: keys drawn from each
+    /// `patternProperties` pattern in turn (valued by its schema), else words
+    /// matching no pattern and no declared property (valued by
+    /// `additionalProperties`, unless it is `false`). Gives up after a bounded
+    /// number of clashing draws or when the hard node budget runs out.
+    fn fake_extra_members<R: Rng>(
+        &self,
+        ctx: &mut Ctx<'_>,
+        s: &Map<String, Value>,
+        out: &mut Map<String, Value>,
+        wanted: usize,
+        depth: usize,
+        rng: &mut R,
+    ) {
+        let patterns: Vec<(&str, &Value)> = s
+            .get("patternProperties")
+            .and_then(Value::as_object)
+            .map(|p| p.iter().map(|(k, v)| (k.as_str(), v)).collect())
+            .unwrap_or_default();
+        let any = Value::Bool(true);
+        let additional = match s.get("additionalProperties") {
+            Some(Value::Bool(false)) => None,
+            Some(schema) => Some(schema),
+            None => Some(&any),
+        };
+        let declared = s.get("properties").and_then(Value::as_object);
+        let matches =
+            |pattern: &str, key: &str| check_regex(pattern).is_some_and(|re| re.is_match(key));
+        let draws = wanted.saturating_mul(2).saturating_add(EXTRA_KEY_DRAWS);
+        for turn in 0..draws {
+            if out.len() >= wanted || hard_exhausted(ctx) {
+                break;
+            }
+            let from_pattern = (!patterns.is_empty())
+                .then(|| turn % patterns.len())
+                .and_then(|i| {
+                    let (pattern, schema) = patterns[i];
+                    let key = pattern_string(pattern, 1, Some(MAX_KEY_CHARS), rng)?;
+                    // A key another pattern matches must satisfy both.
+                    let shared = patterns
+                        .iter()
+                        .enumerate()
+                        .any(|(j, (other, _))| j != i && matches(other, &key));
+                    (!shared).then_some((key, schema))
+                });
+            let drawn = from_pattern.or_else(|| {
+                let schema = additional?;
+                let key = extra_key(rng, out.len());
+                let patterned = patterns.iter().any(|(p, _)| matches(p, &key));
+                (!patterned).then_some((key, schema))
+            });
+            let Some((key, schema)) = drawn else {
+                continue;
+            };
+            if out.contains_key(&key) || declared.is_some_and(|d| d.contains_key(&key)) {
+                continue;
+            }
+            let value = self.gen_value(ctx, schema, None, depth + 1, None, rng);
+            out.insert(key, value);
+        }
     }
 
     fn fake_array<R: Rng>(
@@ -333,34 +411,84 @@ impl Faker {
         at_limit: bool,
         rng: &mut R,
     ) -> Value {
-        let min = s.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let max = s
-            .get("maxItems")
-            .and_then(Value::as_u64)
-            .map(|m| m as usize);
-        let mut len = if at_limit { min } else { min.max(1) };
+        let count = |k: &str| s.get(k).and_then(Value::as_u64).map(|n| n as usize);
+        let prefix: &[Value] = s
+            .get("prefixItems")
+            .and_then(Value::as_array)
+            .map_or(&[], Vec::as_slice);
+        let contains = s.get("contains");
+        let min_contains = contains.map_or(0, |_| count("minContains").unwrap_or(1));
+        let min = count("minItems").unwrap_or(0).max(min_contains);
+        let max = count("maxItems");
+        let any = Value::Bool(true);
+        let items = s.get("items").unwrap_or(&any);
+        let mut len = if at_limit {
+            min
+        } else {
+            min.max(1).max(prefix.len())
+        };
+        // `items: false` closes the list after its `prefixItems`.
+        if matches!(items, Value::Bool(false)) {
+            len = len.min(prefix.len());
+        }
         if let Some(max) = max {
             len = len.min(max);
         }
         let unique = s.get("uniqueItems").and_then(Value::as_bool) == Some(true);
-        let any = Value::Bool(true);
-        let items = s.get("items").unwrap_or(&any);
         let mut out: Vec<Value> = Vec::with_capacity(len.min(NODE_BUDGET));
         for i in 0..len {
             if hard_exhausted(ctx) || (i >= min && ctx.generated >= NODE_BUDGET) {
                 break;
             }
-            let mut candidate = self.gen_value(ctx, items, None, depth + 1, None, rng);
+            let base = prefix.get(i).unwrap_or(items);
+            // The first `minContains` items satisfy `contains` too.
+            let both;
+            let schema = match contains {
+                Some(c) if i < min_contains => {
+                    both = json!({"allOf": [c, base]});
+                    &both
+                }
+                _ => base,
+            };
+            let mut candidate = self.gen_value(ctx, schema, None, depth + 1, None, rng);
             if unique {
                 let mut tries = 0;
                 while out.contains(&candidate) && tries < 32 && !hard_exhausted(ctx) {
-                    candidate = self.gen_value(ctx, items, None, depth + 1, None, rng);
+                    candidate = self.gen_value(ctx, schema, None, depth + 1, None, rng);
                     tries += 1;
                 }
             }
             out.push(candidate);
         }
         Value::Array(out)
+    }
+}
+
+/// Draws allowed beyond twice the wanted member count when keys clash.
+const EXTRA_KEY_DRAWS: usize = 16;
+
+/// Most characters in a key drawn from a `patternProperties` pattern.
+const MAX_KEY_CHARS: usize = 32;
+
+/// The schema a map's values take: its first `patternProperties` schema,
+/// else a schema (not a boolean) under `additionalProperties`.
+fn map_value_schema(s: &Map<String, Value>) -> Option<&Value> {
+    s.get("patternProperties")
+        .and_then(Value::as_object)
+        .and_then(|p| p.values().next())
+        .or_else(|| {
+            s.get("additionalProperties")
+                .filter(|a| !matches!(a, Value::Bool(_)))
+        })
+}
+
+/// A map key: a word, numbered once the words could run out.
+fn extra_key<R: Rng>(rng: &mut R, n: usize) -> String {
+    let w = word(rng);
+    if n < WORDS.len() / 2 {
+        w
+    } else {
+        format!("{w}_{n}")
     }
 }
 
@@ -681,9 +809,23 @@ fn type_names(s: &Map<String, Value>) -> Vec<&str> {
 
 fn infer_type(s: &Map<String, Value>) -> &'static str {
     let has = |keys: &[&str]| keys.iter().any(|k| s.contains_key(*k));
-    if has(&["properties", "required"]) {
+    if has(&[
+        "properties",
+        "required",
+        "additionalProperties",
+        "patternProperties",
+        "minProperties",
+        "maxProperties",
+    ]) {
         "object"
-    } else if has(&["items", "minItems", "maxItems", "uniqueItems"]) {
+    } else if has(&[
+        "items",
+        "prefixItems",
+        "contains",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    ]) {
         "array"
     } else if has(&[
         "minimum",

@@ -107,14 +107,106 @@ fn schema() -> impl Strategy<Value = Value> {
             inner
                 .clone()
                 .prop_map(|s| json!({"anyOf": [s, {"type": "null"}]})),
-            (inner.clone(), inner).prop_map(|(a, b)| {
+            (inner.clone(), inner.clone()).prop_map(|(a, b)| {
                 json!({"allOf": [
                     {"type": "object", "properties": {"p": a}, "required": ["p"]},
                     {"type": "object", "properties": {"q": b}}
                 ]})
             }),
+            (inner.clone(), 0u64..3, 0u64..3).prop_map(|(values, min, extra)| {
+                json!({"type": "object", "additionalProperties": values,
+                       "minProperties": min, "maxProperties": min + extra})
+            }),
+            (inner.clone(), inner.clone()).prop_map(|(a, b)| {
+                json!({"type": "array", "prefixItems": [a], "items": b, "minItems": 1})
+            }),
+            // The faker intersects `contains` with `items` only as far as
+            // `allOf` merging goes; an item schema that is `contains` itself
+            // is always satisfiable.
+            (inner, 0u64..3).prop_map(|(items, n)| {
+                json!({"type": "array", "items": items, "contains": items, "minContains": n})
+            }),
         ]
     })
+}
+
+/// Fakes `schema` with 200 seeds and checks every value against it.
+fn always_valid(schema: &Value) -> Vec<Value> {
+    let validator = SchemaValidator::new(schema).unwrap();
+    let faker = Faker::default();
+    (0..200u64)
+        .map(|seed| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let v = faker.fake(schema, &mut rng);
+            if let Err(e) = validator.validate(&v) {
+                panic!("seed {seed}: {e:?} for {v} of {schema}");
+            }
+            v
+        })
+        .collect()
+}
+
+#[test]
+fn fakes_maps_from_additional_and_pattern_properties() {
+    // An Avro map: no declared properties, values from additionalProperties.
+    let map =
+        json!({"type": "object", "additionalProperties": {"type": "integer"}, "minProperties": 2});
+    for v in always_valid(&map) {
+        assert!(v.as_object().unwrap().len() >= 2, "{v}");
+    }
+    let maxed = json!({
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "string"}},
+        "maxProperties": 1
+    });
+    always_valid(&maxed);
+    let patterned = json!({
+        "type": "object",
+        "patternProperties": {"^x-[a-z]{2,4}$": {"type": "boolean"}},
+        "additionalProperties": false,
+        "minProperties": 1
+    });
+    for v in always_valid(&patterned) {
+        assert!(!v.as_object().unwrap().is_empty(), "{v}");
+    }
+    let mixed = json!({
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+        "additionalProperties": {"type": "string", "format": "uuid"},
+        "minProperties": 3,
+        "maxProperties": 4
+    });
+    always_valid(&mixed);
+}
+
+#[test]
+fn fakes_prefix_items_and_contains() {
+    let tuple = json!({
+        "type": "array",
+        "prefixItems": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}],
+        "items": false,
+        "minItems": 3
+    });
+    for v in always_valid(&tuple) {
+        assert_eq!(v.as_array().unwrap().len(), 3, "{v}");
+    }
+    let open = json!({
+        "type": "array",
+        "prefixItems": [{"const": "head"}],
+        "items": {"type": "integer"},
+        "minItems": 2
+    });
+    always_valid(&open);
+    let contains = json!({
+        "type": "array",
+        "items": {"type": ["string", "integer"]},
+        "contains": {"type": "integer", "minimum": 10},
+        "minContains": 2
+    });
+    always_valid(&contains);
+    let untyped = json!({"contains": {"const": 7}});
+    always_valid(&untyped);
 }
 
 proptest! {

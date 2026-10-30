@@ -241,7 +241,9 @@ fn add_entry(m: &mut MockReport, e: &Value) {
     let status = e["status"].as_u64().unwrap_or(0);
     let reason = e["fallback_reason"].as_str();
     let source = match e["source"].as_str() {
-        Some("fallback") if reason == Some(mb_engine::OFFLINE_REASON) => "faker",
+        Some("fallback") if reason.is_some_and(|r| r.starts_with(mb_engine::OFFLINE_REASON)) => {
+            "faker"
+        }
         Some(s) => s,
         None => "none",
     };

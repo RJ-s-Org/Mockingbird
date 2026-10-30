@@ -45,7 +45,7 @@ With `server.tls` set, `auth.external_url` must be an `https://` URL in every au
 | `storage` | section | | | | |
 | `storage.url` | URL | `sqlite::memory:` | `sqlite::memory:`, `sqlite://<path>` (created if missing) or `postgres://…` | `MB_STORAGE_URL`, `--storage-url` | Control-plane store: mocks, contracts, scenarios, profiles, API keys, audit and request logs, token usage. Migrations run at startup under an advisory lock. |
 | `storage.state_url` | URL | unset (same as `storage.url`) | `memory`, `sqlite…`, `postgres://…`, `redis://` or `rediss://` | `MB_STATE_URL` | Session state store. `memory` keeps state in the process. Redis must run with `maxmemory-policy noeviction`; Redis Cluster is not supported (use a single primary; a managed service with automatic failover works). |
-| `storage.session_ttl` | duration | `24h` | | | A session's state expires this long after its last write. |
+| `storage.session_ttl` | duration | `24h` | | | A session's state expires this long after it was last used: any request that reads or writes it (a create, a read served from state, a list that seeds it) restarts the clock. |
 
 ## `bus`
 
@@ -306,7 +306,7 @@ Named scenarios, applied with `X-Mockingbird-Scenario: <name>`, by the mock's `d
 | `mocks.<name>.scenarios.<name>.instructions` | string | unset | | | Extra prompt instructions. |
 | `mocks.<name>.scenarios.<name>.status` | integer | unset | A status the contract declares, or a 5xx | | Answer with this status's response variant (`set` applies to it too); an undeclared 5xx is answered natively. Any other status must be declared by one of the scenario's `operations` (by any operation when it lists none), or the config is rejected, as the Admin API answers 422; an operation that does not declare it serves its own status. |
 | `mocks.<name>.scenarios.<name>.latency` | duration | unset | | | Added latency. |
-| `mocks.<name>.scenarios.<name>.set` | JSON object | unset | | | Fields merged (JSON merge patch; `null` deletes one) into the response body. Each key present must fit the response schema the scenario selects (the `status` response, else the success response) of at least one of its operations, or the config is rejected, as the Admin API answers 422; absent keys and `required` are not checked. |
+| `mocks.<name>.scenarios.<name>.set` | JSON object | unset | | | Fields merged (JSON merge patch; `null` deletes one) into the response body. Each key present must fit the response schema the scenario selects (the `status` response, else the success response) of at least one of its operations, or the config is rejected, as the Admin API answers 422; absent keys and `required` are not checked. At request time a `set` whose patched body would not validate (or whose body is not an object) is dropped whole: the unpatched answer is served, with a WARN log and `mb_scenario_set_ignored_total{reason}` (`invalid`, `not_an_object`). |
 | `mocks.<name>.scenarios.<name>.operations` | list | `[]` (all) | Operation ids | | Operations the scenario applies to. Each entry is an operation id, or `{id, instructions}`. |
 | `mocks.<name>.scenarios.<name>.operations[].id` | string | | An operation id | | The operation of an `{id, instructions}` entry. |
 | `mocks.<name>.scenarios.<name>.operations[].instructions` | string | unset | | | Instructions replacing the scenario's `instructions` for that operation. |

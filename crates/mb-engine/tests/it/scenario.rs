@@ -241,6 +241,74 @@ async fn invalid_scenario_set_is_ignored() {
     order_validator(&bundle).validate(&body).unwrap();
 }
 
+/// MB-ENGINE-STUB-8: a `set` dropped at request time is counted, by
+/// reason, instead of leaving only a log line. The recorder is local to the
+/// test's thread, so the runtime runs on it too.
+#[test]
+fn ignored_scenario_set_is_counted() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    let bundle = orders();
+    let get = bundle.operation("getOrder").unwrap();
+    let list = bundle.operation("listOrders").unwrap();
+    let invalid = ScenarioSpec {
+        name: "broken".into(),
+        instructions: None,
+        set: Some(json!({"total": "NaN-string"})),
+        status: None,
+    };
+    let on_a_list = ScenarioSpec {
+        name: "list".into(),
+        instructions: None,
+        set: Some(json!({"status": "shipped"})),
+        status: None,
+    };
+    let mut list_call = call();
+    list_call.operation_id = "listOrders".into();
+    list_call.path_params.clear();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let engine = Engine::new(None, EngineConfig::default());
+            engine
+                .generate(&bundle, get, &call(), ctx(Some(&invalid)))
+                .await
+                .unwrap();
+            engine
+                .generate(&bundle, list, &list_call, ctx(Some(&on_a_list)))
+                .await
+                .unwrap();
+        });
+    });
+    let mut counted: Vec<(String, DebugValue)> = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == mb_engine::SCENARIO_SET_IGNORED_METRIC)
+        .map(|(key, _, _, value)| {
+            let reason = key
+                .key()
+                .labels()
+                .find(|l| l.key() == "reason")
+                .map(|l| l.value().to_string())
+                .unwrap_or_default();
+            (reason, value)
+        })
+        .collect();
+    counted.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        counted,
+        vec![
+            ("invalid".to_string(), DebugValue::Counter(1)),
+            ("not_an_object".to_string(), DebugValue::Counter(1)),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn usage_sums_primary_and_repair() {
     let bundle = orders();

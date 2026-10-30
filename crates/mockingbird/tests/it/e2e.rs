@@ -38,6 +38,10 @@ fn completion(order: Value) -> Value {
            "usage":{"prompt_tokens":1,"completion_tokens":1}})
 }
 
+/// Ids of scripted orders: uuids, as the contract's `format: uuid` asks.
+const O1: &str = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+const O2: &str = "1f2a3b4c-5d6e-4f7a-8b9c-0d1e2f3a4b5c";
+
 fn order(id: &str) -> Value {
     json!({"id": id, "customerId": "c1", "status": "pending", "total": 10})
 }
@@ -47,14 +51,14 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(completion(order("o1"))))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion(order(O1))))
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&mock)
         .await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(completion(order("o2"))))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completion(order(O2))))
         .with_priority(2)
         .mount(&mock)
         .await;
@@ -75,20 +79,24 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
     assert_eq!(r.status(), 201);
     assert_eq!(r.headers()["x-mockingbird-source"], "llm");
 
-    let r = http.get(format!("{base}/orders/o1")).send().await.unwrap();
+    let r = http
+        .get(format!("{base}/orders/{O1}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["id"], "o1");
+    assert_eq!(body["id"], O1);
 
     let r = http
-        .delete(format!("{base}/orders/o1"))
+        .delete(format!("{base}/orders/{O1}"))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 204);
 
     let r = http
-        .get(format!("{base}/orders/o1"))
+        .get(format!("{base}/orders/{O1}"))
         .header("X-Mockingbird-Status", "404")
         .send()
         .await

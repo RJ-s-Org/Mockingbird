@@ -350,13 +350,13 @@ async fn llm_create_reflects_request_body() {
     c.path_params.clear();
     c.body = Some(json!({"customerId": "c1", "total": 10}));
     let (_p, engine) = scripted(vec![Ok(json!({
-        "id": "o1", "customerId": "someone-else", "status": "pending", "total": 99
+        "id": THING_ID, "customerId": "someone-else", "status": "pending", "total": 99
     })
     .to_string())]);
     let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
     assert_eq!(out.source, Source::Llm);
     let body = out.body.unwrap();
-    assert_eq!(body["id"], "o1");
+    assert_eq!(body["id"], THING_ID);
     assert_eq!(body["customerId"], "c1");
     assert_eq!(body["total"], 10);
 }
@@ -810,7 +810,7 @@ async fn joint_generation_answers_every_part_in_one_call() {
     let get = bundle.operation("getOrder").unwrap();
     let list = bundle.operation("listOrders").unwrap();
     let mut other = valid_order();
-    other["id"] = json!("o2");
+    other["id"] = json!(THING_ID);
     let (provider, engine) = scripted(vec![Ok(json!({
         "order": valid_order_at_o1(),
         "recent": [other.clone()],
@@ -1067,11 +1067,11 @@ async fn duplicate_ids_in_a_list_are_made_unique() {
     let bundle = orders();
     let op = bundle.operation("listOrders").unwrap();
     let mut a2 = valid_order();
-    a2["id"] = json!("a");
+    a2["id"] = json!(DUP_ID);
     let mut a1 = a2.clone();
     a1["total"] = json!(1);
     let mut b = valid_order();
-    b["id"] = json!("b");
+    b["id"] = json!(THING_ID);
     let (_, engine) = scripted(vec![Ok(json!([a1, a2, b]).to_string())]);
     let mut c = call("listOrders");
     c.path_params.clear();
@@ -1085,9 +1085,9 @@ async fn duplicate_ids_in_a_list_are_made_unique() {
         .iter()
         .map(|o| o["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids[0], "a");
-    assert_eq!(ids[2], "b");
-    assert!(ids[1] != "a" && ids[1] != "b", "{ids:?}");
+    assert_eq!(ids[0], DUP_ID);
+    assert_eq!(ids[2], THING_ID);
+    assert!(ids[1] != DUP_ID && ids[1] != THING_ID, "{ids:?}");
 }
 
 #[test]
@@ -1392,4 +1392,171 @@ async fn a_wrapped_list_is_unwrapped_and_patched() {
     assert_eq!(items.len(), 2, "{:?}", out.body);
     assert_eq!(items[0], valid_order());
     assert!(["pending", "shipped"].contains(&items[1]["status"].as_str().unwrap()));
+}
+
+/// A contract whose `GET /things/{thingId}?owner=` answer carries formatted
+/// strings: `id` and `ownerId` (`uuid`), `createdAt` (`date-time`) and
+/// `label` (a custom format, an annotation only).
+fn things() -> Bundle {
+    inline(
+        r##"{
+  "openapi": "3.1.0",
+  "info": {"title": "Things", "version": "1"},
+  "paths": {
+    "/things/{thingId}": {
+      "get": {
+        "operationId": "getThing",
+        "parameters": [
+          {"name": "thingId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "owner", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+          "type": "object",
+          "required": ["id", "ownerId", "createdAt", "label"],
+          "properties": {
+            "id": {"type": "string", "format": "uuid"},
+            "ownerId": {"type": "string", "format": "uuid"},
+            "createdAt": {"type": "string", "format": "date-time"},
+            "label": {"type": "string", "format": "x-house-style"}
+          }
+        }}}}}
+      }
+    }
+  }
+}"##,
+    )
+}
+
+fn thing_call(id: &str, owner: Option<&str>) -> OperationCall {
+    let mut path_params = Map::new();
+    path_params.insert("thingId".into(), json!(id));
+    let mut query = Map::new();
+    if let Some(owner) = owner {
+        query.insert("owner".into(), json!(owner));
+    }
+    OperationCall {
+        operation_id: "getThing".into(),
+        path_params,
+        query,
+        headers: Map::new(),
+        body: None,
+    }
+}
+
+const THING_ID: &str = "5f0c6a1e-2b7d-4c3a-9e8f-1a2b3c4d5e6f";
+
+/// A second valid uuid.
+const DUP_ID: &str = "0b7e2c1d-9a4f-4e3b-8c2d-6f5a4b3c2d1e";
+
+/// MB-ENGINE-STUB-1: a value breaking a format the faker produces is
+/// patched locally (no repair round), and the answer is `repaired`.
+#[tokio::test]
+async fn invalid_uuid_and_date_time_are_patched_locally() {
+    let bundle = things();
+    let op = bundle.operation("getThing").unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "id": THING_ID,
+        "ownerId": "not-a-uuid",
+        "createdAt": "yesterday",
+        "label": "anything goes"
+    })
+    .to_string())]);
+    let out = engine
+        .generate(&bundle, op, &thing_call(THING_ID, None), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Repaired, "{:?}", out.fallback_reason);
+    assert_eq!(
+        provider.requests().len(),
+        1,
+        "format errors never cost a repair call"
+    );
+    let body = out.body.unwrap();
+    uuid::Uuid::parse_str(body["ownerId"].as_str().unwrap()).unwrap();
+    chrono::DateTime::parse_from_rfc3339(body["createdAt"].as_str().unwrap()).unwrap();
+    // A custom format stays an annotation.
+    assert_eq!(body["label"], "anything goes");
+    assert_eq!(body["id"], THING_ID);
+}
+
+/// A value equal to a request path or query value is echoed, not
+/// overwritten, even where it breaks the declared format.
+#[tokio::test]
+async fn request_values_survive_format_patching() {
+    let bundle = things();
+    let op = bundle.operation("getThing").unwrap();
+    let (_p, engine) = scripted(vec![Ok(json!({
+        "id": "t-1",
+        "ownerId": "bob",
+        "createdAt": "2026-10-01T10:00:00Z",
+        "label": "x"
+    })
+    .to_string())]);
+    let out = engine
+        .generate(&bundle, op, &thing_call("t-1", Some("bob")), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm, "{:?}", out.fallback_reason);
+    let body = out.body.unwrap();
+    assert_eq!(body["id"], "t-1");
+    assert_eq!(body["ownerId"], "bob");
+}
+
+/// Request validators built with `SchemaValidator::new` keep formats as
+/// annotations; output validators assert the formats the faker produces.
+#[test]
+fn only_output_validators_assert_formats() {
+    let schema = json!({"type": "string", "format": "uuid"});
+    assert!(SchemaValidator::new(&schema).unwrap().is_valid(&json!("x")));
+    let output = SchemaValidator::for_output(&schema).unwrap();
+    assert!(!output.is_valid_output(&json!("x")));
+    assert!(output.is_valid_output(&json!(THING_ID)));
+    // `is_valid` stays the annotation-only verdict the overlays rely on.
+    assert!(output.is_valid(&json!("x")));
+    let other =
+        SchemaValidator::for_output(&json!({"type": "string", "format": "duration"})).unwrap();
+    assert!(other.is_valid_output(&json!("not a duration")));
+}
+
+/// MB-ENGINE-STUB-7: an offline bodyless answer is the faker's, not the
+/// LLM's.
+#[tokio::test]
+async fn offline_bodyless_answer_is_fallback() {
+    let bundle = orders();
+    let op = bundle.operation("deleteOrder").unwrap();
+    let out = offline()
+        .generate(&bundle, op, &call("deleteOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.status, 204);
+    assert_eq!(out.body, None);
+    assert_eq!(out.source, Source::Fallback);
+    assert_eq!(
+        out.fallback_reason.as_deref(),
+        Some(mb_engine::OFFLINE_REASON)
+    );
+}
+
+/// MB-ENGINE-STUB-2: when no faker draw validates, the answer says so in
+/// its fallback reason instead of passing as schema-valid.
+#[tokio::test]
+async fn unsatisfiable_faker_output_is_flagged() {
+    let bundle = inline(
+        r##"{
+  "openapi": "3.1.0",
+  "info": {"title": "Odd", "version": "1"},
+  "paths": {"/odd": {"get": {"operationId": "getOdd", "responses": {"200": {
+    "description": "ok",
+    "content": {"application/json": {"schema": {"type": "string", "not": {"type": "string"}}}}
+  }}}}}
+}"##,
+    );
+    let op = bundle.operation("getOdd").unwrap();
+    let mut c = call("getOdd");
+    c.path_params.clear();
+    let out = offline().generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!(out.source, Source::Fallback);
+    let reason = out.fallback_reason.unwrap();
+    assert!(reason.starts_with(mb_engine::OFFLINE_REASON), "{reason}");
+    assert!(reason.contains("does not validate"), "{reason}");
 }
