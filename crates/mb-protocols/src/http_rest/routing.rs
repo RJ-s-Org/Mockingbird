@@ -20,8 +20,16 @@ pub enum RouteError {
 }
 
 /// Maps `(method, path)` to an operation id.
+///
+/// Built with [`RouteTable::with_base_paths`], it also routes each
+/// operation under the contract's base paths (`/v1/orders` as well as
+/// `/orders`). A path matched by a contract route is never taken by a
+/// prefixed one.
 pub struct RouteTable {
     by_method: HashMap<HttpMethodKey, matchit::Router<String>>,
+    /// The contract routes under the base paths, consulted when no
+    /// contract route matches.
+    prefixed: HashMap<HttpMethodKey, matchit::Router<String>>,
 }
 
 /// Shows how many methods have routes; `matchit` routers are opaque.
@@ -29,6 +37,7 @@ impl std::fmt::Debug for RouteTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RouteTable")
             .field("methods", &self.by_method.len())
+            .field("prefixed_methods", &self.prefixed.len())
             .finish_non_exhaustive()
     }
 }
@@ -58,6 +67,21 @@ impl RouteTable {
     /// [`RouteError::Insert`] when two operations of one method claim the
     /// same path, or a path is not a valid route.
     pub fn new(bundle: &Bundle) -> Result<Self, RouteError> {
+        Self::with_base_paths(bundle, &[])
+    }
+
+    /// [`RouteTable::new`], with every operation also routed under each of
+    /// `base_paths` (as `mb_import::base_paths` returns them: Swagger
+    /// `basePath`, OpenAPI `servers[].url` paths). A trailing `/` is
+    /// ignored; a base path that does not start with `/`, is the root or
+    /// contains `{` or `}` is skipped. When a prefixed route conflicts with
+    /// another prefixed route, the first one is kept; a contract route
+    /// matching the same request always wins.
+    ///
+    /// # Errors
+    ///
+    /// As [`RouteTable::new`]; base paths never cause an error.
+    pub fn with_base_paths(bundle: &Bundle, base_paths: &[String]) -> Result<Self, RouteError> {
         let mut by_method: HashMap<HttpMethodKey, matchit::Router<String>> = HashMap::new();
         for op in &bundle.operations {
             let Binding::Http { method, path } = &op.binding else {
@@ -75,14 +99,38 @@ impl RouteTable {
                     source,
                 })?;
         }
-        Ok(Self { by_method })
+        let mut prefixed: HashMap<HttpMethodKey, matchit::Router<String>> = HashMap::new();
+        for base in base_paths.iter().filter_map(|b| base_path(b)) {
+            for op in &bundle.operations {
+                let Binding::Http { method, path } = &op.binding else {
+                    continue;
+                };
+                let route = match normalize(path) {
+                    "/" => base.to_owned(),
+                    route => format!("{base}{route}"),
+                };
+                if let Err(e) = prefixed
+                    .entry(key(*method))
+                    .or_default()
+                    .insert(route, op.id.clone())
+                {
+                    tracing::debug!(operation = %op.id, base_path = base, error = %e, "prefixed route skipped");
+                }
+            }
+        }
+        Ok(Self {
+            by_method,
+            prefixed,
+        })
     }
 
     /// The operation id and percent-decoded path parameters for a raw
     /// (still percent-encoded) request path. One trailing `/` is ignored.
     pub fn find(&self, method: HttpMethod, path: &str) -> Option<(String, Map<String, Value>)> {
-        let router = self.by_method.get(&key(method))?;
-        let matched = router.at(normalize(path)).ok()?;
+        let path = normalize(path);
+        let matched = [&self.by_method, &self.prefixed]
+            .into_iter()
+            .find_map(|routers| routers.get(&key(method))?.at(path).ok())?;
         let params = matched
             .params
             .iter()
@@ -97,12 +145,20 @@ impl RouteTable {
         ALL_METHODS
             .into_iter()
             .filter(|m| {
-                self.by_method
-                    .get(&key(*m))
-                    .is_some_and(|r| r.at(path).is_ok())
+                [&self.by_method, &self.prefixed]
+                    .into_iter()
+                    .any(|routers| routers.get(&key(*m)).is_some_and(|r| r.at(path).is_ok()))
             })
             .collect()
     }
+}
+
+/// `base` as a route prefix: without its trailing `/`s; `None` when it does
+/// not start with `/`, is the root, or contains a route pattern brace.
+fn base_path(base: &str) -> Option<&str> {
+    let trimmed = base.trim_end_matches('/');
+    (base.starts_with('/') && !trimmed.is_empty() && !trimmed.contains(['{', '}']))
+        .then_some(trimmed)
 }
 
 /// Strip one trailing `/`, except for the root path.

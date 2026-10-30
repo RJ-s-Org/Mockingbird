@@ -1351,3 +1351,22 @@ async fn bench_change_burst() {
         );
     }
 }
+
+#[tokio::test]
+async fn serves_under_the_contract_base_path_too() {
+    let store = store().await;
+    let mock = create_mock(&store, "orders", "/orders", None).await;
+    let source = fixture_source().replacen(
+        "paths:\n",
+        "servers:\n  - url: https://api.example.com/v1\npaths:\n",
+        1,
+    );
+    activate(&store, &mock, &source).await;
+    let deps = deps(store);
+    let registry = MockRegistry::new();
+    registry.reload_all(&deps).await.unwrap();
+    let base = serve(registry.router()).await;
+    assert_eq!(status_of(&base, "/orders/v1/orders").await, 200);
+    assert_eq!(status_of(&base, "/orders/orders").await, 200);
+    assert_eq!(status_of(&base, "/orders/v2/orders").await, 404);
+}

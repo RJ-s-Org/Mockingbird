@@ -4,7 +4,7 @@ The importer detects a contract's format from its bytes (the file name does not 
 
 | Format | Detected by | Served |
 | --- | --- | --- |
-| OpenAPI 3.x, Swagger 2.0 (JSON or YAML) | an `openapi: 3.*` or `swagger: "2.0"` key | REST at the route prefix. Operations whose success response is `text/event-stream` stream server-sent events (SSE). |
+| OpenAPI 3.x, Swagger 2.0 (JSON or YAML) | an `openapi: 3.*` or `swagger: "2.0"` key | REST at the route prefix, at each operation's path and also under the contract's [base paths](#base-paths). Operations whose success response is `text/event-stream` stream server-sent events (SSE). |
 | GraphQL SDL | SDL definitions (`type Query`, `schema {`, …) | GraphQL at `<prefix>/graphql` (`protocols.graphql.path`, or `mocks.<name>.graphql_path` for one mock, e.g. Shopify's `/graphql.json`): queries over `GET` or `POST`, mutations over `POST`, subscriptions over a WebSocket upgrade of the same path (`graphql-transport-ws` or the legacy `graphql-ws`). |
 | GraphQL introspection JSON | a `__schema` or `data.__schema` key | As GraphQL SDL; no conversion needed (Shopify publishes its Storefront schema this way, as `storefront.schema.json` in `@shopify/hydrogen-react`). |
 | protobuf `.proto` | a `syntax = "proto…"` statement, or `service` and `message` definitions | gRPC on `:50051` (all four call kinds), with server reflection and the standard health service. Requests may be gzip-compressed (`grpc-encoding: gzip`), and responses are gzipped for clients that accept it (`grpc-accept-encoding`); other encodings are refused with `UNIMPLEMENTED`. The route prefix is ignored. |
@@ -14,6 +14,19 @@ The importer detects a contract's format from its bytes (the file name does not 
 | zip or tar.gz archive | the zip or gzip magic bytes | The contract inside: all `.proto` files compiled together, else the single `.wsdl` with its XSDs, else the `.graphql`/`.graphqls`/`.gql` files joined as one schema, else the one file that is a contract (documentation, images, `README` and `LICENSE` files beside it are ignored). See [Archive uploads](cli.md#archive-uploads). |
 
 Operation ids, as scenarios' `operations` lists and the request log use them, are `Query.<field>` / `Mutation.<field>` / `Subscription.<field>` for GraphQL, `<Service>.<Method>` for gRPC (`<package>.<Service>.<Method>` when the short form collides), and `<operation>` for SOAP (`<Service>.<operation>` on collision). Each gRPC service is served by one mock across every workspace (the gRPC listener is shared): uploading with activation, or activating, a contract whose services another mock's active contract serves is a 409, and a config file declaring such a clash is rejected. If a clash reaches the data plane anyway, the mock already serving the service keeps it and the newcomer is reported in `/readyz` as failed. gRPC reflection lists only the services the caller's data-plane key reaches (plus mocks without data-plane auth) and needs a valid key when any gRPC mock is in `api_key` mode.
+
+## Base paths
+
+A REST mock serves each operation at its contract path and also under every base path the contract declares, so a client configured with the server URL works without a `path_rewrite`. With `servers: [{url: https://api.example.com/v1}]` and the route prefix `/orders`, `GET /orders/v1/orders/42` and `GET /orders/orders/42` both reach `GET /orders/{id}`. Unprefixed paths keep working, so mocks of contracts that declare base paths do not change routes.
+
+- Swagger 2.0: `basePath`.
+- OpenAPI 3.x: the path of each top-level `servers[].url` (`https://api.example.com/v1` gives `/v1`, `/beta` gives `/beta`; a URL without a path, such as `https://api.stripe.com`, gives none). Several servers with different paths are all served, in declaration order, duplicates once.
+- Server variables are replaced by their `default` (`https://{region}.example.com/{version}` with `version` defaulting to `v2` gives `/v2`). The other values of a variable's `enum` are not served; declare them as servers of their own if clients use them. A server whose URL names a variable without a default is skipped.
+- A relative URL that does not start with `/` (`v1`, `./v1`) is relative to wherever the document is served and is skipped, as are the root (`/`), the query and the fragment.
+- Path-item and operation `servers` are not read. For another layout, such as a gateway that adds a segment the contract does not declare, use `mocks.<name>.path_rewrite` ([configuration](configuration.md)).
+- A contract path always wins over a prefixed one: with base path `/v1` and contract paths `/orders` and `/v1/orders`, `GET /v1/orders` is the `/v1/orders` operation. When two prefixed routes collide, the first base path keeps the route.
+
+Base paths are read from the stored contract source when the mock is loaded, so contracts uploaded before this release gain them on the next reload.
 
 ## Import warnings
 

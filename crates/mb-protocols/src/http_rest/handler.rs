@@ -67,7 +67,7 @@ struct InputValidators {
 
 impl RestState {
     pub(crate) fn new(rt: Arc<MockRuntime>) -> Result<Self, RouteError> {
-        let routes = RouteTable::new(&rt.bundle)?;
+        let routes = RouteTable::with_base_paths(&rt.bundle, &rt.base_paths)?;
         let compile = |op: &Operation, schema: &Option<Value>| {
             let schema = schema.as_ref()?;
             match SchemaValidator::new(&rt.bundle.with_reachable_defs(schema)) {

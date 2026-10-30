@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use mb_import::{
-    ImportError, SourceFile, SourceFormat, compile, compile_files, pack_dir, read_source, sniff,
-    unpack_archive,
+    ImportError, SourceFile, SourceFormat, base_paths, compile, compile_files, pack_dir,
+    read_source, sniff, unpack_archive,
 };
 use sha2::{Digest, Sha256};
 
@@ -294,4 +294,23 @@ fn a_single_contract_beside_incidental_files_compiles() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn base_paths_of_an_archive_come_from_its_root_contract() {
+    let root = b"openapi: 3.0.3\ninfo: {title: Pets, version: '1'}\nservers:\n  - url: https://pets.example.com/v1\npaths:\n  /pets:\n    get:\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: {$ref: './schemas/pet.yaml#/Pet'}\n";
+    // A shared file with its own header and servers is not the root.
+    let shared = b"openapi: 3.0.3\ninfo: {title: Shared, version: '1'}\nservers:\n  - url: /shared\npaths: {}\nPet: {type: object}\n";
+    let zip = zip_of(&[
+        ("README.md", b"# Pets"),
+        ("openapi.yaml", root),
+        ("schemas/pet.yaml", shared),
+    ]);
+    assert_eq!(base_paths(&zip), ["/v1"]);
+    // Proto, WSDL and GraphQL archives have none.
+    let zip = zip_of(&[(
+        "a.proto",
+        b"syntax = \"proto3\"; message A { int32 x = 1; }",
+    )]);
+    assert!(base_paths(&zip).is_empty());
 }
