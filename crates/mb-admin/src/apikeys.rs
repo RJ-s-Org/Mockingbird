@@ -19,10 +19,20 @@ use crate::workspaces::RoleSchema;
 /// The OpenAPI schema of [`KeyScope`] (which lives in `mb-auth`).
 #[derive(ToSchema)]
 #[schema(as = KeyScope, rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub enum KeyScopeSchema {
     Admin,
     DataPlane,
+}
+
+/// Keeps the schema in step with [`KeyScope`]: a new scope fails to compile
+/// here until the schema has it too.
+impl From<KeyScope> for KeyScopeSchema {
+    fn from(s: KeyScope) -> Self {
+        match s {
+            KeyScope::Admin => Self::Admin,
+            KeyScope::DataPlane => Self::DataPlane,
+        }
+    }
 }
 
 /// A new API key.

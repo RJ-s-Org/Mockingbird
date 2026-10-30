@@ -12,7 +12,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::AdminState;
 use crate::access::{CurrentPrincipal, WsAccess, request_id};
-use crate::audit::snapshot;
+use crate::audit::{AuditEntry, snapshot};
 use crate::problem::{ApiResult, Json, MANAGED_BY_FILE, Problem, Query};
 
 /// Longest accepted `display_name`, in characters.
@@ -21,12 +21,24 @@ const MAX_DISPLAY_NAME: usize = 128;
 /// The OpenAPI schema of [`Role`] (which lives in `mb-auth`).
 #[derive(ToSchema)]
 #[schema(as = Role, rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum RoleSchema {
     Viewer,
     Editor,
     Admin,
     Owner,
+}
+
+/// Keeps the schema in step with [`Role`]: a new role fails to compile here
+/// until the schema has it too.
+impl From<Role> for RoleSchema {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::Viewer => Self::Viewer,
+            Role::Editor => Self::Editor,
+            Role::Admin => Self::Admin,
+            Role::Owner => Self::Owner,
+        }
+    }
 }
 
 /// A workspace and the caller's role in it.
@@ -167,12 +179,14 @@ pub async fn create(
     st.audit
         .record_by(
             &principal,
-            Some(view.name.clone()),
-            request_id(&headers),
-            "workspace.create",
-            format!("workspace:{}", view.name),
-            None,
-            snapshot(&view),
+            AuditEntry {
+                workspace: Some(view.name.clone()),
+                request_id: request_id(&headers),
+                action: "workspace.create",
+                target: format!("workspace:{}", view.name),
+                before: None,
+                after: snapshot(&view),
+            },
         )
         .await;
     Ok((StatusCode::CREATED, Json(view)))

@@ -14,7 +14,9 @@ use crate::role::Role;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct RoleMapping {
+    /// The claim holding the group strings (default `groups`).
     pub roles_claim: String,
+    /// The prefix of the group strings that grant roles (default `mb`).
     pub group_prefix: String,
     /// `sub` values that are always sysadmin.
     pub sysadmin_subjects: Vec<String>,
@@ -31,6 +33,13 @@ impl Default for RoleMapping {
 }
 
 impl RoleMapping {
+    /// The user principal `claims` describe: `sub` as its subject, `name`,
+    /// `preferred_username` or `email` as its display name, and the roles
+    /// and sysadmin flag its groups grant.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Unauthenticated`] when `claims` has no non-empty `sub`.
     pub fn principal(&self, claims: &Map<String, Value>) -> Result<Principal, AuthError> {
         let sub = claims
             .get("sub")

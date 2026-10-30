@@ -65,6 +65,10 @@ pub struct WsAccess {
 
 impl WsAccess {
     /// A 403 problem unless the caller's role in the workspace grants `p`.
+    ///
+    /// # Errors
+    ///
+    /// A 403 [`Problem`] when it does not.
     pub fn require(&self, p: Permission) -> ApiResult<()> {
         if self.principal.can(&self.ws, p) {
             Ok(())

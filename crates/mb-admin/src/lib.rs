@@ -4,10 +4,35 @@
 //! `default`), plus each workspace's API keys and audit log and the global
 //! audit log at `/api/v1/audit`, the live request tail over SSE and the
 //! caller's identity at `/api/v1/me`, described by the OpenAPI document at
-//! `/api/openapi.json`, plus the OIDC browser login under `/auth`. Every successful mutation writes one audit event.
+//! `/api/openapi.json`, plus the OIDC browser login under `/auth`.
+//! Every successful mutation writes one audit event.
 //! Every `/api/v1` request is authenticated and checked against the caller's
 //! workspace role. Every error is an RFC 9457 `application/problem+json`
-//! document.
+//! document ([`Problem`]).
+//!
+//! [`router`] serves the whole API from an [`AdminState`]; the state's
+//! defaults ([`AdminState::new`]) are `auth.mode: none`, no LLM and no
+//! webhook:
+//!
+//! ```no_run
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! let store = mb_store::connect("sqlite::memory:").await?;
+//! let state = Arc::new(mb_state::MemoryStore::new(Duration::from_secs(3600)));
+//! let app = mb_admin::router(mb_admin::AdminState::new(store, state));
+//! let listener = tokio::net::TcpListener::bind("127.0.0.1:9090").await?;
+//! axum::serve(listener, app).await?;
+//! # Ok(())
+//! # }
+//! ```
+
+// No `clippy::missing_errors_doc`: the public handlers (`channels`,
+// `imports`, `webhook_deliveries`) list their error answers in their
+// `#[utoipa::path]` responses, and a doc comment on them would become the
+// OpenAPI operation's description.
+#![warn(missing_debug_implementations, clippy::missing_panics_doc)]
 
 use std::sync::Arc;
 
@@ -79,6 +104,8 @@ pub const DEFAULT_API_WEBHOOK_SECRET_REFS: [&str; 2] = ["env:*_WEBHOOK_SECRET", 
 /// Default [`AdminState::live_recheck`].
 pub const DEFAULT_LIVE_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Everything the Admin API handlers share. Its `Debug` output shows the
+/// settings, not the stores or extension points.
 #[derive(Clone)]
 pub struct AdminState {
     pub store: Arc<dyn ControlStore>,
@@ -112,6 +139,20 @@ pub struct AdminState {
     /// `quota` and their LLM calls reported to `usage`, like data-plane
     /// calls ([`Extensions::default`] by default).
     pub ext: Extensions,
+}
+
+impl std::fmt::Debug for AdminState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminState")
+            .field("api_secret_refs", &self.api_secret_refs)
+            .field("api_webhook_secret_refs", &self.api_webhook_secret_refs)
+            .field("audit", &self.audit)
+            .field("live", &self.live.is_some())
+            .field("live_recheck", &self.live_recheck)
+            .field("web_auth", &self.web_auth)
+            .field("imports", &self.imports)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AdminState {

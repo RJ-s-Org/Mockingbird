@@ -19,6 +19,7 @@ use utoipa::ToSchema;
 
 use crate::AdminState;
 use crate::access::{CurrentPrincipal, request_id};
+use crate::audit::AuditEntry;
 use crate::problem::{ApiResult, Json, Problem, Query, RequireJson};
 use crate::workspaces::RoleSchema;
 
@@ -32,10 +33,13 @@ const LOGIN_STATE_MAX_AGE: u64 = 600;
 /// Title of every failed callback.
 const LOGIN_FAILED: &str = "Login failed";
 
-/// Browser login in `auth.mode: oidc`.
-#[derive(Clone)]
+/// Browser login in `auth.mode: oidc`. Its `Debug` output shows no
+/// secret (see [`mb_auth::OidcClient`]).
+#[derive(Clone, Debug)]
 pub struct WebAuth {
+    /// The relying party for the configured provider.
     pub oidc: Arc<mb_auth::OidcClient>,
+    /// Where console sessions live.
     pub sessions: mb_auth::SessionManager,
     /// Whether cookies carry `Secure` (`auth.external_url` is https).
     pub secure_cookies: bool,
@@ -77,11 +81,22 @@ pub struct MeWorkspace {
 /// The OpenAPI schema of [`PrincipalKind`] (which lives in `mb-auth`).
 #[derive(ToSchema)]
 #[schema(as = PrincipalKind, rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum PrincipalKindSchema {
     User,
     ApiKey,
     Local,
+}
+
+/// Keeps the schema in step with [`PrincipalKind`]: a new kind fails to
+/// compile here until the schema has it too.
+impl From<PrincipalKind> for PrincipalKindSchema {
+    fn from(k: PrincipalKind) -> Self {
+        match k {
+            PrincipalKind::User => Self::User,
+            PrincipalKind::ApiKey => Self::ApiKey,
+            PrincipalKind::Local => Self::Local,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -224,16 +239,18 @@ async fn callback(
     st.audit
         .record_by(
             &principal,
-            None,
-            rid,
-            "auth.login",
-            format!("user:{}", principal.subject),
-            None,
-            Some(json!({
-                "display_name": principal.display_name,
-                "sysadmin": principal.sysadmin,
-                "roles": principal.roles,
-            })),
+            AuditEntry {
+                workspace: None,
+                request_id: rid,
+                action: "auth.login",
+                target: format!("user:{}", principal.subject),
+                before: None,
+                after: Some(json!({
+                    "display_name": principal.display_name,
+                    "sysadmin": principal.sysadmin,
+                    "roles": principal.roles,
+                })),
+            },
         )
         .await;
     let resp = redirect(&completed.return_to)?;
@@ -351,12 +368,14 @@ async fn logout(
         st.audit
             .record_by(
                 &principal,
-                None,
-                request_id(&headers),
-                "auth.logout",
-                format!("user:{}", principal.subject),
-                None,
-                None,
+                AuditEntry {
+                    workspace: None,
+                    request_id: request_id(&headers),
+                    action: "auth.logout",
+                    target: format!("user:{}", principal.subject),
+                    before: None,
+                    after: None,
+                },
             )
             .await;
     }

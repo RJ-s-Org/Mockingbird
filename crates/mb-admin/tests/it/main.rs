@@ -24,5 +24,6 @@ mod mocks;
 mod perf;
 mod rbac;
 mod scenarios;
+mod traits;
 mod webhook_deliveries;
 mod workspaces;

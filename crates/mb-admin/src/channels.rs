@@ -109,6 +109,24 @@ impl ChannelControlError {
     }
 }
 
+/// The problem detail the Admin API answers with.
+impl std::fmt::Display for ChannelControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.detail())
+    }
+}
+
+/// [`Partial`](ChannelControlError::Partial)'s source is the error that
+/// stopped the publish.
+impl std::error::Error for ChannelControlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Partial { error, .. } => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
+
 /// The event runtime, as seen by the Admin API.
 #[async_trait]
 pub trait ChannelControl: Send + Sync {
@@ -246,6 +264,7 @@ pub struct PutEventSettings {
     )),
     tags((name = "channels"), (name = "brokers"))
 )]
+#[derive(Debug)]
 pub struct ChannelsDoc;
 
 /// The channel and event-settings routes of a workspace (relative to

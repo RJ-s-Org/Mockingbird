@@ -39,7 +39,9 @@ pub const API_KEY_CACHE_CAPACITY: usize = 10_000;
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeyScope {
+    /// The Admin API (`/api/v1`).
     Admin,
+    /// A mock's data plane, in `data_plane_auth.mode: api_key`.
     DataPlane,
 }
 
@@ -53,12 +55,21 @@ impl KeyScope {
     }
 }
 
+impl std::fmt::Display for KeyScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A freshly generated key. `token` is shown once; only `secret_hash` is stored.
 /// Its `Debug` output redacts `token`.
 #[derive(Clone)]
 pub struct GeneratedKey {
+    /// The public key id (the part after `mbk_`).
     pub key_id: String,
+    /// The full credential, `mbk_<key_id>_<secret>`.
     pub token: String,
+    /// The hex sha256 of the secret bytes ([`hash_secret`]).
     pub secret_hash: String,
 }
 
@@ -119,11 +130,15 @@ pub fn hash_secret(secret: &[u8; 32]) -> String {
 /// A request to create an API key in a workspace.
 #[derive(Clone, Debug)]
 pub struct NewKeyRequest {
+    /// 1 to 128 characters.
     pub name: String,
+    /// At most the creator's own role in the workspace.
     pub role: Role,
     /// Empty means `[Admin]`.
     pub scopes: Vec<KeyScope>,
+    /// `None`: never expires.
     pub expires_at: Option<DateTime<Utc>>,
+    /// Only a sysadmin may create a sysadmin key.
     pub sysadmin: bool,
 }
 
@@ -139,7 +154,16 @@ pub struct ApiKeys {
     cache: Option<Arc<KeyCache>>,
 }
 
+impl std::fmt::Debug for ApiKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeys")
+            .field("cached", &self.cache.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ApiKeys {
+    /// Keys stored in `store`, read on every verification.
     pub fn new(store: Arc<dyn ControlStore>) -> Self {
         ApiKeys { store, cache: None }
     }
@@ -183,6 +207,13 @@ impl ApiKeys {
 
     /// Creates a key in `ws` on behalf of `creator`; returns the stored record
     /// and the token, which is never retrievable again.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Forbidden`] when `creator` is an API key, asks for a
+    /// sysadmin key without being a sysadmin, or asks for a role above its
+    /// own in `ws`; [`AuthError::Invalid`] for an empty or over-long name;
+    /// [`AuthError::Store`] when the key cannot be stored.
     pub async fn create(
         &self,
         creator: &Principal,
@@ -246,6 +277,12 @@ impl ApiKeys {
 
     /// Checks `token` and that it carries `scope`. Every failure is
     /// `Unauthenticated`. Touches `last_used_at` at most once per 60 s.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Unauthenticated`] for a malformed, unknown, revoked or
+    /// expired token or one without `scope`; [`AuthError::Store`] when the
+    /// store cannot be read or touched.
     pub async fn verify(&self, token: &str, scope: KeyScope) -> Result<ApiKey, AuthError> {
         let invalid = || AuthError::Unauthenticated("invalid API key".to_string());
         let (key_id, secret) = parse_token(token).ok_or_else(invalid)?;
@@ -288,8 +325,17 @@ impl ApiKeys {
         Ok(key)
     }
 
-    /// The principal a verified key acts as.
+    /// The principal a verified key acts as; the same as
+    /// `Principal::from(key)`.
     pub fn principal(key: &ApiKey) -> Principal {
+        Principal::from(key)
+    }
+}
+
+impl From<&ApiKey> for Principal {
+    /// The principal a verified key acts as: subject `api_key:<key_id>`,
+    /// its role in its workspace (none when the stored role is unknown).
+    fn from(key: &ApiKey) -> Self {
         let roles: BTreeMap<String, Role> = Role::parse(&key.role)
             .map(|r| (key.workspace.clone(), r))
             .into_iter()

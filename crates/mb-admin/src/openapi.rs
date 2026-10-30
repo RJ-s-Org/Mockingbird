@@ -143,6 +143,7 @@ use crate::{
         (name = "me"),
     )
 )]
+#[derive(Debug)]
 pub struct ApiDoc;
 
 /// Where the canonical workspace resource paths live.

@@ -22,9 +22,8 @@ use crate::profiles::accepted_secret_refs;
 use crate::{AdminState, Source, ensure_api_managed, glob_match};
 
 /// The OpenAPI schema of [`WebhookTarget`] (which lives in `mb-store`).
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = WebhookTarget)]
-#[allow(dead_code)]
 pub struct WebhookTargetSchema {
     /// Absolute `http` or `https` URL events are POSTed to.
     url: String,
@@ -43,9 +42,8 @@ pub struct WebhookTargetSchema {
 }
 
 /// How a webhook delivery is signed.
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = WebhookSigning)]
-#[allow(dead_code)]
 pub enum WebhookSigningSchema {
     #[schema(rename = "stripe")]
     Stripe,
@@ -112,9 +110,8 @@ fn check_webhooks(targets: &[WebhookTarget], allowed: &[String]) -> ApiResult<()
 }
 
 /// The OpenAPI schema of [`DataPlaneAuthConfig`] (which lives in `mb-store`).
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = DataPlaneAuthConfig)]
-#[allow(dead_code)]
 pub struct DataPlaneAuthSchema {
     /// How callers of the mock's data plane authenticate.
     #[schema(default = "none")]
@@ -126,9 +123,8 @@ pub struct DataPlaneAuthSchema {
 }
 
 /// The OpenAPI schema of `DataPlaneAuthMode`.
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = DataPlaneAuthMode, rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum DataPlaneAuthModeSchema {
     None,
     ApiKey,
@@ -139,9 +135,8 @@ pub enum DataPlaneAuthModeSchema {
 /// A mock's path rewrite, applied to the path below the route prefix:
 /// `strip_prefix` is removed when the path starts with it, then
 /// `add_prefix` is put in front.
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = PathRewrite)]
-#[allow(dead_code)]
 pub struct PathRewriteSchema {
     /// `/seg(/seg)*`, removed from the front of the path.
     strip_prefix: Option<String>,
@@ -149,9 +144,8 @@ pub struct PathRewriteSchema {
     add_prefix: Option<String>,
 }
 
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = ChaosSettings)]
-#[allow(dead_code)]
 pub struct ChaosSchema {
     /// Probability (0–1) that a call answers with an injected error.
     #[serde(default)]
@@ -166,9 +160,8 @@ pub struct ChaosSchema {
 }
 
 /// The OpenAPI schema of `LatencyJitter`.
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = LatencyJitter)]
-#[allow(dead_code)]
 pub struct LatencyJitterSchema {
     min_ms: u64,
     /// At most 30000 and at least `min_ms`.
@@ -178,9 +171,8 @@ pub struct LatencyJitterSchema {
 
 /// The OpenAPI schema of [`MockLimits`] (which lives in `mb-store`). Unset
 /// fields fall back to the global limits (or to no limit).
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = MockLimits)]
-#[allow(dead_code)]
 pub struct MockLimitsSchema {
     rate_limit: Option<RateLimitSchema>,
     /// Tokens per UTC day across all replicas; at least 1.
@@ -195,9 +187,8 @@ pub struct MockLimitsSchema {
 }
 
 /// The OpenAPI schema of `RateLimit`: a token bucket.
-#[derive(ToSchema)]
+#[derive(ToSchema, Debug)]
 #[schema(as = RateLimit)]
-#[allow(dead_code)]
 pub struct RateLimitSchema {
     /// Greater than 0, at most 100000.
     #[schema(maximum = 100000)]
@@ -205,6 +196,120 @@ pub struct RateLimitSchema {
     /// 1–100000.
     #[schema(minimum = 1, maximum = 100000)]
     burst: u32,
+}
+
+// The schema mirrors above are read only by these conversions to the
+// `mb-store` types they describe. Each is exhaustive (no `..`, no `_` arm),
+// so a field or variant added to an `mb-store` type fails to compile here
+// until its schema has it too.
+
+impl From<WebhookTargetSchema> for WebhookTarget {
+    fn from(s: WebhookTargetSchema) -> Self {
+        WebhookTarget {
+            url: s.url,
+            events: s.events.unwrap_or_else(WebhookTarget::all_events),
+            secret: s.secret,
+            signing: s.signing.map(Into::into),
+            delay_ms: s.delay_ms.unwrap_or(0),
+        }
+    }
+}
+
+impl From<WebhookSigningSchema> for mb_store::WebhookSigning {
+    fn from(s: WebhookSigningSchema) -> Self {
+        match s {
+            WebhookSigningSchema::Stripe => Self::Stripe,
+            WebhookSigningSchema::HmacSha256 => Self::HmacSha256,
+            WebhookSigningSchema::None => Self::None,
+        }
+    }
+}
+
+impl From<mb_store::WebhookSigning> for WebhookSigningSchema {
+    fn from(s: mb_store::WebhookSigning) -> Self {
+        match s {
+            mb_store::WebhookSigning::Stripe => Self::Stripe,
+            mb_store::WebhookSigning::HmacSha256 => Self::HmacSha256,
+            mb_store::WebhookSigning::None => Self::None,
+        }
+    }
+}
+
+impl From<DataPlaneAuthSchema> for DataPlaneAuthConfig {
+    fn from(s: DataPlaneAuthSchema) -> Self {
+        DataPlaneAuthConfig {
+            mode: s.mode.into(),
+            header: s.header,
+        }
+    }
+}
+
+impl From<DataPlaneAuthModeSchema> for mb_store::DataPlaneAuthMode {
+    fn from(m: DataPlaneAuthModeSchema) -> Self {
+        match m {
+            DataPlaneAuthModeSchema::None => Self::None,
+            DataPlaneAuthModeSchema::ApiKey => Self::ApiKey,
+            DataPlaneAuthModeSchema::PassthroughValidate => Self::PassthroughValidate,
+        }
+    }
+}
+
+impl From<mb_store::DataPlaneAuthMode> for DataPlaneAuthModeSchema {
+    fn from(m: mb_store::DataPlaneAuthMode) -> Self {
+        match m {
+            mb_store::DataPlaneAuthMode::None => Self::None,
+            mb_store::DataPlaneAuthMode::ApiKey => Self::ApiKey,
+            mb_store::DataPlaneAuthMode::PassthroughValidate => Self::PassthroughValidate,
+        }
+    }
+}
+
+impl From<PathRewriteSchema> for PathRewrite {
+    fn from(s: PathRewriteSchema) -> Self {
+        PathRewrite {
+            strip_prefix: s.strip_prefix,
+            add_prefix: s.add_prefix,
+        }
+    }
+}
+
+impl From<ChaosSchema> for ChaosSettings {
+    fn from(s: ChaosSchema) -> Self {
+        ChaosSettings {
+            error_rate: s.error_rate,
+            latency_jitter: s.latency_jitter.map(Into::into),
+            drop_stream_rate: s.drop_stream_rate,
+        }
+    }
+}
+
+impl From<LatencyJitterSchema> for mb_store::LatencyJitter {
+    fn from(s: LatencyJitterSchema) -> Self {
+        mb_store::LatencyJitter {
+            min_ms: s.min_ms,
+            max_ms: s.max_ms,
+        }
+    }
+}
+
+impl From<MockLimitsSchema> for MockLimits {
+    fn from(s: MockLimitsSchema) -> Self {
+        MockLimits {
+            rate_limit: s.rate_limit.map(Into::into),
+            daily_token_budget: s.daily_token_budget,
+            max_request_bytes: s.max_request_bytes,
+            max_response_bytes: s.max_response_bytes,
+        }
+    }
+}
+
+impl From<RateLimitSchema> for mb_store::RateLimit {
+    fn from(s: RateLimitSchema) -> Self {
+        mb_store::RateLimit {
+            requests_per_second: s.requests_per_second,
+            burst: s.burst,
+        }
+    }
 }
 
 /// Path of one mock.

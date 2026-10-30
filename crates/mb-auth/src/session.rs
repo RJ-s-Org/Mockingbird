@@ -18,6 +18,16 @@ const TOUCH_INTERVAL_SECS: i64 = 60;
 /// How often the sweeper deletes expired sessions.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 
+/// Whether session cookies carry the `Secure` attribute (sent over HTTPS
+/// only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CookieSecurity {
+    /// `Secure`: the console is served over HTTPS (or behind a TLS proxy).
+    Secure,
+    /// No `Secure` attribute, for a console served over plain HTTP.
+    Insecure,
+}
+
 /// Server-side console sessions. The cookie value is 32 random bytes
 /// (base64url, no padding); the store only sees its hex sha256. The TTL is
 /// absolute.
@@ -28,12 +38,38 @@ pub struct SessionManager {
     secure: bool,
 }
 
+impl std::fmt::Debug for SessionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionManager")
+            .field("ttl", &self.ttl)
+            .field("secure", &self.secure)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SessionManager {
+    /// Sessions stored in `store` that last `ttl` from login; `secure`
+    /// adds the `Secure` cookie attribute. Prefer
+    /// [`Self::with_cookie_security`], which names that choice.
     pub fn new(store: Arc<dyn ControlStore>, ttl: Duration, secure: bool) -> Self {
         SessionManager { store, ttl, secure }
     }
 
+    /// [`Self::new`] with the cookie's `Secure` attribute set by `security`.
+    pub fn with_cookie_security(
+        store: Arc<dyn ControlStore>,
+        ttl: Duration,
+        security: CookieSecurity,
+    ) -> Self {
+        Self::new(store, ttl, security == CookieSecurity::Secure)
+    }
+
     /// Stores a new session for `p` and returns the cookie value.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Invalid`] when the TTL is out of range or `p` cannot be
+    /// serialised; [`AuthError::Store`] when the session cannot be stored.
     pub async fn create(&self, p: &Principal) -> Result<String, AuthError> {
         let mut bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut bytes);
@@ -60,6 +96,10 @@ impl SessionManager {
 
     /// The session's principal, or `None` for an unknown or expired session
     /// (an expired one is deleted).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Store`] when the store cannot be read or updated.
     pub async fn lookup(&self, cookie_value: &str) -> Result<Option<Principal>, AuthError> {
         let id_hash = hash_cookie(cookie_value);
         let Some(session) = self.store.get_admin_session(&id_hash).await? else {
@@ -84,6 +124,12 @@ impl SessionManager {
         Ok(Some(principal))
     }
 
+    /// Deletes the session `cookie_value` identifies (logout); unknown
+    /// sessions are ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Store`] when the store cannot delete it.
     pub async fn destroy(&self, cookie_value: &str) -> Result<(), AuthError> {
         self.store
             .delete_admin_session(&hash_cookie(cookie_value))
@@ -111,6 +157,10 @@ impl SessionManager {
     }
 
     /// Deletes expired sessions every hour.
+    ///
+    /// # Panics
+    ///
+    /// When called outside a Tokio runtime.
     pub fn spawn_sweeper(&self) -> tokio::task::JoinHandle<()> {
         let store = self.store.clone();
         tokio::spawn(async move {
