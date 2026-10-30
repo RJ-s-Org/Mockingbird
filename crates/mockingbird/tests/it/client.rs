@@ -1174,6 +1174,49 @@ async fn mocks_update_patches_the_given_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mocks_update_sets_and_clears_the_faker_seed() {
+    let admin = admin_url().await;
+    let out = run(&admin, &["mocks", "create", "shop"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.json().get("faker_seed").is_none(), "{}", out.stdout);
+
+    // The flag alone is a change, and wins over --patch.
+    let out = run_with(
+        &admin,
+        &[
+            "mocks",
+            "update",
+            "shop",
+            "--patch",
+            "-",
+            "--faker-seed",
+            "18446744073709551615",
+        ],
+        &[],
+        Some(r#"{"faker_seed": 1, "persona": "Terse"}"#),
+    )
+    .await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let mock = out.json();
+    assert_eq!(mock["faker_seed"], u64::MAX, "{mock}");
+    assert_eq!(mock["persona"], "Terse", "{mock}");
+    let out = run(&admin, &["mocks", "update", "shop", "--faker-seed", "7"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["faker_seed"], 7);
+
+    // Not a u64: a usage error, before any request.
+    for bad in ["-1", "seven", "null", "18446744073709551616"] {
+        let out = run(&admin, &["mocks", "update", "shop", "--faker-seed", bad]).await;
+        assert_eq!(out.code, 2, "{bad}: {}", out.stderr);
+    }
+
+    // `none` clears it.
+    let out = run(&admin, &["mocks", "update", "shop", "--faker-seed", "none"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.json().get("faker_seed").is_none(), "{}", out.stdout);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contracts_list_and_activate() {
     let admin = admin_url().await;
     create_workspace(&admin, "team-c").await;

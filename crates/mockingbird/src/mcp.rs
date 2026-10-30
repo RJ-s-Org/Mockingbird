@@ -451,6 +451,7 @@ fn tools() -> Vec<Tool> {
                     "route_prefix": s("Route prefix; default /<name>."),
                     "persona": s("Style instructions for generated data."),
                     "llm_profile": s("LLM profile; default the default profile."),
+                    "faker_seed": n("Seed for faker data (0 to 2^64-1): the same seed, contract and request give the same body; default unset."),
                 }),
                 &["name"],
             ),
@@ -460,7 +461,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "update_mock",
             title: "Update a mock",
-            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits. Only the given fields change.",
+            description: "PATCH a mock. Fields: route_prefix, persona, llm_profile, header_overrides, data_plane_auth {mode: none|api_key|passthrough_validate, header}, chaos {error_rate, latency_jitter {min_ms, max_ms}, drop_stream_rate} (null clears), limits, faker_seed (0 to 2^64-1; null clears). Only the given fields change.",
             schema: obj(
                 json!({ "name": mock(), "patch": o("Fields to change.") }),
                 &["name", "patch"],
@@ -1262,6 +1263,11 @@ impl McpServer {
                     if let Some(v) = opt_str(a, key) {
                         body[key] = json!(v);
                     }
+                }
+                // Passed as given, so the Admin API rejects a seed that is
+                // not a u64 instead of it being dropped here.
+                if let Some(seed) = a.get("faker_seed").filter(|v| !v.is_null()) {
+                    body["faker_seed"] = seed.clone();
                 }
                 self.ws(Method::POST, &["mocks"], &[], Some(body)).await
             }

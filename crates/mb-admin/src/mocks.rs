@@ -353,6 +353,12 @@ pub struct MockView {
     #[serde(skip_serializing_if = "PathRewrite::is_identity")]
     #[schema(value_type = Option<PathRewriteSchema>)]
     pub path_rewrite: PathRewrite,
+    /// Seeds the faker: the same seed, contract and request give the same
+    /// faker body. Absent when unset (offline answers then use seed 0, LLM
+    /// fallbacks are random).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 0, maximum = 18446744073709551615_u64)]
+    pub faker_seed: Option<u64>,
     /// Where the mock POSTs events after successful writes; absent when
     /// none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -383,6 +389,7 @@ impl MockView {
             unknown_ids: m.behavior.unknown_ids,
             default_scenario: m.behavior.default_scenario,
             path_rewrite: m.behavior.path_rewrite,
+            faker_seed: m.behavior.faker_seed,
             hosts: m.hosts,
             webhooks: m.webhooks.into_iter().map(redact_target).collect(),
             created_at: m.created_at,
@@ -433,6 +440,10 @@ pub struct CreateMock {
     #[serde(default)]
     #[schema(value_type = Option<PathRewriteSchema>)]
     pub path_rewrite: PathRewrite,
+    /// Seeds the faker (0 to 2^64-1); unset by default.
+    #[serde(default)]
+    #[schema(minimum = 0, maximum = 18446744073709551615_u64)]
+    pub faker_seed: Option<u64>,
     /// Webhook targets; none by default.
     #[serde(default)]
     #[schema(value_type = Option<Vec<WebhookTargetSchema>>)]
@@ -482,6 +493,10 @@ pub struct PatchMock {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<PathRewriteSchema>)]
     pub path_rewrite: Option<Option<PathRewrite>>,
+    /// Seeds the faker (0 to 2^64-1); `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<u64>, minimum = 0, maximum = 18446744073709551615_u64)]
+    pub faker_seed: Option<Option<u64>>,
     /// Replaces the webhook targets; `[]` clears them.
     #[schema(value_type = Option<Vec<WebhookTargetSchema>>)]
     pub webhooks: Option<Vec<WebhookTarget>>,
@@ -619,7 +634,7 @@ pub async fn create(
                     default_scenario: None,
                     path_rewrite: body.path_rewrite,
                     graphql_path: None,
-                    faker_seed: None,
+                    faker_seed: body.faker_seed,
                 },
                 hosts: body.hosts,
                 webhooks: body.webhooks,
@@ -762,6 +777,9 @@ pub async fn patch(
     }
     if let Some(rewrite) = body.path_rewrite {
         m.behavior.path_rewrite = rewrite.unwrap_or_default();
+    }
+    if let Some(seed) = body.faker_seed {
+        m.behavior.faker_seed = seed;
     }
     let updated = view(&st, st.store.update_mock(&m).await?).await?;
     access

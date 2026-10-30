@@ -414,6 +414,70 @@ async fn patch_consistency_settings() {
 }
 
 #[tokio::test]
+async fn faker_seed_round_trips_through_the_api() {
+    let h = harness().await;
+    let stored_seed = async |name: &str| {
+        h.store
+            .get_mock(DEFAULT_WORKSPACE, name)
+            .await
+            .unwrap()
+            .unwrap()
+            .behavior
+            .faker_seed
+    };
+
+    // Unset by default: absent from the view.
+    h.create("plain").await;
+    let (_, view) = h.send(Method::GET, "/api/v1/mocks/plain", None).await;
+    assert!(view.get("faker_seed").is_none(), "{view}");
+    assert_eq!(stored_seed("plain").await, None);
+
+    // Set on create.
+    let (status, created) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({ "name": "orders", "faker_seed": 42 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["faker_seed"], 42, "{created}");
+    assert_eq!(stored_seed("orders").await, Some(42));
+
+    // Changed by a patch (the whole u64 range), kept by a patch of another
+    // field.
+    let (status, view) = h.patch("orders", json!({ "faker_seed": u64::MAX })).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["faker_seed"], u64::MAX, "{view}");
+    let (status, view) = h.patch("orders", json!({ "persona": "Terse" })).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["faker_seed"], u64::MAX, "{view}");
+    assert_eq!(stored_seed("orders").await, Some(u64::MAX));
+
+    // Not a u64: a 422 problem, and the stored seed is untouched.
+    for bad in [json!(-1), json!(1.5), json!("7"), json!(1.8e19)] {
+        let (status, problem) = h.patch("orders", json!({ "faker_seed": bad })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {problem}");
+        assert_eq!(problem["title"], "Invalid request body", "{problem}");
+    }
+    let (status, problem) = h
+        .send(
+            Method::POST,
+            "/api/v1/mocks",
+            Some(json!({ "name": "negative", "faker_seed": -3 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(stored_seed("orders").await, Some(u64::MAX));
+
+    // `null` clears it.
+    let (status, view) = h.patch("orders", json!({ "faker_seed": null })).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert!(view.get("faker_seed").is_none(), "{view}");
+    assert_eq!(stored_seed("orders").await, None);
+}
+
+#[tokio::test]
 async fn webhooks_round_trip_through_the_api() {
     let h = harness().await;
     let (status, body) = h

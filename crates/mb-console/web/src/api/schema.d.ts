@@ -1278,6 +1278,11 @@ export interface components {
             /** @description `on` (default) or `off`. */
             consistency?: string | null;
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
+            /**
+             * Format: int64
+             * @description Seeds the faker (0 to 2^64-1); unset by default.
+             */
+            faker_seed?: number | null;
             /** @description Whether callers may steer responses with `X-Mockingbird-*` headers. */
             header_overrides?: boolean;
             /**
@@ -1623,6 +1628,13 @@ export interface components {
             data_plane_auth: components["schemas"]["DataPlaneAuthConfig"];
             /** @description The scenario applied when a call names none; absent when unset. */
             default_scenario?: string | null;
+            /**
+             * Format: int64
+             * @description Seeds the faker: the same seed, contract and request give the same
+             *     faker body. Absent when unset (offline answers then use seed 0, LLM
+             *     fallbacks are random).
+             */
+            faker_seed?: number | null;
             header_overrides: boolean;
             /** @description Host names the mock answers for; empty answers for any host. */
             hosts: string[];
@@ -1685,6 +1697,11 @@ export interface components {
             data_plane_auth?: components["schemas"]["DataPlaneAuthConfig"] | null;
             /** @description A scenario of the mock; `null` clears it. */
             default_scenario?: string | null;
+            /**
+             * Format: int64
+             * @description Seeds the faker (0 to 2^64-1); `null` clears it.
+             */
+            faker_seed?: number | null;
             header_overrides?: boolean | null;
             /** @description Replaces the host list; `[]` clears it. */
             hosts?: string[] | null;

@@ -114,8 +114,8 @@ pub struct MocksUpdateArgs {
     pub name: String,
     /// A JSON object of fields to change (a file, or `-` for stdin):
     /// `route_prefix`, `persona`, `llm_profile`, `header_overrides`,
-    /// `data_plane_auth`, `chaos`, `limits`, …; `null` clears a field. The
-    /// flags below win over the same keys.
+    /// `data_plane_auth`, `chaos`, `limits`, `faker_seed`, …; `null` clears
+    /// a field. The flags below win over the same keys.
     #[arg(long, value_name = "FILE")]
     pub patch: Option<PathBuf>,
     /// New route prefix.
@@ -127,6 +127,34 @@ pub struct MocksUpdateArgs {
     /// New LLM profile.
     #[arg(long)]
     pub profile: Option<String>,
+    /// Seed the faker with an integer from 0 to 2^64-1 (the same seed,
+    /// contract and request give the same faker body), or `none` to clear
+    /// the seed (offline answers then use seed 0, LLM fallbacks are random).
+    #[arg(long, value_name = "N|none")]
+    pub faker_seed: Option<FakerSeedArg>,
+}
+
+/// `mocks update --faker-seed`: a seed, or `none` to clear it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FakerSeedArg {
+    /// Seed the faker with this value.
+    Seed(u64),
+    /// Clear the mock's seed (`none`).
+    Clear,
+}
+
+impl std::str::FromStr for FakerSeedArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "none" {
+            return Ok(Self::Clear);
+        }
+        s.parse()
+            .map(Self::Seed)
+            .map_err(|_| format!("{s:?} is not `none` or an integer from 0 to 2^64-1"))
+    }
 }
 
 /// `drafts …`.
@@ -597,9 +625,19 @@ pub async fn run_workflow(
                     fields.insert(key.to_string(), Value::String(v));
                 }
             }
+            match args.faker_seed {
+                Some(FakerSeedArg::Seed(seed)) => {
+                    fields.insert("faker_seed".to_string(), Value::from(seed));
+                }
+                Some(FakerSeedArg::Clear) => {
+                    fields.insert("faker_seed".to_string(), Value::Null);
+                }
+                None => {}
+            }
             if fields.is_empty() {
                 return Err(ClientError::Usage(
-                    "nothing to change: give --patch, --prefix, --persona or --profile".to_string(),
+                    "nothing to change: give --patch, --prefix, --persona, --profile or --faker-seed"
+                        .to_string(),
                 ));
             }
             api.send(

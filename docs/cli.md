@@ -7,6 +7,7 @@ mockingbird mocks list
 mockingbird mocks get orders
 mockingbird mocks create billing --prefix /bill --persona "Formal" --profile openrouter
 mockingbird mocks update billing --persona "Terse" --patch chaos.json   # flags win over --patch keys
+mockingbird mocks update billing --faker-seed 42   # --faker-seed none clears it
 mockingbird mocks delete billing
 
 # Upload a contract as a new version (creating the mock if missing).
