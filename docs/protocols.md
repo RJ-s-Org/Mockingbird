@@ -59,6 +59,19 @@ curl -s localhost:8080/graphql \
 
 The sources of the root fields are reported in the response, under `extensions.mockingbird.sources`.
 
+### Batched GraphQL requests
+
+A `POST` whose JSON body is an array of operations is a batch, answered `200` with an array of responses in the same order:
+
+```sh
+curl -s localhost:8080/graphql \
+  -H 'content-type: application/json' \
+  -d '[{"query":"{ hero(episode: JEDI) { name } }"},
+       {"query":"query($e: Episode) { hero(episode: $e) { name } }","variables":{"e":"EMPIRE"}}]'
+```
+
+A batch holds at most 10 operations; a larger or empty one is a `400` problem and nothing runs. The operations run one after another (a query after a mutation sees its write), each as if it had been sent on its own: checked against the root-field, depth and complexity limits, admitted (tenant, quota and, in `api_key` mode, the data-plane key), given its own chaos decision and recorded as its own request-log entry. An operation that is refused answers its own entry, `{"errors": [{"message", "extensions": {"code", "status"}}]}` (with `retryAfter` in seconds for a `429`), and the others still run. The response's `x-mockingbird-source` is the worst source over the batch, and the largest injected latency is waited once. The 1 MiB body limit applies to the whole batch.
+
 gRPC (`mockingbird serve --offline helloworld.proto`):
 
 ```sh

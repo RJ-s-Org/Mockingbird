@@ -699,6 +699,105 @@ async fn graphql_http_401_is_reported_and_requests_are_admitted_once() {
     assert_eq!(events.len(), 3, "one usage event per root field");
 }
 
+/// Admits the first `n` calls, then refuses with a 429.
+struct AdmitFirst(AtomicUsize);
+
+#[async_trait]
+impl QuotaGuard for AdmitFirst {
+    async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
+        let left = self.0.load(Ordering::Relaxed);
+        if left == 0 {
+            return Err(Rejection::new(429, "Too Many Requests", "quota exhausted")
+                .with_retry_after(Duration::from_secs(3)));
+        }
+        self.0.store(left - 1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+fn graphql_batch(queries: &[&str], key: Option<&str>) -> Request<Body> {
+    let mut req = Request::post("/graphql").header("content-type", "application/json");
+    if let Some(k) = key {
+        req = req.header("x-key", k);
+    }
+    let ops: Vec<Value> = queries.iter().map(|q| json!({"query": q})).collect();
+    req.body(Body::from(Value::Array(ops).to_string())).unwrap()
+}
+
+async fn json_body(resp: axum::response::Response) -> Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// MB-PROTOCOLS-STUB-9: in `api_key` mode each operation of a batch is
+/// admitted and its key checked on its own: a refused one answers its own
+/// error (and is recorded with its status) while the others run.
+#[tokio::test]
+async fn graphql_batch_admits_each_operation() {
+    let provider = Arc::new(ScriptedProvider::new(vec![]));
+    let records = Arc::new(Records::default());
+    let usage = Arc::new(Usage::default());
+    let mut rt = secured(
+        runtime(
+            "github",
+            fixture("graphql/github.graphql"),
+            Some(provider.clone()),
+        ),
+        "team-a",
+        "x-key",
+        keys(&[("team-a", "gql-good")]),
+    );
+    rt.recorder = Some(records.clone());
+    rt.ext.usage = usage.clone();
+    rt.ext.quota = Arc::new(AdmitFirst(AtomicUsize::new(4)));
+    let app = graphql::try_router(Arc::new(rt)).unwrap();
+    let q = "{ viewer { login } }";
+
+    // A bad key: every operation is admitted, then refused before the
+    // engine runs.
+    let resp = app
+        .clone()
+        .oneshot(graphql_batch(&[q, q], Some("nope")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body.as_array().map(Vec::len), Some(2), "{body}");
+    for answer in body.as_array().unwrap() {
+        let error = &answer["errors"][0];
+        assert_eq!(error["extensions"]["code"], "UNAUTHENTICATED", "{body}");
+        assert_eq!(error["extensions"]["status"], 401, "{body}");
+    }
+    assert_engine_not_called(&provider, "graphql batch");
+    let statuses: Vec<u16> = records.wait(2).await.iter().map(|r| r.status).collect();
+    assert_eq!(statuses, [401, 401]);
+
+    // A good key: two admissions are left, so the third operation is
+    // refused on its own.
+    let resp = app
+        .clone()
+        .oneshot(graphql_batch(&[q, q, q], Some("gql-good")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert!(body[0]["data"]["viewer"]["login"].is_string(), "{body}");
+    assert!(body[1]["data"]["viewer"]["login"].is_string(), "{body}");
+    let refused = &body[2]["errors"][0];
+    assert_eq!(refused["extensions"]["code"], "RATE_LIMITED", "{body}");
+    assert_eq!(refused["extensions"]["status"], 429, "{body}");
+    assert_eq!(refused["extensions"]["retryAfter"], 3, "{body}");
+    assert_eq!(refused["message"], "quota exhausted", "{body}");
+    let recs = records.wait(5).await;
+    let statuses: Vec<u16> = recs.iter().map(|r| r.status).collect();
+    assert_eq!(statuses, [401, 401, 200, 200, 429]);
+    // One usage event per operation (each a single root field).
+    assert_eq!(usage.0.lock().unwrap().len(), 5);
+    assert_no_secret(&recs, &["nope", "gql-good"]);
+}
+
 // ----------------------------------------------------- GraphQL WebSocket
 
 type Ws =

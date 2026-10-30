@@ -8,10 +8,17 @@
 //! HTTP, each root field admitted and checked like a subscription. GraphQL parse and validation errors are
 //! answered `200 {errors}`; only transport-level failures (unknown path,
 //! wrong method, oversized or unparseable body) are problem documents.
+//!
+//! A `POST` body may also be a JSON array of operations (a batch, at most
+//! [`MAX_BATCH_OPERATIONS`]): it is answered `200` with an array of
+//! responses in the same order. The operations run one after another, each
+//! checked, admitted and recorded as if it had been sent on its own; one
+//! that is refused answers its own `{errors}` entry.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 
 use async_graphql::Name;
 use async_graphql::Request;
@@ -24,6 +31,7 @@ use axum::extract::{FromRequestParts, Query, Request as HttpRequest, State, WebS
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
+use mb_engine::Source;
 use serde_json::{Value, json};
 
 use mb_ext::Tenancy;
@@ -44,6 +52,12 @@ pub(crate) use schema::build_schema;
 const SOURCE_HEADER: HeaderName = HeaderName::from_static("x-mockingbird-source");
 const PROBLEM_JSON: &str = "application/problem+json";
 const GRAPHQL_MEDIA_TYPE: &str = "application/graphql";
+
+/// Most operations one batched `POST` (a JSON array body) may hold. A
+/// larger batch, or an empty one, is a `400` problem and nothing runs.
+/// Each operation is still bounded on its own (root fields, depth,
+/// complexity), and the whole body by the request-size limit.
+pub const MAX_BATCH_OPERATIONS: usize = 10;
 
 /// Why a bundle cannot be served over GraphQL.
 #[derive(Debug, thiserror::Error)]
@@ -127,7 +141,7 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             }
         };
     }
-    let mut request = match method {
+    let request = match method {
         Method::GET => match async_graphql::http::parse_query_string(uri.query().unwrap_or("")) {
             Ok(r) => r,
             Err(e) => {
@@ -142,7 +156,10 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
                 Err(resp) => Err(resp),
             };
             match parsed {
-                Ok(r) => r,
+                Ok(Posted::Single(r)) => *r,
+                Ok(Posted::Batch(requests)) => {
+                    return batch(&st, requests, &method, &headers, &query).await;
+                }
                 Err(resp) => return refused(rt, &method, &headers, resp, None).await,
             }
         }
@@ -157,11 +174,41 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             return refused(rt, &method, &headers, resp, None).await;
         }
     };
+    match operation(&st, request, &method, &headers, &query).await {
+        Ok(ran) => {
+            if let Some(delay) = ran.delay {
+                tokio::time::sleep(delay).await;
+            }
+            match serde_json::to_vec(&ran.response) {
+                Ok(body) => respond(body, &ran.meta),
+                Err(e) => problem(500, "Internal Server Error", e.to_string()),
+            }
+        }
+        Err(refusal) => refusal.response,
+    }
+}
+
+/// An operation refused before it ran (already reported): the response
+/// answering it alone, and its entry in a batch's answer.
+struct Refusal {
+    response: Response,
+    entry: Value,
+}
+
+/// Checks, admits and runs one operation (sent alone or in a batch).
+async fn operation(
+    st: &GraphqlState,
+    mut request: Request,
+    method: &Method,
+    headers: &HeaderMap,
+    query: &[(String, String)],
+) -> Result<Ran, Refusal> {
+    let rt = &st.rt;
     // Parsed once: the checks below read the document and the executor
     // reuses it. One that does not parse is left to the executor to report.
     let doc = async_graphql::parser::parse_query(&request.query).ok();
     let operation_name = request.operation_name.as_deref();
-    if method == Method::GET
+    if *method == Method::GET
         && doc
             .as_ref()
             .is_some_and(|doc| is_mutation(doc, operation_name))
@@ -173,7 +220,9 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
         );
         resp.headers_mut()
             .insert(header::ALLOW, HeaderValue::from_static("POST"));
-        return refused(rt, &method, &headers, resp, None).await;
+        let entry = refused_entry(405, "mutations must be sent with POST");
+        let response = refused(rt, method, headers, resp, None).await;
+        return Err(Refusal { response, entry });
     }
     // Each root field is one engine call, and validation walks the document
     // with every fragment spread expanded: bound both before anything runs.
@@ -191,18 +240,19 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        return refused(rt, &method, &headers, resp, Some(body)).await;
+        let response = refused(rt, method, headers, resp, Some(body.clone())).await;
+        return Err(Refusal {
+            response,
+            entry: body,
+        });
     }
-    // Data-plane auth: in `api_key` mode the whole request is admitted
+    // Data-plane auth: in `api_key` mode the whole operation is admitted
     // (tenant, then quota) and then its key checked once, before anything
     // runs (a 429/401 problem, as for REST, reported like any call); root
     // fields are then not admitted again. Each root field still runs the
     // per-operation checks of the shared pipeline.
     let admitted = if rt.data_plane_auth.mode == DataPlaneAuthMode::ApiKey {
-        match admit_request(rt, &request, &method, &headers, &query).await {
-            Ok(tenancy) => Some(tenancy),
-            Err(resp) => return resp,
-        }
+        Some(admit_request(rt, &request, method, headers, query).await?)
     } else {
         None
     };
@@ -210,38 +260,90 @@ async fn handle(State(st): State<Arc<GraphqlState>>, req: HttpRequest) -> Respon
         st.schema.strip(&mut doc);
         request.set_parsed_query(doc);
     }
-    execute(&st, request, &method, headers, admitted).await
+    Ok(execute(st, request, method, headers.clone(), admitted).await)
 }
 
-/// Admits a whole request and checks its data-plane key; a refusal is
-/// answered with a problem and reported (without the key).
+/// Answers a batch: each operation runs in order, as if sent on its own,
+/// and the answer is the array of their responses (a refused operation's
+/// entry is its `{errors}`). The largest injected latency is waited once.
+async fn batch(
+    st: &GraphqlState,
+    requests: Vec<Request>,
+    method: &Method,
+    headers: &HeaderMap,
+    query: &[(String, String)],
+) -> Response {
+    let rt = &st.rt;
+    let detail = match requests.len() {
+        0 => Some("a batch holds at least one operation".to_string()),
+        n if n > MAX_BATCH_OPERATIONS => Some(format!(
+            "a batch holds at most {MAX_BATCH_OPERATIONS} operations (got {n})"
+        )),
+        _ => None,
+    };
+    if let Some(detail) = detail {
+        let resp = problem(400, "Invalid GraphQL request", detail);
+        return refused(rt, method, headers, resp, None).await;
+    }
+    let mut entries = Vec::with_capacity(requests.len());
+    let mut meta = Meta::default();
+    let mut delay: Option<Duration> = None;
+    for request in requests {
+        match operation(st, request, method, headers, query).await {
+            Ok(ran) => {
+                delay = delay.max(ran.delay);
+                meta.merge(ran.meta);
+                let entry = serde_json::to_value(&ran.response)
+                    .unwrap_or_else(|e| refused_entry(500, &e.to_string()));
+                entries.push(entry);
+            }
+            Err(refusal) => entries.push(refusal.entry),
+        }
+    }
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
+    match serde_json::to_vec(&entries) {
+        Ok(body) => respond(body, &meta),
+        Err(e) => problem(500, "Internal Server Error", e.to_string()),
+    }
+}
+
+/// Admits a whole operation and checks its data-plane key; a refusal is
+/// answered with a problem (or, in a batch, a GraphQL error) and reported
+/// (without the key).
 async fn admit_request(
     rt: &MockRuntime,
     request: &Request,
     method: &Method,
     headers: &HeaderMap,
     query: &[(String, String)],
-) -> Result<Tenancy, Response> {
+) -> Result<Tenancy, Refusal> {
     let started = tokio::time::Instant::now();
     let operation_id = request.operation_name.clone().unwrap_or_default();
-    let (resp, tenancy) = match call::admit(rt, &operation_id, headers).await {
+    let (resp, entry, tenancy) = match call::admit(rt, &operation_id, headers).await {
         Err((r, tenancy)) => {
+            let secs = r
+                .retry_after
+                .map(|after| after.as_secs() + u64::from(after.subsec_nanos() > 0));
+            let mut entry = refused_entry(r.status, &r.detail);
             let mut resp = problem(r.status, &r.title, r.detail);
-            if let Some(after) = r.retry_after {
-                let secs = after.as_secs() + u64::from(after.subsec_nanos() > 0);
+            if let Some(secs) = secs {
                 resp.headers_mut()
                     .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+                entry["errors"][0]["extensions"]["retryAfter"] = json!(secs);
             }
-            (resp, tenancy)
+            (resp, entry, tenancy)
         }
         Ok(tenancy) => match call::check_key(rt, headers, query).await {
             Ok(()) => return Ok(tenancy),
             Err(u) => {
+                let entry = refused_entry(401, &u.detail);
                 let mut resp = problem(401, "Unauthorized", u.detail);
                 if let Ok(v) = HeaderValue::from_str(&u.challenge) {
                     resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
                 }
-                (resp, Some(tenancy))
+                (resp, entry, Some(tenancy))
             }
         },
     };
@@ -270,19 +372,64 @@ async fn admit_request(
         response: None,
     };
     call::report(rt, headers, report).await;
-    Err(resp)
+    Err(Refusal {
+        response: resp,
+        entry,
+    })
 }
 
-/// Runs `request`, records it (one request-log entry for all its root
-/// fields; each is metered on its own), then sleeps the largest injected
-/// latency of its root fields and answers `200` JSON.
+/// A batch entry for an operation refused with HTTP `status`.
+fn refused_entry(status: u16, message: &str) -> Value {
+    json!({"errors": [{
+        "message": message,
+        "extensions": {"code": error_code(status), "status": status},
+    }]})
+}
+
+/// What running one operation produced, before it is answered.
+struct Ran {
+    response: async_graphql::Response,
+    /// The largest injected latency of its root fields.
+    delay: Option<Duration>,
+    meta: Meta,
+}
+
+/// The response headers one or more operations call for.
+#[derive(Default)]
+struct Meta {
+    /// The worst source over the generated root fields.
+    worst: Option<Source>,
+    /// Why the faker answered a root field (the first one).
+    fallback_reason: Option<String>,
+    /// The applying scenario's headers.
+    scenario_headers: Vec<(String, String)>,
+}
+
+impl Meta {
+    /// Adds a later operation's headers to these.
+    fn merge(&mut self, other: Meta) {
+        self.worst = match (self.worst, other.worst) {
+            (Some(a), Some(b)) => Some(a.worst(b)),
+            (a, b) => a.or(b),
+        };
+        if self.fallback_reason.is_none() {
+            self.fallback_reason = other.fallback_reason;
+        }
+        if self.scenario_headers.is_empty() {
+            self.scenario_headers = other.scenario_headers;
+        }
+    }
+}
+
+/// Runs `request` and records it (one request-log entry for all its root
+/// fields; each is metered on its own).
 async fn execute(
     st: &GraphqlState,
     request: Request,
     method: &Method,
     headers: HeaderMap,
     admitted: Option<Tenancy>,
-) -> Response {
+) -> Ran {
     let variables = serde_json::to_value(&request.variables).unwrap_or(Value::Null);
     let scenario = request_scenario(&st.rt, &headers);
     let call = Arc::new(resolve::HttpCall::new(
@@ -326,32 +473,38 @@ async fn execute(
             response.extensions.insert("mockingbird".into(), v);
         }
     }
-    if let Some(delay) = collected.delay {
-        tokio::time::sleep(delay).await;
+    Ran {
+        response,
+        delay: collected.delay,
+        meta: Meta {
+            worst: collected.worst,
+            fallback_reason,
+            scenario_headers,
+        },
     }
-    let body = match serde_json::to_vec(&response) {
-        Ok(b) => b,
-        Err(e) => return problem(500, "Internal Server Error", e.to_string()),
-    };
+}
+
+/// A `200` JSON response with `body` and the headers `meta` calls for.
+fn respond(body: Vec<u8>, meta: &Meta) -> Response {
     let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    if let Some(source) = collected.worst {
+    if let Some(source) = meta.worst {
         resp.headers_mut()
             .insert(SOURCE_HEADER, HeaderValue::from_static(source.as_str()));
     }
-    if let Some(reason) = fallback_reason {
+    if let Some(reason) = &meta.fallback_reason {
         resp.headers_mut().insert(
             HeaderName::from_static("x-mockingbird-fallback-reason"),
-            crate::call::reason_header(&reason),
+            crate::call::reason_header(reason),
         );
     }
-    for (name, value) in scenario_headers {
+    for (name, value) in &meta.scenario_headers {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(&value),
+            HeaderValue::from_str(value),
         ) {
             resp.headers_mut().insert(name, value);
         }
@@ -445,9 +598,16 @@ async fn refused_at(
     resp
 }
 
+/// A parsed `POST` body.
+enum Posted {
+    Single(Box<Request>),
+    /// A JSON array of operations.
+    Batch(Vec<Request>),
+}
+
 /// A `POST` body: raw query text for `application/graphql`, else the JSON
-/// `{query, variables, operationName}` envelope.
-fn parse_post(headers: &HeaderMap, body: &[u8]) -> Result<Request, String> {
+/// `{query, variables, operationName}` envelope, or an array of them.
+fn parse_post(headers: &HeaderMap, body: &[u8]) -> Result<Posted, String> {
     let media = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -455,9 +615,20 @@ fn parse_post(headers: &HeaderMap, body: &[u8]) -> Result<Request, String> {
         .map(|v| v.trim().to_ascii_lowercase());
     if media.as_deref() == Some(GRAPHQL_MEDIA_TYPE) {
         let text = std::str::from_utf8(body).map_err(|e| format!("body is not UTF-8: {e}"))?;
-        return Ok(Request::new(text));
+        return Ok(Posted::Single(Box::new(Request::new(text))));
     }
-    serde_json::from_slice::<Request>(body).map_err(|e| format!("body: {e}"))
+    let is_array = body
+        .iter()
+        .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        .is_some_and(|b| *b == b'[');
+    if is_array {
+        return serde_json::from_slice::<Vec<Request>>(body)
+            .map(Posted::Batch)
+            .map_err(|e| format!("body: {e}"));
+    }
+    serde_json::from_slice::<Request>(body)
+        .map(|r| Posted::Single(Box::new(r)))
+        .map_err(|e| format!("body: {e}"))
 }
 
 /// Whether the operation `doc` selects (by `operation_name`) is a
