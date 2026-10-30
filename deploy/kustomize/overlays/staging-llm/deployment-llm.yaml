@@ -16,7 +16,7 @@ spec:
             - name: MB_LLM_BASE_URL
               value: https://openrouter.ai/api/v1
             - name: MB_LLM_MODEL
-              value: deepseek/deepseek-v4.1-flash
+              value: deepseek/deepseek-v4.1-flash-1017
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {memory: 512Mi}

@@ -124,7 +124,7 @@ fn loads_full_example_config() {
     assert_eq!(cfg.llm.profiles.len(), 2);
     let p = &cfg.llm.profiles["openrouter"];
     assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
-    assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
+    assert_eq!(p.model, "deepseek/deepseek-v4.1-flash-1017");
     assert_eq!(p.api_key.as_deref(), Some("env:OPENROUTER_API_KEY"));
     assert_eq!(p.mode(), mb_store::OutputMode::JsonObject);
     assert_eq!(p.timeout, Duration::from_secs(3));
@@ -561,7 +561,7 @@ fn env_llm_vars_create_default_profile() {
     .unwrap();
     let p = &cfg.llm.profiles["default"];
     assert_eq!(p.base_url, "http://env");
-    assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
+    assert_eq!(p.model, "deepseek/deepseek-v4.1-flash-1017");
     assert_eq!(cfg.llm.default_profile.as_deref(), Some("default"));
 }
 

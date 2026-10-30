@@ -9,7 +9,7 @@ llm:
       headers:
         http-referer: https://github.com/rj-s-org/mockingbird
         x-title: Mockingbird
-      model: deepseek/deepseek-v4.1-flash
+      model: deepseek/deepseek-v4.1-flash-1017
 mocks:
   bookshop:
     contract: ./bookshop.yaml

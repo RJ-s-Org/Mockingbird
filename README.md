@@ -75,21 +75,21 @@ Choose WireMock or Mockoon when you want exact, hand-authored responses; Prism w
 
 ## Model benchmarks
 
-The latest benchmark, on 2026-10-30, ran 12 OpenRouter configurations through Mockingbird's own generation code at production settings. It took 162 engine samples per model over REST, GraphQL, gRPC, SOAP and AsyncAPI contracts. It also collected blinded realism and coherence scores from a judge model, and ran the server's consistency, SSE and smart import suites. Value is quality squared over the square roots of cost and latency, relative to the default (100).
+The latest benchmark, on 2026-10-30, ran 12 OpenRouter configurations through Mockingbird's own generation code at production settings. It took 162 engine samples per model over REST, GraphQL, gRPC, SOAP and AsyncAPI contracts. It also collected blinded realism and coherence scores from a judge model, and ran the server's consistency, SSE and smart import suites. Value is quality squared over the square roots of cost and latency, relative to the baseline (100), `deepseek/deepseek-v4.1-flash`, which was the default when this ran.
 
 | Model | Schema-valid | Judge score (1-5) | p50 latency | Cost per 1k responses | Value |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `openai/gpt-6-luna` | 100.0% | 4.33 | 2.7 s | $0.20 | 160.5 |
-| `deepseek/deepseek-v4.1-flash-1017` | 99.8% | 4.36 | 1.9 s | $0.32 | 144.0 |
+| `deepseek/deepseek-v4.1-flash-1017` (default) | 99.8% | 4.36 | 1.9 s | $0.32 | 144.0 |
 | `nvidia/nemotron-3.5-lightning` | 93.1% | 3.71 | 2.6 s | $0.16 | 134.6 |
 | `inception/mercury-3` | 97.5% | 3.43 | 1.0 s | $0.44 | 128.6 |
 | `anthropic/claude-haiku-5.5` | 99.8% | 4.57 | 2.2 s | $0.43 | 120.4 |
 | `nvidia/nemotron-3.5-super-vl` | 99.2% | 4.21 | 2.5 s | $0.44 | 102.1 |
-| `deepseek/deepseek-v4.1-flash` (default) | 99.6% | 4.36 | 3.5 s | $0.37 | 100.0 |
+| `deepseek/deepseek-v4.1-flash` (baseline) | 99.6% | 4.36 | 3.5 s | $0.37 | 100.0 |
 | `minimax/minimax-m3.1-flash` | 95.9% | 4.57 | 2.7 s | $0.61 | 88.1 |
 | `thinkingmachines/inkling@nojson` | 99.2% | 4.00 | 4.2 s | $2.21 | 32.6 |
 
-All 12 configurations cleared the 0.90 schema-valid gate, against 5 of 16 in the first round on 2026-10-29. On the same models and workload, fallbacks to the faker fell from 239 to 59. That followed the engine's output-validity fixes and a switch to production token limits. Inkling runs with `output_mode: none`. The default is unchanged. The [benchmark page](docs/benchmarks.md) has the method, both rounds, the caveats and how to re-run it.
+All 12 configurations cleared the 0.90 schema-valid gate, against 5 of 16 in the first round on 2026-10-29. On the same models and workload, fallbacks to the faker fell from 239 to 59. That followed the engine's output-validity fixes and a switch to production token limits. Inkling runs with `output_mode: none`. The default has since moved to `deepseek/deepseek-v4.1-flash-1017`; these numbers are as measured. The [benchmark page](docs/benchmarks.md) has the method, both rounds, the caveats and how to re-run it.
 
 ## Integrations
 

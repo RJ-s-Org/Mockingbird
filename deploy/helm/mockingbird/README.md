@@ -97,7 +97,7 @@ llm:
   profiles:
     openrouter:
       base_url: https://openrouter.ai/api/v1
-      model: deepseek/deepseek-v4.1-flash
+      model: deepseek/deepseek-v4.1-flash-1017
       apiKeySecret: {name: openrouter, key: api-key}   # -> MB_PROFILE_KEY_OPENROUTER, api_key: env:MB_PROFILE_KEY_OPENROUTER
 ```
 

@@ -34,6 +34,8 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+# The shipped default when rounds 1 and 2 ran, kept so Value stays comparable
+# across rounds. The default is now deepseek/deepseek-v4.1-flash-1017.
 BASELINE = "deepseek/deepseek-v4.1-flash"
 SEED = "mb-bench-2026-10-29"
 API_ORDER = ["rest", "graphql", "grpc", "soap", "asyncapi"]
