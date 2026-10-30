@@ -136,9 +136,12 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add "$TARGET"
+      # A tag's caches are visible only to runs of that tag, so only runs on
+      # main (manual dry runs) save; tag runs read what main saved.
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: matrix.zigbuild
         uses: mlugg/setup-zig@v2
       - if: matrix.zigbuild
@@ -243,7 +246,8 @@ jobs:
             REVISION=${{ github.sha }}
           outputs: type=image,name=${{ needs.verify.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ needs.verify.outputs.publish }}
           cache-from: type=gha,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
-          cache-to: type=gha,mode=max,scope=release-${{ matrix.flavor }}-${{ matrix.platform.arch }}
+          # Saved only from main, for the same reason as rust-cache above.
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=gha,mode=max,scope=release-{0}-{1}', matrix.flavor, matrix.platform.arch) || '' }}
       # A dry run pushes nothing, so the scan reads the image from the local
       # daemon instead (the build above is cached).
       - name: Load the image for scanning (dry run)
