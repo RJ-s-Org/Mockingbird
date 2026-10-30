@@ -321,12 +321,15 @@ impl Faker {
             .find(|t| *t != "null")
             .or(types.first().copied())
             .unwrap_or_else(|| infer_type(s));
-        // A list is never null: at the limit it is empty instead. A nullable
-        // value is null at the limit, and whenever its other type has no
-        // finite instance.
-        if types.contains(&"null")
-            && !types.contains(&"array")
-            && (at_limit || (chosen == "object" && !ctx.finite(&with_type(s, chosen))))
+        // A value is null only where every part of its schema admits null
+        // (an `allOf`/`$ref` beside a nullable `type` may not): at the limit
+        // (where a list is empty instead), and whenever its other type has
+        // no finite instance.
+        if chosen != "null"
+            && types.contains(&"null")
+            && admits_null(ctx.root, schema, 0)
+            && ((at_limit && chosen != "array")
+                || (matches!(chosen, "object" | "array") && !ctx.finite(&with_type(s, chosen))))
         {
             return Value::Null;
         }
@@ -484,17 +487,20 @@ impl Faker {
             .and_then(Value::as_array)
             .map_or(&[], Vec::as_slice);
         let contains = s.get("contains");
-        let min_contains = contains.map_or(0, |_| count("minContains").unwrap_or(1));
-        let min = count("minItems").unwrap_or(0).max(min_contains);
+        let (min_contains, min) = min_items(s);
         let max = count("maxItems");
         let any = Value::Bool(true);
         let items = s.get("items").unwrap_or(&any);
-        // Items with no finite instance are generated only when required.
-        let mut len = if at_limit || !ctx.finite(items) {
+        let mut len = if at_limit {
             min
         } else {
             min.max(1).max(prefix.len())
         };
+        // Items beyond the required ones stop at the first with no finite
+        // instance.
+        if let Some(stop) = (min..len).find(|&i| !ctx.finite(prefix.get(i).unwrap_or(items))) {
+            len = stop;
+        }
         // `items: false` closes the list after its `prefixItems`.
         if matches!(items, Value::Bool(false)) {
             len = len.min(prefix.len());
@@ -530,6 +536,19 @@ impl Faker {
         }
         Value::Array(out)
     }
+}
+
+/// `(minContains, minItems)` of a list schema: the items a minimal instance
+/// has, the first `minContains` of them also satisfying `contains`.
+fn min_items(s: &Map<String, Value>) -> (usize, usize) {
+    let count = |k: &str| s.get(k).and_then(Value::as_u64).map(|n| n as usize);
+    let min_contains = s
+        .get("contains")
+        .map_or(0, |_| count("minContains").unwrap_or(1));
+    (
+        min_contains,
+        count("minItems").unwrap_or(0).max(min_contains),
+    )
 }
 
 /// Draws allowed beyond twice the wanted member count when keys clash.
@@ -632,6 +651,11 @@ struct Parts<'a> {
     extra: u64,
     /// A merged `const`/`enum` ends generation with a single value.
     terminal: bool,
+    /// The largest merged `minProperties`.
+    min_props: u64,
+    /// Schemas members beyond the declared ones take (`patternProperties`,
+    /// `additionalProperties`).
+    map_values: Vec<&'a Value>,
 }
 
 thread_local! {
@@ -724,7 +748,7 @@ impl Costs {
         };
         if obj.contains_key("const")
             || matches!(obj.get("enum"), Some(Value::Array(a)) if !a.is_empty())
-            || type_names(obj).contains(&"null")
+            || (type_names(obj).contains(&"null") && admits_null(root, schema, 0))
         {
             return 1;
         }
@@ -748,6 +772,42 @@ impl Costs {
                     .fold(0u64, |acc, p| acc.saturating_add(self.of(root, p))),
             };
             cost = cost.saturating_add(member);
+        }
+        // Members `minProperties` asks for beyond the required ones, each
+        // valued by the costliest schema extra members may take.
+        let extra_members = parts.min_props.saturating_sub(parts.required.len() as u64);
+        if extra_members > 0 {
+            let each = parts
+                .map_values
+                .iter()
+                .map(|v| self.of(root, v))
+                .max()
+                .unwrap_or(1);
+            cost = cost.saturating_add(each.saturating_mul(extra_members));
+        }
+        cost
+    }
+
+    /// Cost of the items a minimal instance of the list `obj` has (see
+    /// [`min_items`]): its `prefixItems`, then `items`, the first
+    /// `minContains` of them also satisfying `contains`.
+    fn elements(&self, root: &Value, obj: &Map<String, Value>) -> u64 {
+        let (min_contains, min) = min_items(obj);
+        if min == 0 {
+            return 0;
+        }
+        let prefix: &[Value] = obj
+            .get("prefixItems")
+            .and_then(Value::as_array)
+            .map_or(&[], Vec::as_slice);
+        let leading = prefix.len().min(min);
+        let mut cost = prefix[..leading]
+            .iter()
+            .fold(0u64, |acc, p| acc.saturating_add(self.of(root, p)));
+        let item = obj.get("items").map_or(1, |i| self.of(root, i));
+        cost = cost.saturating_add(item.saturating_mul((min - leading) as u64));
+        if let Some(c) = obj.get("contains") {
+            cost = cost.saturating_add(self.of(root, c).saturating_mul(min_contains as u64));
         }
         cost
     }
@@ -791,10 +851,17 @@ impl Costs {
                 parts.extra = parts.extra.saturating_add(min);
             }
         }
-        let min_items = obj.get("minItems").and_then(Value::as_u64).unwrap_or(0);
-        if min_items > 0 {
-            let item = obj.get("items").map_or(1, |i| self.of(root, i));
-            parts.extra = parts.extra.saturating_add(item.saturating_mul(min_items));
+        parts.extra = parts.extra.saturating_add(self.elements(root, obj));
+        if let Some(n) = obj.get("minProperties").and_then(Value::as_u64) {
+            parts.min_props = parts.min_props.max(n);
+        }
+        if let Some(Value::Object(patterns)) = obj.get("patternProperties") {
+            parts.map_values.extend(patterns.values());
+        }
+        if let Some(additional) = obj.get("additionalProperties")
+            && !matches!(additional, Value::Bool(false))
+        {
+            parts.map_values.push(additional);
         }
         if let Some(Value::Object(props)) = obj.get("properties") {
             for (name, sub) in props {
@@ -876,9 +943,14 @@ fn collect_refs(value: &Value, out: &mut Vec<String>) {
 }
 
 fn type_names(s: &Map<String, Value>) -> Vec<&str> {
-    match s.get("type") {
-        Some(Value::String(t)) => vec![t.as_str()],
-        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+    s.get("type").map(type_list).unwrap_or_default()
+}
+
+/// The type names a `type` keyword's value lists.
+fn type_list(t: &Value) -> Vec<&str> {
+    match t {
+        Value::String(t) => vec![t.as_str()],
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     }
 }
@@ -888,13 +960,46 @@ fn has_type(value: &Value, name: &str) -> bool {
     match name {
         "null" => value.is_null(),
         "boolean" => value.is_boolean(),
-        "integer" => value.is_i64() || value.is_u64(),
+        "integer" => value.as_f64().is_some_and(|f| f.fract() == 0.0),
         "number" => value.is_number(),
         "string" => value.is_string(),
         "array" => value.is_array(),
         "object" => value.is_object(),
         _ => false,
     }
+}
+
+/// Whether `null` satisfies `schema`: its `type`, `const` and `enum`, its
+/// `$ref` target and every `allOf` member allow it, and so does some
+/// `oneOf`/`anyOf` branch. `false` past [`MAX_INLINE_HOPS`] references.
+fn admits_null(root: &Value, schema: &Value, hops: usize) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return schema.as_bool() != Some(false);
+    };
+    if hops > MAX_INLINE_HOPS
+        || (obj.contains_key("type") && !type_names(obj).contains(&"null"))
+        || obj.get("const").is_some_and(|c| !c.is_null())
+        || matches!(obj.get("enum"), Some(Value::Array(a)) if !a.iter().any(Value::is_null))
+    {
+        return false;
+    }
+    if let Some(Value::String(r)) = obj.get("$ref")
+        && let Some(target) = resolve_ref(root, r)
+        && !admits_null(root, target, hops + 1)
+    {
+        return false;
+    }
+    if let Some(Value::Array(all)) = obj.get("allOf")
+        && !all.iter().all(|m| admits_null(root, m, hops + 1))
+    {
+        return false;
+    }
+    ["oneOf", "anyOf"].iter().all(|key| match obj.get(*key) {
+        Some(Value::Array(branches)) if !branches.is_empty() => {
+            branches.iter().any(|b| admits_null(root, b, hops + 1))
+        }
+        _ => true,
+    })
 }
 
 /// `s` with its `type` narrowed to `name`.
@@ -1062,6 +1167,36 @@ fn merge_keyword(out: &mut Map<String, Value>, key: String, value: Value) {
                     }
                     Some(_) => {}
                 }
+            }
+        }
+        // A value must have a type both sides allow (a nullable `type`
+        // beside the chosen `null` branch is null). Contradicting types
+        // keep the first.
+        ("type", Some(existing), _) => {
+            let theirs = type_list(&value);
+            let both: Vec<&str> = type_list(existing)
+                .into_iter()
+                .filter_map(|t| match t {
+                    _ if theirs.contains(&t) => Some(t),
+                    "number" | "integer"
+                        if theirs.contains(&"number") || theirs.contains(&"integer") =>
+                    {
+                        Some("integer")
+                    }
+                    _ => None,
+                })
+                .collect();
+            let merged = match both.as_slice() {
+                [] => None,
+                [one] => Some(Value::String((*one).to_string())),
+                many => Some(Value::Array(
+                    many.iter()
+                        .map(|t| Value::String((*t).to_string()))
+                        .collect(),
+                )),
+            };
+            if let Some(merged) = merged {
+                *existing = merged;
             }
         }
         ("required", Some(Value::Array(existing)), Value::Array(incoming)) => {

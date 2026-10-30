@@ -216,3 +216,85 @@ fn the_depth_limit_keeps_required_members() {
             .is_valid_output(&deep)
     );
 }
+
+/// `A` and `B` require each other: neither has a finite instance.
+fn cycle() -> serde_json::Value {
+    serde_json::json!({
+        "A": {"type": "object", "required": ["b"], "properties": {"b": {"$ref": "#/$defs/B"}}},
+        "B": {"type": "object", "required": ["a"], "properties": {"a": {"$ref": "#/$defs/A"}}}
+    })
+}
+
+/// An object `{x: member}` (`x` required when `required`) over [`cycle`].
+fn holder(member: serde_json::Value, required: bool) -> serde_json::Value {
+    let required: Vec<&str> = if required { vec!["x"] } else { vec![] };
+    serde_json::json!({
+        "type": "object",
+        "required": required,
+        "properties": {"x": member},
+        "$defs": cycle()
+    })
+}
+
+/// A nullable type next to an `allOf`/`$ref` that rules null out (what
+/// OpenAPI 3.0 `nullable: true` beside `allOf: [$ref]` imports to) is not
+/// cheap: its `null` is invalid, so an optional cyclic one is left out.
+#[test]
+fn null_counts_only_where_every_part_admits_it() {
+    let member = serde_json::json!({"allOf": [{"$ref": "#/$defs/A"}], "type": ["object", "null"]});
+    for value in assert_fakes_validly(&holder(member, false)) {
+        assert!(value.get("x").is_none(), "{value}");
+    }
+    // Where every part admits null, a required cyclic one is null.
+    let member = serde_json::json!({"anyOf": [{"$ref": "#/$defs/A"}, {"type": "null"}],
+                                   "type": ["object", "null"]});
+    for value in assert_fakes_validly(&holder(member, true)) {
+        assert!(value["x"].is_null(), "{value}");
+    }
+}
+
+/// A nullable list whose `minItems` items have no finite instance is null.
+#[test]
+fn a_nullable_list_of_cyclic_items_is_null() {
+    let member = serde_json::json!({"type": ["array", "null"], "minItems": 1,
+                                   "items": {"$ref": "#/$defs/A"}});
+    for value in assert_fakes_validly(&holder(member, true)) {
+        assert!(value["x"].is_null(), "{value}");
+    }
+}
+
+/// `prefixItems`, `contains` and `minProperties` count toward the minimal
+/// instance: optional members that would need a cyclic element are left
+/// out, and lists stop before a cyclic prefix item.
+#[test]
+fn prefix_items_contains_and_min_properties_are_costed() {
+    let members = [
+        serde_json::json!({"type": "array", "contains": {"$ref": "#/$defs/A"}}),
+        serde_json::json!({"type": "object", "minProperties": 1,
+                           "additionalProperties": {"$ref": "#/$defs/A"}}),
+        serde_json::json!({"type": "array", "minItems": 1,
+                           "prefixItems": [{"$ref": "#/$defs/A"}]}),
+    ];
+    for member in members {
+        for value in assert_fakes_validly(&holder(member.clone(), false)) {
+            assert!(value.get("x").is_none(), "{member}: {value}");
+        }
+    }
+    let member = serde_json::json!({"type": "array", "prefixItems": [{"type": "string"},
+                                   {"$ref": "#/$defs/A"}], "items": {"type": "string"}});
+    for value in assert_fakes_validly(&holder(member, true)) {
+        assert!(
+            value["x"].as_array().is_some_and(|l| l.len() < 2),
+            "{value}"
+        );
+    }
+}
+
+/// An integer `enum` written with floats (`1.0`) keeps its options.
+#[test]
+fn integer_enum_options_written_as_floats_are_kept() {
+    let schema = serde_json::json!({"type": "integer", "enum": [1.0, 2.0, "x"]});
+    for value in assert_fakes_validly(&schema) {
+        assert!(value.is_number(), "{value}");
+    }
+}
