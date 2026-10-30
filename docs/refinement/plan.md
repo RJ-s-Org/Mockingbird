@@ -21,6 +21,7 @@ before and after numbers are in [baseline.md](baseline.md#after).
 | 5 | #108–#113 #118 #121 #122 | F1–F8 merged |
 | 6 | #123–#128 | A1–A5 per crate group, additive, with deprecations |
 | 7 | #129–#136 | D1–D7 merged (D2 as #131 and #133) |
+| 8 | #138 #140 #141 #145–#147 #149–#154 | e2e image cache, CI-4/CI-5, the four product calls and the follow-ups; details in [baseline.md](baseline.md#wave-8) |
 
 Left open: the [0.2.0 scope](#020-scope), the issue [#78](https://github.com/RJ-s-Org/Mockingbird/issues/78) deferrals,
 and the follow-ups in [baseline.md](baseline.md#left-open).
