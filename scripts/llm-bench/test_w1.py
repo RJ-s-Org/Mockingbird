@@ -69,6 +69,15 @@ class OutputModeTest(unittest.TestCase):
         self.assertEqual(run.output_mode("deepseek/deepseek-v4.1-flash", "json_schema"), "json_schema")
 
 
+class SliceTest(unittest.TestCase):
+    def test_slice_keeps_only_the_selections_of_kept_operations(self):
+        m = {"entries": [{"name": "g", "api_type": "graphql", "operations": ["Query.a", "Query.b"],
+                          "selections": {"Query.a": {"x": {}}, "Query.b": {"y": {}}}}]}
+        e = run.slice_manifest(m, 1)["entries"][0]
+        self.assertEqual(e["operations"], ["Query.a"])
+        self.assertEqual(e["selections"], {"Query.a": {"x": {}}})
+
+
 class SessionSlugTest(unittest.TestCase):
     def test_variant_suffix_is_header_safe(self):
         self.assertEqual(server_suites.session_slug("thinkingmachines/inkling@nojson"),
