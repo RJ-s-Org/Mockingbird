@@ -323,7 +323,7 @@ impl ChannelInner {
         if hop >= MAX_HOPS {
             return Some("skipped: hop limit".into());
         }
-        let Some(target) = self.rt.bundle().channel(&reply.channel) else {
+        let Some(target) = self.rt.channel(&reply.channel) else {
             return Some(format!(
                 "error: {}",
                 PublishError::UnknownChannel(reply.channel.clone())

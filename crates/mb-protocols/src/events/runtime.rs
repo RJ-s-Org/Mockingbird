@@ -577,7 +577,7 @@ impl ChannelRuntime {
         context: Option<Value>,
     ) -> Result<Vec<Published>, PublishFailure> {
         let inner = &self.inner;
-        let Some(ch) = inner.rt.bundle().channel(channel) else {
+        let Some(ch) = inner.rt.channel(channel) else {
             return Err(PublishError::UnknownChannel(channel.to_string()).into());
         };
         if ch.direction == Direction::Subscribe {

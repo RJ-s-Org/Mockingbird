@@ -159,6 +159,78 @@ fn prometheus_usage_records() {
     ));
 }
 
+#[test]
+fn prometheus_usage_status_label_is_the_decimal_status() {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let statuses = [
+        0u16,
+        7,
+        99,
+        100,
+        200,
+        201,
+        404,
+        418,
+        503,
+        599,
+        600,
+        1000,
+        u16::MAX,
+    ];
+    metrics::with_local_recorder(&recorder, || {
+        for status in statuses {
+            let mut event = UsageEvent::new(default_tenancy(), "petstore", "listPets");
+            event.status = status;
+            event.source = "fallback".to_string();
+            PrometheusUsage.record(&event);
+        }
+    });
+    let mut seen: Vec<String> = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, _, _, _)| key.key().name() == "mb_requests_total")
+        .filter_map(|(key, _, _, _)| {
+            key.key()
+                .labels()
+                .find(|l| l.key() == "status")
+                .map(|l| l.value().to_string())
+        })
+        .collect();
+    seen.sort();
+    let mut want: Vec<String> = statuses.iter().map(u16::to_string).collect();
+    want.sort();
+    assert_eq!(seen, want);
+}
+
+/// Timing harness: `cargo test -p mb-ext --test it -- --ignored --nocapture
+/// prometheus_usage_timing`.
+#[test]
+#[ignore = "timing harness"]
+fn prometheus_usage_timing() {
+    let mut event = UsageEvent::new(default_tenancy(), "petstore-production", "listPetsByOwner");
+    event.status = 200;
+    event.source = "llm".to_string();
+    event.latency = Duration::from_millis(42);
+    event.prompt_tokens = 10;
+    event.completion_tokens = 5;
+    let runs = 200_000u32;
+    let noop = metrics::NoopRecorder;
+    let debugging = DebuggingRecorder::new();
+    let time = |recorder: &dyn metrics::Recorder| {
+        metrics::with_local_recorder(recorder, || {
+            let started = std::time::Instant::now();
+            for _ in 0..runs {
+                PrometheusUsage.record(std::hint::black_box(&event));
+            }
+            started.elapsed() / runs
+        })
+    };
+    println!("record, no-op recorder: {:?}", time(&noop));
+    println!("record, registry recorder: {:?}", time(&debugging));
+}
+
 /// A quota guard that refuses everything, to tell it apart from `AllowAll`.
 struct DenyAll;
 

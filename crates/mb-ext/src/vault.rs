@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -47,6 +47,9 @@ pub struct VaultSecrets {
     namespace: Option<String>,
     client: reqwest::Client,
     cache: Mutex<HashMap<String, (String, Instant)>>,
+    /// Per reference with a read under way: the lock the misses on it queue
+    /// on, so concurrent misses share one Vault read.
+    inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl fmt::Debug for VaultSecrets {
@@ -126,6 +129,7 @@ impl VaultSecrets {
             namespace: var("VAULT_NAMESPACE"),
             client,
             cache: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -205,13 +209,56 @@ impl SecretStore for VaultSecrets {
         if let Some(value) = self.cached(reference) {
             return Ok(value);
         }
+        // One read per reference at a time: a miss that queued behind
+        // another finds the value it cached. A failure is not cached, so
+        // the next one in line reads again.
+        let queued = Queued::join(&self.inflight, reference);
+        let _read = queued.lock.clone().lock_owned().await;
+        if let Some(value) = self.cached(reference) {
+            return Ok(value);
+        }
         let value = self.fetch(reference, &parsed).await?;
+        let now = Instant::now();
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.insert(
-            reference.to_string(),
-            (value.clone(), Instant::now() + CACHE_TTL),
-        );
+        cache.retain(|_, (_, expires)| now < *expires);
+        cache.insert(reference.to_string(), (value.clone(), now + CACHE_TTL));
         Ok(value)
+    }
+}
+
+/// A place in the queue of misses on one reference. The last one to leave
+/// (or be dropped, if its resolve is cancelled) removes the queue.
+struct Queued<'a> {
+    inflight: &'a Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    reference: &'a str,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl<'a> Queued<'a> {
+    fn join(
+        inflight: &'a Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+        reference: &'a str,
+    ) -> Self {
+        let mut map = inflight.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = map.entry(reference.to_string()).or_default().clone();
+        Self {
+            inflight,
+            reference,
+            lock,
+        }
+    }
+}
+
+impl Drop for Queued<'_> {
+    fn drop(&mut self) {
+        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        // The map's handle and this one: nobody else is queued.
+        if map
+            .get(self.reference)
+            .is_some_and(|l| Arc::ptr_eq(l, &self.lock) && Arc::strong_count(l) == 2)
+        {
+            map.remove(self.reference);
+        }
     }
 }
 
@@ -321,5 +368,60 @@ impl SecretStore for DefaultSecrets {
             };
         }
         self.files.resolve(reference).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::{CACHE_TTL, VaultSecrets};
+    use crate::SecretStore;
+
+    /// Expired values leave the cache when a new one is stored, and no
+    /// queue outlives its resolve.
+    #[tokio::test]
+    async fn expired_values_are_evicted_and_queues_removed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "data": { "k": "v" } }
+            })))
+            .mount(&server)
+            .await;
+        let addr = server.uri();
+        let vault = VaultSecrets::from_vars(|name| match name {
+            "VAULT_ADDR" => Some(addr.clone()),
+            "VAULT_TOKEN" => Some("t".to_string()),
+            _ => None,
+        })
+        .expect("config")
+        .expect("VAULT_ADDR is set");
+        let cached = |vault: &VaultSecrets| {
+            let mut keys: Vec<String> =
+                vault.cache.lock().expect("cache").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+
+        for reference in ["vault:secret/a#k", "vault:secret/b#k"] {
+            assert_eq!(vault.resolve(reference).await.ok().as_deref(), Some("v"));
+        }
+        assert_eq!(cached(&vault), ["vault:secret/a#k", "vault:secret/b#k"]);
+        assert!(vault.inflight.lock().expect("inflight").is_empty());
+
+        tokio::time::pause();
+        tokio::time::advance(CACHE_TTL + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        assert_eq!(
+            vault.resolve("vault:secret/c#k").await.ok().as_deref(),
+            Some("v")
+        );
+        assert_eq!(cached(&vault), ["vault:secret/c#k"]);
+        assert!(vault.inflight.lock().expect("inflight").is_empty());
     }
 }

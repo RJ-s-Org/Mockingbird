@@ -248,3 +248,76 @@ async fn default_secrets_resolves_vault_refs_lazily() {
         Some("v")
     );
 }
+
+/// Concurrent misses on one reference share a single Vault read; another
+/// reference is read alongside, not after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_misses_share_one_vault_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .respond_with(kv2(json!({ "k": "v" })).set_delay(Duration::from_millis(300)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/other"))
+        .respond_with(kv2(json!({ "k": "w" })).set_delay(Duration::from_millis(300)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let store = std::sync::Arc::new(vault(&[
+        ("VAULT_ADDR", &server.uri()),
+        ("VAULT_TOKEN", "t"),
+    ]));
+
+    let started = std::time::Instant::now();
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..16 {
+        let store = store.clone();
+        let reference = if i % 4 == 0 {
+            "vault:secret/other#k"
+        } else {
+            "vault:secret/mockingbird#k"
+        };
+        tasks.spawn(async move { (reference, store.resolve(reference).await.ok()) });
+    }
+    while let Some(joined) = tasks.join_next().await {
+        let (reference, value) = joined.expect("task");
+        let want = if reference.contains("other") {
+            "w"
+        } else {
+            "v"
+        };
+        assert_eq!(value.as_deref(), Some(want), "{reference}");
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(590), "{elapsed:?}");
+}
+
+/// A failed read is not cached: the next resolve reads Vault again.
+#[tokio::test]
+async fn failed_vault_reads_are_not_cached() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/secret/data/mockingbird"))
+        .respond_with(kv2(json!({ "k": "v" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let store = vault(&[("VAULT_ADDR", &server.uri()), ("VAULT_TOKEN", "t")]);
+    let reference = "vault:secret/mockingbird#k";
+    assert!(matches!(
+        store.resolve(reference).await,
+        Err(ExtError::Other(_))
+    ));
+    assert_eq!(store.resolve(reference).await.ok().as_deref(), Some("v"));
+    assert_eq!(store.resolve(reference).await.ok().as_deref(), Some("v"));
+}
