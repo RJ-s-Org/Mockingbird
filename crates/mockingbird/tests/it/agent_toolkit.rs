@@ -540,6 +540,20 @@ fn mcp_drives_a_background_server() {
         );
         assert!(answer["body"]["data"]["hello"].is_string(), "{answer}");
 
+        // The faker seed through create_mock and update_mock.
+        let seeded = mcp.tool("create_mock", json!({ "name": "seeded", "faker_seed": 5 }));
+        assert_eq!(seeded["faker_seed"], 5, "{seeded}");
+        let error = mcp.tool_error(
+            "create_mock",
+            json!({ "name": "negative", "faker_seed": -5 }),
+        );
+        assert!(error.contains("faker_seed"), "{error}");
+        let cleared = mcp.tool(
+            "update_mock",
+            json!({ "name": "seeded", "patch": { "faker_seed": null } }),
+        );
+        assert!(cleared.get("faker_seed").is_none(), "{cleared}");
+
         let doctor = mcp.tool("doctor", json!({}));
         assert_eq!(doctor["admin"]["reachable"], true);
     }));
