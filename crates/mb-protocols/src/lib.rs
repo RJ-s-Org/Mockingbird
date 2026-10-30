@@ -397,6 +397,12 @@ pub struct MockRuntime {
     credential_names: CredentialNames,
     /// Lookups into `bundle`, computed once with it.
     index: call::BundleIndex,
+    /// Which stored resource a path field value names, from this
+    /// runtime's writes (see [`call::PathAliases`]).
+    path_aliases: call::PathAliases,
+    /// GraphQL root fields' narrowed schemas, by selection.
+    #[cfg(feature = "graphql")]
+    narrowed: graphql::NarrowCache,
 }
 
 /// Shows the mock's settings; leaves out the contract, the engine, the
@@ -509,6 +515,9 @@ impl MockRuntime {
             base_paths: Vec::new(),
             credential_names,
             index,
+            path_aliases: call::PathAliases::default(),
+            #[cfg(feature = "graphql")]
+            narrowed: graphql::NarrowCache::default(),
         }
     }
 
@@ -547,5 +556,17 @@ impl MockRuntime {
     /// Lookups into [`MockRuntime::bundle`], computed with it.
     pub(crate) fn index(&self) -> &call::BundleIndex {
         &self.index
+    }
+
+    /// Path field values of this runtime's writes (see
+    /// [`call::PathAliases`]).
+    pub(crate) fn path_aliases(&self) -> &call::PathAliases {
+        &self.path_aliases
+    }
+
+    /// Narrowed schemas of GraphQL root fields, by selection.
+    #[cfg(feature = "graphql")]
+    pub(crate) fn narrowed(&self) -> &graphql::NarrowCache {
+        &self.narrowed
     }
 }

@@ -12,15 +12,17 @@
 //! separate values. Aliases with the same name and arguments are generated
 //! once and copied (see [`settle`]).
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 use async_graphql::SelectionField;
 use serde_json::{Map, Value, json};
 
 /// The fields selected below one field, merged across fragments, with their
 /// arguments.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Selection {
     /// The field's name (empty for a hand-built root).
     pub name: String,
@@ -36,6 +38,18 @@ pub(crate) struct Selection {
     /// same name and arguments: this child is not generated, it copies
     /// that one's value.
     pub shares: Option<String>,
+}
+
+/// Agrees with the derived `Eq`: arguments are hashed with their keys
+/// sorted, as map equality ignores their order.
+impl Hash for Selection {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.also.hash(state);
+        crate::call::hash_canonical_members(&self.args, state);
+        self.fields.hash(state);
+        self.shares.hash(state);
+    }
 }
 
 impl Selection {
@@ -185,6 +199,63 @@ pub(crate) fn narrow(schema: &Value, defs: &Map<String, Value>, sel: &Selection)
         out.insert(key.clone(), narrowed);
     }
     Value::Object(out)
+}
+
+/// Narrowed schemas the cache holds at most; it is emptied when full, as
+/// selections are client-controlled.
+const MAX_NARROWED: usize = 256;
+
+/// Each operation's narrowed success schema by selection: a query sends the
+/// same selection on every request, and narrowing GitHub's `viewer` to a
+/// dozen fields takes longer than finding it again. Held by a runtime,
+/// whose bundle is fixed, so the operation id is key enough.
+#[derive(Debug, Default)]
+pub(crate) struct NarrowCache(Mutex<Narrowed>);
+
+#[derive(Debug, Default)]
+struct Narrowed {
+    by_op: HashMap<String, HashMap<Selection, Arc<Value>>>,
+    len: usize,
+}
+
+impl NarrowCache {
+    /// [`narrow`] of operation `op_id`'s `schema`, from the cache when it
+    /// was narrowed to `sel` before. `schema` must be the same for every
+    /// call with `op_id`.
+    pub(crate) fn narrow(
+        &self,
+        op_id: &str,
+        schema: &Value,
+        defs: &Map<String, Value>,
+        sel: &Selection,
+    ) -> Arc<Value> {
+        if let Ok(cache) = self.0.lock()
+            && let Some(hit) = cache.by_op.get(op_id).and_then(|m| m.get(sel))
+        {
+            return hit.clone();
+        }
+        let narrowed = Arc::new(narrow(schema, defs, sel));
+        if let Ok(mut cache) = self.0.lock() {
+            if cache.len >= MAX_NARROWED {
+                cache.by_op.clear();
+                cache.len = 0;
+            }
+            let previous = cache
+                .by_op
+                .entry(op_id.to_string())
+                .or_default()
+                .insert(sel.clone(), narrowed.clone());
+            if previous.is_none() {
+                cache.len += 1;
+            }
+        }
+        narrowed
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().map(|c| c.len).unwrap_or_default()
+    }
 }
 
 /// `__typename` if listed, then every generated response key whose field
@@ -617,5 +688,150 @@ mod tests {
         let mut body = json!({"ref": "r", "id": "other"});
         settle(&mut body, &query, None, None);
         assert_eq!(body["ref"], "r");
+    }
+
+    #[test]
+    fn narrow_cache_answers_like_narrow_once_per_selection() {
+        let cache = NarrowCache::default();
+        let schema = json!({"$ref": "#/$defs/User"});
+        let defs = defs();
+        let mut repos = sel([("totalCount", leaf())]);
+        repos.args.insert("first".into(), json!(1));
+        let first = sel([("login", leaf()), ("repositories", repos.clone())]);
+        repos.args.insert("first".into(), json!(5));
+        let five = sel([("login", leaf()), ("repositories", repos)]);
+
+        let a = cache.narrow("viewer", &schema, &defs, &first);
+        assert_eq!(*a, narrow(&schema, &defs, &first));
+        // The same selection again, built anew: the same schema.
+        let again = cache.narrow("viewer", &schema, &defs, &first.clone());
+        assert!(Arc::ptr_eq(&a, &again));
+        // Other arguments, or another operation: narrowed on their own.
+        let b = cache.narrow("viewer", &schema, &defs, &five);
+        assert_eq!(*b, narrow(&schema, &defs, &five));
+        assert_ne!(a, b);
+        let c = cache.narrow("user", &schema, &defs, &first);
+        assert!(!Arc::ptr_eq(&a, &c));
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn narrow_cache_is_bounded() {
+        let cache = NarrowCache::default();
+        let schema = json!({"$ref": "#/$defs/User"});
+        let defs = defs();
+        for i in 0..(MAX_NARROWED + 10) {
+            let mut repos = sel([("totalCount", leaf())]);
+            repos.args.insert("first".into(), json!(i));
+            let query = sel([("repositories", repos)]);
+            let narrowed = cache.narrow("viewer", &schema, &defs, &query);
+            assert_eq!(*narrowed, narrow(&schema, &defs, &query));
+            assert!(cache.len() <= MAX_NARROWED);
+        }
+    }
+
+    #[test]
+    fn selection_hash_agrees_with_equality() {
+        use std::hash::DefaultHasher;
+        let hash = |s: &Selection| {
+            let mut hasher = DefaultHasher::new();
+            s.hash(&mut hasher);
+            hasher.finish()
+        };
+        let mut a = aliased("repositories", json!({"first": 1, "after": "x"}), leaf());
+        let mut b = aliased("repositories", json!({"after": "x", "first": 1}), leaf());
+        assert_eq!(a, b);
+        assert_eq!(hash(&a), hash(&b));
+        b.args.insert("first".into(), json!(2));
+        assert_ne!(hash(&a), hash(&b));
+        b.args.insert("first".into(), json!(1));
+        a.shares = Some("other".into());
+        assert_ne!(hash(&a), hash(&b));
+    }
+
+    /// The selection of up to `width` members of `schema`'s object (three
+    /// below that), `depth` levels down.
+    fn first_members(
+        schema: &Value,
+        defs: &Map<String, Value>,
+        width: usize,
+        depth: usize,
+    ) -> Selection {
+        let resolve = |v: &Value| match v.get("$ref").and_then(Value::as_str) {
+            Some(r) => defs
+                .get(r.trim_start_matches("#/$defs/"))
+                .cloned()
+                .unwrap_or_default(),
+            None => v.clone(),
+        };
+        let object = resolve(schema);
+        let object = resolve(object.get("items").unwrap_or(&object));
+        let mut out = Selection::default();
+        if depth == 0 {
+            return out;
+        }
+        if let Some(props) = object.get("properties").and_then(Value::as_object) {
+            for (key, member) in props.iter().take(width) {
+                let mut child = first_members(member, defs, 3, depth - 1);
+                child.name = key.clone();
+                out.fields.insert(key.clone(), child);
+            }
+        }
+        out
+    }
+
+    /// Timing harness for what a GraphQL root field narrows and hashes per
+    /// request: `cargo test -p mockingbird-protocols --lib --release
+    /// --all-features -- --ignored --nocapture narrow_timing`.
+    #[test]
+    #[ignore = "timing harness"]
+    fn narrow_timing() {
+        use std::hash::DefaultHasher;
+        let path = format!(
+            "{}/../../examples/apis/github-graphql/github.graphql",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bundle = mb_import::compile(&std::fs::read(path).unwrap()).unwrap();
+        let op = bundle
+            .operations
+            .iter()
+            .find(|o| o.id == "Query.viewer")
+            .unwrap();
+        let schema = op.success_output().and_then(|o| o.schema.clone()).unwrap();
+        let query = first_members(&schema, &bundle.defs, 12, 3);
+        let cache = NarrowCache::default();
+        let n = 2000u32;
+        let time = |f: &dyn Fn()| {
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                f();
+            }
+            started.elapsed() / n
+        };
+        let narrowed = narrow(&schema, &bundle.defs, &query);
+        let fresh = time(&|| {
+            std::hint::black_box(narrow(&schema, &bundle.defs, &query));
+        });
+        let cached = time(&|| {
+            std::hint::black_box(cache.narrow(&op.id, &schema, &bundle.defs, &query));
+        });
+        let size = narrowed.to_string().len();
+        println!(
+            "{} ({size} bytes narrowed): narrow {fresh:?}, cache {cached:?}",
+            op.id
+        );
+        let printed = time(&|| {
+            let mut hasher = DefaultHasher::new();
+            crate::call::canonical(&narrowed)
+                .to_string()
+                .hash(&mut hasher);
+            std::hint::black_box(hasher.finish());
+        });
+        let walked = time(&|| {
+            let mut hasher = DefaultHasher::new();
+            crate::call::hash_canonical(&narrowed, &mut hasher);
+            std::hint::black_box(hasher.finish());
+        });
+        println!("cache key hash: canonical text {printed:?}, walk {walked:?}");
     }
 }
