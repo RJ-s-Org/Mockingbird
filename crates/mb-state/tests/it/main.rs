@@ -14,6 +14,7 @@ mod cache;
 mod conformance;
 mod leader;
 mod memory;
+mod perf;
 mod redis;
 mod sql;
 mod support;

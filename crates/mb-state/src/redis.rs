@@ -74,6 +74,38 @@ fn delete_script() -> Script {
     ))
 }
 
+/// The newest `limit` resources of one type. KEYS: order, res. ARGV:
+/// field prefix (`{resource_type}\x1f`), limit, chunk. Walks the order zset
+/// newest first in pages of `chunk` members, stopping once `limit` match, and
+/// returns their JSON values: one round trip, and only matches cross the
+/// wire. A member without a value (never written by this store) is skipped.
+const LIST_LUA: &str = "
+local prefix, limit, chunk = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[3])
+local plen = string.len(prefix)
+local out = {}
+local start = 0
+while #out < limit do
+  local page = redis.call('ZREVRANGE', KEYS[1], start, start + chunk - 1)
+  for _, m in ipairs(page) do
+    if string.sub(m, 1, plen) == prefix then
+      local v = redis.call('HGET', KEYS[2], m)
+      if v then
+        out[#out + 1] = v
+        if #out >= limit then break end
+      end
+    end
+  end
+  if #page < chunk then break end
+  start = start + chunk
+end
+return out
+";
+
+/// Members read per `ZREVRANGE` page of [`LIST_LUA`], for a list of `limit`.
+fn list_chunk(limit: usize) -> usize {
+    limit.saturating_mul(4).clamp(64, 1024)
+}
+
 impl From<redis::ParsingError> for StateError {
     fn from(e: redis::ParsingError) -> Self {
         StateError::Backend(format!("redis: unexpected reply: {e}"))
@@ -157,6 +189,7 @@ pub struct RedisStateStore {
     tx: broadcast::Sender<StateChanged>,
     touch: Script,
     delete: Script,
+    list: Script,
 }
 
 impl RedisStateStore {
@@ -182,6 +215,7 @@ impl RedisStateStore {
             tx,
             touch: touch_script(),
             delete: delete_script(),
+            list: Script::new(LIST_LUA),
         })
     }
 
@@ -285,28 +319,16 @@ impl StateStore for RedisStateStore {
             return Ok(Vec::new());
         }
         let k = Keys::of(s);
-        let prefix = field(resource_type, "");
-        let members: Vec<String> = redis::cmd("ZREVRANGE")
-            .arg(&k.order)
-            .arg(0)
-            .arg(-1)
-            .query_async(&mut self.con())
+        let values: Vec<String> = self
+            .list
+            .key(&k.order)
+            .key(&k.res)
+            .arg(field(resource_type, ""))
+            .arg(limit)
+            .arg(list_chunk(limit))
+            .invoke_async(&mut self.con())
             .await?;
-        let fields: Vec<String> = members
-            .into_iter()
-            .filter(|m| m.starts_with(&prefix))
-            .take(limit)
-            .collect();
-        if fields.is_empty() {
-            return Ok(Vec::new());
-        }
-        let values: Vec<Option<String>> = redis::cmd("HMGET")
-            .arg(&k.res)
-            .arg(&fields)
-            .query_async(&mut self.con())
-            .await?;
-        // A resource deleted between the two reads is simply skipped.
-        values.iter().flatten().map(|j| decode(j)).collect()
+        values.iter().map(|j| decode(j)).collect()
     }
 
     async fn insert_seeded(&self, s: &SessionKey, r: StoredResource) -> Result<bool, StateError> {

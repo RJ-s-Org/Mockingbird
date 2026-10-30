@@ -27,6 +27,7 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     reset_mock_clears_every_session(&store, ws).await;
     publishes_changes(&store, ws).await;
     upsert_replaces_and_moves_to_front(&store, ws).await;
+    list_picks_one_type_among_many(&store, ws).await;
     reads_do_not_create_sessions(&store, ws).await;
     sessions_lists_with_counts(&store, ws).await;
     export_then_seed_round_trips(&store, ws).await;
@@ -317,6 +318,37 @@ async fn upsert_replaces_and_moves_to_front(st: &Arc<dyn StateStore>, ws: &str) 
     let l = st.list(&k, "order", 10).await.expect("list");
     assert_eq!(ids(&l), ["1", "2"]);
     assert_eq!(l[0].data, json!({"v": 3}));
+}
+
+/// `list` of a sparse type in a session dominated by other types, past
+/// any paging boundary of the backend, after deletes and re-upserts.
+async fn list_picks_one_type_among_many(st: &Arc<dyn StateStore>, ws: &str) {
+    let k = key(ws, "many-types", "a");
+    for i in 0..300 {
+        let t = if i % 50 == 0 { "rare" } else { "common" };
+        st.upsert(&k, res(t, &i.to_string(), json!({"i": i})))
+            .await
+            .expect("upsert");
+    }
+    // "rare" holds 0, 50, .., 250; move 50 to the front and drop 150.
+    st.upsert(&k, res("rare", "50", json!({"i": "again"})))
+        .await
+        .expect("upsert");
+    assert!(st.delete(&k, "rare", "150").await.expect("delete"));
+    let l = st.list(&k, "rare", 10).await.expect("list");
+    assert_eq!(ids(&l), ["50", "250", "200", "100", "0"]);
+    assert_eq!(l[0].data, json!({"i": "again"}));
+    let l = st.list(&k, "rare", 2).await.expect("list");
+    assert_eq!(ids(&l), ["50", "250"]);
+    let l = st.list(&k, "common", 3).await.expect("list");
+    assert_eq!(ids(&l), ["299", "298", "297"]);
+    assert_eq!(st.list(&k, "common", 1000).await.expect("list").len(), 294);
+    assert!(st.list(&k, "absent", 10).await.expect("list").is_empty());
+    assert!(st.list(&k, "rare", 0).await.expect("list").is_empty());
+    let exported = st.export(&k).await.expect("export");
+    assert_eq!(exported.len(), 299);
+    assert_eq!(exported.last().map(|r| r.id.as_str()), Some("50"));
+    assert_eq!(exported.first().map(|r| r.id.as_str()), Some("0"));
 }
 
 async fn reads_do_not_create_sessions(st: &Arc<dyn StateStore>, ws: &str) {
