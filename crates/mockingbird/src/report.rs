@@ -85,7 +85,7 @@ pub struct VerifyArgs {
 #[derive(Serialize, Debug, Default, Clone)]
 pub struct Counts {
     pub requests: u64,
-    /// By response source: `llm`, `repaired`, `cache`, `state`, `faker`
+    /// By response source: `llm`, `patched`, `repaired`, `cache`, `state`, `faker`
     /// (an offline mock), `fallback` (the LLM call failed), `rejected` (the
     /// request failed validation) or `none`.
     pub sources: BTreeMap<String, u64>,

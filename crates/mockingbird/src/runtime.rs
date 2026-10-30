@@ -786,11 +786,20 @@ async fn openai_provider(
         headers,
         extra_body: profile.extra_body.clone(),
         model: profile.model.clone(),
-        json_schema: profile.json_schema,
+        output_mode: llm_output_mode(profile.output_mode),
         http: deps.http.clone(),
     })
     .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?;
     Ok(Arc::new(provider))
+}
+
+/// The client's output mode for a stored profile's.
+pub(crate) fn llm_output_mode(mode: mb_store::OutputMode) -> mb_llm::OutputMode {
+    match mode {
+        mb_store::OutputMode::None => mb_llm::OutputMode::None,
+        mb_store::OutputMode::JsonObject => mb_llm::OutputMode::JsonObject,
+        mb_store::OutputMode::JsonSchema => mb_llm::OutputMode::JsonSchema,
+    }
 }
 
 fn chain_names(chain: &[LlmProfile]) -> String {

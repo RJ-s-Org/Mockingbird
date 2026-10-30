@@ -297,7 +297,9 @@ pub struct LlmEnv {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
-    pub json_schema: bool,
+    /// `MB_LLM_OUTPUT_MODE`, else the deprecated `MB_LLM_JSON_SCHEMA`;
+    /// `None` when neither is set or the value is not a mode.
+    pub output_mode: Option<mb_store::OutputMode>,
 }
 
 impl LlmEnv {
@@ -308,9 +310,13 @@ impl LlmEnv {
             base_url: get("MB_LLM_BASE_URL").unwrap_or_else(|| DEFAULT_LLM_BASE_URL.into()),
             model: get("MB_LLM_MODEL").unwrap_or_else(|| DEFAULT_LLM_MODEL.into()),
             api_key: get("MB_LLM_API_KEY"),
-            json_schema: get("MB_LLM_JSON_SCHEMA")
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+            output_mode: get("MB_LLM_OUTPUT_MODE")
+                .and_then(|v| v.parse().ok())
+                .or_else(|| {
+                    get("MB_LLM_JSON_SCHEMA").map(|v| {
+                        mb_store::OutputMode::from_json_schema(v.eq_ignore_ascii_case("true"))
+                    })
+                }),
         }
     }
 }
@@ -464,7 +470,7 @@ pub fn zero_config(args: &ServeArgs, llm: Option<&LlmEnv>) -> anyhow::Result<Fil
     if let (false, Some(env)) = (args.offline, llm) {
         let mut profile = FileProfile::new(env.base_url.clone(), env.model.clone());
         profile.api_key = Some(ENV_API_KEY_REF.to_string());
-        profile.json_schema = env.json_schema;
+        profile.output_mode = env.output_mode;
         cfg.llm.profiles.insert(ENV_PROFILE.to_string(), profile);
         cfg.llm.default_profile = Some(ENV_PROFILE.to_string());
     }

@@ -17,6 +17,7 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 | `0200_smart_import` | P6 | `contract_versions.draft_meta` and import jobs. |
 | `0300_hardening` | P7 | `mocks.chaos`, `mocks.limits`, the `token_usage` table. |
 | `0900_admin_session_grants` | Unreleased | Nullable `admin_sessions` columns (`claims`, `mapping_hash`, `refresh_token`, `refreshed_at`) so console roles can be re-derived after login. Additive; sessions from before keep their login roles. |
+| `1000_profile_output_mode` | Unreleased | Nullable `llm_profiles.output_mode` (`none`, `json_object`, `json_schema`). Additive; a profile written before reads its mode from `json_schema`, which is still written, so older nodes keep working during a rolling upgrade. |
 
 ### `0300_hardening` is additive
 

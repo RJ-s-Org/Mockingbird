@@ -23,7 +23,8 @@ pub struct UsageEvent {
     pub operation_id: String,
     /// Response status (HTTP status, or the protocol's equivalent).
     pub status: u16,
-    /// Where the response came from: `llm`, `repaired` or `fallback`, or
+    /// Where the response came from: `llm`, `patched`, `repaired` or
+    /// `fallback`, or
     /// `not_generated` for a call answered without generating a body
     /// (refused before generation, or a native error answer); `import` for
     /// smart-import jobs. The `UsageEvent::SOURCE_*` constants name them.
@@ -39,7 +40,11 @@ pub struct UsageEvent {
 impl UsageEvent {
     /// [`UsageEvent::source`] of an answer the LLM generated.
     pub const SOURCE_LLM: &str = "llm";
-    /// [`UsageEvent::source`] of an LLM answer repaired to fit the contract.
+    /// [`UsageEvent::source`] of an LLM answer fixed locally to fit the
+    /// contract, without a second LLM call.
+    pub const SOURCE_PATCHED: &str = "patched";
+    /// [`UsageEvent::source`] of an LLM answer repaired to fit the contract
+    /// by a second LLM call.
     pub const SOURCE_REPAIRED: &str = "repaired";
     /// [`UsageEvent::source`] of a faker or offline answer.
     pub const SOURCE_FALLBACK: &str = "fallback";
@@ -143,6 +148,7 @@ fn status_label(status: u16) -> SharedString {
 fn source_label(source: &str) -> SharedString {
     match source {
         UsageEvent::SOURCE_LLM => SharedString::const_str(UsageEvent::SOURCE_LLM),
+        UsageEvent::SOURCE_PATCHED => SharedString::const_str(UsageEvent::SOURCE_PATCHED),
         UsageEvent::SOURCE_REPAIRED => SharedString::const_str(UsageEvent::SOURCE_REPAIRED),
         UsageEvent::SOURCE_FALLBACK => SharedString::const_str(UsageEvent::SOURCE_FALLBACK),
         UsageEvent::SOURCE_NOT_GENERATED => {

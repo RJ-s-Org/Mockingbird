@@ -25,7 +25,7 @@ import {
 /** The table keeps at most this many rows, newest first. */
 export const MAX_ROWS = 500;
 
-const SOURCES = ["llm", "repaired", "fallback"] as const;
+const SOURCES = ["llm", "patched", "repaired", "fallback"] as const;
 
 interface Row {
   key: number;

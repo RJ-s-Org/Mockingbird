@@ -3,7 +3,9 @@ use mb_engine::{
     SchemaValidator, Source,
 };
 use mb_import::compile;
-use mb_llm::{LlmError, Role};
+use std::sync::Arc;
+
+use mb_llm::{Capabilities, LlmError, Provider, Role, ScriptedProvider};
 use mb_mcm::Bundle;
 use mb_state::StoredResource;
 use serde_json::{Map, Value, json};
@@ -967,7 +969,7 @@ async fn disallowed_nulls_are_patched_without_a_repair_call() {
         .await
         .unwrap();
     assert_eq!(provider.requests().len(), 1, "no repair call");
-    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(out.source, Source::Patched);
     let body = out.body.unwrap();
     assert!(body.get("category").is_none(), "{body}");
     assert!(body["customerId"].is_string(), "{body}");
@@ -1170,7 +1172,7 @@ paths:
         .await
         .unwrap();
     assert_eq!(provider.requests().len(), 1, "no repair call");
-    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(out.source, Source::Patched);
     let path = out.body.unwrap()["file_path"].as_str().unwrap().to_string();
     assert!(
         regex::Regex::new(r"^/[A-Za-z0-9]{22}\.jpg$")
@@ -1206,7 +1208,7 @@ paths:
         .await
         .unwrap();
     assert_eq!(provider.requests().len(), 1, "no repair call");
-    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(out.source, Source::Patched);
     let body = out.body.unwrap();
     assert!(body["current"].as_f64().unwrap() >= 0.0, "{body}");
     assert!(body["percent"].as_i64().unwrap() <= 100, "{body}");
@@ -1248,7 +1250,7 @@ paths:
         .await
         .unwrap();
     assert_eq!(provider.requests().len(), 1);
-    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(out.source, Source::Patched);
     let body = out.body.unwrap();
     assert_eq!(body["city"].as_str().unwrap().chars().count(), 200);
     assert_eq!(body["essay"].as_str().unwrap().len(), 3000);
@@ -1449,7 +1451,7 @@ const THING_ID: &str = "5f0c6a1e-2b7d-4c3a-9e8f-1a2b3c4d5e6f";
 const DUP_ID: &str = "0b7e2c1d-9a4f-4e3b-8c2d-6f5a4b3c2d1e";
 
 /// MB-ENGINE-STUB-1: a value breaking a format the faker produces is
-/// patched locally (no repair round), and the answer is `repaired`.
+/// patched locally (no repair round), and the answer is `patched`.
 #[tokio::test]
 async fn invalid_uuid_and_date_time_are_patched_locally() {
     let bundle = things();
@@ -1465,7 +1467,7 @@ async fn invalid_uuid_and_date_time_are_patched_locally() {
         .generate(&bundle, op, &thing_call(THING_ID, None), ctx())
         .await
         .unwrap();
-    assert_eq!(out.source, Source::Repaired, "{:?}", out.fallback_reason);
+    assert_eq!(out.source, Source::Patched, "{:?}", out.fallback_reason);
     assert_eq!(
         provider.requests().len(),
         1,
@@ -1635,4 +1637,122 @@ async fn non_json_text_responses_come_from_the_example_or_the_faker() {
     );
     assert_eq!(out.body, None);
     assert!(provider.requests().is_empty());
+}
+
+/// An engine whose provider replays `script` in JSON-object mode (no
+/// structured outputs), and that provider.
+fn json_mode(script: Vec<Result<String, LlmError>>) -> (Arc<ScriptedProvider>, Engine) {
+    let provider = Arc::new(
+        ScriptedProvider::new(script).with_capabilities(Capabilities {
+            json_schema: false,
+            json_mode: true,
+        }),
+    );
+    let dyn_provider: Arc<dyn Provider> = provider.clone();
+    (
+        provider,
+        Engine::new(Some(dyn_provider), EngineConfig::default()),
+    )
+}
+
+/// JSON mode forces an object at the top level: an array answer is asked
+/// for as `{"items": [...]}` and unwrapped, whatever else the model put
+/// beside it, without a repair call.
+#[tokio::test]
+async fn array_root_in_json_mode_is_asked_for_and_unwrapped_from_items() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let list = json!([valid_order(), valid_order()]);
+    for answer in [
+        json!({"items": list}),
+        json!({"items": list, "total": 2}),
+        list.clone(),
+    ] {
+        let (provider, engine) = json_mode(vec![Ok(answer.to_string())]);
+        let out = engine
+            .generate(&bundle, op, &call("listOrders"), ctx())
+            .await
+            .unwrap();
+        assert_eq!(out.source, Source::Llm, "{answer}");
+        let items = out.body.as_ref().and_then(Value::as_array).unwrap();
+        assert_eq!(items.len(), 2, "{answer}");
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        let user = requests[0].messages.last().unwrap();
+        assert_eq!(user.role, Role::User);
+        assert!(
+            user.content.contains(r#"{"items": [...]}"#),
+            "{}",
+            user.content
+        );
+    }
+}
+
+/// With structured outputs (or for an object root) nothing changes: no
+/// envelope is asked for, and an `items` member is not unwrapped.
+#[tokio::test]
+async fn items_envelope_only_for_array_roots_in_json_mode() {
+    let bundle = orders();
+    let list = json!([valid_order()]);
+    let (provider, engine) = scripted(vec![Ok(list.to_string())]);
+    let op = bundle.operation("listOrders").unwrap();
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert!(
+        !provider.requests()[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains(r#""items""#)
+    );
+
+    let (provider, engine) = json_mode(vec![Ok(valid_order().to_string())]);
+    let op = bundle.operation("getOrder").unwrap();
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert!(
+        !provider.requests()[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains(r#"{"items": [...]}"#)
+    );
+}
+
+/// `none` mode reports no JSON mode: an array is asked for as an array.
+#[tokio::test]
+async fn no_items_envelope_without_json_mode() {
+    let bundle = orders();
+    let op = bundle.operation("listOrders").unwrap();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![Ok(json!([valid_order()]).to_string())]).with_capabilities(
+            Capabilities {
+                json_schema: false,
+                json_mode: false,
+            },
+        ),
+    );
+    let dyn_provider: Arc<dyn Provider> = provider.clone();
+    let engine = Engine::new(Some(dyn_provider), EngineConfig::default());
+    let out = engine
+        .generate(&bundle, op, &call("listOrders"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert!(
+        !provider.requests()[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains(r#"{"items": [...]}"#)
+    );
 }

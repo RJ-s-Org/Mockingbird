@@ -84,7 +84,7 @@ llm:
       base_url: https://openrouter.ai/api/v1
       model: deepseek/deepseek-v4.1-flash
       api_key: env:OPENROUTER_API_KEY # a secret reference (env:NAME, file:/path or vault:<mount>/<path>#<field>), never the key itself
-      json_schema: false
+      output_mode: json_object        # none | json_object (default) | json_schema
       timeout: 3s
       temperature: 0.7
       max_tokens: 2048
@@ -92,7 +92,7 @@ llm:
     local:
       base_url: http://127.0.0.1:11434/v1
       model: llama3.2
-      json_schema: true
+      output_mode: json_schema
       timeout: 10s
       temperature: 0.2
       max_tokens: 1024

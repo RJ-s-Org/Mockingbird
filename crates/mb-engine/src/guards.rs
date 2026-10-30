@@ -210,8 +210,9 @@ impl Engine {
         }
     }
 
-    /// Parse LLM output, enforce the size cap, scrub PII, fill what the
-    /// output budget left out (see [`crate::budget`]), then validate. A
+    /// Parse LLM output, unwrap the `{"items": [...]}` envelope when
+    /// `checks` asked for one, enforce the size cap, scrub PII, fill what
+    /// the output budget left out (see [`crate::budget`]), then validate. A
     /// value breaking an asserted format (see
     /// [`SchemaValidator::for_output`]) is refilled locally unless `echoes`
     /// holds it; a format error alone never makes the answer `Invalid`.
@@ -219,12 +220,15 @@ impl Engine {
         &self,
         validator: &SchemaValidator,
         text: &str,
-        fill: Option<&Fill<'_>>,
-        echoes: &Echoes<'_>,
+        checks: &Checks<'_>,
     ) -> Checked {
+        let (fill, echoes) = (checks.fill, &checks.echoes);
         let Some(mut value) = crate::extract_json(text) else {
             return Checked::Invalid(vec!["output is not valid JSON".to_string()]);
         };
+        if checks.items_envelope {
+            value = unwrap_items(value);
+        }
         if let Some(cap) = self.guards.max_response_bytes {
             let size = serde_json::to_vec(&value).map_or(text.len(), |b| b.len());
             if size > cap {
@@ -315,11 +319,75 @@ pub(crate) struct Fill<'a> {
 }
 
 /// What [`Engine::check_output`] needs besides the text: the output-budget
-/// fill, if any, and the request values the answer may echo.
+/// fill, if any, the request values the answer may echo, and whether the
+/// answer was asked for as an [`ITEMS_KEY`] envelope.
 #[derive(Default)]
 pub(crate) struct Checks<'a> {
     pub fill: Option<&'a Fill<'a>>,
     pub echoes: Echoes<'a>,
+    /// The array the schema describes was asked for as
+    /// `{"items": [...]}` (see [`items_envelope`]).
+    pub items_envelope: bool,
+}
+
+/// The member an array answer is asked for under in JSON-object mode.
+pub(crate) const ITEMS_KEY: &str = "items";
+
+/// The instruction added to the prompt when an array answer is asked for
+/// as an [`ITEMS_KEY`] envelope.
+pub(crate) const ITEMS_ENVELOPE_NOTE: &str = "The response schema describes a JSON array, but \
+JSON mode only allows an object at the top level. Output {\"items\": [...]}: one object whose only \
+member, \"items\", is the array the schema describes. Add no other members.";
+
+/// Whether an answer of `schema` (with its definitions) is asked for as an
+/// [`ITEMS_KEY`] envelope: the provider is in JSON-object mode (JSON mode
+/// without structured outputs), which forces an object at the top level,
+/// and the schema's root is an array. Models otherwise invent an envelope
+/// of their own (`{"messages": [...]}`), or answer one item.
+pub(crate) fn items_envelope(caps: mb_llm::Capabilities, schema: &Value) -> bool {
+    caps.json_mode && !caps.json_schema && is_array_root(schema)
+}
+
+/// Whether `doc`'s root admits only arrays (or `null`), following local
+/// `$ref`s within `doc`.
+fn is_array_root(doc: &Value) -> bool {
+    let mut schema = doc;
+    // Bounded: a `$ref` cycle is not an array.
+    for _ in 0..8 {
+        let Some(obj) = schema.as_object() else {
+            return false;
+        };
+        if let Some(r) = obj.get("$ref").and_then(Value::as_str) {
+            match r.strip_prefix('#').and_then(|p| doc.pointer(p)) {
+                Some(target) => {
+                    schema = target;
+                    continue;
+                }
+                None => return false,
+            }
+        }
+        return match obj.get("type") {
+            Some(Value::String(t)) => t == "array",
+            Some(Value::Array(types)) => {
+                types.iter().any(|t| t == "array")
+                    && types.iter().all(|t| t == "array" || t == "null")
+            }
+            Some(_) => false,
+            None => obj.contains_key("items") || obj.contains_key("prefixItems"),
+        };
+    }
+    false
+}
+
+/// The array under [`ITEMS_KEY`] when `value` is an object holding one
+/// there, else `value` as it is (a model may answer the bare array).
+fn unwrap_items(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) if map.get(ITEMS_KEY).is_some_and(Value::is_array) => {
+            map.remove(ITEMS_KEY).unwrap_or_default()
+        }
+        other => other,
+    }
 }
 
 impl Engine {

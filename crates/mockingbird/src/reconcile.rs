@@ -767,7 +767,7 @@ fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
         base_url: p.base_url.clone(),
         model: p.model.clone(),
         secret_ref: p.api_key.clone(),
-        json_schema: p.json_schema,
+        output_mode: p.mode(),
         temperature: p.temperature,
         timeout_ms: u64::try_from(p.timeout.as_millis())
             .map_err(|_| anyhow!("LLM profile {name:?}: timeout is too long"))?,

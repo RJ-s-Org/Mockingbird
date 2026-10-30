@@ -21,6 +21,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::file_config::FileProfile;
+use crate::runtime::llm_output_mode;
+use mb_store::OutputMode;
 
 /// A value a preset's base URL or headers need (`{account_id}`).
 #[derive(Serialize, Debug, Clone, Copy)]
@@ -49,7 +51,8 @@ pub struct Preset {
     pub key_env: Option<&'static str>,
     /// Whether the provider rejects calls without a key.
     pub key_required: bool,
-    pub json_schema: bool,
+    /// How the provider is asked for JSON.
+    pub output_mode: OutputMode,
     /// Extra headers; `{param}` placeholders are filled like the base URL.
     pub headers: &'static [(&'static str, &'static str)],
     pub params: &'static [Param],
@@ -77,7 +80,7 @@ pub const PRESETS: &[Preset] = &[
         // JSON-object mode: some routes (DeepSeek on DigitalOcean) drop the
         // answer in JSON Schema mode and return only reasoning. The engine
         // unwraps the arrays models wrap in an object in this mode.
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[
             ("http-referer", "https://github.com/rj-s-org/mockingbird"),
             ("x-title", "Mockingbird"),
@@ -93,7 +96,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("gemini-2.5-flash"),
         key_env: Some("GEMINI_API_KEY"),
         key_required: true,
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: &[],
         params: &[],
         key_url: Some("https://aistudio.google.com/apikey"),
@@ -106,7 +109,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
         key_env: None,
         key_required: false,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[("cf-aig-authorization", "Bearer ${env:CF_AIG_API_KEY}")],
         params: &[
             CF_ACCOUNT,
@@ -127,7 +130,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
         key_env: Some("CLOUDFLARE_API_KEY"),
         key_required: true,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[CF_ACCOUNT],
         key_url: Some("https://dash.cloudflare.com/profile/api-tokens"),
@@ -140,7 +143,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("gpt-4.1-mini"),
         key_env: Some("OPENAI_API_KEY"),
         key_required: true,
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: &[],
         params: &[],
         key_url: Some("https://platform.openai.com/api-keys"),
@@ -153,7 +156,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("claude-haiku-5-5"),
         key_env: Some("ANTHROPIC_API_KEY"),
         key_required: true,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[],
         key_url: Some("https://console.anthropic.com/settings/keys"),
@@ -166,7 +169,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("deepseek-chat"),
         key_env: Some("DEEPSEEK_API_KEY"),
         key_required: true,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[],
         key_url: Some("https://platform.deepseek.com/api_keys"),
@@ -179,7 +182,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("llama-3.3-70b-versatile"),
         key_env: Some("GROQ_API_KEY"),
         key_required: true,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[],
         key_url: Some("https://console.groq.com/keys"),
@@ -192,7 +195,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("mistral-small-latest"),
         key_env: Some("MISTRAL_API_KEY"),
         key_required: true,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[],
         key_url: Some("https://console.mistral.ai/api-keys"),
@@ -205,7 +208,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
         key_env: Some("TOGETHER_API_KEY"),
         key_required: true,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[],
         key_url: Some("https://api.together.ai/settings/api-keys"),
@@ -218,7 +221,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: None,
         key_env: None,
         key_required: false,
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: &[("api-key", "${env:AZURE_OPENAI_API_KEY}")],
         params: &[Param {
             name: "resource",
@@ -236,7 +239,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: Some("llama3.2"),
         key_env: None,
         key_required: false,
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: &[],
         params: &[],
         key_url: None,
@@ -249,7 +252,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: None,
         key_env: None,
         key_required: false,
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: &[],
         params: &[],
         key_url: None,
@@ -262,7 +265,7 @@ pub const PRESETS: &[Preset] = &[
         default_model: None,
         key_env: None,
         key_required: false,
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: &[],
         params: &[],
         key_url: None,
@@ -319,8 +322,13 @@ pub struct ProviderArgs {
     /// `${env:NAME}`.
     #[arg(long = "header", value_name = "NAME=VALUE")]
     pub headers: Vec<String>,
-    /// Request JSON Schema structured output [default: the preset's].
-    #[arg(long)]
+    /// How the provider is asked for JSON: none, json_object or
+    /// json_schema [default: the preset's].
+    #[arg(long, value_name = "MODE", conflicts_with = "json_schema")]
+    pub output_mode: Option<OutputMode>,
+    /// Deprecated: `--output-mode json_schema` (true) or `json_object`
+    /// (false).
+    #[arg(long, hide = true)]
     pub json_schema: Option<bool>,
     /// Time before a call falls back to the faker [default: 60s].
     #[arg(long)]
@@ -388,7 +396,11 @@ impl ProviderArgs {
             .or_else(|| preset.default_model.map(String::from))
             .ok_or_else(|| anyhow!("the {id} preset needs --model"))?;
         let mut profile = FileProfile::new(base_url, model);
-        profile.json_schema = self.json_schema.unwrap_or(preset.json_schema);
+        profile.output_mode = Some(
+            self.output_mode
+                .or(self.json_schema.map(OutputMode::from_json_schema))
+                .unwrap_or(preset.output_mode),
+        );
         let key_env = self.api_key_env.as_deref().or(preset.key_env);
         if !self.no_api_key
             && let Some(name) = key_env
@@ -432,7 +444,7 @@ pub fn api_body(profile: &FileProfile, fallback: Option<&str>) -> Value {
         "base_url": profile.base_url,
         "model": profile.model,
         "secret_ref": profile.api_key,
-        "json_schema": profile.json_schema,
+        "output_mode": profile.mode(),
         "temperature": profile.temperature,
         "timeout_ms": u64::try_from(profile.timeout.as_millis()).unwrap_or(u64::MAX),
         "max_tokens": profile.max_tokens,
@@ -514,7 +526,7 @@ pub async fn probe(profile: &FileProfile) -> anyhow::Result<ProbeReport> {
         base_url: profile.base_url.clone(),
         api_key,
         model: profile.model.clone(),
-        json_schema: profile.json_schema,
+        output_mode: llm_output_mode(profile.mode()),
         headers,
         extra_body: profile.extra_body.clone(),
         http: HttpOptions::default(),
@@ -531,7 +543,7 @@ pub async fn probe(profile: &FileProfile) -> anyhow::Result<ProbeReport> {
                 content: r#"Reply with {"ok": true, "service": "mockingbird"}"#.into(),
             },
         ],
-        response_format: if profile.json_schema {
+        response_format: if profile.mode() == OutputMode::JsonSchema {
             ResponseFormat::JsonSchema {
                 name: "probe".into(),
                 schema: json!({
@@ -663,7 +675,7 @@ mod tests {
         // Field trials: JSON Schema output (JSON-object mode makes models
         // wrap top-level arrays) and a timeout a remote model can meet.
         // JSON Schema mode loses the answer on some OpenRouter routes.
-        assert!(!p.json_schema);
+        assert_eq!(p.mode(), OutputMode::JsonObject);
         assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
         assert_eq!(p.timeout, std::time::Duration::from_secs(60));
         assert_eq!(p.max_tokens, 16_384);

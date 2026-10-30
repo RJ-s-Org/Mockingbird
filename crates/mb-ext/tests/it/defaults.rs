@@ -317,12 +317,20 @@ fn usage_event_source_constants_match_the_documented_values() {
     assert_eq!(
         [
             UsageEvent::SOURCE_LLM,
+            UsageEvent::SOURCE_PATCHED,
             UsageEvent::SOURCE_REPAIRED,
             UsageEvent::SOURCE_FALLBACK,
             UsageEvent::SOURCE_NOT_GENERATED,
             UsageEvent::SOURCE_IMPORT,
         ],
-        ["llm", "repaired", "fallback", "not_generated", "import"]
+        [
+            "llm",
+            "patched",
+            "repaired",
+            "fallback",
+            "not_generated",
+            "import"
+        ]
     );
 }
 

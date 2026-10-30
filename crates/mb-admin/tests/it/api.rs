@@ -1812,7 +1812,7 @@ async fn file_managed_mock_is_read_only() {
             base_url: "https://x".into(),
             model: "m".into(),
             secret_ref: None,
-            json_schema: false,
+            output_mode: mb_store::OutputMode::JsonObject,
             temperature: 0.7,
             timeout_ms: 3000,
             max_tokens: 2048,

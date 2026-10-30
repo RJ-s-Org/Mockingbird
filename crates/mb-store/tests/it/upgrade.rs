@@ -95,6 +95,8 @@ async fn check_upgraded(store: &dyn ControlStore, applied: usize) {
             .expect("get profile")
             .expect("P2 profile kept");
         assert_eq!(profile.model, "m");
+        // Written before `output_mode`: read from `json_schema`.
+        assert_eq!(profile.output_mode, mb_store::OutputMode::JsonObject);
     } else {
         assert_eq!(workspaces, ["default"]);
     }

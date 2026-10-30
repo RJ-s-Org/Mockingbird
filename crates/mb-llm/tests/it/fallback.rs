@@ -239,7 +239,7 @@ fn openai(server: &wiremock::MockServer) -> Arc<dyn Provider> {
             base_url: format!("{}/", server.uri()),
             api_key: Some("k".into()),
             model: "m".into(),
-            json_schema: false,
+            output_mode: mb_llm::OutputMode::JsonObject,
             headers: Vec::new(),
             extra_body: serde_json::Map::new(),
             http: mb_llm::HttpOptions::default(),

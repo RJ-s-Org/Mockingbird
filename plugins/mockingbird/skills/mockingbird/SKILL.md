@@ -26,7 +26,7 @@ curl -s localhost:8080/<mock>/<path>                           # the mock, mount
 mockingbird server stop
 ```
 
-Every response carries `X-Mockingbird-Source: llm | repaired | fallback` (`fallback` = faker). Ports: data plane `:8080`, Admin API + console `:9090` (console at http://127.0.0.1:9090/), gRPC `:50051`.
+Every response carries `X-Mockingbird-Source: llm | patched | repaired | fallback` (`fallback` = faker). Ports: data plane `:8080`, Admin API + console `:9090` (console at http://127.0.0.1:9090/), gRPC `:50051`.
 
 ## MCP tools
 

@@ -21,8 +21,8 @@ pub struct OpenAiConfig {
     pub api_key: Option<String>,
     /// The model to ask for.
     pub model: String,
-    /// Whether the endpoint supports `response_format: json_schema`.
-    pub json_schema: bool,
+    /// How the endpoint is asked for JSON (`response_format`).
+    pub output_mode: OutputMode,
     /// Extra request headers (name, value), already resolved: Cloudflare AI
     /// Gateway's `cf-aig-authorization`, Azure's `api-key`, attribution.
     pub headers: Vec<(String, String)>,
@@ -45,11 +45,76 @@ impl std::fmt::Debug for OpenAiConfig {
             .field("base_url", &crate::http::redact_userinfo(&self.base_url))
             .field("api_key", &self.api_key.as_ref().map(|_| REDACTED))
             .field("model", &self.model)
-            .field("json_schema", &self.json_schema)
+            .field("output_mode", &self.output_mode)
             .field("headers", &headers)
             .field("extra_body", &self.extra_body)
             .field("http", &self.http)
             .finish()
+    }
+}
+
+/// How an [`OpenAiCompatible`] endpoint is asked for JSON: the
+/// `response_format` it sends for a JSON answer.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    /// No `response_format`: the prompt alone asks for JSON. For models
+    /// that answer worse (or not at all) in JSON mode.
+    None,
+    /// `{"type": "json_object"}` (JSON mode), which every
+    /// OpenAI-compatible endpoint supports. It forces an object at the top
+    /// level.
+    #[default]
+    JsonObject,
+    /// `{"type": "json_schema", ...}` (structured outputs) with the
+    /// answer's schema, sent with `strict: false`: strict mode rejects most
+    /// API contracts' schemas (optional members, open objects).
+    JsonSchema,
+}
+
+impl OutputMode {
+    /// The deprecated `json_schema` flag's mode: `true` is
+    /// [`OutputMode::JsonSchema`], `false` [`OutputMode::JsonObject`].
+    #[must_use]
+    pub fn from_json_schema(json_schema: bool) -> Self {
+        if json_schema {
+            OutputMode::JsonSchema
+        } else {
+            OutputMode::JsonObject
+        }
+    }
+
+    /// The config name: `none`, `json_object` or `json_schema`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputMode::None => "none",
+            OutputMode::JsonObject => "json_object",
+            OutputMode::JsonSchema => "json_schema",
+        }
+    }
+}
+
+impl std::fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OutputMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "none" => Ok(OutputMode::None),
+            "json_object" => Ok(OutputMode::JsonObject),
+            "json_schema" => Ok(OutputMode::JsonSchema),
+            other => Err(format!(
+                "unknown output mode {other:?}; expected none, json_object or json_schema"
+            )),
+        }
     }
 }
 
@@ -175,18 +240,14 @@ impl OpenAiCompatible {
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         });
-        let format = match &req.response_format {
-            ResponseFormat::Text => None,
-            ResponseFormat::JsonObject => Some(json!({"type": "json_object"})),
-            ResponseFormat::JsonSchema { name, schema } => {
-                if self.config.json_schema {
-                    Some(json!({
-                        "type": "json_schema",
-                        "json_schema": {"name": name, "schema": schema, "strict": false}
-                    }))
-                } else {
-                    Some(json!({"type": "json_object"}))
-                }
+        let format = match (&req.response_format, self.config.output_mode) {
+            (ResponseFormat::Text, _) | (_, OutputMode::None) => None,
+            (ResponseFormat::JsonSchema { name, schema }, OutputMode::JsonSchema) => Some(json!({
+                "type": "json_schema",
+                "json_schema": {"name": name, "schema": schema, "strict": false}
+            })),
+            (ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. }, _) => {
+                Some(json!({"type": "json_object"}))
             }
         };
         if let Some(obj) = body.as_object_mut() {
@@ -541,8 +602,8 @@ fn excerpt(text: &str) -> String {
 impl Provider for OpenAiCompatible {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            json_schema: self.config.json_schema,
-            json_mode: true,
+            json_schema: self.config.output_mode == OutputMode::JsonSchema,
+            json_mode: self.config.output_mode != OutputMode::None,
         }
     }
 

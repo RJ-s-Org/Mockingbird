@@ -97,7 +97,7 @@ async fn markdown_import_end_to_end() {
         base_url: llm.uri(),
         model: "m".into(),
         api_key: Some("k".into()),
-        json_schema: false,
+        output_mode: None,
     };
     let app: App = build_app(&args, Some(env)).await.unwrap();
     let data = serve(app.data.clone()).await;

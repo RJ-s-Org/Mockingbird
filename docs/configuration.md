@@ -161,7 +161,8 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `llm.profiles.<name>.base_url` | URL | required | | `MB_LLM_BASE_URL` (default `https://openrouter.ai/api/v1`) | OpenAI-compatible base URL. |
 | `llm.profiles.<name>.model` | string | required | | `MB_LLM_MODEL` (default `deepseek/deepseek-v4.1-flash`, DeepSeek V4.1 Flash on OpenRouter) | Model name. |
 | `llm.profiles.<name>.api_key` | secret reference | unset | | `MB_LLM_API_KEY` (stored as `env:MB_LLM_API_KEY`) | Provider API key. |
-| `llm.profiles.<name>.json_schema` | bool | `false` | | `MB_LLM_JSON_SCHEMA` | Request JSON Schema structured output instead of JSON mode. |
+| `llm.profiles.<name>.output_mode` | string | `json_object` | `none`, `json_object` or `json_schema` | `MB_LLM_OUTPUT_MODE` | How the provider is asked for JSON. `json_object` sends `response_format: {type: json_object}` (JSON mode), which every OpenAI-compatible provider supports; it forces an object at the top level, so for an operation that returns an array the model is asked for `{"items": [...]}` and the array is unwrapped. `json_schema` sends the answer's schema as structured output (`strict: false`, since strict mode rejects most API schemas). `none` sends no `response_format` and relies on the prompt and on parsing the first JSON value of the reply: for models that answer badly, or not at all, in JSON mode. |
+| `llm.profiles.<name>.json_schema` | bool | unset | Not with `output_mode` | `MB_LLM_JSON_SCHEMA` | Deprecated alias of `output_mode`: `true` is `json_schema`, `false` is `json_object`. |
 | `llm.profiles.<name>.timeout` | duration | `60s` | | `--llm-timeout` (profile `default`) | Time before the call falls back to the faker. |
 | `llm.profiles.<name>.temperature` | number | `0.7` | | | Sampling temperature. |
 | `llm.profiles.<name>.max_tokens` | integer | `16384` | | | Completion token limit. A reply cut at this limit falls back to the faker, with the reason in `X-Mockingbird-Fallback-Reason`. |
@@ -355,7 +356,7 @@ Overrides of an AsyncAPI mock's event channels, by channel id. Channels not list
 | `MB_STORAGE_URL` | `--storage-url` | `storage.url` |
 | `MB_STATE_URL` | | `storage.state_url` |
 | `MB_BUS_URL` | | `bus.url` |
-| `MB_LLM_BASE_URL`, `MB_LLM_MODEL`, `MB_LLM_API_KEY`, `MB_LLM_JSON_SCHEMA` | `--llm-timeout` | The `default` LLM profile. |
+| `MB_LLM_BASE_URL`, `MB_LLM_MODEL`, `MB_LLM_API_KEY`, `MB_LLM_OUTPUT_MODE` (deprecated: `MB_LLM_JSON_SCHEMA`) | `--llm-timeout` | The `default` LLM profile. |
 | `MB_STATE_DIR` | `--state-dir` | Where `mockingbird server start` keeps the background server's pid, log and URLs (default `.mockingbird`). Not a config file key. |
 | `MB_STOP_FILE` | | Set by `mockingbird server start` on the server it spawns: `serve` shuts down gracefully once this file exists. `server stop` creates it (the graceful path on Windows, where a background server gets no Ctrl-C), then kills the server after 10 s and reports `forced: true`. |
 | | `--offline` | Faker only, no LLM calls. |

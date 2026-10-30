@@ -68,6 +68,20 @@ pub enum ResourceSource {
     Api,
 }
 
+/// How an LLM profile's endpoint is asked for JSON (its
+/// `response_format`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    /// No `response_format`; the prompt alone asks for JSON.
+    None,
+    /// JSON mode (`json_object`), which forces an object at the top level.
+    #[default]
+    JsonObject,
+    /// Structured outputs (`json_schema`) with the answer's schema.
+    JsonSchema,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Mock {
     pub id: Uuid,
@@ -774,7 +788,8 @@ pub struct LlmProfile {
     /// `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`; never a
     /// raw secret.
     pub secret_ref: Option<String>,
-    pub json_schema: bool,
+    #[serde(default)]
+    pub output_mode: OutputMode,
     pub temperature: f32,
     pub timeout_ms: u64,
     pub max_tokens: u32,
@@ -1264,6 +1279,61 @@ impl ResourceSource {
                 "unknown resource source {other:?}"
             ))),
         }
+    }
+}
+
+impl OutputMode {
+    /// The deprecated `json_schema` flag's mode: `true` is `JsonSchema`,
+    /// `false` `JsonObject`.
+    pub fn from_json_schema(json_schema: bool) -> Self {
+        if json_schema {
+            OutputMode::JsonSchema
+        } else {
+            OutputMode::JsonObject
+        }
+    }
+
+    /// The wire name (`none`, `json_object`, `json_schema`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputMode::None => "none",
+            OutputMode::JsonObject => "json_object",
+            OutputMode::JsonSchema => "json_schema",
+        }
+    }
+
+    /// The mode stored for a profile: its `output_mode` column, or, for a
+    /// row written before that column existed (`NULL`), its `json_schema`
+    /// flag.
+    pub(crate) fn from_columns(
+        output_mode: Option<&str>,
+        json_schema: bool,
+    ) -> Result<Self, crate::StoreError> {
+        match output_mode {
+            None => Ok(Self::from_json_schema(json_schema)),
+            Some("none") => Ok(OutputMode::None),
+            Some("json_object") => Ok(OutputMode::JsonObject),
+            Some("json_schema") => Ok(OutputMode::JsonSchema),
+            Some(other) => Err(crate::StoreError::Db(format!(
+                "unknown output mode {other:?}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for OutputMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OutputMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::from_columns(Some(s), false).map_err(|_| {
+            format!("unknown output mode {s:?}; expected none, json_object or json_schema")
+        })
     }
 }
 

@@ -159,7 +159,7 @@ fn profile(ws: &str, name: &str, base_url: String) -> LlmProfile {
         base_url,
         model: "m".into(),
         secret_ref: None,
-        json_schema: false,
+        output_mode: mb_store::OutputMode::JsonObject,
         temperature: 0.2,
         timeout_ms: 3000,
         max_tokens: 512,

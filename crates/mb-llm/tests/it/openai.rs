@@ -26,7 +26,7 @@ fn config_debug_redacts_the_api_key_and_header_values() {
         base_url: "https://api.example/v1/".into(),
         api_key: Some(key.into()),
         model: "m".into(),
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: vec![(
             "cf-aig-authorization".into(),
             "Bearer s3ntinel-gateway-token".into(),
@@ -55,7 +55,7 @@ fn config_with_secrets() -> OpenAiConfig {
         base_url: "https://bob:s3ntinel-base-pass@llm.example/v1".into(),
         api_key: Some("sk-s3ntinel-api-key".into()),
         model: "m".into(),
-        json_schema: true,
+        output_mode: OutputMode::JsonSchema,
         headers: vec![("api-key".into(), "s3ntinel-header".into())],
         extra_body: serde_json::Map::new(),
         http: HttpOptions {
@@ -104,12 +104,12 @@ fn invalid_proxy_error_hides_its_credentials() {
     assert!(!err.contains("s3ntinel"), "proxy password leaked: {err}");
 }
 
-fn client(server: &MockServer, json_schema: bool) -> OpenAiCompatible {
+fn client(server: &MockServer, output_mode: OutputMode) -> OpenAiCompatible {
     OpenAiCompatible::new(OpenAiConfig {
         base_url: format!("{}/", server.uri()),
         api_key: Some("k".into()),
         model: "m".into(),
-        json_schema,
+        output_mode,
         headers: Vec::new(),
         extra_body: serde_json::Map::new(),
         http: HttpOptions::default(),
@@ -139,7 +139,7 @@ async fn sends_json_object_and_parses_content() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    let resp = client(&server, false)
+    let resp = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -162,7 +162,7 @@ async fn sends_extra_headers() {
         base_url: server.uri(),
         api_key: Some("k".into()),
         model: "m".into(),
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: vec![
             ("cf-aig-authorization".into(), "Bearer gw".into()),
             ("x-title".into(), "Mockingbird".into()),
@@ -189,7 +189,7 @@ async fn downgrades_json_schema_when_unsupported() {
         name: "n".into(),
         schema: json!({"type":"object"}),
     };
-    client(&server, false)
+    client(&server, OutputMode::JsonObject)
         .complete(req(f, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -210,13 +210,68 @@ async fn uses_json_schema_when_supported() {
         name: "n".into(),
         schema: json!({"type":"object"}),
     };
-    client(&server, true)
+    client(&server, OutputMode::JsonSchema)
         .complete(req(f, Duration::from_secs(2)))
         .await
         .unwrap();
     let b = wire_body(&server).await;
     assert_eq!(b["response_format"]["type"], "json_schema");
     assert_eq!(b["response_format"]["json_schema"]["name"], "n");
+    assert_eq!(b["response_format"]["json_schema"]["strict"], false);
+}
+
+/// `output_mode: none` sends no `response_format` for any JSON request,
+/// and reports neither capability.
+#[tokio::test]
+async fn output_mode_none_sends_no_response_format() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+        .mount(&server)
+        .await;
+    let provider = client(&server, OutputMode::None);
+    assert_eq!(
+        provider.capabilities(),
+        Capabilities {
+            json_schema: false,
+            json_mode: false,
+        }
+    );
+    let schema = ResponseFormat::JsonSchema {
+        name: "n".into(),
+        schema: json!({"type":"object"}),
+    };
+    for format in [schema, ResponseFormat::JsonObject] {
+        provider
+            .complete(req(format, Duration::from_secs(2)))
+            .await
+            .unwrap();
+    }
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 2);
+    for r in reqs {
+        let body: Value = serde_json::from_slice(&r.body).unwrap();
+        assert!(body.get("response_format").is_none(), "{body}");
+    }
+}
+
+#[test]
+fn output_mode_names_round_trip() {
+    for mode in [
+        OutputMode::None,
+        OutputMode::JsonObject,
+        OutputMode::JsonSchema,
+    ] {
+        assert_eq!(mode.as_str().parse::<OutputMode>(), Ok(mode));
+        assert_eq!(
+            serde_json::to_value(mode).unwrap(),
+            Value::String(mode.to_string())
+        );
+    }
+    assert_eq!(OutputMode::default(), OutputMode::JsonObject);
+    assert_eq!(OutputMode::from_json_schema(true), OutputMode::JsonSchema);
+    assert_eq!(OutputMode::from_json_schema(false), OutputMode::JsonObject);
+    assert!("strict".parse::<OutputMode>().is_err());
 }
 
 #[tokio::test]
@@ -230,7 +285,7 @@ async fn times_out() {
         )
         .mount(&server)
         .await;
-    let r = client(&server, false)
+    let r = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::Text, Duration::from_millis(100)))
         .await;
     assert!(matches!(r, Err(LlmError::Timeout)));
@@ -243,7 +298,7 @@ async fn maps_http_error() {
         .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
         .mount(&server)
         .await;
-    let r = client(&server, false)
+    let r = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::Text, Duration::from_secs(2)))
         .await;
     assert!(matches!(r, Err(LlmError::Http { status: 429, .. })));
@@ -265,7 +320,7 @@ async fn openai_stream_yields_deltas() {
         .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
-    let stream = client(&server, false)
+    let stream = client(&server, OutputMode::JsonObject)
         .stream(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -292,7 +347,7 @@ async fn openai_stream_reports_the_final_usage_chunk() {
         .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
-    let metered = client(&server, false)
+    let metered = client(&server, OutputMode::JsonObject)
         .stream_metered(req(ResponseFormat::Text, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -340,7 +395,7 @@ async fn a_rejected_stream_usage_option_is_dropped() {
         ))
         .mount(&server)
         .await;
-    let c = client(&server, false);
+    let c = client(&server, OutputMode::JsonObject);
     for _ in 0..2 {
         let metered = c
             .stream_metered(req(ResponseFormat::Text, Duration::from_secs(2)))
@@ -360,7 +415,7 @@ async fn openai_stream_http_error_before_first_delta() {
         .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
         .mount(&server)
         .await;
-    let r = client(&server, false)
+    let r = client(&server, OutputMode::JsonObject)
         .stream(req(ResponseFormat::Text, Duration::from_secs(2)))
         .await;
     assert!(matches!(r, Err(LlmError::Http { status: 500, .. })));
@@ -376,7 +431,7 @@ async fn stream_items(sse: &'static str) -> Vec<Result<String, LlmError>> {
         .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
-    client(&server, false)
+    client(&server, OutputMode::JsonObject)
         .stream(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap()
@@ -480,7 +535,7 @@ async fn reasoning_only_reply_uses_the_json_in_reasoning() {
         )))
         .mount(&server)
         .await;
-    let resp = client(&server, false)
+    let resp = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -498,7 +553,7 @@ async fn reasoning_only_reply_uses_the_last_whole_value_not_a_nested_one() {
         )))
         .mount(&server)
         .await;
-    let resp = client(&server, false)
+    let resp = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -523,7 +578,7 @@ async fn in_band_error_is_retried_once() {
         ]))
         .mount(&server)
         .await;
-    let resp = client(&server, false)
+    let resp = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -541,7 +596,7 @@ async fn server_error_is_retried_once() {
         ]))
         .mount(&server)
         .await;
-    let resp = client(&server, false)
+    let resp = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -558,7 +613,7 @@ async fn empty_reply_error_names_the_provider_and_finish_reason() {
         )))
         .mount(&server)
         .await;
-    let err = client(&server, false)
+    let err = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap_err()
@@ -582,7 +637,7 @@ async fn reasoning_that_only_plans_the_answer_is_empty() {
         )))
         .mount(&server)
         .await;
-    let err = client(&server, false)
+    let err = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap_err()
@@ -600,7 +655,7 @@ async fn truncated_reply_says_to_raise_max_tokens() {
         )
         .mount(&server)
         .await;
-    let err = client(&server, false)
+    let err = client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap_err()
@@ -622,7 +677,7 @@ async fn merges_extra_body_under_its_own_fields() {
         base_url: server.uri(),
         api_key: None,
         model: "m".into(),
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: Vec::new(),
         extra_body: extra.as_object().unwrap().clone(),
         http: HttpOptions::default(),
@@ -644,7 +699,7 @@ async fn reasoning_off_is_sent_unless_extra_body_sets_it() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    let c = client(&server, false).with_reasoning_disabled(true);
+    let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
     c.complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();
@@ -662,7 +717,7 @@ async fn reasoning_off_is_sent_unless_extra_body_sets_it() {
         base_url: server.uri(),
         api_key: None,
         model: "m".into(),
-        json_schema: false,
+        output_mode: OutputMode::JsonObject,
         headers: Vec::new(),
         extra_body: json!({"reasoning": {"effort": "high"}})
             .as_object()
@@ -700,7 +755,7 @@ async fn a_rejected_reasoning_switch_is_dropped() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    let c = client(&server, false).with_reasoning_disabled(true);
+    let c = client(&server, OutputMode::JsonObject).with_reasoning_disabled(true);
     for _ in 0..2 {
         let resp = c
             .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
@@ -719,7 +774,7 @@ async fn other_endpoints_get_no_reasoning_switch() {
         .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    client(&server, false)
+    client(&server, OutputMode::JsonObject)
         .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
         .await
         .unwrap();

@@ -26,7 +26,7 @@ use crate::{
     ContractVersionInfo, ControlChange, ControlStore, DEFAULT_WORKSPACE, ImportJob,
     ImportJobStatus, ImportOutcome, ImportProgress, LlmProfile, MAX_IMPORT_JOB_LIST, Mock,
     MockEventSettings, NewAuditEvent, NewContractVersion, NewImportJob, NewMock,
-    NewRequestLogEntry, OidcPendingLogin, PruneCounter, RequestKind, RequestLogEntry,
+    NewRequestLogEntry, OidcPendingLogin, OutputMode, PruneCounter, RequestKind, RequestLogEntry,
     RequestLogFilter, RequestLogSummary, ResourceSource, STALE_IMPORT_ERROR, Scenario,
     ScenarioRules, StoreError, Workspace, lease_times, missing_workspace, not_a_draft, now,
     queued_progress, require_draft_status, sha256_hex, validate_header_name, validate_hosts,
@@ -53,10 +53,10 @@ const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundl
 const JOB_SELECT: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress::text AS progress, \
      result_version, error, created_by, created_at, started_at, finished_at, updated_at, mode";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers, extra_body";
+     max_tokens, fallback_profile, source, headers, extra_body, output_mode";
 /// [`PROFILE_COLUMNS`] with JSON read back as text.
 const PROFILE_SELECT: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers::text AS headers, extra_body::text AS extra_body";
+     max_tokens, fallback_profile, source, headers::text AS headers, extra_body::text AS extra_body, output_mode";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 /// [`API_KEY_COLUMNS`] with JSON read back as text.
@@ -398,7 +398,10 @@ fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
         base_url: row.try_get("base_url")?,
         model: row.try_get("model")?,
         secret_ref: row.try_get("secret_ref")?,
-        json_schema: row.try_get("json_schema")?,
+        output_mode: OutputMode::from_columns(
+            row.try_get::<Option<String>, _>("output_mode")?.as_deref(),
+            row.try_get("json_schema")?,
+        )?,
         // Stored from an f32, so the narrowing is exact.
         temperature: temperature as f32,
         timeout_ms: from_i64(row.try_get("timeout_ms")?, "timeout_ms")?,
@@ -1223,12 +1226,13 @@ impl ControlStore for PgStore {
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
             "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
-             source = excluded.source, headers = excluded.headers, extra_body = excluded.extra_body"
+             source = excluded.source, headers = excluded.headers, extra_body = excluded.extra_body, \
+             output_mode = excluded.output_mode"
         );
         let mut tx = self.pool.begin().await?;
         lock_workspace(&mut tx, &p.workspace).await?;
@@ -1238,7 +1242,8 @@ impl ControlStore for PgStore {
             .bind(&p.base_url)
             .bind(&p.model)
             .bind(&p.secret_ref)
-            .bind(p.json_schema)
+            // Kept for a server that predates `output_mode`.
+            .bind(p.output_mode == OutputMode::JsonSchema)
             .bind(f64::from(p.temperature))
             .bind(to_i64(p.timeout_ms, "timeout_ms")?)
             .bind(i64::from(p.max_tokens))
@@ -1246,6 +1251,7 @@ impl ControlStore for PgStore {
             .bind(p.source.as_str())
             .bind(serde_json::to_string(&p.headers)?)
             .bind(serde_json::to_string(&p.extra_body)?)
+            .bind(p.output_mode.as_str())
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

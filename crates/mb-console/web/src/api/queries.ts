@@ -60,6 +60,7 @@ export type ContractSummary = components["schemas"]["ContractVersionSummary"];
 export type ContractDetail = components["schemas"]["ContractVersionDetail"];
 export type UploadResult = components["schemas"]["UploadResult"];
 export type Profile = components["schemas"]["LlmProfileView"];
+export type OutputMode = components["schemas"]["OutputMode"];
 
 /** Query keys of a workspace's resources; every key starts `["ws", ws]`. */
 export const keys = {

@@ -7,13 +7,13 @@
 //! provider.
 //!
 //! ```
-//! use mb_llm::{OpenAiCompatible, OpenAiConfig};
+//! use mb_llm::{OpenAiCompatible, OpenAiConfig, OutputMode};
 //!
 //! let provider = OpenAiCompatible::new(OpenAiConfig {
 //!     base_url: "http://127.0.0.1:11434/v1".into(),
 //!     api_key: None,
 //!     model: "llama3.2".into(),
-//!     json_schema: true,
+//!     output_mode: OutputMode::JsonSchema,
 //!     headers: Vec::new(),
 //!     extra_body: serde_json::Map::new(),
 //!     http: mb_llm::HttpOptions::default(),
@@ -43,7 +43,7 @@ pub mod scripted;
 
 pub use fallback::{FallbackProvider, HopSettings};
 pub use http::{HttpOptions, http_client};
-pub use openai::{OpenAiCompatible, OpenAiConfig};
+pub use openai::{OpenAiCompatible, OpenAiConfig, OutputMode};
 #[cfg(feature = "testing")]
 pub use scripted::ScriptedProvider;
 
@@ -151,7 +151,8 @@ pub struct ChatResponse {
 pub struct Capabilities {
     /// [`ResponseFormat::JsonSchema`] (structured outputs).
     pub json_schema: bool,
-    /// [`ResponseFormat::JsonObject`] (JSON mode).
+    /// [`ResponseFormat::JsonObject`] (JSON mode), which forces an object
+    /// at the top level.
     pub json_mode: bool,
 }
 

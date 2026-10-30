@@ -75,7 +75,7 @@ pub(crate) struct HttpCall {
 /// What the root resolvers learned, read once execution is done.
 #[derive(Default)]
 pub(crate) struct Collected {
-    /// Response key → `llm`, `repaired` or `fallback`.
+    /// Response key → `llm`, `patched`, `repaired` or `fallback`.
     pub sources: Map<String, Value>,
     /// The worst source over the generated root fields.
     pub worst: Option<Source>,

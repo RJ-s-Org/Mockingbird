@@ -16,6 +16,7 @@ use mb_engine::pii::{BuiltinPattern, CustomPattern, Scrubber, ScrubberConfig};
 use mb_mcm::{StateChangeKind, Trigger};
 use mb_protocols::ProtocolSettings;
 use mb_protocols::events::{BrokerConfig, BrokerKind, MQTT_TLS_UNSUPPORTED, SaslConfig};
+use mb_store::OutputMode;
 use mb_store::{
     ChaosSettings, Consistency, DEFAULT_WORKSPACE, DataPlaneAuthConfig, DataPlaneAuthMode,
     LatencyJitter, MockLimits, RateLimit, UnknownIds, WebhookSigning, WebhookTarget,
@@ -750,8 +751,14 @@ pub struct FileProfile {
     /// `vault:<mount>/<path>#<field>`), never a raw key.
     #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub json_schema: bool,
+    /// How the provider is asked for JSON: `none`, `json_object` (the
+    /// default) or `json_schema`. Read it with [`FileProfile::mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mode: Option<OutputMode>,
+    /// Deprecated alias of `output_mode`: `true` is `json_schema`, `false`
+    /// `json_object`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<bool>,
     #[serde(with = "humantime_serde", default = "FileProfile::default_timeout")]
     pub timeout: Duration,
     #[serde(default = "FileProfile::default_temperature")]
@@ -784,6 +791,14 @@ impl FileProfile {
         16_384
     }
 
+    /// The output mode: `output_mode`, else the deprecated `json_schema`,
+    /// else `json_object`.
+    pub fn mode(&self) -> OutputMode {
+        self.output_mode
+            .or(self.json_schema.map(OutputMode::from_json_schema))
+            .unwrap_or_default()
+    }
+
     /// A profile with the given endpoint and every other field defaulted.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
@@ -791,7 +806,8 @@ impl FileProfile {
             base_url: base_url.into(),
             model: model.into(),
             api_key: None,
-            json_schema: false,
+            output_mode: None,
+            json_schema: None,
             timeout: Self::default_timeout(),
             temperature: Self::default_temperature(),
             max_tokens: Self::default_max_tokens(),
@@ -1562,6 +1578,13 @@ impl FileConfig {
         crate::proxy::images::validate_image_entries(&self.proxy.images)
             .map_err(|e| format!("proxy.images: {e}"))?;
         self.proxy.check_bind(self.proxy.host)?;
+        for (name, profile) in &self.llm.profiles {
+            if profile.output_mode.is_some() && profile.json_schema.is_some() {
+                return Err(format!(
+                    "llm.profiles.{name}: set output_mode only; json_schema is its deprecated alias"
+                ));
+            }
+        }
         for (name, mock) in &self.mocks {
             let prefix = format!("mocks.{name}.");
             mb_store::validate_hosts(&mock.hosts).map_err(|e| format!("{prefix}hosts: {e}"))?;
@@ -1979,10 +2002,23 @@ pub fn apply_env_from(
     let base_url = get("MB_LLM_BASE_URL");
     let model = get("MB_LLM_MODEL");
     let api_key = get("MB_LLM_API_KEY");
+    let output_mode = get("MB_LLM_OUTPUT_MODE");
+    // Deprecated: MB_LLM_OUTPUT_MODE.
     let json_schema = get("MB_LLM_JSON_SCHEMA");
-    if base_url.is_none() && model.is_none() && api_key.is_none() && json_schema.is_none() {
+    if base_url.is_none()
+        && model.is_none()
+        && api_key.is_none()
+        && output_mode.is_none()
+        && json_schema.is_none()
+    {
         return Ok(());
     }
+    let output_mode = output_mode
+        .map(|v| {
+            v.parse::<OutputMode>()
+                .map_err(|e| anyhow!("MB_LLM_OUTPUT_MODE: {e}"))
+        })
+        .transpose()?;
     let profile = cfg
         .llm
         .profiles
@@ -1997,8 +2033,11 @@ pub fn apply_env_from(
     if api_key.is_some() {
         profile.api_key = Some(ENV_API_KEY_REF.to_string());
     }
-    if let Some(v) = json_schema {
-        profile.json_schema = v.eq_ignore_ascii_case("true");
+    if let Some(mode) = output_mode.or_else(|| {
+        json_schema.map(|v| OutputMode::from_json_schema(v.eq_ignore_ascii_case("true")))
+    }) {
+        profile.output_mode = Some(mode);
+        profile.json_schema = None;
     }
     if cfg.llm.default_profile.is_none() {
         cfg.llm.default_profile = Some(ENV_PROFILE.to_string());

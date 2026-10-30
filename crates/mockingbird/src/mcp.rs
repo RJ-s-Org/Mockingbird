@@ -224,8 +224,13 @@ fn provider_props() -> Map<String, Value> {
         b("Cloudflare AI Gateway without authentication: no cf-aig-authorization."),
     );
     m.insert(
+        "output_mode".into(),
+        json!({ "type": "string", "enum": ["none", "json_object", "json_schema"],
+            "description": "How the provider is asked for JSON: none (prompt only), json_object (JSON mode) or json_schema (structured output); default the preset's." }),
+    );
+    m.insert(
         "json_schema".into(),
-        b("Request JSON Schema structured output."),
+        b("Deprecated: output_mode json_schema (true) or json_object (false)."),
     );
     m.insert(
         "headers".into(),
@@ -629,14 +634,14 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "list_requests",
             title: "Read the request log",
-            description: "Recorded calls to a mock, newest first: method, path, status, matched operation, source (llm, repaired, fallback), fallback reason, latency, sizes; bodies with include_bodies or get_request.",
+            description: "Recorded calls to a mock, newest first: method, path, status, matched operation, source (llm, patched, repaired, fallback), fallback reason, latency, sizes; bodies with include_bodies or get_request.",
             schema: obj(
                 json!({
                     "mock": mock(),
                     "limit": n("1-500; default 20."),
                     "session": s("Only this session."),
                     "operation": s("Only this operation id."),
-                    "source": s("llm, repaired or fallback."),
+                    "source": s("llm, patched, repaired or fallback."),
                     "kind": s("http, graphql, grpc, soap or event."),
                     "include_bodies": b("Return request and response bodies; default false (sizes only)."),
                 }),
@@ -727,7 +732,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "put_llm_profile",
             title: "Create or replace an LLM profile",
-            description: "Write an LLM profile through the Admin API: base_url, model, secret_ref (env:NAME), json_schema, temperature, timeout_ms, max_tokens, fallback_profile, headers. configure_llm builds one from a preset.",
+            description: "Write an LLM profile through the Admin API: base_url, model, secret_ref (env:NAME), output_mode, temperature, timeout_ms, max_tokens, fallback_profile, headers. configure_llm builds one from a preset.",
             schema: obj(
                 json!({ "name": s("Profile name."), "profile": o("The profile.") }),
                 &["name", "profile"],
@@ -831,6 +836,10 @@ fn provider_args(args: &Value) -> Result<ProviderArgs, ToolError> {
         no_gateway_token: opt_bool(args, "no_gateway_token"),
         resource: opt_str(args, "resource"),
         headers,
+        output_mode: opt_str(args, "output_mode")
+            .map(|m| m.parse())
+            .transpose()
+            .map_err(|e: String| ToolError(format!("output_mode: {e}")))?,
         json_schema: args.get("json_schema").and_then(Value::as_bool),
         timeout: duration(args, "timeout")?,
         extra_body: args

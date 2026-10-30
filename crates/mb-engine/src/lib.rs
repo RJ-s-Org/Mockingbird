@@ -145,7 +145,10 @@ pub struct GenerationContext<'a> {
 pub enum Source {
     /// The LLM's answer, valid as it came.
     Llm,
-    /// The LLM's answer after a local patch or a repair round.
+    /// The LLM's first answer after a local fix (a patched value, a
+    /// truncated runaway string), with no second LLM call.
+    Patched,
+    /// The LLM's answer after a repair round trip (a second LLM call).
     Repaired,
     /// The faker's answer (no LLM, or the LLM's answer was unusable).
     Fallback,
@@ -159,7 +162,8 @@ pub enum Source {
 }
 
 impl Source {
-    /// The less trustworthy of two sources: `Fallback` > `Repaired` > `Llm`.
+    /// The less trustworthy of two sources: `Fallback` > `Repaired` >
+    /// `Patched` > `Llm`.
     #[must_use]
     pub fn worst(self, other: Source) -> Source {
         if other.rank() > self.rank() {
@@ -172,17 +176,19 @@ impl Source {
     fn rank(self) -> u8 {
         match self {
             Source::Llm | Source::State | Source::Cache | Source::Rejected => 0,
-            Source::Repaired => 1,
-            Source::Fallback => 2,
+            Source::Patched => 1,
+            Source::Repaired => 2,
+            Source::Fallback => 3,
         }
     }
 
-    /// The lowercase name (`llm`, `repaired`, `fallback`...), also its
+    /// The lowercase name (`llm`, `patched`, `repaired`, `fallback`...), also its
     /// [`Display`](fmt::Display) form.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Llm => "llm",
+            Source::Patched => "patched",
             Source::Repaired => "repaired",
             Source::Fallback => "fallback",
             Source::State => "state",
@@ -614,7 +620,7 @@ impl Engine {
             Some(provider) => {
                 let shaped = self.shaped(bundle, op, status, schema, narrowed.is_some(), call);
                 let written = shaped.as_ref().map_or(schema, |s| &s.schema);
-                let messages = tracing::info_span!("mb.prompt").in_scope(|| {
+                let mut messages = tracing::info_span!("mb.prompt").in_scope(|| {
                     build_messages(
                         bundle,
                         op,
@@ -625,6 +631,12 @@ impl Engine {
                         self.config.persona.as_deref(),
                     )
                 });
+                let items_envelope =
+                    guards::items_envelope(provider.capabilities(), validator.schema());
+                if items_envelope && let Some(user) = messages.last_mut() {
+                    user.content.push_str("\n\n");
+                    user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
+                }
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
                     schema: compact::response_prompt_schema(bundle, written),
@@ -643,6 +655,7 @@ impl Engine {
                         &Checks {
                             fill: fill.as_ref(),
                             echoes: Echoes::of([call]),
+                            items_envelope,
                         },
                         &mut usage,
                     )
@@ -771,6 +784,7 @@ impl Engine {
                 &Checks {
                     fill: None,
                     echoes: Echoes::of(parts.iter().map(|p| p.call)),
+                    items_envelope: false,
                 },
                 &mut usage,
             )
@@ -1379,7 +1393,6 @@ impl Engine {
         checks: &Checks<'_>,
         usage: &mut Usage,
     ) -> Result<(Value, Source), String> {
-        let (fill, echoes) = (checks.fill, &checks.echoes);
         // A fallback chain gets every hop's timeout, not just the first's.
         let limit = provider.total_timeout(self.config.timeout);
         let deadline = Instant::now() + limit;
@@ -1388,10 +1401,10 @@ impl Engine {
             .complete(provider, &messages, format, usage, deadline)
             .await?;
         let checked = tracing::info_span!("mb.validate")
-            .in_scope(|| self.check_output(validator, &first, fill, echoes));
+            .in_scope(|| self.check_output(validator, &first, checks));
         let errors = match checked {
             Checked::Valid(value) => return Ok((value, Source::Llm)),
-            Checked::Patched(value) => return Ok((value, Source::Repaired)),
+            Checked::Patched(value) => return Ok((value, Source::Patched)),
             Checked::Rejected(reason) => return Err(reason),
             Checked::Invalid(errors) => errors,
         };
@@ -1415,7 +1428,7 @@ impl Engine {
                 .complete(provider, &messages, format, usage, Instant::now() + limit)
                 .await?;
             let checked = tracing::info_span!("mb.validate")
-                .in_scope(|| self.check_output(validator, &second, fill, echoes));
+                .in_scope(|| self.check_output(validator, &second, checks));
             match checked {
                 Checked::Valid(value) | Checked::Patched(value) => Ok((value, Source::Repaired)),
                 Checked::Rejected(reason) => Err(reason),

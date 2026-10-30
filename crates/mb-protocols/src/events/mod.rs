@@ -41,7 +41,7 @@ pub use ws::CLOSE_RUNTIME_REPLACED;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// No reply is sent to a message whose hop count is at least this.
 pub const MAX_HOPS: u32 = 3;
-/// Header naming how a produced payload was made (`llm|repaired|fallback`).
+/// Header naming how a produced payload was made (`llm|patched|repaired|fallback`).
 pub const HEADER_SOURCE: &str = "x-mockingbird-source";
 /// Header naming the mock that produced a message.
 pub const HEADER_MOCK: &str = "x-mockingbird-mock";

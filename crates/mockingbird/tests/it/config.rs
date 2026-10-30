@@ -126,13 +126,13 @@ fn loads_full_example_config() {
     assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
     assert_eq!(p.model, "deepseek/deepseek-v4.1-flash");
     assert_eq!(p.api_key.as_deref(), Some("env:OPENROUTER_API_KEY"));
-    assert!(!p.json_schema);
+    assert_eq!(p.mode(), mb_store::OutputMode::JsonObject);
     assert_eq!(p.timeout, Duration::from_secs(3));
     assert!((p.temperature - 0.7).abs() < f32::EPSILON);
     assert_eq!(p.max_tokens, 2048);
     assert_eq!(p.fallback.as_deref(), Some("local"));
     let local = &cfg.llm.profiles["local"];
-    assert!(local.json_schema);
+    assert_eq!(local.mode(), mb_store::OutputMode::JsonSchema);
     assert_eq!(local.api_key, None);
     assert_eq!(local.fallback, None);
     assert_eq!(local.timeout, Duration::from_secs(10));
@@ -697,7 +697,7 @@ fn api_profile(name: &str) -> LlmProfile {
         base_url: "http://api".into(),
         model: "m".into(),
         secret_ref: None,
-        json_schema: false,
+        output_mode: mb_store::OutputMode::JsonObject,
         temperature: 0.7,
         timeout_ms: 3000,
         max_tokens: 2048,
