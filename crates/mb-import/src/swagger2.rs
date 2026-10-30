@@ -4,7 +4,7 @@ use crate::heuristics::{infer_identity, infer_kind, infer_resource_type};
 use crate::openapi3::{
     CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
     OperationIds, check_defs_refs, check_operation_refs, deref, escape, invalid, is_event_stream,
-    is_json_media, slug, stream_item_schema, stream_kind,
+    is_json_media, non_json_schema, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -178,9 +178,19 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
             ),
             None => (None, None),
             Some(s) if produces.is_empty() => (Some("application/json".to_owned()), Some(norm(s))),
-            Some(s) => match &json_ct {
-                Some(ct) => (Some(ct.clone()), Some(norm(s))),
-                None => (produces.first().cloned(), None),
+            Some(s) => match (&json_ct, produces.first()) {
+                (Some(ct), _) => (Some(ct.clone()), Some(norm(s))),
+                (None, Some(ct)) => {
+                    let example = resp
+                        .get("examples")
+                        .and_then(|e| e.get(ct.as_str()))
+                        .cloned();
+                    (
+                        Some(ct.clone()),
+                        non_json_schema(ct, Some(norm(s)), example),
+                    )
+                }
+                (None, None) => (None, None),
             },
         };
         // A Swagger 2 header object is its own schema.

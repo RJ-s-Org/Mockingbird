@@ -79,10 +79,45 @@ fn swagger_produces_controls_response_schema() {
     let b = compile(doc).unwrap();
     let a = b.operation("a").unwrap().success_output().unwrap();
     assert_eq!(a.content_type.as_deref(), Some("text/plain"));
-    assert_eq!(a.schema, None);
+    assert_eq!(a.schema, Some(json!({"type": "string"})));
     let o = b.operation("b").unwrap().success_output().unwrap();
     assert_eq!(o.content_type.as_deref(), Some("application/json"));
     assert_eq!(o.schema, Some(json!({"type": "string"})));
+}
+
+/// A non-JSON `produces` keeps the schema of text and XML responses and
+/// takes the response's `examples` entry for that media type; binary
+/// media keep a schema only from an example.
+#[test]
+fn swagger_non_json_responses_keep_schema_and_example() {
+    let doc = br#"{"swagger":"2.0","info":{"title":"T","version":"1"},
+      "paths":{
+        "/csv":{"get":{"operationId":"csv","produces":["text/csv"],
+          "responses":{"200":{"description":"ok","schema":{"type":"string"},
+            "examples":{"text/csv":"a,b\n1,2\n"}}}}},
+        "/xml":{"get":{"operationId":"xml","produces":["application/xml"],
+          "responses":{"200":{"description":"ok","schema":{"type":"object"}}}}},
+        "/bin":{"get":{"operationId":"bin","produces":["application/octet-stream"],
+          "responses":{"200":{"description":"ok","schema":{"type":"file"}}}}},
+        "/bin2":{"get":{"operationId":"bin2","produces":["application/octet-stream"],
+          "responses":{"200":{"description":"ok","schema":{"type":"file"},
+            "examples":{"application/octet-stream":"raw"}}}}}}}"#;
+    let b = compile(doc).unwrap();
+    let out = |id: &str| b.operation(id).unwrap().success_output().unwrap().clone();
+    let csv = out("csv");
+    assert_eq!(csv.content_type.as_deref(), Some("text/csv"));
+    assert_eq!(
+        csv.schema,
+        Some(json!({"type": "string", "examples": ["a,b\n1,2\n"]}))
+    );
+    let xml = out("xml");
+    assert_eq!(xml.content_type.as_deref(), Some("application/xml"));
+    assert_eq!(xml.schema, Some(json!({"type": "object"})));
+    assert_eq!(out("bin").schema, None);
+    assert_eq!(
+        out("bin2").schema,
+        Some(json!({"type": "string", "examples": ["raw"]}))
+    );
 }
 
 #[test]

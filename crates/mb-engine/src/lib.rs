@@ -57,6 +57,7 @@ pub mod extract;
 pub mod faker;
 pub mod guards;
 pub mod headers;
+mod media;
 pub mod message;
 pub mod ndjson;
 pub mod persona;
@@ -299,6 +300,12 @@ pub const OFFLINE_REASON: &str = "no LLM is configured for this mock (offline)";
 /// passed off as schema-valid. The faker does not generate for `not` or
 /// `if`/`then`/`else`; such schemas rely on its retries and can end here.
 pub const FAKER_INVALID_REASON: &str = "faker output does not validate against the schema";
+
+/// The fallback reason of a REST answer in a non-JSON media type (`text/*`,
+/// a declared example of any media type, an empty binary body), which the
+/// LLM never writes.
+pub const NON_JSON_MEDIA_REASON: &str =
+    "the response media type is not JSON: answered from the declared example or the faker";
 
 /// Counter of faker answers that matched no schema-valid draw.
 pub const FAKER_INVALID_METRIC: &str = "mb_faker_invalid_total";
@@ -573,6 +580,9 @@ impl Engine {
                 fallback_reason,
             });
         };
+        if let Some(answer) = media::answer(op, variant, schema) {
+            return Ok(self.media_response(bundle, op, variant, status, call, answer));
+        }
 
         // A narrowed schema varies per query: its validator is cached by
         // the schema itself.
@@ -712,6 +722,9 @@ impl Engine {
                 return None;
             }
             let variant = part.op.success_output()?;
+            if media::is_non_json(part.op, variant) {
+                return None;
+            }
             let status = success_status(variant.status);
             let schema = part.ctx.response_schema.or(variant.schema.as_ref())?;
             let validator = match part.ctx.response_schema {
@@ -819,6 +832,9 @@ impl Engine {
                 fallback_reason: None,
             };
         };
+        if let Some(answer) = media::answer(op, variant, schema) {
+            return self.media_response(bundle, op, variant, status, call, answer);
+        }
         let mut draws = self.call_draws(bundle, &op.id, status, call);
         match self.validator(bundle, op, status, schema) {
             Ok(validator) => {
@@ -1103,6 +1119,50 @@ impl Engine {
             source: Source::Fallback,
             usage: Usage::default(),
             fallback_reason: (!valid).then(|| FAKER_INVALID_REASON.to_string()),
+        }
+    }
+
+    /// The answer of a response in a non-JSON media type (see [`media`]):
+    /// the declared example, a faker value or no body, never the LLM's.
+    fn media_response(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        variant: &OutputVariant,
+        status: u16,
+        call: &OperationCall,
+        answer: media::MediaAnswer<'_>,
+    ) -> GeneratedResponse {
+        let (body, faker_note) = match answer {
+            media::MediaAnswer::Example(example) => (Some(example.clone()), None),
+            media::MediaAnswer::Empty => (None, None),
+            media::MediaAnswer::Fake(schema) => {
+                let validator = self.validator(bundle, op, status, schema).ok();
+                let mut draws = self.call_draws(bundle, &op.id, status, call);
+                let fake = self.fake_response(
+                    bundle,
+                    variant,
+                    status,
+                    schema,
+                    validator.as_deref(),
+                    &mut AnswerDraws {
+                        hints: FakerHints::from_call(op, call),
+                        draws: &mut draws,
+                    },
+                );
+                (fake.body, fake.fallback_reason)
+            }
+        };
+        GeneratedResponse {
+            status,
+            content_type: variant.content_type.clone(),
+            body,
+            source: Source::Fallback,
+            usage: Usage::default(),
+            fallback_reason: Some(with_faker_note(
+                NON_JSON_MEDIA_REASON.to_string(),
+                faker_note,
+            )),
         }
     }
 

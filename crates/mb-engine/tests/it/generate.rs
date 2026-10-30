@@ -1560,3 +1560,79 @@ async fn unsatisfiable_faker_output_is_flagged() {
     assert!(reason.starts_with(mb_engine::OFFLINE_REASON), "{reason}");
     assert!(reason.contains("does not validate"), "{reason}");
 }
+
+const TEXT_CONTRACT: &str = r##"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /csv:
+    get:
+      operationId: getCsv
+      responses:
+        "200":
+          description: ok
+          content:
+            text/csv:
+              schema: {type: string, examples: ["a,b\n1,2\n"]}
+  /text:
+    get:
+      operationId: getText
+      responses:
+        "200":
+          description: ok
+          content:
+            text/plain:
+              schema: {type: string, enum: [hi]}
+  /bin:
+    get:
+      operationId: getBin
+      responses:
+        "200":
+          description: ok
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+"##;
+
+/// A REST response in a non-JSON, non-XML media type is answered from its
+/// declared example, else faked (`text/*`) or left empty, and never by the
+/// LLM: its JSON-mode answer could not be that media type.
+#[tokio::test]
+async fn non_json_text_responses_come_from_the_example_or_the_faker() {
+    let bundle = compile(TEXT_CONTRACT.as_bytes()).unwrap();
+    let (provider, engine) = scripted(vec![]);
+    let csv = bundle.operation("getCsv").unwrap();
+    let out = engine
+        .generate(&bundle, csv, &call("getCsv"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.content_type.as_deref(), Some("text/csv"));
+    assert_eq!(out.body, Some(json!("a,b\n1,2\n")));
+    assert_eq!(out.source, Source::Fallback);
+    assert_eq!(
+        out.fallback_reason.as_deref(),
+        Some(mb_engine::NON_JSON_MEDIA_REASON)
+    );
+
+    let text = bundle.operation("getText").unwrap();
+    let out = engine
+        .generate(&bundle, text, &call("getText"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.body, Some(json!("hi")));
+    let variant = text.success_output().unwrap();
+    let fallback = engine.fallback(&bundle, text, variant, 200, &call("getText"), &ctx());
+    assert_eq!(fallback.body, Some(json!("hi")));
+
+    let bin = bundle.operation("getBin").unwrap();
+    let out = engine
+        .generate(&bundle, bin, &call("getBin"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        out.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_eq!(out.body, None);
+    assert!(provider.requests().is_empty());
+}
