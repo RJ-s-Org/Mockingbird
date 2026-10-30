@@ -1,0 +1,54 @@
+{
+ "batch_id": "batch-09",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "d8a3e6e04c",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "\"The Nightfall Chronicles\" with specific overview, tagline, budget 68M, revenue 142.85M, vote stats and three plausible studios looks real. id echoed, title matches original_title, languages and countries agree, Released fits 2021 date."
+  },
+  {
+   "opaque_id": "51bce12009",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "\"Echoes of Orbit\" overview and tagline are convincing; homepage example.com and paths like /A8bK4mN2pQ6rT9vX1yZ3cD5eF7G are the only tells. id echoed, sci-fi genres fit plot, null collection and modest vote_count consistent."
+  },
+  {
+   "opaque_id": "fc189b5afb",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Rich Lantern Coast details and GB/IE companies with Irish language, but image paths run alphabetically (/aB3cD4eF5gH6...) and homepage is .example. id echoed; origin countries match companies and genres fit overview."
+  },
+  {
+   "opaque_id": "d11adaa635",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Clockwork Garden has natural image paths, a family-animation budget and revenue, vote_count 32871 plausible. homepage example.com/movie/148474 is the one tell. id echoed, genres match story, GB company not in origin_country is harmless."
+  },
+  {
+   "opaque_id": "2796be8e57",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Vivid Hollow Tide overview, but image paths repeat the substring \"vNb8sTfWcYdAeLhJg\". id echoed and data mostly agrees; homepage on paramountpictures.com though Paramount is not among production_companies."
+  },
+  {
+   "opaque_id": "ca5391c34b",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "Collection name \"TheChroniclesCollection\" with no spaces, homepage moviewebsite.com, Spanish name \"Spanish\" look synthetic. Quantum Rift does not fit a Chronicles collection and Legendary is marked GB; id and titles otherwise agree."
+  },
+  {
+   "opaque_id": "1d73f42e89",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "\"The Last Tide\" has a specific overview, tagline and US/CA companies matching origin_country; .example homepage and shared path suffixes like dF1sW5a are the small tells. id echoed; crime genres fit, collection plausible."
+  },
+  {
+   "opaque_id": "9cba9c3374",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "All images share /f6c5g8v9m2k1n3o4p5q6r7s8t9u.jpg, homepage example.com/movie, generic title and overview. Collection \"Marvel Cinematic Universe\" clashes with Paramount, Warner and Universal as producers and no Marvel or Disney; id echoed."
+  }
+ ]
+}

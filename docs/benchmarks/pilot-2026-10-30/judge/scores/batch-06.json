@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-06",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "41e683d80c",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Believable Harbor Goods order, named buyer, realistic ids and statement; processing_fee amount_money {} is empty. total 13700 = 12900+800, refund_ids with refunded 2500, timeline ordered; id does not echo \"harbor\"."
+  },
+  {
+   "opaque_id": "991eaaba03",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "\"Order notes here\", customer@example.com, receipt A1B2, 411111/1111, refund_ids \"azfodxnx\", \"SQ *  LM\". Card status AUTHORIZED with captured_at set while payment APPROVED; refund id with 0 refunded; id not \"alpha\". Total sums right."
+  },
+  {
+   "opaque_id": "1f578108c0",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "auth code \"000000\", last_4 1234, \"REF123456\", statement \"SQ *FWJW\", refund_ids \"haosyowe\" feel synthetic. total 4673 = 4523+150, timeline ordered, but refund id with refunded 0, and id does not echo \"alpha\" though receipt URL does."
+  },
+  {
+   "opaque_id": "b1ce61e31d",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Harbor Coffee EMV sale, plausible amounts and tight timeline; fingerprint and token look patterned, Visa 411111/1111 test card. id \"harbor\" echoed, total equals amount and approved, COMPLETED with CAPTURED, timestamps ordered."
+  },
+  {
+   "opaque_id": "f74dcd34b0",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Northlight order, reference web-order-48213, sensible note; processing_fee amount_money {} empty, customer id patterned. total 4600 = 4250+350 and timeline ordered, but refund id with refunded 0 and id does not echo \"harbor\"."
+  },
+  {
+   "opaque_id": "45a9f2f57b",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Ceramic tableware order with matching WEB-ORDER-1847, good ids; refund_ids \"hykccpxb\" gibberish, fee amount empty. Total, status, timeline hold, but CONTACTLESS on an online order, refund id with 0 refunded, and id not \"kestrel\"."
+  },
+  {
+   "opaque_id": "fb20759f58",
+   "realism": 2,
+   "coherence": 4,
+   "rationale": "Placeholders throughout: \"CUST0123...\", \"L123456789012\", \"ORD1234...\", \"REC1234\", \"ABC123XYZ...\", \"sq-1-abc123def456\", \"Test payment for order\". id alpha echoed, total matches; created 10-27 but authorized 10-30 is an odd gap."
+  },
+  {
+   "opaque_id": "c80002ce79",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Harbor Books hardcover order, varied ids, plausible amounts; refund_ids \"ilmfzweo\" is gibberish, fee amount empty. Total and timeline fit, but CONTACTLESS on an online order with shipping, refund id with 0 refunded, id not \"kestrel\"."
+  },
+  {
+   "opaque_id": "371d592053",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Kite Cafe POS sale plausible, but application id \"aBcDeF1234567890_-Zxy1\" and fingerprint \"abcDEF1234567890_...\" are placeholders; card 411111. total 4750 = 4250+500 holds; created_at is after authorized_at and id does not echo \"kestrel\"."
+  }
+ ]
+}

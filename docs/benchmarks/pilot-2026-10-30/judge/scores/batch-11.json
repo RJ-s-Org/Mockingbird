@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-11",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "7fe6f60775",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Real airports and carriers, but reference \"A1B2C3\", tax currencies LSB/BVP, amount \"056.28\". Id echoed; tax 355.83 exceeds total 325 USD, durationMinutes 135 vs 08:15-14:30, infant born 2020, passengers from three unrelated families."
+  },
+  {
+   "opaque_id": "25d1da4102",
+   "realism": 5,
+   "coherence": 3,
+   "rationale": "Family booking with TAP Miles&Go, 047 ticket stock, A320neo, PDL routing, K7M2Q4 ref look production-grade. Id echoed, ticketed fits, EUR taxes fit; but TP1863 205 min vs 145 and TP1864 105 min vs 165 contradict."
+  },
+  {
+   "opaque_id": "7d04d97727",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Good airports, but program \"vgmsfxnp\", number \"1146\", patterned offerId, ticket 1234567890123, tax currencies NOF/WHK. Id echoed; 955.34 tax exceeds 525 total, durations contradict all segments, infant born 2020, cabins mixed."
+  },
+  {
+   "opaque_id": "f8cf3e6d9d",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Air-rail itinerary with TP flight, TGV9301 SNCF leg, plausible ref H7K2QP, tax codes. Id echoed, connection order holds, durations match timestamps, EUR throughout, ticketed status fits, adult and child ages right."
+  },
+  {
+   "opaque_id": "07d97a3a7f",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "Stock values: reference \"BK1234\", BA123, ticket 1234567890123, \"AVIOS123456789\", round 120/50/850 GBP. Id echoed; single passenger, 90-minute duration matches times, holder matches passenger, GBP throughout, updatedAt after createdAt."
+  },
+  {
+   "opaque_id": "85c8a545ec",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Realistic LHR-JFK on BA274 with 470 min, GB/US tax codes, GBP fare, H7K2Q9 ref. Id echoed and passenger, payment, status all align; arrival 13:15Z looks like local time so 10:25Z departure gives 170 min, not 470."
+  },
+  {
+   "opaque_id": "6942f4f545",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Rich family booking with believable tickets and FF numbers; generic traveler@example.net and BA flying MAD-BCN is a domain slip. Id echoed, itinerary loops LHR-MAD-BCN-LHR, durations match times, GBP consistent, ages fit types."
+  },
+  {
+   "opaque_id": "f8cdc524a5",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Swedish family, EuroBonus, SK/KL routing read true, though tax currency \"KUK\" with code X8 is odd. Id echoed and itinerary loops, but SK1428 165 min vs 105 and SK1549 135 vs 75 contradict, and KUK clashes with EUR total."
+  },
+  {
+   "opaque_id": "d8afe7e736",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Family with mixed FF programs, sensible BA117 and AA legs, 787-9, sequential ticket stock, US/AY taxes. Id echoed, connection works, USD throughout. BA117 mixes Z and -05:00, making 710 min against durationMinutes 410."
+  }
+ ]
+}

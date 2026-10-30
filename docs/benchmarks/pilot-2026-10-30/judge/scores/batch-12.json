@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-12",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "330b88d808",
+   "realism": 2,
+   "coherence": 5,
+   "rationale": "offers is empty and total 0, so there is no data to judge; request implies results. searchId UUID is fine. Currency XCV echoed and total matches the empty list, so nothing contradicts."
+  },
+  {
+   "opaque_id": "3f28aa1333",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "Second segments have gibberish like city \"vtqaluhs\", timezone \"tplqfeeh\". First legs fly WDH-LIS, not ZMW-ERD. total 549 vs 3 offers, cabins ignore economy filter, stops 2 above maxStops, arrivalAt equals departureAt with durationMinutes 3433."
+  },
+  {
+   "opaque_id": "5e071866d6",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Invented but plausible Glenhaven/Lindenport airports, varied prices; 260 min UK domestic is odd. Route, dates, cabin, stops, total 3 and durations hold. Third offer's return departs 18:30 before the outbound arrives 18:40."
+  },
+  {
+   "opaque_id": "0624849c1e",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "Gibberish segment fields (\"skyuebzq\"), origin city \"ZMW\" named \"Zambia\". Destination LHR not ERD, price currency YUZ vs FPE, total 2 with 3 offers, 08:15-14:30 with durationMinutes 90, zero-length segments dated 2026-10-30."
+  },
+  {
+   "opaque_id": "eb9bdd46f2",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Fictional Mylestown/Fulmar Bay but credible names, aircraft types, varied prices. FVB-MYL route, outbound 10-13 and return 10-27, cabin, stops within 2, total 3, and every durationMinutes matches the timestamps."
+  },
+  {
+   "opaque_id": "7f0a5067c9",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Plausible airports, carriers, flight numbers and prices. Route, dates, cabin, total 3 hold, but RB207 (265 min vs 205), RB214 (290 vs 230) and KC88 (190 vs 130) durationMinutes contradict timestamps."
+  },
+  {
+   "opaque_id": "967c3e2fd9",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Real airports but MYL shown as Merrill US, Faro-Keflavik in 145 min, KEF-US 210 min. Origin FAO not FVB, no return leg for 10-27 returnDate, durationMinutes contradicts times on QV1032 (125 vs 65) and QV441."
+  },
+  {
+   "opaque_id": "520a64c7ff",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Real-looking Owen Roberts and Vilo Acuna airports, varied fares, credible flight numbers. Destination is GCM rather than requested GCG, a material miss; otherwise dates, cabin, stops, durations and total 3 hold."
+  },
+  {
+   "opaque_id": "01a8e63470",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Thin: single offer, \"Zambezi Airport\" at Lusaka, generic AT123, 3.5 h Lusaka-Turkey flight. Route and cabin echoed and duration matches, but total 2 with 1 offer and no return segment despite returnDate."
+  }
+ ]
+}

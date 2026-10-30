@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-02",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "5d50de113e",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "id \"02pEOoIzyo8qSa\" is not a Shopify gid, field paths like [\"title\",\"required\"] are wrong, invented t-shirt and Acme Outdoors. \"Title is required\" although title tundra is returned; product created alongside errors."
+  },
+  {
+   "opaque_id": "8015cb33b8",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Proper gid://shopify/Product/8427610395127, empty productType and vendor as Shopify returns for omitted values, empty userErrors. handle, title, tag and DRAFT echoed; createdAt equals updatedAt on create."
+  },
+  {
+   "opaque_id": "41b712a6c5",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "Field paths contain junk \"yjmqlafx\" and \"rkmvukrd\", id is not a gid, vendor \"handmade\" is odd. Single tag flagged \"must be unique\", vendor reported missing yet set, product created despite three errors."
+  },
+  {
+   "opaque_id": "17b0d47d12",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "id YLqilhHqTMuYVA is not a gid, but error wording and field paths are plausible. Claims handle could not be generated while returning handle sable; productType \"General\" with error it is missing; product created despite errors."
+  },
+  {
+   "opaque_id": "adbda13001",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Non-gid id, repeated field paths [\"handle\",\"handle\"] look wrong, messages are Rails-like. \"Handle can't be blank\" while handle is sable; productType General but reported blank; ARCHIVED product returned despite errors."
+  },
+  {
+   "opaque_id": "1445cb49b8",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Well-worded errors and paths, but id S5SepxospzJ0yW is not a gid. \"Title is required.\" contradicts title kestrel in both request and response; product returned alongside three validation errors."
+  },
+  {
+   "opaque_id": "18d8f00395",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "gid://shopify/Product/8814207361, handle derived from title sable, empty productType, vendor raven, ARCHIVED status and empty userErrors; all request values honored and timestamps equal on create."
+  },
+  {
+   "opaque_id": "685b5a5ff0",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Non-gid id S5SepxospzJ0yW, otherwise plausible errors. Blank productType and vendor errors match the empty values, but a successful product returned alongside errors is a material conflict; DRAFT and echoes hold."
+  },
+  {
+   "opaque_id": "eefa592f53",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "gid present but Product/12345 is a bland short id; otherwise looks real with empty productType and vendor. Echoes tundra, iris and kestrel; null status defaults to DRAFT, no errors, timestamps equal."
+  }
+ ]
+}

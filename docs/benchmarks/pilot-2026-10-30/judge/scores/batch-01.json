@@ -1,0 +1,54 @@
+{
+ "batch_id": "batch-01",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "684f2b8a08",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Good titles, vendors, prices, base64 cursor, but ids like \"aQDw0oSfelnluK\" are not gids. Only one of three matches query \"cedar\" (harbor and quartz cursor words used as titles); inventory sorted 184,67,12 descending with reverse false."
+  },
+  {
+   "opaque_id": "072777ec6c",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "gids, SKUs like LUM-DESK-BLK and sensible lamp variants, though ids run sequentially. All match \"lumen\"; totalInventory equals variant sum (24+18, 17+14, 12+0), price ranges match variants, sort key holds with one type."
+  },
+  {
+   "opaque_id": "620977fcfc",
+   "realism": 5,
+   "coherence": 3,
+   "rationale": "Production-like: 13-digit gids, 14-digit variant gids, believable vendors and products, varied dates. Price ranges match variants, but only one of three matches query \"cedar\", and inventory runs 142,38,0 descending with reverse false."
+  },
+  {
+   "opaque_id": "c8e5f84ecf",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Non-gid ids and thin data. Handle \"classic-wool-blanket\" vs title \"Organic Cotton Blanket\"; priceRangeV2 129.99 min=max while variants are 99.50 and 149.99, similar on all three; query \"onyx\" ignored; cursor \"Y3Vyc2l6ZT1xYWV\" is odd."
+  },
+  {
+   "opaque_id": "d98b9b6c9b",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Long gids, plausible variant ids, Lumen lamps with Matte Black, Aged Bronze, realistic prices and vendor. All match \"lumen\", price ranges equal variant extremes, created before updated, cursor encodes last id and sort value."
+  },
+  {
+   "opaque_id": "9a20b61d53",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Sensible cedar goods and SKUs, short sequential gids; USD, CAD, EUR, GBP mixed in one store is a slip. Query honored, inventory sums hold, but INVENTORY_TOTAL sort ignored (142,0,57,9,23) and essential oil updatedAt precedes createdAt."
+  },
+  {
+   "opaque_id": "f7d2c30ef4",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "gids 123456789, 987654321, 555555555 and variants 1234567890 are placeholders; dates 2023-24 are stale. Query \"onyx\" ignored with only leather goods; wallet maxVariantPrice 149.99 but variants top out at 59.99."
+  },
+  {
+   "opaque_id": "a3b714f67d",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Realistic lamp products and prices, but ids like \"3jAjBPWWnGF0WT\" are not gids and endCursor \"cursor_lumen_outdoor_lighting_2026\" is filler. All match \"lumen\", price ranges match variants, PRODUCT_TYPE order holds, dates ordered."
+  }
+ ]
+}

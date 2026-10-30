@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-05",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "35f0ad60d9",
+   "realism": 3,
+   "coherence": 5,
+   "rationale": "\"123 Main Street\", merchant_id ML00000000001, website example.com, phone (415) 555-0000, round created time read as filler. Single location: SF address, LA timezone, USD, ACTIVE, PHYSICAL all agree with each other."
+  },
+  {
+   "opaque_id": "f54920f02c",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "\"Square Mock Location 1\", 123 Main Street, address_line_2 \"sodgrlpm\" are synthetic. Addresses and timezones align, but two locations in one account have different merchant_id values, and hardware mcc 5251 sits on a MOBILE \"New York Office\"."
+  },
+  {
+   "opaque_id": "38e19826cb",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Harborview Coffee and Cedar & Stone Market with fitting mcc 5812 and 5499, local area codes, varied dates. Seattle/LA and Madison/Chicago time zones right, but one list spans two merchant_id values for unrelated businesses."
+  },
+  {
+   "opaque_id": "df3ede6f13",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Juniper & Stone in Hollywood and Northline in Chicago Loop, matching zips, area codes, mcc, suite details look production-like. Timezones right; two businesses with distinct merchant_id under a single seller's list is a slip."
+  },
+  {
+   "opaque_id": "48e4853f51",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Maple Street Cafe plus Riverside Kiosk with events email and events URL is a believable chain, mcc 5814. Same merchant_id and business_name on both, MOBILE fits kiosk, zips, area codes and timezones right."
+  },
+  {
+   "opaque_id": "cb51b411d1",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Harborview and Lakeshore details, area codes and zips look real; capabilities repeats \"CREDIT_CARD_PROCESSING\" twice. Timezones align; different merchant_id and businesses in one list plus duplicate capability are two minor slips."
+  },
+  {
+   "opaque_id": "40116c5a0c",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Acme Hardware, Beta Solutions, 123 Main Street, billing@example.com, address_line_2 \"eywlbhfv\" read synthetic. Timezones fit addresses, but merchant_id differs between locations and Acme Hardware uses department-store mcc 5311."
+  },
+  {
+   "opaque_id": "d436945a75",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Harborlight Coffee Sutter St. and Beacon Hill with correct zips 94109 and 02108, area codes, mcc 5814 feel genuine. Same business and timezones right, but merchant_id differs (MLKL87ILHA2HJ vs MLQ113VRWHSFN) for one seller."
+  },
+  {
+   "opaque_id": "b759c6f972",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Harborlight Pine Street and Congress Avenue with accurate zips, area codes, branch emails, LLC name read as real. Same merchant_id and business_name across both; Austin on America/Chicago correct; created dates plausible."
+  }
+ ]
+}

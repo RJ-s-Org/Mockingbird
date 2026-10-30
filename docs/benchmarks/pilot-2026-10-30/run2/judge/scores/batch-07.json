@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-07",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "8599cf7cdb",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Studio lighting kit at 4280, card_declined with generic_decline, stripe docs url, req_ log url and dashboard test path look real. requires_payment_method with amount_received 0, null charge and null payment_method after decline all fit."
+  },
+  {
+   "opaque_id": "d3e999aecc",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Pro plan 14900, billing@northwind-traders.com, insufficient_funds decline with proper doc and log urls read as production. Status and amounts agree, but payment_method stays set under requires_payment_method, a small slip."
+  },
+  {
+   "opaque_id": "e85f738e07",
+   "realism": 4,
+   "coherence": 4,
+   "rationale": "Acme Labs renewal with .example receipt, odd log path dashboard.stripe.com/req_logs and short pm_1QxTvKLdR9mWbZ4n are slightly off. Decline fields fit, amount_received 0; payment_method retained under requires_payment_method."
+  },
+  {
+   "opaque_id": "9c5708da57",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "last_payment_error is pure gibberish: code \"piujuorf\", message \"oriufolj\", doc_url \"rpmknfuo\". Status succeeded with that error present, latest_charge null and payment_method null contradict a captured 1250."
+  },
+  {
+   "opaque_id": "64f2bcc93c",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Lumen Studio subscription, cus_ and ch_ ids are fine, but the error block is junk: code \"rtjcdtrv\", message \"lqzbmwwk\". succeeded with received 6840 and a charge should have last_payment_error null."
+  },
+  {
+   "opaque_id": "2cfbd3db88",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Lumen workshop registration at 4899 is plausible; id with run 7kQ2mN8vR4xZ1aBcD6eF9gHj looks hand-patterned. requires_payment_method, received 0, null charge, null error all agree; secret prefix matches id."
+  },
+  {
+   "opaque_id": "efd802a12f",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Sensible succeeded payment with ch_, pm_ and order_id metadata, but id pi_Onyx7Qp... embeds the path word and cus_Qx3Lm8Tn2vW7 is short. amount_received equals amount, charge present, error null, secret matches id."
+  },
+  {
+   "opaque_id": "f51e18962e",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "doc_url \"piujuorf\" and request_log_url \"qxtrsecj\" are junk, \"ach\" is not a Stripe method type. requires_action with amount_received 1250 and a charge, decline_code use_another_card with message \"Insufficient funds\", confirmation manual."
+  },
+  {
+   "opaque_id": "8bc6d6c485",
+   "realism": 3,
+   "coherence": 2,
+   "rationale": "Round amount 1000, all optional fields null, bland but well-formed ids. client_secret prefix pi_nq629... does not match id pi_nkI0xg8...; succeeded with received 1000 but latest_charge and payment_method null."
+  }
+ ]
+}

@@ -1,6 +1,18 @@
 # Simulated worlds at runtime: design
 
-Status: approved 2026-10-30; the pilot decides what gets built. Date: 2026-10-30. Evidence: round 2 benchmark data in `docs/benchmarks/2026-10-30/`.
+Status: approved 2026-10-30, revised after the pilot: slices 2 and 3 go ahead, slice 1 does not. Date: 2026-10-30. Evidence: round 2 benchmark data in `docs/benchmarks/2026-10-30/`.
+
+## Pilot outcome
+
+[The pilot](../../benchmarks/pilot-2026-10-30/README.md) changes this design:
+
+- **Values-only generation (slice 1) is dropped**, along with engine-owned IDs. Three variants all lost coherence against full-document generation (-0.56 to -0.97 on a 1 to 5 scale), and none was cheaper or faster.
+- **A world grown from traffic, and effects (slices 2 and 3), go ahead** on today's full-document generation. Journey checks passed rose from 56% to 84–86%, with 27% fewer generated answers. That gain was measured on template generation, so confirming it on full-document generation is the first step.
+- **A state a write should move needs help:** models shown an existing resource tend to keep its status. Slice 3 has to solve this.
+- **Template assembly stays a candidate for the fallback path:** its answers were schema-valid with LLM-written values, where the faker's are random. It has not been tested in that role.
+- **Learned invariants (slice 4) stay optional:** the judge still names durations that contradict timestamps, so the case for them is unchanged, and they need their own test.
+
+The sections below keep the design as it was approved.
 
 ## Goal
 
@@ -126,10 +138,10 @@ If single calls fail, values-only generation is dropped. Estimated spend is unde
 
 ## Delivery order
 
-1. Pilot and its results, for a decision.
-2. Slot plan and values-only generation, including engine-owned opaque values.
-3. Entity extraction and references.
-4. Effects.
-5. Learned invariants, if the pilot's evidence calls for them.
+1. Confirm the world's gain on full-document generation, with a journey suite in the bench that later changes have to pass.
+2. Entity extraction and references.
+3. Effects, including state transitions.
+4. Template assembly in place of the faker on fallback, if a test supports it.
+5. Learned invariants, if a test supports them.
 
 Each is one PR with the standard gates. The separate near-term fixes (first-try reporting, patching inside `oneOf`/`anyOf`, coherent patches, the echo exemption for `pattern`) do not depend on this design and stay useful for full-document generation.

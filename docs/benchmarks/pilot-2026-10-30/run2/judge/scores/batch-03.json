@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-03",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "b4ed8bad34",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Labels \"kfhufv6ja:m3ki\" and \"rydrj:a98/-eps-...\" are gibberish, node_id U_kgDOABCDEFGH and id 1000000059 look fake, no additions or deletions. head.user html_url /gcul with login iris; same node_id with two user ids."
+  },
+  {
+   "opaque_id": "0966b99704",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "ref \"refs/heads/main\" and label \"main:refs/heads/main\" are not how GitHub formats refs; \"alice\", \"bob\" and \"feature-branch\" feel generic. Author bob but head owned by alice; \"documentation\" label on a UI feature."
+  },
+  {
+   "opaque_id": "11fe9d5231",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Specific title and body with \"Closes #29\", marcusdev fork label, default label colors and varied numbers read like production. Same login marcusdev has different ids in user (65617108) and head.user (163314120)."
+  },
+  {
+   "opaque_id": "a1d158fdd8",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Fitting retry title and body with a fork head and modest diff, but sha a2b4c6d8e0f1234567890abcdef and node ids U_kgDOMnOp1234, PR_kwDOaBcD1234EfGh look hand-patterned. Echoes, owner and author links all hold; state open."
+  },
+  {
+   "opaque_id": "ad0f83f9ba",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Good cache-fix title, real label colors and merged timestamps match closed_at. But avatar ids differ from user ids (48372615 vs 114247372), and mira-chen has id 32186487 in head and 191368459 in user."
+  },
+  {
+   "opaque_id": "5e884066ca",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "Title, label set and diff stats fine, but user fields are junk: login \"kdc3w\", html_url /rj5u6, url /users/ovx. Author does not match head owner mira-dev. merged, merged_at and closed_at agree."
+  },
+  {
+   "opaque_id": "2b562c433a",
+   "realism": 4,
+   "coherence": 2,
+   "rationale": "Coherent token-refresh title and body, default labels. base.label says iris:feature/session-refresh while ref is main; iris has three different ids across base, head and user; owner iris labelled CONTRIBUTOR."
+  },
+  {
+   "opaque_id": "ad98fe3cb9",
+   "realism": 5,
+   "coherence": 4,
+   "rationale": "Multiline markdown body about a streaming reader, fork head miravale, default label colors and diff stats feel genuine. Echoes hold, user id matches head; miravale has two different node_ids, a minor slip."
+  },
+  {
+   "opaque_id": "3886657563",
+   "realism": 2,
+   "coherence": 2,
+   "rationale": "Base label \"kl1y:qs-\", login \"feature-branch\", label url github.com/labels/1a2b3c, colors 1a2b3c are placeholder-like. state closed and merged_at set but closed_at null; login and html_url disagree; base user octocat."
+  }
+ ]
+}

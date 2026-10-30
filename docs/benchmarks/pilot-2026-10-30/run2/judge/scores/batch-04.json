@@ -1,0 +1,60 @@
+{
+ "batch_id": "batch-04",
+ "judge": "claude-opus-5-5",
+ "scores": [
+  {
+   "opaque_id": "01073d015b",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Good registry-sidecar description, varied counts and timestamps. Topic \"p80tl07x9ymmeh-qcu1pd\" is random junk among real topics. URLs, full_name and owner echo alpha/harbor, watchers equal stars."
+  },
+  {
+   "opaque_id": "bf7b9199fd",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Believable event-stream description, varied stars 1260, forks 184, homepage delta.pebble.dev. Owner, URLs and ids all echo pebble/delta; watchers equal stargazers, dates ordered."
+  },
+  {
+   "opaque_id": "e035fc7917",
+   "realism": 4,
+   "coherence": 3,
+   "rationale": "Plausible personal repo with modest counts. owner.url points to /users/z8s- while login is sable; topics \"cli\" and description about web frameworks fit Rust only loosely, size 45 is small for 89 stars."
+  },
+  {
+   "opaque_id": "17fc11d56d",
+   "realism": 3,
+   "coherence": 4,
+   "rationale": "clone_url, ssh_url, has_issues and subscribers_count absent, topic \"inqg19sq69-w\" is junk, node_id ABCHeY and license \"type\" look off. Path values echoed; id 148519773 is low for a 2024 repo."
+  },
+  {
+   "opaque_id": "ed6f0f68b9",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Specific description of a simulation harness, Rust language and topics agree, counts 2874/312/47 varied. All URLs and owner echo alpha/harbor, watchers equal stars, dates ordered."
+  },
+  {
+   "opaque_id": "3016e6bc0c",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "\"Compact Rust toolkit\" fits language Rust and topics; stars 1276, forks 42 and varied timestamps look organic. Owner and URLs echo pebble/delta, watchers match stars."
+  },
+  {
+   "opaque_id": "76908b568a",
+   "realism": 5,
+   "coherence": 5,
+   "rationale": "Service mesh description with Go language and golang topic, realistic counts 3120/214/37. All URL fields echo alpha/harbor, watchers equal stars, created before pushed and updated."
+  },
+  {
+   "opaque_id": "79bcc072fe",
+   "realism": 3,
+   "coherence": 3,
+   "rationale": "created_at, pushed_at and updated_at are all the same second 2026-10-30T20:42:16Z, license url null. A just-created repo with 150 stars, 12 forks, fork true and subscribers_count 0 does not hang together."
+  },
+  {
+   "opaque_id": "40a2ade827",
+   "realism": 4,
+   "coherence": 5,
+   "rationale": "Sensible event-processing repo with modest counts, but node_ids like U_kgDOa1b2C3d4 and R_kgDOAb3XyZ look hand-patterned. Go language fits go-tooling topic; echoes and dates all consistent."
+  }
+ ]
+}
