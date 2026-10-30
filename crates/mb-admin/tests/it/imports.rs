@@ -1370,6 +1370,57 @@ async fn import_llm_calls_are_billed_to_the_resolved_tenant() {
     );
 }
 
+/// An admin node over the control store at `url`, billing usage to the
+/// returned sink.
+async fn node(url: &str, provider: Option<Arc<dyn Provider>>) -> (Harness, Arc<Collect>) {
+    let store = mb_store::connect(url).await.unwrap();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let sink = Arc::new(Collect::default());
+    let mut st = AdminState {
+        auth: Arc::new(TestAuth),
+        ..AdminState::new(store, state)
+    };
+    if let Some(p) = provider {
+        st.llm = Arc::new(TestLlm(Some(p)));
+    }
+    st.ext.usage = sink.clone();
+    st.ext.tenants = Arc::new(HeaderTenant);
+    let h = Harness {
+        app: router(st.clone()),
+        st,
+    };
+    (h, sink)
+}
+
+#[tokio::test]
+async fn an_import_run_by_another_node_is_billed_to_its_tenant() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("control.db").display());
+    let (a, queued_on) = node(&url, Some(scripted(vec![]))).await;
+    a.create_mock("pets").await;
+    let view = import_as(&a, "acme")
+        .await
+        .expect(StatusCode::ACCEPTED, "create");
+
+    // Another node (or this one after a restart): a fresh store handle and
+    // worker that never saw the request.
+    let provider = Arc::new(ScriptedProvider::with_usage(vec![Ok((
+        pets_answer(),
+        usage(100, 20),
+    ))]));
+    let (b, ran_on) = node(&url, Some(provider)).await;
+    assert!(b.run().await);
+    let job = b.job("pets", view["id"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "done", "{job}");
+    let events = ran_on.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].tenancy,
+        mb_ext::Tenancy::new("acme", DEFAULT_WORKSPACE)
+    );
+    assert!(queued_on.0.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn an_import_the_tenant_resolver_refuses_is_a_problem() {
     let (mut h, sink) = metered(scripted(vec![pets_answer()])).await;

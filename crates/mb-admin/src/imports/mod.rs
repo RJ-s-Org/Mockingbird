@@ -692,18 +692,18 @@ pub async fn create(
         .await
         .map_err(Problem::from)?;
 
+    let new_job = NewImportJob {
+        mock_id: m.id,
+        kind: job.kind,
+        source_name: job.source_name,
+        input: job.input,
+        created_by: Some(access.principal.subject.clone()),
+        mode: job.mode.map(|m| m.as_str().to_string()),
+    };
     let created = st
         .store
-        .create_import_job(NewImportJob {
-            mock_id: m.id,
-            kind: job.kind,
-            source_name: job.source_name,
-            input: job.input,
-            created_by: Some(access.principal.subject.clone()),
-            mode: job.mode.map(|m| m.as_str().to_string()),
-        })
+        .create_import_job_for_tenant(new_job, Some(tenancy.tenant))
         .await?;
-    worker::remember_tenancy(created.id, tenancy);
     st.imports.wake.notify_one();
     let view = ImportJobView::from(&created);
     access
