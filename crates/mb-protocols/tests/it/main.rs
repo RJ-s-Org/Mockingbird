@@ -33,6 +33,7 @@ mod graphql;
 mod graphql_ws;
 mod grpc;
 mod http_rest;
+mod provider_policy;
 mod runtime;
 mod soap;
 mod sse;

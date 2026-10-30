@@ -8,7 +8,7 @@ The extension contract of [Mockingbird](https://github.com/rj-s-org/mockingbird)
 | `QuotaGuard` | after the tenant is known: may they call? | `AllowAll` |
 | `UsageSink` | after every call: status, source, latency, tokens | `PrometheusUsage` (`mb_requests_total`, `mb_request_duration_seconds`, `mb_llm_tokens_total`) |
 | `SecretStore` | when a secret reference is resolved | `DefaultSecrets`: `env:`, `file:` and, with `VAULT_ADDR`, `vault:` |
-| `ProviderPolicy` | when an LLM profile is chosen for a call | `ConfiguredProfile` (the mock's own profile) |
+| `ProviderPolicy` | for every admitted call (data plane, imports, draft previews), with its tenancy, to choose its LLM profile | `ConfiguredProfile` (the mock's own profile) |
 | `AdminHooks` | at startup: extra Admin API routes | `NoHooks` (none) |
 
 `Extensions::default()` wires the defaults together; the `with_*` builders replace one each:

@@ -163,6 +163,9 @@ pub(crate) struct CallPlan<'a> {
     #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
     pub stream_items: Option<usize>,
     pub tenancy: Tenancy,
+    /// The engine the call generates with: the provider policy's choice for
+    /// `tenancy` (see [`MockRuntime::engine_for`]).
+    pub engine: std::sync::Arc<mb_engine::Engine>,
     /// The call's faults. An injected error comes with `forced_status` set
     /// to the declared error status it uses; with `forced_status` unset,
     /// the adapter answers its protocol-native error.
@@ -385,6 +388,12 @@ pub(crate) async fn plan<'a>(
     let tenancy = admit_and_authenticate(rt, op, headers, presented)
         .instrument(tracing::info_span!("mb.admission"))
         .await?;
+    // The provider policy runs per call, with the call's tenancy; a
+    // rejection is answered like a quota's.
+    let engine = match rt.engine_for(&tenancy).await {
+        Ok(engine) => engine,
+        Err(r) => return Err(PlanFailure::new(PlanError::Rejected(r), Some(tenancy))),
+    };
     let overrides = match Overrides::parse(headers, rt.header_overrides) {
         Ok(o) => o,
         Err(detail) => {
@@ -451,6 +460,7 @@ pub(crate) async fn plan<'a>(
         #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
         stream_items,
         tenancy,
+        engine,
         chaos,
     })
 }
@@ -657,7 +667,7 @@ pub(crate) async fn generate_pending(
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
     };
-    let generated = rt.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     Ok(complete(rt, plan, call, pending, generated).await)
 }
 
@@ -1239,7 +1249,7 @@ pub(crate) async fn open_stream(
         request_stream,
         item_interval: plan.scenario.and_then(|s| s.stream_item_interval),
     };
-    rt.engine
+    plan.engine
         .generate_stream(Arc::clone(&rt.bundle), op, call, ctx, plan.stream_items)
 }
 

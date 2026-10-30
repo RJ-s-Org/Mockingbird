@@ -72,7 +72,7 @@ pub use audit::{AuditEventView, Auditor, retention_cutoff, spawn_retention};
 pub use auth_routes::{
     LOGIN_STATE_COOKIE, MeView, MeWorkspace, WebAuth, auth_router, console_gate,
 };
-pub use imports::llm::{LlmResolver, OfflineLlm};
+pub use imports::llm::{LlmAccessError, LlmResolver, OfflineLlm};
 pub use imports::worker::{ImportWorkers, run_next_import, spawn_import_workers};
 pub use imports::{
     CreateImport, DEFAULT_MAX_ACTIVE_JOBS_PER_MOCK, IMPORT_OPERATION, ImportJobView,
@@ -189,16 +189,43 @@ impl AdminState {
     }
 }
 
-/// The tenant every admin call is attributed to (as the runtime attributes
-/// its provider choices).
+/// The tenant admin-side LLM work is attributed to when no request is there
+/// to resolve one from (an import job queued on another node or before a
+/// restart). Imports and draft previews otherwise ask the
+/// [`TenantResolver`](mb_ext::TenantResolver), which self-hosted
+/// ([`SingleTenant`](mb_ext::SingleTenant)) answers with this tenant too.
 pub const DEFAULT_TENANT: &str = "default";
 
-/// The tenancy of a call in workspace `ws`.
+/// The tenancy of a call in workspace `ws` with no request to resolve it
+/// from: tenant [`DEFAULT_TENANT`].
 pub(crate) fn tenancy(ws: &str) -> Tenancy {
     Tenancy {
         tenant: DEFAULT_TENANT.to_string(),
         workspace: ws.to_string(),
     }
+}
+
+/// The tenancy admin-side LLM work on `mock` in workspace `ws` is billed
+/// to: the tenant the [`TenantResolver`](mb_ext::TenantResolver) resolves
+/// for a call of `operation` with the admin request's `headers`, as on the
+/// data plane, in the request's workspace.
+///
+/// # Errors
+///
+/// The resolver's rejection, as its problem.
+pub(crate) async fn resolve_tenancy(
+    st: &AdminState,
+    ws: &str,
+    mock: &str,
+    operation: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<Tenancy, Problem> {
+    let call = mb_ext::CallInfo::new(mock, operation, headers);
+    let resolved = st.ext.tenants.resolve(&call).await.map_err(Problem::from)?;
+    Ok(Tenancy {
+        tenant: resolved.tenant,
+        workspace: ws.to_string(),
+    })
 }
 
 /// Whether `text` matches `pattern`, where `*` matches any run of

@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use async_graphql::Context;
 use async_graphql::parser::types::{OperationType, Selection};
-use mb_engine::{GeneratedResponse, GenerationContext, JointPart, OperationCall, ScenarioSpec};
+use mb_engine::{
+    Engine, GeneratedResponse, GenerationContext, JointPart, OperationCall, ScenarioSpec,
+};
 use mb_state::StoredResource;
 use serde_json::Value;
 use tokio::sync::{Notify, watch};
@@ -36,6 +38,9 @@ pub(crate) struct Part {
     pub target: Option<StoredResource>,
     pub related: Vec<StoredResource>,
     pub scenario: Option<ScenarioSpec>,
+    /// The engine the provider policy chose for the call (the same for
+    /// every root field of a query: they share its tenancy).
+    pub engine: Arc<Engine>,
 }
 
 type Answers = Arc<HashMap<String, Result<GeneratedResponse, String>>>;
@@ -168,11 +173,12 @@ async fn generate(
             None => unknown.push(part.key.clone()),
         }
     }
+    let engine = parts.first().map_or(&rt.engine, |p| &p.engine);
     let results = if joint.len() == 1 {
         let p = &joint[0];
-        vec![rt.engine.generate(&rt.bundle, p.op, p.call, p.ctx).await]
+        vec![engine.generate(&rt.bundle, p.op, p.call, p.ctx).await]
     } else {
-        rt.engine.generate_joint(&rt.bundle, &joint).await
+        engine.generate_joint(&rt.bundle, &joint).await
     };
     let mut answers: HashMap<String, Result<GeneratedResponse, String>> = joint
         .iter()

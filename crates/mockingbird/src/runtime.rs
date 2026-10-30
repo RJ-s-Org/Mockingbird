@@ -230,17 +230,32 @@ pub fn runtime_limits(deps: &RuntimeDeps, mock: &Mock) -> RuntimeLimits {
     }
 }
 
-/// The engine without guards.
+/// The engine of the mock's configured profile, without guards.
 async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Engine> {
+    let profile = configured_profile(deps, mock);
+    let workspace = match &profile {
+        Some(name) if !deps.offline => Some(profile_workspace(deps, mock, name).await?),
+        _ => None,
+    };
+    bare_engine(deps, mock, profile.zip(workspace)).await
+}
+
+/// `mock`'s engine generating with `profile` (its name and the workspace
+/// it is loaded from), or with no LLM for `None` or offline; without
+/// guards.
+async fn bare_engine(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    profile: Option<(String, String)>,
+) -> anyhow::Result<Engine> {
     let mut config = EngineConfig {
         persona: mock.persona.clone(),
         stream: deps.stream.clone(),
         output_budget: deps.limits.output_budget_tokens,
         ..EngineConfig::default()
     };
-    let provider = match profile_name(deps, mock)? {
-        Some(name) if !deps.offline => {
-            let workspace = profile_workspace(deps, mock, &name).await?;
+    let provider = match profile {
+        Some((name, workspace)) if !deps.offline => {
             let chain = load_chain(deps, &workspace, &name).await?;
             let head = chain
                 .first()
@@ -262,28 +277,46 @@ async fn build_bare_engine(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<En
 /// `profile_override` (from the mock's workspace, else `default`) or the
 /// one the mock is served with; each hop's settings are raised to the
 /// import minimums ([`IMPORT_MIN_TIMEOUT`], [`IMPORT_MIN_MAX_TOKENS`]) and
-/// its temperature capped at 0.2.
+/// its temperature capped at 0.2. The provider policy is asked as tenant
+/// `default`; [`import_provider_for`] names the tenancy.
 ///
 /// # Errors
 ///
-/// As [`build_provider`].
+/// As [`build_provider`], and the provider policy's rejection.
 pub async fn import_provider(
     deps: &RuntimeDeps,
     mock: &Mock,
     profile_override: Option<&str>,
 ) -> anyhow::Result<Option<ExtractLlm>> {
+    let tenancy = Tenancy::new(DEFAULT_TENANT, mock.workspace.clone());
+    import_provider_for(deps, mock, profile_override, &tenancy).await
+}
+
+/// [`import_provider`] for an import billed to `tenancy`: the provider
+/// policy chooses the profile for it.
+///
+/// # Errors
+///
+/// As [`build_provider`]; a rejection by the provider policy is an error
+/// that downcasts to [`mb_ext::Rejection`].
+pub async fn import_provider_for(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    profile_override: Option<&str>,
+    tenancy: &Tenancy,
+) -> anyhow::Result<Option<ExtractLlm>> {
     if deps.offline {
         return Ok(None);
     }
+    // The override is chosen through the provider policy like any other
+    // profile; the policy may swap or refuse it.
     let (workspace, name) = match profile_override {
-        // The override is chosen through the provider policy like any
-        // other profile; the policy may swap or refuse it.
-        Some(name) => match choose_profile(deps, mock, Some(name))? {
+        Some(name) => match choose_profile(deps, mock, Some(name), tenancy)? {
             Some(name) => (own_or_default_workspace(deps, mock, &name).await?, name),
             None => return Ok(None),
         },
-        None => match profile_name(deps, mock)? {
-            Some(name) => (profile_workspace(deps, mock, &name).await?, name),
+        None => match chosen_profile(deps, mock, tenancy).await? {
+            Some((name, workspace)) => (workspace, name),
             None => return Ok(None),
         },
     };
@@ -294,6 +327,70 @@ pub async fn import_provider(
         .ok_or_else(|| anyhow!("empty LLM profile chain"))?;
     let provider = chain_provider(deps, &chain, import_hop).await?;
     Ok(Some(ExtractLlm { provider, settings }))
+}
+
+/// The engine previews of `mock` generate with for a call of `tenancy`:
+/// [`build_engine`] when the provider policy keeps the configured profile,
+/// else the same engine with the policy's choice.
+///
+/// # Errors
+///
+/// As [`build_engine`]; a rejection by the provider policy is an error that
+/// downcasts to [`mb_ext::Rejection`].
+pub async fn preview_engine_for(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    tenancy: &Tenancy,
+) -> anyhow::Result<Engine> {
+    let configured = configured_profile(deps, mock);
+    let chosen = choose_profile(deps, mock, configured.as_deref(), tenancy)?;
+    if chosen == configured {
+        return build_engine(deps, mock).await;
+    }
+    let engine = bare_engine(
+        deps,
+        mock,
+        policy_profile(deps, mock, chosen.as_deref()).await?,
+    )
+    .await?;
+    let (guards, _) = engine_guards(deps, mock);
+    Ok(engine.with_guards(guards))
+}
+
+/// `profile` with the workspace it is loaded from when the provider policy
+/// chose it: the mock's own when it has the profile, else `default`.
+/// `None` offline or for no profile.
+async fn policy_profile(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    profile: Option<&str>,
+) -> anyhow::Result<Option<(String, String)>> {
+    Ok(match profile {
+        Some(name) if !deps.offline => Some((
+            name.to_string(),
+            own_or_default_workspace(deps, mock, name).await?,
+        )),
+        _ => None,
+    })
+}
+
+/// The profile (with its workspace) the provider policy picks for a call
+/// of `tenancy` on `mock`: loaded as the runtime loads the configured
+/// profile when the policy keeps it, else as [`policy_profile`].
+async fn chosen_profile(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    tenancy: &Tenancy,
+) -> anyhow::Result<Option<(String, String)>> {
+    let configured = configured_profile(deps, mock);
+    let chosen = choose_profile(deps, mock, configured.as_deref(), tenancy)?;
+    match chosen {
+        Some(name) if configured.as_deref() == Some(name.as_str()) => {
+            let workspace = profile_workspace(deps, mock, &name).await?;
+            Ok(Some((name, workspace)))
+        }
+        other => policy_profile(deps, mock, other.as_deref()).await,
+    }
 }
 
 /// The workspace profile `name` is loaded from for `mock` when it may come
@@ -376,6 +473,14 @@ pub async fn build_runtime_with_budget(
         deps.state.clone(),
     );
     rt.workspace = mock.workspace.clone();
+    rt.configured_profile = configured_profile(deps, mock);
+    if !deps.offline {
+        rt.profile_engines = Some(Arc::new(PolicyEngines {
+            deps: deps.clone(),
+            mock: mock.clone(),
+            guards: rt.engine.guards().clone(),
+        }));
+    }
     rt.set_data_plane_auth(data_plane_auth(&mock.data_plane_auth));
     rt.data_plane_keys = deps.data_plane_keys.clone();
     rt.header_overrides = mock.header_overrides;
@@ -512,31 +617,64 @@ fn hop_settings(profile: &LlmProfile) -> HopSettings {
     }
 }
 
-/// The profile the provider policy picks for `mock`, if any.
-fn profile_name(deps: &RuntimeDeps, mock: &Mock) -> anyhow::Result<Option<String>> {
-    let default_profile = deps.default_profile.get();
-    let configured = mock.llm_profile.as_deref().or(default_profile.as_deref());
-    choose_profile(deps, mock, configured)
+/// The profile `mock` is configured with: its own, else the workspace
+/// default. The provider policy is asked about it per call.
+fn configured_profile(deps: &RuntimeDeps, mock: &Mock) -> Option<String> {
+    mock.llm_profile
+        .clone()
+        .or_else(|| deps.default_profile.get())
 }
 
-/// The profile the provider policy picks for `mock` given `configured`.
+/// The tenant admin-side LLM work is attributed to when no tenancy was
+/// resolved for it.
+const DEFAULT_TENANT: &str = "default";
+
+/// The profile the provider policy picks for a call of `tenancy` on `mock`
+/// given `configured`. A rejection is an error that downcasts to
+/// [`mb_ext::Rejection`].
 fn choose_profile(
     deps: &RuntimeDeps,
     mock: &Mock,
     configured: Option<&str>,
+    tenancy: &Tenancy,
 ) -> anyhow::Result<Option<String>> {
-    let tenancy = Tenancy::new("default", mock.workspace.clone());
     deps.ext
         .providers
-        .choose(&tenancy, &mock.name, configured)
+        .choose(tenancy, &mock.name, configured)
         .map_err(|r| {
-            anyhow!(
-                "provider policy rejected mock {:?}: {} ({})",
-                mock.name,
-                r.title,
-                r.detail
-            )
+            anyhow::Error::new(r).context(format!("provider policy rejected mock {:?}", mock.name))
         })
+}
+
+/// Builds the engines of the profiles `mock`'s provider policy picks
+/// instead of the configured one ([`mb_protocols::ProfileEngines`]): the
+/// same persona, stream settings and guards (the token budget included),
+/// another provider chain.
+struct PolicyEngines {
+    deps: RuntimeDeps,
+    mock: Mock,
+    guards: EngineGuards,
+}
+
+impl std::fmt::Debug for PolicyEngines {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolicyEngines")
+            .field("mock", &self.mock.name)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl mb_protocols::ProfileEngines for PolicyEngines {
+    async fn engine(&self, profile: Option<&str>) -> Result<Arc<Engine>, String> {
+        let built = async {
+            let profile = policy_profile(&self.deps, &self.mock, profile).await?;
+            bare_engine(&self.deps, &self.mock, profile).await
+        }
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        Ok(Arc::new(built.with_guards(self.guards.clone())))
+    }
 }
 
 async fn load_profile(

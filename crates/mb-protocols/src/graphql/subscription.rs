@@ -792,6 +792,7 @@ fn generated(
     let scenario = plan.scenario.cloned();
     let stream_items = plan.stream_items;
     let tenancy = plan.tenancy.clone();
+    let engine = plan.engine.clone();
     let drop_after = plan.chaos.drop_after;
     let items = stream::once(async move {
         let plan = CallPlan {
@@ -802,6 +803,7 @@ fn generated(
             delay: None,
             stream_items,
             tenancy,
+            engine,
             chaos: Default::default(),
         };
         match call::open_stream(&rt, &plan, call, Vec::new()).await {

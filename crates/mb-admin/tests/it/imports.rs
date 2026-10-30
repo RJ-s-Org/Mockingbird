@@ -1309,6 +1309,81 @@ async fn import_llm_calls_are_recorded_as_usage() {
     );
 }
 
+/// The tenant named by the `x-tenant` header (refusing `blocked`), else
+/// `default`, always in workspace `elsewhere` (the Admin API keeps the
+/// request's workspace).
+struct HeaderTenant;
+
+#[async_trait]
+impl mb_ext::TenantResolver for HeaderTenant {
+    async fn resolve(
+        &self,
+        call: &mb_ext::CallInfo<'_>,
+    ) -> Result<mb_ext::Tenancy, mb_ext::Rejection> {
+        assert_eq!(call.operation_id, "import");
+        let tenant = call
+            .headers
+            .get("x-tenant")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("default");
+        if tenant == "blocked" {
+            return Err(mb_ext::Rejection::new(403, "Forbidden", "unknown tenant"));
+        }
+        Ok(mb_ext::Tenancy::new(tenant, "elsewhere"))
+    }
+}
+
+/// Posts a Markdown import as tenant `tenant`.
+async fn import_as(h: &Harness, tenant: &str) -> Resp {
+    let req = Request::post(format!("{BASE}/pets/imports"))
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-tenant", tenant)
+        .body(Body::from(
+            json!({ "kind": "markdown", "text": md_text() }).to_string(),
+        ))
+        .unwrap();
+    h.send(req).await
+}
+
+#[tokio::test]
+async fn import_llm_calls_are_billed_to_the_resolved_tenant() {
+    let provider = Arc::new(ScriptedProvider::with_usage(vec![Ok((
+        pets_answer(),
+        usage(100, 20),
+    ))]));
+    let (mut h, sink) = metered(provider).await;
+    h.st.ext.tenants = Arc::new(HeaderTenant);
+    h.app = router(h.st.clone());
+
+    let view = import_as(&h, "acme")
+        .await
+        .expect(StatusCode::ACCEPTED, "create");
+    assert!(h.run().await);
+    let job = h.job("pets", view["id"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "done");
+    let events = sink.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].tenancy,
+        mb_ext::Tenancy::new("acme", DEFAULT_WORKSPACE)
+    );
+}
+
+#[tokio::test]
+async fn an_import_the_tenant_resolver_refuses_is_a_problem() {
+    let (mut h, sink) = metered(scripted(vec![pets_answer()])).await;
+    h.st.ext.tenants = Arc::new(HeaderTenant);
+    h.app = router(h.st.clone());
+
+    let r = import_as(&h, "blocked").await;
+    let p = r.expect(StatusCode::FORBIDDEN, "refused");
+    assert_eq!(p["detail"], "unknown tenant");
+    assert_eq!(r.headers[header::CONTENT_TYPE], "application/problem+json");
+    assert!(!h.run().await, "no job was queued");
+    assert!(sink.0.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn failed_import_llm_calls_are_recorded_as_usage() {
     let provider = Arc::new(ScriptedProvider::new(vec![Err(LlmError::Timeout)]));
