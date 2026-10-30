@@ -64,7 +64,7 @@ pub use oidc::{
 };
 pub use principal::{Principal, PrincipalKind};
 pub use role::{ParseRoleError, Permission, Role};
-pub use session::{CookieSecurity, SESSION_COOKIE, SessionManager};
+pub use session::{CookieSecurity, SESSION_COOKIE, SessionInfo, SessionManager};
 
 /// Lowercase hex encoding of `bytes`.
 pub(crate) fn hex(bytes: &[u8]) -> String {

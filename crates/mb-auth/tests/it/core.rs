@@ -663,6 +663,123 @@ async fn session_ids_are_unique_and_hashed_at_rest() {
     assert_eq!(row.principal["kind"], json!("local"));
 }
 
+/// Stores a session for `p` whose cookie value is `cookie`, created and
+/// last seen `seen_ago` before now, expiring in an hour.
+async fn insert_seen(
+    s: &Arc<dyn ControlStore>,
+    cookie: &str,
+    p: &Principal,
+    seen_ago: chrono::Duration,
+) {
+    let now = Utc::now();
+    s.create_admin_session(&AdminSession {
+        id_hash: sha_hex(cookie),
+        principal: serde_json::to_value(p).unwrap(),
+        created_at: now - seen_ago,
+        expires_at: now + chrono::Duration::hours(1),
+        last_seen: now - seen_ago,
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn idle_session_is_none_and_deleted() {
+    let s = store().await;
+    let sm = SessionManager::new(s.clone(), Duration::from_secs(4 * 3600), false)
+        .with_idle_timeout(Duration::from_secs(1800));
+    assert_eq!(sm.idle_timeout(), Some(Duration::from_secs(1800)));
+    let alice = user(&[("default", Role::Editor)], false);
+    insert_seen(&s, "idle", &alice, chrono::Duration::minutes(31)).await;
+    insert_seen(&s, "active", &alice, chrono::Duration::minutes(29)).await;
+
+    assert_eq!(sm.lookup("idle").await.unwrap(), None);
+    assert!(
+        s.get_admin_session(&sha_hex("idle"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(sm.lookup("active").await.unwrap(), Some(alice.clone()));
+    // The lookup counts as activity: `last_seen` moved to about now.
+    let row = s
+        .get_admin_session(&sha_hex("active"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(Utc::now() - row.last_seen < chrono::Duration::seconds(5));
+
+    // `0` disables the idle timeout; the absolute TTL still applies.
+    let unlimited = SessionManager::new(s.clone(), Duration::from_secs(3600), false)
+        .with_idle_timeout(Duration::ZERO);
+    assert_eq!(unlimited.idle_timeout(), None);
+    insert_seen(&s, "old", &alice, chrono::Duration::hours(30)).await;
+    assert_eq!(unlimited.lookup("old").await.unwrap(), Some(alice));
+}
+
+#[tokio::test]
+async fn short_idle_timeout_touches_more_often() {
+    // `last_seen` is written at most once a minute, or every half idle
+    // timeout when that is shorter, so an active session never idles out.
+    let s = store().await;
+    let sm = SessionManager::new(s.clone(), Duration::from_secs(3600), false)
+        .with_idle_timeout(Duration::from_secs(20));
+    insert_seen(&s, "c", &Principal::local(), chrono::Duration::seconds(12)).await;
+    assert!(sm.lookup("c").await.unwrap().is_some());
+    let row = s.get_admin_session(&sha_hex("c")).await.unwrap().unwrap();
+    assert!(Utc::now() - row.last_seen < chrono::Duration::seconds(5));
+}
+
+#[tokio::test]
+async fn sessions_are_listed_and_revoked() {
+    let s = store().await;
+    let sm = SessionManager::new(s.clone(), Duration::from_secs(3600), false)
+        .with_idle_timeout(Duration::from_secs(1800));
+    let alice = user(&[("default", Role::Editor)], false);
+    let mut bob = user(&[], false);
+    bob.subject = "bob".into();
+    bob.display_name = "Bob".into();
+    let a1 = sm.create(&alice).await.unwrap();
+    let a2 = sm.create(&alice).await.unwrap();
+    let b1 = sm.create(&bob).await.unwrap();
+    // Idle sessions are not listed.
+    insert_seen(&s, "idle-alice", &alice, chrono::Duration::hours(1)).await;
+
+    assert_eq!(SessionManager::session_id(&a1), sha_hex(&a1));
+    let mine = sm.list(Some("alice")).await.unwrap();
+    let mut ids: Vec<String> = mine.iter().map(|i| i.id.clone()).collect();
+    ids.sort();
+    let mut want = vec![sha_hex(&a1), sha_hex(&a2)];
+    want.sort();
+    assert_eq!(ids, want);
+    let info = &mine[0];
+    assert_eq!(info.subject, "alice");
+    assert_eq!(info.display_name, "Alice");
+    assert_eq!(
+        info.expires_at - info.created_at,
+        chrono::Duration::hours(1)
+    );
+    assert_eq!(
+        info.idle_expires_at,
+        Some(info.last_seen + chrono::Duration::minutes(30))
+    );
+    assert_eq!(sm.list(None).await.unwrap().len(), 3);
+
+    let one = sm.get(&sha_hex(&a1)).await.unwrap().unwrap();
+    assert_eq!(one.subject, "alice");
+    assert!(sm.get("unknown").await.unwrap().is_none());
+    assert!(sm.revoke(&sha_hex(&a1)).await.unwrap());
+    assert!(!sm.revoke(&sha_hex(&a1)).await.unwrap());
+    assert_eq!(sm.lookup(&a1).await.unwrap(), None);
+    assert!(sm.lookup(&a2).await.unwrap().is_some());
+
+    // The idle row is deleted too, though it was not listed.
+    assert_eq!(sm.revoke_all("alice").await.unwrap(), 2);
+    assert_eq!(sm.lookup(&a2).await.unwrap(), None);
+    assert_eq!(sm.lookup(&b1).await.unwrap(), Some(bob));
+    assert!(sm.list(Some("alice")).await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn set_cookie_attributes() {
     let s = store().await;

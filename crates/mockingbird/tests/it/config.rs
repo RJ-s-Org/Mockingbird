@@ -274,6 +274,7 @@ fn auth_defaults() {
     assert_eq!(cfg.auth.mode, AuthMode::None);
     assert_eq!(cfg.auth.external_url, "http://127.0.0.1:9090");
     assert_eq!(cfg.auth.session_ttl, Duration::from_secs(12 * 3600));
+    assert_eq!(cfg.auth.session_idle_timeout, Duration::from_secs(3600));
     assert!(cfg.auth.sysadmin_subjects.is_empty());
     assert!(cfg.auth.public_metrics);
     assert_eq!(cfg.auth.oidc, None);
@@ -307,6 +308,21 @@ fn auth_defaults() {
         ws.write(yaml);
         assert!(file_config::load(&ws.config_path()).is_err(), "{yaml}");
     }
+}
+
+#[test]
+fn session_idle_timeout_is_bounded_and_zero_disables() {
+    let ws = Workspace::new();
+    let cfg = ws.load("auth:\n  session_idle_timeout: 0\n");
+    assert_eq!(cfg.auth.session_idle_timeout, Duration::ZERO);
+    let cfg = ws.load("auth:\n  session_idle_timeout: 30m\n");
+    assert_eq!(cfg.auth.session_idle_timeout, Duration::from_secs(1800));
+    ws.write("auth:\n  session_idle_timeout: 31d\n");
+    let err = file_config::load(&ws.config_path()).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("auth.session_idle_timeout"),
+        "{err:#}"
+    );
 }
 
 #[test]

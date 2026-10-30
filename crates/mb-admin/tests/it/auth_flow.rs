@@ -921,3 +921,202 @@ async fn admin_state_debug_shows_no_secret() {
     assert!(shown.contains("AdminState"), "{shown}");
     assert!(shown.contains(MockOidcProvider::CLIENT_ID), "{shown}");
 }
+
+/// `method uri` with the session cookie `session`.
+async fn call(h: &Harness, method: Method, uri: &str, session: &str) -> Resp {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::COOKIE, session_header(session))
+        .body(Body::empty())
+        .unwrap();
+    send(&h.app, req).await
+}
+
+#[tokio::test]
+async fn console_sessions_are_listed_per_principal() {
+    let h = harness().await;
+    let a1 = h.login("alice", &["mb:default:viewer"], None).await;
+    let _a2 = h.login("alice", &["mb:default:viewer"], None).await;
+    let bob = h.login("bob", &["mb:default:admin"], None).await;
+    let root = h.login("root", &["mb:sysadmin"], None).await;
+
+    // Without `subject`, a non-sysadmin sees their own sessions.
+    let r = call(&h, Method::GET, "/api/v1/console-sessions", &a1).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let list = r.json();
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 2, "{list:?}");
+    for s in list {
+        assert_eq!(s["subject"], "alice");
+        assert_eq!(s["id"].as_str().unwrap().len(), 64, "{s}");
+        assert!(s["created_at"].is_string() && s["expires_at"].is_string());
+        assert!(s["last_seen"].is_string());
+        assert!(s["idle_expires_at"].is_null());
+    }
+    let current: Vec<&Value> = list.iter().filter(|s| s["current"] == true).collect();
+    assert_eq!(current.len(), 1, "{list:?}");
+    assert_eq!(current[0]["id"], SessionManager::session_id(&a1));
+    // Their own subject is fine; someone else's is a sysadmin's business.
+    let r = call(
+        &h,
+        Method::GET,
+        "/api/v1/console-sessions?subject=alice",
+        &a1,
+    )
+    .await;
+    assert_eq!(r.json().as_array().unwrap().len(), 2);
+    call(&h, Method::GET, "/api/v1/console-sessions?subject=bob", &a1)
+        .await
+        .problem(StatusCode::FORBIDDEN);
+
+    // A sysadmin sees everyone, or one subject.
+    let all = call(&h, Method::GET, "/api/v1/console-sessions", &root).await;
+    assert_eq!(all.json().as_array().unwrap().len(), 4, "{}", all.text);
+    let r = call(
+        &h,
+        Method::GET,
+        "/api/v1/console-sessions?subject=bob",
+        &root,
+    )
+    .await;
+    let list = r.json();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], SessionManager::session_id(&bob));
+    assert_eq!(list[0]["current"], false);
+}
+
+#[tokio::test]
+async fn one_console_session_is_revoked() {
+    let h = harness().await;
+    let a1 = h.login("alice", &["mb:default:viewer"], None).await;
+    let a2 = h.login("alice", &["mb:default:viewer"], None).await;
+    let bob = h.login("bob", &["mb:default:owner"], None).await;
+    let root = h.login("root", &["mb:sysadmin"], None).await;
+    let a2_uri = format!(
+        "/api/v1/console-sessions/{}",
+        SessionManager::session_id(&a2)
+    );
+
+    // Another principal's session is not found for a non-sysadmin.
+    call(&h, Method::DELETE, &a2_uri, &bob)
+        .await
+        .problem(StatusCode::NOT_FOUND);
+    assert_eq!(h.me(&a2).await.status, StatusCode::OK);
+
+    // Alice ends her other session.
+    let r = call(&h, Method::DELETE, &a2_uri, &a1).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+    h.me(&a2).await.problem(StatusCode::UNAUTHORIZED);
+    assert_eq!(h.me(&a1).await.status, StatusCode::OK);
+    call(&h, Method::DELETE, &a2_uri, &a1)
+        .await
+        .problem(StatusCode::NOT_FOUND);
+
+    // A sysadmin ends anyone's.
+    let bob_id = SessionManager::session_id(&bob);
+    let r = call(
+        &h,
+        Method::DELETE,
+        &format!("/api/v1/console-sessions/{bob_id}"),
+        &root,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.text);
+    h.me(&bob).await.problem(StatusCode::UNAUTHORIZED);
+
+    let events = h.audit("console_session.revoke").await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].actor_subject, "root");
+    assert_eq!(events[0].target, "user:bob");
+    assert_eq!(events[0].after, Some(json!({ "session": bob_id })));
+    assert_eq!(events[1].actor_subject, "alice");
+    assert_eq!(events[1].target, "user:alice");
+}
+
+#[tokio::test]
+async fn every_console_session_of_a_principal_is_revoked() {
+    let h = harness().await;
+    let a1 = h.login("alice", &["mb:default:viewer"], None).await;
+    let a2 = h.login("alice", &["mb:default:viewer"], None).await;
+    let bob = h.login("bob", &["mb:default:owner"], None).await;
+    let root = h.login("root", &["mb:sysadmin"], None).await;
+
+    call(&h, Method::DELETE, "/api/v1/console-sessions", &a1)
+        .await
+        .problem(StatusCode::BAD_REQUEST);
+    call(
+        &h,
+        Method::DELETE,
+        "/api/v1/console-sessions?subject=alice",
+        &bob,
+    )
+    .await
+    .problem(StatusCode::FORBIDDEN);
+    assert_eq!(h.me(&a1).await.status, StatusCode::OK);
+
+    // A sysadmin signs bob out everywhere.
+    let r = call(
+        &h,
+        Method::DELETE,
+        "/api/v1/console-sessions?subject=bob",
+        &root,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json(), json!({ "revoked": 1 }));
+    h.me(&bob).await.problem(StatusCode::UNAUTHORIZED);
+
+    // Sign out everywhere: alice ends her own sessions, this one included.
+    let r = call(
+        &h,
+        Method::DELETE,
+        "/api/v1/console-sessions?subject=alice",
+        &a1,
+    )
+    .await;
+    assert_eq!(r.json(), json!({ "revoked": 2 }), "{}", r.text);
+    h.me(&a1).await.problem(StatusCode::UNAUTHORIZED);
+    h.me(&a2).await.problem(StatusCode::UNAUTHORIZED);
+    assert_eq!(h.me(&root).await.status, StatusCode::OK);
+
+    let events = h.audit("console_session.revoke_all").await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].actor_subject, "alice");
+    assert_eq!(events[0].target, "user:alice");
+    assert_eq!(events[0].after, Some(json!({ "revoked": 2 })));
+    assert_eq!(events[1].actor_subject, "root");
+    assert_eq!(events[1].target, "user:bob");
+}
+
+#[tokio::test]
+async fn console_sessions_without_login_are_empty() {
+    // `auth.mode: none` has no console sessions.
+    let (store, state) = stores().await;
+    let app = router(AdminState::new(store, state));
+    let r = send(
+        &app,
+        Request::get("/api/v1/console-sessions")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json(), json!([]));
+    let r = send(
+        &app,
+        Request::delete("/api/v1/console-sessions?subject=local")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.json(), json!({ "revoked": 0 }), "{}", r.text);
+    let r = send(
+        &app,
+        Request::delete(format!("/api/v1/console-sessions/{}", "0".repeat(64)))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    r.problem(StatusCode::NOT_FOUND);
+}

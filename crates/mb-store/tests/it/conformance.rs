@@ -58,6 +58,8 @@ macro_rules! conformance_checks {
             api_key_touch_updates_last_used,
             admin_session_lifecycle,
             expired_admin_sessions_are_swept,
+            admin_sessions_listed_and_revoked_by_subject,
+            idle_admin_sessions_are_swept,
             oidc_pending_login_is_taken_once,
             expired_oidc_pending_logins_are_not_returned,
             oidc_pending_logins_are_bounded,
@@ -1734,6 +1736,138 @@ pub(crate) async fn expired_admin_sessions_are_swept(store: &Arc<dyn ControlStor
             .await
             .expect("sweep again"),
         0
+    );
+}
+
+fn admin_session_of(
+    id_hash: &str,
+    subject: &str,
+    created_at: DateTime<Utc>,
+    last_seen: DateTime<Utc>,
+) -> AdminSession {
+    AdminSession {
+        id_hash: id_hash.into(),
+        principal: json!({"subject": subject, "kind": "user", "roles": {}}),
+        created_at,
+        expires_at: created_at + Duration::hours(12),
+        last_seen,
+    }
+}
+
+pub(crate) async fn admin_sessions_listed_and_revoked_by_subject(store: &Arc<dyn ControlStore>) {
+    // Subjects of their own: on Postgres every check shares one store.
+    let now = now_us();
+    let a1 = admin_session_of(&"a".repeat(64), "list-alice", now - Duration::hours(2), now);
+    let a2 = admin_session_of(&"b".repeat(64), "list-alice", now - Duration::hours(1), now);
+    let b1 = admin_session_of(&"c".repeat(64), "list-bob", now, now);
+    // A subject that only looks like a pattern matching another.
+    let tricky = admin_session_of(
+        &"d".repeat(64),
+        "list-ali%",
+        now - Duration::minutes(30),
+        now,
+    );
+    let mine = [&a1, &a2, &b1, &tricky];
+    for s in mine {
+        store.create_admin_session(s).await.expect("create");
+    }
+    let listed_of_mine = |all: Vec<AdminSession>| -> Vec<AdminSession> {
+        all.into_iter()
+            .filter(|s| mine.iter().any(|m| m.id_hash == s.id_hash))
+            .collect()
+    };
+
+    // Newest (`created_at`) first.
+    let all = store.list_admin_sessions(None).await.expect("list all");
+    assert_eq!(
+        listed_of_mine(all),
+        vec![b1.clone(), tricky.clone(), a2.clone(), a1.clone()]
+    );
+    assert_eq!(
+        store
+            .list_admin_sessions(Some("list-alice"))
+            .await
+            .expect("list"),
+        vec![a2.clone(), a1.clone()]
+    );
+    assert_eq!(
+        store
+            .list_admin_sessions(Some("list-ali%"))
+            .await
+            .expect("list"),
+        vec![tricky.clone()]
+    );
+    assert!(
+        store
+            .list_admin_sessions(Some("list-nobody"))
+            .await
+            .expect("list")
+            .is_empty()
+    );
+
+    assert_eq!(
+        store
+            .delete_admin_sessions_of("list-alice")
+            .await
+            .expect("revoke"),
+        2
+    );
+    assert_eq!(
+        store
+            .delete_admin_sessions_of("list-alice")
+            .await
+            .expect("revoke again"),
+        0
+    );
+    let all = store.list_admin_sessions(None).await.expect("list");
+    assert_eq!(listed_of_mine(all), vec![b1, tricky]);
+}
+
+pub(crate) async fn idle_admin_sessions_are_swept(store: &Arc<dyn ControlStore>) {
+    let now = now_us();
+    let idle = admin_session_of(
+        &"e".repeat(64),
+        "alice",
+        now - Duration::hours(3),
+        now - Duration::hours(2),
+    );
+    let edge = admin_session_of(
+        &"f".repeat(64),
+        "alice",
+        now - Duration::hours(3),
+        now - Duration::hours(1),
+    );
+    let active = admin_session_of(&"0".repeat(64), "bob", now - Duration::hours(3), now);
+    for s in [&idle, &edge, &active] {
+        store.create_admin_session(s).await.expect("create");
+    }
+    // `last_seen < before`: a session seen exactly at the cutoff stays.
+    // (At least: on Postgres other checks' sessions share the store.)
+    let swept = store
+        .delete_idle_admin_sessions(now - Duration::hours(1))
+        .await
+        .expect("sweep");
+    assert!(swept >= 1, "{swept}");
+    assert!(
+        store
+            .get_admin_session(&idle.id_hash)
+            .await
+            .expect("get")
+            .is_none()
+    );
+    assert!(
+        store
+            .get_admin_session(&edge.id_hash)
+            .await
+            .expect("get")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_admin_session(&active.id_hash)
+            .await
+            .expect("get")
+            .is_some()
     );
 }
 

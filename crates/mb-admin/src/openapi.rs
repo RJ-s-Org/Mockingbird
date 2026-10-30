@@ -11,13 +11,13 @@ use utoipa::openapi::path::{Operation, ParameterIn, PathItem};
 use utoipa::openapi::{Deprecated, RefOr};
 
 use crate::{
-    API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, contracts, drafts, imports, live,
-    mocks, problem, profiles, requests, scenarios, sessions, workspaces,
+    API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, console_sessions, contracts,
+    drafts, imports, live, mocks, problem, profiles, requests, scenarios, sessions, workspaces,
 };
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, import jobs, scenarios, LLM profiles, sessions, the request log and its live SSE tail, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only); `GET /api/v1/me` describes the caller. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
+    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, import jobs, scenarios, LLM profiles, sessions, the request log and its live SSE tail, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only); `GET /api/v1/me` describes the caller; `/api/v1/console-sessions` lists and ends console login sessions. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
     paths(
         workspaces::list,
         workspaces::create,
@@ -63,6 +63,9 @@ use crate::{
         audit::list,
         audit::list_global,
         auth_routes::me,
+        console_sessions::list,
+        console_sessions::revoke,
+        console_sessions::revoke_all,
     ),
     components(schemas(
         problem::Problem,
@@ -128,6 +131,8 @@ use crate::{
         auth_routes::MeView,
         auth_routes::MeWorkspace,
         auth_routes::PrincipalKindSchema,
+        console_sessions::ConsoleSessionView,
+        console_sessions::RevokedSessions,
     )),
     tags(
         (name = "workspaces"),
@@ -141,6 +146,7 @@ use crate::{
         (name = "api-keys"),
         (name = "audit"),
         (name = "me"),
+        (name = "console-sessions"),
     )
 )]
 #[derive(Debug)]

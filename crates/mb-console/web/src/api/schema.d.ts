@@ -36,6 +36,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/console-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["console_sessions_list"];
+        put?: never;
+        post?: never;
+        delete: operations["console_sessions_revoke_all"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/console-sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["console_sessions_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/llm-profiles": {
         parameters: {
             query?: never;
@@ -1113,6 +1145,40 @@ export interface components {
             error_rate?: number;
             latency_jitter?: components["schemas"]["LatencyJitter"] | null;
         };
+        /** @description A live console session (neither expired nor idle). */
+        ConsoleSessionView: {
+            /**
+             * Format: date-time
+             * @description The login.
+             */
+            created_at: string;
+            /** @description Whether this is the session the request came with. */
+            current: boolean;
+            display_name: string;
+            /**
+             * Format: date-time
+             * @description The session ends then regardless of activity (`auth.session_ttl`).
+             */
+            expires_at: string;
+            /**
+             * @description Names the session for `DELETE /api/v1/console-sessions/{id}`; it
+             *     cannot be used to sign in.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description The session ends then unless it is used again
+             *     (`auth.session_idle_timeout`); absent without an idle timeout.
+             */
+            idle_expires_at?: string | null;
+            /**
+             * Format: date-time
+             * @description The last request with this session, to within a minute.
+             */
+            last_seen: string;
+            /** @description The signed-in principal's subject. */
+            subject: string;
+        };
         /** @description A contract version's metadata, operations and channels. */
         ContractVersionDetail: {
             /** @description The contract's `info.version`. */
@@ -1917,6 +1983,11 @@ export interface components {
             /** Format: int32 */
             status: number;
         };
+        /** @description How many sessions `DELETE /api/v1/console-sessions` ended. */
+        RevokedSessions: {
+            /** Format: int64 */
+            revoked: number;
+        };
         /**
          * @description The OpenAPI schema of [`Role`] (which lives in `mb-auth`).
          * @enum {string}
@@ -2152,6 +2223,116 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    console_sessions_list: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only this principal's sessions. Without it a sysadmin gets
+                 *     everyone's and anyone else their own; anyone but a sysadmin may
+                 *     only name themselves.
+                 */
+                subject?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The live console sessions, newest first (none in `auth.mode: none`) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsoleSessionView"][];
+                };
+            };
+            /** @description Another principal's sessions, asked for by a non-sysadmin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    console_sessions_revoke_all: {
+        parameters: {
+            query?: {
+                /**
+                 * @description The principal whose sessions end. Anyone but a sysadmin may only
+                 *     name themselves.
+                 */
+                subject?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every session of `subject` ended (sign out everywhere) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedSessions"];
+                };
+            };
+            /** @description No `subject` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another principal's sessions, by a non-sysadmin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    console_sessions_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ended: requests with that session get 401 from now on */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such live session, or (for a non-sysadmin) another principal's */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

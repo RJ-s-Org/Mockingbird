@@ -464,6 +464,10 @@ pub struct AuthConfig {
     /// Absolute lifetime of a console login session.
     #[serde(with = "humantime_serde")]
     pub session_ttl: Duration,
+    /// A console session ends once it has not been used for this long;
+    /// zero disables the idle timeout.
+    #[serde(with = "humantime_serde")]
+    pub session_idle_timeout: Duration,
     /// OIDC `sub` values that are always sysadmin.
     pub sysadmin_subjects: Vec<String>,
     /// Whether `/metrics` is served without credentials.
@@ -478,6 +482,7 @@ impl Default for AuthConfig {
             mode: AuthMode::None,
             external_url: "http://127.0.0.1:9090".into(),
             session_ttl: Duration::from_secs(12 * 60 * 60),
+            session_idle_timeout: Duration::from_secs(60 * 60),
             sysadmin_subjects: Vec::new(),
             public_metrics: true,
             oidc: None,
@@ -1477,7 +1482,8 @@ pub const MIN_GRPC_MESSAGE_BYTES: usize = 1024;
 
 impl FileConfig {
     /// Every range and consistency check that does not depend on the auth
-    /// mode, each error naming its key: `auth.session_ttl` ≤ 30 days,
+    /// mode, each error naming its key: `auth.session_ttl` and
+    /// `auth.session_idle_timeout` ≤ 30 days,
     /// `audit.retention_days` in 1..=3650, the `server.role` storage rule,
     /// `server.tls` (both files or neither), `bus.url`'s scheme,
     /// `outbound.proxy`, the `limits:` and `protocols:` ranges, every mock's
@@ -1500,6 +1506,12 @@ impl FileConfig {
             return Err(format!(
                 "auth.session_ttl {} exceeds the maximum of 30d",
                 humantime::format_duration(self.auth.session_ttl)
+            ));
+        }
+        if self.auth.session_idle_timeout > MAX_SESSION_TTL {
+            return Err(format!(
+                "auth.session_idle_timeout {} exceeds the maximum of 30d",
+                humantime::format_duration(self.auth.session_idle_timeout)
             ));
         }
         if !RETENTION_DAYS.contains(&self.audit.retention_days) {

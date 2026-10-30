@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiError, api, loginUrl, signOut } from "../api/client";
+import { ApiError, api, loginUrl, signOut, signOutEverywhere } from "../api/client";
 
 function problem(status: number, title: string): Response {
   return new Response(JSON.stringify({ type: "about:blank", title, status, detail: title }), {
@@ -42,6 +42,35 @@ describe("sign out", () => {
       logout(new Response(JSON.stringify({ end_session_url: "javascript:alert(1)" }), { status: 200 })),
     );
     await expect(signOut()).resolves.toBe("/auth/login?return_to=/");
+  });
+});
+
+describe("sign out everywhere", () => {
+  it("ends every session of the subject, then signs out", async () => {
+    const calls: { method: string; url: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = input instanceof Request ? input : new Request(new URL(String(input), window.location.origin), init);
+        const url = new URL(req.url);
+        calls.push({ method: req.method, url: url.pathname + url.search });
+        return url.pathname === "/auth/logout"
+          ? new Response(null, { status: 204 })
+          : new Response(JSON.stringify({ revoked: 2 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    );
+    await expect(signOutEverywhere("auth0|a b")).resolves.toBe("/auth/login?return_to=/");
+    expect(calls).toEqual([
+      { method: "DELETE", url: "/api/v1/console-sessions?subject=auth0%7Ca%20b" },
+      { method: "POST", url: "/auth/logout" },
+    ]);
+  });
+
+  it("does not sign out when the sessions could not be ended", async () => {
+    const fetchMock = vi.fn(async () => problem(500, "store down"));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(signOutEverywhere("alice")).rejects.toMatchObject({ status: 500 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

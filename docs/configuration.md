@@ -128,6 +128,7 @@ How the Admin API, console and CLI authenticate. Read at startup.
 | `auth.mode` | `none`, `oidc` | `none` | `oidc` needs `auth.oidc` | | `none`: every admin request is the local sysadmin. `oidc`: console login, bearer JWTs and API keys. |
 | `auth.external_url` | URL | `http://127.0.0.1:9090` | `http(s)://` URL with a host; `https://` when `server.tls` is set | | The URL browsers reach the admin port at. The OIDC redirect is `<external_url>/auth/callback`, `https` makes cookies `Secure`, and in `oidc` mode the admin port answers only to this host (except `/healthz`, `/readyz` and `/metrics`). |
 | `auth.session_ttl` | duration | `12h` | At most `30d` | | Absolute lifetime of a console login. |
+| `auth.session_idle_timeout` | duration | `1h` | At most `30d`; `0` disables | | A console login also ends once it has not been used for this long (no request with its cookie). Activity is recorded at most once a minute, or every half timeout when that is shorter. |
 | `auth.sysadmin_subjects` | list | `[]` | | | OIDC `sub` values that are always sysadmin. |
 | `auth.public_metrics` | bool | `true` | | | `false`: `/metrics` needs the same credentials as the Admin API. |
 | `auth.oidc` | section | unset | Required in `oidc` mode | | The OIDC relying party. |

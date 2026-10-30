@@ -63,6 +63,7 @@ describe("shell", () => {
     expect(screen.getByRole("button", { name: "New workspace" })).toBeTruthy();
     await screen.findByText("Local");
     expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sign out everywhere" })).toBeNull();
   });
 
   it("shows sign-out for a signed-in user and remembers the workspace", async () => {
@@ -80,6 +81,7 @@ describe("shell", () => {
     await screen.findByLabelText("Workspace");
     await screen.findByText("Alice");
     expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign out everywhere" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "New workspace" })).toBeNull();
     expect(window.localStorage.getItem("mb.lastWorkspace")).toBe("team");
   });

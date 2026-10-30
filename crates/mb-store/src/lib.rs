@@ -319,6 +319,47 @@ pub trait ControlStore: Send + Sync {
     async fn delete_admin_session(&self, id_hash: &str) -> Result<bool, StoreError>;
     /// Deletes sessions with `expires_at <= now`; returns how many.
     async fn delete_expired_admin_sessions(&self, now: DateTime<Utc>) -> Result<u64, StoreError>;
+    /// Every console session (expired ones included until they are swept),
+    /// or those whose principal's `subject` is exactly `subject`, newest
+    /// (`created_at`) first.
+    ///
+    /// The default implementation refuses with `Invalid`: a store that does
+    /// not override it cannot list or revoke console sessions.
+    async fn list_admin_sessions(
+        &self,
+        subject: Option<&str>,
+    ) -> Result<Vec<AdminSession>, StoreError> {
+        let _ = subject;
+        Err(StoreError::Invalid(
+            "this control store does not list admin sessions (implement \
+             `ControlStore::list_admin_sessions`)"
+                .to_string(),
+        ))
+    }
+    /// Deletes every session whose principal's `subject` is exactly
+    /// `subject`; returns how many. The default implementation lists them
+    /// with [`Self::list_admin_sessions`] and deletes each.
+    async fn delete_admin_sessions_of(&self, subject: &str) -> Result<u64, StoreError> {
+        let mut n = 0;
+        for s in self.list_admin_sessions(Some(subject)).await? {
+            if self.delete_admin_session(&s.id_hash).await? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+    /// Deletes sessions with `last_seen < before` (idle ones); returns how
+    /// many. The default implementation lists them with
+    /// [`Self::list_admin_sessions`] and deletes each.
+    async fn delete_idle_admin_sessions(&self, before: DateTime<Utc>) -> Result<u64, StoreError> {
+        let mut n = 0;
+        for s in self.list_admin_sessions(None).await? {
+            if s.last_seen < before && self.delete_admin_session(&s.id_hash).await? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
     /// Stores a started OIDC login. Expired logins are deleted first, then,
     /// while `max` or more remain, the oldest (`created_at`), so at most
     /// `max` are kept. `Conflict` if `state_hash` is taken.
