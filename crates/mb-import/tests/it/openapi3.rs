@@ -747,3 +747,97 @@ fn cookie_params_and_unresolved_headers_warn() {
     assert!(cookie.message.contains("session"), "{}", cookie.message);
     assert_eq!(cookie.operation.as_deref(), Some("a"));
 }
+
+/// A response that declares only non-JSON media keeps its media type and
+/// a schema the data plane can answer from: text and XML keep (or get) a
+/// schema, a declared example becomes its `examples`, and
+/// `application/octet-stream` gets one only from a declared example.
+#[test]
+fn non_json_responses_keep_their_media_type_schema_and_example() {
+    let doc = br##"
+openapi: 3.0.3
+info: {title: T, version: "1"}
+paths:
+  /csv:
+    get:
+      operationId: csv
+      responses:
+        "200":
+          description: ok
+          content:
+            text/csv:
+              schema: {type: string}
+              example: "a,b\n1,2\n"
+  /text:
+    get:
+      operationId: text
+      responses:
+        "200": {description: ok, content: {text/plain: {}}}
+  /xml:
+    get:
+      operationId: xml
+      responses:
+        "200":
+          description: ok
+          content:
+            application/xml:
+              schema: {$ref: "#/components/schemas/Pet"}
+  /bytes:
+    get:
+      operationId: bytes
+      responses:
+        "200":
+          description: ok
+          content:
+            application/octet-stream:
+              examples: {one: {value: "raw"}}
+  /blob:
+    get:
+      operationId: blob
+      responses:
+        "200":
+          description: ok
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+components:
+  schemas:
+    Pet: {type: object, properties: {name: {type: string}}}
+"##;
+    let (b, warnings) = mb_import::compile_with_warnings(doc).unwrap();
+    let out = |id: &str| b.operation(id).unwrap().success_output().unwrap().clone();
+
+    let csv = out("csv");
+    assert_eq!(csv.content_type.as_deref(), Some("text/csv"));
+    assert_eq!(
+        csv.schema,
+        Some(json!({"type": "string", "examples": ["a,b\n1,2\n"]}))
+    );
+    let text = out("text");
+    assert_eq!(text.content_type.as_deref(), Some("text/plain"));
+    assert_eq!(text.schema, Some(json!({"type": "string"})));
+    let xml = out("xml");
+    assert_eq!(xml.content_type.as_deref(), Some("application/xml"));
+    assert_eq!(xml.schema, Some(json!({"$ref": "#/$defs/Pet"})));
+    let bytes = out("bytes");
+    assert_eq!(
+        bytes.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_eq!(
+        bytes.schema,
+        Some(json!({"type": "string", "examples": ["raw"]}))
+    );
+    let blob = out("blob");
+    assert_eq!(
+        blob.content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_eq!(blob.schema, None);
+    let empty: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "response_body_omitted")
+        .collect();
+    assert_eq!(empty.len(), 1, "{warnings:?}");
+    assert_eq!(empty[0].operation.as_deref(), Some("blob"));
+}

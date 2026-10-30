@@ -411,7 +411,7 @@ async fn serve(
                 PlanError::Rejected(r) => log.rejected(r),
                 PlanError::RateLimited(r) => match call::declared_rate_limited(rt, op) {
                     Some(generated) => {
-                        let mut resp = log.generated(generated);
+                        let mut resp = log.generated(as_xml(rt, op, generated));
                         set_retry_after(&mut resp, r.retry_after);
                         add_headers(&mut resp, rt, op, None);
                         resp
@@ -520,7 +520,8 @@ async fn serve(
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
-    let mut resp = tracing::info_span!("mb.encode").in_scope(|| log.generated(generated));
+    let mut resp =
+        tracing::info_span!("mb.encode").in_scope(|| log.generated(as_xml(rt, op, generated)));
     add_headers(&mut resp, rt, op, plan.scenario);
     if plan.chaos.inject_error {
         mark_chaos(&mut resp);
@@ -957,7 +958,70 @@ fn filled_error(
     if let (Some(body), Some(schema)) = (generated.body.as_mut(), &variant.schema) {
         set_message(body, schema, &rt.bundle.defs, message);
     }
+    as_xml(rt, op, generated)
+}
+
+/// A body generated as JSON for a response declared as XML
+/// (`application/xml`, `text/xml`, `+xml`), rendered as that XML by the
+/// SOAP mapper. The root element is the `x-xml-root` of the variant's
+/// schema, else its `xml.name`, else the name of the definition it
+/// references, else `response`. A string body (a declared example) is
+/// served as written; a body the mapper cannot render stays JSON.
+#[cfg(feature = "soap")]
+fn as_xml(rt: &MockRuntime, op: &Operation, mut generated: GeneratedResponse) -> GeneratedResponse {
+    let xml = generated.content_type.as_deref().is_some_and(is_xml_media);
+    let (Some(body), Some(schema)) = (
+        generated.body.as_ref().filter(|b| xml && !b.is_string()),
+        op.output_for_status(generated.status)
+            .and_then(|v| v.schema.as_ref()),
+    ) else {
+        return generated;
+    };
+    let mut with_defs = rt.bundle.with_reachable_defs(schema);
+    if let Some(obj) = with_defs.as_object_mut()
+        && !obj.contains_key("x-xml-root")
+    {
+        let mut root = Map::new();
+        root.insert("name".into(), json!(xml_root_name(schema)));
+        if let Some(ns) = schema.pointer("/xml/namespace") {
+            root.insert("namespace".into(), ns.clone());
+        }
+        obj.insert("x-xml-root".into(), Value::Object(root));
+    }
+    match crate::soap::json_to_xml(body, &with_defs) {
+        Ok(rendered) => generated.body = Some(Value::String(rendered)),
+        Err(e) => tracing::warn!(operation = %op.id, error = %e, "XML response not rendered"),
+    }
     generated
+}
+
+/// Without the SOAP XML mapper an XML response is served as JSON.
+#[cfg(not(feature = "soap"))]
+fn as_xml(_: &MockRuntime, _: &Operation, generated: GeneratedResponse) -> GeneratedResponse {
+    generated
+}
+
+/// The root element name of an XML response with body schema `schema`.
+#[cfg(feature = "soap")]
+fn xml_root_name(schema: &Value) -> &str {
+    schema
+        .pointer("/xml/name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.rsplit('/').next())
+        })
+        .filter(|name| {
+            name.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        })
+        .unwrap_or("response")
 }
 
 /// `text` as a header value: visible ASCII only, at most `max` bytes.
@@ -1125,12 +1189,20 @@ fn respond(generated: &GeneratedResponse) -> Response {
             format!("invalid status {}", generated.status),
         );
     };
-    let body = match &generated.body {
-        Some(v) => match serde_json::to_vec(v) {
+    // A string body of a non-JSON media type (a declared example, faked
+    // text, rendered XML) is served as written, labelled as declared.
+    let raw = generated
+        .content_type
+        .as_deref()
+        .filter(|ct| !is_json_media(ct))
+        .zip(generated.body.as_ref().and_then(Value::as_str));
+    let body = match (&generated.body, raw) {
+        (_, Some((_, text))) => Body::from(text.to_owned()),
+        (Some(v), None) => match serde_json::to_vec(v) {
             Ok(bytes) => Body::from(bytes),
             Err(e) => return problem(500, "Internal Server Error", e.to_string()),
         },
-        None => Body::empty(),
+        (None, None) => Body::empty(),
     };
     let mut resp = Response::new(body);
     *resp.status_mut() = status;
@@ -1139,7 +1211,7 @@ fn respond(generated: &GeneratedResponse) -> Response {
         let declared = generated
             .content_type
             .as_deref()
-            .filter(|ct| is_json_media(ct))
+            .filter(|ct| is_json_media(ct) || raw.is_some())
             .and_then(|ct| HeaderValue::from_str(ct).ok());
         headers.insert(
             header::CONTENT_TYPE,
@@ -1165,6 +1237,19 @@ fn is_json_media(ct: &str) -> bool {
         .trim()
         .to_ascii_lowercase();
     base == "application/json" || base.ends_with("+json")
+}
+
+/// `application/xml`, `text/xml` or any `+xml` media type (parameters
+/// allowed).
+#[cfg(feature = "soap")]
+fn is_xml_media(ct: &str) -> bool {
+    let base = ct
+        .split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase();
+    base == "application/xml" || base == "text/xml" || base.ends_with("+xml")
 }
 
 #[cfg(test)]

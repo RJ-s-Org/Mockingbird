@@ -28,6 +28,19 @@ A REST mock serves each operation at its contract path and also under every base
 
 Base paths are read from the stored contract source when the mock is loaded, so contracts uploaded before this release gain them on the next reload.
 
+## Response media types
+
+A REST response is served in the media type the contract declares. JSON (`application/json`, any `+json`) is generated as usual. A response that declares only other media types is answered in the first of them:
+
+| Declared media type | Answer |
+| --- | --- |
+| any, with an example | The example as written: the media type object's `example`, else the `value` of its first `examples` entry, else the schema's `example` (Swagger 2.0: the response's `examples` entry for the type). |
+| `text/*` (`text/plain`, `text/csv`, …) | A faker value for the schema, served as text; a string when the media type declares no schema. |
+| XML (`application/xml`, `text/xml`, `+xml`) | Generated as JSON for the schema (by the LLM like any other body), then rendered as XML by the SOAP XML mapper. The root element is the schema's `xml.name` (OpenAPI 3.1), else the name of the schema it references (`Pet` for `$ref: '#/components/schemas/Pet'`), else `response`; members become child elements in name order. |
+| anything else (`application/octet-stream`, images, PDF) | Only a declared example; without one the response has no body, and the import warns with `response_body_omitted`. |
+
+Text and example answers never call the LLM (its JSON-mode answer could not be that media type); they carry `X-Mockingbird-Source: fallback` and a fallback reason that says so. Scenario `set` patches do not apply to them. The `Content-Type` is the declared one whenever the body is served as text; a body that is not text (a text schema of `type: object`, an XML mapper failure, a build without the `soap` feature) is served as JSON labelled `application/json`, as before. Contract versions uploaded before this release keep their empty non-JSON responses until they are imported again; contracts from the config file are compiled afresh at startup.
+
 ## Import warnings
 
 Compiling a contract never fails over what the mock cannot represent exactly; it relaxes or skips it and says so. `mockingbird validate` prints each warning, and uploads, the version list, activation and approval return them (`warnings: [{code, operation, message}]`). They never block activation.
@@ -41,6 +54,7 @@ Compiling a contract never fails over what the mock cannot represent exactly; it
 | `security_scheme_unsupported` | A security requirement uses a scheme the mock cannot check (see [the console guide](console.md)). |
 | `schema_too_large` | A response schema is over the 64 KiB prompt budget; the prompt shows a trimmed schema. |
 | `xsd_wildcard_ignored` | An XSD uses `xs:any` or `xs:anyAttribute`; the elements and attributes they allow are never generated. |
+| `response_body_omitted` | A response declares only a binary media type (`application/octet-stream`, …) and no example, so it is served without a body (see [response media types](#response-media-types)). |
 | `wsdl_import_ignored` | The WSDL uses `wsdl:import`, which is not followed; only the definitions in the uploaded file are served. |
 
 OpenAPI 3.0 documents may declare webhooks under `x-webhooks` (GitHub's spec does); they are read as 3.1 `webhooks` are.

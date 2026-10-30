@@ -151,6 +151,58 @@ pub(crate) fn is_json_media(ct: &str) -> bool {
     base == "application/json" || base.ends_with("+json")
 }
 
+/// The body schema of a response in non-JSON media type `ct`, given the
+/// media's normalized `schema` and its declared `example`. The data plane
+/// answers it from the schema's first `examples` entry when there is one,
+/// else fakes `text/*` and generates XML as JSON it renders. So text
+/// (a string when it declares no schema) and XML keep their schema; other
+/// media (`application/octet-stream`) get one only from an example; a
+/// declared example becomes the schema's first `examples` entry.
+pub(crate) fn non_json_schema(
+    ct: &str,
+    schema: Option<Value>,
+    example: Option<Value>,
+) -> Option<Value> {
+    let base = ct
+        .split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase();
+    let text = base.starts_with("text/");
+    let xml = base == "application/xml" || base == "text/xml" || base.ends_with("+xml");
+    let mut schema = match (schema, &example) {
+        (Some(s), _) if text || xml => s,
+        (None, _) if text => json!({"type": "string"}),
+        (_, Some(e)) if e.is_string() => json!({"type": "string"}),
+        (_, Some(_)) => json!({}),
+        (_, None) => return None,
+    };
+    if let (Some(obj), Some(example)) = (schema.as_object_mut(), example) {
+        let examples = obj.entry("examples").or_insert_with(|| json!([]));
+        if let Some(list) = examples.as_array_mut() {
+            list.insert(0, example);
+        }
+    }
+    Some(schema)
+}
+
+/// The example an OpenAPI 3 media type object declares: its `example`,
+/// else the `value` of its first inline `examples` entry, else the
+/// `example` of its inline schema.
+fn media_example(media: &Value) -> Option<Value> {
+    media
+        .get("example")
+        .or_else(|| {
+            media
+                .get("examples")
+                .and_then(Value::as_object)
+                .and_then(|e| e.values().find_map(|x| x.get("value")))
+        })
+        .or_else(|| media.get("schema").and_then(|s| s.get("example")))
+        .cloned()
+}
+
 /// The form media types, whose body schemas are tagged with
 /// [`CONTENT_TYPE_EXT`] so the data plane decodes them as forms.
 pub(crate) const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
@@ -381,9 +433,26 @@ fn compile_outputs(
         let rat = format!("{at}/responses/{}", escape(status));
         let resp = deref(doc, resp, &rat)?;
         let headers = response_headers(doc, resp, &rat, op_id, ctx);
-        for selector in selectors {
-            outputs.push(output_variant(resp, selector, headers.clone()));
+        let variants: Vec<OutputVariant> = selectors
+            .into_iter()
+            .map(|selector| output_variant(resp, selector, headers.clone()))
+            .collect();
+        if let Some(variant) = variants.first()
+            && variant.schema.is_none()
+            && let Some(ct) = variant
+                .content_type
+                .as_deref()
+                .filter(|ct| !is_json_media(ct))
+        {
+            ctx.warn(
+                "response_body_omitted",
+                Some(op_id),
+                format!(
+                    "operation {op_id}: the {status} response declares only {ct} with no example, so it is served without a body"
+                ),
+            );
         }
+        outputs.extend(variants);
     }
     if !expanded.is_empty() {
         ctx.warn(
@@ -420,7 +489,18 @@ fn output_variant(
         (None, Some(c)) if c.is_empty() => (None, None),
         (None, Some(c)) => match json_media(c) {
             Some((ct, media)) => (Some(ct.clone()), Some(schema_of(media))),
-            None => (c.keys().next().cloned(), None),
+            None => match c.iter().next() {
+                Some((ct, media)) => {
+                    let schema = media
+                        .get("schema")
+                        .map(|s| normalize_schema(s, REF_PREFIX, true));
+                    (
+                        Some(ct.clone()),
+                        non_json_schema(ct, schema, media_example(media)),
+                    )
+                }
+                None => (None, None),
+            },
         },
     };
     OutputVariant {

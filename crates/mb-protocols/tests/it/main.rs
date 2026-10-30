@@ -32,6 +32,7 @@ mod events_ws;
 mod graphql;
 mod graphql_ws;
 mod grpc;
+mod http_media;
 mod http_rest;
 mod provider_policy;
 mod runtime;
