@@ -194,7 +194,7 @@ impl SchemaValidator {
     /// numeric range (`minimum`, `maximum`, their exclusive forms,
     /// `multipleOf`) is
     /// replaced from `fill` of the schema holding that keyword, keeping what
-    /// fits of the old value (see [`mend`]). `fill` gets the
+    /// fits of the old value. `fill` gets the
     /// schema with the root's `$defs`. `None` unless such errors are all that
     /// is wrong and the patched value is valid. `format` counts only for a
     /// validator built by [`SchemaValidator::for_output`], and only for
