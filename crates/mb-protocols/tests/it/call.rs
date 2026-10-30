@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mb_engine::{Engine, EngineConfig};
+use mb_engine::{Engine, EngineConfig, SchemaValidator};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_protocols::{MockRuntime, STREAM_ITEMS_HEADER, http_rest};
@@ -118,10 +118,14 @@ struct Actions {
 }
 
 fn actions(script: Vec<Result<String, LlmError>>) -> Actions {
+    actions_of(ACTIONS, script)
+}
+
+fn actions_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions {
     let provider = Arc::new(ScriptedProvider::new(script));
     let rt = MockRuntime::new(
         "actions",
-        Arc::new(compile(ACTIONS.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -283,4 +287,121 @@ async fn an_action_answer_keeps_its_own_id() {
         .await;
     assert_eq!(refund["id"], "re_1");
     assert_eq!(refund.get("intent"), None);
+}
+
+/// The create answers a shape of its own, with a member the read and the
+/// action's closed schema do not allow.
+const CREATED_APART: &str = r##"
+openapi: 3.0.0
+info: {title: Actions, version: "1"}
+paths:
+  /payment_intents:
+    post:
+      operationId: createIntent
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Created"}}}}
+  /payment_intents/{intent}:
+    get:
+      operationId: getIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /payment_intents/{intent}/confirm:
+    post:
+      operationId: confirmIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+components:
+  schemas:
+    Created:
+      type: object
+      required: [id, status, client_secret]
+      properties: {id: {type: string}, status: {type: string}, client_secret: {type: string}}
+    Intent:
+      type: object
+      additionalProperties: false
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, note: {type: string}}
+"##;
+
+/// A stored resource need not fit the action's schema: it may come from a
+/// create of another shape, a seeded list item or a fixture. The answer stays
+/// valid, and so does what is stored.
+#[tokio::test]
+async fn confirm_stays_valid_when_the_stored_resource_does_not_fit() {
+    let h = actions_of(
+        CREATED_APART,
+        vec![
+            Ok(
+                json!({"id": "pi_1", "status": "new", "client_secret": "s", "note": "kept"})
+                    .to_string(),
+            ),
+            Ok(json!({"id": "pi_1", "status": "succeeded"}).to_string()),
+        ],
+    );
+    let (_, _, created) = h.call("POST", "/payment_intents", None).await;
+    assert_eq!(created["client_secret"], "s");
+
+    let (status, source, confirmed) = h.call("POST", "/payment_intents/pi_1/confirm", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source, "llm");
+    let expected = json!({"id": "pi_1", "status": "succeeded", "note": "kept"});
+    assert_eq!(confirmed, expected);
+
+    let bundle = compile(CREATED_APART.as_bytes()).unwrap();
+    let schema = json!({"$ref": "#/$defs/Intent", "$defs": bundle.defs});
+    let validator = SchemaValidator::new(&schema).unwrap();
+    assert!(validator.is_valid(&confirmed), "{confirmed}");
+
+    let (status, source, read) = h.call("GET", "/payment_intents/pi_1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source, "state");
+    assert_eq!(read, expected);
+    assert_eq!(h.provider.requests().len(), 2);
+}
+
+/// An action whose answer is not an object has nothing to merge.
+#[tokio::test]
+async fn an_action_keeps_an_answer_that_is_not_an_object() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Actions, version: "1"}
+paths:
+  /jobs:
+    post:
+      operationId: createJob
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}}}}
+  /jobs/{job}:
+    get:
+      operationId: getJob
+      parameters: [{name: job, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {type: string}}}}
+  /jobs/{job}/run:
+    post:
+      operationId: runJob
+      parameters: [{name: job, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {type: string}}}}
+"##;
+    let h = actions_of(
+        contract,
+        vec![
+            Ok(json!({"id": "j1"}).to_string()),
+            Ok(json!(["started"]).to_string()),
+        ],
+    );
+    h.call("POST", "/jobs", None).await;
+    let (status, source, answer) = h.call("POST", "/jobs/j1/run", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source, "llm");
+    assert_eq!(answer, json!(["started"]));
 }

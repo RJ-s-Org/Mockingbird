@@ -1746,9 +1746,7 @@ fn reflect(
         OperationKind::Command(Effect::Update) => {
             let from_llm = !matches!(response.source, Source::Fallback);
             let body = match ctx.target {
-                Some(target) if op.is_action() && from_llm => {
-                    overlay(validator, target.data.clone(), Some(&body))
-                }
+                Some(target) if op.is_action() && from_llm => fill_omitted(validator, body, target),
                 target => overlay(validator, body, target.map(|t| &t.data)),
             };
             overlay_request(validator, body, call.body.as_ref())
@@ -1798,6 +1796,21 @@ fn overlay_request(validator: &SchemaValidator, base: Value, body: Option<&Value
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     overlay(validator, base, Some(&Value::Object(kept)))
+}
+
+/// Add to an answer the stored members it omits, each only if the answer stays
+/// valid. The answer is the base because it is valid, which a stored resource
+/// need not be: it may come from a create of another shape, or a fixture.
+fn fill_omitted(validator: &SchemaValidator, answer: Value, target: &StoredResource) -> Value {
+    let (Value::Object(answer_obj), Value::Object(stored)) = (&answer, &target.data) else {
+        return answer;
+    };
+    let omitted: Map<String, Value> = stored
+        .iter()
+        .filter(|(k, _)| !answer_obj.contains_key(*k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    overlay(validator, answer, Some(&Value::Object(omitted)))
 }
 
 /// Overlay `fields`' top-level members onto an object `base`: all at once if
