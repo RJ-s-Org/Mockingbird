@@ -108,8 +108,10 @@ fn perf_4_compile_parses_once() {
         let yaml_compile = best(3, || mb_import::compile(yaml.as_bytes()).unwrap());
         let json_parse = best(3, || mb_import::parse_document(&json).unwrap());
         let json_compile = best(3, || mb_import::compile(&json).unwrap());
+        let sniff = best(3, || mb_import::sniff(yaml.as_bytes()).unwrap());
+        let kib = yaml.len() / 1024;
         println!(
-            "PERF-4 n={n}: YAML parse {parse:?}, compile {yaml_compile:?}; JSON parse {json_parse:?}, compile {json_compile:?}"
+            "PERF-4 n={n}: YAML ({kib} KiB) parse {parse:?}, sniff {sniff:?}, compile {yaml_compile:?}; JSON parse {json_parse:?}, compile {json_compile:?}"
         );
     }
 }
@@ -213,6 +215,40 @@ fn perf_7_path_templates() {
             .collect();
         let t = best(3, || infer_templates_with(&paths, &shapes));
         println!("PERF-7 n={n}: infer_templates_with {t:?}");
+    }
+    // Wider responses: 20 shared keys and 3 of their own each. Then four
+    // distinct bodies of 12 of 16 keys, whose shared keys cannot prove them
+    // compatible, so their pairs are compared.
+    for n in [200, 2000] {
+        let paths: Vec<String> = (0..n).map(|i| format!("/api/items/slug-{i}")).collect();
+        let wide: BTreeMap<String, Shape> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let mut body = serde_json::Map::new();
+                for k in 0..20 {
+                    body.insert(format!("f{k}"), json!(k));
+                }
+                for k in 0..3 {
+                    body.insert(format!("own{i}_{k}"), json!(k));
+                }
+                (p.clone(), Shape::of(&Value::Object(body)))
+            })
+            .collect();
+        let overlapping: BTreeMap<String, Shape> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let body: serde_json::Map<String, Value> = (0..16)
+                    .filter(|k| (k + i) % 4 != 0)
+                    .map(|k| (format!("f{k}"), json!(k)))
+                    .collect();
+                (p.clone(), Shape::of(&Value::Object(body)))
+            })
+            .collect();
+        let w = best(3, || infer_templates_with(&paths, &wide));
+        let o = best(3, || infer_templates_with(&paths, &overlapping));
+        println!("PERF-7 n={n}: 23-key shapes {w:?}, four 12-of-16-key shapes {o:?}");
     }
 }
 
