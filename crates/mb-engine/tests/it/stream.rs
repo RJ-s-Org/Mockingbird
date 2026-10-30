@@ -195,6 +195,43 @@ async fn stream_items_carry_their_usage() {
     assert_eq!(attributed, budget.0.load(Ordering::SeqCst));
 }
 
+/// When the provider reports the stream's usage, that is what the budget is
+/// charged and what the items carry in all, not the byte estimate: the
+/// stream is read to its end with the last item (here the text ends with a
+/// newline, so the end follows the last line), which carries the difference
+/// to the estimate attributed before it.
+#[tokio::test]
+async fn stream_items_charge_the_reported_usage() {
+    let bundle = stream_bundle();
+    let reported = Usage {
+        prompt_tokens: 100_000,
+        completion_tokens: 5_000,
+    };
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![])
+            .with_streams(vec![Ok(vec![
+                Ok("{\"id\":\"a\",\"n\":1}\n".into()),
+                Ok("{\"id\":\"b\",\"n\":2}\n".into()),
+                Ok("{\"id\":\"c\",\"n\":3}\n".into()),
+            ])])
+            .with_stream_usage(reported),
+    );
+    let budget = Arc::new(SpentBudget::default());
+    let dyn_provider: Arc<dyn Provider> = provider.clone();
+    let engine = Arc::new(
+        Engine::new(Some(dyn_provider), EngineConfig::default()).with_guards(EngineGuards {
+            budget: Some(Arc::clone(&budget) as Arc<dyn TokenBudget>),
+            ..EngineGuards::default()
+        }),
+    );
+    let items = collect(&engine, &bundle, StreamContext::default(), Some(3)).await;
+    assert_eq!(items.len(), 3);
+    assert!(items.iter().all(|i| i.source == Source::Llm));
+    assert_eq!(budget.0.load(Ordering::SeqCst), total(reported));
+    let attributed = items.iter().fold(Usage::default(), |sum, i| sum + i.usage);
+    assert_eq!(attributed, reported);
+}
+
 #[tokio::test]
 async fn faker_stream_items_cost_nothing() {
     let bundle = stream_bundle();

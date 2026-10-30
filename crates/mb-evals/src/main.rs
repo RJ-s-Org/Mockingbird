@@ -78,6 +78,10 @@ struct RunArgs {
     max_fallback_rate: f64,
     #[arg(long, default_value_t = Thresholds::default().max_p95_ms)]
     max_p95_ms: u64,
+    /// Fails the run when more calls and contracts than this were skipped
+    /// (unset: skips are only reported).
+    #[arg(long)]
+    max_skipped: Option<u64>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -171,12 +175,19 @@ fn main() -> ExitCode {
 }
 
 async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
-    let contracts: Vec<EvalContract> = match &args.manifest {
-        Some(path) => manifest::load(path, Path::new("."), args.max_ops_per_contract)?,
-        None => corpus::load(&args.corpus)?
-            .iter()
-            .map(|e| EvalContract::from_corpus(e, args.max_ops_per_contract))
-            .collect(),
+    let (contracts, skipped_contracts): (Vec<EvalContract>, Vec<String>) = match &args.manifest {
+        Some(path) => (
+            manifest::load(path, Path::new("."), args.max_ops_per_contract)?,
+            Vec::new(),
+        ),
+        None => {
+            let (entries, skipped) = corpus::load_with_skipped(&args.corpus)?;
+            let contracts = entries
+                .iter()
+                .map(|e| EvalContract::from_corpus(e, args.max_ops_per_contract))
+                .collect();
+            (contracts, skipped)
+        }
     };
     eprintln!(
         "evaluating {} contracts with {} at {}",
@@ -215,6 +226,7 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         Err((report, e)) => (report, Some(e)),
     };
     report.base_url = env.base_url;
+    report.skipped_contracts = skipped_contracts;
     write_reports(&args.out, &report)?;
     if let Some(e) = sample_error {
         let path = args.samples.unwrap_or_default();
@@ -227,6 +239,7 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
         max_repair_rate: args.max_repair_rate,
         max_fallback_rate: args.max_fallback_rate,
         max_p95_ms: args.max_p95_ms,
+        max_skipped: args.max_skipped,
     };
     let violations = report.violations(&thresholds);
     if violations.is_empty() {

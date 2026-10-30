@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use mb_llm::{ChatMessage, ChatRequest, Provider, ResponseFormat, Role, TextStream, Usage};
+use mb_llm::{
+    ChatMessage, ChatRequest, Provider, ResponseFormat, Role, StreamUsage, TextStream, Usage,
+};
 use mb_mcm::{Bundle, Operation};
 use serde_json::Value;
 use tokio::time::Instant;
@@ -92,6 +94,7 @@ impl Engine {
             permit: None,
             prompt_bytes: 0,
             completion_bytes: 0,
+            reported: StreamUsage::new(),
             attributed: Usage::default(),
             repair_usage: Usage::default(),
         };
@@ -125,14 +128,19 @@ enum Upstream {
     Closed,
 }
 
+/// The longest the stream waits, after its last item, for the provider
+/// stream to end, so the usage it reports at its end can be read.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Charges an open provider stream to the token budget when it closes
-/// (ends, fails, times out, is released or dropped). `TextStream` carries
-/// no usage, so tokens are estimated as `ceil(bytes / 4)` of the prompt and
-/// of the text received.
+/// (ends, fails, times out, is released or dropped): the usage the provider
+/// reported ([`Provider::stream_metered`]), else an estimate of
+/// `ceil(bytes / 4)` of the prompt and of the text received.
 struct StreamMeter {
     engine: Arc<Engine>,
     prompt_bytes: usize,
     completion_bytes: usize,
+    reported: StreamUsage,
     /// The provider call's `mb.llm` span: open until the stream closes,
     /// when the estimate is recorded on it.
     span: tracing::Span,
@@ -140,7 +148,10 @@ struct StreamMeter {
 
 impl Drop for StreamMeter {
     fn drop(&mut self) {
-        let usage = estimate_usage(self.prompt_bytes, self.completion_bytes);
+        let usage = self
+            .reported
+            .get()
+            .unwrap_or_else(|| estimate_usage(self.prompt_bytes, self.completion_bytes));
         record_usage(&self.span, usage);
         self.engine.spend(usage);
     }
@@ -184,7 +195,9 @@ struct StreamState {
     /// far (mirrors its [`StreamMeter`], which outlives no item).
     prompt_bytes: usize,
     completion_bytes: usize,
-    /// The stream estimate already attributed to emitted items.
+    /// The usage the provider stream reports, once it has ended.
+    reported: StreamUsage,
+    /// The stream usage already attributed to emitted items.
     attributed: Usage,
     /// Repair-call tokens not yet attributed to an item.
     repair_usage: Usage,
@@ -204,6 +217,9 @@ impl StreamState {
             _ => (self.fake(), Source::Fallback),
         };
         self.emitted += 1;
+        if self.emitted == self.items {
+            self.drain().await;
+        }
         let usage = self.take_usage();
         Some(StreamItem {
             value: self.apply_scenario(value),
@@ -213,12 +229,18 @@ impl StreamState {
     }
 
     /// The tokens spent since the previous item: the growth of the provider
-    /// stream's estimate (the prompt counts toward the first item that reads
-    /// it) plus any repair call. Summed over every item, this is what the
-    /// stream charges to the token budget, less text received after the last
-    /// item.
+    /// stream's usage (the prompt counts toward the first item that reads
+    /// it) plus any repair call. The stream's usage is an estimate until the
+    /// provider reports it at the end of its stream; the item read then
+    /// carries the difference (or nothing, when the estimate was higher).
+    /// Summed over every item, this is what the stream charges to the token
+    /// budget, less text received after the last item, when the estimate
+    /// was not too high.
     fn take_usage(&mut self) -> Usage {
-        let total = estimate_usage(self.prompt_bytes, self.completion_bytes);
+        let total = self
+            .reported
+            .get()
+            .unwrap_or_else(|| estimate_usage(self.prompt_bytes, self.completion_bytes));
         let stream = Usage {
             prompt_tokens: total
                 .prompt_tokens
@@ -265,17 +287,19 @@ impl StreamState {
                     let prompt_bytes = request.messages.iter().map(|m| m.content.len()).sum();
                     // One span for the whole provider stream, never one per item.
                     let span = llm_span();
-                    let open = provider.stream(request).instrument(span.clone());
+                    let open = provider.stream_metered(request).instrument(span.clone());
                     match tokio::time::timeout_at(deadline, open).await {
-                        Ok(Ok(stream)) => {
+                        Ok(Ok(metered)) => {
                             self.prompt_bytes = prompt_bytes;
+                            self.reported = metered.usage.clone();
                             self.upstream = Upstream::Open {
-                                stream,
+                                stream: metered.text,
                                 splitter: LineSplitter::new(),
                                 meter: StreamMeter {
                                     engine: Arc::clone(&self.engine),
                                     prompt_bytes,
                                     completion_bytes: 0,
+                                    reported: metered.usage,
                                     span,
                                 },
                             };
@@ -303,6 +327,30 @@ impl StreamState {
                     Ok(Some(Err(e))) => self.give_up(&e.to_string()),
                     Err(_) => self.give_up("LLM stream timed out"),
                 },
+            }
+        }
+    }
+
+    /// After the last item: reads the open provider stream to its end, for
+    /// at most [`DRAIN_TIMEOUT`] (and the request timeout), so the usage it
+    /// reports at the end is known. Text other than whitespace means the
+    /// model writes more than was asked for, so the stream is left to be
+    /// closed (and estimated) instead.
+    async fn drain(&mut self) {
+        let Upstream::Open { stream, meter, .. } = &mut self.upstream else {
+            return;
+        };
+        let deadline = Instant::now() + DRAIN_TIMEOUT.min(self.engine.config.timeout);
+        loop {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(Some(Ok(delta))) => {
+                    meter.completion_bytes += delta.len();
+                    self.completion_bytes += delta.len();
+                    if !delta.trim().is_empty() {
+                        return;
+                    }
+                }
+                Ok(Some(Err(_)) | None) | Err(_) => return,
             }
         }
     }

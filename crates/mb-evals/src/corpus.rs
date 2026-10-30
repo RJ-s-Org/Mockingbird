@@ -21,18 +21,33 @@ pub struct CorpusEntry {
 /// contract: it is packed and compiled through the archive path
 /// ([`mb_import::read_source`]) and named after the directory. Hidden
 /// entries are ignored. A file or directory that cannot be read or does
-/// not compile is skipped with a warning.
+/// not compile is skipped with a warning ([`load_with_skipped`] names the
+/// skipped contracts).
 ///
 /// Fails only when `root` itself cannot be read.
 pub fn load(root: &Path) -> anyhow::Result<Vec<CorpusEntry>> {
-    std::fs::read_dir(root).with_context(|| format!("cannot read {}", root.display()))?;
-    let mut entries = Vec::new();
-    visit(root, "", &mut entries);
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(entries)
+    load_with_skipped(root).map(|(entries, _)| entries)
 }
 
-fn visit(dir: &Path, rel: &str, out: &mut Vec<CorpusEntry>) {
+/// [`load`], also returning the names of the contracts it skipped (they
+/// could not be read or do not compile), sorted.
+pub fn load_with_skipped(root: &Path) -> anyhow::Result<(Vec<CorpusEntry>, Vec<String>)> {
+    std::fs::read_dir(root).with_context(|| format!("cannot read {}", root.display()))?;
+    let mut out = Loaded::default();
+    visit(root, "", &mut out);
+    out.entries.sort_by(|a, b| a.name.cmp(&b.name));
+    out.skipped.sort();
+    Ok((out.entries, out.skipped))
+}
+
+/// What [`visit`] gathers.
+#[derive(Default)]
+struct Loaded {
+    entries: Vec<CorpusEntry>,
+    skipped: Vec<String>,
+}
+
+fn visit(dir: &Path, rel: &str, out: &mut Loaded) {
     let mut children: Vec<(String, std::path::PathBuf, bool)> = match std::fs::read_dir(dir) {
         Ok(read) => read
             .filter_map(|entry| match entry {
@@ -116,18 +131,20 @@ fn extensions(dir: &Path, recursive: bool) -> Vec<String> {
     out
 }
 
-fn compile_into(path: &Path, name: String, out: &mut Vec<CorpusEntry>) {
+fn compile_into(path: &Path, name: String, out: &mut Loaded) {
     let bytes = match mb_import::read_source(path) {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(contract = %name, error = %e, "skipping unreadable contract");
+            out.skipped.push(name);
             return;
         }
     };
     match mb_import::compile(&bytes) {
-        Ok(bundle) => out.push(CorpusEntry { name, bundle }),
+        Ok(bundle) => out.entries.push(CorpusEntry { name, bundle }),
         Err(e) => {
-            tracing::warn!(contract = %name, error = %e, "skipping contract that does not compile")
+            tracing::warn!(contract = %name, error = %e, "skipping contract that does not compile");
+            out.skipped.push(name);
         }
     }
 }

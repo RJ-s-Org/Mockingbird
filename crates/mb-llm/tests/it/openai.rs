@@ -220,6 +220,85 @@ async fn openai_stream_yields_deltas() {
     assert_eq!(wire_body(&server).await["stream"], true);
 }
 
+/// Streams ask for usage (`stream_options.include_usage`), and the final
+/// usage chunk (no choices) is reported once the stream has ended.
+#[tokio::test]
+async fn openai_stream_reports_the_final_usage_chunk() {
+    use futures::StreamExt;
+
+    let server = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"a\\\":1}\\n\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let metered = client(&server, false)
+        .stream_metered(req(ResponseFormat::Text, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(
+        metered.usage.get(),
+        None,
+        "nothing is reported before the end"
+    );
+    let deltas: Vec<String> = metered.text.map(|d| d.unwrap()).collect().await;
+    assert_eq!(deltas, vec!["{\"a\":1}\n".to_string()]);
+    assert_eq!(
+        metered.usage.get(),
+        Some(Usage {
+            prompt_tokens: 12,
+            completion_tokens: 7
+        })
+    );
+    assert_eq!(
+        wire_body(&server).await["stream_options"],
+        json!({"include_usage": true})
+    );
+}
+
+/// An endpoint that rejects `stream_options` is asked once more without
+/// it, and then never again; its streams report no usage.
+#[tokio::test]
+async fn a_rejected_stream_usage_option_is_dropped() {
+    use futures::StreamExt;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v.get("stream_options").is_some()
+        })
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+    let c = client(&server, false);
+    for _ in 0..2 {
+        let metered = c
+            .stream_metered(req(ResponseFormat::Text, Duration::from_secs(2)))
+            .await
+            .unwrap();
+        let deltas: Vec<String> = metered.text.map(|d| d.unwrap()).collect().await;
+        assert_eq!(deltas, vec!["x".to_string()]);
+        assert_eq!(metered.usage.get(), None);
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
 #[tokio::test]
 async fn openai_stream_http_error_before_first_delta() {
     let server = MockServer::start().await;

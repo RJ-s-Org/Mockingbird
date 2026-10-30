@@ -7,7 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider, TextStream};
+use crate::{
+    Capabilities, ChatRequest, ChatResponse, LlmError, MeteredStream, Provider, TextStream,
+};
 
 /// The request settings of one hop of a fallback chain (its profile's
 /// timeout, temperature and token limit), applied to the request before it
@@ -109,13 +111,25 @@ impl Provider for FallbackProvider {
     /// has yielded a delta it is never switched, so its later errors reach
     /// the caller.
     async fn stream(&self, req: ChatRequest) -> Result<TextStream, LlmError> {
+        self.stream_metered(req).await.map(|m| m.text)
+    }
+
+    /// [`FallbackProvider::stream`] with the usage reported by the hop
+    /// whose stream is returned.
+    async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
         let primary_req = for_hop(self.primary_settings, req.clone());
-        let error = match self.primary.stream(primary_req).await {
-            Ok(mut stream) => match stream.next().await {
+        let error = match self.primary.stream_metered(primary_req).await {
+            Ok(MeteredStream {
+                text: mut stream,
+                usage,
+            }) => match stream.next().await {
                 Some(Ok(first)) => {
-                    return Ok(Box::pin(
-                        futures::stream::once(std::future::ready(Ok(first))).chain(stream),
-                    ));
+                    return Ok(MeteredStream {
+                        text: Box::pin(
+                            futures::stream::once(std::future::ready(Ok(first))).chain(stream),
+                        ),
+                        usage,
+                    });
                 }
                 Some(Err(error)) => error,
                 None => LlmError::Empty("the stream ended before any content".to_string()),
@@ -124,7 +138,7 @@ impl Provider for FallbackProvider {
         };
         tracing::warn!(%error, "primary LLM provider stream failed; trying fallback provider");
         self.secondary
-            .stream(for_hop(self.secondary_settings, req))
+            .stream_metered(for_hop(self.secondary_settings, req))
             .await
     }
 

@@ -1,6 +1,7 @@
 //! LLM provider abstraction and an OpenAI-compatible client.
 
 use std::ops::Add;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -126,6 +127,45 @@ impl LlmError {
 /// ends.
 pub type TextStream = BoxStream<'static, Result<String, LlmError>>;
 
+/// The usage a provider reports for a streamed completion, filled in by the
+/// stream (typically from its final chunk) and readable by the caller once
+/// the stream has ended. Clones share one value.
+#[derive(Clone, Debug, Default)]
+pub struct StreamUsage(Arc<Mutex<Option<Usage>>>);
+
+impl StreamUsage {
+    /// Nothing reported yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the reported usage (a later report replaces it).
+    pub fn set(&self, usage: Usage) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(usage);
+    }
+
+    /// The reported usage; `None` while nothing has been reported (the
+    /// stream has not ended, or the provider reports none).
+    pub fn get(&self) -> Option<Usage> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A streamed completion ([`Provider::stream_metered`]): its text deltas
+/// and the usage its provider reports.
+pub struct MeteredStream {
+    pub text: TextStream,
+    pub usage: StreamUsage,
+}
+
+impl std::fmt::Debug for MeteredStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeteredStream")
+            .field("usage", &self.usage)
+            .finish_non_exhaustive()
+    }
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn capabilities(&self) -> Capabilities;
@@ -145,5 +185,14 @@ pub trait Provider: Send + Sync {
         Ok(Box::pin(futures::stream::once(std::future::ready(Ok(
             response.content,
         )))))
+    }
+
+    /// [`Provider::stream`], with the usage the provider reports for it.
+    /// The default reports none, so callers estimate it.
+    async fn stream_metered(&self, req: ChatRequest) -> Result<MeteredStream, LlmError> {
+        Ok(MeteredStream {
+            text: self.stream(req).await?,
+            usage: StreamUsage::new(),
+        })
     }
 }

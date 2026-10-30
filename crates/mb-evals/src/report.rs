@@ -44,6 +44,21 @@ pub struct EvalReport {
     /// Keyed by the manifest's `domain`; empty for a corpus run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_domain: BTreeMap<String, ContractStats>,
+    /// Calls the engine rejected outright (sampled with source `error`),
+    /// not counted in `calls`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_calls: u64,
+    /// Streaming operations of the evaluated contracts, which evals do not
+    /// call.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_streaming_operations: u64,
+    /// Corpus contracts that could not be read or do not compile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_contracts: Vec<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The calls of one contract, by source.
@@ -63,6 +78,9 @@ pub struct Thresholds {
     pub max_repair_rate: f64,
     pub max_fallback_rate: f64,
     pub max_p95_ms: u64,
+    /// Skipped calls plus skipped contracts at most; `None` (the default)
+    /// only reports them.
+    pub max_skipped: Option<u64>,
 }
 
 impl Default for Thresholds {
@@ -72,6 +90,7 @@ impl Default for Thresholds {
             max_repair_rate: 0.25,
             max_fallback_rate: 0.05,
             max_p95_ms: 3000,
+            max_skipped: None,
         }
     }
 }
@@ -105,11 +124,24 @@ impl EvalReport {
         if self.p95_ms > t.max_p95_ms {
             out.push(format!("p95_ms {} > {}", self.p95_ms, t.max_p95_ms));
         }
+        let skipped = self
+            .skipped_calls
+            .saturating_add(u64::try_from(self.skipped_contracts.len()).unwrap_or(u64::MAX));
+        if let Some(max) = t.max_skipped
+            && skipped > max
+        {
+            out.push(format!(
+                "skipped {skipped} > {max} ({} calls, {} contracts)",
+                self.skipped_calls,
+                self.skipped_contracts.len()
+            ));
+        }
         out
     }
 
-    /// A Markdown summary: a metric table, then one row per contract, then
-    /// (for a manifest run) one row per API type and per domain.
+    /// A Markdown summary: a metric table (with skip counts when there are
+    /// any), then one row per contract, then (for a manifest run) one row
+    /// per API type and per domain, then the skipped contracts.
     pub fn to_markdown(&self) -> String {
         let pct = |r: f64| format!("{:.1}%", r * 100.0);
         let mut md = String::new();
@@ -143,12 +175,28 @@ impl EvalReport {
         for (metric, value) in rows {
             let _ = writeln!(md, "| {metric} | {value} |");
         }
+        let skips = [
+            ("Skipped calls", self.skipped_calls),
+            (
+                "Streaming operations not evaluated",
+                self.skipped_streaming_operations,
+            ),
+        ];
+        for (metric, n) in skips.into_iter().filter(|(_, n)| *n > 0) {
+            let _ = writeln!(md, "| {metric} | {n} |");
+        }
         stats_table(&mut md, "Per contract", "Contract", &self.per_contract);
         if !self.per_api_type.is_empty() {
             stats_table(&mut md, "Per API type", "API type", &self.per_api_type);
         }
         if !self.per_domain.is_empty() {
             stats_table(&mut md, "Per domain", "Domain", &self.per_domain);
+        }
+        if !self.skipped_contracts.is_empty() {
+            let _ = writeln!(md, "\n## Skipped contracts\n");
+            for name in &self.skipped_contracts {
+                let _ = writeln!(md, "- {name}");
+            }
         }
         md
     }
@@ -514,8 +562,10 @@ pub async fn run_evals(
 /// Runs `opts.repeat` calls of every target of `contracts` against
 /// `provider`, at most `opts.concurrency` in flight, hands each call to
 /// `on_sample` as it finishes, and summarises them. A call the engine
-/// rejects outright is logged, sampled with source `error` and not counted.
-/// `per_api_type`/`per_domain` cover the contracts that set them.
+/// rejects outright is logged, sampled with source `error`, not counted in
+/// `calls` but in `skipped_calls`; streaming operations are counted in
+/// `skipped_streaming_operations`. `skipped_contracts` is left empty for the
+/// caller (see [`crate::corpus::load_with_skipped`]). `per_api_type`/`per_domain` cover the contracts that set them.
 /// `base_url` is left empty for the caller to fill in.
 ///
 /// After `on_sample` first fails it is not called again, the run still
@@ -560,6 +610,12 @@ pub async fn run_contracts(
     let mut per_api_type: BTreeMap<String, Tally> = BTreeMap::new();
     let mut per_domain: BTreeMap<String, Tally> = BTreeMap::new();
     let mut sample_error: Option<std::io::Error> = None;
+    let mut skipped_calls = 0u64;
+    let skipped_streaming_operations = contracts
+        .iter()
+        .flat_map(|c| &c.bundle.operations)
+        .filter(|op| op.kind.streams_request() || op.kind.streams_response())
+        .count();
 
     let mut in_flight = tokio::task::JoinSet::new();
     loop {
@@ -639,6 +695,7 @@ pub async fn run_contracts(
             }
             Err(e) => {
                 tracing::warn!(contract = %contract.name, target = %sample.target, error = %e, "eval call skipped");
+                skipped_calls += 1;
                 sample.error = Some(e);
             }
         }
@@ -678,6 +735,10 @@ pub async fn run_contracts(
         per_contract,
         per_api_type: finish_all(per_api_type),
         per_domain: finish_all(per_domain),
+        skipped_calls,
+        skipped_streaming_operations: u64::try_from(skipped_streaming_operations)
+            .unwrap_or(u64::MAX),
+        skipped_contracts: Vec::new(),
     };
     match sample_error {
         None => Ok(report),
