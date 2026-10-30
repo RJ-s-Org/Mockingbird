@@ -85,8 +85,26 @@ The snapshot directory:
 |---|---|---|
 | `answers.jsonl` | `serve --record` | One recorded answer per line (prompt digests and the answer text). Re-recording appends; delete it to start over. |
 | `sessions/<mock>/<session>.json` | `snapshot export` | Each session's stored resources, seeded on `serve --replay` and by `snapshot import`. |
-| `mocks/<mock>.json`, `contracts/<mock>.<ext>` | `snapshot export` | The mocks and their active contracts, for `snapshot import` into a server without the config (mocks created through the API or the console). A mock file carries `name`, `route_prefix`, `persona`, `consistency`, `unknown_ids`, `hosts`, `path_rewrite` and `header_overrides`; not the LLM profile, scenarios, data-plane auth, chaos, limits or webhooks, which name profiles, secrets and targets of the source environment (set them on the target after the import). |
-| `snapshot.json` | `snapshot export` | Format version and the workspace the sessions came from. |
+| `mocks/<mock>.json`, `contracts/<mock>.<ext>` | `snapshot export` | The mocks and their active contracts, for `snapshot import` into a server without the config (mocks created through the API or the console). A mock file carries `name`, `route_prefix`, `persona`, `consistency`, `unknown_ids`, `hosts`, `path_rewrite` and `header_overrides`, plus `chaos`, `limits` and `default_scenario` when exported with `--include` (below). Never the LLM profile, data-plane auth or webhooks, which name profiles, secrets and targets of the source environment (set them on the target after the import). |
+| `scenarios/<mock>/<scenario>.json` | `snapshot export --include scenarios` | Each scenario of the mock, as its `PUT /mocks/{mock}/scenarios/{name}` body. |
+| `snapshot.json` | `snapshot export` | Format version and the workspace the sessions came from; with `--include`, the parts it added (`"include": ["scenarios", "chaos", "limits"]`). |
+
+By default a snapshot leaves out each mock's scenarios, chaos and limits:
+they shape test runs, and a snapshot committed for one suite should not
+force errors or latency on another. Opt in per export with `--include`
+(comma-separated, or repeated):
+
+```sh
+mockingbird snapshot export --dir .mockingbird/snapshot --include scenarios,chaos,limits
+```
+
+`scenarios` also exports the mock's default scenario. Without `--include`
+the export writes exactly what it always did, and a re-export without
+`scenarios` removes a mock's `scenarios/<mock>/` directory. The format
+version stays 1, so snapshots exported either way import into this and
+older builds; an older build's import restores `chaos` and `limits` (they
+are part of the mock it creates) but ignores the scenario files and the
+default scenario, so set those on the target yourself.
 
 The answers and sessions hold what the LLM generated for your tests:
 synthetic data, but review them like any fixture before committing.
@@ -94,7 +112,11 @@ synthetic data, but review them like any fixture before committing.
 `mockingbird snapshot import --dir DIR` creates the snapshot's mocks that
 the running server lacks (from their contracts) and seeds its sessions,
 through the Admin API (`--admin-url`, `--token`, `--workspace` as for the
-other client commands).
+other client commands). When the snapshot holds them, each created mock
+also gets its chaos and limits, then its scenarios (after the contract, so
+they are checked against it) and its default scenario; its summary counts
+them as `restored_scenarios`. Mocks the server already has are left as they
+are.
 
 ## Report and verify
 

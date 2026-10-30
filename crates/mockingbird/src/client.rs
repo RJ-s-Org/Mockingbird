@@ -61,7 +61,8 @@ pub enum ClientCommand {
 /// [`ClientCommand`] (see [`crate::config::parse`]) and run by
 /// [`run_workflow`]; the MCP tools `update_mock`, `approve_draft`,
 /// `list_contract_versions`, `activate_contract_version` and `admin_api`
-/// do the same.
+/// do the same. `snapshot export --include …` is parsed the same way, so
+/// [`crate::snapshot::SnapshotArgs`] keeps its fields.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum WorkflowCommand {
@@ -73,6 +74,9 @@ pub enum WorkflowCommand {
     Contracts(ContractsCommand),
     /// `api <METHOD> <PATH>`.
     Api(ApiArgs),
+    /// `snapshot export --include …` (a plain `snapshot export` is
+    /// [`crate::snapshot::SnapshotCommand::Export`]).
+    SnapshotExport(crate::snapshot::SnapshotExportArgs),
 }
 
 // The top-level subcommands among `WorkflowCommand`, for clap. No doc
@@ -566,6 +570,12 @@ pub async fn run_workflow(
     if let WorkflowCommand::Api(args) = cmd {
         return raw_api(admin_url, token, args).await;
     }
+    if let WorkflowCommand::SnapshotExport(args) = &cmd {
+        return crate::snapshot::export_with(admin_url, token, workspace, args)
+            .await
+            .map(Some)
+            .map_err(ClientError::Other);
+    }
     let api = AdminClient::new(admin_url, token, workspace)?;
     match cmd {
         WorkflowCommand::MocksUpdate(args) => {
@@ -632,6 +642,9 @@ pub async fn run_workflow(
             .await
         }
         WorkflowCommand::Api(_) => Err(ClientError::Other(anyhow!("api is sent by path"))),
+        WorkflowCommand::SnapshotExport(_) => {
+            Err(ClientError::Other(anyhow!("snapshot export is run above")))
+        }
     }
 }
 

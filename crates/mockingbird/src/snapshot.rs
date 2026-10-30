@@ -3,7 +3,8 @@
 //! answers from that file and never calls an LLM (a request it holds no
 //! answer for falls back to the faker), and `mockingbird snapshot
 //! export|import` copy contracts and session state between a running
-//! server and the same directory.
+//! server and the same directory (`snapshot export --include` adds the
+//! mocks' scenarios, chaos and limits; see [`SnapshotPart`]).
 //!
 //! Answers are matched on the prompt, not on the HTTP request: the prompt
 //! already carries everything that shapes an answer (the operation, its
@@ -584,6 +585,89 @@ pub struct SnapshotArgs {
     pub dir: PathBuf,
 }
 
+/// A mock setting `snapshot export --include` adds to a snapshot. None is
+/// exported by default; `snapshot import` restores whichever the snapshot
+/// holds.
+#[derive(
+    clap::ValueEnum,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum SnapshotPart {
+    /// The mock's scenarios (`scenarios/<mock>/<scenario>.json`) and its
+    /// default scenario.
+    Scenarios,
+    /// The mock's chaos settings.
+    Chaos,
+    /// The mock's limits.
+    Limits,
+}
+
+impl SnapshotPart {
+    /// The `--include` value and the name in `snapshot.json`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SnapshotPart::Scenarios => "scenarios",
+            SnapshotPart::Chaos => "chaos",
+            SnapshotPart::Limits => "limits",
+        }
+    }
+}
+
+impl std::fmt::Display for SnapshotPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// The `--include` flag that `crate::config::command` adds to `snapshot
+// export`. No doc comment: clap would make it the about text of the
+// subcommand.
+#[derive(Args, Debug)]
+pub(crate) struct IncludeArgs {
+    /// Also export these mock settings (comma-separated): `scenarios` (with
+    /// the default scenario), `chaos`, `limits`. None by default; `snapshot
+    /// import` restores them on the mocks it creates.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "PART")]
+    pub(crate) include: Vec<SnapshotPart>,
+}
+
+/// `snapshot export --include …`: an export that also writes the chosen
+/// [`SnapshotPart`]s. Run by [`export_with`]; a plain `snapshot export` is
+/// [`SnapshotCommand::Export`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SnapshotExportArgs {
+    /// The snapshot directory.
+    pub dir: PathBuf,
+    /// What to add to the default export, sorted and without duplicates.
+    pub include: Vec<SnapshotPart>,
+}
+
+impl SnapshotExportArgs {
+    /// An export of `dir` that adds `include`.
+    pub fn new(dir: impl Into<PathBuf>, include: impl IntoIterator<Item = SnapshotPart>) -> Self {
+        let mut include: Vec<SnapshotPart> = include.into_iter().collect();
+        include.sort_unstable();
+        include.dedup();
+        Self {
+            dir: dir.into(),
+            include,
+        }
+    }
+}
+
 /// The `snapshot` subcommands; JSON summaries.
 ///
 /// # Errors
@@ -602,9 +686,32 @@ pub async fn run(
         workspace,
     };
     match cmd {
-        SnapshotCommand::Export(args) => export(&api, &args.dir).await,
+        SnapshotCommand::Export(args) => export(&api, &args.dir, &[]).await,
         SnapshotCommand::Import(args) => import(&api, &args.dir).await,
     }
+}
+
+/// `snapshot export --include …`: [`run`]'s export plus `args.include`,
+/// which add `chaos`, `limits` and `default_scenario` to each mock file,
+/// `scenarios/<mock>/<scenario>.json` files and an `include` list to
+/// `snapshot.json`. Without parts it writes exactly what a plain export
+/// writes.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn export_with(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    args: &SnapshotExportArgs,
+) -> anyhow::Result<Value> {
+    let api = Api {
+        admin_url,
+        token,
+        workspace,
+    };
+    export(&api, &args.dir, &args.include).await
 }
 
 struct Api<'a> {
@@ -670,10 +777,11 @@ fn api_error(e: ClientError) -> anyhow::Error {
 
 /// The mock settings `snapshot import` creates a missing mock with: what
 /// it is called and how requests reach it and are answered. Not its LLM
-/// profile, scenarios, data-plane auth, chaos, limits or webhooks, which
-/// name things of the source environment (profiles, secrets, targets) the
-/// target may not have. Snapshots written before `path_rewrite` and
-/// `header_overrides` were exported import with the defaults.
+/// profile, data-plane auth or webhooks, which name things of the source
+/// environment (profiles, secrets, targets) the target may not have, and
+/// its scenarios, chaos and limits only when asked for ([`SnapshotPart`]).
+/// Snapshots written before `path_rewrite` and `header_overrides` were
+/// exported import with the defaults.
 const MOCK_FIELDS: &[&str] = &[
     "name",
     "route_prefix",
@@ -685,7 +793,30 @@ const MOCK_FIELDS: &[&str] = &[
     "header_overrides",
 ];
 
-async fn export(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
+/// The directory of each mock's exported scenarios.
+const SCENARIOS_DIR: &str = "scenarios";
+
+/// The mock-view fields each [`SnapshotPart`] adds to a mock file.
+fn part_fields(part: SnapshotPart) -> &'static [&'static str] {
+    match part {
+        SnapshotPart::Scenarios => &["default_scenario"],
+        SnapshotPart::Chaos => &["chaos"],
+        SnapshotPart::Limits => &["limits"],
+    }
+}
+
+/// Whether `name` is safe as a file stem (scenario names are
+/// `[A-Za-z0-9._-]`, which the Admin API enforces).
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+async fn export(api: &Api<'_>, dir: &Path, include: &[SnapshotPart]) -> anyhow::Result<Value> {
     let mocks = api.get(&["mocks"]).await?;
     let mocks = mocks.as_array().cloned().unwrap_or_default();
     std::fs::create_dir_all(dir.join("mocks"))
@@ -695,8 +826,10 @@ async fn export(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
         let Some(name) = mock["name"].as_str() else {
             continue;
         };
-        let settings: serde_json::Map<String, Value> = MOCK_FIELDS
+        let fields = MOCK_FIELDS
             .iter()
+            .chain(include.iter().flat_map(|p| part_fields(*p)));
+        let settings: serde_json::Map<String, Value> = fields
             .filter_map(|k| {
                 mock.get(*k)
                     .filter(|v| !v.is_null())
@@ -750,9 +883,43 @@ async fn export(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
             )?;
             exported += 1;
         }
-        summary.push(json!({ "mock": name, "contract": contract, "sessions": exported }));
+        let scenarios_dir = dir.join(SCENARIOS_DIR).join(name);
+        // A re-export replaces the mock's scenarios, and one without
+        // `scenarios` drops them.
+        if scenarios_dir.exists() {
+            std::fs::remove_dir_all(&scenarios_dir)
+                .with_context(|| format!("clearing {}", scenarios_dir.display()))?;
+        }
+        let mut entry = json!({ "mock": name, "contract": contract, "sessions": exported });
+        if include.contains(&SnapshotPart::Scenarios) {
+            let scenarios = api.get(&["mocks", name, "scenarios"]).await?;
+            let mut written = 0;
+            for scenario in scenarios.as_array().into_iter().flatten() {
+                let Value::Object(mut body) = scenario.clone() else {
+                    continue;
+                };
+                let Some(Value::String(id)) = body.remove("name") else {
+                    continue;
+                };
+                if !plain_name(&id) {
+                    bail!("mock {name} has a scenario named {id:?}, which is not a file name");
+                }
+                // The rest is the scenario's `PUT` body.
+                body.remove("source");
+                write(
+                    &scenarios_dir.join(format!("{id}.json")),
+                    &serde_json::to_vec_pretty(&body)?,
+                )?;
+                written += 1;
+            }
+            entry["scenarios"] = json!(written);
+        }
+        summary.push(entry);
     }
-    let meta = json!({ "version": FORMAT_VERSION, "workspace": api.workspace });
+    let mut meta = json!({ "version": FORMAT_VERSION, "workspace": api.workspace });
+    if !include.is_empty() {
+        meta["include"] = json!(include);
+    }
     write(&dir.join(META_FILE), &serde_json::to_vec_pretty(&meta)?)?;
     let answers = count_lines(&dir.join(ANSWERS_FILE));
     Ok(json!({ "dir": dir, "mocks": summary, "answers": answers }))
@@ -763,6 +930,7 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
         bail!("{} is not a snapshot directory", dir.display());
     }
     let mut created = Vec::new();
+    let mut restored = 0;
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir.join("mocks")) {
         Ok(entries) => entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -787,6 +955,12 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
             .as_object_mut()
             .and_then(|m| m.remove("contract"))
             .and_then(|c| c.as_str().map(str::to_string));
+        // Set once the scenarios exist (`chaos` and `limits` are part of
+        // the create body).
+        let default_scenario = mock
+            .as_object_mut()
+            .and_then(|m| m.remove("default_scenario"))
+            .filter(|d| !d.is_null());
         api.json(Method::POST, &["mocks"], Some(mock))
             .await
             .map_err(api_error)
@@ -814,6 +988,28 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
                 );
             }
         }
+        // After the contract: a scenario is checked against it.
+        for (scenario, body) in read_scenarios(dir, &name)? {
+            api.json(
+                Method::PUT,
+                &["mocks", &name, "scenarios", &scenario],
+                Some(body),
+            )
+            .await
+            .map_err(api_error)
+            .with_context(|| format!("restoring scenario {scenario} of {name}"))?;
+            restored += 1;
+        }
+        if let Some(default_scenario) = default_scenario {
+            api.json(
+                Method::PATCH,
+                &["mocks", &name],
+                Some(json!({ "default_scenario": default_scenario })),
+            )
+            .await
+            .map_err(api_error)
+            .with_context(|| format!("setting the default scenario of {name}"))?;
+        }
         created.push(name);
     }
     let mut seeded = 0;
@@ -828,7 +1024,35 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
         .with_context(|| format!("seeding session {session} of {mock}"))?;
         seeded += 1;
     }
-    Ok(json!({ "dir": dir, "created_mocks": created, "seeded_sessions": seeded }))
+    let mut out = json!({ "dir": dir, "created_mocks": created, "seeded_sessions": seeded });
+    if restored > 0 {
+        out["restored_scenarios"] = json!(restored);
+    }
+    Ok(out)
+}
+
+/// `<dir>/scenarios/<mock>/<scenario>.json`, sorted: `(scenario, body)`.
+fn read_scenarios(dir: &Path, mock: &str) -> anyhow::Result<Vec<(String, Value)>> {
+    let root = dir.join(SCENARIOS_DIR).join(mock);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let body = serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not JSON", path.display()))?;
+        out.push((name.to_string(), body));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 fn write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -957,7 +1181,7 @@ mod tests {
             token: None,
             workspace: "default",
         };
-        export(&api, &snap).await.unwrap();
+        export(&api, &snap, &[]).await.unwrap();
 
         let target = MockServer::start().await;
         Mock::given(method("GET"))
@@ -991,6 +1215,303 @@ mod tests {
         assert_eq!(body["header_overrides"], false, "{body}");
         assert_eq!(body["hosts"], json!(["api.tmdb.test"]));
         assert!(body.get("llm_profile").is_none(), "{body}");
+    }
+
+    const WS: &str = "/api/v1/workspaces/default";
+
+    /// A source server whose mock `pay` has chaos, limits, a default
+    /// scenario and one scenario.
+    async fn source_with_behaviour() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let source = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "name": "pay",
+                "route_prefix": "/pay",
+                "persona": null,
+                "llm_profile": "env-only",
+                "header_overrides": true,
+                "consistency": "on",
+                "unknown_ids": "generate",
+                "hosts": [],
+                "chaos": { "error_rate": 0.25 },
+                "limits": { "max_body_bytes": 1024 },
+                "default_scenario": "declined",
+                "active_version": null,
+            }])))
+            .mount(&source)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pay/sessions")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&source)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pay/scenarios")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "name": "declined",
+                "instructions": "Decline the card.",
+                "status": 402,
+                "latency_ms": null,
+                "set": null,
+                "operations": [],
+                "source": "api",
+            }])))
+            .mount(&source)
+            .await;
+        source
+    }
+
+    /// Every file under `dir`, relative path to bytes.
+    fn files(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                    out.insert(rel, std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// SNAPSHOT-OPTIN: a plain export writes exactly what it wrote before
+    /// the opt-in existed, byte for byte, and never reads scenarios.
+    #[tokio::test]
+    async fn a_default_export_is_unchanged() {
+        let source = source_with_behaviour().await;
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path().join("snap");
+        let api = Api {
+            admin_url: &source.uri(),
+            token: None,
+            workspace: "default",
+        };
+        let out = export(&api, &snap, &[]).await.unwrap();
+        assert_eq!(
+            out["mocks"],
+            json!([{ "mock": "pay", "contract": null, "sessions": 0 }])
+        );
+        let files = files(&snap);
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            ["mocks/pay.json", "snapshot.json"]
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&files["mocks/pay.json"]),
+            "{\n  \"consistency\": \"on\",\n  \"contract\": null,\n  \"header_overrides\": true,\n  \"hosts\": [],\n  \"name\": \"pay\",\n  \"route_prefix\": \"/pay\",\n  \"unknown_ids\": \"generate\"\n}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&files["snapshot.json"]),
+            "{\n  \"version\": 1,\n  \"workspace\": \"default\"\n}"
+        );
+        let requests = source.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|r| !r.url.path().ends_with("/scenarios")),
+            "a default export reads no scenarios"
+        );
+    }
+
+    /// SNAPSHOT-OPTIN: `--include scenarios,chaos,limits` adds them to the
+    /// snapshot, and importing it restores them on the created mock.
+    #[tokio::test]
+    async fn an_opt_in_export_restores_scenarios_chaos_and_limits() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let source = source_with_behaviour().await;
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path().join("snap");
+        let api = Api {
+            admin_url: &source.uri(),
+            token: None,
+            workspace: "default",
+        };
+        let args = SnapshotExportArgs::new(
+            &snap,
+            [
+                SnapshotPart::Limits,
+                SnapshotPart::Scenarios,
+                SnapshotPart::Chaos,
+                SnapshotPart::Limits,
+            ],
+        );
+        let out = export(&api, &args.dir, &args.include).await.unwrap();
+        assert_eq!(out["mocks"][0]["scenarios"], 1, "{out}");
+        let meta: Value = serde_json::from_slice(&files(&snap)["snapshot.json"]).unwrap();
+        assert_eq!(meta["include"], json!(["scenarios", "chaos", "limits"]));
+        let scenario: Value =
+            serde_json::from_slice(&files(&snap)["scenarios/pay/declined.json"]).unwrap();
+        assert!(scenario.get("name").is_none() && scenario.get("source").is_none());
+        assert_eq!(scenario["status"], 402);
+
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pay")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&target)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&target)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("{WS}/mocks/pay/scenarios/declined")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&target)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("{WS}/mocks/pay")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&target)
+            .await;
+        let api = Api {
+            admin_url: &target.uri(),
+            token: None,
+            workspace: "default",
+        };
+        let out = import(&api, &snap).await.unwrap();
+        assert_eq!(out["created_mocks"], json!(["pay"]));
+        assert_eq!(out["restored_scenarios"], 1, "{out}");
+        let requests = target.received_requests().await.unwrap();
+        let order: Vec<&str> = requests
+            .iter()
+            .filter(|r| r.method.as_str() != "GET")
+            .map(|r| r.method.as_str())
+            .collect();
+        assert_eq!(order, ["POST", "PUT", "PATCH"], "scenarios before default");
+        let body = |m: &str| -> Value {
+            let r = requests.iter().find(|r| r.method.as_str() == m).unwrap();
+            serde_json::from_slice(&r.body).unwrap()
+        };
+        let created = body("POST");
+        assert_eq!(created["chaos"], json!({ "error_rate": 0.25 }), "{created}");
+        assert_eq!(created["limits"], json!({ "max_body_bytes": 1024 }));
+        assert!(created.get("default_scenario").is_none(), "{created}");
+        assert_eq!(body("PUT")["instructions"], "Decline the card.");
+        assert_eq!(body("PATCH"), json!({ "default_scenario": "declined" }));
+    }
+
+    /// SNAPSHOT-OPTIN: a snapshot written before the opt-in (no scenarios,
+    /// no `include`) still imports as before: one create, no scenario or
+    /// default-scenario calls, the same summary.
+    #[tokio::test]
+    async fn an_old_snapshot_still_imports() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path();
+        write(
+            &snap.join("mocks/pay.json"),
+            br#"{"name":"pay","route_prefix":"/pay","consistency":"on","unknown_ids":"generate","hosts":[],"contract":null}"#,
+        )
+        .unwrap();
+        write(
+            &snap.join("snapshot.json"),
+            br#"{"version":1,"workspace":"default"}"#,
+        )
+        .unwrap();
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{WS}/mocks/pay")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&target)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{WS}/mocks")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&target)
+            .await;
+        let api = Api {
+            admin_url: &target.uri(),
+            token: None,
+            workspace: "default",
+        };
+        let out = import(&api, snap).await.unwrap();
+        assert_eq!(
+            out,
+            json!({ "dir": snap, "created_mocks": ["pay"], "seeded_sessions": 0 })
+        );
+        let methods: Vec<String> = target
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.method.to_string())
+            .collect();
+        assert_eq!(methods, ["GET", "POST"]);
+    }
+
+    /// SNAPSHOT-OPTIN: `snapshot export` stays the `Cli` command; with
+    /// `--include` it becomes [`WorkflowCommand::SnapshotExport`].
+    #[test]
+    fn include_parses_as_the_opt_in_export() {
+        use crate::client::WorkflowCommand;
+        use crate::config::{Command, Invocation, parse_from};
+        let plain = parse_from(["mockingbird", "snapshot", "export", "--dir", "d"]).unwrap();
+        assert!(
+            matches!(&plain, Invocation::Cli(cli) if matches!(
+                &cli.cmd,
+                Command::Snapshot(SnapshotCommand::Export(a)) if a.dir == Path::new("d")
+            )),
+            "{plain:?}"
+        );
+        let opt_in = parse_from([
+            "mockingbird",
+            "snapshot",
+            "export",
+            "--dir",
+            "d",
+            "--include",
+            "limits,scenarios",
+            "--include",
+            "chaos",
+        ])
+        .unwrap();
+        let Invocation::Workflow {
+            cmd: WorkflowCommand::SnapshotExport(args),
+            ..
+        } = opt_in
+        else {
+            panic!("{opt_in:?}");
+        };
+        assert_eq!(
+            args,
+            SnapshotExportArgs::new(
+                "d",
+                [
+                    SnapshotPart::Scenarios,
+                    SnapshotPart::Chaos,
+                    SnapshotPart::Limits
+                ]
+            )
+        );
+        assert!(
+            parse_from(["mockingbird", "snapshot", "import", "--include", "chaos"]).is_err(),
+            "import restores whatever the snapshot holds"
+        );
+        let mut cmd = crate::config::command();
+        let about = cmd
+            .find_subcommand_mut("snapshot")
+            .and_then(|s| s.find_subcommand_mut("export"))
+            .and_then(|e| e.get_about())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(about.starts_with("Write the running server"), "{about}");
+        assert!(
+            parse_from(["mockingbird", "snapshot", "export", "--include", "webhooks"]).is_err()
+        );
     }
 
     #[tokio::test]

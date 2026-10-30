@@ -94,12 +94,16 @@ pub enum Invocation {
 #[must_use]
 pub fn command() -> clap::Command {
     use clap::{Args as _, CommandFactory as _, Subcommand as _};
-    let cmd = Cli::command().mut_subcommand("mocks", |mocks| {
-        mocks.subcommand(
-            MocksUpdateArgs::augment_args(clap::Command::new("update"))
-                .about("Change some fields of a mock; the others keep their values"),
-        )
-    });
+    let cmd = Cli::command()
+        .mut_subcommand("mocks", |mocks| {
+            mocks.subcommand(
+                MocksUpdateArgs::augment_args(clap::Command::new("update"))
+                    .about("Change some fields of a mock; the others keep their values"),
+            )
+        })
+        .mut_subcommand("snapshot", |snapshot| {
+            snapshot.mut_subcommand("export", crate::snapshot::IncludeArgs::augment_args)
+        });
     WorkflowTop::augment_subcommands(cmd)
 }
 
@@ -121,6 +125,25 @@ where
             Some(("update", update)) => Some(WorkflowCommand::MocksUpdate(
                 MocksUpdateArgs::from_arg_matches(update).map_err(formatted)?,
             )),
+            _ => None,
+        },
+        // `snapshot export` without `--include` stays a `Cli` command.
+        Some(("snapshot", snapshot)) => match snapshot.subcommand() {
+            Some(("export", export)) => {
+                let include = crate::snapshot::IncludeArgs::from_arg_matches(export)
+                    .map_err(formatted)?
+                    .include;
+                if include.is_empty() {
+                    None
+                } else {
+                    let dir = crate::snapshot::SnapshotArgs::from_arg_matches(export)
+                        .map_err(formatted)?
+                        .dir;
+                    Some(WorkflowCommand::SnapshotExport(
+                        crate::snapshot::SnapshotExportArgs::new(dir, include),
+                    ))
+                }
+            }
             _ => None,
         },
         Some((name, _)) if WorkflowTop::has_subcommand(name) => Some(

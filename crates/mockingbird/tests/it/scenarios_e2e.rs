@@ -139,3 +139,93 @@ async fn undeclared_server_error_scenario_is_answered_natively() {
     assert_eq!(r.status(), 503);
     assert_eq!(r.headers()["content-type"], "application/problem+json");
 }
+
+/// SNAPSHOT-OPTIN: `snapshot export --include scenarios,chaos,limits`
+/// against a real Admin API, then `snapshot import` into an empty server,
+/// restores the scenario, the default scenario, chaos and limits; a plain
+/// export of the same mock carries none of them.
+#[tokio::test]
+async fn an_opt_in_snapshot_restores_scenarios_chaos_and_limits() {
+    use mockingbird::snapshot::{
+        self, SnapshotArgs, SnapshotCommand, SnapshotExportArgs, SnapshotPart,
+    };
+    let source = start().await;
+    seed(&source, &orders_with_conflict()).await;
+    let http = reqwest::Client::new();
+    let w = format!("{}/api/v1/workspaces/default", source.admin);
+    let behaviour = json!({
+        "chaos": {"error_rate": 0.0, "drop_stream_rate": 0.5},
+        "limits": {"max_request_bytes": 4096},
+        "default_scenario": "out-of-stock",
+    });
+    let r = http
+        .patch(format!("{w}/mocks/orders"))
+        .json(&behaviour)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let plain = tmp.path().join("plain");
+    snapshot::run(
+        &source.admin,
+        None,
+        "default",
+        SnapshotCommand::Export(SnapshotArgs { dir: plain.clone() }),
+    )
+    .await
+    .unwrap();
+    let mock: Value =
+        serde_json::from_slice(&std::fs::read(plain.join("mocks/orders.json")).unwrap()).unwrap();
+    for key in ["chaos", "limits", "default_scenario"] {
+        assert!(mock.get(key).is_none(), "{key} in a default export: {mock}");
+    }
+    assert!(!plain.join("scenarios").exists());
+
+    let full = tmp.path().join("full");
+    let args = SnapshotExportArgs::new(
+        &full,
+        [
+            SnapshotPart::Scenarios,
+            SnapshotPart::Chaos,
+            SnapshotPart::Limits,
+        ],
+    );
+    snapshot::export_with(&source.admin, None, "default", &args)
+        .await
+        .unwrap();
+
+    let target = start().await;
+    let out = snapshot::run(
+        &target.admin,
+        None,
+        "default",
+        SnapshotCommand::Import(SnapshotArgs { dir: full.clone() }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["created_mocks"], json!(["orders"]), "{out}");
+    assert_eq!(out["restored_scenarios"], 1, "{out}");
+    let t = format!("{}/api/v1/workspaces/default", target.admin);
+    let get = |url: String| {
+        let http = http.clone();
+        async move {
+            let r = http.get(url).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            r.json::<Value>().await.unwrap()
+        }
+    };
+    let restored = get(format!("{t}/mocks/orders")).await;
+    let original = get(format!("{w}/mocks/orders")).await;
+    for key in ["chaos", "limits", "default_scenario"] {
+        assert_eq!(restored[key], original[key], "{key}: {restored}");
+    }
+    assert_eq!(restored["default_scenario"], "out-of-stock");
+    let mut scenarios = get(format!("{t}/mocks/orders/scenarios")).await;
+    let mut expected = get(format!("{w}/mocks/orders/scenarios")).await;
+    assert_eq!(scenarios.as_array().map(Vec::len), Some(1), "{scenarios}");
+    scenarios[0].as_object_mut().unwrap().remove("source");
+    expected[0].as_object_mut().unwrap().remove("source");
+    assert_eq!(scenarios, expected);
+}
